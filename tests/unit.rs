@@ -1,5 +1,7 @@
 #[path = "unit/bootstrap_tests.rs"]
 mod bootstrap_tests;
+#[path = "unit/query_loop_tests.rs"]
+mod query_loop_tests;
 #[path = "unit/router_tests.rs"]
 mod router_tests;
 #[path = "unit/security_tests.rs"]

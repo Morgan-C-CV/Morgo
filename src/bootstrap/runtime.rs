@@ -18,6 +18,8 @@ use crate::interaction::cli::renderer::render_output;
 use crate::interaction::cli::repl::handle_cli_input;
 use crate::interaction::router::CommandRouter;
 use crate::security::authorizer::DefaultSurfaceAuthorizer;
+use crate::service::api::client::AnthropicClient;
+use crate::service::compact::reactive_compact::ReactiveCompactor;
 use crate::state::app_state::AppState;
 use crate::state::permission_context::{PermissionMode, ToolPermissionContext};
 use crate::tool::builtin::{
@@ -156,6 +158,8 @@ impl RuntimeBootstrap {
         let query_context = QueryContext {
             app_state: app_state.clone(),
             tool_registry,
+            api_client: AnthropicClient::default(),
+            compactor: ReactiveCompactor,
         };
         let engine = QueryEngine::new(query_context);
 
