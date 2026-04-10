@@ -1,49 +1,115 @@
 use std::sync::{Arc, RwLock};
 
+use crate::interaction::notification::Notification;
 use crate::task::types::{TaskDeliveryState, TaskRecord, TaskStatus};
+
+#[derive(Debug, Default)]
+struct TaskStore {
+    next_id: usize,
+    tasks: Vec<TaskRecord>,
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct TaskManager {
-    tasks: Arc<RwLock<Vec<TaskRecord>>>,
+    store: Arc<RwLock<TaskStore>>,
 }
 
 impl TaskManager {
-    pub fn register(&self, id: impl Into<String>, description: impl Into<String>) -> TaskRecord {
+    pub fn create(&self, description: impl Into<String>) -> TaskRecord {
+        let mut store = self.store.write().expect("task store poisoned");
+        let id = format!("task-{}", store.next_id);
+        store.next_id += 1;
         let task = TaskRecord {
-            id: id.into(),
+            id: id.clone(),
             description: description.into(),
             status: TaskStatus::Pending,
+            output: String::new(),
             delivery: TaskDeliveryState {
-                output_path: "stdout".into(),
+                output_path: format!("memory://tasks/{id}"),
                 notified: false,
+                notification: None,
             },
         };
-        self.tasks
-            .write()
-            .expect("task store poisoned")
-            .push(task.clone());
+        store.tasks.push(task.clone());
         task
     }
 
-    pub fn transition(&self, id: &str, status: TaskStatus) {
+    pub fn start(&self, id: &str) {
+        self.update_status(id, TaskStatus::Running);
+    }
+
+    pub fn append_output(&self, id: &str, chunk: impl AsRef<str>) {
         if let Some(task) = self
-            .tasks
+            .store
             .write()
             .expect("task store poisoned")
+            .tasks
             .iter_mut()
             .find(|task| task.id == id)
         {
-            task.status = status.clone();
-            if matches!(
-                status,
-                TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Killed
-            ) {
-                task.delivery.notified = true;
-            }
+            task.output.push_str(chunk.as_ref());
         }
     }
 
+    pub fn complete(&self, id: &str, session_id: &str) {
+        self.finish(id, TaskStatus::Completed, session_id, "Task completed");
+    }
+
+    pub fn fail(&self, id: &str, session_id: &str) {
+        self.finish(id, TaskStatus::Failed, session_id, "Task failed");
+    }
+
+    pub fn kill(&self, id: &str, session_id: &str) {
+        self.finish(id, TaskStatus::Killed, session_id, "Task killed");
+    }
+
+    pub fn get(&self, id: &str) -> Option<TaskRecord> {
+        self.store
+            .read()
+            .expect("task store poisoned")
+            .tasks
+            .iter()
+            .find(|task| task.id == id)
+            .cloned()
+    }
+
     pub fn list(&self) -> Vec<TaskRecord> {
-        self.tasks.read().expect("task store poisoned").clone()
+        self.store
+            .read()
+            .expect("task store poisoned")
+            .tasks
+            .clone()
+    }
+
+    fn update_status(&self, id: &str, status: TaskStatus) {
+        if let Some(task) = self
+            .store
+            .write()
+            .expect("task store poisoned")
+            .tasks
+            .iter_mut()
+            .find(|task| task.id == id)
+        {
+            task.status = status;
+        }
+    }
+
+    fn finish(&self, id: &str, status: TaskStatus, session_id: &str, title: &str) {
+        if let Some(task) = self
+            .store
+            .write()
+            .expect("task store poisoned")
+            .tasks
+            .iter_mut()
+            .find(|task| task.id == id)
+        {
+            task.status = status;
+            task.delivery.notified = true;
+            task.delivery.notification = Some(Notification::task_update(
+                session_id,
+                title,
+                format!("{} ({})", task.description, task.id),
+            ));
+        }
     }
 }

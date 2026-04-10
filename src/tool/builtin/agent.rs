@@ -1,8 +1,6 @@
 use async_trait::async_trait;
 
 use crate::state::permission_context::ToolPermissionContext;
-use crate::task::manager::TaskManager;
-use crate::task::types::TaskStatus;
 use crate::tool::definition::{Tool, ToolCall, ToolMetadata, ToolResult};
 
 pub struct AgentTool;
@@ -25,13 +23,17 @@ impl Tool for AgentTool {
     async fn invoke(
         &self,
         call: &ToolCall,
-        _permissions: &ToolPermissionContext,
+        permissions: &ToolPermissionContext,
     ) -> anyhow::Result<ToolResult> {
-        let tasks = TaskManager::default();
-        let task = tasks.register("agent-task", format!("Spawned agent for {}", call.input));
-        tasks.transition(&task.id, TaskStatus::Completed);
+        let tasks = permissions
+            .task_manager
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("shared task manager is not configured"))?;
+        let task = tasks.create(format!("Spawned agent for {}", call.input));
+        tasks.start(&task.id);
+        tasks.append_output(&task.id, format!("pending subagent input: {}", call.input));
         Ok(ToolResult::Text(format!(
-            "agent task {} completed with isolated scaffold for {}",
+            "agent task {} created and running for {}",
             task.id, call.input
         )))
     }

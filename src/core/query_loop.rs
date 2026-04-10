@@ -30,7 +30,6 @@ pub struct QueryLoopResult {
 
 pub async fn run_query_loop(context: &QueryContext, input: Message) -> QueryLoopResult {
     let mut messages = Vec::new();
-    let mut aggregated_text = String::new();
     let token_estimate = input.content.len();
 
     if context.compactor.should_compact(token_estimate, 512) {
@@ -44,73 +43,122 @@ pub async fn run_query_loop(context: &QueryContext, input: Message) -> QueryLoop
         };
     }
 
-    let events = context.api_client.stream_message(&input).await;
-    if events.is_empty() {
-        messages.push(Message::assistant(format!(
-            "no stream events available for: {}",
-            input.content
-        )));
-        return QueryLoopResult {
-            state: QueryLoopState::Completed,
-            terminal_reason: QueryTerminalReason::Completed,
-            messages,
-        };
-    }
+    let mut current_input = input;
+    for _ in 0..4 {
+        let events = context.api_client.stream_message(&current_input).await;
+        if events.is_empty() {
+            break;
+        }
 
-    for event in events {
-        match event {
-            StreamEvent::MessageStart => {}
-            StreamEvent::TextDelta(delta) => {
-                aggregated_text.push_str(&delta);
-            }
-            StreamEvent::ToolUse { tool_name, input } => {
-                if !aggregated_text.is_empty() {
-                    messages.push(Message::assistant(aggregated_text.clone()));
+        let mut aggregated_text = String::new();
+        let mut pending_tool_use: Option<(String, String)> = None;
+
+        for event in events {
+            match event {
+                StreamEvent::MessageStart => {}
+                StreamEvent::TextDelta(delta) => {
+                    aggregated_text.push_str(&delta);
                 }
-                messages.push(Message::assistant(format!(
-                    "tool requested: {tool_name} {input}"
-                )));
-                return QueryLoopResult {
-                    state: QueryLoopState::AwaitingTool,
-                    terminal_reason: QueryTerminalReason::ToolUseRequested,
-                    messages,
-                };
-            }
-            StreamEvent::MessageStop { stop_reason } => {
-                if !aggregated_text.is_empty() {
-                    messages.push(Message::assistant(aggregated_text.clone()));
+                StreamEvent::ToolUse { tool_name, input } => {
+                    pending_tool_use = Some((tool_name, input));
                 }
-                let terminal_reason = match stop_reason {
-                    StopReason::EndTurn => QueryTerminalReason::Completed,
-                    StopReason::ToolUse => QueryTerminalReason::ToolUseRequested,
-                    StopReason::MaxTokens => QueryTerminalReason::Interrupted,
-                    StopReason::Error => QueryTerminalReason::Failed,
-                };
-                let state = match stop_reason {
-                    StopReason::EndTurn => QueryLoopState::Completed,
-                    StopReason::ToolUse => QueryLoopState::AwaitingTool,
-                    StopReason::MaxTokens => QueryLoopState::Interrupted,
-                    StopReason::Error => QueryLoopState::Failed,
-                };
-                return QueryLoopResult {
-                    state,
-                    terminal_reason,
-                    messages,
-                };
-            }
-            StreamEvent::Error(error) => {
-                messages.push(Message::assistant(format!("stream error: {error}")));
-                return QueryLoopResult {
-                    state: QueryLoopState::Failed,
-                    terminal_reason: QueryTerminalReason::Failed,
-                    messages,
-                };
+                StreamEvent::MessageStop { stop_reason } => match stop_reason {
+                    StopReason::EndTurn => {
+                        if !aggregated_text.is_empty() {
+                            messages.push(Message::assistant(aggregated_text));
+                        }
+                        return QueryLoopResult {
+                            state: QueryLoopState::Completed,
+                            terminal_reason: QueryTerminalReason::Completed,
+                            messages,
+                        };
+                    }
+                    StopReason::ToolUse => {
+                        if !aggregated_text.is_empty() {
+                            messages.push(Message::assistant(aggregated_text.clone()));
+                        }
+                        let Some((tool_name, tool_input)) = pending_tool_use.take() else {
+                            messages.push(Message::assistant(
+                                "stream error: tool stop without tool payload",
+                            ));
+                            return QueryLoopResult {
+                                state: QueryLoopState::Failed,
+                                terminal_reason: QueryTerminalReason::Failed,
+                                messages,
+                            };
+                        };
+                        let tool_result = context
+                            .tool_registry
+                            .invoke(
+                                &crate::tool::definition::ToolCall {
+                                    name: tool_name.clone(),
+                                    input: tool_input.clone(),
+                                },
+                                &context.app_state.permission_context,
+                            )
+                            .await;
+                        match tool_result {
+                            Ok(crate::tool::definition::ToolResult::Text(text)) => {
+                                messages.push(Message::assistant(format!(
+                                    "tool {tool_name} result: {text}"
+                                )));
+                                current_input =
+                                    Message::user(format!("tool result for {tool_name}: {text}"));
+                                break;
+                            }
+                            Ok(crate::tool::definition::ToolResult::Denied(reason)) => {
+                                messages.push(Message::assistant(format!(
+                                    "tool {tool_name} denied: {reason}"
+                                )));
+                                return QueryLoopResult {
+                                    state: QueryLoopState::Failed,
+                                    terminal_reason: QueryTerminalReason::Failed,
+                                    messages,
+                                };
+                            }
+                            Err(error) => {
+                                messages.push(Message::assistant(format!(
+                                    "tool {tool_name} failed: {error}"
+                                )));
+                                return QueryLoopResult {
+                                    state: QueryLoopState::Failed,
+                                    terminal_reason: QueryTerminalReason::Failed,
+                                    messages,
+                                };
+                            }
+                        }
+                    }
+                    StopReason::MaxTokens => {
+                        if !aggregated_text.is_empty() {
+                            messages.push(Message::assistant(aggregated_text));
+                        }
+                        return QueryLoopResult {
+                            state: QueryLoopState::Interrupted,
+                            terminal_reason: QueryTerminalReason::Interrupted,
+                            messages,
+                        };
+                    }
+                    StopReason::Error => {
+                        if !aggregated_text.is_empty() {
+                            messages.push(Message::assistant(aggregated_text));
+                        }
+                        return QueryLoopResult {
+                            state: QueryLoopState::Failed,
+                            terminal_reason: QueryTerminalReason::Failed,
+                            messages,
+                        };
+                    }
+                },
+                StreamEvent::Error(error) => {
+                    messages.push(Message::assistant(format!("stream error: {error}")));
+                    return QueryLoopResult {
+                        state: QueryLoopState::Failed,
+                        terminal_reason: QueryTerminalReason::Failed,
+                        messages,
+                    };
+                }
             }
         }
-    }
-
-    if !aggregated_text.is_empty() {
-        messages.push(Message::assistant(aggregated_text));
     }
 
     QueryLoopResult {

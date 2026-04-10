@@ -22,6 +22,7 @@ use crate::service::api::client::AnthropicClient;
 use crate::service::compact::reactive_compact::ReactiveCompactor;
 use crate::state::app_state::AppState;
 use crate::state::permission_context::{PermissionMode, ToolPermissionContext};
+use crate::task::manager::TaskManager;
 use crate::tool::builtin::{
     agent::AgentTool, file_edit::FileEditTool, file_read::FileReadTool, glob::GlobTool,
     grep::GrepTool, tool_search::ToolSearchTool, web_fetch::WebFetchTool,
@@ -87,11 +88,13 @@ impl RuntimeBootstrap {
         state.record_phase(BootstrapPhase::InjectSessionMetadata);
         state.record_phase(BootstrapPhase::ResolvePermissions);
 
+        let task_manager = Arc::new(TaskManager::default());
         let permission_context = ToolPermissionContext::new(if self.cli.init_only {
             PermissionMode::Plan
         } else {
             PermissionMode::Default
-        });
+        })
+        .with_task_manager(task_manager.clone());
 
         state.record_phase(BootstrapPhase::BuildToolContext);
         let tool_registry = self.build_tool_registry();
