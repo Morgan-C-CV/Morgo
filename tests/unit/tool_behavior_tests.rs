@@ -1,7 +1,11 @@
+use std::io::{Read as _, Write as _};
+use std::net::TcpListener;
 use std::sync::Arc;
+use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rust_agent::state::permission_context::{PermissionMode, ToolPermissionContext};
+use rust_agent::tool::builtin::file_edit::FileEditTool;
 use rust_agent::tool::builtin::file_read::FileReadTool;
 use rust_agent::tool::builtin::glob::GlobTool;
 use rust_agent::tool::builtin::grep::GrepTool;
@@ -126,12 +130,126 @@ async fn grep_tool_reports_matching_lines() {
 }
 
 #[tokio::test]
+async fn edit_tool_replaces_unique_match() {
+    let dir = std::env::temp_dir().join(unique_name("rust-agent-edit"));
+    fs::create_dir_all(&dir).await.expect("create dir");
+    let file = dir.join("sample.txt");
+    fs::write(&file, "before\nneedle\nafter")
+        .await
+        .expect("write sample file");
+
+    let input = serde_json::json!({
+        "file_path": file.to_string_lossy(),
+        "old_string": "needle",
+        "new_string": "replacement"
+    })
+    .to_string();
+
+    let result = FileEditTool
+        .invoke(
+            &ToolCall {
+                name: "Edit".into(),
+                input,
+            },
+            &ToolPermissionContext::new(PermissionMode::Default),
+        )
+        .await
+        .expect("edit should succeed");
+
+    assert_eq!(
+        result,
+        ToolResult::Text(format!("edited {}", file.display()))
+    );
+    let updated = fs::read_to_string(&file).await.expect("read edited file");
+    assert_eq!(updated, "before\nreplacement\nafter");
+
+    fs::remove_dir_all(&dir).await.expect("cleanup dir");
+}
+
+#[tokio::test]
+async fn edit_tool_rejects_non_unique_match_without_replace_all() {
+    let dir = std::env::temp_dir().join(unique_name("rust-agent-edit-duplicate"));
+    fs::create_dir_all(&dir).await.expect("create dir");
+    let file = dir.join("sample.txt");
+    fs::write(&file, "needle\nneedle")
+        .await
+        .expect("write sample file");
+
+    let input = serde_json::json!({
+        "file_path": file.to_string_lossy(),
+        "old_string": "needle",
+        "new_string": "replacement"
+    })
+    .to_string();
+
+    let error = FileEditTool
+        .invoke(
+            &ToolCall {
+                name: "Edit".into(),
+                input,
+            },
+            &ToolPermissionContext::new(PermissionMode::Default),
+        )
+        .await
+        .expect_err("edit should fail for duplicate match");
+
+    assert!(error.to_string().contains("old_string is not unique"));
+    fs::remove_dir_all(&dir).await.expect("cleanup dir");
+}
+
+#[tokio::test]
+async fn web_fetch_tool_returns_response_body() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+    let addr = listener.local_addr().expect("local addr");
+    let handle = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept connection");
+        let mut buffer = [0_u8; 1024];
+        let _ = stream.read(&mut buffer);
+        stream
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Length: 12\r\nConnection: close\r\n\r\nhello client",
+            )
+            .expect("write response");
+    });
+
+    let result = WebFetchTool
+        .invoke(
+            &ToolCall {
+                name: "WebFetch".into(),
+                input: format!("http://{addr}"),
+            },
+            &ToolPermissionContext::new(PermissionMode::Default),
+        )
+        .await
+        .expect("web fetch should succeed");
+
+    handle.join().expect("server should exit cleanly");
+    assert_eq!(result, ToolResult::Text("hello client".into()));
+}
+
+#[tokio::test]
+async fn web_fetch_tool_rejects_invalid_url() {
+    let error = WebFetchTool
+        .invoke(
+            &ToolCall {
+                name: "WebFetch".into(),
+                input: "not-a-url".into(),
+            },
+            &ToolPermissionContext::new(PermissionMode::Default),
+        )
+        .await
+        .expect_err("invalid url should fail");
+
+    assert!(error.to_string().contains("invalid URL"));
+}
+
+#[tokio::test]
 async fn tool_search_filters_catalog() {
     let result = ToolSearchTool
         .invoke(
             &ToolCall {
                 name: "ToolSearch".into(),
-                input: "read".into(),
+                input: "edit".into(),
             },
             &ToolPermissionContext::new(PermissionMode::Default),
         )
@@ -141,7 +259,7 @@ async fn tool_search_filters_catalog() {
     let ToolResult::Text(text) = result else {
         panic!("expected text result");
     };
-    assert!(text.contains("Read - Read files from disk"));
+    assert!(text.contains("Edit - Edit existing files with safety rails"));
     assert!(!text.contains("WebFetch - Fetch remote web content"));
 }
 
