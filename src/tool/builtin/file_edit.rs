@@ -11,10 +11,12 @@ impl Tool for FileEditTool {
         ToolMetadata {
             name: "Edit",
             description: "Edit existing files with safety rails",
+            aliases: &[],
             read_only: false,
             destructive: false,
             always_load: true,
             should_defer: false,
+            requires_auth: true,
         }
     }
 

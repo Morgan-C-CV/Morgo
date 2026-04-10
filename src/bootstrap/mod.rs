@@ -4,4 +4,6 @@ mod state;
 
 pub use runtime::{BootstrapCli, RuntimeBootstrap};
 pub use setup::SetupContext;
-pub use state::{BootstrapPhase, BootstrapState, InteractionSurface, SessionMode};
+pub use state::{
+    BootstrapPhase, BootstrapState, ClientType, InteractionSurface, SessionMode, SessionSource,
+};

@@ -15,6 +15,20 @@ pub enum SessionMode {
     InitOnly,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClientType {
+    Cli,
+    Bot,
+    RemoteControl,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionSource {
+    LocalCli,
+    Telegram,
+    RemoteControl,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum BootstrapPhase {
     DetectSurface,
@@ -33,6 +47,8 @@ pub enum BootstrapPhase {
 pub struct BootstrapState {
     pub surface: InteractionSurface,
     pub session_mode: SessionMode,
+    pub client_type: ClientType,
+    pub session_source: SessionSource,
     pub original_cwd: PathBuf,
     pub current_cwd: PathBuf,
     pub phases: Vec<BootstrapPhase>,
@@ -46,9 +62,16 @@ impl BootstrapState {
         trace_startup: bool,
     ) -> Self {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let (client_type, session_source) = match surface {
+            InteractionSurface::Cli => (ClientType::Cli, SessionSource::LocalCli),
+            InteractionSurface::Telegram => (ClientType::Bot, SessionSource::Telegram),
+            InteractionSurface::Remote => (ClientType::RemoteControl, SessionSource::RemoteControl),
+        };
         Self {
             surface,
             session_mode,
+            client_type,
+            session_source,
             original_cwd: cwd.clone(),
             current_cwd: cwd,
             phases: Vec::new(),
@@ -57,7 +80,20 @@ impl BootstrapState {
     }
 
     pub fn enter_phase(&mut self, phase: BootstrapPhase) {
+        self.record_phase(phase);
+    }
+
+    pub fn record_phase(&mut self, phase: BootstrapPhase) {
         self.phases.push(phase);
+    }
+
+    pub fn finalize(mut self) -> Self {
+        self.record_phase(BootstrapPhase::FinalizeState);
+        self
+    }
+
+    pub fn current_phase(&self) -> Option<BootstrapPhase> {
+        self.phases.last().copied()
     }
 
     pub fn startup_trace(&self) -> String {

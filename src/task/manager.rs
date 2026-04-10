@@ -1,6 +1,6 @@
 use std::sync::{Arc, RwLock};
 
-use crate::task::types::{TaskRecord, TaskStatus};
+use crate::task::types::{TaskDeliveryState, TaskRecord, TaskStatus};
 
 #[derive(Debug, Clone, Default)]
 pub struct TaskManager {
@@ -13,6 +13,10 @@ impl TaskManager {
             id: id.into(),
             description: description.into(),
             status: TaskStatus::Pending,
+            delivery: TaskDeliveryState {
+                output_path: "stdout".into(),
+                notified: false,
+            },
         };
         self.tasks
             .write()
@@ -29,7 +33,13 @@ impl TaskManager {
             .iter_mut()
             .find(|task| task.id == id)
         {
-            task.status = status;
+            task.status = status.clone();
+            if matches!(
+                status,
+                TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Killed
+            ) {
+                task.delivery.notified = true;
+            }
         }
     }
 

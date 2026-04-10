@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use crate::state::permission_context::ToolPermissionContext;
-use crate::tool::definition::{Tool, ToolMetadata};
-use crate::tool::permission::is_tool_allowed;
+use crate::tool::definition::{Tool, ToolCall, ToolMetadata, ToolResult};
+use crate::tool::permission::{evaluate_tool_permission, is_tool_allowed};
 
 #[derive(Clone, Default)]
 pub struct ToolRegistry {
@@ -34,5 +34,33 @@ impl ToolRegistry {
             .map(|tool| tool.metadata())
             .filter(|metadata| is_tool_allowed(metadata, permissions))
             .collect()
+    }
+
+    pub async fn invoke(
+        &self,
+        call: &ToolCall,
+        permissions: &ToolPermissionContext,
+    ) -> anyhow::Result<ToolResult> {
+        let tool = self
+            .tools
+            .iter()
+            .find(|tool| {
+                let metadata = tool.metadata();
+                metadata.name == call.name
+                    || metadata.aliases.iter().any(|alias| *alias == call.name)
+            })
+            .ok_or_else(|| anyhow::anyhow!("unknown tool {}", call.name))?;
+
+        let metadata = tool.metadata();
+        tool.validate_input(call).await?;
+        match evaluate_tool_permission(&metadata, call, permissions) {
+            crate::tool::definition::PermissionDecision::Allow => {
+                tool.invoke(call, permissions).await
+            }
+            crate::tool::definition::PermissionDecision::Ask(reason)
+            | crate::tool::definition::PermissionDecision::Deny(reason) => {
+                Ok(ToolResult::Denied(reason))
+            }
+        }
     }
 }

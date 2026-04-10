@@ -1,6 +1,7 @@
 pub mod bootstrap;
 pub mod command;
 pub mod core;
+pub mod history;
 pub mod hook;
 pub mod interaction;
 pub mod security;

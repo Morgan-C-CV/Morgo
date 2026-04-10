@@ -4,6 +4,7 @@ use std::path::PathBuf;
 pub struct SetupContext {
     pub working_directory: PathBuf,
     pub worktree_enabled: bool,
+    pub hooks_snapshot_captured: bool,
 }
 
 impl SetupContext {
@@ -14,6 +15,7 @@ impl SetupContext {
             worktree_enabled: std::env::var("RUST_AGENT_WORKTREE_ENABLED")
                 .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
                 .unwrap_or(false),
+            hooks_snapshot_captured: true,
         }
     }
 }

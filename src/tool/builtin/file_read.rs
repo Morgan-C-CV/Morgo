@@ -1,4 +1,7 @@
+use std::path::Path;
+
 use async_trait::async_trait;
+use tokio::fs;
 
 use crate::state::permission_context::ToolPermissionContext;
 use crate::tool::definition::{Tool, ToolCall, ToolMetadata, ToolResult};
@@ -11,11 +14,20 @@ impl Tool for FileReadTool {
         ToolMetadata {
             name: "Read",
             description: "Read files from disk",
+            aliases: &[],
             read_only: true,
             destructive: false,
             always_load: true,
             should_defer: false,
+            requires_auth: false,
         }
+    }
+
+    async fn validate_input(&self, call: &ToolCall) -> anyhow::Result<()> {
+        if call.input.trim().is_empty() {
+            anyhow::bail!("read target cannot be empty")
+        }
+        Ok(())
     }
 
     async fn invoke(
@@ -23,9 +35,10 @@ impl Tool for FileReadTool {
         call: &ToolCall,
         _permissions: &ToolPermissionContext,
     ) -> anyhow::Result<ToolResult> {
-        Ok(ToolResult::Text(format!(
-            "file read scaffold: {}",
-            call.input
-        )))
+        let path = Path::new(call.input.trim());
+        let contents = fs::read_to_string(path)
+            .await
+            .map_err(|error| anyhow::anyhow!("failed to read {}: {error}", path.display()))?;
+        Ok(ToolResult::Text(contents))
     }
 }

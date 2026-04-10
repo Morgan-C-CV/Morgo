@@ -1,6 +1,10 @@
 use async_trait::async_trait;
 
 use crate::state::permission_context::ToolPermissionContext;
+use crate::tool::builtin::{
+    agent::AgentTool, file_edit::FileEditTool, file_read::FileReadTool, glob::GlobTool,
+    grep::GrepTool, web_fetch::WebFetchTool,
+};
 use crate::tool::definition::{Tool, ToolCall, ToolMetadata, ToolResult};
 
 pub struct ToolSearchTool;
@@ -11,11 +15,17 @@ impl Tool for ToolSearchTool {
         ToolMetadata {
             name: "ToolSearch",
             description: "Search the available tool catalog",
+            aliases: &[],
             read_only: true,
             destructive: false,
             always_load: true,
             should_defer: false,
+            requires_auth: false,
         }
+    }
+
+    async fn validate_input(&self, _call: &ToolCall) -> anyhow::Result<()> {
+        Ok(())
     }
 
     async fn invoke(
@@ -23,9 +33,32 @@ impl Tool for ToolSearchTool {
         call: &ToolCall,
         _permissions: &ToolPermissionContext,
     ) -> anyhow::Result<ToolResult> {
-        Ok(ToolResult::Text(format!(
-            "tool search scaffold: {}",
-            call.input
-        )))
+        let query = call.input.trim().to_ascii_lowercase();
+        let catalog = vec![
+            AgentTool.metadata(),
+            FileEditTool.metadata(),
+            FileReadTool.metadata(),
+            GlobTool.metadata(),
+            GrepTool.metadata(),
+            self.metadata(),
+            WebFetchTool.metadata(),
+        ];
+
+        let mut matches = catalog
+            .into_iter()
+            .filter(|tool| {
+                query.is_empty()
+                    || tool.name.to_ascii_lowercase().contains(&query)
+                    || tool.description.to_ascii_lowercase().contains(&query)
+                    || tool
+                        .aliases
+                        .iter()
+                        .any(|alias| alias.to_ascii_lowercase().contains(&query))
+            })
+            .map(|tool| format!("{} - {}", tool.name, tool.description))
+            .collect::<Vec<_>>();
+        matches.sort();
+
+        Ok(ToolResult::Text(matches.join("\n")))
     }
 }

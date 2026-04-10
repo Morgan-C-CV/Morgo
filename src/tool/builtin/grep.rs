@@ -1,3 +1,6 @@
+use std::fs;
+use std::path::Path;
+
 use async_trait::async_trait;
 
 use crate::state::permission_context::ToolPermissionContext;
@@ -11,11 +14,20 @@ impl Tool for GrepTool {
         ToolMetadata {
             name: "Grep",
             description: "Search file contents by regex",
+            aliases: &[],
             read_only: true,
             destructive: false,
             always_load: true,
             should_defer: false,
+            requires_auth: false,
         }
+    }
+
+    async fn validate_input(&self, call: &ToolCall) -> anyhow::Result<()> {
+        if call.input.trim().is_empty() {
+            anyhow::bail!("grep query cannot be empty")
+        }
+        Ok(())
     }
 
     async fn invoke(
@@ -23,6 +35,56 @@ impl Tool for GrepTool {
         call: &ToolCall,
         _permissions: &ToolPermissionContext,
     ) -> anyhow::Result<ToolResult> {
-        Ok(ToolResult::Text(format!("grep scaffold: {}", call.input)))
+        let root = std::env::current_dir()
+            .map_err(|error| anyhow::anyhow!("failed to resolve cwd: {error}"))?;
+        let query = call.input.trim();
+        let mut matches = Vec::new();
+        collect_matches(&root, &root, query, &mut matches)?;
+        matches.sort();
+        Ok(ToolResult::Text(matches.join("\n")))
     }
+}
+
+fn collect_matches(
+    root: &Path,
+    current: &Path,
+    query: &str,
+    matches: &mut Vec<String>,
+) -> anyhow::Result<()> {
+    for entry in fs::read_dir(current).map_err(|error| {
+        anyhow::anyhow!("failed to read directory {}: {error}", current.display())
+    })? {
+        let entry = entry.map_err(|error| {
+            anyhow::anyhow!("failed to iterate directory {}: {error}", current.display())
+        })?;
+        let entry_path = entry.path();
+        let file_type = entry.file_type().map_err(|error| {
+            anyhow::anyhow!(
+                "failed to read file type for {}: {error}",
+                entry_path.display()
+            )
+        })?;
+
+        if file_type.is_dir() {
+            collect_matches(root, &entry_path, query, matches)?;
+            continue;
+        }
+
+        let Ok(contents) = fs::read_to_string(&entry_path) else {
+            continue;
+        };
+
+        let relative = entry_path
+            .strip_prefix(root)
+            .unwrap_or(&entry_path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        for (index, line) in contents.lines().enumerate() {
+            if line.contains(query) {
+                matches.push(format!("{}:{}:{}", relative, index + 1, line.trim()));
+            }
+        }
+    }
+
+    Ok(())
 }

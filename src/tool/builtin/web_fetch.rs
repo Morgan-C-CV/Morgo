@@ -11,10 +11,12 @@ impl Tool for WebFetchTool {
         ToolMetadata {
             name: "WebFetch",
             description: "Fetch remote web content",
+            aliases: &[],
             read_only: true,
             destructive: false,
             always_load: false,
             should_defer: true,
+            requires_auth: true,
         }
     }
 

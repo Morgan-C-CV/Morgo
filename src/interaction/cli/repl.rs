@@ -14,6 +14,14 @@ pub async fn handle_cli_input(
     let input = NormalizedInput::from_raw(app_state.surface, raw);
     match router.route(&input, app_state).await? {
         CommandResult::Message(message) => Ok(message),
+        CommandResult::Prompt(prompt) => {
+            let responses = engine.submit_message(Message::user(prompt)).await;
+            Ok(responses
+                .into_iter()
+                .map(|message| message.content)
+                .collect::<Vec<_>>()
+                .join("\n"))
+        }
         CommandResult::ContinueToQuery => {
             let responses = engine.submit_message(Message::user(input.raw)).await;
             Ok(responses
@@ -22,5 +30,6 @@ pub async fn handle_cli_input(
                 .collect::<Vec<_>>()
                 .join("\n"))
         }
+        CommandResult::Denied(reason) => Ok(format!("Denied: {reason}")),
     }
 }
