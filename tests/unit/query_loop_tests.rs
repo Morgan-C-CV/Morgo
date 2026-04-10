@@ -3,6 +3,7 @@ use rust_agent::core::context::QueryContext;
 use rust_agent::core::engine::QueryEngine;
 use rust_agent::core::message::Message;
 use rust_agent::core::query_loop::{QueryLoopState, QueryTerminalReason};
+use rust_agent::hook::registry::{HookEvent, HookEventMatcher, HookRegistry, HookRule};
 use rust_agent::service::api::client::AnthropicClient;
 use rust_agent::service::api::streaming::{StopReason, StreamEvent};
 use rust_agent::service::compact::reactive_compact::ReactiveCompactor;
@@ -41,6 +42,7 @@ fn test_context_with_turns(
         tool_registry,
         api_client: AnthropicClient::with_scripted_turns(turns),
         compactor: ReactiveCompactor,
+        hook_registry: HookRegistry::default(),
     }
 }
 
@@ -170,5 +172,57 @@ async fn query_loop_fails_when_tool_is_unknown() {
         result.messages[0]
             .content
             .contains("tool MissingTool failed")
+    );
+}
+
+#[tokio::test]
+async fn query_loop_respects_pre_tool_hook_denial() {
+    let registry = ToolRegistry::new().register(Arc::new(AgentTool));
+    let mut permission_context = ToolPermissionContext::new(PermissionMode::Default)
+        .with_task_manager(Arc::new(TaskManager::default()));
+    permission_context.always_allow_rules.push("Agent".into());
+
+    let context = QueryContext {
+        app_state: AppState {
+            surface: InteractionSurface::Cli,
+            session_mode: SessionMode::Headless,
+            client_type: ClientType::Cli,
+            session_source: SessionSource::LocalCli,
+            permission_context,
+            startup_trace: Vec::new(),
+            active_session_id: "test-session".into(),
+            session: None,
+            history: None,
+            restored_session: None,
+        },
+        tool_registry: registry,
+        api_client: AnthropicClient::with_scripted_turns(vec![vec![
+            StreamEvent::MessageStart,
+            StreamEvent::ToolUse {
+                tool_name: "Agent".into(),
+                input: "inspect file".into(),
+            },
+            StreamEvent::MessageStop {
+                stop_reason: StopReason::ToolUse,
+            },
+        ]]),
+        compactor: ReactiveCompactor,
+        hook_registry: HookRegistry::default().register_rule(HookRule {
+            event: HookEventMatcher::PreToolUse,
+            deny_match: Some("Agent".into()),
+        }),
+    };
+
+    let engine = QueryEngine::new(context);
+    let result = engine.submit_turn(Message::user("inspect file")).await;
+
+    assert_eq!(result.state, QueryLoopState::Failed);
+    assert!(result.messages[0].content.contains("denied by hook"));
+    assert!(
+        engine
+            .context
+            .hook_registry
+            .recorded_events()
+            .contains(&HookEvent::UserPromptSubmit)
     );
 }

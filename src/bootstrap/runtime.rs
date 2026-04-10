@@ -14,6 +14,8 @@ use crate::history::session::{
     SessionStore,
 };
 use crate::history::transcript::Transcript;
+use crate::hook::executor::run_hook;
+use crate::hook::registry::{HookEvent, HookRegistry};
 use crate::interaction::cli::renderer::render_output;
 use crate::interaction::cli::repl::handle_cli_input;
 use crate::interaction::router::CommandRouter;
@@ -30,7 +32,7 @@ use crate::tool::builtin::{
 use crate::tool::registry::ToolRegistry;
 
 #[derive(Debug, Clone, Parser)]
-#[command(name = "rust-agent", about = "Rust agent runtime scaffold")]
+#[command(name = "rust-agent", about = "Rust agent runtime")]
 pub struct BootstrapCli {
     #[arg(long)]
     pub print: Option<String>,
@@ -96,11 +98,15 @@ impl RuntimeBootstrap {
         })
         .with_task_manager(task_manager.clone());
 
+        let hook_registry = HookRegistry::default();
+        let _ = run_hook(&hook_registry, HookEvent::SessionStart);
+
         state.record_phase(BootstrapPhase::BuildToolContext);
         let tool_registry = self.build_tool_registry();
 
         state.record_phase(BootstrapPhase::AssembleTools);
         let setup = SetupContext::detect();
+        let _ = run_hook(&hook_registry, HookEvent::Setup);
         state.record_phase(BootstrapPhase::Setup);
         state.current_cwd = setup.working_directory.clone();
 
@@ -163,6 +169,7 @@ impl RuntimeBootstrap {
             tool_registry,
             api_client: AnthropicClient::default(),
             compactor: ReactiveCompactor,
+            hook_registry,
         };
         let engine = QueryEngine::new(query_context);
 

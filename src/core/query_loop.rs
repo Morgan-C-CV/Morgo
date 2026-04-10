@@ -1,5 +1,7 @@
 use crate::core::context::QueryContext;
 use crate::core::message::Message;
+use crate::hook::executor::{HookDecision, run_hook};
+use crate::hook::registry::HookEvent;
 use crate::service::api::streaming::{StopReason, StreamEvent};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,10 +34,20 @@ pub async fn run_query_loop(context: &QueryContext, input: Message) -> QueryLoop
     let mut messages = Vec::new();
     let token_estimate = input.content.len();
 
+    if let HookDecision::Deny(reason) = run_hook(&context.hook_registry, HookEvent::UserPromptSubmit)
+    {
+        return QueryLoopResult {
+            state: QueryLoopState::Failed,
+            terminal_reason: QueryTerminalReason::Failed,
+            messages: vec![Message::assistant(format!("hook denied prompt: {reason}"))],
+        };
+    }
+
     if context.compactor.should_compact(token_estimate, 512) {
         messages.push(Message::assistant(
             "compaction requested before continuing the turn",
         ));
+        let _ = run_hook(&context.hook_registry, HookEvent::Stop);
         return QueryLoopResult {
             state: QueryLoopState::Compacting,
             terminal_reason: QueryTerminalReason::Compacted,
@@ -67,6 +79,7 @@ pub async fn run_query_loop(context: &QueryContext, input: Message) -> QueryLoop
                         if !aggregated_text.is_empty() {
                             messages.push(Message::assistant(aggregated_text));
                         }
+                        let _ = run_hook(&context.hook_registry, HookEvent::Stop);
                         return QueryLoopResult {
                             state: QueryLoopState::Completed,
                             terminal_reason: QueryTerminalReason::Completed,
@@ -81,12 +94,38 @@ pub async fn run_query_loop(context: &QueryContext, input: Message) -> QueryLoop
                             messages.push(Message::assistant(
                                 "stream error: tool stop without tool payload",
                             ));
+                            let _ = run_hook(&context.hook_registry, HookEvent::Stop);
                             return QueryLoopResult {
                                 state: QueryLoopState::Failed,
                                 terminal_reason: QueryTerminalReason::Failed,
                                 messages,
                             };
                         };
+                        if matches!(
+                            run_hook(
+                                &context.hook_registry,
+                                HookEvent::PreToolUse {
+                                    tool_name: tool_name.clone(),
+                                },
+                            ),
+                            HookDecision::Deny(reason) if {
+                                messages.push(Message::assistant(format!("tool {tool_name} denied by hook: {reason}")));
+                                true
+                            }
+                        ) {
+                            let _ = run_hook(
+                                &context.hook_registry,
+                                HookEvent::PostToolUseFailure {
+                                    tool_name: tool_name.clone(),
+                                },
+                            );
+                            let _ = run_hook(&context.hook_registry, HookEvent::Stop);
+                            return QueryLoopResult {
+                                state: QueryLoopState::Failed,
+                                terminal_reason: QueryTerminalReason::Failed,
+                                messages,
+                            };
+                        }
                         let tool_result = context
                             .tool_registry
                             .invoke(
@@ -99,6 +138,12 @@ pub async fn run_query_loop(context: &QueryContext, input: Message) -> QueryLoop
                             .await;
                         match tool_result {
                             Ok(crate::tool::definition::ToolResult::Text(text)) => {
+                                let _ = run_hook(
+                                    &context.hook_registry,
+                                    HookEvent::PostToolUse {
+                                        tool_name: tool_name.clone(),
+                                    },
+                                );
                                 messages.push(Message::assistant(format!(
                                     "tool {tool_name} result: {text}"
                                 )));
@@ -107,9 +152,16 @@ pub async fn run_query_loop(context: &QueryContext, input: Message) -> QueryLoop
                                 break;
                             }
                             Ok(crate::tool::definition::ToolResult::Denied(reason)) => {
+                                let _ = run_hook(
+                                    &context.hook_registry,
+                                    HookEvent::PostToolUseFailure {
+                                        tool_name: tool_name.clone(),
+                                    },
+                                );
                                 messages.push(Message::assistant(format!(
                                     "tool {tool_name} denied: {reason}"
                                 )));
+                                let _ = run_hook(&context.hook_registry, HookEvent::Stop);
                                 return QueryLoopResult {
                                     state: QueryLoopState::Failed,
                                     terminal_reason: QueryTerminalReason::Failed,
@@ -117,9 +169,16 @@ pub async fn run_query_loop(context: &QueryContext, input: Message) -> QueryLoop
                                 };
                             }
                             Err(error) => {
+                                let _ = run_hook(
+                                    &context.hook_registry,
+                                    HookEvent::PostToolUseFailure {
+                                        tool_name: tool_name.clone(),
+                                    },
+                                );
                                 messages.push(Message::assistant(format!(
                                     "tool {tool_name} failed: {error}"
                                 )));
+                                let _ = run_hook(&context.hook_registry, HookEvent::Stop);
                                 return QueryLoopResult {
                                     state: QueryLoopState::Failed,
                                     terminal_reason: QueryTerminalReason::Failed,
@@ -132,6 +191,7 @@ pub async fn run_query_loop(context: &QueryContext, input: Message) -> QueryLoop
                         if !aggregated_text.is_empty() {
                             messages.push(Message::assistant(aggregated_text));
                         }
+                        let _ = run_hook(&context.hook_registry, HookEvent::Stop);
                         return QueryLoopResult {
                             state: QueryLoopState::Interrupted,
                             terminal_reason: QueryTerminalReason::Interrupted,
@@ -142,6 +202,7 @@ pub async fn run_query_loop(context: &QueryContext, input: Message) -> QueryLoop
                         if !aggregated_text.is_empty() {
                             messages.push(Message::assistant(aggregated_text));
                         }
+                        let _ = run_hook(&context.hook_registry, HookEvent::Stop);
                         return QueryLoopResult {
                             state: QueryLoopState::Failed,
                             terminal_reason: QueryTerminalReason::Failed,
@@ -151,6 +212,7 @@ pub async fn run_query_loop(context: &QueryContext, input: Message) -> QueryLoop
                 },
                 StreamEvent::Error(error) => {
                     messages.push(Message::assistant(format!("stream error: {error}")));
+                    let _ = run_hook(&context.hook_registry, HookEvent::Stop);
                     return QueryLoopResult {
                         state: QueryLoopState::Failed,
                         terminal_reason: QueryTerminalReason::Failed,
@@ -161,6 +223,7 @@ pub async fn run_query_loop(context: &QueryContext, input: Message) -> QueryLoop
         }
     }
 
+    let _ = run_hook(&context.hook_registry, HookEvent::Stop);
     QueryLoopResult {
         state: QueryLoopState::Completed,
         terminal_reason: QueryTerminalReason::Completed,

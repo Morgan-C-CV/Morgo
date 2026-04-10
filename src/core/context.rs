@@ -1,3 +1,4 @@
+use crate::hook::registry::HookRegistry;
 use crate::service::api::client::AnthropicClient;
 use crate::service::compact::reactive_compact::ReactiveCompactor;
 use crate::state::app_state::AppState;
@@ -9,4 +10,5 @@ pub struct QueryContext {
     pub tool_registry: ToolRegistry,
     pub api_client: AnthropicClient,
     pub compactor: ReactiveCompactor,
+    pub hook_registry: HookRegistry,
 }

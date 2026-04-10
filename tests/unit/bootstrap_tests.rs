@@ -8,6 +8,7 @@ use rust_agent::history::session::{
     InMemorySessionStore, SessionHistory, SessionHistoryEntry, SessionId, SessionSnapshot,
     SessionStore,
 };
+use rust_agent::hook::registry::HookEvent;
 
 #[test]
 fn bootstrap_state_records_phase_order() {
@@ -87,4 +88,10 @@ async fn runtime_continue_session_uses_restored_snapshot() {
     .with_session_store(store);
 
     runtime.run().await.expect("runtime should run");
+}
+
+#[test]
+fn hook_event_enum_exposes_bootstrap_lifecycle_markers() {
+    assert_eq!(HookEvent::SessionStart, HookEvent::SessionStart);
+    assert_eq!(HookEvent::Setup, HookEvent::Setup);
 }
