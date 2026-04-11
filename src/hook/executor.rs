@@ -44,10 +44,24 @@ pub fn run_hook(registry: &HookRegistry, event: HookEvent) -> HookResult {
             result.prevent_continuation = true;
         }
         if let Some(permission_decision) = &rule.permission_decision {
-            result.payload.permission_decision = Some(permission_decision.clone());
-            result.payload.permission_reason = Some(format!("hook rule set permission to {permission_decision}"));
-        }
-        if let Some(updated_input) = &rule.updated_input {
+            let updated_input = rule.updated_input.clone();
+            let reason = Some(format!("hook rule set permission to {permission_decision}"));
+            result.payload.permission_result = match permission_decision.as_str() {
+                "allow" => crate::hook::output::HookPermissionResult::Allow {
+                    updated_input,
+                    reason,
+                },
+                "ask" => crate::hook::output::HookPermissionResult::Ask {
+                    updated_input,
+                    reason,
+                },
+                "deny" => crate::hook::output::HookPermissionResult::Deny {
+                    updated_input,
+                    reason,
+                },
+                _ => crate::hook::output::HookPermissionResult::Passthrough,
+            };
+        } else if let Some(updated_input) = &rule.updated_input {
             result.payload.updated_input = Some(updated_input.clone());
         }
         if let Some(additional_context) = &rule.additional_context {

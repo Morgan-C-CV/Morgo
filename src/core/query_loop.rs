@@ -496,21 +496,20 @@ async fn execute_tool_phase(
             tool_name: tool_name.clone(),
         },
     );
-    let effective_tool_input = pre_tool_hook
-        .payload
-        .updated_input
-        .clone()
-        .unwrap_or(tool_input.clone());
+    let effective_tool_input = crate::hook::permission_resolution::updated_input_from_hook(
+        &pre_tool_hook.payload.permission_result,
+    )
+    .or(pre_tool_hook.payload.updated_input.clone())
+    .unwrap_or(tool_input.clone());
     for message in pre_tool_hook.messages.clone() {
         engine_events.push(EngineEvent::MessageCommitted(message.clone()));
         state.messages.push(message);
     }
-    if matches!(pre_tool_hook.payload.permission_decision.as_deref(), Some("deny")) {
-        let reason = pre_tool_hook
-            .payload
-            .permission_reason
-            .clone()
-            .unwrap_or_else(|| "tool denied by hook payload".into());
+    let hook_permission_decision = crate::hook::permission_resolution::resolve_hook_permission_decision(
+        &pre_tool_hook.payload.permission_result,
+        crate::tool::definition::PermissionDecision::Allow,
+    );
+    if let crate::tool::definition::PermissionDecision::Deny { message: reason, .. } = hook_permission_decision {
         let denial = Message::assistant(format!("tool {tool_name} denied by hook: {reason}"));
         let post_failure_hook = run_hook(
             &context.hook_registry,
@@ -767,14 +766,6 @@ fn finalize_with_stop_hook(
     for message in hook_messages {
         events.push(EngineEvent::MessageCommitted(message.clone()));
         state.messages.push(message);
-    }
-
-    if !stop_hook.messages.is_empty() && !stop_hook.prevent_continuation {
-        events.push(EngineEvent::Notice {
-            kind: "hook",
-            message: "stop hook requested blocking follow-up continuation".into(),
-        });
-        state.transition = Some(Continue::StopHookBlocking);
     }
 
     if stop_hook.prevent_continuation {

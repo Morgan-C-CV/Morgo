@@ -8,6 +8,7 @@ use tokio::time::timeout;
 use crate::state::permission_context::{PermissionMode, ToolPermissionContext};
 use crate::tool::definition::{PermissionDecision, Tool, ToolCall, ToolMetadata, ToolResult};
 
+pub mod command_helpers;
 pub mod path_validation;
 pub mod permissions;
 pub mod readonly_validation;
@@ -15,6 +16,7 @@ pub mod sandbox;
 pub mod security;
 pub mod sed_validation;
 
+use command_helpers::{command_matches_rule, normalized_command_variants};
 use permissions::evaluate_bash_policy;
 use sandbox::{execute_with_sandbox, SandboxPolicy};
 
@@ -96,11 +98,17 @@ impl Tool for BashTool {
         };
 
         let policy = evaluate_bash_policy(&input.command);
+        let variants = normalized_command_variants(&input.command);
 
         if permissions
             .always_deny_rules
             .iter()
             .any(|rule| rule == self.metadata().name || rule == call.name.as_str())
+            || permissions.always_deny_rules.iter().any(|rule| {
+                variants
+                    .iter()
+                    .any(|variant| command_matches_rule(variant, rule))
+            })
         {
             return PermissionDecision::Deny {
                 message: "tool Bash denied by explicit rule".into(),
@@ -119,6 +127,11 @@ impl Tool for BashTool {
             .always_allow_rules
             .iter()
             .any(|rule| rule == self.metadata().name || rule == call.name.as_str())
+            || permissions.always_allow_rules.iter().any(|rule| {
+                variants
+                    .iter()
+                    .any(|variant| command_matches_rule(variant, rule))
+            })
         {
             return PermissionDecision::Allow;
         }
@@ -128,6 +141,22 @@ impl Tool for BashTool {
                 message: "bash command requests disabling sandbox protections".into(),
                 reason: crate::tool::definition::PermissionDecisionReason::Safety,
             };
+        }
+
+        match crate::tool::classifier::auto_classifier::classify_bash_command(&input.command) {
+            crate::tool::classifier::auto_classifier::ClassifierDecision::Deny(message) => {
+                return PermissionDecision::Deny {
+                    message,
+                    reason: crate::tool::definition::PermissionDecisionReason::Safety,
+                };
+            }
+            crate::tool::classifier::auto_classifier::ClassifierDecision::Ask(message) => {
+                return PermissionDecision::Ask {
+                    message,
+                    reason: crate::tool::definition::PermissionDecisionReason::Safety,
+                };
+            }
+            crate::tool::classifier::auto_classifier::ClassifierDecision::Allow => {}
         }
 
         if policy.requires_escalation {
@@ -203,6 +232,7 @@ fn format_output(
         parts.push(format!("description: {}", description.trim()));
     }
     parts.push(format!("command: {}", input.command.trim()));
+    parts.push(format!("normalized_variants: {:?}", normalized_command_variants(&input.command)));
     parts.push(format!("cwd: {}", cwd.display()));
     parts.push(format!("sandbox_policy: {:?}", policy));
     parts.push(format!("exit_code: {status}"));

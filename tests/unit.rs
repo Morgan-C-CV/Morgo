@@ -6,6 +6,8 @@ mod bootstrap_tests;
 mod coordinator_tests;
 #[path = "unit/cost_tests.rs"]
 mod cost_tests;
+#[path = "unit/hook_loop3_tests.rs"]
+mod hook_loop3_tests;
 #[path = "unit/hook_tests.rs"]
 mod hook_tests;
 #[path = "unit/notification_tests.rs"]
@@ -14,6 +16,8 @@ mod notification_tests;
 mod query_loop_tests;
 #[path = "unit/router_tests.rs"]
 mod router_tests;
+#[path = "unit/security_loop3_tests.rs"]
+mod security_loop3_tests;
 #[path = "unit/security_tests.rs"]
 mod security_tests;
 #[path = "unit/task_manager_tests.rs"]

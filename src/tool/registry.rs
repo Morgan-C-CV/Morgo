@@ -101,7 +101,8 @@ impl ToolRegistry {
         tool.validate_input(call).await?;
         let base_decision = evaluate_tool_permission(&metadata, call, permissions);
         let tool_decision = tool.check_permissions(call, permissions).await;
-        match merge_permission_decisions(base_decision, tool_decision) {
+        let resolved_decision = merge_permission_decisions(base_decision, tool_decision);
+        match resolved_decision {
             crate::tool::definition::PermissionDecision::Allow => {
                 tool.invoke(call, permissions).await
             }

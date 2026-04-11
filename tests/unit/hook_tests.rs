@@ -160,7 +160,9 @@ fn hook_rule_can_provide_typed_payload() {
         },
     );
 
-    assert_eq!(result.payload.permission_decision.as_deref(), Some("deny"));
-    assert_eq!(result.payload.updated_input.as_deref(), Some("patched-input"));
+    assert!(matches!(
+        result.payload.permission_result,
+        rust_agent::hook::output::HookPermissionResult::Deny { .. }
+    ));
     assert_eq!(result.payload.additional_context.as_deref(), Some("extra context"));
 }

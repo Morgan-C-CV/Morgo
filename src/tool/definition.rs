@@ -72,6 +72,16 @@ pub enum PermissionDecision {
     },
 }
 
+impl PermissionDecision {
+    pub fn is_deny(&self) -> bool {
+        matches!(self, Self::Deny { .. })
+    }
+
+    pub fn is_ask(&self) -> bool {
+        matches!(self, Self::Ask { .. })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToolResult {
     Text(String),
