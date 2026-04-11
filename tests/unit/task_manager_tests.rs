@@ -7,6 +7,7 @@ use rust_agent::state::permission_context::{PermissionMode, ToolPermissionContex
 use rust_agent::task::manager::TaskManager;
 use rust_agent::task::types::{TaskEvent, TaskOwner, TaskStatus};
 use rust_agent::tool::builtin::agent::AgentTool;
+use rust_agent::tool::builtin::task_stop::TaskStopTool;
 use rust_agent::tool::definition::{Tool, ToolCall, ToolResult};
 
 #[test]
@@ -172,19 +173,18 @@ async fn non_owner_cannot_kill_running_task() {
 }
 
 #[tokio::test]
-async fn owner_can_retrieve_continuation_input_but_non_owner_cannot() {
+async fn owner_can_send_mailbox_message_but_non_owner_cannot() {
     let manager = TaskManager::default();
     let task = manager.create("running task", "session-owner", InteractionSurface::Cli);
 
-    manager.launch(&task.id, "continue me", async move {
-        tokio::task::yield_now().await;
-    });
+    manager.launch(&task.id, "continue me", std::future::pending::<()>());
 
+    assert!(manager.send_message(&task.id, "session-owner", "continue me"));
     assert_eq!(
-        manager.continuation_input(&task.id, "session-owner"),
+        manager.wait_for_mailbox_message(&task.id).await,
         Some("continue me".into())
     );
-    assert_eq!(manager.continuation_input(&task.id, "session-other"), None);
+    assert!(!manager.send_message(&task.id, "session-other", "nope"));
 }
 
 #[tokio::test]
@@ -236,7 +236,7 @@ async fn non_owner_cannot_continue_existing_task() {
         .invoke(
             &ToolCall {
                 name: "Agent".into(),
-                input: "continue: task-0".into(),
+                input: "continue: task-0: follow-up".into(),
             },
             &other_permissions,
         )
@@ -246,7 +246,7 @@ async fn non_owner_cannot_continue_existing_task() {
     assert!(
         error
             .to_string()
-            .contains("not continuable by this session")
+            .contains("not running or not owned by this session")
     );
 }
 
@@ -269,7 +269,7 @@ fn addressed_event_drain_filters_by_target_task() {
 }
 
 #[tokio::test]
-async fn agent_tool_allows_owner_to_continue_existing_task() {
+async fn agent_tool_allows_owner_to_message_running_task() {
     let manager = Arc::new(TaskManager::default());
     let inherited_tools =
         rust_agent::tool::registry::ToolRegistry::new().register(Arc::new(AgentTool));
@@ -277,13 +277,26 @@ async fn agent_tool_allows_owner_to_continue_existing_task() {
         .with_task_manager(manager.clone())
         .with_active_session_id("session-9")
         .with_inherited_tool_registry(inherited_tools)
-        .with_subagent_scripted_turns(vec![vec![
-            rust_agent::service::api::streaming::StreamEvent::MessageStart,
-            rust_agent::service::api::streaming::StreamEvent::TextDelta("continued answer".into()),
-            rust_agent::service::api::streaming::StreamEvent::MessageStop {
-                stop_reason: rust_agent::service::api::streaming::StopReason::EndTurn,
-            },
-        ]]);
+        .with_subagent_scripted_turns(vec![
+            vec![
+                rust_agent::service::api::streaming::StreamEvent::MessageStart,
+                rust_agent::service::api::streaming::StreamEvent::TextDelta(
+                    "initial answer".into(),
+                ),
+                rust_agent::service::api::streaming::StreamEvent::MessageStop {
+                    stop_reason: rust_agent::service::api::streaming::StopReason::EndTurn,
+                },
+            ],
+            vec![
+                rust_agent::service::api::streaming::StreamEvent::MessageStart,
+                rust_agent::service::api::streaming::StreamEvent::TextDelta(
+                    "continued answer".into(),
+                ),
+                rust_agent::service::api::streaming::StreamEvent::MessageStop {
+                    stop_reason: rust_agent::service::api::streaming::StopReason::EndTurn,
+                },
+            ],
+        ]);
 
     AgentTool
         .invoke(
@@ -296,23 +309,11 @@ async fn agent_tool_allows_owner_to_continue_existing_task() {
         .await
         .expect("initial agent launch should succeed");
 
-    tokio::time::timeout(std::time::Duration::from_secs(1), async {
-        loop {
-            let created = manager.get("task-0").expect("task should be created");
-            if created.status == TaskStatus::Completed {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("initial task should complete");
-
     let result = AgentTool
         .invoke(
             &ToolCall {
                 name: "Agent".into(),
-                input: "continue: task-0".into(),
+                input: "continue: task-0: follow-up".into(),
             },
             &permissions,
         )
@@ -321,8 +322,71 @@ async fn agent_tool_allows_owner_to_continue_existing_task() {
 
     assert_eq!(
         result,
-        ToolResult::Text("agent task task-0 continued".into())
+        ToolResult::Text("agent task task-0 accepted message follow-up".into())
     );
+
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            let output = manager
+                .get_output("task-0", 0)
+                .expect("task output should exist");
+            if output.content.contains("continued answer") {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("continued worker should produce follow-up output");
+}
+
+#[tokio::test]
+async fn task_stop_tool_allows_owner_and_rejects_non_owner() {
+    let manager = Arc::new(TaskManager::default());
+    let dispatcher = NotificationDispatcher::new(TelegramGateway::default());
+    let task = manager.create("stoppable task", "session-owner", InteractionSurface::Cli);
+
+    manager.launch(&task.id, "work", std::future::pending::<()>());
+
+    let non_owner_permissions = ToolPermissionContext::new(PermissionMode::Default)
+        .with_task_manager(manager.clone())
+        .with_active_session_id("session-other");
+    let non_owner_error = TaskStopTool
+        .invoke(
+            &ToolCall {
+                name: "TaskStop".into(),
+                input: task.id.clone(),
+            },
+            &non_owner_permissions,
+        )
+        .await
+        .expect_err("non-owner stop should fail");
+    assert!(
+        non_owner_error
+            .to_string()
+            .contains("not running or not owned by this session")
+    );
+
+    let owner_permissions = ToolPermissionContext::new(PermissionMode::Default)
+        .with_task_manager(manager.clone())
+        .with_active_session_id("session-owner");
+    let result = TaskStopTool
+        .invoke(
+            &ToolCall {
+                name: "TaskStop".into(),
+                input: task.id.clone(),
+            },
+            &owner_permissions,
+        )
+        .await
+        .expect("owner stop should succeed");
+
+    assert_eq!(
+        result,
+        ToolResult::Text(format!("task {} stopped", task.id))
+    );
+    assert_eq!(manager.get(&task.id).unwrap().status, TaskStatus::Killed);
+    assert_eq!(dispatcher.delivered().len(), 0);
 }
 
 #[test]

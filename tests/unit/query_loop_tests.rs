@@ -12,6 +12,7 @@ use rust_agent::service::api::streaming::{StopReason, StreamEvent};
 use rust_agent::service::compact::reactive_compact::ReactiveCompactor;
 use rust_agent::task::types::TaskOwner;
 use std::sync::Arc;
+use tokio::time::{Duration, timeout};
 
 use rust_agent::state::app_state::{AppState, RuntimeRole};
 use rust_agent::state::permission_context::{PermissionMode, ToolPermissionContext};
@@ -412,6 +413,77 @@ async fn engine_drains_internal_task_events() {
         rust_agent::task::types::TaskStatus::Completed
     );
     assert!(engine.drain_task_events().is_empty());
+}
+
+#[tokio::test]
+async fn worker_query_loop_consumes_mailbox_messages() {
+    let manager = Arc::new(TaskManager::default());
+    let task = manager.create("worker task", "test-session", InteractionSurface::Cli);
+
+    let mut permission_context = ToolPermissionContext::new(PermissionMode::Default)
+        .with_task_manager(manager.clone())
+        .with_active_session_id("test-session");
+    permission_context.always_allow_rules.push("Agent".into());
+
+    let context = QueryContext {
+        app_state: AppState {
+            surface: InteractionSurface::Cli,
+            session_mode: SessionMode::Headless,
+            client_type: ClientType::Cli,
+            session_source: SessionSource::LocalCli,
+            runtime_role: RuntimeRole::Worker,
+            permission_context,
+            cost_tracker: CostTracker::default(),
+            notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
+            startup_trace: Vec::new(),
+            active_session_id: "test-session".into(),
+            session: None,
+            history: None,
+            restored_session: None,
+        },
+        tool_registry: ToolRegistry::new(),
+        api_client: AnthropicClient::with_scripted_turns(vec![
+            vec![
+                StreamEvent::MessageStart,
+                StreamEvent::TextDelta("first answer".into()),
+                StreamEvent::MessageStop {
+                    stop_reason: StopReason::EndTurn,
+                },
+            ],
+            vec![
+                StreamEvent::MessageStart,
+                StreamEvent::TextDelta("second answer".into()),
+                StreamEvent::MessageStop {
+                    stop_reason: StopReason::EndTurn,
+                },
+            ],
+        ]),
+        compactor: ReactiveCompactor,
+        hook_registry: HookRegistry::default(),
+        agent_id: Some(task.id.clone()),
+    };
+
+    manager.launch(&task.id, "initial", std::future::pending::<()>());
+    let engine = QueryEngine::new(context);
+    let engine_handle =
+        tokio::spawn(async move { engine.submit_turn(Message::user("initial")).await });
+
+    tokio::task::yield_now().await;
+    assert!(manager.send_message(&task.id, "test-session", "follow-up"));
+
+    let result = timeout(Duration::from_secs(1), engine_handle)
+        .await
+        .expect("worker should finish")
+        .expect("join should succeed");
+
+    assert_eq!(result.state, QueryLoopState::Completed);
+    assert_eq!(
+        result.messages,
+        vec![
+            Message::assistant("first answer"),
+            Message::assistant("second answer")
+        ]
+    );
 }
 
 #[tokio::test]

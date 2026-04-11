@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::sync::{Arc, RwLock};
 
+use tokio::sync::Notify;
 use tokio::task::AbortHandle;
 
 use crate::bootstrap::InteractionSurface;
@@ -11,12 +12,6 @@ use crate::task::output_store::TaskOutputStore;
 use crate::task::types::{
     TaskDeliveryState, TaskEvent, TaskOutputSlice, TaskOwner, TaskRecord, TaskStatus,
 };
-
-#[derive(Debug, Clone)]
-struct ContinuationRecord {
-    owner: TaskOwner,
-    input: String,
-}
 
 #[derive(Debug, Default)]
 struct TaskStore {
@@ -28,7 +23,8 @@ struct TaskStore {
 struct TaskRuntimeStore {
     abort_handles: HashMap<String, AbortHandle>,
     running_owners: HashMap<String, TaskOwner>,
-    continuations: HashMap<String, ContinuationRecord>,
+    mailboxes: HashMap<String, Vec<String>>,
+    mailbox_notifiers: HashMap<String, Arc<Notify>>,
     events: Vec<TaskEvent>,
 }
 
@@ -76,7 +72,7 @@ impl TaskManager {
         self.update_status(id, TaskStatus::Running);
     }
 
-    pub fn launch<F>(&self, id: &str, input: impl Into<String>, future: F)
+    pub fn launch<F>(&self, id: &str, _input: impl Into<String>, future: F)
     where
         F: Future<Output = ()> + Send + 'static,
     {
@@ -98,16 +94,11 @@ impl TaskManager {
         runtime_store
             .abort_handles
             .insert(id.to_string(), join_handle.abort_handle());
+        runtime_store.running_owners.insert(id.to_string(), owner);
+        runtime_store.mailboxes.insert(id.to_string(), Vec::new());
         runtime_store
-            .running_owners
-            .insert(id.to_string(), owner.clone());
-        runtime_store.continuations.insert(
-            id.to_string(),
-            ContinuationRecord {
-                owner,
-                input: input.into(),
-            },
-        );
+            .mailbox_notifiers
+            .insert(id.to_string(), Arc::new(Notify::new()));
     }
 
     pub fn append_output(&self, id: &str, chunk: impl AsRef<str>) {
@@ -227,14 +218,72 @@ impl TaskManager {
             .cloned()
     }
 
-    pub fn continuation_input(&self, id: &str, requester_session_id: &str) -> Option<String> {
-        self.runtime_store
-            .read()
-            .expect("task runtime store poisoned")
-            .continuations
-            .get(id)
-            .filter(|record| record.owner.session_id == requester_session_id)
-            .map(|record| record.input.clone())
+    pub fn is_running_owned_by(&self, id: &str, requester_session_id: &str) -> bool {
+        self.running_owner(id)
+            .map(|owner| owner.session_id == requester_session_id)
+            .unwrap_or(false)
+    }
+
+    pub fn send_message(
+        &self,
+        id: &str,
+        requester_session_id: &str,
+        message: impl Into<String>,
+    ) -> bool {
+        let message = message.into();
+        let notifier = {
+            let mut runtime_store = self
+                .runtime_store
+                .write()
+                .expect("task runtime store poisoned");
+            if runtime_store
+                .running_owners
+                .get(id)
+                .map(|owner| owner.session_id.as_str() != requester_session_id)
+                .unwrap_or(true)
+            {
+                return false;
+            }
+            runtime_store
+                .mailboxes
+                .entry(id.to_string())
+                .or_default()
+                .push(message);
+            runtime_store.mailbox_notifiers.get(id).cloned()
+        };
+        if let Some(notifier) = notifier {
+            notifier.notify_one();
+        }
+        true
+    }
+
+    pub fn drain_mailbox(&self, id: &str) -> Vec<String> {
+        let mut runtime_store = self
+            .runtime_store
+            .write()
+            .expect("task runtime store poisoned");
+        runtime_store
+            .mailboxes
+            .get_mut(id)
+            .map(std::mem::take)
+            .unwrap_or_default()
+    }
+
+    pub async fn wait_for_mailbox_message(&self, id: &str) -> Option<String> {
+        loop {
+            let notifier = {
+                let mut runtime_store = self
+                    .runtime_store
+                    .write()
+                    .expect("task runtime store poisoned");
+                let mailbox = runtime_store.mailboxes.get_mut(id)?;
+                if !mailbox.is_empty() {
+                    return Some(mailbox.remove(0));
+                }
+                runtime_store.mailbox_notifiers.get(id).cloned()?
+            };
+            notifier.notified().await;
+        }
     }
 
     fn update_status(&self, id: &str, status: TaskStatus) {
@@ -257,6 +306,8 @@ impl TaskManager {
             .expect("task runtime store poisoned");
         runtime_store.abort_handles.remove(id);
         runtime_store.running_owners.remove(id);
+        runtime_store.mailboxes.remove(id);
+        runtime_store.mailbox_notifiers.remove(id);
     }
 
     fn finish(

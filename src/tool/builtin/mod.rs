@@ -4,5 +4,6 @@ pub mod file_edit;
 pub mod file_read;
 pub mod glob;
 pub mod grep;
+pub mod task_stop;
 pub mod tool_search;
 pub mod web_fetch;

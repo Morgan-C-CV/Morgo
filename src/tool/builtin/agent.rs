@@ -16,7 +16,7 @@ use crate::tool::registry::ToolRegistry;
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum AgentRequest {
     Spawn { prompt: String },
-    Continue { task_id: String },
+    Continue { task_id: String, message: String },
 }
 
 pub struct AgentTool;
@@ -73,23 +73,13 @@ impl Tool for AgentTool {
                     task.id, prompt
                 )))
             }
-            AgentRequest::Continue { task_id } => {
-                let prompt = tasks
-                    .continuation_input(&task_id, &session_id)
-                    .ok_or_else(|| {
-                        anyhow::anyhow!("task {task_id} is not continuable by this session")
-                    })?;
-                launch_agent_task(
-                    tasks.clone(),
-                    &parent_context,
-                    task_id.clone(),
-                    prompt,
-                    permissions,
-                    dispatcher,
-                );
+            AgentRequest::Continue { task_id, message } => {
+                if !tasks.send_message(&task_id, &session_id, message.clone()) {
+                    anyhow::bail!("task {task_id} is not running or not owned by this session");
+                }
                 Ok(ToolResult::Text(format!(
-                    "agent task {} continued",
-                    task_id
+                    "agent task {} accepted message {}",
+                    task_id, message
                 )))
             }
         }
@@ -138,10 +128,11 @@ fn launch_agent_task(
 }
 
 fn parse_agent_request(input: &str) -> AgentRequest {
-    if let Some(task_id) = input.strip_prefix("continue:") {
-        AgentRequest::Continue {
-            task_id: task_id.trim().to_string(),
-        }
+    if let Some(rest) = input.strip_prefix("continue:") {
+        let mut parts = rest.splitn(2, ':');
+        let task_id = parts.next().unwrap_or_default().trim().to_string();
+        let message = parts.next().unwrap_or_default().trim().to_string();
+        AgentRequest::Continue { task_id, message }
     } else {
         AgentRequest::Spawn {
             prompt: input.to_string(),
