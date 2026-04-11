@@ -1,4 +1,5 @@
 use crate::core::context::QueryContext;
+use crate::core::events::EngineEvent;
 use crate::core::message::Message;
 use crate::core::query_loop::{QueryLoopResult, run_query_loop};
 use crate::task::types::TaskEvent;
@@ -15,6 +16,10 @@ impl QueryEngine {
 
     pub async fn submit_message(&self, input: Message) -> Vec<Message> {
         self.submit_turn(input).await.messages
+    }
+
+    pub async fn submit_message_events(&self, input: Message) -> Vec<EngineEvent> {
+        self.submit_turn(input).await.events
     }
 
     pub async fn submit_turn(&self, input: Message) -> QueryLoopResult {

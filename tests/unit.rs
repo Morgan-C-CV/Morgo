@@ -16,5 +16,7 @@ mod security_tests;
 mod task_manager_tests;
 #[path = "unit/tool_behavior_tests.rs"]
 mod tool_behavior_tests;
+#[path = "unit/tool_orchestrator_tests.rs"]
+mod tool_orchestrator_tests;
 #[path = "unit/tool_tests.rs"]
 mod tool_tests;

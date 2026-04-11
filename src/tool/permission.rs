@@ -5,10 +5,7 @@ pub fn is_tool_allowed(metadata: &ToolMetadata, permissions: &ToolPermissionCont
     matches!(
         evaluate_tool_permission(
             metadata,
-            &ToolCall {
-                name: metadata.name.into(),
-                input: String::new(),
-            },
+            &ToolCall::new(metadata.name, String::new()),
             permissions
         ),
         PermissionDecision::Allow | PermissionDecision::Ask(_)

@@ -1,8 +1,11 @@
 use rust_agent::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
 use rust_agent::core::context::QueryContext;
 use rust_agent::core::engine::QueryEngine;
+use rust_agent::core::events::EngineEvent;
 use rust_agent::core::message::Message;
-use rust_agent::core::query_loop::{QueryLoopState, QueryTerminalReason};
+use rust_agent::core::query_loop::{
+    Continue, QueryLoopState, QueryParams, Terminal, run_query_loop_with_params,
+};
 use rust_agent::cost::tracker::CostTracker;
 use rust_agent::hook::registry::{HookEvent, HookEventMatcher, HookRegistry, HookRule};
 use rust_agent::interaction::dispatcher::NotificationDispatcher;
@@ -70,7 +73,8 @@ async fn query_loop_collects_text_until_end_turn() {
     let result = engine.submit_turn(Message::user("hi")).await;
 
     assert_eq!(result.state, QueryLoopState::Completed);
-    assert_eq!(result.terminal_reason, QueryTerminalReason::Completed);
+    assert_eq!(result.terminal, Terminal::Completed);
+    assert_eq!(result.transition, None);
     assert_eq!(result.messages, vec![Message::assistant("hello world")]);
 }
 
@@ -104,28 +108,51 @@ async fn query_loop_invokes_tool_and_continues_follow_up_turn() {
     let result = engine.submit_turn(Message::user("inspect file")).await;
 
     assert_eq!(result.state, QueryLoopState::Completed);
-    assert_eq!(result.terminal_reason, QueryTerminalReason::Completed);
+    assert_eq!(result.terminal, Terminal::Completed);
+    assert_eq!(result.transition, Some(Continue::ToolUseFollowUp));
     assert_eq!(result.messages.len(), 3);
     assert_eq!(result.messages[0], Message::assistant("planning..."));
     assert!(result.messages[1].content.contains("tool Agent result:"));
     assert_eq!(result.messages[2], Message::assistant("done after tool"));
+    assert!(
+        result
+            .events
+            .iter()
+            .any(|event| matches!(event, EngineEvent::Transition(Continue::ToolUseFollowUp)))
+    );
 }
 
 #[tokio::test]
-async fn query_loop_marks_interrupted_on_max_tokens() {
-    let engine = QueryEngine::new(test_context(vec![
-        StreamEvent::MessageStart,
-        StreamEvent::TextDelta("partial".into()),
-        StreamEvent::MessageStop {
-            stop_reason: StopReason::MaxTokens,
-        },
-    ]));
+async fn query_loop_uses_max_output_escalation_then_recovery() {
+    let engine = QueryEngine::new(test_context_with_turns(
+        vec![
+            vec![
+                StreamEvent::MessageStart,
+                StreamEvent::TextDelta("partial".into()),
+                StreamEvent::MessageStop {
+                    stop_reason: StopReason::MaxTokens,
+                },
+            ],
+            vec![
+                StreamEvent::MessageStart,
+                StreamEvent::TextDelta("completed".into()),
+                StreamEvent::MessageStop {
+                    stop_reason: StopReason::EndTurn,
+                },
+            ],
+        ],
+        ToolRegistry::new(),
+    ));
 
     let result = engine.submit_turn(Message::user("long answer")).await;
 
-    assert_eq!(result.state, QueryLoopState::Interrupted);
-    assert_eq!(result.terminal_reason, QueryTerminalReason::Interrupted);
-    assert_eq!(result.messages, vec![Message::assistant("partial")]);
+    assert_eq!(result.state, QueryLoopState::Completed);
+    assert_eq!(result.terminal, Terminal::Completed);
+    assert_eq!(result.transition, Some(Continue::MaxOutputTokensEscalate));
+    assert_eq!(
+        result.messages,
+        vec![Message::assistant("partial"), Message::assistant("completed")]
+    );
 }
 
 #[tokio::test]
@@ -135,8 +162,9 @@ async fn query_loop_requests_compaction_for_large_input() {
 
     let result = engine.submit_turn(Message::user(oversized)).await;
 
-    assert_eq!(result.state, QueryLoopState::Compacting);
-    assert_eq!(result.terminal_reason, QueryTerminalReason::Compacted);
+    assert_eq!(result.state, QueryLoopState::Completed);
+    assert_eq!(result.terminal, Terminal::Completed);
+    assert_eq!(result.transition, Some(Continue::ReactiveCompactRetry));
     assert_eq!(
         result.messages,
         vec![Message::assistant(
@@ -146,17 +174,22 @@ async fn query_loop_requests_compaction_for_large_input() {
 }
 
 #[tokio::test]
-async fn query_loop_surfaces_stream_errors() {
-    let engine = QueryEngine::new(test_context(vec![StreamEvent::Error("boom".into())]));
+async fn query_loop_surfaces_stream_errors_after_recovery_attempt() {
+    let engine = QueryEngine::new(test_context_with_turns(
+        vec![
+            vec![StreamEvent::Error("boom".into())],
+            vec![StreamEvent::Error("boom again".into())],
+        ],
+        ToolRegistry::new(),
+    ));
 
     let result = engine.submit_turn(Message::user("trigger error")).await;
 
     assert_eq!(result.state, QueryLoopState::Failed);
-    assert_eq!(result.terminal_reason, QueryTerminalReason::Failed);
-    assert_eq!(
-        result.messages,
-        vec![Message::assistant("stream error: boom")]
-    );
+    assert_eq!(result.terminal, Terminal::ModelError("boom again".into()));
+    assert_eq!(result.transition, Some(Continue::ReactiveCompactRetry));
+    assert!(result.messages[0].content.contains("stream error: boom"));
+    assert!(result.messages[1].content.contains("stream error: boom again"));
 }
 
 #[tokio::test]
@@ -176,13 +209,9 @@ async fn query_loop_fails_when_tool_is_unknown() {
         .submit_turn(Message::user("trigger unknown tool"))
         .await;
 
-    assert_eq!(result.state, QueryLoopState::Failed);
-    assert_eq!(result.terminal_reason, QueryTerminalReason::Failed);
-    assert!(
-        result.messages[0]
-            .content
-            .contains("tool MissingTool failed")
-    );
+    assert_eq!(result.state, QueryLoopState::Interrupted);
+    assert_eq!(result.terminal, Terminal::AbortedTools);
+    assert!(result.messages[0].content.contains("tool MissingTool failed"));
 }
 
 #[tokio::test]
@@ -230,7 +259,7 @@ async fn query_loop_stop_hook_can_prevent_continuation() {
     let result = engine.submit_turn(Message::user("inspect file")).await;
 
     assert_eq!(result.state, QueryLoopState::Completed);
-    assert_eq!(result.terminal_reason, QueryTerminalReason::StoppedByHook);
+    assert_eq!(result.terminal, Terminal::StopHookPrevented);
     assert_eq!(
         result.messages,
         vec![
@@ -288,7 +317,8 @@ async fn query_loop_respects_pre_tool_hook_denial() {
     let engine = QueryEngine::new(context);
     let result = engine.submit_turn(Message::user("inspect file")).await;
 
-    assert_eq!(result.state, QueryLoopState::Failed);
+    assert_eq!(result.state, QueryLoopState::Interrupted);
+    assert_eq!(result.terminal, Terminal::AbortedTools);
     assert!(result.messages[0].content.contains("denied by hook"));
     assert!(
         engine
@@ -344,7 +374,7 @@ async fn query_loop_uses_subagent_stop_hook_for_subagent_context() {
     let result = engine.submit_turn(Message::user("inspect file")).await;
 
     assert_eq!(result.state, QueryLoopState::Completed);
-    assert_eq!(result.terminal_reason, QueryTerminalReason::StoppedByHook);
+    assert_eq!(result.terminal, Terminal::StopHookPrevented);
     assert_eq!(
         result.messages,
         vec![
@@ -497,6 +527,7 @@ async fn worker_query_loop_consumes_mailbox_messages() {
             Message::assistant("second answer")
         ]
     );
+    assert_eq!(result.transition, Some(Continue::NextTurn));
 }
 
 #[tokio::test]
@@ -572,4 +603,31 @@ async fn subagent_context_inherits_parent_tools_and_hooks() {
             .recorded_events()
             .contains(&HookEvent::SubagentStop)
     );
+}
+
+#[tokio::test]
+async fn query_loop_respects_max_turns_terminal() {
+    let context = test_context_with_turns(
+        vec![vec![
+            StreamEvent::MessageStart,
+            StreamEvent::TextDelta("partial".into()),
+            StreamEvent::MessageStop {
+                stop_reason: StopReason::MaxTokens,
+            },
+        ]],
+        ToolRegistry::new(),
+    );
+
+    let result = run_query_loop_with_params(
+        &context,
+        Message::user("needs many turns"),
+        QueryParams {
+            max_turns: Some(0),
+            ..QueryParams::default()
+        },
+    )
+    .await;
+
+    assert_eq!(result.state, QueryLoopState::Failed);
+    assert_eq!(result.terminal, Terminal::MaxTurns { count: 0 });
 }

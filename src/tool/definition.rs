@@ -1,14 +1,23 @@
 use async_trait::async_trait;
+use serde_json::Value;
 
 use crate::state::permission_context::ToolPermissionContext;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InterruptBehavior {
+    Block,
+    Cancel,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolMetadata {
     pub name: &'static str,
     pub description: &'static str,
     pub aliases: &'static [&'static str],
+    pub search_hint: Option<&'static str>,
     pub read_only: bool,
     pub destructive: bool,
+    pub concurrency_safe: bool,
     pub always_load: bool,
     pub should_defer: bool,
     pub requires_auth: bool,
@@ -18,6 +27,23 @@ pub struct ToolMetadata {
 pub struct ToolCall {
     pub name: String,
     pub input: String,
+}
+
+impl ToolCall {
+    pub fn new(name: impl Into<String>, input: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            input: input.into(),
+        }
+    }
+
+    pub fn raw_input(&self) -> &str {
+        &self.input
+    }
+
+    pub fn json_input(&self) -> Option<Value> {
+        serde_json::from_str(&self.input).ok()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,8 +63,28 @@ pub enum ToolResult {
 pub trait Tool: Send + Sync {
     fn metadata(&self) -> ToolMetadata;
 
+    fn input_schema(&self) -> Option<Value> {
+        None
+    }
+
+    fn output_schema(&self) -> Option<Value> {
+        None
+    }
+
+    fn max_result_size_chars(&self) -> usize {
+        usize::MAX
+    }
+
+    fn is_concurrency_safe(&self, _call: &ToolCall) -> bool {
+        self.metadata().concurrency_safe
+    }
+
+    fn interrupt_behavior(&self) -> InterruptBehavior {
+        InterruptBehavior::Block
+    }
+
     async fn validate_input(&self, call: &ToolCall) -> anyhow::Result<()> {
-        if call.input.trim().is_empty() {
+        if call.raw_input().trim().is_empty() && call.json_input().is_none() {
             anyhow::bail!("tool input cannot be empty")
         }
         Ok(())

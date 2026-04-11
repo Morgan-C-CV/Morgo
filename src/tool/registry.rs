@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::state::permission_context::ToolPermissionContext;
-use crate::tool::definition::{Tool, ToolCall, ToolMetadata, ToolResult};
+use crate::tool::definition::{InterruptBehavior, Tool, ToolCall, ToolMetadata, ToolResult};
 use crate::tool::permission::{evaluate_tool_permission, is_tool_allowed};
 
 #[derive(Clone, Default)]
@@ -46,19 +46,28 @@ impl ToolRegistry {
         Self { tools }
     }
 
+    pub fn find(&self, call: &ToolCall) -> Option<&Arc<dyn Tool>> {
+        self.tools.iter().find(|tool| {
+            let metadata = tool.metadata();
+            metadata.name == call.name || metadata.aliases.iter().any(|alias| *alias == call.name)
+        })
+    }
+
+    pub fn is_concurrency_safe(&self, call: &ToolCall) -> Option<bool> {
+        self.find(call).map(|tool| tool.is_concurrency_safe(call))
+    }
+
+    pub fn interrupt_behavior(&self, call: &ToolCall) -> Option<InterruptBehavior> {
+        self.find(call).map(|tool| tool.interrupt_behavior())
+    }
+
     pub async fn invoke(
         &self,
         call: &ToolCall,
         permissions: &ToolPermissionContext,
     ) -> anyhow::Result<ToolResult> {
         let tool = self
-            .tools
-            .iter()
-            .find(|tool| {
-                let metadata = tool.metadata();
-                metadata.name == call.name
-                    || metadata.aliases.iter().any(|alias| *alias == call.name)
-            })
+            .find(call)
             .ok_or_else(|| anyhow::anyhow!("unknown tool {}", call.name))?;
 
         let metadata = tool.metadata();
