@@ -412,6 +412,13 @@ async fn engine_drains_internal_task_events() {
         events[0].status,
         rust_agent::task::types::TaskStatus::Completed
     );
+    let formatted = QueryEngine::format_task_event_message(&events[0]);
+    assert!(formatted.content.contains("[task] id: task-0"));
+    assert!(
+        formatted
+            .content
+            .contains("TaskOutput with input 'task-0:0'")
+    );
     assert!(engine.drain_task_events().is_empty());
 }
 

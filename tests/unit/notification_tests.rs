@@ -45,9 +45,11 @@ fn cli_renderer_marks_task_event_lines() {
     });
 
     assert!(rendered.contains("assistant reply"));
-    assert!(rendered.contains("[task] demo task"));
+    assert!(rendered.contains("[task] id: task-1"));
+    assert!(rendered.contains("[task] summary: demo task"));
     assert!(rendered.contains("[task] status: Completed"));
     assert!(rendered.contains("[task] output: /tmp/task-1.log"));
+    assert!(rendered.contains("[task] next_action: use TaskOutput with input 'task-1:0'"));
 }
 
 #[test]

@@ -7,6 +7,10 @@ use rust_agent::state::permission_context::{PermissionMode, ToolPermissionContex
 use rust_agent::task::manager::TaskManager;
 use rust_agent::task::types::{TaskEvent, TaskOwner, TaskStatus};
 use rust_agent::tool::builtin::agent::AgentTool;
+use rust_agent::tool::builtin::send_message::SendMessageTool;
+use rust_agent::tool::builtin::task_get::TaskGetTool;
+use rust_agent::tool::builtin::task_list::TaskListTool;
+use rust_agent::tool::builtin::task_output::TaskOutputTool;
 use rust_agent::tool::builtin::task_stop::TaskStopTool;
 use rust_agent::tool::definition::{Tool, ToolCall, ToolResult};
 
@@ -387,6 +391,130 @@ async fn task_stop_tool_allows_owner_and_rejects_non_owner() {
     );
     assert_eq!(manager.get(&task.id).unwrap().status, TaskStatus::Killed);
     assert_eq!(dispatcher.delivered().len(), 0);
+}
+
+#[tokio::test]
+async fn task_inspection_tools_are_owner_scoped() {
+    let manager = Arc::new(TaskManager::default());
+    let owned = manager.create("owned task", "session-owner", InteractionSurface::Cli);
+    manager.append_output(&owned.id, "owned output");
+    let other = manager.create("other task", "session-other", InteractionSurface::Cli);
+    manager.append_output(&other.id, "other output");
+
+    let owner_permissions = ToolPermissionContext::new(PermissionMode::Default)
+        .with_task_manager(manager.clone())
+        .with_active_session_id("session-owner");
+
+    let list = TaskListTool
+        .invoke(
+            &ToolCall {
+                name: "TaskList".into(),
+                input: "ignored".into(),
+            },
+            &owner_permissions,
+        )
+        .await
+        .expect("task list should succeed");
+    let ToolResult::Text(list_text) = list else {
+        panic!("expected text result");
+    };
+    assert!(list_text.contains("id: task-0"));
+    assert!(!list_text.contains("id: task-1"));
+
+    let get = TaskGetTool
+        .invoke(
+            &ToolCall {
+                name: "TaskGet".into(),
+                input: owned.id.clone(),
+            },
+            &owner_permissions,
+        )
+        .await
+        .expect("task get should succeed");
+    let ToolResult::Text(get_text) = get else {
+        panic!("expected text result");
+    };
+    assert!(get_text.contains("description: owned task"));
+
+    let output = TaskOutputTool
+        .invoke(
+            &ToolCall {
+                name: "TaskOutput".into(),
+                input: format!("{}:0", owned.id),
+            },
+            &owner_permissions,
+        )
+        .await
+        .expect("task output should succeed");
+    let ToolResult::Text(output_text) = output else {
+        panic!("expected text result");
+    };
+    assert!(output_text.contains("task_id: task-0"));
+    assert!(output_text.contains("content:\nowned output"));
+
+    let denied = TaskGetTool
+        .invoke(
+            &ToolCall {
+                name: "TaskGet".into(),
+                input: other.id.clone(),
+            },
+            &owner_permissions,
+        )
+        .await
+        .expect_err("non-owned task should be rejected");
+    assert!(
+        denied
+            .to_string()
+            .contains("unknown or not owned by this session")
+    );
+}
+
+#[tokio::test]
+async fn send_message_tool_allows_owner_and_rejects_non_owner() {
+    let manager = Arc::new(TaskManager::default());
+    let task = manager.create("running task", "session-owner", InteractionSurface::Cli);
+    manager.launch(&task.id, "work", std::future::pending::<()>());
+
+    let owner_permissions = ToolPermissionContext::new(PermissionMode::Default)
+        .with_task_manager(manager.clone())
+        .with_active_session_id("session-owner");
+    let result = SendMessageTool
+        .invoke(
+            &ToolCall {
+                name: "SendMessage".into(),
+                input: format!("{}:follow-up", task.id),
+            },
+            &owner_permissions,
+        )
+        .await
+        .expect("owner send should succeed");
+    assert_eq!(
+        result,
+        ToolResult::Text(format!("task {} accepted message follow-up", task.id))
+    );
+    assert_eq!(
+        manager.wait_for_mailbox_message(&task.id).await,
+        Some("follow-up".into())
+    );
+
+    let other_permissions = ToolPermissionContext::new(PermissionMode::Default)
+        .with_task_manager(manager.clone())
+        .with_active_session_id("session-other");
+    let error = SendMessageTool
+        .invoke(
+            &ToolCall {
+                name: "SendMessage".into(),
+                input: format!("{}:nope", task.id),
+            },
+            &other_permissions,
+        )
+        .await
+        .expect_err("non-owner send should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("not running or not owned by this session")
+    );
 }
 
 #[test]

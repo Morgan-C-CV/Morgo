@@ -31,8 +31,9 @@ use crate::state::permission_context::{PermissionMode, ToolPermissionContext};
 use crate::task::manager::TaskManager;
 use crate::tool::builtin::{
     agent::AgentTool, bash::BashTool, file_edit::FileEditTool, file_read::FileReadTool,
-    glob::GlobTool, grep::GrepTool, task_stop::TaskStopTool, tool_search::ToolSearchTool,
-    web_fetch::WebFetchTool,
+    glob::GlobTool, grep::GrepTool, send_message::SendMessageTool, task_get::TaskGetTool,
+    task_list::TaskListTool, task_output::TaskOutputTool, task_stop::TaskStopTool,
+    tool_search::ToolSearchTool, web_fetch::WebFetchTool,
 };
 use crate::tool::registry::ToolRegistry;
 
@@ -277,6 +278,10 @@ impl RuntimeBootstrap {
             .register(Arc::new(FileReadTool))
             .register(Arc::new(GlobTool))
             .register(Arc::new(GrepTool))
+            .register(Arc::new(SendMessageTool))
+            .register(Arc::new(TaskGetTool))
+            .register(Arc::new(TaskListTool))
+            .register(Arc::new(TaskOutputTool))
             .register(Arc::new(TaskStopTool))
             .register(Arc::new(ToolSearchTool))
             .register(Arc::new(WebFetchTool))
