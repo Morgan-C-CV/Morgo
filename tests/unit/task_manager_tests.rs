@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use rust_agent::bootstrap::InteractionSurface;
+use rust_agent::history::session::{InMemorySessionStore, SessionId, SessionStore};
 use rust_agent::interaction::dispatcher::NotificationDispatcher;
 use rust_agent::interaction::telegram::gateway::TelegramGateway;
 use rust_agent::state::permission_context::{PermissionMode, ToolPermissionContext};
@@ -632,6 +633,99 @@ async fn task_update_adds_reciprocal_dependencies_without_duplicates() {
     };
     assert!(task_c_text.contains("blocks: task-0"));
     assert!(task_c_text.contains("blocked_by: "));
+}
+
+#[tokio::test]
+async fn task_list_persistence_round_trips_snapshot_and_next_id() {
+    let session_store = Arc::new(InMemorySessionStore::default());
+    let session_id = SessionId("session-owner".into());
+    let task_list = Arc::new(
+        rust_agent::task::list_manager::TaskListManager::default()
+            .with_persistence(session_store.clone(), session_id.clone()),
+    );
+    let permissions = ToolPermissionContext::new(PermissionMode::Default)
+        .with_task_list_manager(task_list.clone())
+        .with_active_session_id("session-owner");
+
+    TaskCreateTool
+        .invoke(
+            &ToolCall {
+                name: "TaskCreate".into(),
+                input: "task a:alpha:Doing alpha".into(),
+            },
+            &permissions,
+        )
+        .await
+        .expect("create task a");
+    TaskCreateTool
+        .invoke(
+            &ToolCall {
+                name: "TaskCreate".into(),
+                input: "task b:beta:Doing beta".into(),
+            },
+            &permissions,
+        )
+        .await
+        .expect("create task b");
+    TaskUpdateTool
+        .invoke(
+            &ToolCall {
+                name: "TaskUpdate".into(),
+                input: "task-0:-:-:-:completed:-:task-1:-".into(),
+            },
+            &permissions,
+        )
+        .await
+        .expect("persist dependency and status update");
+
+    let persisted = session_store
+        .load_task_list(&session_id)
+        .expect("task list snapshot should persist");
+    assert_eq!(persisted.next_id, 2);
+    assert_eq!(persisted.tasks.len(), 2);
+
+    let restored = rust_agent::task::list_manager::TaskListManager::from_snapshot(persisted)
+        .with_persistence(session_store.clone(), session_id.clone());
+    let restored_permissions = ToolPermissionContext::new(PermissionMode::Default)
+        .with_task_list_manager(Arc::new(restored))
+        .with_active_session_id("session-owner");
+
+    let restored_task = TaskGetTool
+        .invoke(
+            &ToolCall {
+                name: "TaskGet".into(),
+                input: "task-1".into(),
+            },
+            &restored_permissions,
+        )
+        .await
+        .expect("restored task should be readable");
+    let ToolResult::Text(restored_task_text) = restored_task else {
+        panic!("expected text result");
+    };
+    assert!(restored_task_text.contains("blocked_by: task-0"));
+
+    TaskCreateTool
+        .invoke(
+            &ToolCall {
+                name: "TaskCreate".into(),
+                input: "task c:gamma:Doing gamma".into(),
+            },
+            &restored_permissions,
+        )
+        .await
+        .expect("create task c after restore");
+
+    let restored_snapshot = session_store
+        .load_task_list(&session_id)
+        .expect("updated task list snapshot should persist");
+    assert_eq!(restored_snapshot.next_id, 3);
+    assert!(
+        restored_snapshot
+            .tasks
+            .iter()
+            .any(|task| task.id == "task-2")
+    );
 }
 
 #[tokio::test]

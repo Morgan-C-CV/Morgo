@@ -1,6 +1,7 @@
 use std::sync::{Arc, RwLock};
 
-use crate::task::list_types::{TaskListItem, TaskListStatus};
+use crate::history::session::{SessionId, SessionStore};
+use crate::task::list_types::{TaskListItem, TaskListSnapshot, TaskListStatus};
 
 #[derive(Debug, Default)]
 pub struct TaskListUpdate {
@@ -19,12 +20,67 @@ struct TaskListStore {
     tasks: Vec<TaskListItem>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Clone)]
+struct TaskListPersistence {
+    session_store: Arc<dyn SessionStore>,
+    session_id: SessionId,
+}
+
+#[derive(Clone)]
 pub struct TaskListManager {
     store: Arc<RwLock<TaskListStore>>,
+    persistence: Option<TaskListPersistence>,
+}
+
+impl std::fmt::Debug for TaskListManager {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TaskListManager")
+            .field("snapshot", &self.snapshot())
+            .field("persistent", &self.persistence.is_some())
+            .finish()
+    }
+}
+
+impl Default for TaskListManager {
+    fn default() -> Self {
+        Self {
+            store: Arc::new(RwLock::new(TaskListStore::default())),
+            persistence: None,
+        }
+    }
 }
 
 impl TaskListManager {
+    pub fn from_snapshot(snapshot: TaskListSnapshot) -> Self {
+        Self {
+            store: Arc::new(RwLock::new(TaskListStore {
+                next_id: snapshot.next_id,
+                tasks: snapshot.tasks,
+            })),
+            persistence: None,
+        }
+    }
+
+    pub fn with_persistence(
+        mut self,
+        session_store: Arc<dyn SessionStore>,
+        session_id: SessionId,
+    ) -> Self {
+        self.persistence = Some(TaskListPersistence {
+            session_store,
+            session_id,
+        });
+        self
+    }
+
+    pub fn snapshot(&self) -> TaskListSnapshot {
+        let store = self.store.read().expect("task list store poisoned");
+        TaskListSnapshot {
+            next_id: store.next_id,
+            tasks: store.tasks.clone(),
+        }
+    }
+
     pub fn create(
         &self,
         subject: impl Into<String>,
@@ -32,20 +88,24 @@ impl TaskListManager {
         active_form: Option<String>,
         owner: Option<String>,
     ) -> TaskListItem {
-        let mut store = self.store.write().expect("task list store poisoned");
-        let id = format!("task-{}", store.next_id);
-        store.next_id += 1;
-        let task = TaskListItem {
-            id,
-            subject: subject.into(),
-            description: description.into(),
-            active_form,
-            status: TaskListStatus::Pending,
-            owner,
-            blocks: Vec::new(),
-            blocked_by: Vec::new(),
+        let task = {
+            let mut store = self.store.write().expect("task list store poisoned");
+            let id = format!("task-{}", store.next_id);
+            store.next_id += 1;
+            let task = TaskListItem {
+                id,
+                subject: subject.into(),
+                description: description.into(),
+                active_form,
+                status: TaskListStatus::Pending,
+                owner,
+                blocks: Vec::new(),
+                blocked_by: Vec::new(),
+            };
+            store.tasks.push(task.clone());
+            task
         };
-        store.tasks.push(task.clone());
+        self.persist_snapshot();
         task
     }
 
@@ -117,7 +177,19 @@ impl TaskListManager {
             );
         }
 
-        Ok(store.tasks[task_index].clone())
+        let updated = store.tasks[task_index].clone();
+        drop(store);
+        self.persist_snapshot();
+        Ok(updated)
+    }
+
+    fn persist_snapshot(&self) {
+        let Some(persistence) = &self.persistence else {
+            return;
+        };
+        persistence
+            .session_store
+            .save_task_list(&persistence.session_id, self.snapshot());
     }
 }
 

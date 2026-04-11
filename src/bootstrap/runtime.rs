@@ -98,7 +98,6 @@ impl RuntimeBootstrap {
         state.record_phase(BootstrapPhase::ResolvePermissions);
 
         let task_manager = Arc::new(TaskManager::default());
-        let task_list_manager = Arc::new(TaskListManager::default());
         let hook_registry = HookRegistry::default();
         let _ = run_hook(&hook_registry, HookEvent::SessionStart);
 
@@ -137,6 +136,14 @@ impl RuntimeBootstrap {
             .as_ref()
             .map(|session| session.snapshot.session_id.0.clone())
             .unwrap_or_else(|| "local-session".into());
+        let task_list_session_id = SessionId(active_session_id.clone());
+        let task_list_snapshot = self.session_store.load_task_list(&task_list_session_id);
+        let task_list_manager = Arc::new(
+            task_list_snapshot
+                .map(TaskListManager::from_snapshot)
+                .unwrap_or_default()
+                .with_persistence(self.session_store.clone(), task_list_session_id),
+        );
         let permission_context = ToolPermissionContext::new(if self.cli.init_only {
             PermissionMode::Plan
         } else {

@@ -3,6 +3,7 @@ use std::sync::{Arc, RwLock};
 
 use crate::bootstrap::{InteractionSurface, SessionMode};
 use crate::core::message::Message;
+use crate::task::list_types::TaskListSnapshot;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SessionId(pub String);
@@ -45,17 +46,24 @@ pub trait SessionStore: Send + Sync {
     fn load(&self, request: &SessionRestoreRequest) -> Option<(SessionSnapshot, SessionHistory)>;
     fn save(&self, snapshot: SessionSnapshot, history: SessionHistory);
     fn append_entry(&self, session_id: &SessionId, entry: SessionHistoryEntry);
+    fn load_task_list(&self, session_id: &SessionId) -> Option<TaskListSnapshot>;
+    fn save_task_list(&self, session_id: &SessionId, snapshot: TaskListSnapshot);
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct InMemorySessionStore {
     sessions: Arc<RwLock<HashMap<SessionId, (SessionSnapshot, SessionHistory)>>>,
+    task_lists: Arc<RwLock<HashMap<SessionId, TaskListSnapshot>>>,
     latest_session: Arc<RwLock<Option<SessionId>>>,
 }
 
 impl InMemorySessionStore {
     pub fn insert(&self, snapshot: SessionSnapshot, history: SessionHistory) {
         self.save(snapshot, history);
+    }
+
+    pub fn insert_task_list(&self, session_id: SessionId, snapshot: TaskListSnapshot) {
+        self.save_task_list(&session_id, snapshot);
     }
 }
 
@@ -87,6 +95,16 @@ impl SessionStore for InMemorySessionStore {
             if let Some((_, history)) = sessions.get_mut(session_id) {
                 history.entries.push(entry);
             }
+        }
+    }
+
+    fn load_task_list(&self, session_id: &SessionId) -> Option<TaskListSnapshot> {
+        self.task_lists.read().ok()?.get(session_id).cloned()
+    }
+
+    fn save_task_list(&self, session_id: &SessionId, snapshot: TaskListSnapshot) {
+        if let Ok(mut task_lists) = self.task_lists.write() {
+            task_lists.insert(session_id.clone(), snapshot);
         }
     }
 }
