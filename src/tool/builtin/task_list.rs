@@ -25,26 +25,29 @@ impl Tool for TaskListTool {
         _call: &ToolCall,
         permissions: &ToolPermissionContext,
     ) -> anyhow::Result<ToolResult> {
-        let tasks = permissions
-            .task_manager
+        let task_list = permissions
+            .task_list_manager
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("shared task manager is not configured"))?;
-        let session_id = permissions
-            .active_session_id
-            .clone()
-            .unwrap_or_else(|| "local-session".into());
+            .ok_or_else(|| anyhow::anyhow!("shared task list manager is not configured"))?;
 
-        let owned = tasks
+        let tasks = task_list
             .list()
             .into_iter()
-            .filter(|task| task.owner.session_id == session_id)
             .map(|task| {
                 format!(
-                    "id: {}\ndescription: {}\nstatus: {:?}\noutput_file: {}\noutput_offset: {}",
-                    task.id, task.description, task.status, task.output_file, task.output_offset
+                    "id: {}\nsubject: {}\ndescription: {}\nstatus: {:?}\nowner: {}\nblocked_by: {}\nblocks: {}",
+                    task.id,
+                    task.subject,
+                    task.description,
+                    task.status,
+                    task.owner.as_deref().unwrap_or(""),
+                    task.blocked_by.join(","),
+                    task.blocks.join(",")
                 )
             })
             .collect::<Vec<_>>();
+
+        let owned = tasks;
 
         Ok(ToolResult::Text(if owned.is_empty() {
             "no tasks".into()

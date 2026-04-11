@@ -10,7 +10,7 @@ impl Tool for TaskGetTool {
     fn metadata(&self) -> ToolMetadata {
         ToolMetadata {
             name: "TaskGet",
-            description: "Get a task owned by the active session",
+            description: "Get a planning task-list item",
             aliases: &[],
             read_only: true,
             destructive: false,
@@ -25,34 +25,29 @@ impl Tool for TaskGetTool {
         call: &ToolCall,
         permissions: &ToolPermissionContext,
     ) -> anyhow::Result<ToolResult> {
-        let tasks = permissions
-            .task_manager
+        let task_list = permissions
+            .task_list_manager
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("shared task manager is not configured"))?;
-        let session_id = permissions
-            .active_session_id
-            .clone()
-            .unwrap_or_else(|| "local-session".into());
+            .ok_or_else(|| anyhow::anyhow!("shared task list manager is not configured"))?;
         let task_id = call.input.trim();
         if task_id.is_empty() {
             anyhow::bail!("task id cannot be empty");
         }
 
-        let task = tasks
+        let task = task_list
             .get(task_id)
-            .filter(|task| task.owner.session_id == session_id)
-            .ok_or_else(|| {
-                anyhow::anyhow!("task {task_id} is unknown or not owned by this session")
-            })?;
+            .ok_or_else(|| anyhow::anyhow!("task {task_id} is unknown"))?;
 
         Ok(ToolResult::Text(format!(
-            "id: {}\ndescription: {}\nstatus: {:?}\nowner_session_id: {}\noutput_file: {}\noutput_offset: {}",
+            "id: {}\nsubject: {}\ndescription: {}\nactive_form: {}\nstatus: {:?}\nowner: {}\nblocked_by: {}\nblocks: {}",
             task.id,
+            task.subject,
             task.description,
+            task.active_form.as_deref().unwrap_or(""),
             task.status,
-            task.owner.session_id,
-            task.output_file,
-            task.output_offset
+            task.owner.as_deref().unwrap_or(""),
+            task.blocked_by.join(","),
+            task.blocks.join(",")
         )))
     }
 }

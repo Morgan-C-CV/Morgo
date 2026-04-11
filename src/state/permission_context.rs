@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use crate::hook::registry::HookRegistry;
+use crate::task::list_manager::TaskListManager;
 use crate::task::manager::TaskManager;
 use crate::tool::registry::ToolRegistry;
 
@@ -18,6 +19,7 @@ pub struct ToolPermissionContext {
     pub always_allow_rules: Vec<String>,
     pub always_deny_rules: Vec<String>,
     pub task_manager: Option<Arc<TaskManager>>,
+    pub task_list_manager: Option<Arc<TaskListManager>>,
     pub active_session_id: Option<String>,
     pub subagent_scripted_turns: Option<Vec<Vec<crate::service::api::streaming::StreamEvent>>>,
     pub inherited_tool_registry: Option<ToolRegistry>,
@@ -31,6 +33,7 @@ impl ToolPermissionContext {
             always_allow_rules: Vec::new(),
             always_deny_rules: Vec::new(),
             task_manager: None,
+            task_list_manager: None,
             active_session_id: None,
             subagent_scripted_turns: None,
             inherited_tool_registry: None,
@@ -40,6 +43,11 @@ impl ToolPermissionContext {
 
     pub fn with_task_manager(mut self, task_manager: Arc<TaskManager>) -> Self {
         self.task_manager = Some(task_manager);
+        self
+    }
+
+    pub fn with_task_list_manager(mut self, task_list_manager: Arc<TaskListManager>) -> Self {
+        self.task_list_manager = Some(task_list_manager);
         self
     }
 

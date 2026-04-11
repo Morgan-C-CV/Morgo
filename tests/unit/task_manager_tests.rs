@@ -8,10 +8,12 @@ use rust_agent::task::manager::TaskManager;
 use rust_agent::task::types::{TaskEvent, TaskOwner, TaskStatus};
 use rust_agent::tool::builtin::agent::AgentTool;
 use rust_agent::tool::builtin::send_message::SendMessageTool;
+use rust_agent::tool::builtin::task_create::TaskCreateTool;
 use rust_agent::tool::builtin::task_get::TaskGetTool;
 use rust_agent::tool::builtin::task_list::TaskListTool;
 use rust_agent::tool::builtin::task_output::TaskOutputTool;
 use rust_agent::tool::builtin::task_stop::TaskStopTool;
+use rust_agent::tool::builtin::task_update::TaskUpdateTool;
 use rust_agent::tool::definition::{Tool, ToolCall, ToolResult};
 
 #[test]
@@ -394,16 +396,52 @@ async fn task_stop_tool_allows_owner_and_rejects_non_owner() {
 }
 
 #[tokio::test]
-async fn task_inspection_tools_are_owner_scoped() {
+async fn task_list_tools_follow_planning_model_and_runtime_output_still_works() {
     let manager = Arc::new(TaskManager::default());
-    let owned = manager.create("owned task", "session-owner", InteractionSurface::Cli);
-    manager.append_output(&owned.id, "owned output");
-    let other = manager.create("other task", "session-other", InteractionSurface::Cli);
-    manager.append_output(&other.id, "other output");
+    let task_list = Arc::new(rust_agent::task::list_manager::TaskListManager::default());
+    let runtime_task = manager.create(
+        "owned runtime task",
+        "session-owner",
+        InteractionSurface::Cli,
+    );
+    manager.append_output(&runtime_task.id, "owned output");
 
-    let owner_permissions = ToolPermissionContext::new(PermissionMode::Default)
+    let permissions = ToolPermissionContext::new(PermissionMode::Default)
         .with_task_manager(manager.clone())
+        .with_task_list_manager(task_list.clone())
         .with_active_session_id("session-owner");
+
+    let created = TaskCreateTool
+        .invoke(
+            &ToolCall {
+                name: "TaskCreate".into(),
+                input: "plan task:write tests:Writing tests".into(),
+            },
+            &permissions,
+        )
+        .await
+        .expect("task create should succeed");
+    let ToolResult::Text(created_text) = created else {
+        panic!("expected text result");
+    };
+    assert!(created_text.contains("subject: plan task"));
+
+    let updated = TaskUpdateTool
+        .invoke(
+            &ToolCall {
+                name: "TaskUpdate".into(),
+                input: "task-0:renamed task:refined description:Refining:in_progress:session-owner"
+                    .into(),
+            },
+            &permissions,
+        )
+        .await
+        .expect("task update should succeed");
+    let ToolResult::Text(updated_text) = updated else {
+        panic!("expected text result");
+    };
+    assert!(updated_text.contains("subject: renamed task"));
+    assert!(updated_text.contains("status: InProgress"));
 
     let list = TaskListTool
         .invoke(
@@ -411,62 +449,46 @@ async fn task_inspection_tools_are_owner_scoped() {
                 name: "TaskList".into(),
                 input: "ignored".into(),
             },
-            &owner_permissions,
+            &permissions,
         )
         .await
         .expect("task list should succeed");
     let ToolResult::Text(list_text) = list else {
         panic!("expected text result");
     };
-    assert!(list_text.contains("id: task-0"));
-    assert!(!list_text.contains("id: task-1"));
+    assert!(list_text.contains("subject: renamed task"));
+    assert!(!list_text.contains("output_file:"));
 
     let get = TaskGetTool
         .invoke(
             &ToolCall {
                 name: "TaskGet".into(),
-                input: owned.id.clone(),
+                input: "task-0".into(),
             },
-            &owner_permissions,
+            &permissions,
         )
         .await
         .expect("task get should succeed");
     let ToolResult::Text(get_text) = get else {
         panic!("expected text result");
     };
-    assert!(get_text.contains("description: owned task"));
+    assert!(get_text.contains("active_form: Refining"));
+    assert!(get_text.contains("owner: session-owner"));
 
     let output = TaskOutputTool
         .invoke(
             &ToolCall {
                 name: "TaskOutput".into(),
-                input: format!("{}:0", owned.id),
+                input: format!("{}:0", runtime_task.id),
             },
-            &owner_permissions,
+            &permissions,
         )
         .await
-        .expect("task output should succeed");
+        .expect("runtime task output should still succeed");
     let ToolResult::Text(output_text) = output else {
         panic!("expected text result");
     };
-    assert!(output_text.contains("task_id: task-0"));
     assert!(output_text.contains("content:\nowned output"));
-
-    let denied = TaskGetTool
-        .invoke(
-            &ToolCall {
-                name: "TaskGet".into(),
-                input: other.id.clone(),
-            },
-            &owner_permissions,
-        )
-        .await
-        .expect_err("non-owned task should be rejected");
-    assert!(
-        denied
-            .to_string()
-            .contains("unknown or not owned by this session")
-    );
 }
 
 #[tokio::test]

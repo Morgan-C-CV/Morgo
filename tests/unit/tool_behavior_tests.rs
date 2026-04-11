@@ -11,7 +11,9 @@ use rust_agent::tool::builtin::file_edit::FileEditTool;
 use rust_agent::tool::builtin::file_read::FileReadTool;
 use rust_agent::tool::builtin::glob::GlobTool;
 use rust_agent::tool::builtin::grep::GrepTool;
+use rust_agent::tool::builtin::task_create::TaskCreateTool;
 use rust_agent::tool::builtin::task_stop::TaskStopTool;
+use rust_agent::tool::builtin::task_update::TaskUpdateTool;
 use rust_agent::tool::builtin::tool_search::ToolSearchTool;
 use rust_agent::tool::builtin::web_fetch::WebFetchTool;
 use rust_agent::tool::definition::{Tool, ToolCall, ToolResult};
@@ -392,7 +394,9 @@ fn worker_tool_filter_excludes_agent_tool() {
         .register(Arc::new(BashTool))
         .register(Arc::new(FileReadTool))
         .register(Arc::new(AgentTool))
-        .register(Arc::new(TaskStopTool));
+        .register(Arc::new(TaskCreateTool))
+        .register(Arc::new(TaskStopTool))
+        .register(Arc::new(TaskUpdateTool));
 
     let filtered = registry.filter_for_worker();
     let names = filtered
@@ -403,6 +407,8 @@ fn worker_tool_filter_excludes_agent_tool() {
 
     assert!(names.contains(&"Bash"));
     assert!(names.contains(&"Read"));
+    assert!(names.contains(&"TaskCreate"));
     assert!(names.contains(&"TaskStop"));
+    assert!(names.contains(&"TaskUpdate"));
     assert!(!names.contains(&"Agent"));
 }

@@ -28,12 +28,14 @@ use crate::service::api::client::AnthropicClient;
 use crate::service::compact::reactive_compact::ReactiveCompactor;
 use crate::state::app_state::{AppState, RuntimeRole};
 use crate::state::permission_context::{PermissionMode, ToolPermissionContext};
+use crate::task::list_manager::TaskListManager;
 use crate::task::manager::TaskManager;
 use crate::tool::builtin::{
     agent::AgentTool, bash::BashTool, file_edit::FileEditTool, file_read::FileReadTool,
-    glob::GlobTool, grep::GrepTool, send_message::SendMessageTool, task_get::TaskGetTool,
-    task_list::TaskListTool, task_output::TaskOutputTool, task_stop::TaskStopTool,
-    tool_search::ToolSearchTool, web_fetch::WebFetchTool,
+    glob::GlobTool, grep::GrepTool, send_message::SendMessageTool, task_create::TaskCreateTool,
+    task_get::TaskGetTool, task_list::TaskListTool, task_output::TaskOutputTool,
+    task_stop::TaskStopTool, task_update::TaskUpdateTool, tool_search::ToolSearchTool,
+    web_fetch::WebFetchTool,
 };
 use crate::tool::registry::ToolRegistry;
 
@@ -96,6 +98,7 @@ impl RuntimeBootstrap {
         state.record_phase(BootstrapPhase::ResolvePermissions);
 
         let task_manager = Arc::new(TaskManager::default());
+        let task_list_manager = Arc::new(TaskListManager::default());
         let hook_registry = HookRegistry::default();
         let _ = run_hook(&hook_registry, HookEvent::SessionStart);
 
@@ -140,6 +143,7 @@ impl RuntimeBootstrap {
             PermissionMode::Default
         })
         .with_task_manager(task_manager.clone())
+        .with_task_list_manager(task_list_manager.clone())
         .with_active_session_id(active_session_id.clone())
         .with_inherited_tool_registry(tool_registry.clone())
         .with_inherited_hook_registry(hook_registry.clone());
@@ -279,10 +283,12 @@ impl RuntimeBootstrap {
             .register(Arc::new(GlobTool))
             .register(Arc::new(GrepTool))
             .register(Arc::new(SendMessageTool))
+            .register(Arc::new(TaskCreateTool))
             .register(Arc::new(TaskGetTool))
             .register(Arc::new(TaskListTool))
             .register(Arc::new(TaskOutputTool))
             .register(Arc::new(TaskStopTool))
+            .register(Arc::new(TaskUpdateTool))
             .register(Arc::new(ToolSearchTool))
             .register(Arc::new(WebFetchTool))
     }
