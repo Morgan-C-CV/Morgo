@@ -42,6 +42,7 @@ pub struct TaskOutputSlice {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskEvent {
     pub owner: TaskOwner,
+    pub target_task_id: Option<String>,
     pub task_id: String,
     pub status: TaskStatus,
     pub summary: String,

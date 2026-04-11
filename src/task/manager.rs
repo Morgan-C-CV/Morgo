@@ -12,6 +12,12 @@ use crate::task::types::{
     TaskDeliveryState, TaskEvent, TaskOutputSlice, TaskOwner, TaskRecord, TaskStatus,
 };
 
+#[derive(Debug, Clone)]
+struct ContinuationRecord {
+    owner: TaskOwner,
+    input: String,
+}
+
 #[derive(Debug, Default)]
 struct TaskStore {
     next_id: usize,
@@ -22,6 +28,7 @@ struct TaskStore {
 struct TaskRuntimeStore {
     abort_handles: HashMap<String, AbortHandle>,
     running_owners: HashMap<String, TaskOwner>,
+    continuations: HashMap<String, ContinuationRecord>,
     events: Vec<TaskEvent>,
 }
 
@@ -69,7 +76,7 @@ impl TaskManager {
         self.update_status(id, TaskStatus::Running);
     }
 
-    pub fn launch<F>(&self, id: &str, future: F)
+    pub fn launch<F>(&self, id: &str, input: impl Into<String>, future: F)
     where
         F: Future<Output = ()> + Send + 'static,
     {
@@ -91,7 +98,16 @@ impl TaskManager {
         runtime_store
             .abort_handles
             .insert(id.to_string(), join_handle.abort_handle());
-        runtime_store.running_owners.insert(id.to_string(), owner);
+        runtime_store
+            .running_owners
+            .insert(id.to_string(), owner.clone());
+        runtime_store.continuations.insert(
+            id.to_string(),
+            ContinuationRecord {
+                owner,
+                input: input.into(),
+            },
+        );
     }
 
     pub fn append_output(&self, id: &str, chunk: impl AsRef<str>) {
@@ -178,14 +194,26 @@ impl TaskManager {
     }
 
     pub fn drain_events(&self, session_id: &str) -> Vec<TaskEvent> {
+        self.drain_events_for_target(session_id, None)
+    }
+
+    pub fn drain_events_for_target(
+        &self,
+        session_id: &str,
+        target_task_id: Option<&str>,
+    ) -> Vec<TaskEvent> {
         let mut runtime_store = self
             .runtime_store
             .write()
             .expect("task runtime store poisoned");
         let events = std::mem::take(&mut runtime_store.events);
-        let (matched, unmatched): (Vec<_>, Vec<_>) = events
-            .into_iter()
-            .partition(|event| event.owner.session_id == session_id);
+        let (matched, unmatched): (Vec<_>, Vec<_>) = events.into_iter().partition(|event| {
+            event.owner.session_id == session_id
+                && match target_task_id {
+                    Some(task_id) => event.target_task_id.as_deref() == Some(task_id),
+                    None => true,
+                }
+        });
         runtime_store.events = unmatched;
         matched
     }
@@ -197,6 +225,16 @@ impl TaskManager {
             .running_owners
             .get(id)
             .cloned()
+    }
+
+    pub fn continuation_input(&self, id: &str, requester_session_id: &str) -> Option<String> {
+        self.runtime_store
+            .read()
+            .expect("task runtime store poisoned")
+            .continuations
+            .get(id)
+            .filter(|record| record.owner.session_id == requester_session_id)
+            .map(|record| record.input.clone())
     }
 
     fn update_status(&self, id: &str, status: TaskStatus) {
@@ -241,6 +279,7 @@ impl TaskManager {
             task.delivery.notified = true;
             let event = TaskEvent {
                 owner: task.owner.clone(),
+                target_task_id: Some(task.id.clone()),
                 task_id: task.id.clone(),
                 status,
                 summary: format!("{} ({})", task.description, task.id),

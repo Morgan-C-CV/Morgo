@@ -90,6 +90,39 @@ async fn runtime_continue_session_uses_restored_snapshot() {
     runtime.run().await.expect("runtime should run");
 }
 
+#[tokio::test]
+async fn runtime_resume_prefers_restored_surface_and_mode() {
+    let store = Arc::new(InMemorySessionStore::default());
+    store.save(
+        SessionSnapshot {
+            session_id: SessionId("session-remote".into()),
+            surface: InteractionSurface::Remote,
+            session_mode: SessionMode::Interactive,
+            cwd: "/tmp/resume".into(),
+            last_turn_at: None,
+            prompt_seed: None,
+        },
+        SessionHistory::default(),
+    );
+
+    let runtime = RuntimeBootstrap::from_cli(BootstrapCli {
+        print: None,
+        interactive: false,
+        init_only: false,
+        continue_session: false,
+        resume: Some("session-remote".into()),
+        trace_startup: false,
+        show_tools: false,
+        surface: "cli".into(),
+    })
+    .with_session_store(store);
+
+    runtime
+        .run()
+        .await
+        .expect("runtime should run with restored mode");
+}
+
 #[test]
 fn hook_event_enum_exposes_bootstrap_lifecycle_markers() {
     assert_eq!(HookEvent::SessionStart, HookEvent::SessionStart);

@@ -141,6 +141,7 @@ fn task_manager_queues_internal_task_notifications() {
                 session_id: "session-1".into(),
                 surface: InteractionSurface::Cli,
             },
+            target_task_id: Some(task.id.clone()),
             task_id: task.id.clone(),
             status: TaskStatus::Completed,
             summary: format!("demo task ({})", task.id),
@@ -156,7 +157,7 @@ async fn non_owner_cannot_kill_running_task() {
     let dispatcher = NotificationDispatcher::new(TelegramGateway::default());
     let task = manager.create("running task", "session-owner", InteractionSurface::Cli);
 
-    manager.launch(&task.id, async move {
+    manager.launch(&task.id, "inspect", async move {
         tokio::task::yield_now().await;
     });
 
@@ -168,6 +169,160 @@ async fn non_owner_cannot_kill_running_task() {
         })
     );
     assert!(!manager.kill(&task.id, "session-other", &dispatcher));
+}
+
+#[tokio::test]
+async fn owner_can_retrieve_continuation_input_but_non_owner_cannot() {
+    let manager = TaskManager::default();
+    let task = manager.create("running task", "session-owner", InteractionSurface::Cli);
+
+    manager.launch(&task.id, "continue me", async move {
+        tokio::task::yield_now().await;
+    });
+
+    assert_eq!(
+        manager.continuation_input(&task.id, "session-owner"),
+        Some("continue me".into())
+    );
+    assert_eq!(manager.continuation_input(&task.id, "session-other"), None);
+}
+
+#[tokio::test]
+async fn non_owner_cannot_continue_existing_task() {
+    let manager = Arc::new(TaskManager::default());
+    let inherited_tools =
+        rust_agent::tool::registry::ToolRegistry::new().register(Arc::new(AgentTool));
+    let owner_permissions = ToolPermissionContext::new(PermissionMode::Default)
+        .with_task_manager(manager.clone())
+        .with_active_session_id("session-owner")
+        .with_inherited_tool_registry(inherited_tools.clone())
+        .with_subagent_scripted_turns(vec![vec![
+            rust_agent::service::api::streaming::StreamEvent::MessageStart,
+            rust_agent::service::api::streaming::StreamEvent::TextDelta("owned answer".into()),
+            rust_agent::service::api::streaming::StreamEvent::MessageStop {
+                stop_reason: rust_agent::service::api::streaming::StopReason::EndTurn,
+            },
+        ]]);
+
+    AgentTool
+        .invoke(
+            &ToolCall {
+                name: "Agent".into(),
+                input: "inspect repository".into(),
+            },
+            &owner_permissions,
+        )
+        .await
+        .expect("initial launch should succeed");
+
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            let created = manager.get("task-0").expect("task should be created");
+            if created.status == TaskStatus::Completed {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("initial task should complete");
+
+    let other_permissions = ToolPermissionContext::new(PermissionMode::Default)
+        .with_task_manager(manager.clone())
+        .with_active_session_id("session-other")
+        .with_inherited_tool_registry(inherited_tools);
+
+    let error = AgentTool
+        .invoke(
+            &ToolCall {
+                name: "Agent".into(),
+                input: "continue: task-0".into(),
+            },
+            &other_permissions,
+        )
+        .await
+        .expect_err("non-owner continuation should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("not continuable by this session")
+    );
+}
+
+#[test]
+fn addressed_event_drain_filters_by_target_task() {
+    let manager = TaskManager::default();
+    let dispatcher = NotificationDispatcher::new(TelegramGateway::default());
+    let task_a = manager.create("task a", "session-1", InteractionSurface::Cli);
+    let task_b = manager.create("task b", "session-1", InteractionSurface::Cli);
+    manager.complete(&task_a.id, &dispatcher);
+    manager.complete(&task_b.id, &dispatcher);
+
+    let drained = manager.drain_events_for_target("session-1", Some(&task_a.id));
+    assert_eq!(drained.len(), 1);
+    assert_eq!(drained[0].task_id, task_a.id);
+    assert_eq!(
+        drained[0].target_task_id.as_deref(),
+        Some(task_a.id.as_str())
+    );
+}
+
+#[tokio::test]
+async fn agent_tool_allows_owner_to_continue_existing_task() {
+    let manager = Arc::new(TaskManager::default());
+    let inherited_tools =
+        rust_agent::tool::registry::ToolRegistry::new().register(Arc::new(AgentTool));
+    let permissions = ToolPermissionContext::new(PermissionMode::Default)
+        .with_task_manager(manager.clone())
+        .with_active_session_id("session-9")
+        .with_inherited_tool_registry(inherited_tools)
+        .with_subagent_scripted_turns(vec![vec![
+            rust_agent::service::api::streaming::StreamEvent::MessageStart,
+            rust_agent::service::api::streaming::StreamEvent::TextDelta("continued answer".into()),
+            rust_agent::service::api::streaming::StreamEvent::MessageStop {
+                stop_reason: rust_agent::service::api::streaming::StopReason::EndTurn,
+            },
+        ]]);
+
+    AgentTool
+        .invoke(
+            &ToolCall {
+                name: "Agent".into(),
+                input: "inspect repository".into(),
+            },
+            &permissions,
+        )
+        .await
+        .expect("initial agent launch should succeed");
+
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            let created = manager.get("task-0").expect("task should be created");
+            if created.status == TaskStatus::Completed {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("initial task should complete");
+
+    let result = AgentTool
+        .invoke(
+            &ToolCall {
+                name: "Agent".into(),
+                input: "continue: task-0".into(),
+            },
+            &permissions,
+        )
+        .await
+        .expect("continue should succeed");
+
+    assert_eq!(
+        result,
+        ToolResult::Text("agent task task-0 continued".into())
+    );
 }
 
 #[test]

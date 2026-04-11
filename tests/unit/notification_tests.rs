@@ -36,6 +36,7 @@ fn cli_renderer_marks_task_event_lines() {
                 session_id: "session-1".into(),
                 surface: InteractionSurface::Cli,
             },
+            target_task_id: Some("task-1".into()),
             task_id: "task-1".into(),
             status: TaskStatus::Completed,
             summary: "demo task".into(),

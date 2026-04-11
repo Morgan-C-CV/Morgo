@@ -32,7 +32,7 @@ pub struct QueryLoopResult {
 }
 
 pub async fn run_query_loop(context: &QueryContext, input: Message) -> QueryLoopResult {
-    let mut messages = Vec::new();
+    let mut messages = inbox_messages(context, None);
     let token_estimate = input.content.len();
     context
         .app_state
@@ -252,12 +252,29 @@ pub async fn run_query_loop(context: &QueryContext, input: Message) -> QueryLoop
     )
 }
 
+fn inbox_messages(context: &QueryContext, target_task_id: Option<&str>) -> Vec<Message> {
+    context
+        .app_state
+        .permission_context
+        .task_manager
+        .as_ref()
+        .map(|manager| {
+            manager
+                .drain_events_for_target(&context.app_state.active_session_id, target_task_id)
+                .into_iter()
+                .map(|event| crate::core::engine::QueryEngine::format_task_event_message(&event))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn finalize_with_stop_hook(
     context: &QueryContext,
     mut messages: Vec<Message>,
     default_state: QueryLoopState,
     default_reason: QueryTerminalReason,
 ) -> QueryLoopResult {
+    messages.extend(inbox_messages(context, context.agent_id.as_deref()));
     let stop_event = if context.is_subagent() {
         HookEvent::SubagentStop
     } else {

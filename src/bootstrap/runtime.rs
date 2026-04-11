@@ -84,11 +84,10 @@ impl RuntimeBootstrap {
     }
 
     pub async fn run(&self) -> anyhow::Result<()> {
-        let mut state = BootstrapState::new(
-            self.detect_surface(),
-            self.detect_session_mode(),
-            self.cli.trace_startup,
-        );
+        let detected_surface = self.detect_surface();
+        let detected_mode = self.detect_session_mode();
+        let mut state =
+            BootstrapState::new(detected_surface, detected_mode, self.cli.trace_startup);
 
         state.record_phase(BootstrapPhase::DetectSurface);
         state.record_phase(BootstrapPhase::InjectSessionMetadata);
@@ -109,6 +108,26 @@ impl RuntimeBootstrap {
 
         let restore_request = self.restore_request();
         let restored_session = self.restore_session(&state, restore_request.as_ref());
+        if let Some(restored) = &restored_session {
+            state.surface = restored.snapshot.surface;
+            state.session_mode = restored.snapshot.session_mode;
+            let (client_type, session_source) = match restored.snapshot.surface {
+                InteractionSurface::Cli => (
+                    crate::bootstrap::ClientType::Cli,
+                    crate::bootstrap::SessionSource::LocalCli,
+                ),
+                InteractionSurface::Telegram => (
+                    crate::bootstrap::ClientType::Bot,
+                    crate::bootstrap::SessionSource::Telegram,
+                ),
+                InteractionSurface::Remote => (
+                    crate::bootstrap::ClientType::RemoteControl,
+                    crate::bootstrap::SessionSource::RemoteControl,
+                ),
+            };
+            state.client_type = client_type;
+            state.session_source = session_source;
+        }
         let active_session_id = restored_session
             .as_ref()
             .map(|session| session.snapshot.session_id.0.clone())

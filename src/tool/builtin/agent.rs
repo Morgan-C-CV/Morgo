@@ -13,6 +13,12 @@ use crate::state::permission_context::ToolPermissionContext;
 use crate::tool::definition::{Tool, ToolCall, ToolMetadata, ToolResult};
 use crate::tool::registry::ToolRegistry;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AgentRequest {
+    Spawn { prompt: String },
+    Continue { task_id: String },
+}
+
 pub struct AgentTool;
 
 #[async_trait]
@@ -43,52 +49,103 @@ impl Tool for AgentTool {
             .active_session_id
             .clone()
             .unwrap_or_else(|| "local-session".into());
-        let task = tasks.create(
-            format!("Spawned agent for {}", call.input),
-            session_id.clone(),
-            InteractionSurface::Cli,
-        );
-
+        let request = parse_agent_request(&call.input);
         let parent_context = build_parent_query_context(permissions.clone());
-        let query_context = parent_context.create_subagent_context(
-            task.id.clone(),
-            permissions
-                .subagent_scripted_turns
-                .clone()
-                .unwrap_or_default(),
-        );
-        let task_id = task.id.clone();
-        let task_input = call.input.clone();
         let dispatcher = parent_context.app_state.notification_dispatcher.clone();
-        let tasks_for_run = tasks.clone();
 
-        tasks.launch(&task.id, async move {
-            let result = QueryEngine::new(query_context)
-                .submit_turn(Message::user(task_input.clone()))
-                .await;
-
-            if result.messages.is_empty() {
-                tasks_for_run.append_output(&task_id, "subagent produced no output");
-            } else {
-                for message in &result.messages {
-                    tasks_for_run.append_output(&task_id, format!("{}\n", message.content));
-                }
+        match request {
+            AgentRequest::Spawn { prompt } => {
+                let task = tasks.create(
+                    format!("Spawned agent for {}", prompt),
+                    session_id.clone(),
+                    InteractionSurface::Cli,
+                );
+                launch_agent_task(
+                    tasks.clone(),
+                    &parent_context,
+                    task.id.clone(),
+                    prompt.clone(),
+                    permissions,
+                    dispatcher,
+                );
+                Ok(ToolResult::Text(format!(
+                    "agent task {} launched for {}",
+                    task.id, prompt
+                )))
             }
-
-            if matches!(
-                result.state,
-                crate::core::query_loop::QueryLoopState::Failed
-            ) {
-                tasks_for_run.fail(&task_id, &dispatcher);
-            } else {
-                tasks_for_run.complete(&task_id, &dispatcher);
+            AgentRequest::Continue { task_id } => {
+                let prompt = tasks
+                    .continuation_input(&task_id, &session_id)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("task {task_id} is not continuable by this session")
+                    })?;
+                launch_agent_task(
+                    tasks.clone(),
+                    &parent_context,
+                    task_id.clone(),
+                    prompt,
+                    permissions,
+                    dispatcher,
+                );
+                Ok(ToolResult::Text(format!(
+                    "agent task {} continued",
+                    task_id
+                )))
             }
-        });
+        }
+    }
+}
 
-        Ok(ToolResult::Text(format!(
-            "agent task {} launched for {}",
-            task.id, call.input
-        )))
+fn launch_agent_task(
+    tasks: std::sync::Arc<crate::task::manager::TaskManager>,
+    parent_context: &QueryContext,
+    task_id: String,
+    task_input: String,
+    permissions: &ToolPermissionContext,
+    dispatcher: NotificationDispatcher,
+) {
+    let query_context = parent_context.create_subagent_context(
+        task_id.clone(),
+        permissions
+            .subagent_scripted_turns
+            .clone()
+            .unwrap_or_default(),
+    );
+    let tasks_for_run = tasks.clone();
+    let launched_task_id = task_id.clone();
+    tasks.launch(&launched_task_id.clone(), task_input.clone(), async move {
+        let result = QueryEngine::new(query_context)
+            .submit_turn(Message::user(task_input.clone()))
+            .await;
+
+        if result.messages.is_empty() {
+            tasks_for_run.append_output(&launched_task_id, "subagent produced no output");
+        } else {
+            for message in &result.messages {
+                tasks_for_run.append_output(&launched_task_id, format!("{}\n", message.content));
+            }
+        }
+
+        if matches!(
+            result.state,
+            crate::core::query_loop::QueryLoopState::Failed
+        ) {
+            tasks_for_run.fail(&launched_task_id, &dispatcher);
+        } else {
+            tasks_for_run.complete(&launched_task_id, &dispatcher);
+        }
+    });
+}
+
+fn parse_agent_request(input: &str) -> AgentRequest {
+    if let Some(task_id) = input.strip_prefix("continue:") {
+        AgentRequest::Continue {
+            task_id: task_id.trim().to_string(),
+        }
+    } else {
+        AgentRequest::Spawn {
+            prompt: input.to_string(),
+        }
     }
 }
 
