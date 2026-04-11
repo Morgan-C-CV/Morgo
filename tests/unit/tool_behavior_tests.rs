@@ -1,6 +1,6 @@
 use std::io::{Read as _, Write as _};
 use std::net::TcpListener;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -23,6 +23,11 @@ fn unique_name(prefix: &str) -> String {
         .expect("clock should be after unix epoch")
         .as_nanos();
     format!("{prefix}-{nanos}")
+}
+
+fn cwd_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
 }
 
 #[tokio::test]
@@ -52,6 +57,7 @@ async fn read_tool_returns_file_contents() {
 
 #[tokio::test]
 async fn glob_tool_matches_nested_files() {
+    let _guard = cwd_lock().lock().expect("cwd lock poisoned");
     let dir = std::env::temp_dir().join(unique_name("rust-agent-glob"));
     let nested = dir.join("nested");
     fs::create_dir_all(&nested)
@@ -94,6 +100,7 @@ async fn glob_tool_matches_nested_files() {
 
 #[tokio::test]
 async fn grep_tool_reports_matching_lines() {
+    let _guard = cwd_lock().lock().expect("cwd lock poisoned");
     let dir = std::env::temp_dir().join(unique_name("rust-agent-grep"));
     let nested = dir.join("nested");
     fs::create_dir_all(&nested)

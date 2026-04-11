@@ -118,7 +118,9 @@ impl RuntimeBootstrap {
             PermissionMode::Default
         })
         .with_task_manager(task_manager.clone())
-        .with_active_session_id(active_session_id.clone());
+        .with_active_session_id(active_session_id.clone())
+        .with_inherited_tool_registry(tool_registry.clone())
+        .with_inherited_hook_registry(hook_registry.clone());
 
         state.record_phase(BootstrapPhase::InitializeRuntime);
         state.record_phase(BootstrapPhase::AugmentPrompt);

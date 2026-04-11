@@ -357,3 +357,75 @@ async fn query_loop_uses_subagent_stop_hook_for_subagent_context() {
             .contains(&HookEvent::Stop)
     );
 }
+
+#[tokio::test]
+async fn subagent_context_inherits_parent_tools_and_hooks() {
+    let mut permission_context = ToolPermissionContext::new(PermissionMode::Default)
+        .with_task_manager(Arc::new(TaskManager::default()));
+    permission_context.always_allow_rules.push("Agent".into());
+
+    let parent_hook_registry = HookRegistry::default().register_rule(HookRule {
+        event: HookEventMatcher::SubagentStop,
+        deny_match: None,
+        append_message: Some("inherited stop hook".into()),
+        prevent_continuation: false,
+    });
+    let parent_tool_registry = ToolRegistry::new().register(Arc::new(AgentTool));
+
+    let parent = QueryContext {
+        app_state: AppState {
+            surface: InteractionSurface::Cli,
+            session_mode: SessionMode::Headless,
+            client_type: ClientType::Cli,
+            session_source: SessionSource::LocalCli,
+            permission_context,
+            cost_tracker: CostTracker::default(),
+            notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
+            startup_trace: vec!["parent-runtime".into()],
+            active_session_id: "test-session".into(),
+            session: None,
+            history: None,
+            restored_session: None,
+        },
+        tool_registry: parent_tool_registry.clone(),
+        api_client: AnthropicClient::default(),
+        compactor: ReactiveCompactor,
+        hook_registry: parent_hook_registry.clone(),
+        agent_id: None,
+    };
+
+    let child = parent.create_subagent_context(
+        "agent-task-2",
+        vec![vec![
+            StreamEvent::MessageStart,
+            StreamEvent::TextDelta("child result".into()),
+            StreamEvent::MessageStop {
+                stop_reason: StopReason::EndTurn,
+            },
+        ]],
+    );
+
+    assert!(child.is_subagent());
+    assert!(
+        child
+            .tool_registry
+            .visible_tools(&child.app_state.permission_context)
+            .iter()
+            .any(|tool| tool.name == "Agent")
+    );
+    assert_eq!(child.app_state.startup_trace, vec!["parent-runtime"]);
+
+    let result = QueryEngine::new(child.clone())
+        .submit_turn(Message::user("run child"))
+        .await;
+    assert_eq!(
+        result.messages[1],
+        Message::assistant("inherited stop hook")
+    );
+    assert!(
+        child
+            .hook_registry
+            .recorded_events()
+            .contains(&HookEvent::SubagentStop)
+    );
+}

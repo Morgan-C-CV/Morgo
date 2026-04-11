@@ -5,8 +5,8 @@ use crate::core::context::QueryContext;
 use crate::core::engine::QueryEngine;
 use crate::core::message::Message;
 use crate::cost::tracker::CostTracker;
-use crate::hook::registry::HookRegistry;
-use crate::service::api::client::AnthropicClient;
+use crate::interaction::dispatcher::NotificationDispatcher;
+use crate::interaction::telegram::gateway::TelegramGateway;
 use crate::service::compact::reactive_compact::ReactiveCompactor;
 use crate::state::app_state::AppState;
 use crate::state::permission_context::ToolPermissionContext;
@@ -42,44 +42,14 @@ impl Tool for AgentTool {
         let task = tasks.create(format!("Spawned agent for {}", call.input));
         tasks.start(&task.id);
 
-        let mut subagent_permissions = permissions.clone();
-        subagent_permissions
-            .always_allow_rules
-            .push(self.metadata().name.into());
-
-        let app_state = AppState {
-            surface: InteractionSurface::Cli,
-            session_mode: SessionMode::Headless,
-            client_type: ClientType::Cli,
-            session_source: SessionSource::LocalCli,
-            permission_context: subagent_permissions.clone(),
-            cost_tracker: CostTracker::default(),
-            notification_dispatcher: crate::interaction::dispatcher::NotificationDispatcher::new(
-                crate::interaction::telegram::gateway::TelegramGateway::default(),
-            ),
-            startup_trace: Vec::new(),
-            active_session_id: permissions
-                .active_session_id
+        let parent_context = build_parent_query_context(permissions.clone());
+        let query_context = parent_context.create_subagent_context(
+            task.id.clone(),
+            permissions
+                .subagent_scripted_turns
                 .clone()
-                .unwrap_or_else(|| "local-session".into()),
-            session: None,
-            history: None,
-            restored_session: None,
-        };
-
-        let query_context = QueryContext {
-            app_state: app_state.clone(),
-            tool_registry: ToolRegistry::new(),
-            api_client: AnthropicClient::with_scripted_turns(
-                permissions
-                    .subagent_scripted_turns
-                    .clone()
-                    .unwrap_or_default(),
-            ),
-            compactor: ReactiveCompactor,
-            hook_registry: HookRegistry::default(),
-            agent_id: Some(task.id.clone()),
-        };
+                .unwrap_or_default(),
+        );
 
         let result = QueryEngine::new(query_context)
             .submit_turn(Message::user(call.input.clone()))
@@ -99,14 +69,14 @@ impl Tool for AgentTool {
         ) {
             tasks.fail(
                 &task.id,
-                &app_state.active_session_id,
-                &app_state.notification_dispatcher,
+                &parent_context.app_state.active_session_id,
+                &parent_context.app_state.notification_dispatcher,
             );
         } else {
             tasks.complete(
                 &task.id,
-                &app_state.active_session_id,
-                &app_state.notification_dispatcher,
+                &parent_context.app_state.active_session_id,
+                &parent_context.app_state.notification_dispatcher,
             );
         }
 
@@ -114,5 +84,45 @@ impl Tool for AgentTool {
             "agent task {} completed for {}",
             task.id, call.input
         )))
+    }
+}
+
+fn build_parent_query_context(permissions: ToolPermissionContext) -> QueryContext {
+    let mut runtime_permissions = permissions.clone();
+    runtime_permissions
+        .always_allow_rules
+        .push(AgentTool.metadata().name.into());
+
+    let hook_registry = permissions
+        .inherited_hook_registry
+        .clone()
+        .unwrap_or_default();
+    let tool_registry = permissions
+        .inherited_tool_registry
+        .clone()
+        .unwrap_or_else(|| ToolRegistry::new().register(std::sync::Arc::new(AgentTool)));
+    QueryContext {
+        app_state: AppState {
+            surface: InteractionSurface::Cli,
+            session_mode: SessionMode::Headless,
+            client_type: ClientType::Cli,
+            session_source: SessionSource::LocalCli,
+            permission_context: runtime_permissions,
+            cost_tracker: CostTracker::default(),
+            notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default())
+                .with_hook_registry(hook_registry.clone()),
+            startup_trace: Vec::new(),
+            active_session_id: permissions
+                .active_session_id
+                .unwrap_or_else(|| "local-session".into()),
+            session: None,
+            history: None,
+            restored_session: None,
+        },
+        tool_registry,
+        api_client: crate::service::api::client::AnthropicClient::default(),
+        compactor: ReactiveCompactor,
+        hook_registry,
+        agent_id: None,
     }
 }

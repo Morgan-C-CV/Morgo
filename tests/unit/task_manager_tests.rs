@@ -54,9 +54,21 @@ fn task_manager_tracks_failed_and_killed_states() {
 #[tokio::test]
 async fn agent_tool_runs_subagent_and_completes_task() {
     let manager = Arc::new(TaskManager::default());
+    let inherited_tools =
+        rust_agent::tool::registry::ToolRegistry::new().register(Arc::new(AgentTool));
+    let inherited_hooks = rust_agent::hook::registry::HookRegistry::default().register_rule(
+        rust_agent::hook::registry::HookRule {
+            event: rust_agent::hook::registry::HookEventMatcher::SubagentStop,
+            deny_match: None,
+            append_message: Some("shared hook message".into()),
+            prevent_continuation: false,
+        },
+    );
     let permissions = ToolPermissionContext::new(PermissionMode::Default)
         .with_task_manager(manager.clone())
         .with_active_session_id("session-7")
+        .with_inherited_tool_registry(inherited_tools)
+        .with_inherited_hook_registry(inherited_hooks)
         .with_subagent_scripted_turns(vec![vec![
             rust_agent::service::api::streaming::StreamEvent::MessageStart,
             rust_agent::service::api::streaming::StreamEvent::TextDelta("subagent answer".into()),
@@ -87,6 +99,7 @@ async fn agent_tool_runs_subagent_and_completes_task() {
         .get_output("task-0", 0)
         .expect("task output should exist");
     assert!(output.content.contains("subagent answer"));
+    assert!(output.content.contains("shared hook message"));
     assert!(created.delivery.notified);
     assert_eq!(
         created
