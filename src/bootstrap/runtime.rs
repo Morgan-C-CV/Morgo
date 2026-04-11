@@ -23,9 +23,13 @@ use crate::interaction::cli::repl::handle_cli_input;
 use crate::interaction::dispatcher::NotificationDispatcher;
 use crate::interaction::router::CommandRouter;
 use crate::interaction::telegram::gateway::TelegramGateway;
+use crate::plan::manager::PlanManager;
 use crate::security::authorizer::DefaultSurfaceAuthorizer;
 use crate::service::api::client::{ModelProviderClient, ModelProviderConfig, ModelPricing};
 use crate::service::compact::reactive_compact::ReactiveCompactor;
+use crate::skills::bundled::bundled_skills;
+use crate::skills::loader::load_filesystem_skills;
+use crate::skills::registry::SkillRegistry;
 use crate::state::app_state::{AppState, RuntimeRole};
 use crate::state::permission_context::{PermissionMode, ToolPermissionContext};
 use crate::task::list_manager::TaskListManager;
@@ -175,8 +179,18 @@ impl RuntimeBootstrap {
             task_list_snapshot
                 .map(TaskListManager::from_snapshot)
                 .unwrap_or_default()
+                .with_persistence(self.session_store.clone(), task_list_session_id.clone()),
+        );
+        let plan_state = self.session_store.load_plan_state(&task_list_session_id);
+        let plan_manager = Arc::new(
+            plan_state
+                .map(PlanManager::from_state)
+                .unwrap_or_default()
                 .with_persistence(self.session_store.clone(), task_list_session_id),
         );
+        let mut discovered_skills = bundled_skills();
+        discovered_skills.extend(load_filesystem_skills(&state.current_cwd).unwrap_or_default());
+        let skill_registry = Arc::new(SkillRegistry::new(discovered_skills));
         let coordinator_tools = tool_inventory.assemble_for_role(RuntimeRole::Coordinator);
         let permission_context = ToolPermissionContext::new(if self.cli.init_only {
             PermissionMode::Plan
@@ -185,6 +199,8 @@ impl RuntimeBootstrap {
         })
         .with_task_manager(task_manager.clone())
         .with_task_list_manager(task_list_manager.clone())
+        .with_plan_manager(plan_manager.clone())
+        .with_skill_registry(skill_registry.clone())
         .with_active_session_id(active_session_id.clone())
         .with_deferred_tools(true)
         .with_interactive_tools(true)
@@ -206,6 +222,7 @@ impl RuntimeBootstrap {
             permission_context: permission_context.clone(),
             command_registry: None,
             runtime_tool_registry: Some(Arc::new(RwLock::new(coordinator_tools.clone()))),
+            skill_registry: Some(skill_registry.clone()),
             cost_tracker: CostTracker::with_default_pricing(
                 provider_config.model_id.clone(),
                 provider_config.pricing.clone(),

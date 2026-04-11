@@ -5,6 +5,7 @@ use std::sync::{Arc, RwLock};
 use crate::bootstrap::{InteractionSurface, SessionMode};
 use crate::core::events::SessionMilestone;
 use crate::core::message::Message;
+use crate::plan::types::PlanState;
 use crate::task::list_types::TaskListSnapshot;
 use serde::{Deserialize, Serialize};
 
@@ -52,12 +53,15 @@ pub trait SessionStore: Send + Sync {
     fn append_entry(&self, session_id: &SessionId, entry: SessionHistoryEntry);
     fn load_task_list(&self, session_id: &SessionId) -> Option<TaskListSnapshot>;
     fn save_task_list(&self, session_id: &SessionId, snapshot: TaskListSnapshot);
+    fn load_plan_state(&self, session_id: &SessionId) -> Option<PlanState>;
+    fn save_plan_state(&self, session_id: &SessionId, state: PlanState);
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct InMemorySessionStore {
     sessions: Arc<RwLock<HashMap<SessionId, (SessionSnapshot, SessionHistory)>>>,
     task_lists: Arc<RwLock<HashMap<SessionId, TaskListSnapshot>>>,
+    plan_states: Arc<RwLock<HashMap<SessionId, PlanState>>>,
     latest_session: Arc<RwLock<Option<SessionId>>>,
 }
 
@@ -111,6 +115,16 @@ impl SessionStore for InMemorySessionStore {
             task_lists.insert(session_id.clone(), snapshot);
         }
     }
+
+    fn load_plan_state(&self, session_id: &SessionId) -> Option<PlanState> {
+        self.plan_states.read().ok()?.get(session_id).cloned()
+    }
+
+    fn save_plan_state(&self, session_id: &SessionId, state: PlanState) {
+        if let Ok(mut plan_states) = self.plan_states.write() {
+            plan_states.insert(session_id.clone(), state);
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -123,6 +137,7 @@ struct PersistedSessionRecord {
     snapshot: SessionSnapshot,
     history: SessionHistory,
     task_list: Option<TaskListSnapshot>,
+    plan_state: Option<PlanState>,
 }
 
 impl FileBackedSessionStore {
@@ -199,6 +214,7 @@ impl FileBackedSessionStore {
                 },
                 history: SessionHistory::default(),
                 task_list: None,
+                plan_state: None,
             });
         update(&mut record);
         self.write_record(session_id, &record);
@@ -227,15 +243,16 @@ impl SessionStore for FileBackedSessionStore {
 
     fn save(&self, snapshot: SessionSnapshot, history: SessionHistory) {
         let session_id = snapshot.session_id.clone();
-        let task_list = self
-            .read_record(&session_id)
-            .and_then(|record| record.task_list);
+        let record = self.read_record(&session_id);
+        let task_list = record.as_ref().and_then(|record| record.task_list.clone());
+        let plan_state = record.and_then(|record| record.plan_state);
         self.write_record(
             &session_id,
             &PersistedSessionRecord {
                 snapshot,
                 history,
                 task_list,
+                plan_state,
             },
         );
     }
@@ -254,6 +271,17 @@ impl SessionStore for FileBackedSessionStore {
     fn save_task_list(&self, session_id: &SessionId, snapshot: TaskListSnapshot) {
         self.update_record(session_id, |record| {
             record.task_list = Some(snapshot);
+        });
+    }
+
+    fn load_plan_state(&self, session_id: &SessionId) -> Option<PlanState> {
+        self.read_record(session_id)
+            .and_then(|record| record.plan_state)
+    }
+
+    fn save_plan_state(&self, session_id: &SessionId, state: PlanState) {
+        self.update_record(session_id, |record| {
+            record.plan_state = Some(state);
         });
     }
 }

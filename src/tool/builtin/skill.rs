@@ -28,12 +28,52 @@ impl Tool for SkillTool {
     async fn invoke(
         &self,
         call: &ToolCall,
-        _permissions: &ToolPermissionContext,
+        permissions: &ToolPermissionContext,
     ) -> anyhow::Result<ToolResult> {
-        let skill = call.input.trim();
-        if skill.is_empty() {
+        let raw = call.input.trim();
+        if raw.is_empty() {
             anyhow::bail!("skill name cannot be empty");
         }
-        Ok(ToolResult::Text(format!("skill queued: {skill}")))
+
+        let mut parts = raw.splitn(2, char::is_whitespace);
+        let skill_name = parts.next().unwrap_or_default().trim();
+        let args = parts.next().unwrap_or_default().trim();
+        let skill_registry = permissions
+            .skill_registry
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("skill registry is unavailable in this session"))?;
+        let skill = skill_registry
+            .find(skill_name)
+            .ok_or_else(|| anyhow::anyhow!("unknown skill: {skill_name}"))?;
+        if !skill.is_model_invocable() {
+            anyhow::bail!("skill {skill_name} cannot be invoked by the model");
+        }
+
+        let args_line = if args.is_empty() {
+            "Arguments: (none)".to_string()
+        } else {
+            format!("Arguments: {args}")
+        };
+        let when_to_use = skill
+            .when_to_use
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| format!("When to use: {}\n", value.trim()))
+            .unwrap_or_default();
+        let argument_hint = skill
+            .argument_hint
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| format!("Argument hint: {}\n", value.trim()))
+            .unwrap_or_default();
+
+        Ok(ToolResult::Text(format!(
+            "Loaded skill: {}\n{}{}{}\nSkill instructions:\n{}",
+            skill.name,
+            when_to_use,
+            argument_hint,
+            args_line,
+            skill.content
+        )))
     }
 }

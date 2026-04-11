@@ -36,6 +36,11 @@ impl Command for PlanCommand {
                 crate::state::plan_mode::render_plan_status(&app_state.permission_context),
             ));
         }
+        if args == "show" {
+            return Ok(CommandResult::Message(
+                crate::state::plan_mode::render_plan_show(&app_state.permission_context),
+            ));
+        }
 
         let mut parts = args.split_whitespace();
         let action = parts.next().unwrap_or_default();
@@ -51,7 +56,7 @@ impl Command for PlanCommand {
             ),
             _ => {
                 return Ok(CommandResult::Message(
-                    "Usage: /plan [status|enter [reason]|exit [summary]]".into(),
+                    "Usage: /plan [status|show|enter [reason]|exit [summary]]".into(),
                 ))
             }
         };

@@ -1,6 +1,7 @@
 use crate::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
 use crate::command::types::CommandResult;
 use crate::cost::tracker::CostTracker;
+use crate::skills::registry::SkillRegistry;
 use crate::tool::definition::{ToolCall, ToolResult};
 use crate::tool::registry::ToolRegistry;
 use std::sync::Arc;
@@ -28,6 +29,7 @@ pub struct AppState {
     pub permission_context: ToolPermissionContext,
     pub command_registry: Option<Arc<CommandRegistry>>,
     pub runtime_tool_registry: Option<Arc<RwLock<ToolRegistry>>>,
+    pub skill_registry: Option<Arc<SkillRegistry>>,
     pub cost_tracker: CostTracker,
     pub notification_dispatcher: NotificationDispatcher,
     pub startup_trace: Vec<String>,
@@ -65,7 +67,7 @@ impl AppState {
                 let message = crate::state::plan_mode::apply_exit_plan_mode(
                     &self.permission_context,
                     &pending.tool_input,
-                );
+                )?;
                 self.permission_context.set_pending_approval(None);
                 Ok(CommandResult::Message(message))
             }
@@ -112,6 +114,7 @@ impl std::fmt::Debug for AppState {
             .field("permission_context", &self.permission_context)
             .field("has_command_registry", &self.command_registry.is_some())
             .field("has_runtime_tool_registry", &self.runtime_tool_registry.is_some())
+            .field("has_skill_registry", &self.skill_registry.is_some())
             .field("cost_tracker", &self.cost_tracker)
             .field("notification_dispatcher", &self.notification_dispatcher)
             .field("startup_trace", &self.startup_trace)

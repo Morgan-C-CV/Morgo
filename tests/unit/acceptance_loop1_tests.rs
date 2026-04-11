@@ -58,6 +58,7 @@ fn test_app_state() -> AppState {
             .with_task_manager(Arc::new(TaskManager::default())),
         command_registry: None,
         runtime_tool_registry: Some(Arc::new(RwLock::new(ToolRegistry::new()))),
+        skill_registry: None,
         cost_tracker: rust_agent::cost::tracker::CostTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
         startup_trace: Vec::new(),

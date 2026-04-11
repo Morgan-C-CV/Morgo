@@ -27,14 +27,32 @@ impl Command for SkillsCommand {
     async fn execute(
         &self,
         _input: &NormalizedInput,
-        _app_state: &AppState,
+        app_state: &AppState,
     ) -> anyhow::Result<CommandResult> {
-        Ok(CommandResult::Message(
-            "Skills Manager:\n\
-            Custom skills (macros mapping to PromptCommands) require the TUI list picker to view and modify configurations dynamically.\n\
-            Use the '/help' command to view natively mapped built-in skills.\n\
-            \n// TODO: Add `dialoguer` logic to iterate through dynamic skills in `.claude/skills` directory."
-                .to_string(),
-        ))
+        let Some(skill_registry) = app_state.skill_registry.as_ref() else {
+            return Ok(CommandResult::Message("No skills registry is available.".to_string()));
+        };
+        let cwd = app_state
+            .session
+            .as_ref()
+            .map(|session| session.cwd.as_str())
+            .unwrap_or_default();
+        let skills = skill_registry.list_user_invocable(cwd);
+        if skills.is_empty() {
+            return Ok(CommandResult::Message("No skills discovered.".to_string()));
+        }
+
+        let mut lines = vec!["Available skills:".to_string()];
+        for skill in skills {
+            let when = skill
+                .when_to_use
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+                .map(|value| format!(" — when to use: {}", value.trim()))
+                .unwrap_or_default();
+            lines.push(format!("- {}: {}{}", skill.name, skill.description, when));
+        }
+
+        Ok(CommandResult::Message(lines.join("\n")))
     }
 }
