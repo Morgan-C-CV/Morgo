@@ -1,9 +1,11 @@
 use rust_agent::bootstrap::InteractionSurface;
-use rust_agent::interaction::cli::renderer::render_output;
+use rust_agent::interaction::cli::renderer::render_turn_output;
+use rust_agent::interaction::cli::repl::{CliDisplayEvent, CliTurnOutput};
 use rust_agent::interaction::dispatcher::NotificationDispatcher;
 use rust_agent::interaction::notification::{Notification, NotificationType};
 use rust_agent::interaction::telegram::binding::SessionBinding;
 use rust_agent::interaction::telegram::gateway::TelegramGateway;
+use rust_agent::task::types::{TaskEvent, TaskStatus};
 
 #[test]
 fn dispatcher_records_cli_notifications() {
@@ -26,11 +28,19 @@ fn dispatcher_records_cli_notifications() {
 }
 
 #[test]
-fn cli_renderer_marks_task_notification_lines() {
-    let rendered = render_output(
-        "<task-notification>\n<task-id>task-1</task-id>\n<status>Completed</status>\n</task-notification>",
-    );
+fn cli_renderer_marks_task_event_lines() {
+    let rendered = render_turn_output(&CliTurnOutput {
+        primary_text: "assistant reply".into(),
+        events: vec![CliDisplayEvent::TaskEvent(TaskEvent {
+            owner_session_id: "session-1".into(),
+            task_id: "task-1".into(),
+            status: TaskStatus::Completed,
+            summary: "demo task".into(),
+            output_file: "/tmp/task-1.log".into(),
+        })],
+    });
 
+    assert!(rendered.contains("assistant reply"));
     assert!(rendered.contains("[task] <task-notification>"));
     assert!(rendered.contains("[task] <task-id>task-1</task-id>"));
     assert!(rendered.contains("[task] <status>Completed</status>"));

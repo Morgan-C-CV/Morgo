@@ -7,9 +7,7 @@ use tokio::task::AbortHandle;
 use crate::interaction::dispatcher::NotificationDispatcher;
 use crate::interaction::notification::Notification;
 use crate::task::output_store::TaskOutputStore;
-use crate::task::types::{
-    TaskDeliveryState, TaskNotification, TaskOutputSlice, TaskRecord, TaskStatus,
-};
+use crate::task::types::{TaskDeliveryState, TaskEvent, TaskOutputSlice, TaskRecord, TaskStatus};
 
 #[derive(Debug, Default)]
 struct TaskStore {
@@ -20,7 +18,7 @@ struct TaskStore {
 #[derive(Debug, Default)]
 struct TaskRuntimeStore {
     abort_handles: HashMap<String, AbortHandle>,
-    notifications: Vec<TaskNotification>,
+    events: Vec<TaskEvent>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -163,16 +161,16 @@ impl TaskManager {
         self.output_store.read_slice(&output_file, offset).ok()
     }
 
-    pub fn drain_notifications(&self, session_id: &str) -> Vec<TaskNotification> {
+    pub fn drain_events(&self, session_id: &str) -> Vec<TaskEvent> {
         let mut runtime_store = self
             .runtime_store
             .write()
             .expect("task runtime store poisoned");
-        let notifications = std::mem::take(&mut runtime_store.notifications);
-        let (matched, unmatched): (Vec<_>, Vec<_>) = notifications
+        let events = std::mem::take(&mut runtime_store.events);
+        let (matched, unmatched): (Vec<_>, Vec<_>) = events
             .into_iter()
-            .partition(|notification| notification.session_id == session_id);
-        runtime_store.notifications = unmatched;
+            .partition(|event| event.owner_session_id == session_id);
+        runtime_store.events = unmatched;
         matched
     }
 
@@ -216,29 +214,46 @@ impl TaskManager {
         {
             task.status = status.clone();
             task.delivery.notified = true;
-            let summary = format!("{} ({})", task.description, task.id);
-            self.runtime_store
-                .write()
-                .expect("task runtime store poisoned")
-                .notifications
-                .push(TaskNotification {
-                    session_id: session_id.to_string(),
-                    task_id: task.id.clone(),
-                    status: status.clone(),
-                    summary: summary.clone(),
-                    output_file: task.output_file.clone(),
-                });
-            let notification = Notification::task_update(
-                session_id,
-                title,
-                summary,
-                task.id.clone(),
-                format!("{status:?}"),
-                task.output_file.clone(),
-            );
-            dispatcher.dispatch(notification_surface(session_id), notification.clone());
+            let event = TaskEvent {
+                owner_session_id: session_id.to_string(),
+                task_id: task.id.clone(),
+                status,
+                summary: format!("{} ({})", task.description, task.id),
+                output_file: task.output_file.clone(),
+            };
+            self.enqueue_task_event(event.clone());
+            let notification = self.dispatch_task_notification(title, &event, dispatcher);
             task.delivery.notification = Some(notification);
         }
+    }
+
+    fn enqueue_task_event(&self, event: TaskEvent) {
+        self.runtime_store
+            .write()
+            .expect("task runtime store poisoned")
+            .events
+            .push(event);
+    }
+
+    fn dispatch_task_notification(
+        &self,
+        title: &str,
+        event: &TaskEvent,
+        dispatcher: &NotificationDispatcher,
+    ) -> Notification {
+        let notification = Notification::task_update(
+            &event.owner_session_id,
+            title,
+            event.summary.clone(),
+            event.task_id.clone(),
+            format!("{:?}", event.status),
+            event.output_file.clone(),
+        );
+        dispatcher.dispatch(
+            notification_surface(&event.owner_session_id),
+            notification.clone(),
+        );
+        notification
     }
 }
 

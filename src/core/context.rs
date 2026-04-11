@@ -2,7 +2,7 @@ use crate::hook::registry::HookRegistry;
 use crate::service::api::client::AnthropicClient;
 use crate::service::api::streaming::StreamEvent;
 use crate::service::compact::reactive_compact::ReactiveCompactor;
-use crate::state::app_state::AppState;
+use crate::state::app_state::{AppState, RuntimeRole};
 use crate::tool::registry::ToolRegistry;
 
 #[derive(Debug, Clone)]
@@ -17,7 +17,7 @@ pub struct QueryContext {
 
 impl QueryContext {
     pub fn is_subagent(&self) -> bool {
-        self.agent_id.is_some()
+        self.app_state.runtime_role == RuntimeRole::Worker
     }
 
     pub fn create_subagent_context(
@@ -25,8 +25,10 @@ impl QueryContext {
         agent_id: impl Into<String>,
         scripted_turns: Vec<Vec<StreamEvent>>,
     ) -> Self {
+        let mut app_state = self.app_state.clone();
+        app_state.runtime_role = RuntimeRole::Worker;
         Self {
-            app_state: self.app_state.clone(),
+            app_state,
             tool_registry: self.tool_registry.clone(),
             api_client: AnthropicClient::with_scripted_turns(scripted_turns),
             compactor: self.compactor.clone(),

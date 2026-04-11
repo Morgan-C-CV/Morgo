@@ -12,7 +12,7 @@ use rust_agent::service::api::streaming::{StopReason, StreamEvent};
 use rust_agent::service::compact::reactive_compact::ReactiveCompactor;
 use std::sync::Arc;
 
-use rust_agent::state::app_state::AppState;
+use rust_agent::state::app_state::{AppState, RuntimeRole};
 use rust_agent::state::permission_context::{PermissionMode, ToolPermissionContext};
 use rust_agent::task::manager::TaskManager;
 use rust_agent::tool::builtin::agent::AgentTool;
@@ -35,6 +35,7 @@ fn test_context_with_turns(
             session_mode: SessionMode::Headless,
             client_type: ClientType::Cli,
             session_source: SessionSource::LocalCli,
+            runtime_role: RuntimeRole::Coordinator,
             permission_context,
             cost_tracker: CostTracker::default(),
             notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
@@ -193,6 +194,7 @@ async fn query_loop_stop_hook_can_prevent_continuation() {
             session_mode: SessionMode::Headless,
             client_type: ClientType::Cli,
             session_source: SessionSource::LocalCli,
+            runtime_role: RuntimeRole::Coordinator,
             permission_context,
             cost_tracker: CostTracker::default(),
             notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
@@ -247,6 +249,7 @@ async fn query_loop_respects_pre_tool_hook_denial() {
             session_mode: SessionMode::Headless,
             client_type: ClientType::Cli,
             session_source: SessionSource::LocalCli,
+            runtime_role: RuntimeRole::Coordinator,
             permission_context,
             cost_tracker: CostTracker::default(),
             notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
@@ -303,6 +306,7 @@ async fn query_loop_uses_subagent_stop_hook_for_subagent_context() {
             session_mode: SessionMode::Headless,
             client_type: ClientType::Cli,
             session_source: SessionSource::LocalCli,
+            runtime_role: RuntimeRole::Worker,
             permission_context,
             cost_tracker: CostTracker::default(),
             notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
@@ -359,7 +363,7 @@ async fn query_loop_uses_subagent_stop_hook_for_subagent_context() {
 }
 
 #[tokio::test]
-async fn engine_drains_internal_task_notification_messages() {
+async fn engine_drains_internal_task_events() {
     let manager = Arc::new(TaskManager::default());
     let dispatcher = NotificationDispatcher::new(TelegramGateway::default());
     let task = manager.create("worker task");
@@ -375,6 +379,7 @@ async fn engine_drains_internal_task_notification_messages() {
             session_mode: SessionMode::Headless,
             client_type: ClientType::Cli,
             session_source: SessionSource::LocalCli,
+            runtime_role: RuntimeRole::Coordinator,
             permission_context,
             cost_tracker: CostTracker::default(),
             notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
@@ -391,12 +396,15 @@ async fn engine_drains_internal_task_notification_messages() {
         agent_id: None,
     });
 
-    let messages = engine.drain_task_notification_messages();
-    assert_eq!(messages.len(), 1);
-    assert!(messages[0].content.contains("<task-notification>"));
-    assert!(messages[0].content.contains("<task-id>task-0</task-id>"));
-    assert!(messages[0].content.contains("<status>Completed</status>"));
-    assert!(engine.drain_task_notification_messages().is_empty());
+    let events = engine.drain_task_events();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].task_id, "task-0");
+    assert_eq!(events[0].owner_session_id, "test-session");
+    assert_eq!(
+        events[0].status,
+        rust_agent::task::types::TaskStatus::Completed
+    );
+    assert!(engine.drain_task_events().is_empty());
 }
 
 #[tokio::test]
@@ -419,6 +427,7 @@ async fn subagent_context_inherits_parent_tools_and_hooks() {
             session_mode: SessionMode::Headless,
             client_type: ClientType::Cli,
             session_source: SessionSource::LocalCli,
+            runtime_role: RuntimeRole::Coordinator,
             permission_context,
             cost_tracker: CostTracker::default(),
             notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
@@ -446,6 +455,7 @@ async fn subagent_context_inherits_parent_tools_and_hooks() {
         ]],
     );
 
+    assert_eq!(child.app_state.runtime_role, RuntimeRole::Worker);
     assert!(child.is_subagent());
     assert!(
         child

@@ -1,7 +1,7 @@
 use crate::core::context::QueryContext;
 use crate::core::message::Message;
 use crate::core::query_loop::{QueryLoopResult, run_query_loop};
-use crate::task::types::TaskNotification;
+use crate::task::types::TaskEvent;
 
 #[derive(Debug, Clone)]
 pub struct QueryEngine {
@@ -21,20 +21,20 @@ impl QueryEngine {
         run_query_loop(&self.context, input).await
     }
 
-    pub fn drain_task_notifications(&self) -> Vec<TaskNotification> {
+    pub fn drain_task_events(&self) -> Vec<TaskEvent> {
         self.context
             .app_state
             .permission_context
             .task_manager
             .as_ref()
-            .map(|manager| manager.drain_notifications(&self.context.app_state.active_session_id))
+            .map(|manager| manager.drain_events(&self.context.app_state.active_session_id))
             .unwrap_or_default()
     }
 
-    pub fn drain_task_notification_messages(&self) -> Vec<Message> {
-        self.drain_task_notifications()
-            .into_iter()
-            .map(|notification| Message::assistant(notification.as_task_notification_message()))
-            .collect()
+    pub fn format_task_event_message(event: &TaskEvent) -> Message {
+        Message::assistant(format!(
+            "<task-notification>\n<task-id>{}</task-id>\n<status>{:?}</status>\n<summary>{}</summary>\n<output-file>{}</output-file>\n</task-notification>",
+            event.task_id, event.status, event.summary, event.output_file
+        ))
     }
 }

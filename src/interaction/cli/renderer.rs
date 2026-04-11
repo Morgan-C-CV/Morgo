@@ -1,21 +1,38 @@
+use crate::interaction::cli::repl::{CliDisplayEvent, CliTurnOutput};
+use crate::task::types::TaskEvent;
+
 pub fn render_output(output: &str) -> String {
-    output
-        .lines()
-        .map(render_line)
-        .collect::<Vec<_>>()
-        .join("\n")
+    output.to_string()
 }
 
-fn render_line(line: &str) -> String {
-    if line.starts_with("<task-notification>")
-        || line.starts_with("<task-id>")
-        || line.starts_with("<status>")
-        || line.starts_with("<summary>")
-        || line.starts_with("<output-file>")
-        || line.starts_with("</task-notification>")
-    {
-        format!("[task] {line}")
-    } else {
-        line.to_string()
+pub fn render_turn_output(turn: &CliTurnOutput) -> String {
+    let mut sections = Vec::new();
+    if !turn.primary_text.is_empty() {
+        sections.push(turn.primary_text.clone());
     }
+    for event in &turn.events {
+        sections.push(render_event(event));
+    }
+    sections.join("\n")
+}
+
+fn render_event(event: &CliDisplayEvent) -> String {
+    match event {
+        CliDisplayEvent::TaskEvent(task_event) => render_task_event(task_event),
+    }
+}
+
+fn render_task_event(task_event: &TaskEvent) -> String {
+    [
+        "[task] <task-notification>".to_string(),
+        format!("[task] <task-id>{}</task-id>", task_event.task_id),
+        format!("[task] <status>{:?}</status>", task_event.status),
+        format!("[task] <summary>{}</summary>", task_event.summary),
+        format!(
+            "[task] <output-file>{}</output-file>",
+            task_event.output_file
+        ),
+        "[task] </task-notification>".to_string(),
+    ]
+    .join("\n")
 }

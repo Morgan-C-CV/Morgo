@@ -13,7 +13,7 @@ use rust_agent::security::authorizer::DefaultSurfaceAuthorizer;
 use rust_agent::service::api::client::AnthropicClient;
 use rust_agent::service::api::streaming::{StopReason, StreamEvent};
 use rust_agent::service::compact::reactive_compact::ReactiveCompactor;
-use rust_agent::state::app_state::AppState;
+use rust_agent::state::app_state::{AppState, RuntimeRole};
 use rust_agent::state::permission_context::{PermissionMode, ToolPermissionContext};
 use rust_agent::task::manager::TaskManager;
 use rust_agent::tool::registry::ToolRegistry;
@@ -63,6 +63,7 @@ async fn cli_repl_handles_multiple_inputs_in_sequence() {
         session_mode: SessionMode::Interactive,
         client_type: ClientType::Cli,
         session_source: SessionSource::LocalCli,
+        runtime_role: RuntimeRole::Coordinator,
         permission_context,
         cost_tracker: CostTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
@@ -93,12 +94,14 @@ async fn cli_repl_handles_multiple_inputs_in_sequence() {
         .expect("cli repl should handle sequential inputs");
 
     assert_eq!(outputs.len(), 2);
-    assert!(outputs[0].contains("help"));
-    assert!(outputs[1].contains("second reply"));
+    assert!(outputs[0].primary_text.contains("help"));
+    assert!(outputs[1].primary_text.contains("second reply"));
+    assert!(outputs[0].events.is_empty());
+    assert!(outputs[1].events.is_empty());
 }
 
 #[tokio::test]
-async fn cli_repl_appends_task_notifications_for_active_session() {
+async fn cli_repl_surfaces_task_events_for_active_session() {
     let router = CommandRouter::new(
         CommandRegistry::new().register(Arc::new(HelpCommand)),
         Box::new(DefaultSurfaceAuthorizer),
@@ -111,6 +114,7 @@ async fn cli_repl_appends_task_notifications_for_active_session() {
         session_mode: SessionMode::Interactive,
         client_type: ClientType::Cli,
         session_source: SessionSource::LocalCli,
+        runtime_role: RuntimeRole::Coordinator,
         permission_context,
         cost_tracker: CostTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
@@ -141,7 +145,10 @@ async fn cli_repl_appends_task_notifications_for_active_session() {
         .expect("cli repl should surface notifications");
 
     assert_eq!(output.len(), 1);
-    assert!(output[0].contains("Available commands"));
-    assert!(output[0].contains("<task-notification>"));
-    assert!(output[0].contains("<task-id>task-0</task-id>"));
+    assert!(output[0].primary_text.contains("Available commands"));
+    assert_eq!(output[0].events.len(), 1);
+    let rust_agent::interaction::cli::repl::CliDisplayEvent::TaskEvent(task_event) =
+        &output[0].events[0];
+    assert_eq!(task_event.task_id, "task-0");
+    assert_eq!(task_event.owner_session_id, "cli-session");
 }

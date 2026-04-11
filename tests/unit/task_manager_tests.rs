@@ -4,7 +4,7 @@ use rust_agent::interaction::dispatcher::NotificationDispatcher;
 use rust_agent::interaction::telegram::gateway::TelegramGateway;
 use rust_agent::state::permission_context::{PermissionMode, ToolPermissionContext};
 use rust_agent::task::manager::TaskManager;
-use rust_agent::task::types::{TaskNotification, TaskStatus};
+use rust_agent::task::types::{TaskEvent, TaskStatus};
 use rust_agent::tool::builtin::agent::AgentTool;
 use rust_agent::tool::definition::{Tool, ToolCall, ToolResult};
 
@@ -131,19 +131,19 @@ fn task_manager_queues_internal_task_notifications() {
     let task = manager.create("demo task");
     manager.complete(&task.id, "session-1", &dispatcher);
 
-    let notifications = manager.drain_notifications("session-1");
+    let notifications = manager.drain_events("session-1");
     assert_eq!(notifications.len(), 1);
     assert_eq!(
         notifications[0],
-        TaskNotification {
-            session_id: "session-1".into(),
+        TaskEvent {
+            owner_session_id: "session-1".into(),
             task_id: task.id.clone(),
             status: TaskStatus::Completed,
             summary: format!("demo task ({})", task.id),
             output_file: task.output_file.clone(),
         }
     );
-    assert!(manager.drain_notifications("session-1").is_empty());
+    assert!(manager.drain_events("session-1").is_empty());
 }
 
 #[test]

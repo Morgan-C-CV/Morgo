@@ -7,7 +7,7 @@ use rust_agent::cost::tracker::CostTracker;
 use rust_agent::interaction::dispatcher::NotificationDispatcher;
 use rust_agent::interaction::envelope::NormalizedInput;
 use rust_agent::interaction::telegram::gateway::TelegramGateway;
-use rust_agent::state::app_state::AppState;
+use rust_agent::state::app_state::{AppState, RuntimeRole};
 use rust_agent::state::permission_context::{PermissionMode, ToolPermissionContext};
 use rust_agent::task::manager::TaskManager;
 
@@ -23,6 +23,7 @@ async fn cost_command_reports_tracked_usage() {
         session_mode: SessionMode::Headless,
         client_type: ClientType::Cli,
         session_source: SessionSource::LocalCli,
+        runtime_role: RuntimeRole::Coordinator,
         permission_context,
         cost_tracker,
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),

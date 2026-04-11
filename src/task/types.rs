@@ -32,19 +32,10 @@ pub struct TaskOutputSlice {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TaskNotification {
-    pub session_id: String,
+pub struct TaskEvent {
+    pub owner_session_id: String,
     pub task_id: String,
     pub status: TaskStatus,
     pub summary: String,
     pub output_file: String,
-}
-
-impl TaskNotification {
-    pub fn as_task_notification_message(&self) -> String {
-        format!(
-            "<task-notification>\n<task-id>{}</task-id>\n<status>{:?}</status>\n<summary>{}</summary>\n<output-file>{}</output-file>\n</task-notification>",
-            self.task_id, self.status, self.summary, self.output_file
-        )
-    }
 }

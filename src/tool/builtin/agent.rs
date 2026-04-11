@@ -8,7 +8,7 @@ use crate::cost::tracker::CostTracker;
 use crate::interaction::dispatcher::NotificationDispatcher;
 use crate::interaction::telegram::gateway::TelegramGateway;
 use crate::service::compact::reactive_compact::ReactiveCompactor;
-use crate::state::app_state::AppState;
+use crate::state::app_state::{AppState, RuntimeRole};
 use crate::state::permission_context::ToolPermissionContext;
 use crate::tool::definition::{Tool, ToolCall, ToolMetadata, ToolResult};
 use crate::tool::registry::ToolRegistry;
@@ -105,6 +105,7 @@ fn build_parent_query_context(permissions: ToolPermissionContext) -> QueryContex
             session_mode: SessionMode::Headless,
             client_type: ClientType::Cli,
             session_source: SessionSource::LocalCli,
+            runtime_role: RuntimeRole::Coordinator,
             permission_context: runtime_permissions,
             cost_tracker: CostTracker::default(),
             notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default())

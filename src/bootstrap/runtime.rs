@@ -18,7 +18,7 @@ use crate::history::session::{
 use crate::history::transcript::Transcript;
 use crate::hook::executor::run_hook;
 use crate::hook::registry::{HookEvent, HookRegistry};
-use crate::interaction::cli::renderer::render_output;
+use crate::interaction::cli::renderer::{render_output, render_turn_output};
 use crate::interaction::cli::repl::handle_cli_input;
 use crate::interaction::dispatcher::NotificationDispatcher;
 use crate::interaction::router::CommandRouter;
@@ -26,7 +26,7 @@ use crate::interaction::telegram::gateway::TelegramGateway;
 use crate::security::authorizer::DefaultSurfaceAuthorizer;
 use crate::service::api::client::AnthropicClient;
 use crate::service::compact::reactive_compact::ReactiveCompactor;
-use crate::state::app_state::AppState;
+use crate::state::app_state::{AppState, RuntimeRole};
 use crate::state::permission_context::{PermissionMode, ToolPermissionContext};
 use crate::task::manager::TaskManager;
 use crate::tool::builtin::{
@@ -133,6 +133,7 @@ impl RuntimeBootstrap {
             session_mode: state.session_mode,
             client_type: state.client_type,
             session_source: state.session_source,
+            runtime_role: RuntimeRole::Coordinator,
             permission_context: permission_context.clone(),
             cost_tracker: CostTracker::default(),
             notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
@@ -183,8 +184,8 @@ impl RuntimeBootstrap {
         let engine = QueryEngine::new(query_context);
 
         if let Some(prompt) = &self.cli.print {
-            let content = handle_cli_input(&router, &engine, &app_state, prompt.clone()).await?;
-            println!("{}", render_output(&content));
+            let output = handle_cli_input(&router, &engine, &app_state, prompt.clone()).await?;
+            println!("{}", render_turn_output(&output));
             return Ok(());
         }
 
@@ -210,14 +211,14 @@ impl RuntimeBootstrap {
         if self.cli.interactive {
             for line in io::stdin().lock().lines() {
                 let line = line?;
-                let content = handle_cli_input(&router, &engine, &app_state, line).await?;
-                println!("{}", render_output(&content));
+                let output = handle_cli_input(&router, &engine, &app_state, line).await?;
+                println!("{}", render_turn_output(&output));
             }
             return Ok(());
         }
 
-        let content = handle_cli_input(&router, &engine, &app_state, "/help").await?;
-        println!("{}", render_output(&content));
+        let output = handle_cli_input(&router, &engine, &app_state, "/help").await?;
+        println!("{}", render_turn_output(&output));
         Ok(())
     }
 
