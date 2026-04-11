@@ -30,10 +30,25 @@ impl Tool for TaskListTool {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("shared task list manager is not configured"))?;
 
-        let tasks = task_list
-            .list()
-            .into_iter()
+        let all_tasks = task_list.list();
+        let tasks = all_tasks
+            .iter()
             .map(|task| {
+                let visible_blocked_by = task
+                    .blocked_by
+                    .iter()
+                    .filter(|blocker_id| {
+                        all_tasks
+                            .iter()
+                            .find(|candidate| candidate.id == blocker_id.as_str())
+                            .map(|candidate| {
+                                candidate.status
+                                    != crate::task::list_types::TaskListStatus::Completed
+                            })
+                            .unwrap_or(true)
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
                 format!(
                     "id: {}\nsubject: {}\ndescription: {}\nstatus: {:?}\nowner: {}\nblocked_by: {}\nblocks: {}",
                     task.id,
@@ -41,7 +56,7 @@ impl Tool for TaskListTool {
                     task.description,
                     task.status,
                     task.owner.as_deref().unwrap_or(""),
-                    task.blocked_by.join(","),
+                    visible_blocked_by.join(","),
                     task.blocks.join(",")
                 )
             })

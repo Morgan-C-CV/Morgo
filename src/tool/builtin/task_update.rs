@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 
 use crate::state::permission_context::ToolPermissionContext;
+use crate::task::list_manager::TaskListUpdate;
 use crate::task::list_types::TaskListStatus;
 use crate::tool::definition::{Tool, ToolCall, ToolMetadata, ToolResult};
 
@@ -31,21 +32,32 @@ impl Tool for TaskUpdateTool {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("shared task list manager is not configured"))?;
 
-        let mut parts = call.input.splitn(6, ':');
+        let mut parts = call.input.splitn(8, ':');
         let task_id = parts.next().unwrap_or_default().trim();
         let subject = parse_optional_field(parts.next());
         let description = parse_optional_field(parts.next());
         let active_form = parse_nested_optional_field(parts.next());
         let status = parse_optional_status(parts.next())?;
         let owner = parse_nested_optional_field(parts.next());
+        let add_blocks = parse_id_list(parts.next());
+        let add_blocked_by = parse_id_list(parts.next());
 
         if task_id.is_empty() {
             anyhow::bail!("task id cannot be empty");
         }
 
-        let updated = task_list
-            .update(task_id, subject, description, active_form, status, owner)
-            .ok_or_else(|| anyhow::anyhow!("task {task_id} is unknown"))?;
+        let updated = task_list.update(
+            task_id,
+            TaskListUpdate {
+                subject,
+                description,
+                active_form,
+                status,
+                owner,
+                add_blocks,
+                add_blocked_by,
+            },
+        )?;
 
         Ok(ToolResult::Text(format!(
             "id: {}\nsubject: {}\ndescription: {}\nactive_form: {}\nstatus: {:?}\nowner: {}",
@@ -88,4 +100,19 @@ fn parse_optional_status(value: Option<&str>) -> anyhow::Result<Option<TaskListS
         Some("completed") => Ok(Some(TaskListStatus::Completed)),
         Some(other) => anyhow::bail!("unknown task status {other}"),
     }
+}
+
+fn parse_id_list(value: Option<&str>) -> Vec<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && *value != "-")
+        .map(|value| {
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|item| !item.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }

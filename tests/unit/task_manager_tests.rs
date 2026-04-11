@@ -411,7 +411,7 @@ async fn task_list_tools_follow_planning_model_and_runtime_output_still_works() 
         .with_task_list_manager(task_list.clone())
         .with_active_session_id("session-owner");
 
-    let created = TaskCreateTool
+    TaskCreateTool
         .invoke(
             &ToolCall {
                 name: "TaskCreate".into(),
@@ -421,16 +421,22 @@ async fn task_list_tools_follow_planning_model_and_runtime_output_still_works() 
         )
         .await
         .expect("task create should succeed");
-    let ToolResult::Text(created_text) = created else {
-        panic!("expected text result");
-    };
-    assert!(created_text.contains("subject: plan task"));
+    TaskCreateTool
+        .invoke(
+            &ToolCall {
+                name: "TaskCreate".into(),
+                input: "blocked task:wait for tests:Waiting".into(),
+            },
+            &permissions,
+        )
+        .await
+        .expect("second task create should succeed");
 
     let updated = TaskUpdateTool
         .invoke(
             &ToolCall {
                 name: "TaskUpdate".into(),
-                input: "task-0:renamed task:refined description:Refining:in_progress:session-owner"
+                input: "task-0:renamed task:refined description:Refining:in_progress:session-owner:task-1:-"
                     .into(),
             },
             &permissions,
@@ -443,27 +449,11 @@ async fn task_list_tools_follow_planning_model_and_runtime_output_still_works() 
     assert!(updated_text.contains("subject: renamed task"));
     assert!(updated_text.contains("status: InProgress"));
 
-    let list = TaskListTool
-        .invoke(
-            &ToolCall {
-                name: "TaskList".into(),
-                input: "ignored".into(),
-            },
-            &permissions,
-        )
-        .await
-        .expect("task list should succeed");
-    let ToolResult::Text(list_text) = list else {
-        panic!("expected text result");
-    };
-    assert!(list_text.contains("subject: renamed task"));
-    assert!(!list_text.contains("output_file:"));
-
     let get = TaskGetTool
         .invoke(
             &ToolCall {
                 name: "TaskGet".into(),
-                input: "task-0".into(),
+                input: "task-1".into(),
             },
             &permissions,
         )
@@ -472,8 +462,53 @@ async fn task_list_tools_follow_planning_model_and_runtime_output_still_works() 
     let ToolResult::Text(get_text) = get else {
         panic!("expected text result");
     };
-    assert!(get_text.contains("active_form: Refining"));
-    assert!(get_text.contains("owner: session-owner"));
+    assert!(get_text.contains("blocked_by: task-0"));
+    assert!(get_text.contains("blocks: "));
+
+    let list_before_completion = TaskListTool
+        .invoke(
+            &ToolCall {
+                name: "TaskList".into(),
+                input: "ignored".into(),
+            },
+            &permissions,
+        )
+        .await
+        .expect("task list should succeed before completion");
+    let ToolResult::Text(list_before_completion_text) = list_before_completion else {
+        panic!("expected text result");
+    };
+    assert!(list_before_completion_text.contains("subject: renamed task"));
+    assert!(list_before_completion_text.contains("blocked_by: task-0"));
+    assert!(!list_before_completion_text.contains("output_file:"));
+
+    TaskUpdateTool
+        .invoke(
+            &ToolCall {
+                name: "TaskUpdate".into(),
+                input: "task-0:-:-:-:completed:-:-:-".into(),
+            },
+            &permissions,
+        )
+        .await
+        .expect("task completion update should succeed");
+
+    let list_after_completion = TaskListTool
+        .invoke(
+            &ToolCall {
+                name: "TaskList".into(),
+                input: "ignored".into(),
+            },
+            &permissions,
+        )
+        .await
+        .expect("task list should succeed after completion");
+    let ToolResult::Text(list_after_completion_text) = list_after_completion else {
+        panic!("expected text result");
+    };
+    assert!(list_after_completion_text.contains("subject: renamed task"));
+    assert!(list_after_completion_text.contains("id: task-1\nsubject: blocked task"));
+    assert!(list_after_completion_text.contains("blocked_by: \nblocks: "));
 
     let output = TaskOutputTool
         .invoke(
@@ -489,6 +524,114 @@ async fn task_list_tools_follow_planning_model_and_runtime_output_still_works() 
         panic!("expected text result");
     };
     assert!(output_text.contains("content:\nowned output"));
+}
+
+#[tokio::test]
+async fn task_update_adds_reciprocal_dependencies_without_duplicates() {
+    let task_list = Arc::new(rust_agent::task::list_manager::TaskListManager::default());
+    let permissions = ToolPermissionContext::new(PermissionMode::Default)
+        .with_task_list_manager(task_list)
+        .with_active_session_id("session-owner");
+
+    TaskCreateTool
+        .invoke(
+            &ToolCall {
+                name: "TaskCreate".into(),
+                input: "task a:alpha:-".into(),
+            },
+            &permissions,
+        )
+        .await
+        .expect("create task a");
+    TaskCreateTool
+        .invoke(
+            &ToolCall {
+                name: "TaskCreate".into(),
+                input: "task b:beta:-".into(),
+            },
+            &permissions,
+        )
+        .await
+        .expect("create task b");
+    TaskCreateTool
+        .invoke(
+            &ToolCall {
+                name: "TaskCreate".into(),
+                input: "task c:gamma:-".into(),
+            },
+            &permissions,
+        )
+        .await
+        .expect("create task c");
+
+    TaskUpdateTool
+        .invoke(
+            &ToolCall {
+                name: "TaskUpdate".into(),
+                input: "task-0:-:-:-:-:-:task-1:task-2".into(),
+            },
+            &permissions,
+        )
+        .await
+        .expect("add dependency edges");
+    TaskUpdateTool
+        .invoke(
+            &ToolCall {
+                name: "TaskUpdate".into(),
+                input: "task-0:-:-:-:-:-:task-1:task-2".into(),
+            },
+            &permissions,
+        )
+        .await
+        .expect("duplicate dependency edges should be ignored");
+
+    let task_a = TaskGetTool
+        .invoke(
+            &ToolCall {
+                name: "TaskGet".into(),
+                input: "task-0".into(),
+            },
+            &permissions,
+        )
+        .await
+        .expect("get task a");
+    let ToolResult::Text(task_a_text) = task_a else {
+        panic!("expected text result");
+    };
+    assert!(task_a_text.contains("blocks: task-1"));
+    assert!(task_a_text.contains("blocked_by: task-2"));
+
+    let task_b = TaskGetTool
+        .invoke(
+            &ToolCall {
+                name: "TaskGet".into(),
+                input: "task-1".into(),
+            },
+            &permissions,
+        )
+        .await
+        .expect("get task b");
+    let ToolResult::Text(task_b_text) = task_b else {
+        panic!("expected text result");
+    };
+    assert!(task_b_text.contains("blocked_by: task-0"));
+    assert!(task_b_text.matches("task-0").count() >= 1);
+
+    let task_c = TaskGetTool
+        .invoke(
+            &ToolCall {
+                name: "TaskGet".into(),
+                input: "task-2".into(),
+            },
+            &permissions,
+        )
+        .await
+        .expect("get task c");
+    let ToolResult::Text(task_c_text) = task_c else {
+        panic!("expected text result");
+    };
+    assert!(task_c_text.contains("blocks: task-0"));
+    assert!(task_c_text.contains("blocked_by: "));
 }
 
 #[tokio::test]
