@@ -57,7 +57,6 @@ async fn read_tool_returns_file_contents() {
 
 #[tokio::test]
 async fn glob_tool_matches_nested_files() {
-    let _guard = cwd_lock().lock().expect("cwd lock poisoned");
     let dir = std::env::temp_dir().join(unique_name("rust-agent-glob"));
     let nested = dir.join("nested");
     fs::create_dir_all(&nested)
@@ -73,21 +72,32 @@ async fn glob_tool_matches_nested_files() {
         .await
         .expect("write gamma");
 
-    let original = std::env::current_dir().expect("get current dir");
-    std::env::set_current_dir(&dir).expect("enter temp dir");
+    let dir_for_call = dir.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let _guard = cwd_lock().lock().expect("cwd lock poisoned");
+        let original = std::env::current_dir().expect("get current dir");
+        std::env::set_current_dir(&dir_for_call).expect("enter temp dir");
 
-    let result = GlobTool
-        .invoke(
-            &ToolCall {
-                name: "Glob".into(),
-                input: "*.rs".into(),
-            },
-            &ToolPermissionContext::new(PermissionMode::Default),
-        )
-        .await
-        .expect("glob should succeed");
+        let runtime = tokio::runtime::Runtime::new().expect("create runtime");
+        let result = runtime.block_on(async {
+            GlobTool
+                .invoke(
+                    &ToolCall {
+                        name: "Glob".into(),
+                        input: "*.rs".into(),
+                    },
+                    &ToolPermissionContext::new(PermissionMode::Default),
+                )
+                .await
+        });
 
-    std::env::set_current_dir(&original).expect("restore current dir");
+        std::env::set_current_dir(&original).expect("restore current dir");
+        result
+    })
+    .await
+    .expect("join blocking glob task")
+    .expect("glob should succeed");
+
     fs::remove_dir_all(&dir).await.expect("cleanup dir");
 
     let ToolResult::Text(text) = result else {
@@ -100,7 +110,6 @@ async fn glob_tool_matches_nested_files() {
 
 #[tokio::test]
 async fn grep_tool_reports_matching_lines() {
-    let _guard = cwd_lock().lock().expect("cwd lock poisoned");
     let dir = std::env::temp_dir().join(unique_name("rust-agent-grep"));
     let nested = dir.join("nested");
     fs::create_dir_all(&nested)
@@ -113,21 +122,32 @@ async fn grep_tool_reports_matching_lines() {
         .await
         .expect("write beta");
 
-    let original = std::env::current_dir().expect("get current dir");
-    std::env::set_current_dir(&dir).expect("enter temp dir");
+    let dir_for_call = dir.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let _guard = cwd_lock().lock().expect("cwd lock poisoned");
+        let original = std::env::current_dir().expect("get current dir");
+        std::env::set_current_dir(&dir_for_call).expect("enter temp dir");
 
-    let result = GrepTool
-        .invoke(
-            &ToolCall {
-                name: "Grep".into(),
-                input: "needle".into(),
-            },
-            &ToolPermissionContext::new(PermissionMode::Default),
-        )
-        .await
-        .expect("grep should succeed");
+        let runtime = tokio::runtime::Runtime::new().expect("create runtime");
+        let result = runtime.block_on(async {
+            GrepTool
+                .invoke(
+                    &ToolCall {
+                        name: "Grep".into(),
+                        input: "needle".into(),
+                    },
+                    &ToolPermissionContext::new(PermissionMode::Default),
+                )
+                .await
+        });
 
-    std::env::set_current_dir(&original).expect("restore current dir");
+        std::env::set_current_dir(&original).expect("restore current dir");
+        result
+    })
+    .await
+    .expect("join blocking grep task")
+    .expect("grep should succeed");
+
     fs::remove_dir_all(&dir).await.expect("cleanup dir");
 
     let ToolResult::Text(text) = result else {

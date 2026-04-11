@@ -4,7 +4,7 @@ use rust_agent::interaction::dispatcher::NotificationDispatcher;
 use rust_agent::interaction::telegram::gateway::TelegramGateway;
 use rust_agent::state::permission_context::{PermissionMode, ToolPermissionContext};
 use rust_agent::task::manager::TaskManager;
-use rust_agent::task::types::TaskStatus;
+use rust_agent::task::types::{TaskNotification, TaskStatus};
 use rust_agent::tool::builtin::agent::AgentTool;
 use rust_agent::tool::definition::{Tool, ToolCall, ToolResult};
 
@@ -52,7 +52,7 @@ fn task_manager_tracks_failed_and_killed_states() {
 }
 
 #[tokio::test]
-async fn agent_tool_runs_subagent_and_completes_task() {
+async fn agent_tool_launches_subagent_and_completes_task() {
     let manager = Arc::new(TaskManager::default());
     let inherited_tools =
         rust_agent::tool::registry::ToolRegistry::new().register(Arc::new(AgentTool));
@@ -91,7 +91,19 @@ async fn agent_tool_runs_subagent_and_completes_task() {
     let ToolResult::Text(text) = result else {
         panic!("expected text result");
     };
-    assert!(text.contains("agent task task-0 completed"));
+    assert!(text.contains("agent task task-0 launched"));
+
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            let created = manager.get("task-0").expect("task should be created");
+            if created.status == TaskStatus::Completed {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("subagent task should complete");
 
     let created = manager.get("task-0").expect("task should be created");
     assert_eq!(created.status, TaskStatus::Completed);
@@ -110,6 +122,28 @@ async fn agent_tool_runs_subagent_and_completes_task() {
             .session_id,
         "session-7"
     );
+}
+
+#[test]
+fn task_manager_queues_internal_task_notifications() {
+    let manager = TaskManager::default();
+    let dispatcher = NotificationDispatcher::new(TelegramGateway::default());
+    let task = manager.create("demo task");
+    manager.complete(&task.id, "session-1", &dispatcher);
+
+    let notifications = manager.drain_notifications("session-1");
+    assert_eq!(notifications.len(), 1);
+    assert_eq!(
+        notifications[0],
+        TaskNotification {
+            session_id: "session-1".into(),
+            task_id: task.id.clone(),
+            status: TaskStatus::Completed,
+            summary: format!("demo task ({})", task.id),
+            output_file: task.output_file.clone(),
+        }
+    );
+    assert!(manager.drain_notifications("session-1").is_empty());
 }
 
 #[test]

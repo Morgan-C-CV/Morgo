@@ -1,9 +1,15 @@
+use std::collections::HashMap;
+use std::future::Future;
 use std::sync::{Arc, RwLock};
+
+use tokio::task::AbortHandle;
 
 use crate::interaction::dispatcher::NotificationDispatcher;
 use crate::interaction::notification::Notification;
 use crate::task::output_store::TaskOutputStore;
-use crate::task::types::{TaskDeliveryState, TaskOutputSlice, TaskRecord, TaskStatus};
+use crate::task::types::{
+    TaskDeliveryState, TaskNotification, TaskOutputSlice, TaskRecord, TaskStatus,
+};
 
 #[derive(Debug, Default)]
 struct TaskStore {
@@ -11,9 +17,16 @@ struct TaskStore {
     tasks: Vec<TaskRecord>,
 }
 
+#[derive(Debug, Default)]
+struct TaskRuntimeStore {
+    abort_handles: HashMap<String, AbortHandle>,
+    notifications: Vec<TaskNotification>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct TaskManager {
     store: Arc<RwLock<TaskStore>>,
+    runtime_store: Arc<RwLock<TaskRuntimeStore>>,
     output_store: TaskOutputStore,
 }
 
@@ -43,6 +56,24 @@ impl TaskManager {
 
     pub fn start(&self, id: &str) {
         self.update_status(id, TaskStatus::Running);
+    }
+
+    pub fn launch<F>(&self, id: &str, future: F)
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        self.start(id);
+        let manager = self.clone();
+        let task_id = id.to_string();
+        let join_handle = tokio::spawn(async move {
+            future.await;
+            manager.clear_running_handle(&task_id);
+        });
+        self.runtime_store
+            .write()
+            .expect("task runtime store poisoned")
+            .abort_handles
+            .insert(id.to_string(), join_handle.abort_handle());
     }
 
     pub fn append_output(&self, id: &str, chunk: impl AsRef<str>) {
@@ -83,6 +114,15 @@ impl TaskManager {
     }
 
     pub fn kill(&self, id: &str, session_id: &str, dispatcher: &NotificationDispatcher) {
+        if let Some(handle) = self
+            .runtime_store
+            .write()
+            .expect("task runtime store poisoned")
+            .abort_handles
+            .remove(id)
+        {
+            handle.abort();
+        }
         self.finish(
             id,
             TaskStatus::Killed,
@@ -123,6 +163,19 @@ impl TaskManager {
         self.output_store.read_slice(&output_file, offset).ok()
     }
 
+    pub fn drain_notifications(&self, session_id: &str) -> Vec<TaskNotification> {
+        let mut runtime_store = self
+            .runtime_store
+            .write()
+            .expect("task runtime store poisoned");
+        let notifications = std::mem::take(&mut runtime_store.notifications);
+        let (matched, unmatched): (Vec<_>, Vec<_>) = notifications
+            .into_iter()
+            .partition(|notification| notification.session_id == session_id);
+        runtime_store.notifications = unmatched;
+        matched
+    }
+
     fn update_status(&self, id: &str, status: TaskStatus) {
         if let Some(task) = self
             .store
@@ -136,6 +189,14 @@ impl TaskManager {
         }
     }
 
+    fn clear_running_handle(&self, id: &str) {
+        self.runtime_store
+            .write()
+            .expect("task runtime store poisoned")
+            .abort_handles
+            .remove(id);
+    }
+
     fn finish(
         &self,
         id: &str,
@@ -144,6 +205,7 @@ impl TaskManager {
         title: &str,
         dispatcher: &NotificationDispatcher,
     ) {
+        self.clear_running_handle(id);
         if let Some(task) = self
             .store
             .write()
@@ -154,10 +216,22 @@ impl TaskManager {
         {
             task.status = status.clone();
             task.delivery.notified = true;
+            let summary = format!("{} ({})", task.description, task.id);
+            self.runtime_store
+                .write()
+                .expect("task runtime store poisoned")
+                .notifications
+                .push(TaskNotification {
+                    session_id: session_id.to_string(),
+                    task_id: task.id.clone(),
+                    status: status.clone(),
+                    summary: summary.clone(),
+                    output_file: task.output_file.clone(),
+                });
             let notification = Notification::task_update(
                 session_id,
                 title,
-                format!("{} ({})", task.description, task.id),
+                summary,
                 task.id.clone(),
                 format!("{status:?}"),
                 task.output_file.clone(),

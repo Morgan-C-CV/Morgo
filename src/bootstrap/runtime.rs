@@ -1,3 +1,4 @@
+use std::io::{self, BufRead};
 use std::sync::Arc;
 
 use clap::Parser;
@@ -181,16 +182,41 @@ impl RuntimeBootstrap {
         };
         let engine = QueryEngine::new(query_context);
 
-        let content = if let Some(prompt) = &self.cli.print {
-            handle_cli_input(&router, &engine, &app_state, prompt.clone()).await?
-        } else if self.cli.continue_session {
-            format!("continued session {}", app_state.active_session_id)
-        } else if let Some(session_id) = &self.cli.resume {
-            format!("resumed session {session_id}")
-        } else {
-            handle_cli_input(&router, &engine, &app_state, "/help").await?
-        };
+        if let Some(prompt) = &self.cli.print {
+            let content = handle_cli_input(&router, &engine, &app_state, prompt.clone()).await?;
+            println!("{}", render_output(&content));
+            return Ok(());
+        }
 
+        if self.cli.continue_session {
+            println!(
+                "{}",
+                render_output(&format!(
+                    "continued session {}",
+                    app_state.active_session_id
+                ))
+            );
+            return Ok(());
+        }
+
+        if let Some(session_id) = &self.cli.resume {
+            println!(
+                "{}",
+                render_output(&format!("resumed session {session_id}"))
+            );
+            return Ok(());
+        }
+
+        if self.cli.interactive {
+            for line in io::stdin().lock().lines() {
+                let line = line?;
+                let content = handle_cli_input(&router, &engine, &app_state, line).await?;
+                println!("{}", render_output(&content));
+            }
+            return Ok(());
+        }
+
+        let content = handle_cli_input(&router, &engine, &app_state, "/help").await?;
         println!("{}", render_output(&content));
         Ok(())
     }

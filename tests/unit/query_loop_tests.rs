@@ -359,6 +359,47 @@ async fn query_loop_uses_subagent_stop_hook_for_subagent_context() {
 }
 
 #[tokio::test]
+async fn engine_drains_internal_task_notification_messages() {
+    let manager = Arc::new(TaskManager::default());
+    let dispatcher = NotificationDispatcher::new(TelegramGateway::default());
+    let task = manager.create("worker task");
+    manager.complete(&task.id, "test-session", &dispatcher);
+
+    let mut permission_context =
+        ToolPermissionContext::new(PermissionMode::Default).with_task_manager(manager.clone());
+    permission_context.always_allow_rules.push("Agent".into());
+
+    let engine = QueryEngine::new(QueryContext {
+        app_state: AppState {
+            surface: InteractionSurface::Cli,
+            session_mode: SessionMode::Headless,
+            client_type: ClientType::Cli,
+            session_source: SessionSource::LocalCli,
+            permission_context,
+            cost_tracker: CostTracker::default(),
+            notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
+            startup_trace: Vec::new(),
+            active_session_id: "test-session".into(),
+            session: None,
+            history: None,
+            restored_session: None,
+        },
+        tool_registry: ToolRegistry::new(),
+        api_client: AnthropicClient::default(),
+        compactor: ReactiveCompactor,
+        hook_registry: HookRegistry::default(),
+        agent_id: None,
+    });
+
+    let messages = engine.drain_task_notification_messages();
+    assert_eq!(messages.len(), 1);
+    assert!(messages[0].content.contains("<task-notification>"));
+    assert!(messages[0].content.contains("<task-id>task-0</task-id>"));
+    assert!(messages[0].content.contains("<status>Completed</status>"));
+    assert!(engine.drain_task_notification_messages().is_empty());
+}
+
+#[tokio::test]
 async fn subagent_context_inherits_parent_tools_and_hooks() {
     let mut permission_context = ToolPermissionContext::new(PermissionMode::Default)
         .with_task_manager(Arc::new(TaskManager::default()));

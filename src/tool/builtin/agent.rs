@@ -40,7 +40,6 @@ impl Tool for AgentTool {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("shared task manager is not configured"))?;
         let task = tasks.create(format!("Spawned agent for {}", call.input));
-        tasks.start(&task.id);
 
         let parent_context = build_parent_query_context(permissions.clone());
         let query_context = parent_context.create_subagent_context(
@@ -50,38 +49,37 @@ impl Tool for AgentTool {
                 .clone()
                 .unwrap_or_default(),
         );
+        let task_id = task.id.clone();
+        let task_input = call.input.clone();
+        let session_id = parent_context.app_state.active_session_id.clone();
+        let dispatcher = parent_context.app_state.notification_dispatcher.clone();
+        let tasks_for_run = tasks.clone();
 
-        let result = QueryEngine::new(query_context)
-            .submit_turn(Message::user(call.input.clone()))
-            .await;
+        tasks.launch(&task.id, async move {
+            let result = QueryEngine::new(query_context)
+                .submit_turn(Message::user(task_input.clone()))
+                .await;
 
-        if result.messages.is_empty() {
-            tasks.append_output(&task.id, "subagent produced no output");
-        } else {
-            for message in &result.messages {
-                tasks.append_output(&task.id, format!("{}\n", message.content));
+            if result.messages.is_empty() {
+                tasks_for_run.append_output(&task_id, "subagent produced no output");
+            } else {
+                for message in &result.messages {
+                    tasks_for_run.append_output(&task_id, format!("{}\n", message.content));
+                }
             }
-        }
 
-        if matches!(
-            result.state,
-            crate::core::query_loop::QueryLoopState::Failed
-        ) {
-            tasks.fail(
-                &task.id,
-                &parent_context.app_state.active_session_id,
-                &parent_context.app_state.notification_dispatcher,
-            );
-        } else {
-            tasks.complete(
-                &task.id,
-                &parent_context.app_state.active_session_id,
-                &parent_context.app_state.notification_dispatcher,
-            );
-        }
+            if matches!(
+                result.state,
+                crate::core::query_loop::QueryLoopState::Failed
+            ) {
+                tasks_for_run.fail(&task_id, &session_id, &dispatcher);
+            } else {
+                tasks_for_run.complete(&task_id, &session_id, &dispatcher);
+            }
+        });
 
         Ok(ToolResult::Text(format!(
-            "agent task {} completed for {}",
+            "agent task {} launched for {}",
             task.id, call.input
         )))
     }

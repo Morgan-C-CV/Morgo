@@ -25,13 +25,22 @@ pub struct NormalizedInput {
 
 impl NormalizedInput {
     pub fn from_raw(surface: InteractionSurface, raw: impl Into<String>) -> Self {
+        Self::from_session_raw(surface, "local-session", raw)
+    }
+
+    pub fn from_session_raw(
+        surface: InteractionSurface,
+        session_id: impl Into<String>,
+        raw: impl Into<String>,
+    ) -> Self {
+        let session_id = session_id.into();
         let raw = raw.into();
         if let Some(stripped) = raw.strip_prefix('/') {
             let mut parts = stripped.splitn(2, char::is_whitespace);
             let command_name = parts.next().map(str::to_string);
             let command_args = parts.next().unwrap_or_default().trim().to_string();
             Self {
-                session_id: "local-session".into(),
+                session_id,
                 surface,
                 actor: ActorIdentity {
                     actor_id: "local-user".into(),
@@ -47,7 +56,7 @@ impl NormalizedInput {
             }
         } else {
             Self {
-                session_id: "local-session".into(),
+                session_id,
                 surface,
                 actor: ActorIdentity {
                     actor_id: "local-user".into(),

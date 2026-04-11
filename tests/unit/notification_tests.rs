@@ -1,4 +1,5 @@
 use rust_agent::bootstrap::InteractionSurface;
+use rust_agent::interaction::cli::renderer::render_output;
 use rust_agent::interaction::dispatcher::NotificationDispatcher;
 use rust_agent::interaction::notification::{Notification, NotificationType};
 use rust_agent::interaction::telegram::binding::SessionBinding;
@@ -22,6 +23,17 @@ fn dispatcher_records_cli_notifications() {
     dispatcher.dispatch(InteractionSurface::Cli, notification.clone());
 
     assert_eq!(dispatcher.delivered(), vec![notification]);
+}
+
+#[test]
+fn cli_renderer_marks_task_notification_lines() {
+    let rendered = render_output(
+        "<task-notification>\n<task-id>task-1</task-id>\n<status>Completed</status>\n</task-notification>",
+    );
+
+    assert!(rendered.contains("[task] <task-notification>"));
+    assert!(rendered.contains("[task] <task-id>task-1</task-id>"));
+    assert!(rendered.contains("[task] <status>Completed</status>"));
 }
 
 #[test]
