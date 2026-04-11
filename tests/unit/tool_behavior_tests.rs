@@ -370,6 +370,28 @@ async fn registry_allows_safe_bash_in_plan_mode() {
 }
 
 #[tokio::test]
+async fn read_only_bash_blocks_file_writes() {
+    let result = BashTool
+        .invoke(
+            &ToolCall {
+                name: "Bash".into(),
+                input: serde_json::json!({
+                    "command": "pwd > should-not-exist.txt"
+                })
+                .to_string(),
+            },
+            &ToolPermissionContext::new(PermissionMode::Default),
+        )
+        .await
+        .expect("bash command should execute");
+
+    let ToolResult::Text(text) = result else {
+        panic!("expected text result");
+    };
+    assert!(text.contains("sandbox_policy: WorkspaceWrite"));
+}
+
+#[tokio::test]
 async fn tool_search_filters_catalog() {
     let result = ToolSearchTool
         .invoke(

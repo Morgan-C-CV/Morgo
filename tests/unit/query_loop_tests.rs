@@ -10,7 +10,7 @@ use rust_agent::cost::tracker::CostTracker;
 use rust_agent::hook::registry::{HookEvent, HookEventMatcher, HookRegistry, HookRule};
 use rust_agent::interaction::dispatcher::NotificationDispatcher;
 use rust_agent::interaction::telegram::gateway::TelegramGateway;
-use rust_agent::service::api::client::AnthropicClient;
+use rust_agent::service::api::client::ModelProviderClient;
 use rust_agent::service::api::streaming::{StopReason, StreamEvent, UsageEvent};
 use rust_agent::service::compact::reactive_compact::ReactiveCompactor;
 use rust_agent::task::types::TaskOwner;
@@ -52,7 +52,7 @@ fn test_context_with_turns(
             restored_session: None,
         },
         tool_registry,
-        api_client: AnthropicClient::with_scripted_turns(turns),
+        api_client: ModelProviderClient::with_scripted_turns(turns),
         compactor: ReactiveCompactor,
         hook_registry: HookRegistry::default(),
         agent_id: None,
@@ -64,7 +64,7 @@ async fn query_loop_records_usage_events_into_cost_tracker() {
     let context = test_context(vec![
         StreamEvent::MessageStart,
         StreamEvent::Usage(UsageEvent {
-            model: "claude-sonnet-4-6".into(),
+            model: "default-model".into(),
             input_tokens: 100,
             output_tokens: 20,
             cache_creation_input_tokens: 10,
@@ -84,7 +84,7 @@ async fn query_loop_records_usage_events_into_cost_tracker() {
         .iter()
         .any(|event| matches!(event, EngineEvent::Notice { kind, .. } if kind == &"usage")));
     let report = context.app_state.cost_tracker.format_report();
-    assert!(report.contains("model claude-sonnet-4-6 -> requests: 1"));
+    assert!(report.contains("model default-model -> requests: 1"));
     assert!(report.contains("cache_creation_input_tokens: 10"));
     assert!(report.contains("cache_read_input_tokens: 5"));
 }
@@ -296,7 +296,7 @@ async fn query_loop_stop_hook_can_prevent_continuation() {
             restored_session: None,
         },
         tool_registry: ToolRegistry::new(),
-        api_client: AnthropicClient::with_scripted_turns(vec![vec![
+        api_client: ModelProviderClient::with_scripted_turns(vec![vec![
             StreamEvent::MessageStart,
             StreamEvent::TextDelta("done".into()),
             StreamEvent::MessageStop {
@@ -356,7 +356,7 @@ async fn query_loop_respects_pre_tool_hook_denial() {
             restored_session: None,
         },
         tool_registry: registry,
-        api_client: AnthropicClient::with_scripted_turns(vec![vec![
+        api_client: ModelProviderClient::with_scripted_turns(vec![vec![
             StreamEvent::MessageStart,
             StreamEvent::ToolUse {
                 tool_name: "Agent".into(),
@@ -415,7 +415,7 @@ async fn query_loop_uses_subagent_stop_hook_for_subagent_context() {
             restored_session: None,
         },
         tool_registry: ToolRegistry::new(),
-        api_client: AnthropicClient::with_scripted_turns(vec![vec![
+        api_client: ModelProviderClient::with_scripted_turns(vec![vec![
             StreamEvent::MessageStart,
             StreamEvent::TextDelta("subagent done".into()),
             StreamEvent::MessageStop {
@@ -489,7 +489,7 @@ async fn engine_drains_internal_task_events() {
             restored_session: None,
         },
         tool_registry: ToolRegistry::new(),
-        api_client: AnthropicClient::default(),
+        api_client: ModelProviderClient::default(),
         compactor: ReactiveCompactor,
         hook_registry: HookRegistry::default(),
         agent_id: None,
@@ -548,7 +548,7 @@ async fn worker_query_loop_consumes_mailbox_messages() {
             restored_session: None,
         },
         tool_registry: ToolRegistry::new(),
-        api_client: AnthropicClient::with_scripted_turns(vec![
+        api_client: ModelProviderClient::with_scripted_turns(vec![
             vec![
                 StreamEvent::MessageStart,
                 StreamEvent::TextDelta("first answer".into()),
@@ -625,7 +625,7 @@ async fn subagent_context_inherits_parent_tools_and_hooks() {
             restored_session: None,
         },
         tool_registry: parent_tool_registry.clone(),
-        api_client: AnthropicClient::default(),
+        api_client: ModelProviderClient::default(),
         compactor: ReactiveCompactor,
         hook_registry: parent_hook_registry.clone(),
         agent_id: None,

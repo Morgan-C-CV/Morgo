@@ -1,5 +1,5 @@
 use crate::hook::registry::HookRegistry;
-use crate::service::api::client::AnthropicClient;
+use crate::service::api::client::ModelProviderClient;
 use crate::service::api::streaming::StreamEvent;
 use crate::service::compact::reactive_compact::ReactiveCompactor;
 use crate::state::app_state::{AppState, RuntimeRole};
@@ -9,7 +9,7 @@ use crate::tool::registry::ToolRegistry;
 pub struct QueryContext {
     pub app_state: AppState,
     pub tool_registry: ToolRegistry,
-    pub api_client: AnthropicClient,
+    pub api_client: ModelProviderClient,
     pub compactor: ReactiveCompactor,
     pub hook_registry: HookRegistry,
     pub agent_id: Option<String>,
@@ -38,7 +38,7 @@ impl QueryContext {
         Self {
             app_state,
             tool_registry: self.tool_registry.assemble_for_role(RuntimeRole::Worker),
-            api_client: AnthropicClient::with_scripted_turns(scripted_turns),
+            api_client: ModelProviderClient::with_scripted_turns(scripted_turns),
             compactor: self.compactor.clone(),
             hook_registry: self.hook_registry.clone(),
             agent_id: Some(agent_id.into()),

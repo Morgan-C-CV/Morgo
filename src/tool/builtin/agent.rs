@@ -181,7 +181,7 @@ fn build_parent_query_context(permissions: ToolPermissionContext) -> QueryContex
             restored_session: None,
         },
         tool_registry,
-        api_client: crate::service::api::client::AnthropicClient::default(),
+        api_client: crate::service::api::client::ModelProviderClient::default(),
         compactor: ReactiveCompactor,
         hook_registry,
         agent_id: None,

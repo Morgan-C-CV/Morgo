@@ -24,7 +24,7 @@ use crate::interaction::dispatcher::NotificationDispatcher;
 use crate::interaction::router::CommandRouter;
 use crate::interaction::telegram::gateway::TelegramGateway;
 use crate::security::authorizer::DefaultSurfaceAuthorizer;
-use crate::service::api::client::AnthropicClient;
+use crate::service::api::client::{ModelProviderClient, ModelProviderConfig, ModelPricing};
 use crate::service::compact::reactive_compact::ReactiveCompactor;
 use crate::state::app_state::{AppState, RuntimeRole};
 use crate::state::permission_context::{PermissionMode, ToolPermissionContext};
@@ -192,6 +192,7 @@ impl RuntimeBootstrap {
         state.record_phase(BootstrapPhase::GateUserAccess);
         let state = state.finalize();
 
+        let provider_config = self.build_model_provider_config();
         let app_state = AppState {
             surface: state.surface,
             session_mode: state.session_mode,
@@ -199,7 +200,10 @@ impl RuntimeBootstrap {
             session_source: state.session_source,
             runtime_role: RuntimeRole::Coordinator,
             permission_context: permission_context.clone(),
-            cost_tracker: CostTracker::default(),
+            cost_tracker: CostTracker::with_default_pricing(
+                provider_config.model_id.clone(),
+                provider_config.pricing.clone(),
+            ),
             notification_dispatcher: NotificationDispatcher::new(self.build_telegram_gateway()),
             startup_trace: state
                 .phases
@@ -237,7 +241,7 @@ impl RuntimeBootstrap {
         let query_context = QueryContext {
             app_state: app_state.clone(),
             tool_registry: coordinator_tools,
-            api_client: AnthropicClient::default(),
+            api_client: ModelProviderClient::from_config(provider_config),
             compactor: ReactiveCompactor,
             hook_registry,
             agent_id: None,
@@ -331,6 +335,15 @@ impl RuntimeBootstrap {
 
     fn build_telegram_gateway(&self) -> TelegramGateway {
         TelegramGateway::default()
+    }
+
+    fn build_model_provider_config(&self) -> ModelProviderConfig {
+        ModelProviderConfig {
+            provider_id: "modelprovider".into(),
+            base_url: "http://localhost".into(),
+            model_id: "default-model".into(),
+            pricing: ModelPricing::default(),
+        }
     }
 
     fn restore_request(&self) -> Option<RestoreRequest> {

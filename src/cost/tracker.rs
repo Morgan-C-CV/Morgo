@@ -1,9 +1,19 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 
-#[derive(Debug, Clone, Default)]
+use crate::service::api::client::ModelPricing;
+
+#[derive(Debug, Clone)]
 pub struct CostTracker {
     inner: Arc<RwLock<CostState>>,
+    pricing_catalog: Arc<RwLock<BTreeMap<String, ModelPricing>>>,
+    default_model_id: Arc<RwLock<String>>,
+}
+
+impl Default for CostTracker {
+    fn default() -> Self {
+        Self::with_default_pricing("default-model".into(), ModelPricing::default())
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -28,8 +38,31 @@ struct CostState {
 }
 
 impl CostTracker {
+    pub fn with_default_pricing(model_id: String, pricing: ModelPricing) -> Self {
+        let mut pricing_catalog = BTreeMap::new();
+        pricing_catalog.insert(model_id.clone(), pricing);
+        Self {
+            inner: Arc::new(RwLock::new(CostState::default())),
+            pricing_catalog: Arc::new(RwLock::new(pricing_catalog)),
+            default_model_id: Arc::new(RwLock::new(model_id)),
+        }
+    }
+
+    pub fn register_model_pricing(&self, model_id: impl Into<String>, pricing: ModelPricing) {
+        let model_id = model_id.into();
+        self.pricing_catalog
+            .write()
+            .expect("cost tracker pricing catalog poisoned")
+            .insert(model_id, pricing);
+    }
+
     pub fn record_request(&self, input_tokens: usize, output_tokens: usize) {
-        self.record_model_usage("unknown", input_tokens, output_tokens, 0, 0);
+        let default_model_id = self
+            .default_model_id
+            .read()
+            .expect("cost tracker default model poisoned")
+            .clone();
+        self.record_model_usage(&default_model_id, input_tokens, output_tokens, 0, 0);
     }
 
     pub fn record_model_usage(
@@ -41,7 +74,7 @@ impl CostTracker {
         cache_read_input_tokens: usize,
     ) {
         let mut state = self.inner.write().expect("cost tracker poisoned");
-        let estimated_cost_usd = estimate_cost_usd(
+        let estimated_cost_usd = self.estimate_cost_usd(
             model,
             input_tokens,
             output_tokens,
@@ -92,22 +125,28 @@ impl CostTracker {
         }
         lines.join("\n")
     }
-}
 
-fn estimate_cost_usd(
-    model: &str,
-    input_tokens: usize,
-    output_tokens: usize,
-    cache_creation_input_tokens: usize,
-    cache_read_input_tokens: usize,
-) -> f64 {
-    let (input_rate, output_rate, cache_write_rate, cache_read_rate) = match model {
-        "claude-opus-4-6" => (15.0, 75.0, 18.75, 1.5),
-        "claude-haiku-4-5" => (0.8, 4.0, 1.0, 0.08),
-        _ => (3.0, 15.0, 3.75, 0.3),
-    };
-    (input_tokens as f64 / 1_000_000.0) * input_rate
-        + (output_tokens as f64 / 1_000_000.0) * output_rate
-        + (cache_creation_input_tokens as f64 / 1_000_000.0) * cache_write_rate
-        + (cache_read_input_tokens as f64 / 1_000_000.0) * cache_read_rate
+    fn estimate_cost_usd(
+        &self,
+        model: &str,
+        input_tokens: usize,
+        output_tokens: usize,
+        cache_creation_input_tokens: usize,
+        cache_read_input_tokens: usize,
+    ) -> f64 {
+        let pricing_catalog = self
+            .pricing_catalog
+            .read()
+            .expect("cost tracker pricing catalog poisoned");
+        let pricing = pricing_catalog
+            .get(model)
+            .cloned()
+            .or_else(|| pricing_catalog.values().next().cloned())
+            .unwrap_or_default();
+        (input_tokens as f64 / 1_000_000.0) * pricing.input_per_million_usd
+            + (output_tokens as f64 / 1_000_000.0) * pricing.output_per_million_usd
+            + (cache_creation_input_tokens as f64 / 1_000_000.0)
+                * pricing.cache_write_per_million_usd
+            + (cache_read_input_tokens as f64 / 1_000_000.0) * pricing.cache_read_per_million_usd
+    }
 }

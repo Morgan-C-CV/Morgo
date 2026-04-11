@@ -15,7 +15,7 @@ use rust_agent::interaction::envelope::NormalizedInput;
 use rust_agent::interaction::router::{CommandRouter, RouteDecision};
 use rust_agent::interaction::telegram::gateway::TelegramGateway;
 use rust_agent::security::authorizer::{AuthDecision, DefaultSurfaceAuthorizer, SurfaceAuthorizer};
-use rust_agent::service::api::client::AnthropicClient;
+use rust_agent::service::api::client::ModelProviderClient;
 use rust_agent::service::api::streaming::{StopReason, StreamEvent};
 use rust_agent::service::compact::reactive_compact::ReactiveCompactor;
 use rust_agent::state::app_state::{AppState, RuntimeRole};
@@ -126,7 +126,7 @@ async fn cli_repl_handles_multiple_inputs_in_sequence() {
         rust_agent::core::engine::QueryEngine::new(rust_agent::core::context::QueryContext {
             app_state: app_state.clone(),
             tool_registry: ToolRegistry::new(),
-            api_client: AnthropicClient::with_scripted_turns(vec![vec![
+            api_client: ModelProviderClient::with_scripted_turns(vec![vec![
                 StreamEvent::MessageStart,
                 StreamEvent::TextDelta("second reply".into()),
                 StreamEvent::MessageStop {
@@ -184,7 +184,7 @@ async fn cli_repl_surfaces_task_events_for_active_session() {
         rust_agent::core::engine::QueryEngine::new(rust_agent::core::context::QueryContext {
             app_state: app_state.clone(),
             tool_registry: ToolRegistry::new(),
-            api_client: AnthropicClient::default(),
+            api_client: ModelProviderClient::default(),
             compactor: ReactiveCompactor,
             hook_registry: rust_agent::hook::registry::HookRegistry::default(),
             agent_id: None,
@@ -252,7 +252,7 @@ async fn cli_repl_persists_history_for_local_and_query_turns() {
         rust_agent::core::engine::QueryEngine::new(rust_agent::core::context::QueryContext {
             app_state: app_state.clone(),
             tool_registry: ToolRegistry::new(),
-            api_client: AnthropicClient::with_scripted_turns(vec![vec![
+            api_client: ModelProviderClient::with_scripted_turns(vec![vec![
                 StreamEvent::MessageStart,
                 StreamEvent::TextDelta("second reply".into()),
                 StreamEvent::MessageStop {
@@ -336,7 +336,7 @@ async fn cli_repl_persists_denied_turns() {
         rust_agent::core::engine::QueryEngine::new(rust_agent::core::context::QueryContext {
             app_state: app_state.clone(),
             tool_registry: ToolRegistry::new(),
-            api_client: AnthropicClient::default(),
+            api_client: ModelProviderClient::default(),
             compactor: ReactiveCompactor,
             hook_registry: rust_agent::hook::registry::HookRegistry::default(),
             agent_id: None,
