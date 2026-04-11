@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use tokio::sync::RwLock;
+
 use rust_agent::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
 use rust_agent::command::builtin::cost::CostCommand;
 use rust_agent::command::types::{Command, CommandResult};
@@ -35,6 +37,7 @@ async fn cost_command_reports_tracked_usage() {
         session_source: SessionSource::LocalCli,
         runtime_role: RuntimeRole::Coordinator,
         permission_context,
+        command_registry: None,
         runtime_tool_registry: None,
         cost_tracker,
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),

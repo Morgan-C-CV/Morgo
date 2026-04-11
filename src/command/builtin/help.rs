@@ -30,7 +30,7 @@ impl Command for HelpCommand {
         _app_state: &AppState,
     ) -> anyhow::Result<CommandResult> {
         Ok(CommandResult::Message(
-            "Available commands: /help, /cost, /compact".into(),
+            "Available commands: /help, /cost, /compact, /plan, /permissions".into(),
         ))
     }
 }

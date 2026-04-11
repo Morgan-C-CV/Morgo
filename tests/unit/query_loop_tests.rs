@@ -15,6 +15,8 @@ use rust_agent::service::api::streaming::{StopReason, StreamEvent, UsageEvent};
 use rust_agent::service::compact::reactive_compact::ReactiveCompactor;
 use rust_agent::task::types::TaskOwner;
 use std::sync::Arc;
+
+use tokio::sync::RwLock;
 use tokio::time::{Duration, timeout};
 
 use rust_agent::state::app_state::{AppState, RuntimeRole};
@@ -42,7 +44,8 @@ fn test_context_with_turns(
             session_source: SessionSource::LocalCli,
             runtime_role: RuntimeRole::Coordinator,
             permission_context,
-            runtime_tool_registry: Some(ToolRegistry::new()),
+            command_registry: None,
+            runtime_tool_registry: Some(Arc::new(RwLock::new(ToolRegistry::new()))),
             cost_tracker: CostTracker::default(),
             notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
             startup_trace: Vec::new(),
@@ -290,7 +293,8 @@ async fn query_loop_stop_hook_can_prevent_continuation() {
             session_source: SessionSource::LocalCli,
             runtime_role: RuntimeRole::Coordinator,
             permission_context,
-            runtime_tool_registry: Some(ToolRegistry::new()),
+            command_registry: None,
+            runtime_tool_registry: Some(Arc::new(RwLock::new(ToolRegistry::new()))),
             cost_tracker: CostTracker::default(),
             notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
             startup_trace: Vec::new(),
@@ -357,7 +361,8 @@ async fn query_loop_respects_pre_tool_hook_denial() {
             session_source: SessionSource::LocalCli,
             runtime_role: RuntimeRole::Coordinator,
             permission_context,
-            runtime_tool_registry: Some(ToolRegistry::new()),
+            command_registry: None,
+            runtime_tool_registry: Some(Arc::new(RwLock::new(ToolRegistry::new()))),
             cost_tracker: CostTracker::default(),
             notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
             startup_trace: Vec::new(),
@@ -431,7 +436,8 @@ async fn query_loop_runs_permission_request_hook_before_tool_execution() {
             session_source: SessionSource::LocalCli,
             runtime_role: RuntimeRole::Coordinator,
             permission_context,
-            runtime_tool_registry: Some(ToolRegistry::new()),
+            command_registry: None,
+            runtime_tool_registry: Some(Arc::new(RwLock::new(ToolRegistry::new()))),
             cost_tracker: CostTracker::default(),
             notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
             startup_trace: Vec::new(),
@@ -496,7 +502,8 @@ async fn query_loop_uses_subagent_stop_hook_for_subagent_context() {
             session_source: SessionSource::LocalCli,
             runtime_role: RuntimeRole::Worker,
             permission_context,
-            runtime_tool_registry: Some(ToolRegistry::new()),
+            command_registry: None,
+            runtime_tool_registry: Some(Arc::new(RwLock::new(ToolRegistry::new()))),
             cost_tracker: CostTracker::default(),
             notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
             startup_trace: Vec::new(),
@@ -577,7 +584,8 @@ async fn engine_drains_internal_task_events() {
             session_source: SessionSource::LocalCli,
             runtime_role: RuntimeRole::Coordinator,
             permission_context,
-            runtime_tool_registry: Some(ToolRegistry::new()),
+            command_registry: None,
+            runtime_tool_registry: Some(Arc::new(RwLock::new(ToolRegistry::new()))),
             cost_tracker: CostTracker::default(),
             notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
             startup_trace: Vec::new(),
@@ -640,7 +648,8 @@ async fn worker_query_loop_consumes_mailbox_messages() {
             session_source: SessionSource::LocalCli,
             runtime_role: RuntimeRole::Worker,
             permission_context,
-            runtime_tool_registry: Some(ToolRegistry::new()),
+            command_registry: None,
+            runtime_tool_registry: Some(Arc::new(RwLock::new(ToolRegistry::new()))),
             cost_tracker: CostTracker::default(),
             notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
             startup_trace: Vec::new(),
@@ -724,7 +733,8 @@ async fn subagent_context_inherits_parent_tools_and_hooks() {
             session_source: SessionSource::LocalCli,
             runtime_role: RuntimeRole::Coordinator,
             permission_context,
-            runtime_tool_registry: Some(ToolRegistry::new()),
+            command_registry: None,
+            runtime_tool_registry: Some(Arc::new(RwLock::new(ToolRegistry::new()))),
             cost_tracker: CostTracker::default(),
             notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
             startup_trace: vec!["parent-runtime".into()],
@@ -836,10 +846,18 @@ async fn query_loop_emits_token_budget_continuation_before_max_budget() {
     )
     .await;
     assert_eq!(second.state, QueryLoopState::Failed);
+    let expected_budget = format!(
+        "{}\n{}\n{}\n{}",
+        context.current_system_prompt(),
+        context.current_tools_prompt(),
+        context.current_context_prompt(),
+        "budgeted"
+    )
+    .len() as u64;
     assert_eq!(
         second.terminal,
         Terminal::MaxBudget {
-            budget_usd_cents: "budgeted".len() as u64
+            budget_usd_cents: expected_budget
         }
     );
 }

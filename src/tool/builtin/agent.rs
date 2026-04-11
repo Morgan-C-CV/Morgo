@@ -169,7 +169,8 @@ fn build_parent_query_context(permissions: ToolPermissionContext) -> QueryContex
         session_source: SessionSource::LocalCli,
         runtime_role: RuntimeRole::Coordinator,
         permission_context: runtime_permissions,
-        runtime_tool_registry: Some(tool_registry.clone()),
+        command_registry: None,
+        runtime_tool_registry: Some(std::sync::Arc::new(tokio::sync::RwLock::new(tool_registry.clone()))),
         cost_tracker: CostTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default())
             .with_hook_registry(hook_registry.clone()),

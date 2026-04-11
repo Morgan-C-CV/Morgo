@@ -14,20 +14,22 @@ pub enum RouteDecision {
     Deny(String),
 }
 
+use std::sync::Arc;
+
 pub struct CommandRouter {
-    registry: CommandRegistry,
+    registry: Arc<CommandRegistry>,
     authorizer: Box<dyn SurfaceAuthorizer>,
 }
 
 impl CommandRouter {
-    pub fn new(registry: CommandRegistry, authorizer: Box<dyn SurfaceAuthorizer>) -> Self {
+    pub fn new(registry: Arc<CommandRegistry>, authorizer: Box<dyn SurfaceAuthorizer>) -> Self {
         Self {
             registry,
             authorizer,
         }
     }
 
-    pub fn decide(&self, input: &NormalizedInput) -> RouteDecision {
+    pub async fn decide(&self, input: &NormalizedInput) -> RouteDecision {
         match self
             .authorizer
             .authorize(input.surface, &input.actor, &input.raw)
@@ -76,7 +78,7 @@ impl CommandRouter {
         input: &NormalizedInput,
         app_state: &AppState,
     ) -> anyhow::Result<CommandResult> {
-        match self.decide(input) {
+        match self.decide(input).await {
             RouteDecision::ExecuteCommand(ref name) => {
                 let command = self
                     .registry

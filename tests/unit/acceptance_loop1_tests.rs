@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use tokio::sync::RwLock;
+
 use async_trait::async_trait;
 use rust_agent::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
 use rust_agent::command::registry::CommandRegistry;
@@ -54,7 +56,8 @@ fn test_app_state() -> AppState {
         runtime_role: RuntimeRole::Coordinator,
         permission_context: ToolPermissionContext::new(PermissionMode::Default)
             .with_task_manager(Arc::new(TaskManager::default())),
-        runtime_tool_registry: Some(ToolRegistry::new()),
+        command_registry: None,
+        runtime_tool_registry: Some(Arc::new(RwLock::new(ToolRegistry::new()))),
         cost_tracker: rust_agent::cost::tracker::CostTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
         startup_trace: Vec::new(),
@@ -82,19 +85,19 @@ fn test_engine() -> QueryEngine {
     })
 }
 
-#[test]
-fn unknown_slash_command_still_falls_back_to_query() {
-    let router = CommandRouter::new(CommandRegistry::new(), Box::new(DefaultSurfaceAuthorizer));
+#[tokio::test]
+async fn unknown_slash_command_still_falls_back_to_query() {
+    let router = CommandRouter::new(Arc::new(CommandRegistry::new()), Box::new(DefaultSurfaceAuthorizer));
     let input = NormalizedInput::from_raw(InteractionSurface::Cli, "/unknown foo");
-    assert_eq!(router.decide(&input), RouteDecision::ContinueToQuery);
+    assert_eq!(router.decide(&input).await, RouteDecision::ContinueToQuery);
 }
 
-#[test]
-fn plain_user_input_routes_through_query_prompt_path() {
-    let router = CommandRouter::new(CommandRegistry::new(), Box::new(DefaultSurfaceAuthorizer));
+#[tokio::test]
+async fn plain_user_input_routes_through_query_prompt_path() {
+    let router = CommandRouter::new(Arc::new(CommandRegistry::new()), Box::new(DefaultSurfaceAuthorizer));
     let input = NormalizedInput::from_raw(InteractionSurface::Cli, "hello world");
     assert_eq!(
-        router.decide(&input),
+        router.decide(&input).await,
         RouteDecision::ContinueToQueryWithPrompt("hello world".into())
     );
 }
@@ -102,7 +105,7 @@ fn plain_user_input_routes_through_query_prompt_path() {
 #[tokio::test]
 async fn prompt_command_is_interpreted_before_query_engine() {
     let router = CommandRouter::new(
-        CommandRegistry::new().register(Arc::new(PromptCommand)),
+        Arc::new(CommandRegistry::new().register(Arc::new(PromptCommand))),
         Box::new(DefaultSurfaceAuthorizer),
     );
     let app_state = test_app_state();

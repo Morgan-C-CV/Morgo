@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use rust_agent::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
 use rust_agent::command::builtin::help::HelpCommand;
 use rust_agent::command::builtin::permissions::PermissionsCommand;
+use rust_agent::command::builtin::plan::PlanCommand;
 use rust_agent::command::registry::CommandRegistry;
 use rust_agent::command::types::{
     Command, CommandAvailability, CommandMetadata, CommandResult, CommandType,
@@ -24,6 +25,7 @@ use rust_agent::state::permission_context::{PermissionMode, ToolPermissionContex
 use rust_agent::task::manager::TaskManager;
 use rust_agent::task::types::TaskOwner;
 use rust_agent::tool::registry::ToolRegistry;
+use tokio::sync::RwLock;
 
 struct DenyingAuthorizer;
 
@@ -67,34 +69,34 @@ impl Command for RemoteSafeTestCommand {
     }
 }
 
-#[test]
-fn router_executes_known_commands_before_query() {
-    let registry = CommandRegistry::new().register(Arc::new(HelpCommand));
+#[tokio::test]
+async fn router_executes_known_commands_before_query() {
+    let registry = Arc::new(CommandRegistry::new().register(Arc::new(HelpCommand)));
     let router = CommandRouter::new(registry, Box::new(DefaultSurfaceAuthorizer));
     let input = NormalizedInput::from_raw(InteractionSurface::Cli, "/help");
 
     assert_eq!(
-        router.decide(&input),
+        router.decide(&input).await,
         RouteDecision::ExecuteCommand("help".into())
     );
 }
 
-#[test]
-fn router_falls_back_for_unknown_commands() {
-    let router = CommandRouter::new(CommandRegistry::new(), Box::new(DefaultSurfaceAuthorizer));
+#[tokio::test]
+async fn router_falls_back_for_unknown_commands() {
+    let router = CommandRouter::new(Arc::new(CommandRegistry::new()), Box::new(DefaultSurfaceAuthorizer));
     let input = NormalizedInput::from_raw(InteractionSurface::Cli, "/missing foo");
 
-    assert_eq!(router.decide(&input), RouteDecision::ContinueToQuery);
+    assert_eq!(router.decide(&input).await, RouteDecision::ContinueToQuery);
 }
 
-#[test]
-fn router_denies_unauthenticated_remote_actor() {
-    let router = CommandRouter::new(CommandRegistry::new(), Box::new(DefaultSurfaceAuthorizer));
+#[tokio::test]
+async fn router_denies_unauthenticated_remote_actor() {
+    let router = CommandRouter::new(Arc::new(CommandRegistry::new()), Box::new(DefaultSurfaceAuthorizer));
     let mut input = NormalizedInput::from_raw(InteractionSurface::Remote, "/help");
     input.actor.is_authenticated = false;
 
     assert_eq!(
-        router.decide(&input),
+        router.decide(&input).await,
         RouteDecision::Deny("unauthenticated actor for remote surface".into())
     );
 }
@@ -102,7 +104,7 @@ fn router_denies_unauthenticated_remote_actor() {
 #[tokio::test]
 async fn cli_repl_handles_multiple_inputs_in_sequence() {
     let router = CommandRouter::new(
-        CommandRegistry::new().register(Arc::new(HelpCommand)),
+        Arc::new(CommandRegistry::new().register(Arc::new(HelpCommand))),
         Box::new(DefaultSurfaceAuthorizer),
     );
     let permission_context = ToolPermissionContext::new(PermissionMode::Default)
@@ -114,7 +116,8 @@ async fn cli_repl_handles_multiple_inputs_in_sequence() {
         session_source: SessionSource::LocalCli,
         runtime_role: RuntimeRole::Coordinator,
         permission_context,
-        runtime_tool_registry: Some(ToolRegistry::new()),
+        command_registry: None,
+        runtime_tool_registry: Some(Arc::new(RwLock::new(ToolRegistry::new()))),
         cost_tracker: CostTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
         startup_trace: Vec::new(),
@@ -157,7 +160,7 @@ async fn cli_repl_handles_multiple_inputs_in_sequence() {
 #[tokio::test]
 async fn cli_repl_surfaces_task_events_for_active_session() {
     let router = CommandRouter::new(
-        CommandRegistry::new().register(Arc::new(HelpCommand)),
+        Arc::new(CommandRegistry::new().register(Arc::new(HelpCommand))),
         Box::new(DefaultSurfaceAuthorizer),
     );
     let manager = Arc::new(TaskManager::default());
@@ -170,7 +173,8 @@ async fn cli_repl_surfaces_task_events_for_active_session() {
         session_source: SessionSource::LocalCli,
         runtime_role: RuntimeRole::Coordinator,
         permission_context,
-        runtime_tool_registry: Some(ToolRegistry::new()),
+        command_registry: None,
+        runtime_tool_registry: Some(Arc::new(RwLock::new(ToolRegistry::new()))),
         cost_tracker: CostTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
         startup_trace: Vec::new(),
@@ -224,7 +228,7 @@ async fn cli_repl_surfaces_task_events_for_active_session() {
 #[tokio::test]
 async fn cli_repl_persists_history_for_local_and_query_turns() {
     let router = CommandRouter::new(
-        CommandRegistry::new().register(Arc::new(HelpCommand)),
+        Arc::new(CommandRegistry::new().register(Arc::new(HelpCommand))),
         Box::new(DefaultSurfaceAuthorizer),
     );
     let permission_context = ToolPermissionContext::new(PermissionMode::Default)
@@ -248,7 +252,8 @@ async fn cli_repl_persists_history_for_local_and_query_turns() {
         session_source: SessionSource::LocalCli,
         runtime_role: RuntimeRole::Coordinator,
         permission_context,
-        runtime_tool_registry: Some(ToolRegistry::new()),
+        command_registry: None,
+        runtime_tool_registry: Some(Arc::new(RwLock::new(ToolRegistry::new()))),
         cost_tracker: CostTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
         startup_trace: Vec::new(),
@@ -312,7 +317,7 @@ async fn cli_repl_persists_history_for_local_and_query_turns() {
 #[tokio::test]
 async fn cli_repl_persists_denied_turns() {
     let router = CommandRouter::new(
-        CommandRegistry::new().register(Arc::new(RemoteSafeTestCommand)),
+        Arc::new(CommandRegistry::new().register(Arc::new(RemoteSafeTestCommand))),
         Box::new(DenyingAuthorizer),
     );
     let permission_context = ToolPermissionContext::new(PermissionMode::Default)
@@ -336,7 +341,8 @@ async fn cli_repl_persists_denied_turns() {
         session_source: SessionSource::RemoteControl,
         runtime_role: RuntimeRole::Coordinator,
         permission_context,
-        runtime_tool_registry: Some(ToolRegistry::new()),
+        command_registry: None,
+        runtime_tool_registry: Some(Arc::new(RwLock::new(ToolRegistry::new()))),
         cost_tracker: CostTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
         startup_trace: Vec::new(),
@@ -381,7 +387,7 @@ async fn cli_repl_persists_denied_turns() {
 
 #[tokio::test]
 async fn router_approves_pending_plan_mode_request() {
-    let router = CommandRouter::new(CommandRegistry::new(), Box::new(DefaultSurfaceAuthorizer));
+    let router = CommandRouter::new(Arc::new(CommandRegistry::new()), Box::new(DefaultSurfaceAuthorizer));
     let permission_context = ToolPermissionContext::new(PermissionMode::Default)
         .with_task_manager(Arc::new(TaskManager::default()))
         .with_pending_approval(rust_agent::state::permission_context::PendingApproval {
@@ -396,7 +402,8 @@ async fn router_approves_pending_plan_mode_request() {
         session_source: SessionSource::LocalCli,
         runtime_role: RuntimeRole::Coordinator,
         permission_context: permission_context.clone(),
-        runtime_tool_registry: Some(ToolRegistry::new()),
+        command_registry: None,
+        runtime_tool_registry: Some(Arc::new(RwLock::new(ToolRegistry::new()))),
         cost_tracker: CostTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
         startup_trace: Vec::new(),
@@ -422,7 +429,7 @@ async fn router_approves_pending_plan_mode_request() {
 
 #[tokio::test]
 async fn router_denies_pending_request_without_session_approval() {
-    let router = CommandRouter::new(CommandRegistry::new(), Box::new(DefaultSurfaceAuthorizer));
+    let router = CommandRouter::new(Arc::new(CommandRegistry::new()), Box::new(DefaultSurfaceAuthorizer));
     let permission_context = ToolPermissionContext::new(PermissionMode::Default)
         .with_task_manager(Arc::new(TaskManager::default()))
         .with_pending_approval(rust_agent::state::permission_context::PendingApproval {
@@ -437,7 +444,8 @@ async fn router_denies_pending_request_without_session_approval() {
         session_source: SessionSource::LocalCli,
         runtime_role: RuntimeRole::Coordinator,
         permission_context: permission_context.clone(),
-        runtime_tool_registry: Some(ToolRegistry::new()),
+        command_registry: None,
+        runtime_tool_registry: Some(Arc::new(RwLock::new(ToolRegistry::new()))),
         cost_tracker: CostTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
         startup_trace: Vec::new(),
@@ -468,7 +476,7 @@ async fn approval_replay_uses_runtime_tool_registry() {
         .get_or_init(|| std::sync::Mutex::new(()))
         .lock()
         .expect("cwd lock poisoned");
-    let router = CommandRouter::new(CommandRegistry::new(), Box::new(DefaultSurfaceAuthorizer));
+    let router = CommandRouter::new(Arc::new(CommandRegistry::new()), Box::new(DefaultSurfaceAuthorizer));
     let permission_context = ToolPermissionContext::new(PermissionMode::Default)
         .with_task_manager(Arc::new(TaskManager::default()))
         .with_pending_approval(rust_agent::state::permission_context::PendingApproval {
@@ -483,7 +491,8 @@ async fn approval_replay_uses_runtime_tool_registry() {
         session_source: SessionSource::LocalCli,
         runtime_role: RuntimeRole::Coordinator,
         permission_context: permission_context.clone(),
-        runtime_tool_registry: Some(ToolRegistry::new().register(Arc::new(rust_agent::tool::builtin::bash::BashTool))),
+        command_registry: None,
+        runtime_tool_registry: Some(Arc::new(RwLock::new(ToolRegistry::new().register(Arc::new(rust_agent::tool::builtin::bash::BashTool))))),
         cost_tracker: CostTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
         startup_trace: Vec::new(),
@@ -513,7 +522,7 @@ async fn approval_replay_uses_runtime_tool_registry() {
 #[tokio::test]
 async fn permissions_command_reports_session_permission_state() {
     let router = CommandRouter::new(
-        CommandRegistry::new().register(Arc::new(PermissionsCommand)),
+        Arc::new(CommandRegistry::new().register(Arc::new(PermissionsCommand))),
         Box::new(DefaultSurfaceAuthorizer),
     );
     let permission_context = ToolPermissionContext::new(PermissionMode::Plan)
@@ -533,7 +542,8 @@ async fn permissions_command_reports_session_permission_state() {
         session_source: SessionSource::LocalCli,
         runtime_role: RuntimeRole::Coordinator,
         permission_context,
-        runtime_tool_registry: Some(ToolRegistry::new()),
+        command_registry: None,
+        runtime_tool_registry: Some(Arc::new(RwLock::new(ToolRegistry::new()))),
         cost_tracker: CostTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
         startup_trace: Vec::new(),
@@ -563,9 +573,52 @@ async fn permissions_command_reports_session_permission_state() {
 }
 
 #[tokio::test]
-async fn permissions_command_mutates_mode_and_rule_lists() {
+async fn plan_command_reports_inactive_status() {
     let router = CommandRouter::new(
-        CommandRegistry::new().register(Arc::new(PermissionsCommand)),
+        Arc::new(CommandRegistry::new().register(Arc::new(PlanCommand))),
+        Box::new(DefaultSurfaceAuthorizer),
+    );
+    let permission_context = ToolPermissionContext::new(PermissionMode::Default)
+        .with_task_manager(Arc::new(TaskManager::default()));
+    let app_state = AppState {
+        surface: InteractionSurface::Cli,
+        session_mode: SessionMode::Interactive,
+        client_type: ClientType::Cli,
+        session_source: SessionSource::LocalCli,
+        runtime_role: RuntimeRole::Coordinator,
+        permission_context,
+        command_registry: None,
+        runtime_tool_registry: Some(Arc::new(RwLock::new(ToolRegistry::new()))),
+        cost_tracker: CostTracker::default(),
+        notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
+        startup_trace: Vec::new(),
+        active_session_id: "cli-session".into(),
+        session_store: None,
+        session: None,
+        history: None,
+        restored_session: None,
+    };
+
+    let result = router
+        .route(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/plan"),
+            &app_state,
+        )
+        .await
+        .expect("plan status should render");
+
+    assert_eq!(
+        result,
+        CommandResult::Message(
+            "Plan mode is off. Use /plan enter [reason] to start planning.".into()
+        )
+    );
+}
+
+#[tokio::test]
+async fn plan_command_enter_requests_approval_before_switching_mode() {
+    let router = CommandRouter::new(
+        Arc::new(CommandRegistry::new().register(Arc::new(PlanCommand))),
         Box::new(DefaultSurfaceAuthorizer),
     );
     let permission_context = ToolPermissionContext::new(PermissionMode::Default)
@@ -577,7 +630,202 @@ async fn permissions_command_mutates_mode_and_rule_lists() {
         session_source: SessionSource::LocalCli,
         runtime_role: RuntimeRole::Coordinator,
         permission_context: permission_context.clone(),
-        runtime_tool_registry: Some(ToolRegistry::new()),
+        command_registry: None,
+        runtime_tool_registry: Some(Arc::new(RwLock::new(ToolRegistry::new()))),
+        cost_tracker: CostTracker::default(),
+        notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
+        startup_trace: Vec::new(),
+        active_session_id: "cli-session".into(),
+        session_store: None,
+        session: None,
+        history: None,
+        restored_session: None,
+    };
+
+    let result = router
+        .route(
+            &NormalizedInput::from_raw(
+                InteractionSurface::Cli,
+                "/plan enter draft feature work",
+            ),
+            &app_state,
+        )
+        .await
+        .expect("plan enter should request approval");
+
+    assert_eq!(
+        result,
+        CommandResult::Message(
+            "approval required for EnterPlanMode: approve entering plan mode: draft feature work"
+                .into(),
+        )
+    );
+    assert_eq!(permission_context.mode(), PermissionMode::Default);
+    let pending = permission_context
+        .pending_approval()
+        .expect("pending approval should be set");
+    assert_eq!(pending.tool_name, "EnterPlanMode");
+    assert_eq!(pending.tool_input, "draft feature work");
+}
+
+#[tokio::test]
+async fn plan_command_exit_requests_approval_and_approval_exits_mode() {
+    let router = CommandRouter::new(
+        Arc::new(CommandRegistry::new().register(Arc::new(PlanCommand))),
+        Box::new(DefaultSurfaceAuthorizer),
+    );
+    let permission_context = ToolPermissionContext::new(PermissionMode::Plan)
+        .with_task_manager(Arc::new(TaskManager::default()));
+    let app_state = AppState {
+        surface: InteractionSurface::Cli,
+        session_mode: SessionMode::Interactive,
+        client_type: ClientType::Cli,
+        session_source: SessionSource::LocalCli,
+        runtime_role: RuntimeRole::Coordinator,
+        permission_context: permission_context.clone(),
+        command_registry: None,
+        runtime_tool_registry: Some(Arc::new(RwLock::new(ToolRegistry::new()))),
+        cost_tracker: CostTracker::default(),
+        notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
+        startup_trace: Vec::new(),
+        active_session_id: "cli-session".into(),
+        session_store: None,
+        session: None,
+        history: None,
+        restored_session: None,
+    };
+
+    let request = router
+        .route(
+            &NormalizedInput::from_raw(
+                InteractionSurface::Cli,
+                "/plan exit implementation looks good",
+            ),
+            &app_state,
+        )
+        .await
+        .expect("plan exit should request approval");
+    assert_eq!(
+        request,
+        CommandResult::Message(
+            "approval required for ExitPlanMode: approve exiting plan mode: implementation looks good"
+                .into(),
+        )
+    );
+    assert_eq!(permission_context.mode(), PermissionMode::Plan);
+
+    let approved = router
+        .route(
+            &NormalizedInput::from_session_raw(InteractionSurface::Cli, "cli-session", "approve"),
+            &app_state,
+        )
+        .await
+        .expect("plan exit approval should resolve");
+    assert_eq!(
+        approved,
+        CommandResult::Message("plan approved; exited plan mode: implementation looks good".into())
+    );
+    assert_eq!(permission_context.mode(), PermissionMode::Default);
+    assert!(permission_context.pending_approval().is_none());
+}
+
+#[tokio::test]
+async fn plan_command_handles_status_noop_and_denied_exit() {
+    let router = CommandRouter::new(
+        Arc::new(CommandRegistry::new().register(Arc::new(PlanCommand))),
+        Box::new(DefaultSurfaceAuthorizer),
+    );
+    let active_context = ToolPermissionContext::new(PermissionMode::Plan)
+        .with_task_manager(Arc::new(TaskManager::default()));
+    let active_state = AppState {
+        surface: InteractionSurface::Cli,
+        session_mode: SessionMode::Interactive,
+        client_type: ClientType::Cli,
+        session_source: SessionSource::LocalCli,
+        runtime_role: RuntimeRole::Coordinator,
+        permission_context: active_context.clone(),
+        command_registry: None,
+        runtime_tool_registry: Some(Arc::new(RwLock::new(ToolRegistry::new()))),
+        cost_tracker: CostTracker::default(),
+        notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
+        startup_trace: Vec::new(),
+        active_session_id: "cli-session".into(),
+        session_store: None,
+        session: None,
+        history: None,
+        restored_session: None,
+    };
+
+    let status = router
+        .route(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/plan status"),
+            &active_state,
+        )
+        .await
+        .expect("plan status should render");
+    assert_eq!(
+        status,
+        CommandResult::Message(
+            "Plan mode is on. Use /plan exit [summary] when ready to leave.".into()
+        )
+    );
+
+    let no_op = router
+        .route(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/plan enter"),
+            &active_state,
+        )
+        .await
+        .expect("plan enter in plan mode should no-op");
+    assert_eq!(no_op, CommandResult::Message("Already in plan mode.".into()));
+
+    let inactive_context = ToolPermissionContext::new(PermissionMode::Default)
+        .with_task_manager(Arc::new(TaskManager::default()));
+    let inactive_state = AppState {
+        surface: InteractionSurface::Cli,
+        session_mode: SessionMode::Interactive,
+        client_type: ClientType::Cli,
+        session_source: SessionSource::LocalCli,
+        runtime_role: RuntimeRole::Coordinator,
+        permission_context: inactive_context,
+        command_registry: None,
+        runtime_tool_registry: Some(Arc::new(RwLock::new(ToolRegistry::new()))),
+        cost_tracker: CostTracker::default(),
+        notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
+        startup_trace: Vec::new(),
+        active_session_id: "cli-session".into(),
+        session_store: None,
+        session: None,
+        history: None,
+        restored_session: None,
+    };
+    let denied = router
+        .route(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/plan exit"),
+            &inactive_state,
+        )
+        .await
+        .expect("inactive plan exit should resolve");
+    assert_eq!(denied, CommandResult::Denied("Plan mode is not active.".into()));
+}
+
+#[tokio::test]
+async fn permissions_command_mutates_mode_and_rule_lists() {
+    let router = CommandRouter::new(
+        Arc::new(CommandRegistry::new().register(Arc::new(PermissionsCommand))),
+        Box::new(DefaultSurfaceAuthorizer),
+    );
+    let permission_context = ToolPermissionContext::new(PermissionMode::Default)
+        .with_task_manager(Arc::new(TaskManager::default()));
+    let app_state = AppState {
+        surface: InteractionSurface::Cli,
+        session_mode: SessionMode::Interactive,
+        client_type: ClientType::Cli,
+        session_source: SessionSource::LocalCli,
+        runtime_role: RuntimeRole::Coordinator,
+        permission_context: permission_context.clone(),
+        command_registry: None,
+        runtime_tool_registry: Some(Arc::new(RwLock::new(ToolRegistry::new()))),
         cost_tracker: CostTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
         startup_trace: Vec::new(),

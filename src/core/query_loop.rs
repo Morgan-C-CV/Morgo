@@ -199,9 +199,16 @@ fn prepare_turn(
     current_input: &Message,
     events: &mut Vec<EngineEvent>,
 ) -> Result<PreparedTurn, QueryLoopResult> {
+    let prepared_prompt = format!(
+        "{}\n{}\n{}\n{}",
+        context.current_system_prompt(),
+        context.current_tools_prompt(),
+        context.current_context_prompt(),
+        current_input.content
+    );
     let prepared = PreparedTurn {
-        prompt: current_input.content.clone(),
-        token_estimate: current_input.content.len(),
+        token_estimate: prepared_prompt.len(),
+        prompt: prepared_prompt,
     };
     context
         .app_state

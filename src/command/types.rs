@@ -30,11 +30,19 @@ pub struct CommandMetadata {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SystemTrapAction {
+    RequireReboot,
+    ResumeSession(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommandResult {
     Message(String),
     ContinueToQuery,
     Prompt(String),
     Denied(String),
+    UpdateConfig { key: String, value: String },
+    SystemTrap(SystemTrapAction),
 }
 
 #[async_trait]

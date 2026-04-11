@@ -1,5 +1,6 @@
 use std::io::{self, BufRead};
 use std::sync::Arc;
+use tokio::sync::RwLock;
 
 use clap::Parser;
 
@@ -203,7 +204,8 @@ impl RuntimeBootstrap {
             session_source: state.session_source,
             runtime_role: RuntimeRole::Coordinator,
             permission_context: permission_context.clone(),
-            runtime_tool_registry: Some(coordinator_tools.clone()),
+            command_registry: None,
+            runtime_tool_registry: Some(Arc::new(RwLock::new(coordinator_tools.clone()))),
             cost_tracker: CostTracker::with_default_pricing(
                 provider_config.model_id.clone(),
                 provider_config.pricing.clone(),
@@ -240,7 +242,12 @@ impl RuntimeBootstrap {
             return Ok(());
         }
 
-        let registry = self.build_command_registry();
+        let registry = Arc::new(self.build_command_registry());
+        
+        // Finalize AppState by injecting the CommandRegistry Arc now that it is built
+        let mut app_state = app_state;
+        app_state.command_registry = Some(registry.clone());
+
         let router = CommandRouter::new(registry, Box::new(DefaultSurfaceAuthorizer));
         let tools_prompt = crate::prompt::tools::build_tools_prompt(&coordinator_tools, &permission_context);
         let context_prompt = crate::prompt::context::build_context_prompt(&app_state);

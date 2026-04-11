@@ -4,11 +4,13 @@ use crate::cost::tracker::CostTracker;
 use crate::tool::definition::{ToolCall, ToolResult};
 use crate::tool::registry::ToolRegistry;
 use std::sync::Arc;
+use tokio::sync::RwLock;
+use crate::command::registry::CommandRegistry;
 
 use crate::history::resume::RestoredSession;
 use crate::history::session::{SessionHistory, SessionSnapshot, SessionStore};
 use crate::interaction::dispatcher::NotificationDispatcher;
-use crate::state::permission_context::{PermissionMode, ToolPermissionContext};
+use crate::state::permission_context::ToolPermissionContext;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeRole {
@@ -24,7 +26,8 @@ pub struct AppState {
     pub session_source: SessionSource,
     pub runtime_role: RuntimeRole,
     pub permission_context: ToolPermissionContext,
-    pub runtime_tool_registry: Option<ToolRegistry>,
+    pub command_registry: Option<Arc<CommandRegistry>>,
+    pub runtime_tool_registry: Option<Arc<RwLock<ToolRegistry>>>,
     pub cost_tracker: CostTracker,
     pub notification_dispatcher: NotificationDispatcher,
     pub startup_trace: Vec<String>,
@@ -51,29 +54,29 @@ impl AppState {
 
         match pending.tool_name.as_str() {
             "EnterPlanMode" => {
-                self.permission_context.set_mode(PermissionMode::Plan);
+                let message = crate::state::plan_mode::apply_enter_plan_mode(
+                    &self.permission_context,
+                    &pending.tool_input,
+                );
                 self.permission_context.set_pending_approval(None);
-                Ok(CommandResult::Message(if pending.tool_input.trim().is_empty() {
-                    "entered plan mode".into()
-                } else {
-                    format!("entered plan mode: {}", pending.tool_input.trim())
-                }))
+                Ok(CommandResult::Message(message))
             }
             "ExitPlanMode" => {
-                self.permission_context.set_mode(PermissionMode::Default);
+                let message = crate::state::plan_mode::apply_exit_plan_mode(
+                    &self.permission_context,
+                    &pending.tool_input,
+                );
                 self.permission_context.set_pending_approval(None);
-                Ok(CommandResult::Message(if pending.tool_input.trim().is_empty() {
-                    "plan approved; exited plan mode".into()
-                } else {
-                    format!("plan approved; exited plan mode: {}", pending.tool_input.trim())
-                }))
+                Ok(CommandResult::Message(message))
             }
             tool_name => {
-                let result = self
+                let registry = self
                     .runtime_tool_registry
                     .as_ref()
                     .ok_or_else(|| anyhow::anyhow!("runtime tool registry unavailable for approval"))?
-                    .invoke_with_approval(
+                    .read()
+                    .await;
+                let result = registry.invoke_with_approval(
                         &ToolCall::new(tool_name, pending.tool_input.clone()),
                         &self.permission_context,
                     )
@@ -107,6 +110,7 @@ impl std::fmt::Debug for AppState {
             .field("session_source", &self.session_source)
             .field("runtime_role", &self.runtime_role)
             .field("permission_context", &self.permission_context)
+            .field("has_command_registry", &self.command_registry.is_some())
             .field("has_runtime_tool_registry", &self.runtime_tool_registry.is_some())
             .field("cost_tracker", &self.cost_tracker)
             .field("notification_dispatcher", &self.notification_dispatcher)

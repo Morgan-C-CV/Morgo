@@ -46,6 +46,16 @@ pub async fn handle_cli_input(
             Vec::new(),
             false,
         ),
+        CommandResult::UpdateConfig { key, value } => (
+            vec![Message::assistant(format!("Config updated: {key}={value}"))],
+            Vec::new(),
+            false,
+        ),
+        CommandResult::SystemTrap(action) => (
+            vec![Message::assistant(format!("System trap: {:?}", action))],
+            Vec::new(),
+            false,
+        ),
     };
     if !engine_persisted {
         engine.persist_messages(
