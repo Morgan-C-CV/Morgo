@@ -1,7 +1,8 @@
 use std::sync::{Arc, RwLock};
 
 use crate::interaction::notification::Notification;
-use crate::task::types::{TaskDeliveryState, TaskRecord, TaskStatus};
+use crate::task::output_store::TaskOutputStore;
+use crate::task::types::{TaskDeliveryState, TaskOutputSlice, TaskRecord, TaskStatus};
 
 #[derive(Debug, Default)]
 struct TaskStore {
@@ -12,6 +13,7 @@ struct TaskStore {
 #[derive(Debug, Clone, Default)]
 pub struct TaskManager {
     store: Arc<RwLock<TaskStore>>,
+    output_store: TaskOutputStore,
 }
 
 impl TaskManager {
@@ -19,13 +21,17 @@ impl TaskManager {
         let mut store = self.store.write().expect("task store poisoned");
         let id = format!("task-{}", store.next_id);
         store.next_id += 1;
+        let output_file = self
+            .output_store
+            .init(&id)
+            .expect("task output file should be initialized");
         let task = TaskRecord {
             id: id.clone(),
             description: description.into(),
             status: TaskStatus::Pending,
-            output: String::new(),
+            output_file,
+            output_offset: 0,
             delivery: TaskDeliveryState {
-                output_path: format!("memory://tasks/{id}"),
                 notified: false,
                 notification: None,
             },
@@ -47,7 +53,11 @@ impl TaskManager {
             .iter_mut()
             .find(|task| task.id == id)
         {
-            task.output.push_str(chunk.as_ref());
+            let appended = self
+                .output_store
+                .append(&task.output_file, chunk.as_ref())
+                .expect("task output should append");
+            task.output_offset += appended;
         }
     }
 
@@ -79,6 +89,19 @@ impl TaskManager {
             .expect("task store poisoned")
             .tasks
             .clone()
+    }
+
+    pub fn get_output(&self, id: &str, offset: usize) -> Option<TaskOutputSlice> {
+        let output_file = self
+            .store
+            .read()
+            .expect("task store poisoned")
+            .tasks
+            .iter()
+            .find(|task| task.id == id)
+            .map(|task| task.output_file.clone())?;
+
+        self.output_store.read_slice(&output_file, offset).ok()
     }
 
     fn update_status(&self, id: &str, status: TaskStatus) {

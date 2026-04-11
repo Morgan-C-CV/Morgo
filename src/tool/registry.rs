@@ -53,7 +53,9 @@ impl ToolRegistry {
 
         let metadata = tool.metadata();
         tool.validate_input(call).await?;
-        match evaluate_tool_permission(&metadata, call, permissions) {
+        let base_decision = evaluate_tool_permission(&metadata, call, permissions);
+        let tool_decision = tool.check_permissions(call, permissions).await;
+        match merge_permission_decisions(base_decision, tool_decision) {
             crate::tool::definition::PermissionDecision::Allow => {
                 tool.invoke(call, permissions).await
             }
@@ -62,5 +64,19 @@ impl ToolRegistry {
                 Ok(ToolResult::Denied(reason))
             }
         }
+    }
+}
+
+fn merge_permission_decisions(
+    base: crate::tool::definition::PermissionDecision,
+    tool: crate::tool::definition::PermissionDecision,
+) -> crate::tool::definition::PermissionDecision {
+    use crate::tool::definition::PermissionDecision::{Allow, Ask, Deny};
+
+    match (base, tool) {
+        (Deny(reason), _) | (_, Deny(reason)) => Deny(reason),
+        (Ask(reason), _) => Ask(reason),
+        (_, Ask(reason)) => Ask(reason),
+        (Allow, Allow) => Allow,
     }
 }

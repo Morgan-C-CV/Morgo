@@ -11,7 +11,6 @@ pub enum TaskStatus {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskDeliveryState {
-    pub output_path: String,
     pub notified: bool,
     pub notification: Option<Notification>,
 }
@@ -21,6 +20,13 @@ pub struct TaskRecord {
     pub id: String,
     pub description: String,
     pub status: TaskStatus,
-    pub output: String,
+    pub output_file: String,
+    pub output_offset: usize,
     pub delivery: TaskDeliveryState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskOutputSlice {
+    pub content: String,
+    pub next_offset: usize,
 }

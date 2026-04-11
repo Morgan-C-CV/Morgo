@@ -1,4 +1,5 @@
 use crate::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
+use crate::cost::tracker::CostTracker;
 use crate::history::resume::RestoredSession;
 use crate::history::session::{SessionHistory, SessionSnapshot};
 use crate::state::permission_context::ToolPermissionContext;
@@ -10,6 +11,7 @@ pub struct AppState {
     pub client_type: ClientType,
     pub session_source: SessionSource,
     pub permission_context: ToolPermissionContext,
+    pub cost_tracker: CostTracker,
     pub startup_trace: Vec<String>,
     pub active_session_id: String,
     pub session: Option<SessionSnapshot>,

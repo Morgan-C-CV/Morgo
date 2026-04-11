@@ -5,6 +5,7 @@ use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rust_agent::state::permission_context::{PermissionMode, ToolPermissionContext};
+use rust_agent::tool::builtin::bash::BashTool;
 use rust_agent::tool::builtin::file_edit::FileEditTool;
 use rust_agent::tool::builtin::file_read::FileReadTool;
 use rust_agent::tool::builtin::glob::GlobTool;
@@ -244,6 +245,78 @@ async fn web_fetch_tool_rejects_invalid_url() {
 }
 
 #[tokio::test]
+async fn bash_tool_executes_safe_command() {
+    let result = BashTool
+        .invoke(
+            &ToolCall {
+                name: "Bash".into(),
+                input: serde_json::json!({
+                    "command": "printf 'hello from bash'"
+                })
+                .to_string(),
+            },
+            &ToolPermissionContext::new(PermissionMode::Default),
+        )
+        .await
+        .expect("bash should succeed");
+
+    let ToolResult::Text(text) = result else {
+        panic!("expected text result");
+    };
+    assert!(text.contains("command: printf 'hello from bash'"));
+    assert!(text.contains("exit_code: 0"));
+    assert!(text.contains("stdout:\nhello from bash"));
+}
+
+#[tokio::test]
+async fn registry_denies_unsafe_bash_in_plan_mode() {
+    let registry = ToolRegistry::new().register(Arc::new(BashTool));
+    let denied = registry
+        .invoke(
+            &ToolCall {
+                name: "Bash".into(),
+                input: serde_json::json!({
+                    "command": "echo hi > out.txt"
+                })
+                .to_string(),
+            },
+            &ToolPermissionContext::new(PermissionMode::Plan),
+        )
+        .await
+        .expect("registry should return denied result");
+
+    assert_eq!(
+        denied,
+        ToolResult::Denied("bash command is not allowed in plan mode".into())
+    );
+}
+
+#[tokio::test]
+async fn registry_allows_safe_bash_in_plan_mode() {
+    let registry = ToolRegistry::new().register(Arc::new(BashTool));
+    let permissions = ToolPermissionContext::new(PermissionMode::Plan);
+    let result = registry
+        .invoke(
+            &ToolCall {
+                name: "Bash".into(),
+                input: serde_json::json!({
+                    "command": "pwd"
+                })
+                .to_string(),
+            },
+            &permissions,
+        )
+        .await
+        .expect("safe bash should execute in plan mode");
+
+    let ToolResult::Text(text) = result else {
+        panic!("expected text result");
+    };
+    assert!(text.contains("command: pwd"));
+    assert!(text.contains("exit_code: 0"));
+}
+
+#[tokio::test]
 async fn tool_search_filters_catalog() {
     let result = ToolSearchTool
         .invoke(
@@ -272,12 +345,14 @@ fn auth_gated_tools_stay_visible_for_explicit_approval() {
 #[test]
 fn visible_tools_include_ask_only_tools() {
     let registry = ToolRegistry::new()
+        .register(Arc::new(BashTool))
         .register(Arc::new(FileReadTool))
         .register(Arc::new(WebFetchTool));
 
     let visible = registry.visible_tools(&ToolPermissionContext::new(PermissionMode::Default));
     let names = visible.iter().map(|tool| tool.name).collect::<Vec<_>>();
 
+    assert!(names.contains(&"Bash"));
     assert!(names.contains(&"Read"));
     assert!(names.contains(&"WebFetch"));
 }

@@ -1,3 +1,4 @@
+use rust_agent::core::message::Message;
 use rust_agent::hook::executor::{HookDecision, run_hook};
 use rust_agent::hook::registry::{HookEvent, HookEventMatcher, HookRegistry, HookRule};
 
@@ -5,11 +6,17 @@ use rust_agent::hook::registry::{HookEvent, HookEventMatcher, HookRegistry, Hook
 fn hook_registry_records_lifecycle_events() {
     let registry = HookRegistry::default();
     assert_eq!(
-        run_hook(&registry, HookEvent::SessionStart),
+        run_hook(&registry, HookEvent::SessionStart).decision,
         HookDecision::Allow
     );
-    assert_eq!(run_hook(&registry, HookEvent::Setup), HookDecision::Allow);
-    assert_eq!(run_hook(&registry, HookEvent::Stop), HookDecision::Allow);
+    assert_eq!(
+        run_hook(&registry, HookEvent::Setup).decision,
+        HookDecision::Allow
+    );
+    assert_eq!(
+        run_hook(&registry, HookEvent::Stop).decision,
+        HookDecision::Allow
+    );
 
     let events = registry.recorded_events();
     assert_eq!(events.len(), 3);
@@ -23,9 +30,11 @@ fn pre_tool_hook_can_deny_specific_tool() {
     let registry = HookRegistry::default().register_rule(HookRule {
         event: HookEventMatcher::PreToolUse,
         deny_match: Some("Agent".into()),
+        append_message: None,
+        prevent_continuation: false,
     });
 
-    let decision = run_hook(
+    let result = run_hook(
         &registry,
         HookEvent::PreToolUse {
             tool_name: "Agent".into(),
@@ -33,7 +42,7 @@ fn pre_tool_hook_can_deny_specific_tool() {
     );
 
     assert_eq!(
-        decision,
+        result.decision,
         HookDecision::Deny("tool Agent denied by hook policy".into())
     );
 }
@@ -43,6 +52,8 @@ fn unrelated_tool_is_allowed() {
     let registry = HookRegistry::default().register_rule(HookRule {
         event: HookEventMatcher::PreToolUse,
         deny_match: Some("Agent".into()),
+        append_message: None,
+        prevent_continuation: false,
     });
 
     let decision = run_hook(
@@ -52,5 +63,24 @@ fn unrelated_tool_is_allowed() {
         },
     );
 
-    assert_eq!(decision, HookDecision::Allow);
+    assert_eq!(decision.decision, HookDecision::Allow);
+}
+
+#[test]
+fn hook_rule_can_append_message_and_prevent_continuation() {
+    let registry = HookRegistry::default().register_rule(HookRule {
+        event: HookEventMatcher::Stop,
+        deny_match: None,
+        append_message: Some("stop hook says wait".into()),
+        prevent_continuation: true,
+    });
+
+    let result = run_hook(&registry, HookEvent::Stop);
+
+    assert_eq!(result.decision, HookDecision::Allow);
+    assert!(result.prevent_continuation);
+    assert_eq!(
+        result.messages,
+        vec![Message::assistant("stop hook says wait")]
+    );
 }

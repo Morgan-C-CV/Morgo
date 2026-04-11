@@ -3,6 +3,7 @@ use rust_agent::core::context::QueryContext;
 use rust_agent::core::engine::QueryEngine;
 use rust_agent::core::message::Message;
 use rust_agent::core::query_loop::{QueryLoopState, QueryTerminalReason};
+use rust_agent::cost::tracker::CostTracker;
 use rust_agent::hook::registry::{HookEvent, HookEventMatcher, HookRegistry, HookRule};
 use rust_agent::service::api::client::AnthropicClient;
 use rust_agent::service::api::streaming::{StopReason, StreamEvent};
@@ -33,6 +34,7 @@ fn test_context_with_turns(
             client_type: ClientType::Cli,
             session_source: SessionSource::LocalCli,
             permission_context,
+            cost_tracker: CostTracker::default(),
             startup_trace: Vec::new(),
             active_session_id: "test-session".into(),
             session: None,
@@ -176,6 +178,57 @@ async fn query_loop_fails_when_tool_is_unknown() {
 }
 
 #[tokio::test]
+async fn query_loop_stop_hook_can_prevent_continuation() {
+    let mut permission_context = ToolPermissionContext::new(PermissionMode::Default)
+        .with_task_manager(Arc::new(TaskManager::default()));
+    permission_context.always_allow_rules.push("Agent".into());
+
+    let context = QueryContext {
+        app_state: AppState {
+            surface: InteractionSurface::Cli,
+            session_mode: SessionMode::Headless,
+            client_type: ClientType::Cli,
+            session_source: SessionSource::LocalCli,
+            permission_context,
+            cost_tracker: CostTracker::default(),
+            startup_trace: Vec::new(),
+            active_session_id: "test-session".into(),
+            session: None,
+            history: None,
+            restored_session: None,
+        },
+        tool_registry: ToolRegistry::new(),
+        api_client: AnthropicClient::with_scripted_turns(vec![vec![
+            StreamEvent::MessageStart,
+            StreamEvent::TextDelta("done".into()),
+            StreamEvent::MessageStop {
+                stop_reason: StopReason::EndTurn,
+            },
+        ]]),
+        compactor: ReactiveCompactor,
+        hook_registry: HookRegistry::default().register_rule(HookRule {
+            event: HookEventMatcher::Stop,
+            deny_match: None,
+            append_message: Some("stop hook appended message".into()),
+            prevent_continuation: true,
+        }),
+    };
+
+    let engine = QueryEngine::new(context);
+    let result = engine.submit_turn(Message::user("inspect file")).await;
+
+    assert_eq!(result.state, QueryLoopState::Completed);
+    assert_eq!(result.terminal_reason, QueryTerminalReason::StoppedByHook);
+    assert_eq!(
+        result.messages,
+        vec![
+            Message::assistant("done"),
+            Message::assistant("stop hook appended message")
+        ]
+    );
+}
+
+#[tokio::test]
 async fn query_loop_respects_pre_tool_hook_denial() {
     let registry = ToolRegistry::new().register(Arc::new(AgentTool));
     let mut permission_context = ToolPermissionContext::new(PermissionMode::Default)
@@ -189,6 +242,7 @@ async fn query_loop_respects_pre_tool_hook_denial() {
             client_type: ClientType::Cli,
             session_source: SessionSource::LocalCli,
             permission_context,
+            cost_tracker: CostTracker::default(),
             startup_trace: Vec::new(),
             active_session_id: "test-session".into(),
             session: None,
@@ -210,6 +264,8 @@ async fn query_loop_respects_pre_tool_hook_denial() {
         hook_registry: HookRegistry::default().register_rule(HookRule {
             event: HookEventMatcher::PreToolUse,
             deny_match: Some("Agent".into()),
+            append_message: None,
+            prevent_continuation: false,
         }),
     };
 

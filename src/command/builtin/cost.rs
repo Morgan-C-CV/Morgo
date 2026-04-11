@@ -27,10 +27,10 @@ impl Command for CostCommand {
     async fn execute(
         &self,
         _input: &NormalizedInput,
-        _app_state: &AppState,
+        app_state: &AppState,
     ) -> anyhow::Result<CommandResult> {
         Ok(CommandResult::Message(
-            "Cost tracking is scaffolded but not yet connected to model usage.".into(),
+            app_state.cost_tracker.format_report(),
         ))
     }
 }

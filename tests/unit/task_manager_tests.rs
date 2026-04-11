@@ -16,7 +16,13 @@ fn terminal_task_states_mark_delivery_notified() {
 
     let stored = manager.get(&task.id).expect("task should exist");
     assert_eq!(stored.status, TaskStatus::Completed);
-    assert_eq!(stored.output, "hello output");
+    let output = manager
+        .get_output(&task.id, 0)
+        .expect("task output should be readable");
+    assert_eq!(output.content, "hello output");
+    assert_eq!(output.next_offset, "hello output".len());
+    assert!(stored.output_file.ends_with("task-0.log"));
+    assert_eq!(stored.output_offset, "hello output".len());
     assert!(stored.delivery.notified);
     let notification = stored
         .delivery
@@ -62,9 +68,31 @@ async fn agent_tool_creates_running_task_in_shared_manager() {
 
     let created = manager.get("task-0").expect("task should be created");
     assert_eq!(created.status, TaskStatus::Running);
+    let output = manager
+        .get_output("task-0", 0)
+        .expect("task output should exist");
     assert!(
-        created
-            .output
+        output
+            .content
             .contains("pending subagent input: inspect repository")
     );
+}
+
+#[test]
+fn task_output_reads_support_offsets() {
+    let manager = TaskManager::default();
+    let task = manager.create("offset task");
+    manager.append_output(&task.id, "hello");
+    manager.append_output(&task.id, " world");
+
+    let first = manager
+        .get_output(&task.id, 0)
+        .expect("full output should be readable");
+    assert_eq!(first.content, "hello world");
+
+    let second = manager
+        .get_output(&task.id, 5)
+        .expect("delta output should be readable");
+    assert_eq!(second.content, " world");
+    assert_eq!(second.next_offset, "hello world".len());
 }

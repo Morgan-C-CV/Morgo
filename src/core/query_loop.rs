@@ -20,6 +20,7 @@ pub enum QueryTerminalReason {
     ToolUseRequested,
     Interrupted,
     Compacted,
+    StoppedByHook,
     Failed,
 }
 
@@ -33,13 +34,19 @@ pub struct QueryLoopResult {
 pub async fn run_query_loop(context: &QueryContext, input: Message) -> QueryLoopResult {
     let mut messages = Vec::new();
     let token_estimate = input.content.len();
+    context
+        .app_state
+        .cost_tracker
+        .record_request(token_estimate, 0);
 
-    if let HookDecision::Deny(reason) = run_hook(&context.hook_registry, HookEvent::UserPromptSubmit)
-    {
+    let prompt_hook = run_hook(&context.hook_registry, HookEvent::UserPromptSubmit);
+    messages.extend(prompt_hook.messages.clone());
+    if let HookDecision::Deny(reason) = prompt_hook.decision {
+        messages.push(Message::assistant(format!("hook denied prompt: {reason}")));
         return QueryLoopResult {
             state: QueryLoopState::Failed,
             terminal_reason: QueryTerminalReason::Failed,
-            messages: vec![Message::assistant(format!("hook denied prompt: {reason}"))],
+            messages,
         };
     }
 
@@ -47,12 +54,12 @@ pub async fn run_query_loop(context: &QueryContext, input: Message) -> QueryLoop
         messages.push(Message::assistant(
             "compaction requested before continuing the turn",
         ));
-        let _ = run_hook(&context.hook_registry, HookEvent::Stop);
-        return QueryLoopResult {
-            state: QueryLoopState::Compacting,
-            terminal_reason: QueryTerminalReason::Compacted,
+        return finalize_with_stop_hook(
+            context,
             messages,
-        };
+            QueryLoopState::Compacting,
+            QueryTerminalReason::Compacted,
+        );
     }
 
     let mut current_input = input;
@@ -79,12 +86,12 @@ pub async fn run_query_loop(context: &QueryContext, input: Message) -> QueryLoop
                         if !aggregated_text.is_empty() {
                             messages.push(Message::assistant(aggregated_text));
                         }
-                        let _ = run_hook(&context.hook_registry, HookEvent::Stop);
-                        return QueryLoopResult {
-                            state: QueryLoopState::Completed,
-                            terminal_reason: QueryTerminalReason::Completed,
+                        return finalize_with_stop_hook(
+                            context,
                             messages,
-                        };
+                            QueryLoopState::Completed,
+                            QueryTerminalReason::Completed,
+                        );
                     }
                     StopReason::ToolUse => {
                         if !aggregated_text.is_empty() {
@@ -94,37 +101,37 @@ pub async fn run_query_loop(context: &QueryContext, input: Message) -> QueryLoop
                             messages.push(Message::assistant(
                                 "stream error: tool stop without tool payload",
                             ));
-                            let _ = run_hook(&context.hook_registry, HookEvent::Stop);
-                            return QueryLoopResult {
-                                state: QueryLoopState::Failed,
-                                terminal_reason: QueryTerminalReason::Failed,
+                            return finalize_with_stop_hook(
+                                context,
                                 messages,
-                            };
+                                QueryLoopState::Failed,
+                                QueryTerminalReason::Failed,
+                            );
                         };
-                        if matches!(
-                            run_hook(
-                                &context.hook_registry,
-                                HookEvent::PreToolUse {
-                                    tool_name: tool_name.clone(),
-                                },
-                            ),
-                            HookDecision::Deny(reason) if {
-                                messages.push(Message::assistant(format!("tool {tool_name} denied by hook: {reason}")));
-                                true
-                            }
-                        ) {
-                            let _ = run_hook(
+                        let pre_tool_hook = run_hook(
+                            &context.hook_registry,
+                            HookEvent::PreToolUse {
+                                tool_name: tool_name.clone(),
+                            },
+                        );
+                        messages.extend(pre_tool_hook.messages.clone());
+                        if let HookDecision::Deny(reason) = pre_tool_hook.decision {
+                            messages.push(Message::assistant(format!(
+                                "tool {tool_name} denied by hook: {reason}"
+                            )));
+                            let post_failure_hook = run_hook(
                                 &context.hook_registry,
                                 HookEvent::PostToolUseFailure {
                                     tool_name: tool_name.clone(),
                                 },
                             );
-                            let _ = run_hook(&context.hook_registry, HookEvent::Stop);
-                            return QueryLoopResult {
-                                state: QueryLoopState::Failed,
-                                terminal_reason: QueryTerminalReason::Failed,
+                            messages.extend(post_failure_hook.messages);
+                            return finalize_with_stop_hook(
+                                context,
                                 messages,
-                            };
+                                QueryLoopState::Failed,
+                                QueryTerminalReason::Failed,
+                            );
                         }
                         let tool_result = context
                             .tool_registry
@@ -138,12 +145,24 @@ pub async fn run_query_loop(context: &QueryContext, input: Message) -> QueryLoop
                             .await;
                         match tool_result {
                             Ok(crate::tool::definition::ToolResult::Text(text)) => {
-                                let _ = run_hook(
+                                let post_tool_hook = run_hook(
                                     &context.hook_registry,
                                     HookEvent::PostToolUse {
                                         tool_name: tool_name.clone(),
                                     },
                                 );
+                                messages.extend(post_tool_hook.messages.clone());
+                                if post_tool_hook.prevent_continuation {
+                                    messages.push(Message::assistant(format!(
+                                        "tool {tool_name} result: {text}"
+                                    )));
+                                    return finalize_with_stop_hook(
+                                        context,
+                                        messages,
+                                        QueryLoopState::Completed,
+                                        QueryTerminalReason::StoppedByHook,
+                                    );
+                                }
                                 messages.push(Message::assistant(format!(
                                     "tool {tool_name} result: {text}"
                                 )));
@@ -152,38 +171,40 @@ pub async fn run_query_loop(context: &QueryContext, input: Message) -> QueryLoop
                                 break;
                             }
                             Ok(crate::tool::definition::ToolResult::Denied(reason)) => {
-                                let _ = run_hook(
+                                let post_failure_hook = run_hook(
                                     &context.hook_registry,
                                     HookEvent::PostToolUseFailure {
                                         tool_name: tool_name.clone(),
                                     },
                                 );
+                                messages.extend(post_failure_hook.messages);
                                 messages.push(Message::assistant(format!(
                                     "tool {tool_name} denied: {reason}"
                                 )));
-                                let _ = run_hook(&context.hook_registry, HookEvent::Stop);
-                                return QueryLoopResult {
-                                    state: QueryLoopState::Failed,
-                                    terminal_reason: QueryTerminalReason::Failed,
+                                return finalize_with_stop_hook(
+                                    context,
                                     messages,
-                                };
+                                    QueryLoopState::Failed,
+                                    QueryTerminalReason::Failed,
+                                );
                             }
                             Err(error) => {
-                                let _ = run_hook(
+                                let post_failure_hook = run_hook(
                                     &context.hook_registry,
                                     HookEvent::PostToolUseFailure {
                                         tool_name: tool_name.clone(),
                                     },
                                 );
+                                messages.extend(post_failure_hook.messages);
                                 messages.push(Message::assistant(format!(
                                     "tool {tool_name} failed: {error}"
                                 )));
-                                let _ = run_hook(&context.hook_registry, HookEvent::Stop);
-                                return QueryLoopResult {
-                                    state: QueryLoopState::Failed,
-                                    terminal_reason: QueryTerminalReason::Failed,
+                                return finalize_with_stop_hook(
+                                    context,
                                     messages,
-                                };
+                                    QueryLoopState::Failed,
+                                    QueryTerminalReason::Failed,
+                                );
                             }
                         }
                     }
@@ -191,42 +212,67 @@ pub async fn run_query_loop(context: &QueryContext, input: Message) -> QueryLoop
                         if !aggregated_text.is_empty() {
                             messages.push(Message::assistant(aggregated_text));
                         }
-                        let _ = run_hook(&context.hook_registry, HookEvent::Stop);
-                        return QueryLoopResult {
-                            state: QueryLoopState::Interrupted,
-                            terminal_reason: QueryTerminalReason::Interrupted,
+                        return finalize_with_stop_hook(
+                            context,
                             messages,
-                        };
+                            QueryLoopState::Interrupted,
+                            QueryTerminalReason::Interrupted,
+                        );
                     }
                     StopReason::Error => {
                         if !aggregated_text.is_empty() {
                             messages.push(Message::assistant(aggregated_text));
                         }
-                        let _ = run_hook(&context.hook_registry, HookEvent::Stop);
-                        return QueryLoopResult {
-                            state: QueryLoopState::Failed,
-                            terminal_reason: QueryTerminalReason::Failed,
+                        return finalize_with_stop_hook(
+                            context,
                             messages,
-                        };
+                            QueryLoopState::Failed,
+                            QueryTerminalReason::Failed,
+                        );
                     }
                 },
                 StreamEvent::Error(error) => {
                     messages.push(Message::assistant(format!("stream error: {error}")));
-                    let _ = run_hook(&context.hook_registry, HookEvent::Stop);
-                    return QueryLoopResult {
-                        state: QueryLoopState::Failed,
-                        terminal_reason: QueryTerminalReason::Failed,
+                    return finalize_with_stop_hook(
+                        context,
                         messages,
-                    };
+                        QueryLoopState::Failed,
+                        QueryTerminalReason::Failed,
+                    );
                 }
             }
         }
     }
 
-    let _ = run_hook(&context.hook_registry, HookEvent::Stop);
+    finalize_with_stop_hook(
+        context,
+        messages,
+        QueryLoopState::Completed,
+        QueryTerminalReason::Completed,
+    )
+}
+
+fn finalize_with_stop_hook(
+    context: &QueryContext,
+    mut messages: Vec<Message>,
+    default_state: QueryLoopState,
+    default_reason: QueryTerminalReason,
+) -> QueryLoopResult {
+    let stop_hook = run_hook(&context.hook_registry, HookEvent::Stop);
+    messages.extend(stop_hook.messages);
+
+    let (state, terminal_reason) = if stop_hook.prevent_continuation {
+        (
+            QueryLoopState::Completed,
+            QueryTerminalReason::StoppedByHook,
+        )
+    } else {
+        (default_state, default_reason)
+    };
+
     QueryLoopResult {
-        state: QueryLoopState::Completed,
-        terminal_reason: QueryTerminalReason::Completed,
+        state,
+        terminal_reason,
         messages,
     }
 }

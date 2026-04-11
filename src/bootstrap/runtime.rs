@@ -8,6 +8,7 @@ use crate::command::builtin::{compact::CompactCommand, cost::CostCommand, help::
 use crate::command::registry::CommandRegistry;
 use crate::core::context::QueryContext;
 use crate::core::engine::QueryEngine;
+use crate::cost::tracker::CostTracker;
 use crate::history::resume::{RestoreRequest, RestoreSource, RestoredSession};
 use crate::history::session::{
     InMemorySessionStore, SessionHistory, SessionId, SessionRestoreRequest, SessionSnapshot,
@@ -26,8 +27,8 @@ use crate::state::app_state::AppState;
 use crate::state::permission_context::{PermissionMode, ToolPermissionContext};
 use crate::task::manager::TaskManager;
 use crate::tool::builtin::{
-    agent::AgentTool, file_edit::FileEditTool, file_read::FileReadTool, glob::GlobTool,
-    grep::GrepTool, tool_search::ToolSearchTool, web_fetch::WebFetchTool,
+    agent::AgentTool, bash::BashTool, file_edit::FileEditTool, file_read::FileReadTool,
+    glob::GlobTool, grep::GrepTool, tool_search::ToolSearchTool, web_fetch::WebFetchTool,
 };
 use crate::tool::registry::ToolRegistry;
 
@@ -128,6 +129,7 @@ impl RuntimeBootstrap {
             client_type: state.client_type,
             session_source: state.session_source,
             permission_context: permission_context.clone(),
+            cost_tracker: CostTracker::default(),
             startup_trace: state
                 .phases
                 .iter()
@@ -217,6 +219,7 @@ impl RuntimeBootstrap {
     fn build_tool_registry(&self) -> ToolRegistry {
         ToolRegistry::new()
             .register(Arc::new(AgentTool))
+            .register(Arc::new(BashTool))
             .register(Arc::new(FileEditTool))
             .register(Arc::new(FileReadTool))
             .register(Arc::new(GlobTool))

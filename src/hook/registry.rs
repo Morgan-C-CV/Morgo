@@ -17,6 +17,8 @@ pub enum HookEvent {
 pub struct HookRule {
     pub event: HookEventMatcher,
     pub deny_match: Option<String>,
+    pub append_message: Option<String>,
+    pub prevent_continuation: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
