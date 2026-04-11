@@ -19,7 +19,9 @@ use crate::hook::executor::run_hook;
 use crate::hook::registry::{HookEvent, HookRegistry};
 use crate::interaction::cli::renderer::render_output;
 use crate::interaction::cli::repl::handle_cli_input;
+use crate::interaction::dispatcher::NotificationDispatcher;
 use crate::interaction::router::CommandRouter;
+use crate::interaction::telegram::gateway::TelegramGateway;
 use crate::security::authorizer::DefaultSurfaceAuthorizer;
 use crate::service::api::client::AnthropicClient;
 use crate::service::compact::reactive_compact::ReactiveCompactor;
@@ -92,13 +94,6 @@ impl RuntimeBootstrap {
         state.record_phase(BootstrapPhase::ResolvePermissions);
 
         let task_manager = Arc::new(TaskManager::default());
-        let permission_context = ToolPermissionContext::new(if self.cli.init_only {
-            PermissionMode::Plan
-        } else {
-            PermissionMode::Default
-        })
-        .with_task_manager(task_manager.clone());
-
         let hook_registry = HookRegistry::default();
         let _ = run_hook(&hook_registry, HookEvent::SessionStart);
 
@@ -117,6 +112,13 @@ impl RuntimeBootstrap {
             .as_ref()
             .map(|session| session.snapshot.session_id.0.clone())
             .unwrap_or_else(|| "local-session".into());
+        let permission_context = ToolPermissionContext::new(if self.cli.init_only {
+            PermissionMode::Plan
+        } else {
+            PermissionMode::Default
+        })
+        .with_task_manager(task_manager.clone())
+        .with_active_session_id(active_session_id.clone());
 
         state.record_phase(BootstrapPhase::InitializeRuntime);
         state.record_phase(BootstrapPhase::AugmentPrompt);
@@ -130,6 +132,7 @@ impl RuntimeBootstrap {
             session_source: state.session_source,
             permission_context: permission_context.clone(),
             cost_tracker: CostTracker::default(),
+            notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
             startup_trace: state
                 .phases
                 .iter()
@@ -172,6 +175,7 @@ impl RuntimeBootstrap {
             api_client: AnthropicClient::default(),
             compactor: ReactiveCompactor,
             hook_registry,
+            agent_id: None,
         };
         let engine = QueryEngine::new(query_context);
 

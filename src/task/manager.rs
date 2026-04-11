@@ -1,5 +1,6 @@
 use std::sync::{Arc, RwLock};
 
+use crate::interaction::dispatcher::NotificationDispatcher;
 use crate::interaction::notification::Notification;
 use crate::task::output_store::TaskOutputStore;
 use crate::task::types::{TaskDeliveryState, TaskOutputSlice, TaskRecord, TaskStatus};
@@ -61,16 +62,34 @@ impl TaskManager {
         }
     }
 
-    pub fn complete(&self, id: &str, session_id: &str) {
-        self.finish(id, TaskStatus::Completed, session_id, "Task completed");
+    pub fn complete(&self, id: &str, session_id: &str, dispatcher: &NotificationDispatcher) {
+        self.finish(
+            id,
+            TaskStatus::Completed,
+            session_id,
+            "Task completed",
+            dispatcher,
+        );
     }
 
-    pub fn fail(&self, id: &str, session_id: &str) {
-        self.finish(id, TaskStatus::Failed, session_id, "Task failed");
+    pub fn fail(&self, id: &str, session_id: &str, dispatcher: &NotificationDispatcher) {
+        self.finish(
+            id,
+            TaskStatus::Failed,
+            session_id,
+            "Task failed",
+            dispatcher,
+        );
     }
 
-    pub fn kill(&self, id: &str, session_id: &str) {
-        self.finish(id, TaskStatus::Killed, session_id, "Task killed");
+    pub fn kill(&self, id: &str, session_id: &str, dispatcher: &NotificationDispatcher) {
+        self.finish(
+            id,
+            TaskStatus::Killed,
+            session_id,
+            "Task killed",
+            dispatcher,
+        );
     }
 
     pub fn get(&self, id: &str) -> Option<TaskRecord> {
@@ -117,7 +136,14 @@ impl TaskManager {
         }
     }
 
-    fn finish(&self, id: &str, status: TaskStatus, session_id: &str, title: &str) {
+    fn finish(
+        &self,
+        id: &str,
+        status: TaskStatus,
+        session_id: &str,
+        title: &str,
+        dispatcher: &NotificationDispatcher,
+    ) {
         if let Some(task) = self
             .store
             .write()
@@ -126,13 +152,28 @@ impl TaskManager {
             .iter_mut()
             .find(|task| task.id == id)
         {
-            task.status = status;
+            task.status = status.clone();
             task.delivery.notified = true;
-            task.delivery.notification = Some(Notification::task_update(
+            let notification = Notification::task_update(
                 session_id,
                 title,
                 format!("{} ({})", task.description, task.id),
-            ));
+                task.id.clone(),
+                format!("{status:?}"),
+                task.output_file.clone(),
+            );
+            dispatcher.dispatch(notification_surface(session_id), notification.clone());
+            task.delivery.notification = Some(notification);
         }
+    }
+}
+
+fn notification_surface(session_id: &str) -> crate::bootstrap::InteractionSurface {
+    if session_id.starts_with("telegram") {
+        crate::bootstrap::InteractionSurface::Telegram
+    } else if session_id.starts_with("remote") {
+        crate::bootstrap::InteractionSurface::Remote
+    } else {
+        crate::bootstrap::InteractionSurface::Cli
     }
 }

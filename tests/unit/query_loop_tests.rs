@@ -5,6 +5,8 @@ use rust_agent::core::message::Message;
 use rust_agent::core::query_loop::{QueryLoopState, QueryTerminalReason};
 use rust_agent::cost::tracker::CostTracker;
 use rust_agent::hook::registry::{HookEvent, HookEventMatcher, HookRegistry, HookRule};
+use rust_agent::interaction::dispatcher::NotificationDispatcher;
+use rust_agent::interaction::telegram::gateway::TelegramGateway;
 use rust_agent::service::api::client::AnthropicClient;
 use rust_agent::service::api::streaming::{StopReason, StreamEvent};
 use rust_agent::service::compact::reactive_compact::ReactiveCompactor;
@@ -35,6 +37,7 @@ fn test_context_with_turns(
             session_source: SessionSource::LocalCli,
             permission_context,
             cost_tracker: CostTracker::default(),
+            notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
             startup_trace: Vec::new(),
             active_session_id: "test-session".into(),
             session: None,
@@ -45,6 +48,7 @@ fn test_context_with_turns(
         api_client: AnthropicClient::with_scripted_turns(turns),
         compactor: ReactiveCompactor,
         hook_registry: HookRegistry::default(),
+        agent_id: None,
     }
 }
 
@@ -191,6 +195,7 @@ async fn query_loop_stop_hook_can_prevent_continuation() {
             session_source: SessionSource::LocalCli,
             permission_context,
             cost_tracker: CostTracker::default(),
+            notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
             startup_trace: Vec::new(),
             active_session_id: "test-session".into(),
             session: None,
@@ -212,6 +217,7 @@ async fn query_loop_stop_hook_can_prevent_continuation() {
             append_message: Some("stop hook appended message".into()),
             prevent_continuation: true,
         }),
+        agent_id: None,
     };
 
     let engine = QueryEngine::new(context);
@@ -243,6 +249,7 @@ async fn query_loop_respects_pre_tool_hook_denial() {
             session_source: SessionSource::LocalCli,
             permission_context,
             cost_tracker: CostTracker::default(),
+            notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
             startup_trace: Vec::new(),
             active_session_id: "test-session".into(),
             session: None,
@@ -267,6 +274,7 @@ async fn query_loop_respects_pre_tool_hook_denial() {
             append_message: None,
             prevent_continuation: false,
         }),
+        agent_id: None,
     };
 
     let engine = QueryEngine::new(context);
@@ -280,5 +288,72 @@ async fn query_loop_respects_pre_tool_hook_denial() {
             .hook_registry
             .recorded_events()
             .contains(&HookEvent::UserPromptSubmit)
+    );
+}
+
+#[tokio::test]
+async fn query_loop_uses_subagent_stop_hook_for_subagent_context() {
+    let mut permission_context = ToolPermissionContext::new(PermissionMode::Default)
+        .with_task_manager(Arc::new(TaskManager::default()));
+    permission_context.always_allow_rules.push("Agent".into());
+
+    let context = QueryContext {
+        app_state: AppState {
+            surface: InteractionSurface::Cli,
+            session_mode: SessionMode::Headless,
+            client_type: ClientType::Cli,
+            session_source: SessionSource::LocalCli,
+            permission_context,
+            cost_tracker: CostTracker::default(),
+            notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
+            startup_trace: Vec::new(),
+            active_session_id: "test-session".into(),
+            session: None,
+            history: None,
+            restored_session: None,
+        },
+        tool_registry: ToolRegistry::new(),
+        api_client: AnthropicClient::with_scripted_turns(vec![vec![
+            StreamEvent::MessageStart,
+            StreamEvent::TextDelta("subagent done".into()),
+            StreamEvent::MessageStop {
+                stop_reason: StopReason::EndTurn,
+            },
+        ]]),
+        compactor: ReactiveCompactor,
+        hook_registry: HookRegistry::default().register_rule(HookRule {
+            event: HookEventMatcher::SubagentStop,
+            deny_match: None,
+            append_message: Some("subagent stop appended message".into()),
+            prevent_continuation: true,
+        }),
+        agent_id: Some("agent-task-1".into()),
+    };
+
+    let engine = QueryEngine::new(context);
+    let result = engine.submit_turn(Message::user("inspect file")).await;
+
+    assert_eq!(result.state, QueryLoopState::Completed);
+    assert_eq!(result.terminal_reason, QueryTerminalReason::StoppedByHook);
+    assert_eq!(
+        result.messages,
+        vec![
+            Message::assistant("subagent done"),
+            Message::assistant("subagent stop appended message")
+        ]
+    );
+    assert!(
+        engine
+            .context
+            .hook_registry
+            .recorded_events()
+            .contains(&HookEvent::SubagentStop)
+    );
+    assert!(
+        !engine
+            .context
+            .hook_registry
+            .recorded_events()
+            .contains(&HookEvent::Stop)
     );
 }

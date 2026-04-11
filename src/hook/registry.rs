@@ -5,12 +5,25 @@ pub enum HookEvent {
     SessionStart,
     Setup,
     UserPromptSubmit,
-    PreToolUse { tool_name: String },
-    PostToolUse { tool_name: String },
-    PostToolUseFailure { tool_name: String },
+    PreToolUse {
+        tool_name: String,
+    },
+    PostToolUse {
+        tool_name: String,
+    },
+    PostToolUseFailure {
+        tool_name: String,
+    },
     Stop,
     SubagentStop,
-    Notification,
+    Notification {
+        title: String,
+        body: String,
+        notification_type: String,
+        task_id: Option<String>,
+        status: Option<String>,
+        output_file: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

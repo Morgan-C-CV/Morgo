@@ -1,6 +1,10 @@
+use rust_agent::bootstrap::InteractionSurface;
 use rust_agent::core::message::Message;
 use rust_agent::hook::executor::{HookDecision, run_hook};
 use rust_agent::hook::registry::{HookEvent, HookEventMatcher, HookRegistry, HookRule};
+use rust_agent::interaction::dispatcher::NotificationDispatcher;
+use rust_agent::interaction::notification::{Notification, NotificationType};
+use rust_agent::interaction::telegram::gateway::TelegramGateway;
 
 #[test]
 fn hook_registry_records_lifecycle_events() {
@@ -83,4 +87,44 @@ fn hook_rule_can_append_message_and_prevent_continuation() {
         result.messages,
         vec![Message::assistant("stop hook says wait")]
     );
+}
+
+#[test]
+fn notification_hook_can_match_typed_payload() {
+    let registry = HookRegistry::default().register_rule(HookRule {
+        event: HookEventMatcher::Notification,
+        deny_match: Some("task-9".into()),
+        append_message: None,
+        prevent_continuation: false,
+    });
+    let dispatcher = NotificationDispatcher::new(TelegramGateway::default())
+        .with_hook_registry(registry.clone());
+    let notification = Notification {
+        session_id: "session-1".into(),
+        title: "Task completed".into(),
+        body: "demo body".into(),
+        notification_type: NotificationType::TaskUpdate,
+        task_id: Some("task-9".into()),
+        status: Some("Completed".into()),
+        output_file: Some("/tmp/task-9.log".into()),
+        wake_up: true,
+        target: None,
+    };
+
+    dispatcher.dispatch(InteractionSurface::Cli, notification);
+
+    let events = registry.recorded_events();
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        events[0],
+        HookEvent::Notification {
+            title: "Task completed".into(),
+            body: "demo body".into(),
+            notification_type: "task_update".into(),
+            task_id: Some("task-9".into()),
+            status: Some("Completed".into()),
+            output_file: Some("/tmp/task-9.log".into()),
+        }
+    );
+    assert!(dispatcher.delivered().is_empty());
 }

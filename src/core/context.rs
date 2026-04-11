@@ -11,4 +11,11 @@ pub struct QueryContext {
     pub api_client: AnthropicClient,
     pub compactor: ReactiveCompactor,
     pub hook_registry: HookRegistry,
+    pub agent_id: Option<String>,
+}
+
+impl QueryContext {
+    pub fn is_subagent(&self) -> bool {
+        self.agent_id.is_some()
+    }
 }

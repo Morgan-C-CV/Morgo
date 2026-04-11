@@ -4,6 +4,8 @@ mod bootstrap_tests;
 mod cost_tests;
 #[path = "unit/hook_tests.rs"]
 mod hook_tests;
+#[path = "unit/notification_tests.rs"]
+mod notification_tests;
 #[path = "unit/query_loop_tests.rs"]
 mod query_loop_tests;
 #[path = "unit/router_tests.rs"]

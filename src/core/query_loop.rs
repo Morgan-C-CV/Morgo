@@ -258,7 +258,12 @@ fn finalize_with_stop_hook(
     default_state: QueryLoopState,
     default_reason: QueryTerminalReason,
 ) -> QueryLoopResult {
-    let stop_hook = run_hook(&context.hook_registry, HookEvent::Stop);
+    let stop_event = if context.is_subagent() {
+        HookEvent::SubagentStop
+    } else {
+        HookEvent::Stop
+    };
+    let stop_hook = run_hook(&context.hook_registry, stop_event);
     messages.extend(stop_hook.messages);
 
     let (state, terminal_reason) = if stop_hook.prevent_continuation {

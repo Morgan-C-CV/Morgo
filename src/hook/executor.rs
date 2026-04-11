@@ -49,6 +49,11 @@ pub fn run_hook(registry: &HookRegistry, event: HookEvent) -> HookResult {
                     | HookEvent::PostToolUseFailure { tool_name } => {
                         format!("tool {tool_name} denied by hook policy")
                     }
+                    HookEvent::Notification {
+                        notification_type, ..
+                    } => format!(
+                        "notification {notification_type} denied by hook policy: {deny_match}"
+                    ),
                     _ => format!("hook event denied by policy: {deny_match}"),
                 });
                 return result;
@@ -76,7 +81,10 @@ fn matches_event(matcher: &HookEventMatcher, event: &HookEvent) -> bool {
             )
             | (HookEventMatcher::Stop, HookEvent::Stop)
             | (HookEventMatcher::SubagentStop, HookEvent::SubagentStop)
-            | (HookEventMatcher::Notification, HookEvent::Notification)
+            | (
+                HookEventMatcher::Notification,
+                HookEvent::Notification { .. }
+            )
     )
 }
 
@@ -85,6 +93,23 @@ fn matches_denial(event: &HookEvent, deny_match: &str) -> bool {
         HookEvent::PreToolUse { tool_name }
         | HookEvent::PostToolUse { tool_name }
         | HookEvent::PostToolUseFailure { tool_name } => tool_name == deny_match,
+        HookEvent::Notification {
+            title,
+            body,
+            notification_type,
+            task_id,
+            status,
+            output_file,
+        } => {
+            notification_type == deny_match
+                || title.contains(deny_match)
+                || body.contains(deny_match)
+                || task_id.as_deref() == Some(deny_match)
+                || status.as_deref() == Some(deny_match)
+                || output_file
+                    .as_deref()
+                    .is_some_and(|path| path.contains(deny_match))
+        }
         _ => true,
     }
 }
