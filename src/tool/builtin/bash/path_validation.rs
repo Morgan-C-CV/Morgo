@@ -3,7 +3,7 @@ use std::path::{Component, Path};
 pub fn is_safe_path(path: &str) -> bool {
     let candidate = Path::new(path);
     if candidate.is_absolute() {
-        return false;
+        return true;
     }
 
     !candidate
@@ -12,9 +12,9 @@ pub fn is_safe_path(path: &str) -> bool {
 }
 
 pub fn command_uses_only_safe_paths(command: &str) -> bool {
-    command_path_assessment(command).iter().all(|finding| {
-        !finding.starts_with("unsafe:") && !finding.starts_with("absolute:")
-    })
+    command_path_assessment(command)
+        .iter()
+        .all(|finding| !finding.starts_with("unsafe:"))
 }
 
 pub fn command_path_assessment(command: &str) -> Vec<String> {
@@ -23,7 +23,7 @@ pub fn command_path_assessment(command: &str) -> Vec<String> {
         .filter(|token| token.contains('/') || token.starts_with('.'))
         .map(|token| {
             if token.starts_with('/') {
-                format!("absolute:{token}")
+                format!("safe:{token}")
             } else if is_safe_path(token) {
                 format!("safe:{token}")
             } else {

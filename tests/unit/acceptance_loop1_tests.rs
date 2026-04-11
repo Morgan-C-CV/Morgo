@@ -54,6 +54,7 @@ fn test_app_state() -> AppState {
         runtime_role: RuntimeRole::Coordinator,
         permission_context: ToolPermissionContext::new(PermissionMode::Default)
             .with_task_manager(Arc::new(TaskManager::default())),
+        runtime_tool_registry: Some(ToolRegistry::new()),
         cost_tracker: rust_agent::cost::tracker::CostTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
         startup_trace: Vec::new(),

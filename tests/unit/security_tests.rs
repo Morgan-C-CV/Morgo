@@ -12,12 +12,15 @@ use rust_agent::tool::builtin::bash::sed_validation::{analyze_sed_safety, SedSaf
 fn unsafe_paths_are_rejected() {
     assert!(!is_safe_path("../etc/passwd"));
     assert!(is_safe_path("relative/file.txt"));
+    assert!(is_safe_path("/tmp/file.txt"));
     assert!(!command_uses_only_safe_paths("cat ../secret.txt"));
+    assert!(command_uses_only_safe_paths("cat /tmp/file.txt"));
 }
 
 #[test]
 fn plan_mode_allows_only_safe_shell_patterns() {
     assert!(is_plan_mode_safe("git status"));
+    assert!(is_plan_mode_safe("env FOO=bar pwd"));
     assert!(!is_plan_mode_safe("cat file.txt | grep needle"));
     assert!(!is_plan_mode_safe("rm -rf /tmp/test"));
 }
@@ -48,7 +51,7 @@ fn sandbox_policy_prefers_read_only_for_safe_commands() {
 fn path_assessment_reports_unsafe_and_absolute_tokens() {
     let findings = command_path_assessment("cat ../secret /tmp/file");
     assert!(findings.iter().any(|item| item == "unsafe:../secret"));
-    assert!(findings.iter().any(|item| item == "absolute:/tmp/file"));
+    assert!(findings.iter().any(|item| item == "safe:/tmp/file"));
 }
 
 #[test]

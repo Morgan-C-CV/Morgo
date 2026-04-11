@@ -5,7 +5,11 @@ use clap::Parser;
 
 use crate::bootstrap::setup::SetupContext;
 use crate::bootstrap::{BootstrapPhase, BootstrapState, InteractionSurface, SessionMode};
-use crate::command::builtin::{compact::CompactCommand, cost::CostCommand, help::HelpCommand};
+use crate::command::builtin::{
+    clear::ClearCommand, compact::CompactCommand, config::ConfigCommand, cost::CostCommand,
+    help::HelpCommand, plan::PlanCommand, resume::ResumeCommand, session::SessionCommand,
+    status::StatusCommand, tasks::TasksCommand,
+};
 use crate::command::registry::CommandRegistry;
 use crate::core::context::QueryContext;
 use crate::core::engine::QueryEngine;
@@ -204,6 +208,7 @@ impl RuntimeBootstrap {
             session_source: state.session_source,
             runtime_role: RuntimeRole::Coordinator,
             permission_context: permission_context.clone(),
+            runtime_tool_registry: Some(coordinator_tools.clone()),
             cost_tracker: CostTracker::with_default_pricing(
                 provider_config.model_id.clone(),
                 provider_config.pricing.clone(),
@@ -322,6 +327,13 @@ impl RuntimeBootstrap {
             .register(Arc::new(HelpCommand))
             .register(Arc::new(CostCommand))
             .register(Arc::new(CompactCommand))
+            .register(Arc::new(ClearCommand))
+            .register(Arc::new(ConfigCommand))
+            .register(Arc::new(PlanCommand))
+            .register(Arc::new(ResumeCommand))
+            .register(Arc::new(SessionCommand))
+            .register(Arc::new(StatusCommand))
+            .register(Arc::new(TasksCommand))
     }
 
     fn build_tool_registry(&self) -> ToolRegistry {

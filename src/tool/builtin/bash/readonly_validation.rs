@@ -1,12 +1,15 @@
+use crate::tool::builtin::bash::command_helpers::normalized_command_variants;
+use crate::tool::builtin::bash::security::contains_shell_operator;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReadOnlyLevel {
     None,
     ReadOnly,
 }
 
-pub fn classify_read_only_level(command: &str) -> ReadOnlyLevel {
+fn is_read_only_variant(command: &str) -> bool {
     let trimmed = command.trim();
-    let read_only = [
+    [
         "ls",
         "pwd",
         "git status",
@@ -19,9 +22,18 @@ pub fn classify_read_only_level(command: &str) -> ReadOnlyLevel {
         "find",
     ]
     .iter()
-    .any(|prefix| trimmed == *prefix || trimmed.starts_with(&format!("{prefix} ")));
+    .any(|prefix| trimmed == *prefix || trimmed.starts_with(&format!("{prefix} ")))
+}
 
-    if read_only {
+pub fn classify_read_only_level(command: &str) -> ReadOnlyLevel {
+    if contains_shell_operator(command) {
+        return ReadOnlyLevel::None;
+    }
+
+    if normalized_command_variants(command)
+        .iter()
+        .any(|variant| is_read_only_variant(variant))
+    {
         ReadOnlyLevel::ReadOnly
     } else {
         ReadOnlyLevel::None

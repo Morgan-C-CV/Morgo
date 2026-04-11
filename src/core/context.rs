@@ -41,6 +41,7 @@ impl QueryContext {
         );
         app_state.permission_context = permission_context;
         let tool_registry = self.tool_registry.assemble_for_role(RuntimeRole::Worker);
+        app_state.runtime_tool_registry = Some(tool_registry.clone());
         Self {
             system_prompt: build_system_prompt(&app_state),
             tools_prompt: build_tools_prompt(&tool_registry, &app_state.permission_context),

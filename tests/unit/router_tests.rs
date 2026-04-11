@@ -113,6 +113,7 @@ async fn cli_repl_handles_multiple_inputs_in_sequence() {
         session_source: SessionSource::LocalCli,
         runtime_role: RuntimeRole::Coordinator,
         permission_context,
+        runtime_tool_registry: Some(ToolRegistry::new()),
         cost_tracker: CostTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
         startup_trace: Vec::new(),
@@ -168,6 +169,7 @@ async fn cli_repl_surfaces_task_events_for_active_session() {
         session_source: SessionSource::LocalCli,
         runtime_role: RuntimeRole::Coordinator,
         permission_context,
+        runtime_tool_registry: Some(ToolRegistry::new()),
         cost_tracker: CostTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
         startup_trace: Vec::new(),
@@ -245,6 +247,7 @@ async fn cli_repl_persists_history_for_local_and_query_turns() {
         session_source: SessionSource::LocalCli,
         runtime_role: RuntimeRole::Coordinator,
         permission_context,
+        runtime_tool_registry: Some(ToolRegistry::new()),
         cost_tracker: CostTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
         startup_trace: Vec::new(),
@@ -332,6 +335,7 @@ async fn cli_repl_persists_denied_turns() {
         session_source: SessionSource::RemoteControl,
         runtime_role: RuntimeRole::Coordinator,
         permission_context,
+        runtime_tool_registry: Some(ToolRegistry::new()),
         cost_tracker: CostTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
         startup_trace: Vec::new(),
@@ -391,6 +395,7 @@ async fn router_approves_pending_plan_mode_request() {
         session_source: SessionSource::LocalCli,
         runtime_role: RuntimeRole::Coordinator,
         permission_context: permission_context.clone(),
+        runtime_tool_registry: Some(ToolRegistry::new()),
         cost_tracker: CostTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
         startup_trace: Vec::new(),
@@ -431,6 +436,7 @@ async fn router_denies_pending_request_without_session_approval() {
         session_source: SessionSource::LocalCli,
         runtime_role: RuntimeRole::Coordinator,
         permission_context: permission_context.clone(),
+        runtime_tool_registry: Some(ToolRegistry::new()),
         cost_tracker: CostTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
         startup_trace: Vec::new(),
@@ -451,5 +457,49 @@ async fn router_denies_pending_request_without_session_approval() {
 
     assert_eq!(result, CommandResult::Message("Denied approval for Bash".into()));
     assert_eq!(permission_context.mode(), PermissionMode::Default);
+    assert!(permission_context.pending_approval().is_none());
+}
+
+#[tokio::test]
+async fn approval_replay_uses_runtime_tool_registry() {
+    let router = CommandRouter::new(CommandRegistry::new(), Box::new(DefaultSurfaceAuthorizer));
+    let permission_context = ToolPermissionContext::new(PermissionMode::Default)
+        .with_task_manager(Arc::new(TaskManager::default()))
+        .with_pending_approval(rust_agent::state::permission_context::PendingApproval {
+            tool_name: "Bash".into(),
+            tool_input: serde_json::json!({"command": "pwd"}).to_string(),
+            message: "approve pwd".into(),
+        });
+    let app_state = AppState {
+        surface: InteractionSurface::Cli,
+        session_mode: SessionMode::Interactive,
+        client_type: ClientType::Cli,
+        session_source: SessionSource::LocalCli,
+        runtime_role: RuntimeRole::Coordinator,
+        permission_context: permission_context.clone(),
+        runtime_tool_registry: Some(ToolRegistry::new().register(Arc::new(rust_agent::tool::builtin::bash::BashTool))),
+        cost_tracker: CostTracker::default(),
+        notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
+        startup_trace: Vec::new(),
+        active_session_id: "cli-session".into(),
+        session_store: None,
+        session: None,
+        history: None,
+        restored_session: None,
+    };
+
+    let result = router
+        .route(
+            &NormalizedInput::from_session_raw(InteractionSurface::Cli, "cli-session", "approve"),
+            &app_state,
+        )
+        .await
+        .expect("approval replay should resolve");
+
+    let CommandResult::Message(text) = result else {
+        panic!("expected approval replay message");
+    };
+    assert!(text.contains("command: pwd"));
+    assert!(text.contains("exit_code: 0"));
     assert!(permission_context.pending_approval().is_none());
 }

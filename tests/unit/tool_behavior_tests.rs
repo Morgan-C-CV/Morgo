@@ -1,7 +1,4 @@
-use std::io::{Read as _, Write as _};
-use std::net::TcpListener;
 use std::sync::{Arc, Mutex, OnceLock};
-use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rust_agent::state::permission_context::{PermissionMode, ToolPermissionContext};
@@ -17,7 +14,7 @@ use rust_agent::tool::builtin::task_create::TaskCreateTool;
 use rust_agent::tool::builtin::task_stop::TaskStopTool;
 use rust_agent::tool::builtin::task_update::TaskUpdateTool;
 use rust_agent::tool::builtin::tool_search::ToolSearchTool;
-use rust_agent::tool::builtin::web_fetch::WebFetchTool;
+use rust_agent::tool::builtin::web_fetch::{WebFetchTool, fetch_text_with};
 use rust_agent::tool::builtin::web_search::WebSearchTool;
 use rust_agent::tool::definition::{Tool, ToolCall, ToolResult};
 use rust_agent::tool::permission::is_tool_allowed;
@@ -234,32 +231,12 @@ async fn edit_tool_rejects_non_unique_match_without_replace_all() {
 
 #[tokio::test]
 async fn web_fetch_tool_returns_response_body() {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
-    let addr = listener.local_addr().expect("local addr");
-    let handle = thread::spawn(move || {
-        let (mut stream, _) = listener.accept().expect("accept connection");
-        let mut buffer = [0_u8; 1024];
-        let _ = stream.read(&mut buffer);
-        stream
-            .write_all(
-                b"HTTP/1.1 200 OK\r\nContent-Length: 12\r\nConnection: close\r\n\r\nhello client",
-            )
-            .expect("write response");
-    });
-
-    let result = WebFetchTool
-        .invoke(
-            &ToolCall {
-                name: "WebFetch".into(),
-                input: format!("http://{addr}"),
-            },
-            &ToolPermissionContext::new(PermissionMode::Default),
-        )
-        .await
-        .expect("web fetch should succeed");
-
-    handle.join().expect("server should exit cleanly");
-    assert_eq!(result, ToolResult::Text("hello client".into()));
+    let body = fetch_text_with("https://example.com", |_url| async {
+        Ok((200, "hello client".into()))
+    })
+    .await
+    .expect("fake fetch should succeed");
+    assert_eq!(body, "hello client");
 }
 
 #[tokio::test]
@@ -276,6 +253,17 @@ async fn web_fetch_tool_rejects_invalid_url() {
         .expect_err("invalid url should fail");
 
     assert!(error.to_string().contains("invalid URL"));
+}
+
+#[tokio::test]
+async fn web_fetch_seam_reports_http_errors_without_socket_bind() {
+    let error = fetch_text_with("https://example.com", |_url| async {
+        Ok((503, "unavailable".into()))
+    })
+    .await
+    .expect_err("http error should fail");
+
+    assert!(error.to_string().contains("HTTP 503"));
 }
 
 #[tokio::test]
@@ -441,6 +429,32 @@ async fn registry_allows_safe_bash_in_plan_mode() {
         panic!("expected text result");
     };
     assert!(text.contains("command: pwd"));
+    assert!(text.contains("sandbox_policy: ReadOnly"));
+    assert!(text.contains("exit_code: 0"));
+}
+
+#[tokio::test]
+async fn registry_allows_normalized_safe_bash_in_plan_mode() {
+    let registry = ToolRegistry::new().register(Arc::new(BashTool));
+    let permissions = ToolPermissionContext::new(PermissionMode::Plan);
+    let result = registry
+        .invoke(
+            &ToolCall {
+                name: "Bash".into(),
+                input: serde_json::json!({
+                    "command": "env FOO=bar pwd"
+                })
+                .to_string(),
+            },
+            &permissions,
+        )
+        .await
+        .expect("normalized safe bash should execute in plan mode");
+
+    let ToolResult::Text(text) = result else {
+        panic!("expected text result");
+    };
+    assert!(text.contains("command: env FOO=bar pwd"));
     assert!(text.contains("sandbox_policy: ReadOnly"));
     assert!(text.contains("exit_code: 0"));
 }

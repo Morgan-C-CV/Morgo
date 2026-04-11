@@ -21,6 +21,34 @@ fn parse_url_input(call: &ToolCall) -> anyhow::Result<String> {
     Ok(call.input.trim().to_string())
 }
 
+pub async fn fetch_text_with<F, Fut>(raw_url: &str, fetcher: F) -> anyhow::Result<String>
+where
+    F: FnOnce(Url) -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<(u16, String)>>,
+{
+    let url = parse_url(raw_url)?;
+    let (status, body) = fetcher(url.clone()).await?;
+    if !(200..300).contains(&status) {
+        anyhow::bail!("fetch failed for {url}: HTTP {status}")
+    }
+    Ok(body)
+}
+
+async fn fetch_text(raw_url: &str) -> anyhow::Result<String> {
+    fetch_text_with(raw_url, |url| async move {
+        let response = reqwest::get(url.clone())
+            .await
+            .map_err(|error| anyhow::anyhow!("failed to fetch {url}: {error}"))?;
+        let status = response.status().as_u16();
+        let body = response
+            .text()
+            .await
+            .map_err(|error| anyhow::anyhow!("failed to read {url}: {error}"))?;
+        Ok((status, body))
+    })
+    .await
+}
+
 #[async_trait]
 impl Tool for WebFetchTool {
     fn metadata(&self) -> ToolMetadata {
@@ -64,19 +92,7 @@ impl Tool for WebFetchTool {
         call: &ToolCall,
         _permissions: &ToolPermissionContext,
     ) -> anyhow::Result<ToolResult> {
-        let url = parse_url(&parse_url_input(call)?)?;
-        let response = reqwest::get(url.clone())
-            .await
-            .map_err(|error| anyhow::anyhow!("failed to fetch {url}: {error}"))?;
-        let status = response.status();
-        if !status.is_success() {
-            anyhow::bail!("fetch failed for {url}: HTTP {status}")
-        }
-
-        let body = response
-            .text()
-            .await
-            .map_err(|error| anyhow::anyhow!("failed to read {url}: {error}"))?;
+        let body = fetch_text(&parse_url_input(call)?).await?;
         Ok(ToolResult::Text(body))
     }
 }

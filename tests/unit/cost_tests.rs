@@ -35,6 +35,7 @@ async fn cost_command_reports_tracked_usage() {
         session_source: SessionSource::LocalCli,
         runtime_role: RuntimeRole::Coordinator,
         permission_context,
+        runtime_tool_registry: None,
         cost_tracker,
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
         startup_trace: Vec::new(),
