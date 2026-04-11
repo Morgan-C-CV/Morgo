@@ -109,6 +109,9 @@ async fn collect_stream_messages(
             EngineEvent::ToolResultCommitted { tool_name, content } => {
                 runtime_events.push(format!("[tool-result] {tool_name}: {content}"));
             }
+            EngineEvent::PendingApproval { tool_name, message } => {
+                runtime_events.push(format!("[approval] {tool_name}: {message}"));
+            }
             EngineEvent::Notice { kind, message } => {
                 runtime_events.push(format!("[notice:{kind}] {message}"));
             }

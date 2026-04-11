@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 pub enum ToolExecutionOutcomeKind {
     Success,
     Denied,
+    PendingApproval,
     Interrupted,
     Progress,
     ResultTooLarge,

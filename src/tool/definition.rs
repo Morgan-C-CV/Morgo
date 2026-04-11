@@ -86,6 +86,10 @@ impl PermissionDecision {
 pub enum ToolResult {
     Text(String),
     Denied(String),
+    PendingApproval {
+        tool_name: String,
+        message: String,
+    },
     Interrupted(String),
     Progress(String),
     ResultTooLarge(String),

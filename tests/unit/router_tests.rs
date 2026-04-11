@@ -373,3 +373,83 @@ async fn cli_repl_persists_denied_turns() {
     );
     assert!(history.entries[1].message.content.contains("Denied:"));
 }
+
+#[tokio::test]
+async fn router_approves_pending_plan_mode_request() {
+    let router = CommandRouter::new(CommandRegistry::new(), Box::new(DefaultSurfaceAuthorizer));
+    let permission_context = ToolPermissionContext::new(PermissionMode::Default)
+        .with_task_manager(Arc::new(TaskManager::default()))
+        .with_pending_approval(rust_agent::state::permission_context::PendingApproval {
+            tool_name: "EnterPlanMode".into(),
+            tool_input: "draft feature work".into(),
+            message: "approve entering plan mode: draft feature work".into(),
+        });
+    let app_state = AppState {
+        surface: InteractionSurface::Cli,
+        session_mode: SessionMode::Interactive,
+        client_type: ClientType::Cli,
+        session_source: SessionSource::LocalCli,
+        runtime_role: RuntimeRole::Coordinator,
+        permission_context: permission_context.clone(),
+        cost_tracker: CostTracker::default(),
+        notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
+        startup_trace: Vec::new(),
+        active_session_id: "cli-session".into(),
+        session_store: None,
+        session: None,
+        history: None,
+        restored_session: None,
+    };
+
+    let result = router
+        .route(
+            &NormalizedInput::from_session_raw(InteractionSurface::Cli, "cli-session", "approve"),
+            &app_state,
+        )
+        .await
+        .expect("approval should resolve");
+
+    assert_eq!(result, CommandResult::Message("entered plan mode: draft feature work".into()));
+    assert_eq!(permission_context.mode(), PermissionMode::Plan);
+    assert!(permission_context.pending_approval().is_none());
+}
+
+#[tokio::test]
+async fn router_denies_pending_request_without_session_approval() {
+    let router = CommandRouter::new(CommandRegistry::new(), Box::new(DefaultSurfaceAuthorizer));
+    let permission_context = ToolPermissionContext::new(PermissionMode::Default)
+        .with_task_manager(Arc::new(TaskManager::default()))
+        .with_pending_approval(rust_agent::state::permission_context::PendingApproval {
+            tool_name: "Bash".into(),
+            tool_input: serde_json::json!({"command": "sudo whoami"}).to_string(),
+            message: "command touches privileged system state".into(),
+        });
+    let app_state = AppState {
+        surface: InteractionSurface::Cli,
+        session_mode: SessionMode::Interactive,
+        client_type: ClientType::Cli,
+        session_source: SessionSource::LocalCli,
+        runtime_role: RuntimeRole::Coordinator,
+        permission_context: permission_context.clone(),
+        cost_tracker: CostTracker::default(),
+        notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
+        startup_trace: Vec::new(),
+        active_session_id: "cli-session".into(),
+        session_store: None,
+        session: None,
+        history: None,
+        restored_session: None,
+    };
+
+    let result = router
+        .route(
+            &NormalizedInput::from_session_raw(InteractionSurface::Cli, "cli-session", "deny"),
+            &app_state,
+        )
+        .await
+        .expect("denial should resolve");
+
+    assert_eq!(result, CommandResult::Message("Denied approval for Bash".into()));
+    assert_eq!(permission_context.mode(), PermissionMode::Default);
+    assert!(permission_context.pending_approval().is_none());
+}

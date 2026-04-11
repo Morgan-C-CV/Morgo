@@ -18,15 +18,31 @@ fn hook_registry_records_lifecycle_events() {
         HookDecision::Allow
     );
     assert_eq!(
+        run_hook(
+            &registry,
+            HookEvent::PermissionRequest {
+                tool_name: "Read".into(),
+            },
+        )
+        .decision,
+        HookDecision::Allow
+    );
+    assert_eq!(
         run_hook(&registry, HookEvent::Stop).decision,
         HookDecision::Allow
     );
 
     let events = registry.recorded_events();
-    assert_eq!(events.len(), 3);
+    assert_eq!(events.len(), 4);
     assert_eq!(events[0], HookEvent::SessionStart);
     assert_eq!(events[1], HookEvent::Setup);
-    assert_eq!(events[2], HookEvent::Stop);
+    assert_eq!(
+        events[2],
+        HookEvent::PermissionRequest {
+            tool_name: "Read".into(),
+        }
+    );
+    assert_eq!(events[3], HookEvent::Stop);
 }
 
 #[test]

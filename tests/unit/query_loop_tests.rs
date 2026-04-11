@@ -404,6 +404,78 @@ async fn query_loop_respects_pre_tool_hook_denial() {
             .recorded_events()
             .contains(&HookEvent::UserPromptSubmit)
     );
+    assert!(engine.context.hook_registry.recorded_events().contains(
+        &HookEvent::PermissionDenied {
+            tool_name: "Agent".into(),
+            reason: "tool Agent denied by hook policy".into(),
+        }
+    ));
+}
+
+
+#[tokio::test]
+async fn query_loop_runs_permission_request_hook_before_tool_execution() {
+    let registry = ToolRegistry::new().register(Arc::new(AgentTool));
+    let mut permission_context = ToolPermissionContext::new(PermissionMode::Default)
+        .with_task_manager(Arc::new(TaskManager::default()));
+    permission_context.always_allow_rules.push("Agent".into());
+
+    let context = QueryContext {
+        app_state: AppState {
+            surface: InteractionSurface::Cli,
+            session_mode: SessionMode::Headless,
+            client_type: ClientType::Cli,
+            session_source: SessionSource::LocalCli,
+            runtime_role: RuntimeRole::Coordinator,
+            permission_context,
+            cost_tracker: CostTracker::default(),
+            notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
+            startup_trace: Vec::new(),
+            active_session_id: "test-session".into(),
+            session_store: None,
+            session: None,
+            history: None,
+            restored_session: None,
+        },
+        tool_registry: registry,
+        api_client: ModelProviderClient::with_scripted_turns(vec![vec![
+            StreamEvent::MessageStart,
+            StreamEvent::ToolUse {
+                tool_name: "Agent".into(),
+                input: "inspect file".into(),
+            },
+            StreamEvent::MessageStop {
+                stop_reason: StopReason::ToolUse,
+            },
+        ]]),
+        compactor: ReactiveCompactor,
+        hook_registry: HookRegistry::default().register_rule(HookRule {
+            event: HookEventMatcher::PermissionRequest,
+            deny_match: None,
+            append_message: Some("permission request observed".into()),
+            prevent_continuation: false,
+            permission_decision: Some("deny".into()),
+            updated_input: None,
+            additional_context: None,
+        }),
+        agent_id: None,
+        system_prompt: "test system".into(),
+        tools_prompt: "test tools".into(),
+        context_prompt: "test context".into(),
+    };
+
+    let engine = QueryEngine::new(context);
+    let result = engine.submit_turn(Message::user("inspect file")).await;
+
+    assert_eq!(result.state, QueryLoopState::Interrupted);
+    assert_eq!(result.terminal, Terminal::AbortedTools);
+    assert!(result.messages[0].content.contains("permission request observed"));
+    assert!(result.messages[1].content.contains("denied before execution"));
+    assert!(engine.context.hook_registry.recorded_events().contains(
+        &HookEvent::PermissionRequest {
+            tool_name: "Agent".into(),
+        }
+    ));
 }
 
 #[tokio::test]

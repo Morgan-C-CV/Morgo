@@ -178,7 +178,6 @@ impl RuntimeBootstrap {
                 .with_persistence(self.session_store.clone(), task_list_session_id),
         );
         let coordinator_tools = tool_inventory.assemble_for_role(RuntimeRole::Coordinator);
-        let worker_tools = tool_inventory.assemble_for_role(RuntimeRole::Worker);
         let permission_context = ToolPermissionContext::new(if self.cli.init_only {
             PermissionMode::Plan
         } else {
@@ -189,7 +188,7 @@ impl RuntimeBootstrap {
         .with_active_session_id(active_session_id.clone())
         .with_deferred_tools(true)
         .with_interactive_tools(true)
-        .with_inherited_tool_registry(worker_tools.clone())
+        .with_inherited_tool_registry(coordinator_tools.clone())
         .with_inherited_hook_registry(hook_registry.clone());
 
         state.record_phase(BootstrapPhase::InitializeRuntime);

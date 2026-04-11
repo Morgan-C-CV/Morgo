@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use crate::hook::registry::HookRegistry;
 use crate::task::list_manager::TaskListManager;
@@ -13,9 +13,16 @@ pub enum PermissionMode {
     Plan,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingApproval {
+    pub tool_name: String,
+    pub tool_input: String,
+    pub message: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct ToolPermissionContext {
-    pub mode: PermissionMode,
+    mode: Arc<RwLock<PermissionMode>>,
     pub always_allow_rules: Vec<String>,
     pub always_deny_rules: Vec<String>,
     pub always_ask_rules: Vec<String>,
@@ -24,6 +31,7 @@ pub struct ToolPermissionContext {
     pub task_manager: Option<Arc<TaskManager>>,
     pub task_list_manager: Option<Arc<TaskListManager>>,
     pub active_session_id: Option<String>,
+    pub pending_approval: Arc<RwLock<Option<PendingApproval>>>,
     pub subagent_scripted_turns: Option<Vec<Vec<crate::service::api::streaming::StreamEvent>>>,
     pub inherited_tool_registry: Option<ToolRegistry>,
     pub inherited_hook_registry: Option<HookRegistry>,
@@ -32,7 +40,7 @@ pub struct ToolPermissionContext {
 impl ToolPermissionContext {
     pub fn new(mode: PermissionMode) -> Self {
         Self {
-            mode,
+            mode: Arc::new(RwLock::new(mode)),
             always_allow_rules: Vec::new(),
             always_deny_rules: Vec::new(),
             always_ask_rules: Vec::new(),
@@ -41,6 +49,7 @@ impl ToolPermissionContext {
             task_manager: None,
             task_list_manager: None,
             active_session_id: None,
+            pending_approval: Arc::new(RwLock::new(None)),
             subagent_scripted_turns: None,
             inherited_tool_registry: None,
             inherited_hook_registry: None,
@@ -60,6 +69,33 @@ impl ToolPermissionContext {
     pub fn with_active_session_id(mut self, active_session_id: impl Into<String>) -> Self {
         self.active_session_id = Some(active_session_id.into());
         self
+    }
+
+    pub fn with_pending_approval(self, pending_approval: PendingApproval) -> Self {
+        if let Ok(mut slot) = self.pending_approval.write() {
+            *slot = Some(pending_approval);
+        }
+        self
+    }
+
+    pub fn mode(&self) -> PermissionMode {
+        self.mode.read().map(|mode| *mode).unwrap_or(PermissionMode::Default)
+    }
+
+    pub fn set_mode(&self, mode: PermissionMode) {
+        if let Ok(mut slot) = self.mode.write() {
+            *slot = mode;
+        }
+    }
+
+    pub fn set_pending_approval(&self, pending_approval: Option<PendingApproval>) {
+        if let Ok(mut slot) = self.pending_approval.write() {
+            *slot = pending_approval;
+        }
+    }
+
+    pub fn pending_approval(&self) -> Option<PendingApproval> {
+        self.pending_approval.read().ok().and_then(|slot| slot.clone())
     }
 
     pub fn with_subagent_scripted_turns(

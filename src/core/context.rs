@@ -34,6 +34,7 @@ impl QueryContext {
         app_state.history = None;
         app_state.restored_session = None;
         let mut permission_context = app_state.permission_context.clone();
+        permission_context.set_pending_approval(None);
         permission_context.inherited_tool_registry = Some(
             self.tool_registry
                 .assemble_for_role(RuntimeRole::Worker),

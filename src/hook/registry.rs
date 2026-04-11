@@ -14,6 +14,13 @@ pub enum HookEvent {
     PostToolUseFailure {
         tool_name: String,
     },
+    PermissionRequest {
+        tool_name: String,
+    },
+    PermissionDenied {
+        tool_name: String,
+        reason: String,
+    },
     Stop,
     SubagentStop,
     Notification {
@@ -45,6 +52,8 @@ pub enum HookEventMatcher {
     PreToolUse,
     PostToolUse,
     PostToolUseFailure,
+    PermissionRequest,
+    PermissionDenied,
     Stop,
     SubagentStop,
     Notification,

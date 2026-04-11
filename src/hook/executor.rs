@@ -74,8 +74,12 @@ pub fn run_hook(registry: &HookRegistry, event: HookEvent) -> HookResult {
                 result.decision = HookDecision::Deny(match &event {
                     HookEvent::PreToolUse { tool_name }
                     | HookEvent::PostToolUse { tool_name }
-                    | HookEvent::PostToolUseFailure { tool_name } => {
+                    | HookEvent::PostToolUseFailure { tool_name }
+                    | HookEvent::PermissionRequest { tool_name } => {
                         format!("tool {tool_name} denied by hook policy")
+                    }
+                    HookEvent::PermissionDenied { tool_name, reason } => {
+                        format!("tool {tool_name} denied after permission rejection: {reason}")
                     }
                     HookEvent::Notification {
                         notification_type, ..
@@ -107,6 +111,14 @@ fn matches_event(matcher: &HookEventMatcher, event: &HookEvent) -> bool {
                 HookEventMatcher::PostToolUseFailure,
                 HookEvent::PostToolUseFailure { .. }
             )
+            | (
+                HookEventMatcher::PermissionRequest,
+                HookEvent::PermissionRequest { .. }
+            )
+            | (
+                HookEventMatcher::PermissionDenied,
+                HookEvent::PermissionDenied { .. }
+            )
             | (HookEventMatcher::Stop, HookEvent::Stop)
             | (HookEventMatcher::SubagentStop, HookEvent::SubagentStop)
             | (
@@ -120,7 +132,12 @@ fn matches_denial(event: &HookEvent, deny_match: &str) -> bool {
     match event {
         HookEvent::PreToolUse { tool_name }
         | HookEvent::PostToolUse { tool_name }
-        | HookEvent::PostToolUseFailure { tool_name } => tool_name == deny_match,
+        | HookEvent::PostToolUseFailure { tool_name }
+        | HookEvent::PermissionRequest { tool_name } => tool_name == deny_match,
+        HookEvent::PermissionDenied {
+            tool_name,
+            reason,
+        } => tool_name == deny_match || reason.contains(deny_match),
         HookEvent::Notification {
             title,
             body,

@@ -6,6 +6,13 @@ use crate::hook::registry::HookEvent;
 use crate::service::api::streaming::{StopReason, StreamEvent};
 use tokio::time::{Duration, timeout};
 
+#[derive(Debug, Clone)]
+struct PreparedTurn {
+    prompt: String,
+    token_estimate: usize,
+}
+
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueryParams {
     pub messages: Vec<Message>,
@@ -112,94 +119,15 @@ pub async fn run_query_loop_with_params(
     let mut current_input = input;
 
     loop {
-        if let Some(max_turns) = params.max_turns {
-            if state.turn_count >= max_turns {
-                let count = state.turn_count;
-                return finalize_with_stop_hook(
-                    context,
-                    state,
-                    QueryLoopState::Failed,
-                    Terminal::MaxTurns { count },
-                    events,
-                );
-            }
+        if let Some(result) = check_turn_limits(context, &state, &params, &events) {
+            return result;
         }
-
-        let token_estimate = current_input.content.len();
-        context
-            .app_state
-            .cost_tracker
-            .record_model_usage("unknown", token_estimate, 0, 0, 0);
-        if let Some(max_budget_input_tokens) = params.max_budget_input_tokens {
-            if token_estimate >= max_budget_input_tokens {
-                events.push(EngineEvent::Notice {
-                    kind: "budget",
-                    message: format!(
-                        "token budget continuation requested at input size {token_estimate}"
-                    ),
-                });
-                if !params.messages.is_empty() || state.transition == Some(Continue::TokenBudgetContinuation) {
-                    return finalize_with_stop_hook(
-                        context,
-                        state,
-                        QueryLoopState::Failed,
-                        Terminal::MaxBudget {
-                            budget_usd_cents: token_estimate as u64,
-                        },
-                        events,
-                    );
-                }
-                state.transition = Some(Continue::TokenBudgetContinuation);
-                return finalize_with_stop_hook(
-                    context,
-                    state,
-                    QueryLoopState::Completed,
-                    Terminal::Completed,
-                    events,
-                );
-            }
-        }
-
-        let prompt_hook = run_hook(&context.hook_registry, HookEvent::UserPromptSubmit);
-        for message in prompt_hook.messages.clone() {
-            events.push(EngineEvent::MessageCommitted(message.clone()));
-            state.messages.push(message);
-        }
-        if let HookDecision::Deny(reason) = prompt_hook.decision {
-            let denial = Message::assistant(format!("hook denied prompt: {reason}"));
-            events.push(EngineEvent::Terminal(Terminal::ModelError(reason)));
-            state.messages.push(denial);
-            return QueryLoopResult {
-                state: QueryLoopState::Failed,
-                terminal: Terminal::ModelError("prompt denied by hook".into()),
-                messages: state.messages,
-                transition: state.transition,
-                events,
-            };
-        }
-
-        if context.compactor.should_compact(token_estimate, 512) {
-            let compact_message = Message::assistant("compaction requested before continuing the turn");
-            events.push(EngineEvent::Notice {
-                kind: "compaction",
-                message: "reactive compact requested before continuing the turn".into(),
-            });
-            events.push(EngineEvent::Transition(Continue::ReactiveCompactRetry));
-            events.push(EngineEvent::MessageCommitted(compact_message.clone()));
-            state.transition = Some(Continue::ReactiveCompactRetry);
-            state.has_attempted_reactive_compact = true;
-            state.messages.push(compact_message);
-            return finalize_with_stop_hook(
-                context,
-                state,
-                QueryLoopState::Compacting,
-                Terminal::Completed,
-                events,
-            );
-        }
-
-        let events_for_turn = context.api_client.stream_message(&current_input).await;
-        if events_for_turn.is_empty() {
+        let prepared = match prepare_turn(context, &mut state, &params, &current_input, &mut events) {
+            Ok(prepared) => prepared,
+            Err(result) => return result,
+        };
+        let streamed = stream_model_turn(context, &prepared).await;
+        if streamed.is_empty() {
             return finalize_with_stop_hook(
                 context,
                 state,
@@ -209,49 +137,19 @@ pub async fn run_query_loop_with_params(
             );
         }
 
+        let turn_events = std::mem::take(&mut events);
         let turn_outcome = consume_model_stream(
             context,
             &mut state,
-            events,
-            events_for_turn,
+            turn_events,
+            streamed,
             params.max_output_tokens_recovery_limit,
         )
         .await;
-        events = turn_outcome.events;
 
-        match turn_outcome.decision {
-            TurnDecision::Return(loop_state, terminal) => {
-                return finalize_with_stop_hook(context, loop_state, terminal_state(&terminal), terminal, events);
-            }
-            TurnDecision::ContinueWith(next_input, continue_reason) => {
-                state = turn_outcome.state;
-                state.turn_count += 1;
-                state.transition = Some(continue_reason.clone());
-                events.push(EngineEvent::Transition(continue_reason));
-                current_input = next_input;
-                state
-                    .messages
-                    .extend(inbox_messages(context, context.agent_id.as_deref()));
-            }
-            TurnDecision::AwaitMailbox => {
-                if let Some(next_input) = next_worker_mailbox_message(context).await {
-                    state.turn_count += 1;
-                    state.transition = Some(Continue::NextTurn);
-                    events.push(EngineEvent::Transition(Continue::NextTurn));
-                    current_input = next_input;
-                    state
-                        .messages
-                        .extend(inbox_messages(context, context.agent_id.as_deref()));
-                    continue;
-                }
-                return finalize_with_stop_hook(
-                    context,
-                    state,
-                    QueryLoopState::Completed,
-                    Terminal::Completed,
-                    events,
-                );
-            }
+        match decide_next_turn(context, &mut state, turn_outcome, &mut current_input, &mut events).await {
+            NextTurnDecision::Return(result) => return result,
+            NextTurnDecision::Continue => continue,
         }
     }
 }
@@ -266,6 +164,190 @@ enum TurnDecision {
     Return(LoopState, Terminal),
     ContinueWith(Message, Continue),
     AwaitMailbox,
+}
+
+enum NextTurnDecision {
+    Return(QueryLoopResult),
+    Continue,
+}
+
+fn check_turn_limits(
+    context: &QueryContext,
+    state: &LoopState,
+    params: &QueryParams,
+    events: &[EngineEvent],
+) -> Option<QueryLoopResult> {
+    if let Some(max_turns) = params.max_turns {
+        if state.turn_count >= max_turns {
+            let count = state.turn_count;
+            return Some(finalize_with_stop_hook(
+                context,
+                state.clone(),
+                QueryLoopState::Failed,
+                Terminal::MaxTurns { count },
+                events.to_vec(),
+            ));
+        }
+    }
+    None
+}
+
+fn prepare_turn(
+    context: &QueryContext,
+    state: &mut LoopState,
+    params: &QueryParams,
+    current_input: &Message,
+    events: &mut Vec<EngineEvent>,
+) -> Result<PreparedTurn, QueryLoopResult> {
+    let prepared = PreparedTurn {
+        prompt: current_input.content.clone(),
+        token_estimate: current_input.content.len(),
+    };
+    context
+        .app_state
+        .cost_tracker
+        .record_model_usage("unknown", prepared.token_estimate, 0, 0, 0);
+
+    if let Some(max_budget_input_tokens) = params.max_budget_input_tokens {
+        if prepared.token_estimate >= max_budget_input_tokens {
+            events.push(EngineEvent::Notice {
+                kind: "budget",
+                message: format!(
+                    "token budget continuation requested at input size {}",
+                    prepared.token_estimate
+                ),
+            });
+            if !params.messages.is_empty() || state.transition == Some(Continue::TokenBudgetContinuation) {
+                return Err(finalize_with_stop_hook(
+                    context,
+                    state.clone(),
+                    QueryLoopState::Failed,
+                    Terminal::MaxBudget {
+                        budget_usd_cents: prepared.token_estimate as u64,
+                    },
+                    events.clone(),
+                ));
+            }
+            state.transition = Some(Continue::TokenBudgetContinuation);
+            return Err(finalize_with_stop_hook(
+                context,
+                state.clone(),
+                QueryLoopState::Completed,
+                Terminal::Completed,
+                events.clone(),
+            ));
+        }
+    }
+
+    let prompt_hook = process_user_input(context, state, events);
+    if let Some(result) = prompt_hook {
+        return Err(result);
+    }
+
+    if context.compactor.should_compact(prepared.token_estimate, 512) {
+        let compact_message = Message::assistant("compaction requested before continuing the turn");
+        events.push(EngineEvent::Notice {
+            kind: "compaction",
+            message: "reactive compact requested before continuing the turn".into(),
+        });
+        events.push(EngineEvent::Transition(Continue::ReactiveCompactRetry));
+        events.push(EngineEvent::MessageCommitted(compact_message.clone()));
+        state.transition = Some(Continue::ReactiveCompactRetry);
+        state.has_attempted_reactive_compact = true;
+        state.messages.push(compact_message);
+        return Err(finalize_with_stop_hook(
+            context,
+            state.clone(),
+            QueryLoopState::Compacting,
+            Terminal::Completed,
+            events.clone(),
+        ));
+    }
+
+    Ok(prepared)
+}
+
+fn process_user_input(
+    context: &QueryContext,
+    state: &mut LoopState,
+    events: &mut Vec<EngineEvent>,
+) -> Option<QueryLoopResult> {
+    let prompt_hook = run_hook(&context.hook_registry, HookEvent::UserPromptSubmit);
+    for message in prompt_hook.messages.clone() {
+        events.push(EngineEvent::MessageCommitted(message.clone()));
+        state.messages.push(message);
+    }
+    if let HookDecision::Deny(reason) = prompt_hook.decision {
+        let denial = Message::assistant(format!("hook denied prompt: {reason}"));
+        events.push(EngineEvent::Terminal(Terminal::ModelError(reason)));
+        state.messages.push(denial);
+        return Some(QueryLoopResult {
+            state: QueryLoopState::Failed,
+            terminal: Terminal::ModelError("prompt denied by hook".into()),
+            messages: state.messages.clone(),
+            transition: state.transition.clone(),
+            events: events.clone(),
+        });
+    }
+    None
+}
+
+async fn stream_model_turn(context: &QueryContext, prepared: &PreparedTurn) -> Vec<StreamEvent> {
+    context
+        .api_client
+        .stream_message(&Message::user(prepared.prompt.clone()))
+        .await
+}
+
+async fn decide_next_turn(
+    context: &QueryContext,
+    state: &mut LoopState,
+    turn_outcome: TurnOutcome,
+    current_input: &mut Message,
+    events: &mut Vec<EngineEvent>,
+) -> NextTurnDecision {
+    match turn_outcome.decision {
+        TurnDecision::Return(loop_state, terminal) => NextTurnDecision::Return(finalize_with_stop_hook(
+            context,
+            loop_state,
+            terminal_state(&terminal),
+            terminal,
+            turn_outcome.events,
+        )),
+        TurnDecision::ContinueWith(next_input, continue_reason) => {
+            *state = turn_outcome.state;
+            state.turn_count += 1;
+            state.transition = Some(continue_reason.clone());
+            *events = turn_outcome.events;
+            events.push(EngineEvent::Transition(continue_reason));
+            *current_input = next_input;
+            state
+                .messages
+                .extend(inbox_messages(context, context.agent_id.as_deref()));
+            NextTurnDecision::Continue
+        }
+        TurnDecision::AwaitMailbox => {
+            if let Some(next_input) = next_worker_mailbox_message(context).await {
+                *state = turn_outcome.state;
+                state.turn_count += 1;
+                state.transition = Some(Continue::NextTurn);
+                *events = turn_outcome.events;
+                events.push(EngineEvent::Transition(Continue::NextTurn));
+                *current_input = next_input;
+                state
+                    .messages
+                    .extend(inbox_messages(context, context.agent_id.as_deref()));
+                return NextTurnDecision::Continue;
+            }
+            NextTurnDecision::Return(finalize_with_stop_hook(
+                context,
+                turn_outcome.state,
+                QueryLoopState::Completed,
+                Terminal::Completed,
+                turn_outcome.events,
+            ))
+        }
+    }
 }
 
 async fn consume_model_stream(
@@ -511,6 +593,13 @@ async fn execute_tool_phase(
     );
     if let crate::tool::definition::PermissionDecision::Deny { message: reason, .. } = hook_permission_decision {
         let denial = Message::assistant(format!("tool {tool_name} denied by hook: {reason}"));
+        let permission_denied_hook = run_hook(
+            &context.hook_registry,
+            HookEvent::PermissionDenied {
+                tool_name: tool_name.clone(),
+                reason: reason.clone(),
+            },
+        );
         let post_failure_hook = run_hook(
             &context.hook_registry,
             HookEvent::PostToolUseFailure {
@@ -519,6 +608,10 @@ async fn execute_tool_phase(
         );
         state.messages.push(denial.clone());
         engine_events.push(EngineEvent::MessageCommitted(denial));
+        for message in permission_denied_hook.messages {
+            engine_events.push(EngineEvent::MessageCommitted(message.clone()));
+            state.messages.push(message);
+        }
         for message in post_failure_hook.messages {
             engine_events.push(EngineEvent::MessageCommitted(message.clone()));
             state.messages.push(message);
@@ -531,6 +624,13 @@ async fn execute_tool_phase(
     }
     if let HookDecision::Deny(reason) = pre_tool_hook.decision {
         let denial = Message::assistant(format!("tool {tool_name} denied by hook: {reason}"));
+        let permission_denied_hook = run_hook(
+            &context.hook_registry,
+            HookEvent::PermissionDenied {
+                tool_name: tool_name.clone(),
+                reason: reason.clone(),
+            },
+        );
         let post_failure_hook = run_hook(
             &context.hook_registry,
             HookEvent::PostToolUseFailure {
@@ -539,7 +639,47 @@ async fn execute_tool_phase(
         );
         state.messages.push(denial.clone());
         engine_events.push(EngineEvent::MessageCommitted(denial));
+        for message in permission_denied_hook.messages {
+            engine_events.push(EngineEvent::MessageCommitted(message.clone()));
+            state.messages.push(message);
+        }
         for message in post_failure_hook.messages {
+            engine_events.push(EngineEvent::MessageCommitted(message.clone()));
+            state.messages.push(message);
+        }
+        return TurnOutcome {
+            state: state.clone(),
+            events: engine_events,
+            decision: TurnDecision::Return(state.clone(), Terminal::AbortedTools),
+        };
+    }
+
+    let permission_request_hook = run_hook(
+        &context.hook_registry,
+        HookEvent::PermissionRequest {
+            tool_name: tool_name.clone(),
+        },
+    );
+    for message in permission_request_hook.messages.clone() {
+        engine_events.push(EngineEvent::MessageCommitted(message.clone()));
+        state.messages.push(message);
+    }
+    let requested_permission_decision = crate::hook::permission_resolution::resolve_hook_permission_decision(
+        &permission_request_hook.payload.permission_result,
+        crate::tool::definition::PermissionDecision::Allow,
+    );
+    if let crate::tool::definition::PermissionDecision::Deny { message: reason, .. } = requested_permission_decision {
+        let denial = Message::assistant(format!("tool {tool_name} denied before execution: {reason}"));
+        let permission_denied_hook = run_hook(
+            &context.hook_registry,
+            HookEvent::PermissionDenied {
+                tool_name: tool_name.clone(),
+                reason: reason.clone(),
+            },
+        );
+        engine_events.push(EngineEvent::MessageCommitted(denial.clone()));
+        state.messages.push(denial);
+        for message in permission_denied_hook.messages {
             engine_events.push(EngineEvent::MessageCommitted(message.clone()));
             state.messages.push(message);
         }
@@ -603,12 +743,23 @@ async fn execute_tool_phase(
                 }
             }
             Some(crate::tool::definition::ToolResult::Denied(reason)) => {
+                let permission_denied_hook = run_hook(
+                    &context.hook_registry,
+                    HookEvent::PermissionDenied {
+                        tool_name: tool_name.clone(),
+                        reason: reason.clone(),
+                    },
+                );
                 let post_failure_hook = run_hook(
                     &context.hook_registry,
                     HookEvent::PostToolUseFailure {
                         tool_name: tool_name.clone(),
                     },
                 );
+                for message in permission_denied_hook.messages {
+                    engine_events.push(EngineEvent::MessageCommitted(message.clone()));
+                    state.messages.push(message);
+                }
                 for message in post_failure_hook.messages {
                     engine_events.push(EngineEvent::MessageCommitted(message.clone()));
                     state.messages.push(message);
@@ -625,6 +776,33 @@ async fn execute_tool_phase(
                 engine_events.push(EngineEvent::MessageCommitted(missing_tool_result.clone()));
                 state.messages.push(denial);
                 state.messages.push(missing_tool_result);
+                TurnOutcome {
+                    state: state.clone(),
+                    events: engine_events,
+                    decision: TurnDecision::Return(state.clone(), Terminal::AbortedTools),
+                }
+            }
+            Some(crate::tool::definition::ToolResult::PendingApproval {
+                tool_name,
+                message,
+            }) => {
+                context
+                    .app_state
+                    .permission_context
+                    .set_pending_approval(Some(crate::state::permission_context::PendingApproval {
+                        tool_name: tool_name.clone(),
+                        tool_input: effective_tool_input.clone(),
+                        message: message.clone(),
+                    }));
+                engine_events.push(EngineEvent::PendingApproval {
+                    tool_name: tool_name.clone(),
+                    message: message.clone(),
+                });
+                let approval_message = Message::assistant(format!(
+                    "approval required for {tool_name}: {message}"
+                ));
+                engine_events.push(EngineEvent::MessageCommitted(approval_message.clone()));
+                state.messages.push(approval_message);
                 TurnOutcome {
                     state: state.clone(),
                     events: engine_events,

@@ -328,6 +328,79 @@ async fn registry_denies_unsafe_bash_in_plan_mode() {
 }
 
 #[tokio::test]
+async fn registry_returns_pending_approval_for_ask_only_bash() {
+    let registry = ToolRegistry::new().register(Arc::new(BashTool));
+    let result = registry
+        .invoke(
+            &ToolCall {
+                name: "Bash".into(),
+                input: serde_json::json!({
+                    "command": "sudo whoami"
+                })
+                .to_string(),
+            },
+            &ToolPermissionContext::new(PermissionMode::Default),
+        )
+        .await
+        .expect("registry should return pending approval result");
+
+    assert_eq!(
+        result,
+        ToolResult::PendingApproval {
+            tool_name: "Bash".into(),
+            message: "command touches privileged system state".into(),
+        }
+    );
+}
+
+#[tokio::test]
+async fn bash_tool_launches_background_task() {
+    let manager = Arc::new(rust_agent::task::manager::TaskManager::default());
+    let permissions = ToolPermissionContext::new(PermissionMode::Default)
+        .with_task_manager(manager.clone())
+        .with_active_session_id("session-bash");
+
+    let result = BashTool
+        .invoke(
+            &ToolCall {
+                name: "Bash".into(),
+                input: serde_json::json!({
+                    "command": "printf 'background hello'",
+                    "run_in_background": true,
+                    "description": "background demo"
+                })
+                .to_string(),
+            },
+            &permissions,
+        )
+        .await
+        .expect("background bash should launch");
+
+    let ToolResult::Text(text) = result else {
+        panic!("expected text result");
+    };
+    assert!(text.contains("background bash task task-0 launched"));
+
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            let task = manager.get("task-0").expect("task should exist");
+            if task.status == rust_agent::task::types::TaskStatus::Completed {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("background task should complete");
+
+    let output = manager
+        .get_output("task-0", 0)
+        .expect("background task output should exist");
+    assert!(output.content.contains("description: background demo"));
+    assert!(output.content.contains("stdout:\nbackground hello"));
+}
+
+#[tokio::test]
 async fn registry_rejects_non_json_input_for_schema_backed_tools() {
     let registry = ToolRegistry::new().register(Arc::new(FileEditTool));
     let error = registry

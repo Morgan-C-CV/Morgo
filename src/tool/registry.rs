@@ -106,11 +106,32 @@ impl ToolRegistry {
             crate::tool::definition::PermissionDecision::Allow => {
                 tool.invoke(call, permissions).await
             }
-            crate::tool::definition::PermissionDecision::Ask { message, .. }
-            | crate::tool::definition::PermissionDecision::Deny { message, .. } => {
+            crate::tool::definition::PermissionDecision::Ask { message, .. } => {
+                Ok(ToolResult::PendingApproval {
+                    tool_name: metadata.name.to_string(),
+                    message,
+                })
+            }
+            crate::tool::definition::PermissionDecision::Deny { message, .. } => {
                 Ok(ToolResult::Denied(message))
             }
         }
+    }
+
+    pub async fn invoke_with_approval(
+        &self,
+        call: &ToolCall,
+        permissions: &ToolPermissionContext,
+    ) -> anyhow::Result<ToolResult> {
+        let tool = self
+            .find(call)
+            .ok_or_else(|| anyhow::anyhow!("unknown tool {}", call.name))?;
+        let metadata = tool.metadata();
+        if tool.input_schema().is_some() && call.json_input().is_none() {
+            anyhow::bail!("tool {} requires JSON-structured input", metadata.name);
+        }
+        tool.validate_input(call).await?;
+        tool.invoke(call, permissions).await
     }
 }
 

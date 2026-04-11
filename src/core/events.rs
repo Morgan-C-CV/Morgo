@@ -15,6 +15,7 @@ pub enum EngineEvent {
     MessageCommitted(Message),
     ToolCallStarted { tool_name: String, input: String },
     ToolResultCommitted { tool_name: String, content: String },
+    PendingApproval { tool_name: String, message: String },
     Notice { kind: &'static str, message: String },
     Transition(Continue),
     Terminal(Terminal),

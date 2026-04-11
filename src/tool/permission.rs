@@ -28,7 +28,7 @@ pub fn evaluate_tool_permission(
         };
     }
 
-    if metadata.destructive && matches!(permissions.mode, PermissionMode::Plan) {
+    if metadata.destructive && matches!(permissions.mode(), PermissionMode::Plan) {
         return PermissionDecision::Deny {
             message: format!("tool {} not allowed in plan mode", metadata.name),
             reason: crate::tool::definition::PermissionDecisionReason::Mode,

@@ -140,6 +140,7 @@ fn classify_result(result: &ToolResult) -> ToolExecutionOutcomeKind {
     match result {
         ToolResult::Text(_) => ToolExecutionOutcomeKind::Success,
         ToolResult::Denied(_) => ToolExecutionOutcomeKind::Denied,
+        ToolResult::PendingApproval { .. } => ToolExecutionOutcomeKind::PendingApproval,
         ToolResult::Interrupted(_) => ToolExecutionOutcomeKind::Interrupted,
         ToolResult::Progress(_) => ToolExecutionOutcomeKind::Progress,
         ToolResult::ResultTooLarge(_) => ToolExecutionOutcomeKind::ResultTooLarge,
