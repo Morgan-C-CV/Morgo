@@ -27,7 +27,7 @@ use crate::plan::manager::PlanManager;
 use crate::security::authorizer::DefaultSurfaceAuthorizer;
 use crate::service::api::client::{ModelProviderClient, ModelProviderConfig, ModelPricing};
 use crate::service::compact::reactive_compact::ReactiveCompactor;
-use crate::service::mcp::config::load_server_configs;
+use crate::service::mcp::config::load_server_configs_with_diagnostics;
 use crate::service::mcp::runtime::McpRuntime;
 use crate::skills::bundled::bundled_skills;
 use crate::skills::loader::load_filesystem_skills;
@@ -193,9 +193,10 @@ impl RuntimeBootstrap {
         let mut discovered_skills = bundled_skills();
         discovered_skills.extend(load_filesystem_skills(&state.current_cwd).unwrap_or_default());
         let skill_registry = Arc::new(SkillRegistry::new(discovered_skills));
-        let mcp_runtime = Arc::new(McpRuntime::new(
-            Arc::new(crate::service::mcp::client::MockMcpClient),
-            load_server_configs(&state.current_cwd),
+        let mcp_config_result = load_server_configs_with_diagnostics(&state.current_cwd);
+        let mcp_runtime = Arc::new(McpRuntime::new_with_config_result(
+            Arc::new(crate::service::mcp::client::RoutingMcpClient::default()),
+            mcp_config_result,
         ));
         let coordinator_tools = tool_inventory.assemble_for_role(RuntimeRole::Coordinator);
         let permission_context = ToolPermissionContext::new(if self.cli.init_only {

@@ -37,7 +37,18 @@ impl Command for McpCommand {
 
         if args.is_empty() || args == "list" || args == "status" {
             let servers = runtime.list_servers().await;
-            let mut lines = vec!["MCP servers:".to_string()];
+            let config_load = runtime.config_load_result();
+            let mut lines = vec![
+                "MCP servers:".to_string(),
+                format!(
+                    "config_source={} path={}",
+                    config_load.source.as_str(),
+                    config_load.path.display()
+                ),
+            ];
+            for diagnostic in &config_load.diagnostics {
+                lines.push(format!("diagnostic: {}", diagnostic));
+            }
             for server in servers {
                 let error_suffix = server
                     .last_error
@@ -46,10 +57,11 @@ impl Command for McpCommand {
                     .map(|value| format!("; last_error={}", value.trim()))
                     .unwrap_or_default();
                 lines.push(format!(
-                    "- {} ({}) cmd={} status={} tools={} resources={}{}",
+                    "- {} ({}) cmd={} transport={} status={} tools={} resources={}{}",
                     server.config.name,
                     server.config.id,
                     server.config.command,
+                    server.config.transport.as_str(),
                     server.status.as_str(),
                     server.tool_count,
                     server.resource_count,
