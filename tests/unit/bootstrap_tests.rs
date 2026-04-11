@@ -1,15 +1,24 @@
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use rust_agent::bootstrap::{
     BootstrapCli, BootstrapPhase, BootstrapState, InteractionSurface, RuntimeBootstrap, SessionMode,
 };
 use rust_agent::core::message::Message;
 use rust_agent::history::session::{
-    InMemorySessionStore, SessionHistory, SessionHistoryEntry, SessionId, SessionSnapshot,
-    SessionStore,
+    FileBackedSessionStore, InMemorySessionStore, SessionHistory, SessionHistoryEntry, SessionId,
+    SessionSnapshot, SessionStore,
 };
 use rust_agent::hook::registry::HookEvent;
 use rust_agent::task::list_types::{TaskListItem, TaskListSnapshot, TaskListStatus};
+
+fn unique_temp_path(prefix: &str) -> std::path::PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock should be after unix epoch")
+        .as_nanos();
+    std::env::temp_dir().join(format!("{prefix}-{nanos}"))
+}
 
 #[test]
 fn bootstrap_state_records_phase_order() {
@@ -80,6 +89,54 @@ fn in_memory_session_store_round_trips_task_lists_by_session() {
         store.load_task_list(&SessionId("other-session".into())),
         None
     );
+}
+
+#[test]
+fn file_backed_session_store_round_trips_across_store_instances() {
+    let root = unique_temp_path("rust-agent-session-store");
+    let store_a = FileBackedSessionStore::new(root.clone());
+    let session_id = SessionId("session-file-backed".into());
+    let snapshot = SessionSnapshot {
+        session_id: session_id.clone(),
+        surface: InteractionSurface::Cli,
+        session_mode: SessionMode::Interactive,
+        cwd: "/tmp/file-backed".into(),
+        last_turn_at: Some("2026-04-11T12:00:00Z".into()),
+        prompt_seed: Some("seed".into()),
+    };
+    let history = SessionHistory {
+        entries: vec![SessionHistoryEntry {
+            message: Message::assistant("persisted history"),
+            timestamp: Some("2026-04-11T12:00:01Z".into()),
+            tool_refs: vec!["TaskList".into()],
+        }],
+    };
+    let task_list = TaskListSnapshot {
+        next_id: 2,
+        tasks: vec![TaskListItem {
+            id: "task-0".into(),
+            subject: "persisted task".into(),
+            description: "from file-backed store".into(),
+            active_form: Some("Persisting".into()),
+            status: TaskListStatus::Pending,
+            owner: Some("session-file-backed".into()),
+            blocks: vec![],
+            blocked_by: vec![],
+        }],
+    };
+
+    store_a.save(snapshot.clone(), history.clone());
+    store_a.save_task_list(&session_id, task_list.clone());
+
+    let store_b = FileBackedSessionStore::new(root.clone());
+    let loaded = store_b.load(&rust_agent::history::session::SessionRestoreRequest {
+        resume: Some("session-file-backed".into()),
+        continue_session: false,
+    });
+    assert_eq!(loaded, Some((snapshot, history)));
+    assert_eq!(store_b.load_task_list(&session_id), Some(task_list));
+
+    std::fs::remove_dir_all(root).expect("cleanup file-backed session store");
 }
 
 #[tokio::test]
@@ -199,6 +256,66 @@ async fn runtime_restores_persisted_task_list_for_resumed_session() {
         .run()
         .await
         .expect("runtime should restore persisted task list");
+}
+
+#[tokio::test]
+async fn runtime_continue_restores_from_file_backed_store_across_instances() {
+    let root = unique_temp_path("rust-agent-runtime-continue");
+    let session_id = SessionId("session-continue-durable".into());
+    let store_a = Arc::new(FileBackedSessionStore::new(root.clone()));
+    store_a.save(
+        SessionSnapshot {
+            session_id: session_id.clone(),
+            surface: InteractionSurface::Cli,
+            session_mode: SessionMode::Interactive,
+            cwd: "/tmp/runtime-continue".into(),
+            last_turn_at: None,
+            prompt_seed: None,
+        },
+        SessionHistory {
+            entries: vec![SessionHistoryEntry {
+                message: Message::assistant("durable session"),
+                timestamp: None,
+                tool_refs: Vec::new(),
+            }],
+        },
+    );
+    store_a.save_task_list(
+        &session_id,
+        TaskListSnapshot {
+            next_id: 2,
+            tasks: vec![TaskListItem {
+                id: "task-0".into(),
+                subject: "durable task".into(),
+                description: "restored across instances".into(),
+                active_form: Some("Durably restoring".into()),
+                status: TaskListStatus::Pending,
+                owner: Some("session-continue-durable".into()),
+                blocks: vec![],
+                blocked_by: vec![],
+            }],
+        },
+    );
+
+    let store_b = Arc::new(FileBackedSessionStore::new(root.clone()));
+    let runtime = RuntimeBootstrap::from_cli(BootstrapCli {
+        print: Some("TaskGet task-0".into()),
+        interactive: false,
+        init_only: false,
+        continue_session: true,
+        resume: None,
+        trace_startup: false,
+        show_tools: false,
+        surface: "cli".into(),
+    })
+    .with_session_store(store_b);
+
+    runtime
+        .run()
+        .await
+        .expect("runtime should continue from durable session store");
+
+    std::fs::remove_dir_all(root).expect("cleanup durable runtime test store");
 }
 
 #[test]

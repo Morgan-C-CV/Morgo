@@ -12,7 +12,7 @@ use crate::core::engine::QueryEngine;
 use crate::cost::tracker::CostTracker;
 use crate::history::resume::{RestoreRequest, RestoreSource, RestoredSession};
 use crate::history::session::{
-    InMemorySessionStore, SessionHistory, SessionId, SessionRestoreRequest, SessionSnapshot,
+    FileBackedSessionStore, SessionHistory, SessionId, SessionRestoreRequest, SessionSnapshot,
     SessionStore,
 };
 use crate::history::transcript::Transcript;
@@ -78,7 +78,7 @@ impl RuntimeBootstrap {
     pub fn from_cli(cli: BootstrapCli) -> Self {
         Self {
             cli,
-            session_store: Arc::new(InMemorySessionStore::default()),
+            session_store: Arc::new(FileBackedSessionStore::default()),
         }
     }
 
