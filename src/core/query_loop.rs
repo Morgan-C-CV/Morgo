@@ -129,7 +129,7 @@ pub async fn run_query_loop_with_params(
         context
             .app_state
             .cost_tracker
-            .record_request(token_estimate, 0);
+            .record_model_usage("unknown", token_estimate, 0, 0, 0);
         if let Some(max_budget_input_tokens) = params.max_budget_input_tokens {
             if token_estimate >= max_budget_input_tokens {
                 events.push(EngineEvent::Notice {
@@ -291,6 +291,22 @@ async fn consume_model_stream(
                     input: input.clone(),
                 });
                 pending_tool_use = Some((tool_name, input));
+            }
+            StreamEvent::Usage(usage) => {
+                context.app_state.cost_tracker.record_model_usage(
+                    &usage.model,
+                    usage.input_tokens,
+                    usage.output_tokens,
+                    usage.cache_creation_input_tokens,
+                    usage.cache_read_input_tokens,
+                );
+                engine_events.push(EngineEvent::Notice {
+                    kind: "usage",
+                    message: format!(
+                        "recorded usage for model {} (input={}, output={})",
+                        usage.model, usage.input_tokens, usage.output_tokens
+                    ),
+                });
             }
             StreamEvent::MessageStop { stop_reason } => match stop_reason {
                 StopReason::EndTurn => {

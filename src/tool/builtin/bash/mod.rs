@@ -1,9 +1,8 @@
-use std::process::Stdio;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use serde::Deserialize;
-use tokio::process::Command;
 use tokio::time::timeout;
 
 use crate::state::permission_context::{PermissionMode, ToolPermissionContext};
@@ -16,6 +15,7 @@ pub mod sandbox;
 pub mod security;
 
 use permissions::evaluate_bash_policy;
+use sandbox::{execute_with_sandbox, SandboxPolicy};
 
 pub struct BashTool;
 
@@ -143,23 +143,24 @@ impl Tool for BashTool {
     async fn invoke(
         &self,
         call: &ToolCall,
-        _permissions: &ToolPermissionContext,
+        permissions: &ToolPermissionContext,
     ) -> anyhow::Result<ToolResult> {
         let input = parse_input(&call.input)?;
         let timeout_ms = input.timeout.unwrap_or(120_000).min(600_000);
+        let policy = if input.dangerously_disable_sandbox {
+            SandboxPolicy::Disabled
+        } else {
+            evaluate_bash_policy(&input.command).sandbox_policy
+        };
+        let cwd = resolve_cwd(permissions)?;
         let output = timeout(
             Duration::from_millis(timeout_ms),
-            Command::new("/bin/sh")
-                .arg("-lc")
-                .arg(&input.command)
-                .stdin(Stdio::null())
-                .output(),
+            execute_with_sandbox(&input.command, &cwd, policy),
         )
         .await
-        .map_err(|_| anyhow::anyhow!("bash command timed out after {timeout_ms}ms"))?
-        .map_err(|error| anyhow::anyhow!("failed to execute bash command: {error}"))?;
+        .map_err(|_| anyhow::anyhow!("bash command timed out after {timeout_ms}ms"))??;
 
-        Ok(ToolResult::Text(format_output(&input, output)))
+        Ok(ToolResult::Text(format_output(&input, output, &cwd, policy)))
     }
 }
 
@@ -167,7 +168,24 @@ fn parse_input(raw: &str) -> anyhow::Result<BashInput> {
     serde_json::from_str(raw).map_err(|error| anyhow::anyhow!("invalid bash input: {error}"))
 }
 
-fn format_output(input: &BashInput, output: std::process::Output) -> String {
+fn resolve_cwd(permissions: &ToolPermissionContext) -> anyhow::Result<PathBuf> {
+    if let Some(session_id) = &permissions.active_session_id {
+        if let Some(registry) = &permissions.inherited_tool_registry {
+            let _ = registry.all_metadata();
+        }
+        if session_id.is_empty() {
+            anyhow::bail!("active session id cannot be empty");
+        }
+    }
+    std::env::current_dir().map_err(|error| anyhow::anyhow!("failed to resolve cwd: {error}"))
+}
+
+fn format_output(
+    input: &BashInput,
+    output: std::process::Output,
+    cwd: &std::path::Path,
+    policy: SandboxPolicy,
+) -> String {
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
     let status = output
@@ -184,6 +202,8 @@ fn format_output(input: &BashInput, output: std::process::Output) -> String {
         parts.push(format!("description: {}", description.trim()));
     }
     parts.push(format!("command: {}", input.command.trim()));
+    parts.push(format!("cwd: {}", cwd.display()));
+    parts.push(format!("sandbox_policy: {:?}", policy));
     parts.push(format!("exit_code: {status}"));
     if !stdout.is_empty() {
         parts.push(format!("stdout:\n{stdout}"));

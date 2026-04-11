@@ -295,6 +295,8 @@ async fn bash_tool_executes_safe_command() {
         panic!("expected text result");
     };
     assert!(text.contains("command: printf 'hello from bash'"));
+    assert!(text.contains("cwd: "));
+    assert!(text.contains("sandbox_policy: WorkspaceWrite"));
     assert!(text.contains("exit_code: 0"));
     assert!(text.contains("stdout:\nhello from bash"));
 }
@@ -363,6 +365,7 @@ async fn registry_allows_safe_bash_in_plan_mode() {
         panic!("expected text result");
     };
     assert!(text.contains("command: pwd"));
+    assert!(text.contains("sandbox_policy: ReadOnly"));
     assert!(text.contains("exit_code: 0"));
 }
 

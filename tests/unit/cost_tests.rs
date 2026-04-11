@@ -7,16 +7,23 @@ use rust_agent::cost::tracker::CostTracker;
 use rust_agent::interaction::dispatcher::NotificationDispatcher;
 use rust_agent::interaction::envelope::NormalizedInput;
 use rust_agent::interaction::telegram::gateway::TelegramGateway;
+use rust_agent::service::api::client::AnthropicClient;
 use rust_agent::state::app_state::{AppState, RuntimeRole};
 use rust_agent::state::permission_context::{PermissionMode, ToolPermissionContext};
 use rust_agent::task::manager::TaskManager;
+
+#[test]
+fn default_anthropic_client_uses_production_boundary() {
+    let client = AnthropicClient::default();
+    assert!(!client.is_scripted());
+}
 
 #[tokio::test]
 async fn cost_command_reports_tracked_usage() {
     let permission_context = ToolPermissionContext::new(PermissionMode::Default)
         .with_task_manager(Arc::new(TaskManager::default()));
     let cost_tracker = CostTracker::default();
-    cost_tracker.record_request(123, 45);
+    cost_tracker.record_model_usage("claude-sonnet-4-6", 123, 45, 10, 5);
 
     let app_state = AppState {
         surface: InteractionSurface::Cli,
@@ -43,11 +50,15 @@ async fn cost_command_reports_tracked_usage() {
         .await
         .expect("cost command should succeed");
 
-    assert_eq!(
-        result,
-        CommandResult::Message(
-            "Session cost summary\nrequests: 1\ninput_tokens: 123\noutput_tokens: 45\nstatus: partial accounting"
-                .into()
-        )
-    );
+    let CommandResult::Message(text) = result else {
+        panic!("expected cost command message");
+    };
+    assert!(text.contains("Session cost summary"));
+    assert!(text.contains("requests: 1"));
+    assert!(text.contains("input_tokens: 123"));
+    assert!(text.contains("output_tokens: 45"));
+    assert!(text.contains("cache_creation_input_tokens: 10"));
+    assert!(text.contains("cache_read_input_tokens: 5"));
+    assert!(text.contains("estimated_cost_usd:"));
+    assert!(text.contains("model claude-sonnet-4-6 -> requests: 1"));
 }

@@ -4,14 +4,14 @@ use rust_agent::core::engine::QueryEngine;
 use rust_agent::core::events::EngineEvent;
 use rust_agent::core::message::Message;
 use rust_agent::core::query_loop::{
-    Continue, QueryLoopState, QueryParams, Terminal, run_query_loop_with_params,
+    run_query_loop, run_query_loop_with_params, Continue, QueryLoopState, QueryParams, Terminal,
 };
 use rust_agent::cost::tracker::CostTracker;
 use rust_agent::hook::registry::{HookEvent, HookEventMatcher, HookRegistry, HookRule};
 use rust_agent::interaction::dispatcher::NotificationDispatcher;
 use rust_agent::interaction::telegram::gateway::TelegramGateway;
 use rust_agent::service::api::client::AnthropicClient;
-use rust_agent::service::api::streaming::{StopReason, StreamEvent};
+use rust_agent::service::api::streaming::{StopReason, StreamEvent, UsageEvent};
 use rust_agent::service::compact::reactive_compact::ReactiveCompactor;
 use rust_agent::task::types::TaskOwner;
 use std::sync::Arc;
@@ -57,6 +57,36 @@ fn test_context_with_turns(
         hook_registry: HookRegistry::default(),
         agent_id: None,
     }
+}
+
+#[tokio::test]
+async fn query_loop_records_usage_events_into_cost_tracker() {
+    let context = test_context(vec![
+        StreamEvent::MessageStart,
+        StreamEvent::Usage(UsageEvent {
+            model: "claude-sonnet-4-6".into(),
+            input_tokens: 100,
+            output_tokens: 20,
+            cache_creation_input_tokens: 10,
+            cache_read_input_tokens: 5,
+        }),
+        StreamEvent::TextDelta("usage tracked".into()),
+        StreamEvent::MessageStop {
+            stop_reason: StopReason::EndTurn,
+        },
+    ]);
+
+    let result = run_query_loop(&context, Message::user("track usage")).await;
+
+    assert_eq!(result.state, QueryLoopState::Completed);
+    assert!(result
+        .events
+        .iter()
+        .any(|event| matches!(event, EngineEvent::Notice { kind, .. } if kind == &"usage")));
+    let report = context.app_state.cost_tracker.format_report();
+    assert!(report.contains("model claude-sonnet-4-6 -> requests: 1"));
+    assert!(report.contains("cache_creation_input_tokens: 10"));
+    assert!(report.contains("cache_read_input_tokens: 5"));
 }
 
 #[tokio::test]
