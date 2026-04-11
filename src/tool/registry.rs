@@ -36,6 +36,16 @@ impl ToolRegistry {
             .collect()
     }
 
+    pub fn filter_for_worker(&self) -> Self {
+        let tools = self
+            .tools
+            .iter()
+            .filter(|tool| tool.metadata().name != "Agent")
+            .cloned()
+            .collect();
+        Self { tools }
+    }
+
     pub async fn invoke(
         &self,
         call: &ToolCall,

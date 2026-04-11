@@ -1,10 +1,11 @@
 use std::sync::Arc;
 
+use rust_agent::bootstrap::InteractionSurface;
 use rust_agent::interaction::dispatcher::NotificationDispatcher;
 use rust_agent::interaction::telegram::gateway::TelegramGateway;
 use rust_agent::state::permission_context::{PermissionMode, ToolPermissionContext};
 use rust_agent::task::manager::TaskManager;
-use rust_agent::task::types::{TaskEvent, TaskStatus};
+use rust_agent::task::types::{TaskEvent, TaskOwner, TaskStatus};
 use rust_agent::tool::builtin::agent::AgentTool;
 use rust_agent::tool::definition::{Tool, ToolCall, ToolResult};
 
@@ -12,10 +13,10 @@ use rust_agent::tool::definition::{Tool, ToolCall, ToolResult};
 fn terminal_task_states_mark_delivery_notified() {
     let manager = TaskManager::default();
     let dispatcher = NotificationDispatcher::new(TelegramGateway::default());
-    let task = manager.create("demo task");
+    let task = manager.create("demo task", "session-1", InteractionSurface::Cli);
     manager.start(&task.id);
     manager.append_output(&task.id, "hello output");
-    manager.complete(&task.id, "session-1", &dispatcher);
+    manager.complete(&task.id, &dispatcher);
 
     let stored = manager.get(&task.id).expect("task should exist");
     assert_eq!(stored.status, TaskStatus::Completed);
@@ -42,12 +43,12 @@ fn terminal_task_states_mark_delivery_notified() {
 fn task_manager_tracks_failed_and_killed_states() {
     let manager = TaskManager::default();
     let dispatcher = NotificationDispatcher::new(TelegramGateway::default());
-    let failed = manager.create("failing task");
-    manager.fail(&failed.id, "session-2", &dispatcher);
+    let failed = manager.create("failing task", "session-2", InteractionSurface::Cli);
+    manager.fail(&failed.id, &dispatcher);
     assert_eq!(manager.get(&failed.id).unwrap().status, TaskStatus::Failed);
 
-    let killed = manager.create("killed task");
-    manager.kill(&killed.id, "session-3", &dispatcher);
+    let killed = manager.create("killed task", "session-3", InteractionSurface::Cli);
+    assert!(manager.kill(&killed.id, "session-3", &dispatcher));
     assert_eq!(manager.get(&killed.id).unwrap().status, TaskStatus::Killed);
 }
 
@@ -128,15 +129,18 @@ async fn agent_tool_launches_subagent_and_completes_task() {
 fn task_manager_queues_internal_task_notifications() {
     let manager = TaskManager::default();
     let dispatcher = NotificationDispatcher::new(TelegramGateway::default());
-    let task = manager.create("demo task");
-    manager.complete(&task.id, "session-1", &dispatcher);
+    let task = manager.create("demo task", "session-1", InteractionSurface::Cli);
+    manager.complete(&task.id, &dispatcher);
 
     let notifications = manager.drain_events("session-1");
     assert_eq!(notifications.len(), 1);
     assert_eq!(
         notifications[0],
         TaskEvent {
-            owner_session_id: "session-1".into(),
+            owner: TaskOwner {
+                session_id: "session-1".into(),
+                surface: InteractionSurface::Cli,
+            },
             task_id: task.id.clone(),
             status: TaskStatus::Completed,
             summary: format!("demo task ({})", task.id),
@@ -146,10 +150,30 @@ fn task_manager_queues_internal_task_notifications() {
     assert!(manager.drain_events("session-1").is_empty());
 }
 
+#[tokio::test]
+async fn non_owner_cannot_kill_running_task() {
+    let manager = TaskManager::default();
+    let dispatcher = NotificationDispatcher::new(TelegramGateway::default());
+    let task = manager.create("running task", "session-owner", InteractionSurface::Cli);
+
+    manager.launch(&task.id, async move {
+        tokio::task::yield_now().await;
+    });
+
+    assert_eq!(
+        manager.running_owner(&task.id),
+        Some(TaskOwner {
+            session_id: "session-owner".into(),
+            surface: InteractionSurface::Cli,
+        })
+    );
+    assert!(!manager.kill(&task.id, "session-other", &dispatcher));
+}
+
 #[test]
 fn task_output_reads_support_offsets() {
     let manager = TaskManager::default();
-    let task = manager.create("offset task");
+    let task = manager.create("offset task", "session-4", InteractionSurface::Cli);
     manager.append_output(&task.id, "hello");
     manager.append_output(&task.id, " world");
 

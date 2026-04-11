@@ -10,6 +10,7 @@ use rust_agent::interaction::telegram::gateway::TelegramGateway;
 use rust_agent::service::api::client::AnthropicClient;
 use rust_agent::service::api::streaming::{StopReason, StreamEvent};
 use rust_agent::service::compact::reactive_compact::ReactiveCompactor;
+use rust_agent::task::types::TaskOwner;
 use std::sync::Arc;
 
 use rust_agent::state::app_state::{AppState, RuntimeRole};
@@ -366,8 +367,8 @@ async fn query_loop_uses_subagent_stop_hook_for_subagent_context() {
 async fn engine_drains_internal_task_events() {
     let manager = Arc::new(TaskManager::default());
     let dispatcher = NotificationDispatcher::new(TelegramGateway::default());
-    let task = manager.create("worker task");
-    manager.complete(&task.id, "test-session", &dispatcher);
+    let task = manager.create("worker task", "test-session", InteractionSurface::Cli);
+    manager.complete(&task.id, &dispatcher);
 
     let mut permission_context =
         ToolPermissionContext::new(PermissionMode::Default).with_task_manager(manager.clone());
@@ -399,7 +400,13 @@ async fn engine_drains_internal_task_events() {
     let events = engine.drain_task_events();
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].task_id, "task-0");
-    assert_eq!(events[0].owner_session_id, "test-session");
+    assert_eq!(
+        events[0].owner,
+        TaskOwner {
+            session_id: "test-session".into(),
+            surface: InteractionSurface::Cli,
+        }
+    );
     assert_eq!(
         events[0].status,
         rust_agent::task::types::TaskStatus::Completed

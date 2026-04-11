@@ -24,15 +24,9 @@ fn render_event(event: &CliDisplayEvent) -> String {
 
 fn render_task_event(task_event: &TaskEvent) -> String {
     [
-        "[task] <task-notification>".to_string(),
-        format!("[task] <task-id>{}</task-id>", task_event.task_id),
-        format!("[task] <status>{:?}</status>", task_event.status),
-        format!("[task] <summary>{}</summary>", task_event.summary),
-        format!(
-            "[task] <output-file>{}</output-file>",
-            task_event.output_file
-        ),
-        "[task] </task-notification>".to_string(),
+        format!("[task] {}", task_event.summary),
+        format!("[task] status: {:?}", task_event.status),
+        format!("[task] output: {}", task_event.output_file),
     ]
     .join("\n")
 }

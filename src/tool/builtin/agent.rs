@@ -39,7 +39,15 @@ impl Tool for AgentTool {
             .task_manager
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("shared task manager is not configured"))?;
-        let task = tasks.create(format!("Spawned agent for {}", call.input));
+        let session_id = permissions
+            .active_session_id
+            .clone()
+            .unwrap_or_else(|| "local-session".into());
+        let task = tasks.create(
+            format!("Spawned agent for {}", call.input),
+            session_id.clone(),
+            InteractionSurface::Cli,
+        );
 
         let parent_context = build_parent_query_context(permissions.clone());
         let query_context = parent_context.create_subagent_context(
@@ -51,7 +59,6 @@ impl Tool for AgentTool {
         );
         let task_id = task.id.clone();
         let task_input = call.input.clone();
-        let session_id = parent_context.app_state.active_session_id.clone();
         let dispatcher = parent_context.app_state.notification_dispatcher.clone();
         let tasks_for_run = tasks.clone();
 
@@ -72,9 +79,9 @@ impl Tool for AgentTool {
                 result.state,
                 crate::core::query_loop::QueryLoopState::Failed
             ) {
-                tasks_for_run.fail(&task_id, &session_id, &dispatcher);
+                tasks_for_run.fail(&task_id, &dispatcher);
             } else {
-                tasks_for_run.complete(&task_id, &session_id, &dispatcher);
+                tasks_for_run.complete(&task_id, &dispatcher);
             }
         });
 
@@ -98,7 +105,8 @@ fn build_parent_query_context(permissions: ToolPermissionContext) -> QueryContex
     let tool_registry = permissions
         .inherited_tool_registry
         .clone()
-        .unwrap_or_else(|| ToolRegistry::new().register(std::sync::Arc::new(AgentTool)));
+        .unwrap_or_else(|| ToolRegistry::new().register(std::sync::Arc::new(AgentTool)))
+        .filter_for_worker();
     QueryContext {
         app_state: AppState {
             surface: InteractionSurface::Cli,

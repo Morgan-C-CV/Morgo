@@ -5,7 +5,7 @@ use rust_agent::interaction::dispatcher::NotificationDispatcher;
 use rust_agent::interaction::notification::{Notification, NotificationType};
 use rust_agent::interaction::telegram::binding::SessionBinding;
 use rust_agent::interaction::telegram::gateway::TelegramGateway;
-use rust_agent::task::types::{TaskEvent, TaskStatus};
+use rust_agent::task::types::{TaskEvent, TaskOwner, TaskStatus};
 
 #[test]
 fn dispatcher_records_cli_notifications() {
@@ -32,7 +32,10 @@ fn cli_renderer_marks_task_event_lines() {
     let rendered = render_turn_output(&CliTurnOutput {
         primary_text: "assistant reply".into(),
         events: vec![CliDisplayEvent::TaskEvent(TaskEvent {
-            owner_session_id: "session-1".into(),
+            owner: TaskOwner {
+                session_id: "session-1".into(),
+                surface: InteractionSurface::Cli,
+            },
             task_id: "task-1".into(),
             status: TaskStatus::Completed,
             summary: "demo task".into(),
@@ -41,9 +44,9 @@ fn cli_renderer_marks_task_event_lines() {
     });
 
     assert!(rendered.contains("assistant reply"));
-    assert!(rendered.contains("[task] <task-notification>"));
-    assert!(rendered.contains("[task] <task-id>task-1</task-id>"));
-    assert!(rendered.contains("[task] <status>Completed</status>"));
+    assert!(rendered.contains("[task] demo task"));
+    assert!(rendered.contains("[task] status: Completed"));
+    assert!(rendered.contains("[task] output: /tmp/task-1.log"));
 }
 
 #[test]

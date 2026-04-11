@@ -33,8 +33,8 @@ impl QueryEngine {
 
     pub fn format_task_event_message(event: &TaskEvent) -> Message {
         Message::assistant(format!(
-            "<task-notification>\n<task-id>{}</task-id>\n<status>{:?}</status>\n<summary>{}</summary>\n<output-file>{}</output-file>\n</task-notification>",
-            event.task_id, event.status, event.summary, event.output_file
+            "[task] {}\n[task] status: {:?}\n[task] output: {}",
+            event.summary, event.status, event.output_file
         ))
     }
 }

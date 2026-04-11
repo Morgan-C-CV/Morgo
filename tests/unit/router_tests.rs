@@ -16,6 +16,7 @@ use rust_agent::service::compact::reactive_compact::ReactiveCompactor;
 use rust_agent::state::app_state::{AppState, RuntimeRole};
 use rust_agent::state::permission_context::{PermissionMode, ToolPermissionContext};
 use rust_agent::task::manager::TaskManager;
+use rust_agent::task::types::TaskOwner;
 use rust_agent::tool::registry::ToolRegistry;
 
 #[test]
@@ -124,12 +125,12 @@ async fn cli_repl_surfaces_task_events_for_active_session() {
         history: None,
         restored_session: None,
     };
-    let task = manager.create("queued task");
-    manager.complete(
-        &task.id,
-        &app_state.active_session_id,
-        &app_state.notification_dispatcher,
+    let task = manager.create(
+        "queued task",
+        app_state.active_session_id.clone(),
+        InteractionSurface::Cli,
     );
+    manager.complete(&task.id, &app_state.notification_dispatcher);
     let engine =
         rust_agent::core::engine::QueryEngine::new(rust_agent::core::context::QueryContext {
             app_state: app_state.clone(),
@@ -150,5 +151,11 @@ async fn cli_repl_surfaces_task_events_for_active_session() {
     let rust_agent::interaction::cli::repl::CliDisplayEvent::TaskEvent(task_event) =
         &output[0].events[0];
     assert_eq!(task_event.task_id, "task-0");
-    assert_eq!(task_event.owner_session_id, "cli-session");
+    assert_eq!(
+        task_event.owner,
+        TaskOwner {
+            session_id: "cli-session".into(),
+            surface: InteractionSurface::Cli,
+        }
+    );
 }

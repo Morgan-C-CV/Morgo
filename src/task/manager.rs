@@ -4,10 +4,13 @@ use std::sync::{Arc, RwLock};
 
 use tokio::task::AbortHandle;
 
+use crate::bootstrap::InteractionSurface;
 use crate::interaction::dispatcher::NotificationDispatcher;
 use crate::interaction::notification::Notification;
 use crate::task::output_store::TaskOutputStore;
-use crate::task::types::{TaskDeliveryState, TaskEvent, TaskOutputSlice, TaskRecord, TaskStatus};
+use crate::task::types::{
+    TaskDeliveryState, TaskEvent, TaskOutputSlice, TaskOwner, TaskRecord, TaskStatus,
+};
 
 #[derive(Debug, Default)]
 struct TaskStore {
@@ -18,6 +21,7 @@ struct TaskStore {
 #[derive(Debug, Default)]
 struct TaskRuntimeStore {
     abort_handles: HashMap<String, AbortHandle>,
+    running_owners: HashMap<String, TaskOwner>,
     events: Vec<TaskEvent>,
 }
 
@@ -29,7 +33,12 @@ pub struct TaskManager {
 }
 
 impl TaskManager {
-    pub fn create(&self, description: impl Into<String>) -> TaskRecord {
+    pub fn create(
+        &self,
+        description: impl Into<String>,
+        owner_session_id: impl Into<String>,
+        owner_surface: InteractionSurface,
+    ) -> TaskRecord {
         let mut store = self.store.write().expect("task store poisoned");
         let id = format!("task-{}", store.next_id);
         store.next_id += 1;
@@ -41,6 +50,10 @@ impl TaskManager {
             id: id.clone(),
             description: description.into(),
             status: TaskStatus::Pending,
+            owner: TaskOwner {
+                session_id: owner_session_id.into(),
+                surface: owner_surface,
+            },
             output_file,
             output_offset: 0,
             delivery: TaskDeliveryState {
@@ -67,11 +80,18 @@ impl TaskManager {
             future.await;
             manager.clear_running_handle(&task_id);
         });
-        self.runtime_store
+        let owner = self
+            .get(id)
+            .map(|task| task.owner)
+            .expect("task should exist before launch");
+        let mut runtime_store = self
+            .runtime_store
             .write()
-            .expect("task runtime store poisoned")
+            .expect("task runtime store poisoned");
+        runtime_store
             .abort_handles
             .insert(id.to_string(), join_handle.abort_handle());
+        runtime_store.running_owners.insert(id.to_string(), owner);
     }
 
     pub fn append_output(&self, id: &str, chunk: impl AsRef<str>) {
@@ -91,27 +111,28 @@ impl TaskManager {
         }
     }
 
-    pub fn complete(&self, id: &str, session_id: &str, dispatcher: &NotificationDispatcher) {
-        self.finish(
-            id,
-            TaskStatus::Completed,
-            session_id,
-            "Task completed",
-            dispatcher,
-        );
+    pub fn complete(&self, id: &str, dispatcher: &NotificationDispatcher) {
+        self.finish(id, TaskStatus::Completed, "Task completed", dispatcher);
     }
 
-    pub fn fail(&self, id: &str, session_id: &str, dispatcher: &NotificationDispatcher) {
-        self.finish(
-            id,
-            TaskStatus::Failed,
-            session_id,
-            "Task failed",
-            dispatcher,
-        );
+    pub fn fail(&self, id: &str, dispatcher: &NotificationDispatcher) {
+        self.finish(id, TaskStatus::Failed, "Task failed", dispatcher);
     }
 
-    pub fn kill(&self, id: &str, session_id: &str, dispatcher: &NotificationDispatcher) {
+    pub fn kill(
+        &self,
+        id: &str,
+        requester_session_id: &str,
+        dispatcher: &NotificationDispatcher,
+    ) -> bool {
+        let owner = self.running_owner(id);
+        if owner
+            .as_ref()
+            .map(|owner| owner.session_id.as_str() != requester_session_id)
+            .unwrap_or(false)
+        {
+            return false;
+        }
         if let Some(handle) = self
             .runtime_store
             .write()
@@ -121,13 +142,8 @@ impl TaskManager {
         {
             handle.abort();
         }
-        self.finish(
-            id,
-            TaskStatus::Killed,
-            session_id,
-            "Task killed",
-            dispatcher,
-        );
+        self.finish(id, TaskStatus::Killed, "Task killed", dispatcher);
+        true
     }
 
     pub fn get(&self, id: &str) -> Option<TaskRecord> {
@@ -169,9 +185,18 @@ impl TaskManager {
         let events = std::mem::take(&mut runtime_store.events);
         let (matched, unmatched): (Vec<_>, Vec<_>) = events
             .into_iter()
-            .partition(|event| event.owner_session_id == session_id);
+            .partition(|event| event.owner.session_id == session_id);
         runtime_store.events = unmatched;
         matched
+    }
+
+    pub fn running_owner(&self, id: &str) -> Option<TaskOwner> {
+        self.runtime_store
+            .read()
+            .expect("task runtime store poisoned")
+            .running_owners
+            .get(id)
+            .cloned()
     }
 
     fn update_status(&self, id: &str, status: TaskStatus) {
@@ -188,18 +213,18 @@ impl TaskManager {
     }
 
     fn clear_running_handle(&self, id: &str) {
-        self.runtime_store
+        let mut runtime_store = self
+            .runtime_store
             .write()
-            .expect("task runtime store poisoned")
-            .abort_handles
-            .remove(id);
+            .expect("task runtime store poisoned");
+        runtime_store.abort_handles.remove(id);
+        runtime_store.running_owners.remove(id);
     }
 
     fn finish(
         &self,
         id: &str,
         status: TaskStatus,
-        session_id: &str,
         title: &str,
         dispatcher: &NotificationDispatcher,
     ) {
@@ -215,7 +240,7 @@ impl TaskManager {
             task.status = status.clone();
             task.delivery.notified = true;
             let event = TaskEvent {
-                owner_session_id: session_id.to_string(),
+                owner: task.owner.clone(),
                 task_id: task.id.clone(),
                 status,
                 summary: format!("{} ({})", task.description, task.id),
@@ -242,27 +267,14 @@ impl TaskManager {
         dispatcher: &NotificationDispatcher,
     ) -> Notification {
         let notification = Notification::task_update(
-            &event.owner_session_id,
+            &event.owner.session_id,
             title,
             event.summary.clone(),
             event.task_id.clone(),
             format!("{:?}", event.status),
             event.output_file.clone(),
         );
-        dispatcher.dispatch(
-            notification_surface(&event.owner_session_id),
-            notification.clone(),
-        );
+        dispatcher.dispatch(event.owner.surface, notification.clone());
         notification
-    }
-}
-
-fn notification_surface(session_id: &str) -> crate::bootstrap::InteractionSurface {
-    if session_id.starts_with("telegram") {
-        crate::bootstrap::InteractionSurface::Telegram
-    } else if session_id.starts_with("remote") {
-        crate::bootstrap::InteractionSurface::Remote
-    } else {
-        crate::bootstrap::InteractionSurface::Cli
     }
 }

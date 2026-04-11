@@ -5,6 +5,7 @@ use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rust_agent::state::permission_context::{PermissionMode, ToolPermissionContext};
+use rust_agent::tool::builtin::agent::AgentTool;
 use rust_agent::tool::builtin::bash::BashTool;
 use rust_agent::tool::builtin::file_edit::FileEditTool;
 use rust_agent::tool::builtin::file_read::FileReadTool;
@@ -382,4 +383,23 @@ fn visible_tools_include_ask_only_tools() {
     assert!(names.contains(&"Bash"));
     assert!(names.contains(&"Read"));
     assert!(names.contains(&"WebFetch"));
+}
+
+#[test]
+fn worker_tool_filter_excludes_agent_tool() {
+    let registry = ToolRegistry::new()
+        .register(Arc::new(BashTool))
+        .register(Arc::new(FileReadTool))
+        .register(Arc::new(AgentTool));
+
+    let filtered = registry.filter_for_worker();
+    let names = filtered
+        .visible_tools(&ToolPermissionContext::new(PermissionMode::Default))
+        .iter()
+        .map(|tool| tool.name)
+        .collect::<Vec<_>>();
+
+    assert!(names.contains(&"Bash"));
+    assert!(names.contains(&"Read"));
+    assert!(!names.contains(&"Agent"));
 }
