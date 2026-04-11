@@ -7,7 +7,7 @@ use rust_agent::bootstrap::{
 use rust_agent::core::message::Message;
 use rust_agent::history::session::{
     FileBackedSessionStore, InMemorySessionStore, SessionHistory, SessionHistoryEntry, SessionId,
-    SessionSnapshot, SessionStore,
+    SessionRestoreRequest, SessionSnapshot, SessionStore,
 };
 use rust_agent::hook::registry::HookEvent;
 use rust_agent::task::list_types::{TaskListItem, TaskListSnapshot, TaskListStatus};
@@ -54,7 +54,7 @@ fn in_memory_session_store_loads_latest_session_for_continue() {
         },
     );
 
-    let loaded = store.load(&rust_agent::history::session::SessionRestoreRequest {
+    let loaded = store.load(&SessionRestoreRequest {
         resume: None,
         continue_session: true,
     });
@@ -129,7 +129,7 @@ fn file_backed_session_store_round_trips_across_store_instances() {
     store_a.save_task_list(&session_id, task_list.clone());
 
     let store_b = FileBackedSessionStore::new(root.clone());
-    let loaded = store_b.load(&rust_agent::history::session::SessionRestoreRequest {
+    let loaded = store_b.load(&SessionRestoreRequest {
         resume: Some("session-file-backed".into()),
         continue_session: false,
     });
@@ -316,6 +316,85 @@ async fn runtime_continue_restores_from_file_backed_store_across_instances() {
         .expect("runtime should continue from durable session store");
 
     std::fs::remove_dir_all(root).expect("cleanup durable runtime test store");
+}
+
+#[tokio::test]
+async fn runtime_initializes_fresh_session_record_in_store() {
+    let store = Arc::new(InMemorySessionStore::default());
+
+    let runtime = RuntimeBootstrap::from_cli(BootstrapCli {
+        print: None,
+        interactive: false,
+        init_only: true,
+        continue_session: false,
+        resume: None,
+        trace_startup: false,
+        show_tools: false,
+        surface: "cli".into(),
+    })
+    .with_session_store(store.clone());
+
+    runtime
+        .run()
+        .await
+        .expect("runtime should initialize session");
+
+    let loaded = store.load(&SessionRestoreRequest {
+        resume: None,
+        continue_session: true,
+    });
+    let (snapshot, history) = loaded.expect("expected initialized session record");
+    assert_eq!(snapshot.session_id.0, "local-session");
+    assert_eq!(snapshot.surface, InteractionSurface::Cli);
+    assert_eq!(snapshot.session_mode, SessionMode::InitOnly);
+    assert!(history.entries.is_empty());
+}
+
+#[test]
+fn file_backed_session_store_persists_appended_turns_across_instances() {
+    let root = unique_temp_path("rust-agent-session-history");
+    let session_id = SessionId("session-history-durable".into());
+    let store_a = FileBackedSessionStore::new(root.clone());
+    store_a.save(
+        SessionSnapshot {
+            session_id: session_id.clone(),
+            surface: InteractionSurface::Cli,
+            session_mode: SessionMode::Interactive,
+            cwd: "/tmp/history".into(),
+            last_turn_at: None,
+            prompt_seed: None,
+        },
+        SessionHistory::default(),
+    );
+    store_a.append_entry(
+        &session_id,
+        SessionHistoryEntry {
+            message: Message::user("hello"),
+            timestamp: None,
+            tool_refs: Vec::new(),
+        },
+    );
+    store_a.append_entry(
+        &session_id,
+        SessionHistoryEntry {
+            message: Message::assistant("hi there"),
+            timestamp: None,
+            tool_refs: Vec::new(),
+        },
+    );
+
+    let store_b = FileBackedSessionStore::new(root.clone());
+    let (_, history) = store_b
+        .load(&SessionRestoreRequest {
+            resume: Some("session-history-durable".into()),
+            continue_session: false,
+        })
+        .expect("expected durable history after append");
+    assert_eq!(history.entries.len(), 2);
+    assert_eq!(history.entries[0].message, Message::user("hello"));
+    assert_eq!(history.entries[1].message, Message::assistant("hi there"));
+
+    std::fs::remove_dir_all(root).expect("cleanup durable history store");
 }
 
 #[test]

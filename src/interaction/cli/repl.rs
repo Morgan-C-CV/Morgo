@@ -1,6 +1,7 @@
 use crate::command::types::CommandResult;
 use crate::core::engine::QueryEngine;
 use crate::core::message::Message;
+use crate::history::session::{SessionHistoryEntry, SessionId};
 use crate::interaction::envelope::NormalizedInput;
 use crate::interaction::router::CommandRouter;
 use crate::state::app_state::AppState;
@@ -28,16 +29,18 @@ pub async fn handle_cli_input(
         app_state.active_session_id.clone(),
         raw,
     );
-    let primary_text = match router.route(&input, app_state).await? {
-        CommandResult::Message(message) => message,
-        CommandResult::Prompt(prompt) => {
-            collect_message_content(engine.submit_message(Message::user(prompt)).await)
-        }
+    let persisted_messages = match router.route(&input, app_state).await? {
+        CommandResult::Message(message) => vec![Message::assistant(message)],
+        CommandResult::Prompt(prompt) => engine.submit_message(Message::user(prompt)).await,
         CommandResult::ContinueToQuery => {
-            collect_message_content(engine.submit_message(Message::user(input.raw)).await)
+            engine
+                .submit_message(Message::user(input.raw.clone()))
+                .await
         }
-        CommandResult::Denied(reason) => format!("Denied: {reason}"),
+        CommandResult::Denied(reason) => vec![Message::assistant(format!("Denied: {reason}"))],
     };
+    persist_cli_turn(app_state, &input.raw, &persisted_messages);
+    let primary_text = collect_message_content(persisted_messages.clone());
 
     Ok(CliTurnOutput {
         primary_text,
@@ -64,6 +67,31 @@ where
         outputs.push(handle_cli_input(router, engine, app_state, raw).await?);
     }
     Ok(outputs)
+}
+
+fn persist_cli_turn(app_state: &AppState, raw_input: &str, messages: &[Message]) {
+    let Some(session_store) = &app_state.session_store else {
+        return;
+    };
+    let session_id = SessionId(app_state.active_session_id.clone());
+    session_store.append_entry(
+        &session_id,
+        SessionHistoryEntry {
+            message: Message::user(raw_input.to_string()),
+            timestamp: None,
+            tool_refs: Vec::new(),
+        },
+    );
+    for message in messages {
+        session_store.append_entry(
+            &session_id,
+            SessionHistoryEntry {
+                message: message.clone(),
+                timestamp: None,
+                tool_refs: Vec::new(),
+            },
+        );
+    }
 }
 
 fn collect_message_content(messages: Vec<Message>) -> String {

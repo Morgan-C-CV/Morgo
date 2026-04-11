@@ -136,6 +136,36 @@ impl RuntimeBootstrap {
             .as_ref()
             .map(|session| session.snapshot.session_id.0.clone())
             .unwrap_or_else(|| "local-session".into());
+        let session_snapshot = restored_session
+            .as_ref()
+            .map(|session| session.snapshot.clone());
+        let session_history = restored_session
+            .as_ref()
+            .map(|session| session.history.clone());
+        if session_snapshot.is_none() {
+            self.session_store.save(
+                SessionSnapshot {
+                    session_id: SessionId(active_session_id.clone()),
+                    surface: state.surface,
+                    session_mode: state.session_mode,
+                    cwd: state.current_cwd.display().to_string(),
+                    last_turn_at: None,
+                    prompt_seed: None,
+                },
+                SessionHistory::default(),
+            );
+        }
+        let session_snapshot = session_snapshot.or_else(|| {
+            Some(SessionSnapshot {
+                session_id: SessionId(active_session_id.clone()),
+                surface: state.surface,
+                session_mode: state.session_mode,
+                cwd: state.current_cwd.display().to_string(),
+                last_turn_at: None,
+                prompt_seed: None,
+            })
+        });
+        let session_history = session_history.or_else(|| Some(SessionHistory::default()));
         let task_list_session_id = SessionId(active_session_id.clone());
         let task_list_snapshot = self.session_store.load_task_list(&task_list_session_id);
         let task_list_manager = Arc::new(
@@ -175,12 +205,9 @@ impl RuntimeBootstrap {
                 .map(|phase| format!("{phase:?}"))
                 .collect(),
             active_session_id,
-            session: restored_session
-                .as_ref()
-                .map(|session| session.snapshot.clone()),
-            history: restored_session
-                .as_ref()
-                .map(|session| session.history.clone()),
+            session_store: Some(self.session_store.clone()),
+            session: session_snapshot,
+            history: session_history,
             restored_session,
         };
 

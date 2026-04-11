@@ -29,6 +29,7 @@ async fn cost_command_reports_tracked_usage() {
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
         startup_trace: Vec::new(),
         active_session_id: "cost-session".into(),
+        session_store: None,
         session: None,
         history: None,
         restored_session: None,

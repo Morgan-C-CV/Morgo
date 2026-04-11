@@ -170,6 +170,7 @@ fn build_parent_query_context(permissions: ToolPermissionContext) -> QueryContex
             active_session_id: permissions
                 .active_session_id
                 .unwrap_or_else(|| "local-session".into()),
+            session_store: None,
             session: None,
             history: None,
             restored_session: None,
