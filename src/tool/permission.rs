@@ -18,7 +18,7 @@ pub fn evaluate_tool_permission(
     permissions: &ToolPermissionContext,
 ) -> PermissionDecision {
     if permissions
-        .always_deny_rules
+        .always_deny_rules()
         .iter()
         .any(|rule| rule == metadata.name || rule == call.name.as_str())
     {
@@ -36,7 +36,7 @@ pub fn evaluate_tool_permission(
     }
 
     if permissions
-        .always_ask_rules
+        .always_ask_rules()
         .iter()
         .any(|rule| rule == metadata.name || rule == call.name.as_str())
     {
@@ -47,7 +47,7 @@ pub fn evaluate_tool_permission(
     }
 
     if permissions
-        .always_allow_rules
+        .always_allow_rules()
         .iter()
         .any(|rule| rule == metadata.name || rule == call.name.as_str())
     {
@@ -68,7 +68,7 @@ pub fn evaluate_tool_permission(
         };
     }
 
-    if metadata.requires_auth && permissions.always_allow_rules.is_empty() {
+    if metadata.requires_auth && permissions.always_allow_rules().is_empty() {
         return PermissionDecision::Ask {
             message: format!("tool {} requires explicit approval", metadata.name),
             reason: crate::tool::definition::PermissionDecisionReason::Rule,

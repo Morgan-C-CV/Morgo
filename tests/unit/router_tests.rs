@@ -3,6 +3,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use rust_agent::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
 use rust_agent::command::builtin::help::HelpCommand;
+use rust_agent::command::builtin::permissions::PermissionsCommand;
 use rust_agent::command::registry::CommandRegistry;
 use rust_agent::command::types::{
     Command, CommandAvailability, CommandMetadata, CommandResult, CommandType,
@@ -507,4 +508,156 @@ async fn approval_replay_uses_runtime_tool_registry() {
     assert!(text.contains("command: pwd"));
     assert!(text.contains("exit_code: 0"));
     assert!(permission_context.pending_approval().is_none());
+}
+
+#[tokio::test]
+async fn permissions_command_reports_session_permission_state() {
+    let router = CommandRouter::new(
+        CommandRegistry::new().register(Arc::new(PermissionsCommand)),
+        Box::new(DefaultSurfaceAuthorizer),
+    );
+    let permission_context = ToolPermissionContext::new(PermissionMode::Plan)
+        .with_task_manager(Arc::new(TaskManager::default()))
+        .with_pending_approval(rust_agent::state::permission_context::PendingApproval {
+            tool_name: "Bash".into(),
+            tool_input: serde_json::json!({"command": "pwd"}).to_string(),
+            message: "approve pwd".into(),
+        });
+    permission_context.add_always_allow_rule("Read");
+    permission_context.add_always_deny_rule("Bash");
+    permission_context.add_always_ask_rule("WebFetch");
+    let app_state = AppState {
+        surface: InteractionSurface::Cli,
+        session_mode: SessionMode::Interactive,
+        client_type: ClientType::Cli,
+        session_source: SessionSource::LocalCli,
+        runtime_role: RuntimeRole::Coordinator,
+        permission_context,
+        runtime_tool_registry: Some(ToolRegistry::new()),
+        cost_tracker: CostTracker::default(),
+        notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
+        startup_trace: Vec::new(),
+        active_session_id: "cli-session".into(),
+        session_store: None,
+        session: None,
+        history: None,
+        restored_session: None,
+    };
+
+    let result = router
+        .route(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/permissions"),
+            &app_state,
+        )
+        .await
+        .expect("permissions summary should render");
+
+    let CommandResult::Message(text) = result else {
+        panic!("expected permissions summary message");
+    };
+    assert!(text.contains("Permission mode: plan"));
+    assert!(text.contains("Allow rules: Read"));
+    assert!(text.contains("Deny rules: Bash"));
+    assert!(text.contains("Ask rules: WebFetch"));
+    assert!(text.contains("Pending approval: Bash — approve pwd"));
+}
+
+#[tokio::test]
+async fn permissions_command_mutates_mode_and_rule_lists() {
+    let router = CommandRouter::new(
+        CommandRegistry::new().register(Arc::new(PermissionsCommand)),
+        Box::new(DefaultSurfaceAuthorizer),
+    );
+    let permission_context = ToolPermissionContext::new(PermissionMode::Default)
+        .with_task_manager(Arc::new(TaskManager::default()));
+    let app_state = AppState {
+        surface: InteractionSurface::Cli,
+        session_mode: SessionMode::Interactive,
+        client_type: ClientType::Cli,
+        session_source: SessionSource::LocalCli,
+        runtime_role: RuntimeRole::Coordinator,
+        permission_context: permission_context.clone(),
+        runtime_tool_registry: Some(ToolRegistry::new()),
+        cost_tracker: CostTracker::default(),
+        notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
+        startup_trace: Vec::new(),
+        active_session_id: "cli-session".into(),
+        session_store: None,
+        session: None,
+        history: None,
+        restored_session: None,
+    };
+
+    let mode_result = router
+        .route(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/permissions mode accept-edits"),
+            &app_state,
+        )
+        .await
+        .expect("mode update should succeed");
+    assert_eq!(
+        mode_result,
+        CommandResult::Message("Permission mode set to accept-edits.".into())
+    );
+    assert_eq!(permission_context.mode(), PermissionMode::AcceptEdits);
+
+    let allow_result = router
+        .route(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/permissions allow Read Bash"),
+            &app_state,
+        )
+        .await
+        .expect("allow update should succeed");
+    assert_eq!(
+        allow_result,
+        CommandResult::Message("Added allow rule(s): Read, Bash".into())
+    );
+    assert_eq!(
+        permission_context.always_allow_rules(),
+        vec!["Read".to_string(), "Bash".to_string()]
+    );
+
+    let duplicate_result = router
+        .route(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/permissions allow Read"),
+            &app_state,
+        )
+        .await
+        .expect("duplicate allow should be handled");
+    assert_eq!(
+        duplicate_result,
+        CommandResult::Message("No new allow rules added.".into())
+    );
+
+    let ask_result = router
+        .route(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/permissions ask WebFetch"),
+            &app_state,
+        )
+        .await
+        .expect("ask update should succeed");
+    assert_eq!(
+        ask_result,
+        CommandResult::Message("Added ask rule(s): WebFetch".into())
+    );
+    assert_eq!(
+        permission_context.always_ask_rules(),
+        vec!["WebFetch".to_string()]
+    );
+
+    let deny_result = router
+        .route(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/permissions deny Edit"),
+            &app_state,
+        )
+        .await
+        .expect("deny update should succeed");
+    assert_eq!(
+        deny_result,
+        CommandResult::Message("Added deny rule(s): Edit".into())
+    );
+    assert_eq!(
+        permission_context.always_deny_rules(),
+        vec!["Edit".to_string()]
+    );
 }

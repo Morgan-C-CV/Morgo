@@ -149,8 +149,7 @@ fn parse_agent_request(input: &str) -> AgentRequest {
 fn build_parent_query_context(permissions: ToolPermissionContext) -> QueryContext {
     let mut runtime_permissions = permissions.clone();
     runtime_permissions
-        .always_allow_rules
-        .push(AgentTool.metadata().name.into());
+        .add_always_allow_rule(AgentTool.metadata().name);
     runtime_permissions.include_interactive_tools = false;
     runtime_permissions.include_deferred_tools = false;
 

@@ -132,7 +132,7 @@ pub trait Tool: Send + Sync {
         permissions: &ToolPermissionContext,
     ) -> PermissionDecision {
         if permissions
-            .always_deny_rules
+            .always_deny_rules()
             .iter()
             .any(|rule| rule == self.metadata().name)
         {

@@ -33,7 +33,7 @@ fn test_context_with_turns(
 ) -> QueryContext {
     let mut permission_context = ToolPermissionContext::new(PermissionMode::Default)
         .with_task_manager(Arc::new(TaskManager::default()));
-    permission_context.always_allow_rules.push("Agent".into());
+    permission_context.add_always_allow_rule("Agent");
     QueryContext {
         app_state: AppState {
             surface: InteractionSurface::Cli,
@@ -280,7 +280,7 @@ async fn query_loop_fails_when_tool_is_unknown() {
 async fn query_loop_stop_hook_can_prevent_continuation() {
     let mut permission_context = ToolPermissionContext::new(PermissionMode::Default)
         .with_task_manager(Arc::new(TaskManager::default()));
-    permission_context.always_allow_rules.push("Agent".into());
+    permission_context.add_always_allow_rule("Agent");
 
     let context = QueryContext {
         app_state: AppState {
@@ -347,7 +347,7 @@ async fn query_loop_respects_pre_tool_hook_denial() {
     let registry = ToolRegistry::new().register(Arc::new(AgentTool));
     let mut permission_context = ToolPermissionContext::new(PermissionMode::Default)
         .with_task_manager(Arc::new(TaskManager::default()));
-    permission_context.always_allow_rules.push("Agent".into());
+    permission_context.add_always_allow_rule("Agent");
 
     let context = QueryContext {
         app_state: AppState {
@@ -421,7 +421,7 @@ async fn query_loop_runs_permission_request_hook_before_tool_execution() {
     let registry = ToolRegistry::new().register(Arc::new(AgentTool));
     let mut permission_context = ToolPermissionContext::new(PermissionMode::Default)
         .with_task_manager(Arc::new(TaskManager::default()));
-    permission_context.always_allow_rules.push("Agent".into());
+    permission_context.add_always_allow_rule("Agent");
 
     let context = QueryContext {
         app_state: AppState {
@@ -486,7 +486,7 @@ async fn query_loop_runs_permission_request_hook_before_tool_execution() {
 async fn query_loop_uses_subagent_stop_hook_for_subagent_context() {
     let mut permission_context = ToolPermissionContext::new(PermissionMode::Default)
         .with_task_manager(Arc::new(TaskManager::default()));
-    permission_context.always_allow_rules.push("Agent".into());
+    permission_context.add_always_allow_rule("Agent");
 
     let context = QueryContext {
         app_state: AppState {
@@ -567,7 +567,7 @@ async fn engine_drains_internal_task_events() {
 
     let mut permission_context =
         ToolPermissionContext::new(PermissionMode::Default).with_task_manager(manager.clone());
-    permission_context.always_allow_rules.push("Agent".into());
+    permission_context.add_always_allow_rule("Agent");
 
     let engine = QueryEngine::new(QueryContext {
         app_state: AppState {
@@ -630,7 +630,7 @@ async fn worker_query_loop_consumes_mailbox_messages() {
     let mut permission_context = ToolPermissionContext::new(PermissionMode::Default)
         .with_task_manager(manager.clone())
         .with_active_session_id("test-session");
-    permission_context.always_allow_rules.push("Agent".into());
+    permission_context.add_always_allow_rule("Agent");
 
     let context = QueryContext {
         app_state: AppState {
@@ -703,7 +703,7 @@ async fn worker_query_loop_consumes_mailbox_messages() {
 async fn subagent_context_inherits_parent_tools_and_hooks() {
     let mut permission_context = ToolPermissionContext::new(PermissionMode::Default)
         .with_task_manager(Arc::new(TaskManager::default()));
-    permission_context.always_allow_rules.push("Agent".into());
+    permission_context.add_always_allow_rule("Agent");
 
     let parent_hook_registry = HookRegistry::default().register_rule(HookRule {
         event: HookEventMatcher::SubagentStop,

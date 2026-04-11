@@ -23,9 +23,9 @@ pub struct PendingApproval {
 #[derive(Debug, Clone)]
 pub struct ToolPermissionContext {
     mode: Arc<RwLock<PermissionMode>>,
-    pub always_allow_rules: Vec<String>,
-    pub always_deny_rules: Vec<String>,
-    pub always_ask_rules: Vec<String>,
+    always_allow_rules: Arc<RwLock<Vec<String>>>,
+    always_deny_rules: Arc<RwLock<Vec<String>>>,
+    always_ask_rules: Arc<RwLock<Vec<String>>>,
     pub include_deferred_tools: bool,
     pub include_interactive_tools: bool,
     pub task_manager: Option<Arc<TaskManager>>,
@@ -41,9 +41,9 @@ impl ToolPermissionContext {
     pub fn new(mode: PermissionMode) -> Self {
         Self {
             mode: Arc::new(RwLock::new(mode)),
-            always_allow_rules: Vec::new(),
-            always_deny_rules: Vec::new(),
-            always_ask_rules: Vec::new(),
+            always_allow_rules: Arc::new(RwLock::new(Vec::new())),
+            always_deny_rules: Arc::new(RwLock::new(Vec::new())),
+            always_ask_rules: Arc::new(RwLock::new(Vec::new())),
             include_deferred_tools: false,
             include_interactive_tools: true,
             task_manager: None,
@@ -59,6 +59,39 @@ impl ToolPermissionContext {
     pub fn with_task_manager(mut self, task_manager: Arc<TaskManager>) -> Self {
         self.task_manager = Some(task_manager);
         self
+    }
+
+    pub fn always_allow_rules(&self) -> Vec<String> {
+        self.always_allow_rules
+            .read()
+            .map(|rules| rules.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn always_deny_rules(&self) -> Vec<String> {
+        self.always_deny_rules
+            .read()
+            .map(|rules| rules.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn always_ask_rules(&self) -> Vec<String> {
+        self.always_ask_rules
+            .read()
+            .map(|rules| rules.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn add_always_allow_rule(&self, rule: impl Into<String>) -> bool {
+        add_rule(&self.always_allow_rules, rule)
+    }
+
+    pub fn add_always_deny_rule(&self, rule: impl Into<String>) -> bool {
+        add_rule(&self.always_deny_rules, rule)
+    }
+
+    pub fn add_always_ask_rule(&self, rule: impl Into<String>) -> bool {
+        add_rule(&self.always_ask_rules, rule)
     }
 
     pub fn with_task_list_manager(mut self, task_list_manager: Arc<TaskListManager>) -> Self {
@@ -125,4 +158,16 @@ impl ToolPermissionContext {
         self.include_interactive_tools = include_interactive_tools;
         self
     }
+}
+
+fn add_rule(slot: &Arc<RwLock<Vec<String>>>, rule: impl Into<String>) -> bool {
+    let rule = rule.into();
+    if let Ok(mut rules) = slot.write() {
+        if rules.iter().any(|existing| existing == &rule) {
+            return false;
+        }
+        rules.push(rule);
+        return true;
+    }
+    false
 }

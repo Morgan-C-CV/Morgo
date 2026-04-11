@@ -6,8 +6,8 @@ use rust_agent::tool::permission::{evaluate_tool_permission, is_tool_allowed};
 
 #[test]
 fn deny_rules_override_tool_visibility() {
-    let mut context = ToolPermissionContext::new(PermissionMode::Default);
-    context.always_deny_rules.push("WebFetch".into());
+    let context = ToolPermissionContext::new(PermissionMode::Default);
+    context.add_always_deny_rule("WebFetch");
     let metadata = WebFetchTool.metadata();
 
     assert!(!is_tool_allowed(&metadata, &context));
@@ -31,9 +31,9 @@ fn destructive_tools_are_denied_in_plan_mode() {
 
 #[test]
 fn ask_rules_force_ask_decision_before_allow() {
-    let mut context = ToolPermissionContext::new(PermissionMode::Default);
-    context.always_allow_rules.push("WebFetch".into());
-    context.always_ask_rules.push("WebFetch".into());
+    let context = ToolPermissionContext::new(PermissionMode::Default);
+    context.add_always_allow_rule("WebFetch");
+    context.add_always_ask_rule("WebFetch");
     let metadata = WebFetchTool.metadata();
     let call = ToolCall {
         name: "WebFetch".into(),

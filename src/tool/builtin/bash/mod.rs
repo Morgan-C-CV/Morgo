@@ -104,10 +104,10 @@ impl Tool for BashTool {
         let variants = normalized_command_variants(&input.command);
 
         if permissions
-            .always_deny_rules
+            .always_deny_rules()
             .iter()
             .any(|rule| rule == self.metadata().name || rule == call.name.as_str())
-            || permissions.always_deny_rules.iter().any(|rule| {
+            || permissions.always_deny_rules().iter().any(|rule| {
                 variants
                     .iter()
                     .any(|variant| command_matches_rule(variant, rule))
@@ -127,10 +127,10 @@ impl Tool for BashTool {
         }
 
         if permissions
-            .always_allow_rules
+            .always_allow_rules()
             .iter()
             .any(|rule| rule == self.metadata().name || rule == call.name.as_str())
-            || permissions.always_allow_rules.iter().any(|rule| {
+            || permissions.always_allow_rules().iter().any(|rule| {
                 variants
                     .iter()
                     .any(|variant| command_matches_rule(variant, rule))

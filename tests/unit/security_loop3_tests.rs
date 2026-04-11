@@ -20,8 +20,8 @@ fn command_rule_matching_supports_prefix_patterns() {
 
 #[tokio::test]
 async fn bash_permissions_use_command_level_deny_rules() {
-    let mut context = ToolPermissionContext::new(PermissionMode::Default);
-    context.always_deny_rules.push("rm -rf".into());
+    let context = ToolPermissionContext::new(PermissionMode::Default);
+    context.add_always_deny_rule("rm -rf");
 
     let decision = BashTool
         .check_permissions(
