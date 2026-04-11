@@ -409,6 +409,7 @@ async fn registry_rejects_non_json_input_for_schema_backed_tools() {
 
 #[tokio::test]
 async fn registry_allows_safe_bash_in_plan_mode() {
+    let _guard = cwd_lock().lock().expect("cwd lock poisoned");
     let registry = ToolRegistry::new().register(Arc::new(BashTool));
     let permissions = ToolPermissionContext::new(PermissionMode::Plan);
     let result = registry
@@ -435,6 +436,7 @@ async fn registry_allows_safe_bash_in_plan_mode() {
 
 #[tokio::test]
 async fn registry_allows_normalized_safe_bash_in_plan_mode() {
+    let _guard = cwd_lock().lock().expect("cwd lock poisoned");
     let registry = ToolRegistry::new().register(Arc::new(BashTool));
     let permissions = ToolPermissionContext::new(PermissionMode::Plan);
     let result = registry

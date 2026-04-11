@@ -462,6 +462,11 @@ async fn router_denies_pending_request_without_session_approval() {
 
 #[tokio::test]
 async fn approval_replay_uses_runtime_tool_registry() {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    let _guard = LOCK
+        .get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .expect("cwd lock poisoned");
     let router = CommandRouter::new(CommandRegistry::new(), Box::new(DefaultSurfaceAuthorizer));
     let permission_context = ToolPermissionContext::new(PermissionMode::Default)
         .with_task_manager(Arc::new(TaskManager::default()))

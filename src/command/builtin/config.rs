@@ -29,6 +29,9 @@ impl Command for ConfigCommand {
         input: &NormalizedInput,
         _app_state: &AppState,
     ) -> anyhow::Result<CommandResult> {
+        // TODO: 状态留存与外部自动重载机制
+        // 目前受到 `app_state` 不可变借用的限制，无法在此热变更查询引擎或模型，
+        // 需拉起手动 /confirm，执行状态快照落盘并重启外围大循环以应用改动。
         if input.command_args.is_empty() {
             Ok(CommandResult::Message(
                 "Config & Model switching:\nCurrently running in standard mode. \nTo change models (e.g. from Claude-3.5-Sonnet to Haiku for fast tasks), restart the agent with appropriate environment variables.\n(Dynamic TUI model switching requires 'LocalTui' component rendering interface)".into(),

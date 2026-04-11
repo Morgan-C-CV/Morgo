@@ -16,7 +16,6 @@ pub enum SandboxPolicy {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SandboxRunner {
     DirectShell,
-    MacOsSandboxExec,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,9 +49,6 @@ pub async fn execute_with_sandbox(
 
 fn build_execution_plan(policy: SandboxPolicy) -> SandboxExecutionPlan {
     let runner = match policy {
-        SandboxPolicy::ReadOnly if Path::new("/usr/bin/sandbox-exec").exists() => {
-            SandboxRunner::MacOsSandboxExec
-        }
         SandboxPolicy::Disabled | SandboxPolicy::WorkspaceWrite | SandboxPolicy::ReadOnly => {
             SandboxRunner::DirectShell
         }
@@ -67,16 +63,6 @@ fn build_command(plan: SandboxExecutionPlan, command: &str, cwd: &Path) -> Comma
             process.arg("-lc").arg(command);
             process
         }
-        SandboxRunner::MacOsSandboxExec => {
-            let mut process = Command::new("/usr/bin/sandbox-exec");
-            process
-                .arg("-p")
-                .arg(sandbox_profile(plan.policy))
-                .arg("/bin/sh")
-                .arg("-lc")
-                .arg(command);
-            process
-        }
     };
 
     process
@@ -86,13 +72,3 @@ fn build_command(plan: SandboxExecutionPlan, command: &str, cwd: &Path) -> Comma
     process
 }
 
-fn sandbox_profile(policy: SandboxPolicy) -> &'static str {
-    match policy {
-        SandboxPolicy::Disabled | SandboxPolicy::WorkspaceWrite => {
-            "(version 1) (allow default)"
-        }
-        SandboxPolicy::ReadOnly => {
-            "(version 1) (deny default) (allow process*) (allow sysctl-read) (allow file-read*)"
-        }
-    }
-}

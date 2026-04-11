@@ -5,11 +5,6 @@ use clap::Parser;
 
 use crate::bootstrap::setup::SetupContext;
 use crate::bootstrap::{BootstrapPhase, BootstrapState, InteractionSurface, SessionMode};
-use crate::command::builtin::{
-    clear::ClearCommand, compact::CompactCommand, config::ConfigCommand, cost::CostCommand,
-    help::HelpCommand, plan::PlanCommand, resume::ResumeCommand, session::SessionCommand,
-    status::StatusCommand, tasks::TasksCommand,
-};
 use crate::command::registry::CommandRegistry;
 use crate::core::context::QueryContext;
 use crate::core::engine::QueryEngine;
@@ -323,17 +318,10 @@ impl RuntimeBootstrap {
     }
 
     fn build_command_registry(&self) -> CommandRegistry {
-        CommandRegistry::new()
-            .register(Arc::new(HelpCommand))
-            .register(Arc::new(CostCommand))
-            .register(Arc::new(CompactCommand))
-            .register(Arc::new(ClearCommand))
-            .register(Arc::new(ConfigCommand))
-            .register(Arc::new(PlanCommand))
-            .register(Arc::new(ResumeCommand))
-            .register(Arc::new(SessionCommand))
-            .register(Arc::new(StatusCommand))
-            .register(Arc::new(TasksCommand))
+        let registry = CommandRegistry::new();
+        let registry = crate::command::builtin::mount_core_commands(registry);
+        let registry = crate::command::coding::mount_coding_commands(registry);
+        registry
     }
 
     fn build_tool_registry(&self) -> ToolRegistry {
