@@ -65,6 +65,7 @@ impl Tool for AgentTool {
                     session_id.clone(),
                     InteractionSurface::Cli,
                 );
+                crate::coordinator::mode::set_coordinator_mode(true);
                 launch_agent_task(
                     tasks.clone(),
                     &parent_context,

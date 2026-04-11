@@ -1,11 +1,12 @@
 use rust_agent::tool::builtin::bash::path_validation::{
-    command_uses_only_safe_paths, is_safe_path,
+    command_path_assessment, command_uses_only_safe_paths, is_safe_path,
 };
 use rust_agent::tool::builtin::bash::permissions::{evaluate_bash_policy, is_plan_mode_safe};
 use rust_agent::tool::builtin::bash::sandbox::{SandboxPolicy, select_sandbox_policy};
 use rust_agent::tool::builtin::bash::security::{
-    contains_destructive_pattern, contains_shell_operator,
+    contains_destructive_pattern, contains_shell_operator, extract_shell_operators,
 };
+use rust_agent::tool::builtin::bash::sed_validation::{analyze_sed_safety, SedSafety};
 
 #[test]
 fn unsafe_paths_are_rejected() {
@@ -41,4 +42,34 @@ fn sandbox_policy_prefers_read_only_for_safe_commands() {
         select_sandbox_policy("echo hi > out.txt"),
         SandboxPolicy::WorkspaceWrite
     );
+}
+
+#[test]
+fn path_assessment_reports_unsafe_and_absolute_tokens() {
+    let findings = command_path_assessment("cat ../secret /tmp/file");
+    assert!(findings.iter().any(|item| item == "unsafe:../secret"));
+    assert!(findings.iter().any(|item| item == "absolute:/tmp/file"));
+}
+
+#[test]
+fn security_extracts_shell_operators() {
+    let operators = extract_shell_operators("cat foo | grep bar && pwd");
+    assert!(operators.contains(&"|".to_string()));
+    assert!(operators.contains(&"&&".to_string()));
+}
+
+#[test]
+fn sed_safety_detects_unsafe_expression() {
+    assert!(matches!(
+        analyze_sed_safety("sed -e 's/x/y/e' file.txt"),
+        SedSafety::Unsafe(_)
+    ));
+}
+
+#[test]
+fn bash_policy_tracks_structured_findings() {
+    let decision = evaluate_bash_policy("sed -i -e 's/x/y/' ../file.txt");
+    assert!(!decision.path_safe);
+    assert!(!decision.path_findings.is_empty());
+    assert!(decision.requires_escalation);
 }

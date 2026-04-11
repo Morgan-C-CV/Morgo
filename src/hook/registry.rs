@@ -32,6 +32,9 @@ pub struct HookRule {
     pub deny_match: Option<String>,
     pub append_message: Option<String>,
     pub prevent_continuation: bool,
+    pub permission_decision: Option<String>,
+    pub updated_input: Option<String>,
+    pub additional_context: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

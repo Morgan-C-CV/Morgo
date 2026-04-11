@@ -1,6 +1,7 @@
 pub mod bootstrap;
 pub mod command;
 pub mod context;
+pub mod coordinator;
 pub mod core;
 pub mod cost;
 pub mod history;

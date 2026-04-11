@@ -496,9 +496,39 @@ async fn execute_tool_phase(
             tool_name: tool_name.clone(),
         },
     );
+    let effective_tool_input = pre_tool_hook
+        .payload
+        .updated_input
+        .clone()
+        .unwrap_or(tool_input.clone());
     for message in pre_tool_hook.messages.clone() {
         engine_events.push(EngineEvent::MessageCommitted(message.clone()));
         state.messages.push(message);
+    }
+    if matches!(pre_tool_hook.payload.permission_decision.as_deref(), Some("deny")) {
+        let reason = pre_tool_hook
+            .payload
+            .permission_reason
+            .clone()
+            .unwrap_or_else(|| "tool denied by hook payload".into());
+        let denial = Message::assistant(format!("tool {tool_name} denied by hook: {reason}"));
+        let post_failure_hook = run_hook(
+            &context.hook_registry,
+            HookEvent::PostToolUseFailure {
+                tool_name: tool_name.clone(),
+            },
+        );
+        state.messages.push(denial.clone());
+        engine_events.push(EngineEvent::MessageCommitted(denial));
+        for message in post_failure_hook.messages {
+            engine_events.push(EngineEvent::MessageCommitted(message.clone()));
+            state.messages.push(message);
+        }
+        return TurnOutcome {
+            state: state.clone(),
+            events: engine_events,
+            decision: TurnDecision::Return(state.clone(), Terminal::AbortedTools),
+        };
     }
     if let HookDecision::Deny(reason) = pre_tool_hook.decision {
         let denial = Message::assistant(format!("tool {tool_name} denied by hook: {reason}"));
@@ -525,7 +555,10 @@ async fn execute_tool_phase(
     let tool_result = orchestrator
         .execute(
             &[crate::tool::orchestrator::ToolExecutionRequest {
-                call: crate::tool::definition::ToolCall::new(tool_name.clone(), tool_input.clone()),
+                call: crate::tool::definition::ToolCall::new(
+                    tool_name.clone(),
+                    effective_tool_input.clone(),
+                ),
             }],
             &context.app_state.permission_context,
         )
@@ -692,7 +725,10 @@ fn inbox_messages(context: &QueryContext, target_task_id: Option<&str>) -> Vec<M
             manager
                 .drain_events_for_target(&context.app_state.active_session_id, target_task_id)
                 .into_iter()
-                .map(|event| crate::core::engine::QueryEngine::format_task_event_message(&event))
+                .map(|event| {
+                    let notification = crate::coordinator::worker::TaskNotification::from_task_event(&event);
+                    Message::user(notification.format_as_user_message())
+                })
                 .collect()
         })
         .unwrap_or_default()

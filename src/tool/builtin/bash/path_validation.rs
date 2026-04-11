@@ -12,8 +12,23 @@ pub fn is_safe_path(path: &str) -> bool {
 }
 
 pub fn command_uses_only_safe_paths(command: &str) -> bool {
+    command_path_assessment(command).iter().all(|finding| {
+        !finding.starts_with("unsafe:") && !finding.starts_with("absolute:")
+    })
+}
+
+pub fn command_path_assessment(command: &str) -> Vec<String> {
     command
         .split_whitespace()
         .filter(|token| token.contains('/') || token.starts_with('.'))
-        .all(is_safe_path)
+        .map(|token| {
+            if token.starts_with('/') {
+                format!("absolute:{token}")
+            } else if is_safe_path(token) {
+                format!("safe:{token}")
+            } else {
+                format!("unsafe:{token}")
+            }
+        })
+        .collect()
 }

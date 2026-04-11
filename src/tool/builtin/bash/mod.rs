@@ -13,6 +13,7 @@ pub mod permissions;
 pub mod readonly_validation;
 pub mod sandbox;
 pub mod security;
+pub mod sed_validation;
 
 use permissions::evaluate_bash_policy;
 use sandbox::{execute_with_sandbox, SandboxPolicy};

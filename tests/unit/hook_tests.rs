@@ -36,6 +36,9 @@ fn pre_tool_hook_can_deny_specific_tool() {
         deny_match: Some("Agent".into()),
         append_message: None,
         prevent_continuation: false,
+        permission_decision: None,
+        updated_input: None,
+        additional_context: None,
     });
 
     let result = run_hook(
@@ -58,6 +61,9 @@ fn unrelated_tool_is_allowed() {
         deny_match: Some("Agent".into()),
         append_message: None,
         prevent_continuation: false,
+        permission_decision: None,
+        updated_input: None,
+        additional_context: None,
     });
 
     let decision = run_hook(
@@ -77,6 +83,9 @@ fn hook_rule_can_append_message_and_prevent_continuation() {
         deny_match: None,
         append_message: Some("stop hook says wait".into()),
         prevent_continuation: true,
+        permission_decision: None,
+        updated_input: None,
+        additional_context: None,
     });
 
     let result = run_hook(&registry, HookEvent::Stop);
@@ -96,6 +105,9 @@ fn notification_hook_can_match_typed_payload() {
         deny_match: Some("task-9".into()),
         append_message: None,
         prevent_continuation: false,
+        permission_decision: None,
+        updated_input: None,
+        additional_context: None,
     });
     let dispatcher = NotificationDispatcher::new(TelegramGateway::default())
         .with_hook_registry(registry.clone());
@@ -127,4 +139,28 @@ fn notification_hook_can_match_typed_payload() {
         }
     );
     assert!(dispatcher.delivered().is_empty());
+}
+
+#[test]
+fn hook_rule_can_provide_typed_payload() {
+    let registry = HookRegistry::default().register_rule(HookRule {
+        event: HookEventMatcher::PreToolUse,
+        deny_match: None,
+        append_message: None,
+        prevent_continuation: false,
+        permission_decision: Some("deny".into()),
+        updated_input: Some("patched-input".into()),
+        additional_context: Some("extra context".into()),
+    });
+
+    let result = run_hook(
+        &registry,
+        HookEvent::PreToolUse {
+            tool_name: "Read".into(),
+        },
+    );
+
+    assert_eq!(result.payload.permission_decision.as_deref(), Some("deny"));
+    assert_eq!(result.payload.updated_input.as_deref(), Some("patched-input"));
+    assert_eq!(result.payload.additional_context.as_deref(), Some("extra context"));
 }
