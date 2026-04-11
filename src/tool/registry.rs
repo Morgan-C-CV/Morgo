@@ -71,6 +71,9 @@ impl ToolRegistry {
             .ok_or_else(|| anyhow::anyhow!("unknown tool {}", call.name))?;
 
         let metadata = tool.metadata();
+        if tool.input_schema().is_some() && call.json_input().is_none() {
+            anyhow::bail!("tool {} requires JSON-structured input", metadata.name);
+        }
         tool.validate_input(call).await?;
         let base_decision = evaluate_tool_permission(&metadata, call, permissions);
         let tool_decision = tool.check_permissions(call, permissions).await;
@@ -78,9 +81,9 @@ impl ToolRegistry {
             crate::tool::definition::PermissionDecision::Allow => {
                 tool.invoke(call, permissions).await
             }
-            crate::tool::definition::PermissionDecision::Ask(reason)
-            | crate::tool::definition::PermissionDecision::Deny(reason) => {
-                Ok(ToolResult::Denied(reason))
+            crate::tool::definition::PermissionDecision::Ask { message, .. }
+            | crate::tool::definition::PermissionDecision::Deny { message, .. } => {
+                Ok(ToolResult::Denied(message))
             }
         }
     }
@@ -93,9 +96,9 @@ fn merge_permission_decisions(
     use crate::tool::definition::PermissionDecision::{Allow, Ask, Deny};
 
     match (base, tool) {
-        (Deny(reason), _) | (_, Deny(reason)) => Deny(reason),
-        (Ask(reason), _) => Ask(reason),
-        (_, Ask(reason)) => Ask(reason),
+        (Deny { message, reason }, _) | (_, Deny { message, reason }) => Deny { message, reason },
+        (Ask { message, reason }, _) => Ask { message, reason },
+        (_, Ask { message, reason }) => Ask { message, reason },
         (Allow, Allow) => Allow,
     }
 }

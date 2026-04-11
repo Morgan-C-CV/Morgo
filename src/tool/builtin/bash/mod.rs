@@ -49,6 +49,20 @@ impl Tool for BashTool {
         }
     }
 
+    fn input_schema(&self) -> Option<serde_json::Value> {
+        Some(serde_json::json!({
+            "type": "object",
+            "required": ["command"],
+            "properties": {
+                "command": {"type": "string"},
+                "timeout": {"type": "integer"},
+                "description": {"type": "string"},
+                "run_in_background": {"type": "boolean"},
+                "dangerously_disable_sandbox": {"type": "boolean"}
+            }
+        }))
+    }
+
     async fn validate_input(&self, call: &ToolCall) -> anyhow::Result<()> {
         let input = parse_input(&call.input)?;
         if input.command.trim().is_empty() {
@@ -71,7 +85,10 @@ impl Tool for BashTool {
         permissions: &ToolPermissionContext,
     ) -> PermissionDecision {
         let Ok(input) = parse_input(&call.input) else {
-            return PermissionDecision::Deny("invalid bash input".into());
+            return PermissionDecision::Deny {
+                message: "invalid bash input".into(),
+                reason: crate::tool::definition::PermissionDecisionReason::Tool,
+            };
         };
 
         let policy = evaluate_bash_policy(&input.command);
@@ -81,11 +98,17 @@ impl Tool for BashTool {
             .iter()
             .any(|rule| rule == self.metadata().name || rule == call.name.as_str())
         {
-            return PermissionDecision::Deny("tool Bash denied by explicit rule".into());
+            return PermissionDecision::Deny {
+                message: "tool Bash denied by explicit rule".into(),
+                reason: crate::tool::definition::PermissionDecisionReason::Rule,
+            };
         }
 
         if matches!(permissions.mode, PermissionMode::Plan) && !policy.safe_in_plan_mode {
-            return PermissionDecision::Deny("bash command is not allowed in plan mode".into());
+            return PermissionDecision::Deny {
+                message: "bash command is not allowed in plan mode".into(),
+                reason: crate::tool::definition::PermissionDecisionReason::Mode,
+            };
         }
 
         if permissions
@@ -97,16 +120,18 @@ impl Tool for BashTool {
         }
 
         if input.dangerously_disable_sandbox {
-            return PermissionDecision::Ask(
-                "bash command requests disabling sandbox protections".into(),
-            );
+            return PermissionDecision::Ask {
+                message: "bash command requests disabling sandbox protections".into(),
+                reason: crate::tool::definition::PermissionDecisionReason::Safety,
+            };
         }
 
         if policy.requires_escalation {
-            return PermissionDecision::Ask(
-                "bash command requires explicit approval due to shell semantics or path risk"
+            return PermissionDecision::Ask {
+                message: "bash command requires explicit approval due to shell semantics or path risk"
                     .into(),
-            );
+                reason: crate::tool::definition::PermissionDecisionReason::Safety,
+            };
         }
 
         PermissionDecision::Allow

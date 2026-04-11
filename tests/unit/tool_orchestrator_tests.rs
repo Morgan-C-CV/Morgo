@@ -49,7 +49,10 @@ async fn orchestrator_executes_single_request_through_registry() {
             &[ToolExecutionRequest {
                 call: rust_agent::tool::definition::ToolCall::new(
                     "Read",
-                    dir.to_string_lossy().into_owned(),
+                    serde_json::json!({
+                        "file_path": dir.to_string_lossy().into_owned(),
+                    })
+                    .to_string(),
                 ),
             }],
             &ToolPermissionContext::new(PermissionMode::Default),

@@ -60,6 +60,28 @@ fn test_context_with_turns(
 }
 
 #[tokio::test]
+async fn engine_stream_turn_yields_committed_messages() {
+    let engine = QueryEngine::new(test_context(vec![
+        StreamEvent::MessageStart,
+        StreamEvent::TextDelta("hello ".into()),
+        StreamEvent::TextDelta("stream".into()),
+        StreamEvent::MessageStop {
+            stop_reason: StopReason::EndTurn,
+        },
+    ]));
+
+    let mut receiver = engine.stream_turn(Message::user("hi")).await;
+    let mut committed = Vec::new();
+    while let Some(event) = receiver.recv().await {
+        if let EngineEvent::MessageCommitted(message) = event {
+            committed.push(message);
+        }
+    }
+
+    assert_eq!(committed, vec![Message::assistant("hello stream")]);
+}
+
+#[tokio::test]
 async fn query_loop_collects_text_until_end_turn() {
     let engine = QueryEngine::new(test_context(vec![
         StreamEvent::MessageStart,

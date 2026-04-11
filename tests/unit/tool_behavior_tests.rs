@@ -323,6 +323,25 @@ async fn registry_denies_unsafe_bash_in_plan_mode() {
 }
 
 #[tokio::test]
+async fn registry_rejects_non_json_input_for_schema_backed_tools() {
+    let registry = ToolRegistry::new().register(Arc::new(FileEditTool));
+    let error = registry
+        .invoke(
+            &ToolCall {
+                name: "Edit".into(),
+                input: "not-json".into(),
+            },
+            &ToolPermissionContext::new(PermissionMode::Default),
+        )
+        .await
+        .expect_err("schema-backed tool should reject non-json input");
+
+    assert!(error
+        .to_string()
+        .contains("tool Edit requires JSON-structured input"));
+}
+
+#[tokio::test]
 async fn registry_allows_safe_bash_in_plan_mode() {
     let registry = ToolRegistry::new().register(Arc::new(BashTool));
     let permissions = ToolPermissionContext::new(PermissionMode::Plan);

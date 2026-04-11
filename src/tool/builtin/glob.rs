@@ -2,11 +2,26 @@ use std::fs;
 use std::path::Path;
 
 use async_trait::async_trait;
+use serde::Deserialize;
 
 use crate::state::permission_context::ToolPermissionContext;
 use crate::tool::definition::{Tool, ToolCall, ToolMetadata, ToolResult};
 
 pub struct GlobTool;
+
+#[derive(Debug, Deserialize)]
+struct GlobInput {
+    pattern: String,
+}
+
+fn parse_pattern(call: &ToolCall) -> anyhow::Result<String> {
+    if let Some(json) = call.json_input() {
+        let input: GlobInput = serde_json::from_value(json)
+            .map_err(|error| anyhow::anyhow!("invalid glob input: {error}"))?;
+        return Ok(input.pattern);
+    }
+    Ok(call.input.trim().to_string())
+}
 
 #[async_trait]
 impl Tool for GlobTool {
@@ -25,8 +40,18 @@ impl Tool for GlobTool {
         }
     }
 
+    fn input_schema(&self) -> Option<serde_json::Value> {
+        Some(serde_json::json!({
+            "type": "object",
+            "required": ["pattern"],
+            "properties": {
+                "pattern": {"type": "string"}
+            }
+        }))
+    }
+
     async fn validate_input(&self, call: &ToolCall) -> anyhow::Result<()> {
-        if call.input.trim().is_empty() {
+        if parse_pattern(call)?.trim().is_empty() {
             anyhow::bail!("glob pattern cannot be empty")
         }
         Ok(())
@@ -39,8 +64,9 @@ impl Tool for GlobTool {
     ) -> anyhow::Result<ToolResult> {
         let root = std::env::current_dir()
             .map_err(|error| anyhow::anyhow!("failed to resolve cwd: {error}"))?;
+        let pattern = parse_pattern(call)?;
         let mut matches = Vec::new();
-        collect_matches(&root, &root, call.input.trim(), &mut matches)?;
+        collect_matches(&root, &root, pattern.trim(), &mut matches)?;
         matches.sort();
         Ok(ToolResult::Text(matches.join("\n")))
     }

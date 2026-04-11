@@ -1,6 +1,7 @@
 use crate::command::types::CommandResult;
 use crate::core::engine::QueryEngine;
 use crate::core::message::Message;
+use crate::core::events::EngineEvent;
 use crate::history::session::{SessionHistoryEntry, SessionId};
 use crate::interaction::envelope::NormalizedInput;
 use crate::interaction::router::CommandRouter;
@@ -31,11 +32,9 @@ pub async fn handle_cli_input(
     );
     let persisted_messages = match router.route(&input, app_state).await? {
         CommandResult::Message(message) => vec![Message::assistant(message)],
-        CommandResult::Prompt(prompt) => engine.submit_message(Message::user(prompt)).await,
+        CommandResult::Prompt(prompt) => collect_stream_messages(engine, Message::user(prompt)).await,
         CommandResult::ContinueToQuery => {
-            engine
-                .submit_message(Message::user(input.raw.clone()))
-                .await
+            collect_stream_messages(engine, Message::user(input.raw.clone())).await
         }
         CommandResult::Denied(reason) => vec![Message::assistant(format!("Denied: {reason}"))],
     };
@@ -92,6 +91,17 @@ fn persist_cli_turn(app_state: &AppState, raw_input: &str, messages: &[Message])
             },
         );
     }
+}
+
+async fn collect_stream_messages(engine: &QueryEngine, input: Message) -> Vec<Message> {
+    let mut receiver = engine.stream_turn(input).await;
+    let mut messages = Vec::new();
+    while let Some(event) = receiver.recv().await {
+        if let EngineEvent::MessageCommitted(message) = event {
+            messages.push(message);
+        }
+    }
+    messages
 }
 
 fn collect_message_content(messages: Vec<Message>) -> String {

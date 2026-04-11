@@ -47,10 +47,26 @@ impl ToolCall {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PermissionDecisionReason {
+    Rule,
+    Mode,
+    Tool,
+    Hook,
+    Safety,
+    Other,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PermissionDecision {
     Allow,
-    Deny(String),
-    Ask(String),
+    Deny {
+        message: String,
+        reason: PermissionDecisionReason,
+    },
+    Ask {
+        message: String,
+        reason: PermissionDecisionReason,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -100,7 +116,10 @@ pub trait Tool: Send + Sync {
             .iter()
             .any(|rule| rule == self.metadata().name)
         {
-            PermissionDecision::Deny(format!("tool {} denied by policy", self.metadata().name))
+            PermissionDecision::Deny {
+                message: format!("tool {} denied by policy", self.metadata().name),
+                reason: PermissionDecisionReason::Rule,
+            }
         } else {
             PermissionDecision::Allow
         }

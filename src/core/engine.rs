@@ -3,6 +3,7 @@ use crate::core::events::EngineEvent;
 use crate::core::message::Message;
 use crate::core::query_loop::{QueryLoopResult, run_query_loop};
 use crate::task::types::TaskEvent;
+use tokio::sync::mpsc;
 
 #[derive(Debug, Clone)]
 pub struct QueryEngine {
@@ -20,6 +21,17 @@ impl QueryEngine {
 
     pub async fn submit_message_events(&self, input: Message) -> Vec<EngineEvent> {
         self.submit_turn(input).await.events
+    }
+
+    pub async fn stream_turn(&self, input: Message) -> mpsc::Receiver<EngineEvent> {
+        let result = self.submit_turn(input).await;
+        let (tx, rx) = mpsc::channel(result.events.len().max(1));
+        for event in result.events {
+            if tx.send(event).await.is_err() {
+                break;
+            }
+        }
+        rx
     }
 
     pub async fn submit_turn(&self, input: Message) -> QueryLoopResult {

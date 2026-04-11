@@ -24,6 +24,6 @@ fn destructive_tools_are_denied_in_plan_mode() {
 
     assert!(matches!(
         evaluate_tool_permission(&metadata, &call, &context),
-        rust_agent::tool::definition::PermissionDecision::Deny(_)
+        rust_agent::tool::definition::PermissionDecision::Deny { .. }
     ));
 }

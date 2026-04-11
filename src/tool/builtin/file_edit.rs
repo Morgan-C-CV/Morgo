@@ -35,6 +35,19 @@ impl Tool for FileEditTool {
         }
     }
 
+    fn input_schema(&self) -> Option<serde_json::Value> {
+        Some(serde_json::json!({
+            "type": "object",
+            "required": ["file_path", "old_string", "new_string"],
+            "properties": {
+                "file_path": {"type": "string"},
+                "old_string": {"type": "string"},
+                "new_string": {"type": "string"},
+                "replace_all": {"type": "boolean"}
+            }
+        }))
+    }
+
     async fn validate_input(&self, call: &ToolCall) -> anyhow::Result<()> {
         let input = parse_input(&call.input)?;
         if input.file_path.trim().is_empty() {

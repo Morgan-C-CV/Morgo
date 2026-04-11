@@ -1,6 +1,7 @@
 use crate::state::permission_context::ToolPermissionContext;
 use crate::tool::definition::{InterruptBehavior, ToolCall, ToolResult};
 use crate::tool::registry::ToolRegistry;
+use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolExecutionRequest {
@@ -26,13 +27,15 @@ pub struct ToolExecutionPlan {
     pub batches: Vec<ToolExecutionBatch>,
 }
 
-pub struct ToolOrchestrator<'a> {
-    registry: &'a ToolRegistry,
+pub struct ToolOrchestrator {
+    registry: Arc<ToolRegistry>,
 }
 
-impl<'a> ToolOrchestrator<'a> {
-    pub fn new(registry: &'a ToolRegistry) -> Self {
-        Self { registry }
+impl ToolOrchestrator {
+    pub fn new(registry: &ToolRegistry) -> Self {
+        Self {
+            registry: Arc::new(registry.clone()),
+        }
     }
 
     pub fn plan(&self, requests: &[ToolExecutionRequest]) -> ToolExecutionPlan {
@@ -75,6 +78,28 @@ impl<'a> ToolOrchestrator<'a> {
 
         for batch in plan.batches {
             let executed_in_batch = batch.concurrency_safe && batch.end_index - batch.start_index > 1;
+            if executed_in_batch {
+                let mut handles = Vec::new();
+                for request in &requests[batch.start_index..batch.end_index] {
+                    let registry = self.registry.clone();
+                    let permissions = permissions.clone();
+                    let call = request.call.clone();
+                    handles.push(tokio::spawn(async move {
+                        let result = registry.invoke(&call, &permissions).await;
+                        (call, result)
+                    }));
+                }
+                for handle in handles {
+                    let (call, result) = handle.await.map_err(|error| anyhow::anyhow!("tool task join failed: {error}"))?;
+                    outcomes.push(ToolExecutionOutcome {
+                        tool_name: call.name,
+                        result: result?,
+                        executed_in_batch,
+                    });
+                }
+                continue;
+            }
+
             for request in &requests[batch.start_index..batch.end_index] {
                 let interrupt_behavior = self
                     .registry

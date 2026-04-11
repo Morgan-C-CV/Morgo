@@ -8,7 +8,7 @@ pub fn is_tool_allowed(metadata: &ToolMetadata, permissions: &ToolPermissionCont
             &ToolCall::new(metadata.name, String::new()),
             permissions
         ),
-        PermissionDecision::Allow | PermissionDecision::Ask(_)
+        PermissionDecision::Allow | PermissionDecision::Ask { .. }
     )
 }
 
@@ -22,14 +22,17 @@ pub fn evaluate_tool_permission(
         .iter()
         .any(|rule| rule == metadata.name || rule == call.name.as_str())
     {
-        return PermissionDecision::Deny(format!("tool {} denied by explicit rule", metadata.name));
+        return PermissionDecision::Deny {
+            message: format!("tool {} denied by explicit rule", metadata.name),
+            reason: crate::tool::definition::PermissionDecisionReason::Rule,
+        };
     }
 
     if metadata.destructive && matches!(permissions.mode, PermissionMode::Plan) {
-        return PermissionDecision::Deny(format!(
-            "tool {} not allowed in plan mode",
-            metadata.name
-        ));
+        return PermissionDecision::Deny {
+            message: format!("tool {} not allowed in plan mode", metadata.name),
+            reason: crate::tool::definition::PermissionDecisionReason::Mode,
+        };
     }
 
     if permissions
@@ -41,10 +44,10 @@ pub fn evaluate_tool_permission(
     }
 
     if metadata.requires_auth && permissions.always_allow_rules.is_empty() {
-        return PermissionDecision::Ask(format!(
-            "tool {} requires explicit approval",
-            metadata.name
-        ));
+        return PermissionDecision::Ask {
+            message: format!("tool {} requires explicit approval", metadata.name),
+            reason: crate::tool::definition::PermissionDecisionReason::Rule,
+        };
     }
 
     PermissionDecision::Allow
