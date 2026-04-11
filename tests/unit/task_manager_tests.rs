@@ -3,6 +3,8 @@ use std::sync::Arc;
 use rust_agent::bootstrap::InteractionSurface;
 use rust_agent::history::session::{InMemorySessionStore, SessionId, SessionStore};
 use rust_agent::interaction::dispatcher::NotificationDispatcher;
+use rust_agent::interaction::notification::NotificationTarget;
+use rust_agent::interaction::telegram::binding::{SessionBinding, TelegramDeliveryTarget};
 use rust_agent::interaction::telegram::gateway::TelegramGateway;
 use rust_agent::state::permission_context::{PermissionMode, ToolPermissionContext};
 use rust_agent::task::manager::TaskManager;
@@ -58,6 +60,35 @@ fn task_manager_tracks_failed_and_killed_states() {
     let killed = manager.create("killed task", "session-3", InteractionSurface::Cli);
     assert!(manager.kill(&killed.id, "session-3", &dispatcher));
     assert_eq!(manager.get(&killed.id).unwrap().status, TaskStatus::Killed);
+}
+
+#[test]
+fn telegram_task_notifications_resolve_session_target_to_delivery_target() {
+    let manager = TaskManager::default();
+    let gateway = TelegramGateway::default().with_bindings(vec![SessionBinding {
+        actor_id: "actor-1".into(),
+        session_id: "telegram-session".into(),
+        telegram_user_id: Some("user-1".into()),
+        bot_id: Some("bot-1".into()),
+        delivery_target: Some(TelegramDeliveryTarget {
+            chat_id: "chat-1".into(),
+            thread_id: Some("thread-9".into()),
+        }),
+    }]);
+    let dispatcher = NotificationDispatcher::new(gateway);
+    let task = manager.create("telegram task", "telegram-session", InteractionSurface::Telegram);
+
+    manager.complete(&task.id, &dispatcher);
+
+    let delivered = dispatcher.delivered();
+    assert_eq!(delivered.len(), 1);
+    assert_eq!(
+        delivered[0].target,
+        Some(NotificationTarget::Telegram(TelegramDeliveryTarget {
+            chat_id: "chat-1".into(),
+            thread_id: Some("thread-9".into()),
+        }))
+    );
 }
 
 #[tokio::test]

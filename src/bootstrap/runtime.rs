@@ -102,7 +102,7 @@ impl RuntimeBootstrap {
         let _ = run_hook(&hook_registry, HookEvent::SessionStart);
 
         state.record_phase(BootstrapPhase::BuildToolContext);
-        let tool_registry = self.build_tool_registry();
+        let tool_inventory = self.build_tool_registry();
 
         state.record_phase(BootstrapPhase::AssembleTools);
         let setup = SetupContext::detect();
@@ -174,6 +174,8 @@ impl RuntimeBootstrap {
                 .unwrap_or_default()
                 .with_persistence(self.session_store.clone(), task_list_session_id),
         );
+        let coordinator_tools = tool_inventory.assemble_for_role(RuntimeRole::Coordinator);
+        let worker_tools = tool_inventory.assemble_for_role(RuntimeRole::Worker);
         let permission_context = ToolPermissionContext::new(if self.cli.init_only {
             PermissionMode::Plan
         } else {
@@ -182,7 +184,7 @@ impl RuntimeBootstrap {
         .with_task_manager(task_manager.clone())
         .with_task_list_manager(task_list_manager.clone())
         .with_active_session_id(active_session_id.clone())
-        .with_inherited_tool_registry(tool_registry.clone())
+        .with_inherited_tool_registry(worker_tools.clone())
         .with_inherited_hook_registry(hook_registry.clone());
 
         state.record_phase(BootstrapPhase::InitializeRuntime);
@@ -198,7 +200,7 @@ impl RuntimeBootstrap {
             runtime_role: RuntimeRole::Coordinator,
             permission_context: permission_context.clone(),
             cost_tracker: CostTracker::default(),
-            notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
+            notification_dispatcher: NotificationDispatcher::new(self.build_telegram_gateway()),
             startup_trace: state
                 .phases
                 .iter()
@@ -212,7 +214,7 @@ impl RuntimeBootstrap {
         };
 
         if self.cli.show_tools {
-            for tool in tool_registry.visible_tools(&permission_context) {
+            for tool in coordinator_tools.visible_tools(&permission_context) {
                 println!("{} - {}", tool.name, tool.description);
             }
             return Ok(());
@@ -234,7 +236,7 @@ impl RuntimeBootstrap {
         let router = CommandRouter::new(registry, Box::new(DefaultSurfaceAuthorizer));
         let query_context = QueryContext {
             app_state: app_state.clone(),
-            tool_registry,
+            tool_registry: coordinator_tools,
             api_client: AnthropicClient::default(),
             compactor: ReactiveCompactor,
             hook_registry,
@@ -325,6 +327,10 @@ impl RuntimeBootstrap {
             .register(Arc::new(TaskUpdateTool))
             .register(Arc::new(ToolSearchTool))
             .register(Arc::new(WebFetchTool))
+    }
+
+    fn build_telegram_gateway(&self) -> TelegramGateway {
+        TelegramGateway::default()
     }
 
     fn restore_request(&self) -> Option<RestoreRequest> {

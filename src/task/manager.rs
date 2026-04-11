@@ -356,7 +356,7 @@ impl TaskManager {
         event: &TaskEvent,
         dispatcher: &NotificationDispatcher,
     ) -> Notification {
-        let notification = Notification::task_update(
+        let mut notification = Notification::task_update(
             &event.owner.session_id,
             title,
             event.summary.clone(),
@@ -364,6 +364,11 @@ impl TaskManager {
             format!("{:?}", event.status),
             event.output_file.clone(),
         );
+        if matches!(event.owner.surface, InteractionSurface::Telegram) {
+            notification.target = Some(crate::interaction::notification::NotificationTarget::Session {
+                session_id: event.owner.session_id.clone(),
+            });
+        }
         dispatcher.dispatch(event.owner.surface, notification.clone());
         notification
     }

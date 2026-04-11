@@ -2,8 +2,8 @@ use rust_agent::bootstrap::InteractionSurface;
 use rust_agent::interaction::cli::renderer::render_turn_output;
 use rust_agent::interaction::cli::repl::{CliDisplayEvent, CliTurnOutput};
 use rust_agent::interaction::dispatcher::NotificationDispatcher;
-use rust_agent::interaction::notification::{Notification, NotificationType};
-use rust_agent::interaction::telegram::binding::SessionBinding;
+use rust_agent::interaction::notification::{Notification, NotificationTarget, NotificationType};
+use rust_agent::interaction::telegram::binding::{SessionBinding, TelegramDeliveryTarget};
 use rust_agent::interaction::telegram::gateway::TelegramGateway;
 use rust_agent::task::types::{TaskEvent, TaskOwner, TaskStatus};
 
@@ -49,7 +49,7 @@ fn cli_renderer_marks_task_event_lines() {
     assert!(rendered.contains("[task] summary: demo task"));
     assert!(rendered.contains("[task] status: Completed"));
     assert!(rendered.contains("[task] output: /tmp/task-1.log"));
-    assert!(rendered.contains("[task] next_action: use TaskOutput with input 'task-1:0'"));
+    assert!(rendered.contains("use TaskOutput with input 'task-1:0'"));
 }
 
 #[test]
@@ -58,7 +58,12 @@ fn dispatcher_requires_delivery_ready_binding_for_telegram() {
         allowed_bindings: vec![SessionBinding {
             actor_id: "actor-1".into(),
             session_id: "telegram-session-1".into(),
-            delivery_target: Some("chat-1".into()),
+            telegram_user_id: Some("user-1".into()),
+            bot_id: Some("bot-1".into()),
+            delivery_target: Some(TelegramDeliveryTarget {
+                chat_id: "chat-1".into(),
+                thread_id: None,
+            }),
         }],
     });
     let notification = Notification {
@@ -70,10 +75,28 @@ fn dispatcher_requires_delivery_ready_binding_for_telegram() {
         status: Some("Completed".into()),
         output_file: Some("/tmp/task-1.log".into()),
         wake_up: true,
-        target: Some("chat-1".into()),
+        target: Some(NotificationTarget::Session {
+            session_id: "telegram-session-1".into(),
+        }),
     };
 
-    dispatcher.dispatch(InteractionSurface::Telegram, notification.clone());
+    dispatcher.dispatch(InteractionSurface::Telegram, notification);
 
-    assert_eq!(dispatcher.delivered(), vec![notification]);
+    assert_eq!(
+        dispatcher.delivered(),
+        vec![Notification {
+            session_id: "telegram-session-1".into(),
+            title: "Task completed".into(),
+            body: "demo body".into(),
+            notification_type: NotificationType::TaskUpdate,
+            task_id: Some("task-1".into()),
+            status: Some("Completed".into()),
+            output_file: Some("/tmp/task-1.log".into()),
+            wake_up: true,
+            target: Some(NotificationTarget::Telegram(TelegramDeliveryTarget {
+                chat_id: "chat-1".into(),
+                thread_id: None,
+            })),
+        }]
+    );
 }

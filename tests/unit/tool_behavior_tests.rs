@@ -386,6 +386,30 @@ async fn tool_search_filters_catalog() {
     assert!(!text.contains("WebFetch - Fetch remote web content"));
 }
 
+#[tokio::test]
+async fn tool_search_prefers_runtime_registry_when_available() {
+    let registry = ToolRegistry::new().register(Arc::new(FileReadTool));
+    let permissions = ToolPermissionContext::new(PermissionMode::Default)
+        .with_inherited_tool_registry(registry);
+
+    let result = ToolSearchTool
+        .invoke(
+            &ToolCall {
+                name: "ToolSearch".into(),
+                input: "read".into(),
+            },
+            &permissions,
+        )
+        .await
+        .expect("tool search should succeed");
+
+    let ToolResult::Text(text) = result else {
+        panic!("expected text result");
+    };
+    assert!(text.contains("Read - Read files from disk"));
+    assert!(!text.contains("Edit - Edit existing files with safety rails"));
+}
+
 #[test]
 fn auth_gated_tools_stay_visible_for_explicit_approval() {
     let context = ToolPermissionContext::new(PermissionMode::Default);
@@ -408,7 +432,7 @@ fn visible_tools_include_ask_only_tools() {
 }
 
 #[test]
-fn worker_tool_filter_excludes_agent_tool() {
+fn worker_tool_filter_excludes_agent_and_interactive_tools() {
     let registry = ToolRegistry::new()
         .register(Arc::new(BashTool))
         .register(Arc::new(FileReadTool))
@@ -424,10 +448,10 @@ fn worker_tool_filter_excludes_agent_tool() {
         .map(|tool| tool.name)
         .collect::<Vec<_>>();
 
-    assert!(names.contains(&"Bash"));
     assert!(names.contains(&"Read"));
     assert!(names.contains(&"TaskCreate"));
     assert!(names.contains(&"TaskStop"));
     assert!(names.contains(&"TaskUpdate"));
     assert!(!names.contains(&"Agent"));
+    assert!(!names.contains(&"Bash"));
 }

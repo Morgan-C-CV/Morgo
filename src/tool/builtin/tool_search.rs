@@ -39,15 +39,21 @@ impl Tool for ToolSearchTool {
         _permissions: &ToolPermissionContext,
     ) -> anyhow::Result<ToolResult> {
         let query = call.input.trim().to_ascii_lowercase();
-        let catalog = vec![
-            AgentTool.metadata(),
-            FileEditTool.metadata(),
-            FileReadTool.metadata(),
-            GlobTool.metadata(),
-            GrepTool.metadata(),
-            self.metadata(),
-            WebFetchTool.metadata(),
-        ];
+        let catalog = _permissions
+            .inherited_tool_registry
+            .as_ref()
+            .map(|registry| registry.all_metadata())
+            .unwrap_or_else(|| {
+                vec![
+                    AgentTool.metadata(),
+                    FileEditTool.metadata(),
+                    FileReadTool.metadata(),
+                    GlobTool.metadata(),
+                    GrepTool.metadata(),
+                    self.metadata(),
+                    WebFetchTool.metadata(),
+                ]
+            });
 
         let mut matches = catalog
             .into_iter()

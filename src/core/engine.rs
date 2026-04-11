@@ -163,7 +163,7 @@ impl QueryEngine {
             ),
         };
         Message::assistant(format!(
-            "[task] id: {}\n[task] summary: {}\n[task] status: {:?}\n[task] output: {}\n[task] next_action: {}",
+            "<task-notification>\n<task-id>{}</task-id>\n<summary>{}</summary>\n<status>{:?}</status>\n<output-file>{}</output-file>\n<next-action>{}</next-action>\n</task-notification>",
             event.task_id, event.summary, event.status, event.output_file, next_action
         ))
     }

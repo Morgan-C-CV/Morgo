@@ -54,11 +54,11 @@ impl NotificationDispatcher {
                     .push(notification);
             }
             InteractionSurface::Telegram => {
-                if self.telegram_gateway.can_deliver(&notification) {
+                if let Some(prepared) = self.telegram_gateway.prepare_delivery(&notification) {
                     self.delivered
                         .write()
                         .expect("dispatcher state poisoned")
-                        .push(notification);
+                        .push(prepared);
                 }
             }
         }

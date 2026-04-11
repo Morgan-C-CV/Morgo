@@ -1,6 +1,14 @@
+use crate::interaction::telegram::binding::TelegramDeliveryTarget;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NotificationType {
     TaskUpdate,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NotificationTarget {
+    Session { session_id: String },
+    Telegram(TelegramDeliveryTarget),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -13,7 +21,7 @@ pub struct Notification {
     pub status: Option<String>,
     pub output_file: Option<String>,
     pub wake_up: bool,
-    pub target: Option<String>,
+    pub target: Option<NotificationTarget>,
 }
 
 impl Notification {

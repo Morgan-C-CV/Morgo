@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use crate::state::app_state::RuntimeRole;
 use crate::state::permission_context::ToolPermissionContext;
 use crate::tool::definition::{InterruptBehavior, Tool, ToolCall, ToolMetadata, ToolResult};
 use crate::tool::permission::{evaluate_tool_permission, is_tool_allowed};
@@ -36,14 +37,30 @@ impl ToolRegistry {
             .collect()
     }
 
-    pub fn filter_for_worker(&self) -> Self {
+    pub fn all_metadata(&self) -> Vec<ToolMetadata> {
+        self.tools.iter().map(|tool| tool.metadata()).collect()
+    }
+
+    pub fn assemble_for_role(&self, role: RuntimeRole) -> Self {
         let tools = self
             .tools
             .iter()
-            .filter(|tool| tool.metadata().name != "Agent")
+            .filter(|tool| match role {
+                RuntimeRole::Coordinator => true,
+                RuntimeRole::Worker => {
+                    let metadata = tool.metadata();
+                    metadata.name != "Agent"
+                        && !metadata.requires_user_interaction
+                        && !metadata.should_defer
+                }
+            })
             .cloned()
             .collect();
         Self { tools }
+    }
+
+    pub fn filter_for_worker(&self) -> Self {
+        self.assemble_for_role(RuntimeRole::Worker)
     }
 
     pub fn find(&self, call: &ToolCall) -> Option<&Arc<dyn Tool>> {

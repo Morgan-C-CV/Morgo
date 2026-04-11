@@ -159,7 +159,7 @@ fn build_parent_query_context(permissions: ToolPermissionContext) -> QueryContex
         .inherited_tool_registry
         .clone()
         .unwrap_or_else(|| ToolRegistry::new().register(std::sync::Arc::new(AgentTool)))
-        .filter_for_worker();
+        .assemble_for_role(RuntimeRole::Worker);
     QueryContext {
         app_state: AppState {
             surface: InteractionSurface::Cli,

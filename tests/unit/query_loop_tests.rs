@@ -480,7 +480,8 @@ async fn engine_drains_internal_task_events() {
         rust_agent::task::types::TaskStatus::Completed
     );
     let formatted = QueryEngine::format_task_event_message(&events[0]);
-    assert!(formatted.content.contains("[task] id: task-0"));
+    assert!(formatted.content.contains("<task-notification>"));
+    assert!(formatted.content.contains("<task-id>task-0</task-id>"));
     assert!(
         formatted
             .content
@@ -614,7 +615,7 @@ async fn subagent_context_inherits_parent_tools_and_hooks() {
     assert_eq!(child.app_state.runtime_role, RuntimeRole::Worker);
     assert!(child.is_subagent());
     assert!(
-        child
+        !child
             .tool_registry
             .visible_tools(&child.app_state.permission_context)
             .iter()

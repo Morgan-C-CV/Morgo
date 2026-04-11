@@ -27,9 +27,17 @@ impl QueryContext {
     ) -> Self {
         let mut app_state = self.app_state.clone();
         app_state.runtime_role = RuntimeRole::Worker;
+        app_state.history = None;
+        app_state.restored_session = None;
+        let mut permission_context = app_state.permission_context.clone();
+        permission_context.inherited_tool_registry = Some(
+            self.tool_registry
+                .assemble_for_role(RuntimeRole::Worker),
+        );
+        app_state.permission_context = permission_context;
         Self {
             app_state,
-            tool_registry: self.tool_registry.clone(),
+            tool_registry: self.tool_registry.assemble_for_role(RuntimeRole::Worker),
             api_client: AnthropicClient::with_scripted_turns(scripted_turns),
             compactor: self.compactor.clone(),
             hook_registry: self.hook_registry.clone(),
