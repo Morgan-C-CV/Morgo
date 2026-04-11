@@ -27,50 +27,69 @@ impl Command for McpCommand {
     async fn execute(
         &self,
         input: &NormalizedInput,
-        _app_state: &AppState,
+        app_state: &AppState,
     ) -> anyhow::Result<CommandResult> {
+        let runtime = app_state
+            .mcp_runtime
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("MCP runtime is unavailable"))?;
         let args = input.command_args.trim();
 
-        if args.is_empty() {
+        if args.is_empty() || args == "list" || args == "status" {
+            let servers = runtime.list_servers().await;
+            let mut lines = vec!["MCP servers:".to_string()];
+            for server in servers {
+                let error_suffix = server
+                    .last_error
+                    .as_deref()
+                    .filter(|value| !value.trim().is_empty())
+                    .map(|value| format!("; last_error={}", value.trim()))
+                    .unwrap_or_default();
+                lines.push(format!(
+                    "- {} ({}) cmd={} status={} tools={} resources={}{}",
+                    server.config.name,
+                    server.config.id,
+                    server.config.command,
+                    server.status.as_str(),
+                    server.tool_count,
+                    server.resource_count,
+                    error_suffix
+                ));
+            }
+            return Ok(CommandResult::Message(lines.join("\n")));
+        }
+
+        let mut parts = args.split_whitespace();
+        let action = parts.next().unwrap_or_default();
+        let server = parts.collect::<Vec<_>>().join(" ");
+        if server.trim().is_empty() {
             return Ok(CommandResult::Message(
-                "MCP Manager:\n\
-                Model Context Protocol server configurations are pending TUI interface integration.\n\
-                Use '/mcp enable <server>' or '/mcp disable <server>' to quickly toggle an existing configuration."
-                    .to_string(),
+                "Usage: /mcp [list|status|connect <server>|disconnect <server>|reconnect <server>]".to_string(),
             ));
         }
 
-        let parts: Vec<&str> = args.split_whitespace().collect();
-        let action = parts[0];
-        let target = if parts.len() > 1 {
-            parts[1..].join(" ")
-        } else {
-            "all".to_string()
-        };
+        let result = match action {
+            "connect" => runtime.connect(server.trim()).await.map(|state| {
+                format!(
+                    "Connected MCP server {} ({}) with {} tools and {} resources.",
+                    state.config.name, state.config.id, state.tool_count, state.resource_count
+                )
+            }),
+            "disconnect" => runtime.disconnect(server.trim()).await.map(|state| {
+                format!(
+                    "Disconnected MCP server {} ({}).",
+                    state.config.name, state.config.id
+                )
+            }),
+            "reconnect" => runtime.reconnect(server.trim()).await.map(|state| {
+                format!(
+                    "Reconnected MCP server {} ({}) with {} tools and {} resources.",
+                    state.config.name, state.config.id, state.tool_count, state.resource_count
+                )
+            }),
+            _ => anyhow::bail!("Unknown /mcp action: {action}"),
+        }?;
 
-        match action {
-            "enable" | "disable" => {
-                Ok(CommandResult::Message(format!(
-                    "Command acknowledged: Attempted to {} MCP server '{}'.\n\
-                    // TODO: The MCP configuration struct and global mutability bridge are not yet fully implemented.",
-                    action, target
-                )))
-            }
-            "reconnect" => {
-                Ok(CommandResult::Message(format!(
-                    "Command acknowledged: Attempted to reconnect MCP server '{}'.",
-                    target
-                )))
-            }
-            "no-redirect" => {
-                Ok(CommandResult::Message(
-                    "Bypassing tests redirection...".to_string(),
-                ))
-            }
-            _ => Ok(CommandResult::Message(format!(
-                "Unknown action '{}' for MCP. Valid actions are 'enable', 'disable', 'reconnect'.",
-                action
-            ))),
-        }
+        Ok(CommandResult::Message(result))
     }
 }

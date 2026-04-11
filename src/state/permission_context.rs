@@ -2,6 +2,7 @@ use std::sync::{Arc, RwLock};
 
 use crate::hook::registry::HookRegistry;
 use crate::plan::manager::PlanManager;
+use crate::service::mcp::runtime::McpRuntime;
 use crate::skills::registry::SkillRegistry;
 use crate::task::list_manager::TaskListManager;
 use crate::task::manager::TaskManager;
@@ -34,6 +35,7 @@ pub struct ToolPermissionContext {
     pub task_list_manager: Option<Arc<TaskListManager>>,
     pub plan_manager: Option<Arc<PlanManager>>,
     pub skill_registry: Option<Arc<SkillRegistry>>,
+    pub mcp_runtime: Option<Arc<McpRuntime>>,
     pub active_session_id: Option<String>,
     pub pending_approval: Arc<RwLock<Option<PendingApproval>>>,
     pub subagent_scripted_turns: Option<Vec<Vec<crate::service::api::streaming::StreamEvent>>>,
@@ -54,6 +56,7 @@ impl ToolPermissionContext {
             task_list_manager: None,
             plan_manager: None,
             skill_registry: None,
+            mcp_runtime: None,
             active_session_id: None,
             pending_approval: Arc::new(RwLock::new(None)),
             subagent_scripted_turns: None,
@@ -112,6 +115,11 @@ impl ToolPermissionContext {
 
     pub fn with_skill_registry(mut self, skill_registry: Arc<SkillRegistry>) -> Self {
         self.skill_registry = Some(skill_registry);
+        self
+    }
+
+    pub fn with_mcp_runtime(mut self, mcp_runtime: Arc<McpRuntime>) -> Self {
+        self.mcp_runtime = Some(mcp_runtime);
         self
     }
 

@@ -1,6 +1,7 @@
 use crate::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
 use crate::command::types::CommandResult;
 use crate::cost::tracker::CostTracker;
+use crate::service::mcp::runtime::McpRuntime;
 use crate::skills::registry::SkillRegistry;
 use crate::tool::definition::{ToolCall, ToolResult};
 use crate::tool::registry::ToolRegistry;
@@ -30,6 +31,7 @@ pub struct AppState {
     pub command_registry: Option<Arc<CommandRegistry>>,
     pub runtime_tool_registry: Option<Arc<RwLock<ToolRegistry>>>,
     pub skill_registry: Option<Arc<SkillRegistry>>,
+    pub mcp_runtime: Option<Arc<McpRuntime>>,
     pub cost_tracker: CostTracker,
     pub notification_dispatcher: NotificationDispatcher,
     pub startup_trace: Vec<String>,
@@ -115,6 +117,7 @@ impl std::fmt::Debug for AppState {
             .field("has_command_registry", &self.command_registry.is_some())
             .field("has_runtime_tool_registry", &self.runtime_tool_registry.is_some())
             .field("has_skill_registry", &self.skill_registry.is_some())
+            .field("has_mcp_runtime", &self.mcp_runtime.is_some())
             .field("cost_tracker", &self.cost_tracker)
             .field("notification_dispatcher", &self.notification_dispatcher)
             .field("startup_trace", &self.startup_trace)

@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 
+use crate::service::mcp::types::{McpRequest, McpResponse};
 use crate::state::permission_context::ToolPermissionContext;
 use crate::tool::definition::{Tool, ToolCall, ToolMetadata, ToolResult};
 
@@ -28,13 +29,35 @@ impl Tool for McpTool {
     async fn invoke(
         &self,
         call: &ToolCall,
-        _permissions: &ToolPermissionContext,
+        permissions: &ToolPermissionContext,
     ) -> anyhow::Result<ToolResult> {
-        let request = call.input.trim();
-        Ok(ToolResult::Text(if request.is_empty() {
-            "mcp request queued".into()
-        } else {
-            format!("mcp request queued: {request}")
-        }))
+        let runtime = permissions
+            .mcp_runtime
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("MCP runtime is unavailable in this session"))?;
+        let request: McpRequest = serde_json::from_str(call.input.trim())?;
+        let response = runtime.dispatch(request).await?;
+        Ok(ToolResult::Text(render_response(response)))
+    }
+}
+
+fn render_response(response: McpResponse) -> String {
+    match response {
+        McpResponse::ToolList(tools) => {
+            let mut lines = vec!["MCP tools:".to_string()];
+            for tool in tools {
+                lines.push(format!("- {}: {}", tool.name, tool.description));
+            }
+            lines.join("\n")
+        }
+        McpResponse::ResourceList(resources) => {
+            let mut lines = vec!["MCP resources:".to_string()];
+            for resource in resources {
+                lines.push(format!("- {} ({})", resource.name, resource.uri));
+            }
+            lines.join("\n")
+        }
+        McpResponse::ToolResult(value) => format!("MCP tool result:\n{}", value),
+        McpResponse::ResourceContent(content) => format!("MCP resource content:\n{}", content),
     }
 }
