@@ -1,7 +1,5 @@
 use std::sync::Arc;
 
-use tokio::sync::RwLock;
-
 use rust_agent::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
 use rust_agent::command::builtin::cost::CostCommand;
 use rust_agent::command::types::{Command, CommandResult};

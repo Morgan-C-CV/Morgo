@@ -33,7 +33,7 @@ fn test_context_with_turns(
     turns: Vec<Vec<StreamEvent>>,
     tool_registry: ToolRegistry,
 ) -> QueryContext {
-    let mut permission_context = ToolPermissionContext::new(PermissionMode::Default)
+    let permission_context = ToolPermissionContext::new(PermissionMode::Default)
         .with_task_manager(Arc::new(TaskManager::default()));
     permission_context.add_always_allow_rule("Agent");
     QueryContext {
@@ -282,7 +282,7 @@ async fn query_loop_fails_when_tool_is_unknown() {
 
 #[tokio::test]
 async fn query_loop_stop_hook_can_prevent_continuation() {
-    let mut permission_context = ToolPermissionContext::new(PermissionMode::Default)
+    let permission_context = ToolPermissionContext::new(PermissionMode::Default)
         .with_task_manager(Arc::new(TaskManager::default()));
     permission_context.add_always_allow_rule("Agent");
 
@@ -351,7 +351,7 @@ async fn query_loop_stop_hook_can_prevent_continuation() {
 #[tokio::test]
 async fn query_loop_respects_pre_tool_hook_denial() {
     let registry = ToolRegistry::new().register(Arc::new(AgentTool));
-    let mut permission_context = ToolPermissionContext::new(PermissionMode::Default)
+    let permission_context = ToolPermissionContext::new(PermissionMode::Default)
         .with_task_manager(Arc::new(TaskManager::default()));
     permission_context.add_always_allow_rule("Agent");
 
@@ -427,7 +427,7 @@ async fn query_loop_respects_pre_tool_hook_denial() {
 #[tokio::test]
 async fn query_loop_runs_permission_request_hook_before_tool_execution() {
     let registry = ToolRegistry::new().register(Arc::new(AgentTool));
-    let mut permission_context = ToolPermissionContext::new(PermissionMode::Default)
+    let permission_context = ToolPermissionContext::new(PermissionMode::Default)
         .with_task_manager(Arc::new(TaskManager::default()));
     permission_context.add_always_allow_rule("Agent");
 
@@ -494,7 +494,7 @@ async fn query_loop_runs_permission_request_hook_before_tool_execution() {
 
 #[tokio::test]
 async fn query_loop_uses_subagent_stop_hook_for_subagent_context() {
-    let mut permission_context = ToolPermissionContext::new(PermissionMode::Default)
+    let permission_context = ToolPermissionContext::new(PermissionMode::Default)
         .with_task_manager(Arc::new(TaskManager::default()));
     permission_context.add_always_allow_rule("Agent");
 
@@ -577,7 +577,7 @@ async fn engine_drains_internal_task_events() {
     let task = manager.create("worker task", "test-session", InteractionSurface::Cli);
     manager.complete(&task.id, &dispatcher);
 
-    let mut permission_context =
+    let permission_context =
         ToolPermissionContext::new(PermissionMode::Default).with_task_manager(manager.clone());
     permission_context.add_always_allow_rule("Agent");
 
@@ -641,7 +641,7 @@ async fn worker_query_loop_consumes_mailbox_messages() {
     let manager = Arc::new(TaskManager::default());
     let task = manager.create("worker task", "test-session", InteractionSurface::Cli);
 
-    let mut permission_context = ToolPermissionContext::new(PermissionMode::Default)
+    let permission_context = ToolPermissionContext::new(PermissionMode::Default)
         .with_task_manager(manager.clone())
         .with_active_session_id("test-session");
     permission_context.add_always_allow_rule("Agent");
@@ -717,7 +717,7 @@ async fn worker_query_loop_consumes_mailbox_messages() {
 
 #[tokio::test]
 async fn subagent_context_inherits_parent_tools_and_hooks() {
-    let mut permission_context = ToolPermissionContext::new(PermissionMode::Default)
+    let permission_context = ToolPermissionContext::new(PermissionMode::Default)
         .with_task_manager(Arc::new(TaskManager::default()));
     permission_context.add_always_allow_rule("Agent");
 
