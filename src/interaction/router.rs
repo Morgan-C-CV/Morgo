@@ -9,6 +9,7 @@ use crate::state::app_state::AppState;
 pub enum RouteDecision {
     ExecuteCommand(String),
     ContinueToQuery,
+    ContinueToQueryWithPrompt(String),
     Deny(String),
 }
 
@@ -49,9 +50,15 @@ impl CommandRouter {
                         metadata.name
                     ));
                 }
+                if metadata.disable_model_invocation {
+                    return RouteDecision::Deny(format!(
+                        "command {} cannot invoke the model on this surface",
+                        metadata.name
+                    ));
+                }
                 RouteDecision::ExecuteCommand(metadata.name.to_string())
             }
-            None => RouteDecision::ContinueToQuery,
+            None => RouteDecision::ContinueToQueryWithPrompt(input.raw.clone()),
         }
     }
 
@@ -76,6 +83,7 @@ impl CommandRouter {
                 }
             }
             RouteDecision::ContinueToQuery => Ok(CommandResult::ContinueToQuery),
+            RouteDecision::ContinueToQueryWithPrompt(prompt) => Ok(CommandResult::Prompt(prompt)),
             RouteDecision::Deny(reason) => Ok(CommandResult::Denied(reason)),
         }
     }

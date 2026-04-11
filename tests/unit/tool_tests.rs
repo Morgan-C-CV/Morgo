@@ -1,4 +1,5 @@
 use rust_agent::state::permission_context::{PermissionMode, ToolPermissionContext};
+use rust_agent::tool::builtin::ask_user::AskUserQuestionTool;
 use rust_agent::tool::builtin::web_fetch::WebFetchTool;
 use rust_agent::tool::definition::{Tool, ToolCall};
 use rust_agent::tool::permission::{evaluate_tool_permission, is_tool_allowed};
@@ -43,4 +44,19 @@ fn ask_rules_force_ask_decision_before_allow() {
         evaluate_tool_permission(&metadata, &call, &context),
         rust_agent::tool::definition::PermissionDecision::Ask { .. }
     ));
+}
+
+#[test]
+fn deferred_tools_are_hidden_until_explicitly_included() {
+    let context = ToolPermissionContext::new(PermissionMode::Default);
+    assert!(!is_tool_allowed(&WebFetchTool.metadata(), &context));
+
+    let with_deferred = ToolPermissionContext::new(PermissionMode::Default).with_deferred_tools(true);
+    assert!(is_tool_allowed(&WebFetchTool.metadata(), &with_deferred));
+}
+
+#[test]
+fn interactive_tools_can_be_disabled_for_non_interactive_runtime() {
+    let context = ToolPermissionContext::new(PermissionMode::Default).with_interactive_tools(false);
+    assert!(!is_tool_allowed(&AskUserQuestionTool.metadata(), &context));
 }

@@ -56,6 +56,9 @@ fn test_context_with_turns(
         compactor: ReactiveCompactor,
         hook_registry: HookRegistry::default(),
         agent_id: None,
+        system_prompt: "test system".into(),
+        tools_prompt: "test tools".into(),
+        context_prompt: "test context".into(),
     }
 }
 
@@ -311,6 +314,9 @@ async fn query_loop_stop_hook_can_prevent_continuation() {
             prevent_continuation: true,
         }),
         agent_id: None,
+        system_prompt: "test system".into(),
+        tools_prompt: "test tools".into(),
+        context_prompt: "test context".into(),
     };
 
     let engine = QueryEngine::new(context);
@@ -374,6 +380,9 @@ async fn query_loop_respects_pre_tool_hook_denial() {
             prevent_continuation: false,
         }),
         agent_id: None,
+        system_prompt: "test system".into(),
+        tools_prompt: "test tools".into(),
+        context_prompt: "test context".into(),
     };
 
     let engine = QueryEngine::new(context);
@@ -430,6 +439,9 @@ async fn query_loop_uses_subagent_stop_hook_for_subagent_context() {
             prevent_continuation: true,
         }),
         agent_id: Some("agent-task-1".into()),
+        system_prompt: "test system".into(),
+        tools_prompt: "test tools".into(),
+        context_prompt: "test context".into(),
     };
 
     let engine = QueryEngine::new(context);
@@ -493,6 +505,9 @@ async fn engine_drains_internal_task_events() {
         compactor: ReactiveCompactor,
         hook_registry: HookRegistry::default(),
         agent_id: None,
+        system_prompt: "test system".into(),
+        tools_prompt: "test tools".into(),
+        context_prompt: "test context".into(),
     });
 
     let events = engine.drain_task_events();
@@ -567,6 +582,9 @@ async fn worker_query_loop_consumes_mailbox_messages() {
         compactor: ReactiveCompactor,
         hook_registry: HookRegistry::default(),
         agent_id: Some(task.id.clone()),
+        system_prompt: "test system".into(),
+        tools_prompt: "test tools".into(),
+        context_prompt: "test context".into(),
     };
 
     manager.launch(&task.id, "initial", std::future::pending::<()>());
@@ -629,6 +647,9 @@ async fn subagent_context_inherits_parent_tools_and_hooks() {
         compactor: ReactiveCompactor,
         hook_registry: parent_hook_registry.clone(),
         agent_id: None,
+        system_prompt: "test system".into(),
+        tools_prompt: "test tools".into(),
+        context_prompt: "test context".into(),
     };
 
     let child = parent.create_subagent_context(

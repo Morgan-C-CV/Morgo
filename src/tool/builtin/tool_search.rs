@@ -62,6 +62,10 @@ impl Tool for ToolSearchTool {
                     || tool.name.to_ascii_lowercase().contains(&query)
                     || tool.description.to_ascii_lowercase().contains(&query)
                     || tool
+                        .search_hint
+                        .map(|hint| hint.to_ascii_lowercase().contains(&query))
+                        .unwrap_or(false)
+                    || tool
                         .aliases
                         .iter()
                         .any(|alias| alias.to_ascii_lowercase().contains(&query))

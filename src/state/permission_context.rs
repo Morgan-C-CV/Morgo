@@ -19,6 +19,8 @@ pub struct ToolPermissionContext {
     pub always_allow_rules: Vec<String>,
     pub always_deny_rules: Vec<String>,
     pub always_ask_rules: Vec<String>,
+    pub include_deferred_tools: bool,
+    pub include_interactive_tools: bool,
     pub task_manager: Option<Arc<TaskManager>>,
     pub task_list_manager: Option<Arc<TaskListManager>>,
     pub active_session_id: Option<String>,
@@ -34,6 +36,8 @@ impl ToolPermissionContext {
             always_allow_rules: Vec::new(),
             always_deny_rules: Vec::new(),
             always_ask_rules: Vec::new(),
+            include_deferred_tools: false,
+            include_interactive_tools: true,
             task_manager: None,
             task_list_manager: None,
             active_session_id: None,
@@ -73,6 +77,16 @@ impl ToolPermissionContext {
 
     pub fn with_inherited_hook_registry(mut self, hook_registry: HookRegistry) -> Self {
         self.inherited_hook_registry = Some(hook_registry);
+        self
+    }
+
+    pub fn with_deferred_tools(mut self, include_deferred_tools: bool) -> Self {
+        self.include_deferred_tools = include_deferred_tools;
+        self
+    }
+
+    pub fn with_interactive_tools(mut self, include_interactive_tools: bool) -> Self {
+        self.include_interactive_tools = include_interactive_tools;
         self
     }
 }

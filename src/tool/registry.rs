@@ -33,6 +33,13 @@ impl ToolRegistry {
         self.tools
             .iter()
             .map(|tool| tool.metadata())
+            .filter(|metadata| {
+                metadata.always_load
+                    || (!metadata.should_defer || permissions.include_deferred_tools)
+            })
+            .filter(|metadata| {
+                !metadata.requires_user_interaction || permissions.include_interactive_tools
+            })
             .filter(|metadata| is_tool_allowed(metadata, permissions))
             .collect()
     }
@@ -51,7 +58,7 @@ impl ToolRegistry {
                     let metadata = tool.metadata();
                     metadata.name != "Agent"
                         && !metadata.requires_user_interaction
-                        && !metadata.should_defer
+                        && (!metadata.should_defer || metadata.always_load)
                 }
             })
             .cloned()

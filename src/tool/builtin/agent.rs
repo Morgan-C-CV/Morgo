@@ -150,6 +150,8 @@ fn build_parent_query_context(permissions: ToolPermissionContext) -> QueryContex
     runtime_permissions
         .always_allow_rules
         .push(AgentTool.metadata().name.into());
+    runtime_permissions.include_interactive_tools = false;
+    runtime_permissions.include_deferred_tools = false;
 
     let hook_registry = permissions
         .inherited_hook_registry
@@ -160,30 +162,37 @@ fn build_parent_query_context(permissions: ToolPermissionContext) -> QueryContex
         .clone()
         .unwrap_or_else(|| ToolRegistry::new().register(std::sync::Arc::new(AgentTool)))
         .assemble_for_role(RuntimeRole::Worker);
+    let app_state = AppState {
+        surface: InteractionSurface::Cli,
+        session_mode: SessionMode::Headless,
+        client_type: ClientType::Cli,
+        session_source: SessionSource::LocalCli,
+        runtime_role: RuntimeRole::Coordinator,
+        permission_context: runtime_permissions,
+        cost_tracker: CostTracker::default(),
+        notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default())
+            .with_hook_registry(hook_registry.clone()),
+        startup_trace: Vec::new(),
+        active_session_id: permissions
+            .active_session_id
+            .unwrap_or_else(|| "local-session".into()),
+        session_store: None,
+        session: None,
+        history: None,
+        restored_session: None,
+    };
+    let system_prompt = crate::prompt::system::build_system_prompt(&app_state);
+    let tools_prompt = crate::prompt::tools::build_tools_prompt(&tool_registry, &app_state.permission_context);
+    let context_prompt = crate::prompt::context::build_context_prompt(&app_state);
     QueryContext {
-        app_state: AppState {
-            surface: InteractionSurface::Cli,
-            session_mode: SessionMode::Headless,
-            client_type: ClientType::Cli,
-            session_source: SessionSource::LocalCli,
-            runtime_role: RuntimeRole::Coordinator,
-            permission_context: runtime_permissions,
-            cost_tracker: CostTracker::default(),
-            notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default())
-                .with_hook_registry(hook_registry.clone()),
-            startup_trace: Vec::new(),
-            active_session_id: permissions
-                .active_session_id
-                .unwrap_or_else(|| "local-session".into()),
-            session_store: None,
-            session: None,
-            history: None,
-            restored_session: None,
-        },
+        app_state,
         tool_registry,
         api_client: crate::service::api::client::ModelProviderClient::default(),
         compactor: ReactiveCompactor,
         hook_registry,
         agent_id: None,
+        system_prompt,
+        tools_prompt,
+        context_prompt,
     }
 }

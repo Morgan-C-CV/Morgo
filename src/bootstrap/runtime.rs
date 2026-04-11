@@ -31,11 +31,14 @@ use crate::state::permission_context::{PermissionMode, ToolPermissionContext};
 use crate::task::list_manager::TaskListManager;
 use crate::task::manager::TaskManager;
 use crate::tool::builtin::{
-    agent::AgentTool, bash::BashTool, file_edit::FileEditTool, file_read::FileReadTool,
-    glob::GlobTool, grep::GrepTool, send_message::SendMessageTool, task_create::TaskCreateTool,
+    agent::AgentTool, ask_user::AskUserQuestionTool, bash::BashTool,
+    enter_plan_mode::EnterPlanModeTool, exit_plan_mode::ExitPlanModeTool,
+    file_edit::FileEditTool, file_read::FileReadTool, file_write::FileWriteTool,
+    glob::GlobTool, grep::GrepTool, mcp::McpTool, notebook_edit::NotebookEditTool,
+    send_message::SendMessageTool, skill::SkillTool, task_create::TaskCreateTool,
     task_get::TaskGetTool, task_list::TaskListTool, task_output::TaskOutputTool,
-    task_stop::TaskStopTool, task_update::TaskUpdateTool, tool_search::ToolSearchTool,
-    web_fetch::WebFetchTool,
+    task_stop::TaskStopTool, task_update::TaskUpdateTool, todo_write::TodoWriteTool,
+    tool_search::ToolSearchTool, web_fetch::WebFetchTool, web_search::WebSearchTool,
 };
 use crate::tool::registry::ToolRegistry;
 
@@ -184,6 +187,8 @@ impl RuntimeBootstrap {
         .with_task_manager(task_manager.clone())
         .with_task_list_manager(task_list_manager.clone())
         .with_active_session_id(active_session_id.clone())
+        .with_deferred_tools(true)
+        .with_interactive_tools(true)
         .with_inherited_tool_registry(worker_tools.clone())
         .with_inherited_hook_registry(hook_registry.clone());
 
@@ -238,6 +243,9 @@ impl RuntimeBootstrap {
 
         let registry = self.build_command_registry();
         let router = CommandRouter::new(registry, Box::new(DefaultSurfaceAuthorizer));
+        let tools_prompt = crate::prompt::tools::build_tools_prompt(&coordinator_tools, &permission_context);
+        let context_prompt = crate::prompt::context::build_context_prompt(&app_state);
+        let system_prompt = crate::prompt::system::build_system_prompt(&app_state);
         let query_context = QueryContext {
             app_state: app_state.clone(),
             tool_registry: coordinator_tools,
@@ -245,6 +253,9 @@ impl RuntimeBootstrap {
             compactor: ReactiveCompactor,
             hook_registry,
             agent_id: None,
+            system_prompt,
+            tools_prompt,
+            context_prompt,
         };
         let engine = QueryEngine::new(query_context);
 
@@ -317,20 +328,29 @@ impl RuntimeBootstrap {
     fn build_tool_registry(&self) -> ToolRegistry {
         ToolRegistry::new()
             .register(Arc::new(AgentTool))
+            .register(Arc::new(AskUserQuestionTool))
             .register(Arc::new(BashTool))
+            .register(Arc::new(EnterPlanModeTool))
+            .register(Arc::new(ExitPlanModeTool))
             .register(Arc::new(FileEditTool))
             .register(Arc::new(FileReadTool))
+            .register(Arc::new(FileWriteTool))
             .register(Arc::new(GlobTool))
             .register(Arc::new(GrepTool))
+            .register(Arc::new(McpTool))
+            .register(Arc::new(NotebookEditTool))
             .register(Arc::new(SendMessageTool))
+            .register(Arc::new(SkillTool))
             .register(Arc::new(TaskCreateTool))
             .register(Arc::new(TaskGetTool))
             .register(Arc::new(TaskListTool))
             .register(Arc::new(TaskOutputTool))
             .register(Arc::new(TaskStopTool))
             .register(Arc::new(TaskUpdateTool))
+            .register(Arc::new(TodoWriteTool))
             .register(Arc::new(ToolSearchTool))
             .register(Arc::new(WebFetchTool))
+            .register(Arc::new(WebSearchTool))
     }
 
     fn build_telegram_gateway(&self) -> TelegramGateway {

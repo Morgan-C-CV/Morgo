@@ -54,6 +54,20 @@ pub fn evaluate_tool_permission(
         return PermissionDecision::Allow;
     }
 
+    if metadata.should_defer && !metadata.always_load && !permissions.include_deferred_tools {
+        return PermissionDecision::Deny {
+            message: format!("tool {} is deferred until explicitly loaded", metadata.name),
+            reason: crate::tool::definition::PermissionDecisionReason::Tool,
+        };
+    }
+
+    if metadata.requires_user_interaction && !permissions.include_interactive_tools {
+        return PermissionDecision::Deny {
+            message: format!("tool {} requires an interactive surface", metadata.name),
+            reason: crate::tool::definition::PermissionDecisionReason::Tool,
+        };
+    }
+
     if metadata.requires_auth && permissions.always_allow_rules.is_empty() {
         return PermissionDecision::Ask {
             message: format!("tool {} requires explicit approval", metadata.name),

@@ -1,10 +1,12 @@
 pub mod bootstrap;
 pub mod command;
+pub mod context;
 pub mod core;
 pub mod cost;
 pub mod history;
 pub mod hook;
 pub mod interaction;
+pub mod prompt;
 pub mod security;
 pub mod service;
 pub mod state;

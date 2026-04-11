@@ -1,3 +1,5 @@
+#[path = "unit/acceptance_loop1_tests.rs"]
+mod acceptance_loop1_tests;
 #[path = "unit/bootstrap_tests.rs"]
 mod bootstrap_tests;
 #[path = "unit/cost_tests.rs"]

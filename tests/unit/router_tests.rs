@@ -136,6 +136,9 @@ async fn cli_repl_handles_multiple_inputs_in_sequence() {
             compactor: ReactiveCompactor,
             hook_registry: rust_agent::hook::registry::HookRegistry::default(),
             agent_id: None,
+            system_prompt: "test system".into(),
+            tools_prompt: "test tools".into(),
+            context_prompt: "test context".into(),
         });
 
     let outputs = handle_cli_inputs(&router, &engine, &app_state, vec!["/help", "hello"])
@@ -188,6 +191,9 @@ async fn cli_repl_surfaces_task_events_for_active_session() {
             compactor: ReactiveCompactor,
             hook_registry: rust_agent::hook::registry::HookRegistry::default(),
             agent_id: None,
+            system_prompt: "test system".into(),
+            tools_prompt: "test tools".into(),
+            context_prompt: "test context".into(),
         });
 
     let output = handle_cli_inputs(&router, &engine, &app_state, vec!["/help"])
@@ -262,6 +268,9 @@ async fn cli_repl_persists_history_for_local_and_query_turns() {
             compactor: ReactiveCompactor,
             hook_registry: rust_agent::hook::registry::HookRegistry::default(),
             agent_id: None,
+            system_prompt: "test system".into(),
+            tools_prompt: "test tools".into(),
+            context_prompt: "test context".into(),
         });
 
     let outputs = handle_cli_inputs(&router, &engine, &app_state, vec!["/help", "hello"])
@@ -340,6 +349,9 @@ async fn cli_repl_persists_denied_turns() {
             compactor: ReactiveCompactor,
             hook_registry: rust_agent::hook::registry::HookRegistry::default(),
             agent_id: None,
+            system_prompt: "test system".into(),
+            tools_prompt: "test tools".into(),
+            context_prompt: "test context".into(),
         });
 
     let output = handle_cli_inputs(&router, &engine, &app_state, vec!["/remote-safe"])

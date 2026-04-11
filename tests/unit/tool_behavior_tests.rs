@@ -6,9 +6,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use rust_agent::state::permission_context::{PermissionMode, ToolPermissionContext};
 use rust_agent::tool::builtin::agent::AgentTool;
+use rust_agent::tool::builtin::ask_user::AskUserQuestionTool;
 use rust_agent::tool::builtin::bash::BashTool;
 use rust_agent::tool::builtin::file_edit::FileEditTool;
 use rust_agent::tool::builtin::file_read::FileReadTool;
+use rust_agent::tool::builtin::file_write::FileWriteTool;
 use rust_agent::tool::builtin::glob::GlobTool;
 use rust_agent::tool::builtin::grep::GrepTool;
 use rust_agent::tool::builtin::task_create::TaskCreateTool;
@@ -16,6 +18,7 @@ use rust_agent::tool::builtin::task_stop::TaskStopTool;
 use rust_agent::tool::builtin::task_update::TaskUpdateTool;
 use rust_agent::tool::builtin::tool_search::ToolSearchTool;
 use rust_agent::tool::builtin::web_fetch::WebFetchTool;
+use rust_agent::tool::builtin::web_search::WebSearchTool;
 use rust_agent::tool::definition::{Tool, ToolCall, ToolResult};
 use rust_agent::tool::permission::is_tool_allowed;
 use rust_agent::tool::registry::ToolRegistry;
@@ -435,9 +438,32 @@ async fn tool_search_prefers_runtime_registry_when_available() {
     assert!(!text.contains("Edit - Edit existing files with safety rails"));
 }
 
+#[tokio::test]
+async fn tool_search_matches_search_hint() {
+    let registry = ToolRegistry::new().register(Arc::new(FileWriteTool));
+    let permissions = ToolPermissionContext::new(PermissionMode::Default)
+        .with_inherited_tool_registry(registry);
+
+    let result = ToolSearchTool
+        .invoke(
+            &ToolCall {
+                name: "ToolSearch".into(),
+                input: "create file".into(),
+            },
+            &permissions,
+        )
+        .await
+        .expect("tool search should succeed");
+
+    let ToolResult::Text(text) = result else {
+        panic!("expected text result");
+    };
+    assert!(text.contains("Write - Write file contents to disk"));
+}
+
 #[test]
-fn auth_gated_tools_stay_visible_for_explicit_approval() {
-    let context = ToolPermissionContext::new(PermissionMode::Default);
+fn auth_gated_tools_stay_visible_after_deferred_loading() {
+    let context = ToolPermissionContext::new(PermissionMode::Default).with_deferred_tools(true);
     assert!(is_tool_allowed(&WebFetchTool.metadata(), &context));
 }
 
@@ -448,7 +474,9 @@ fn visible_tools_include_ask_only_tools() {
         .register(Arc::new(FileReadTool))
         .register(Arc::new(WebFetchTool));
 
-    let visible = registry.visible_tools(&ToolPermissionContext::new(PermissionMode::Default));
+    let visible = registry.visible_tools(
+        &ToolPermissionContext::new(PermissionMode::Default).with_deferred_tools(true),
+    );
     let names = visible.iter().map(|tool| tool.name).collect::<Vec<_>>();
 
     assert!(names.contains(&"Bash"));
@@ -462,9 +490,11 @@ fn worker_tool_filter_excludes_agent_and_interactive_tools() {
         .register(Arc::new(BashTool))
         .register(Arc::new(FileReadTool))
         .register(Arc::new(AgentTool))
+        .register(Arc::new(AskUserQuestionTool))
         .register(Arc::new(TaskCreateTool))
         .register(Arc::new(TaskStopTool))
-        .register(Arc::new(TaskUpdateTool));
+        .register(Arc::new(TaskUpdateTool))
+        .register(Arc::new(WebSearchTool));
 
     let filtered = registry.filter_for_worker();
     let names = filtered
@@ -478,5 +508,7 @@ fn worker_tool_filter_excludes_agent_and_interactive_tools() {
     assert!(names.contains(&"TaskStop"));
     assert!(names.contains(&"TaskUpdate"));
     assert!(!names.contains(&"Agent"));
+    assert!(!names.contains(&"AskUserQuestion"));
     assert!(!names.contains(&"Bash"));
+    assert!(!names.contains(&"WebSearch"));
 }

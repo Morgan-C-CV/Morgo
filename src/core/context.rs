@@ -1,4 +1,5 @@
 use crate::hook::registry::HookRegistry;
+use crate::prompt::{context::build_context_prompt, system::build_system_prompt, tools::build_tools_prompt};
 use crate::service::api::client::ModelProviderClient;
 use crate::service::api::streaming::StreamEvent;
 use crate::service::compact::reactive_compact::ReactiveCompactor;
@@ -13,6 +14,9 @@ pub struct QueryContext {
     pub compactor: ReactiveCompactor,
     pub hook_registry: HookRegistry,
     pub agent_id: Option<String>,
+    pub system_prompt: String,
+    pub tools_prompt: String,
+    pub context_prompt: String,
 }
 
 impl QueryContext {
@@ -35,9 +39,13 @@ impl QueryContext {
                 .assemble_for_role(RuntimeRole::Worker),
         );
         app_state.permission_context = permission_context;
+        let tool_registry = self.tool_registry.assemble_for_role(RuntimeRole::Worker);
         Self {
+            system_prompt: build_system_prompt(&app_state),
+            tools_prompt: build_tools_prompt(&tool_registry, &app_state.permission_context),
+            context_prompt: build_context_prompt(&app_state),
             app_state,
-            tool_registry: self.tool_registry.assemble_for_role(RuntimeRole::Worker),
+            tool_registry,
             api_client: ModelProviderClient::with_scripted_turns(scripted_turns),
             compactor: self.compactor.clone(),
             hook_registry: self.hook_registry.clone(),
