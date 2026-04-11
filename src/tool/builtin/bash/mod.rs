@@ -46,6 +46,9 @@ impl Tool for BashTool {
             always_load: true,
             should_defer: false,
             requires_auth: false,
+            requires_user_interaction: true,
+            is_open_world: true,
+            is_search_or_read_command: false,
         }
     }
 

@@ -36,6 +36,17 @@ pub fn evaluate_tool_permission(
     }
 
     if permissions
+        .always_ask_rules
+        .iter()
+        .any(|rule| rule == metadata.name || rule == call.name.as_str())
+    {
+        return PermissionDecision::Ask {
+            message: format!("tool {} requires explicit approval by ask rule", metadata.name),
+            reason: crate::tool::definition::PermissionDecisionReason::Rule,
+        };
+    }
+
+    if permissions
         .always_allow_rules
         .iter()
         .any(|rule| rule == metadata.name || rule == call.name.as_str())

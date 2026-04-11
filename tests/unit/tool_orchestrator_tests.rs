@@ -66,6 +66,10 @@ async fn orchestrator_executes_single_request_through_registry() {
         outcomes[0].result,
         rust_agent::tool::definition::ToolResult::Text("hello orchestrator".into())
     );
+    assert_eq!(
+        outcomes[0].record.kind,
+        rust_agent::tool::result::ToolExecutionOutcomeKind::Success
+    );
     assert!(!outcomes[0].executed_in_batch);
 
     let _ = tokio::fs::remove_file(&dir).await;

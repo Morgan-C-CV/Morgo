@@ -207,11 +207,16 @@ async fn query_loop_surfaces_stream_errors_after_recovery_attempt() {
 
     let result = engine.submit_turn(Message::user("trigger error")).await;
 
-    assert_eq!(result.state, QueryLoopState::Failed);
-    assert_eq!(result.terminal, Terminal::ModelError("boom again".into()));
-    assert_eq!(result.transition, Some(Continue::ReactiveCompactRetry));
+    assert_eq!(result.state, QueryLoopState::Completed);
+    assert_eq!(result.terminal, Terminal::Completed);
+    assert_eq!(result.transition, Some(Continue::CollapseDrainRetry));
     assert!(result.messages[0].content.contains("stream error: boom"));
     assert!(result.messages[1].content.contains("stream error: boom again"));
+    assert!(result.events.iter().any(|event| matches!(
+        event,
+        EngineEvent::Notice { kind: "recovery", message }
+        if message.contains("collapse drain retry")
+    )));
 }
 
 #[tokio::test]
@@ -234,6 +239,7 @@ async fn query_loop_fails_when_tool_is_unknown() {
     assert_eq!(result.state, QueryLoopState::Interrupted);
     assert_eq!(result.terminal, Terminal::AbortedTools);
     assert!(result.messages[0].content.contains("tool MissingTool failed"));
+    assert!(result.messages[1].content.contains("result missing; synthesized failure result"));
 }
 
 #[tokio::test]
@@ -289,6 +295,10 @@ async fn query_loop_stop_hook_can_prevent_continuation() {
             Message::assistant("stop hook appended message")
         ]
     );
+    assert!(result.events.iter().any(|event| matches!(
+        event,
+        EngineEvent::Notice { kind: "hook", .. }
+    )));
 }
 
 #[tokio::test]
@@ -652,4 +662,77 @@ async fn query_loop_respects_max_turns_terminal() {
 
     assert_eq!(result.state, QueryLoopState::Failed);
     assert_eq!(result.terminal, Terminal::MaxTurns { count: 0 });
+}
+
+#[tokio::test]
+async fn query_loop_emits_token_budget_continuation_before_max_budget() {
+    let context = test_context(Vec::new());
+
+    let first = run_query_loop_with_params(
+        &context,
+        Message::user("budgeted"),
+        QueryParams {
+            max_budget_input_tokens: Some(1),
+            ..QueryParams::default()
+        },
+    )
+    .await;
+    assert_eq!(first.state, QueryLoopState::Completed);
+    assert_eq!(first.terminal, Terminal::Completed);
+    assert_eq!(first.transition, Some(Continue::TokenBudgetContinuation));
+
+    let second = run_query_loop_with_params(
+        &context,
+        Message::user("budgeted"),
+        QueryParams {
+            messages: vec![Message::assistant("budget continuation already attempted")],
+            max_budget_input_tokens: Some(1),
+            ..QueryParams::default()
+        },
+    )
+    .await;
+    assert_eq!(second.state, QueryLoopState::Failed);
+    assert_eq!(
+        second.terminal,
+        Terminal::MaxBudget {
+            budget_usd_cents: "budgeted".len() as u64
+        }
+    );
+}
+
+#[tokio::test]
+async fn query_loop_uses_param_max_output_recovery_limit() {
+    let context = test_context_with_turns(
+        vec![
+            vec![
+                StreamEvent::MessageStart,
+                StreamEvent::TextDelta("partial".into()),
+                StreamEvent::MessageStop {
+                    stop_reason: StopReason::MaxTokens,
+                },
+            ],
+            vec![
+                StreamEvent::MessageStart,
+                StreamEvent::TextDelta("still partial".into()),
+                StreamEvent::MessageStop {
+                    stop_reason: StopReason::MaxTokens,
+                },
+            ],
+        ],
+        ToolRegistry::new(),
+    );
+
+    let result = run_query_loop_with_params(
+        &context,
+        Message::user("needs recovery"),
+        QueryParams {
+            max_output_tokens_recovery_limit: 0,
+            ..QueryParams::default()
+        },
+    )
+    .await;
+
+    assert_eq!(result.state, QueryLoopState::Interrupted);
+    assert_eq!(result.terminal, Terminal::AbortedStreaming);
+    assert_eq!(result.transition, Some(Continue::MaxOutputTokensEscalate));
 }

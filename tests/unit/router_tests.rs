@@ -146,7 +146,7 @@ async fn cli_repl_handles_multiple_inputs_in_sequence() {
     assert!(outputs[0].primary_text.contains("help"));
     assert!(outputs[1].primary_text.contains("second reply"));
     assert!(outputs[0].events.is_empty());
-    assert!(outputs[1].events.is_empty());
+    assert!(!outputs[1].events.is_empty());
 }
 
 #[tokio::test]
@@ -198,7 +198,10 @@ async fn cli_repl_surfaces_task_events_for_active_session() {
     assert!(output[0].primary_text.contains("Available commands"));
     assert_eq!(output[0].events.len(), 1);
     let rust_agent::interaction::cli::repl::CliDisplayEvent::TaskEvent(task_event) =
-        &output[0].events[0];
+        &output[0].events[0]
+    else {
+        panic!("expected task event");
+    };
     assert_eq!(task_event.task_id, "task-0");
     assert_eq!(
         task_event.owner,

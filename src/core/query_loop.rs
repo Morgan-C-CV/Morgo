@@ -11,6 +11,7 @@ pub struct QueryParams {
     pub messages: Vec<Message>,
     pub max_turns: Option<usize>,
     pub max_output_tokens_recovery_limit: usize,
+    pub max_budget_input_tokens: Option<usize>,
 }
 
 impl Default for QueryParams {
@@ -19,6 +20,7 @@ impl Default for QueryParams {
             messages: Vec::new(),
             max_turns: Some(4),
             max_output_tokens_recovery_limit: 3,
+            max_budget_input_tokens: None,
         }
     }
 }
@@ -128,6 +130,35 @@ pub async fn run_query_loop_with_params(
             .app_state
             .cost_tracker
             .record_request(token_estimate, 0);
+        if let Some(max_budget_input_tokens) = params.max_budget_input_tokens {
+            if token_estimate >= max_budget_input_tokens {
+                events.push(EngineEvent::Notice {
+                    kind: "budget",
+                    message: format!(
+                        "token budget continuation requested at input size {token_estimate}"
+                    ),
+                });
+                if !params.messages.is_empty() || state.transition == Some(Continue::TokenBudgetContinuation) {
+                    return finalize_with_stop_hook(
+                        context,
+                        state,
+                        QueryLoopState::Failed,
+                        Terminal::MaxBudget {
+                            budget_usd_cents: token_estimate as u64,
+                        },
+                        events,
+                    );
+                }
+                state.transition = Some(Continue::TokenBudgetContinuation);
+                return finalize_with_stop_hook(
+                    context,
+                    state,
+                    QueryLoopState::Completed,
+                    Terminal::Completed,
+                    events,
+                );
+            }
+        }
 
         let prompt_hook = run_hook(&context.hook_registry, HookEvent::UserPromptSubmit);
         for message in prompt_hook.messages.clone() {
@@ -149,6 +180,10 @@ pub async fn run_query_loop_with_params(
 
         if context.compactor.should_compact(token_estimate, 512) {
             let compact_message = Message::assistant("compaction requested before continuing the turn");
+            events.push(EngineEvent::Notice {
+                kind: "compaction",
+                message: "reactive compact requested before continuing the turn".into(),
+            });
             events.push(EngineEvent::Transition(Continue::ReactiveCompactRetry));
             events.push(EngineEvent::MessageCommitted(compact_message.clone()));
             state.transition = Some(Continue::ReactiveCompactRetry);
@@ -174,7 +209,14 @@ pub async fn run_query_loop_with_params(
             );
         }
 
-        let turn_outcome = consume_model_stream(context, &mut state, events, events_for_turn).await;
+        let turn_outcome = consume_model_stream(
+            context,
+            &mut state,
+            events,
+            events_for_turn,
+            params.max_output_tokens_recovery_limit,
+        )
+        .await;
         events = turn_outcome.events;
 
         match turn_outcome.decision {
@@ -231,6 +273,7 @@ async fn consume_model_stream(
     state: &mut LoopState,
     mut engine_events: Vec<EngineEvent>,
     stream_events: Vec<StreamEvent>,
+    max_output_tokens_recovery_limit: usize,
 ) -> TurnOutcome {
     let mut aggregated_text = String::new();
     let mut pending_tool_use: Option<(String, String)> = None;
@@ -299,6 +342,10 @@ async fn consume_model_stream(
                     }
                     if state.max_output_tokens_override.is_none() {
                         state.max_output_tokens_override = Some(8_192);
+                        engine_events.push(EngineEvent::Notice {
+                            kind: "recovery",
+                            message: "escalating max output tokens after model stop".into(),
+                        });
                         return TurnOutcome {
                             state: state.clone(),
                             events: engine_events,
@@ -308,8 +355,12 @@ async fn consume_model_stream(
                             ),
                         };
                     }
-                    if state.max_output_tokens_recovery_count < params_max_output_recovery_limit() {
+                    if state.max_output_tokens_recovery_count < max_output_tokens_recovery_limit {
                         state.max_output_tokens_recovery_count += 1;
+                        engine_events.push(EngineEvent::Notice {
+                            kind: "recovery",
+                            message: "continuing after max output token interruption".into(),
+                        });
                         return TurnOutcome {
                             state: state.clone(),
                             events: engine_events,
@@ -333,12 +384,30 @@ async fn consume_model_stream(
                     }
                     if !state.has_attempted_reactive_compact {
                         state.has_attempted_reactive_compact = true;
+                        engine_events.push(EngineEvent::Notice {
+                            kind: "recovery",
+                            message: "stream stop error triggered fallback retry".into(),
+                        });
                         return TurnOutcome {
                             state: state.clone(),
                             events: engine_events,
                             decision: TurnDecision::ContinueWith(
                                 Message::user("Retry after reactive compact / fallback recovery."),
                                 Continue::ModelFallbackRetry,
+                            ),
+                        };
+                    }
+                    if state.transition != Some(Continue::CollapseDrainRetry) {
+                        engine_events.push(EngineEvent::Notice {
+                            kind: "recovery",
+                            message: "draining collapsed context before final model error".into(),
+                        });
+                        return TurnOutcome {
+                            state: state.clone(),
+                            events: engine_events,
+                            decision: TurnDecision::ContinueWith(
+                                Message::user("Retry after collapse drain recovery."),
+                                Continue::CollapseDrainRetry,
                             ),
                         };
                     }
@@ -355,12 +424,30 @@ async fn consume_model_stream(
                 state.messages.push(error_message);
                 if !state.has_attempted_reactive_compact {
                     state.has_attempted_reactive_compact = true;
+                    engine_events.push(EngineEvent::Notice {
+                        kind: "recovery",
+                        message: format!("reactive compact retry triggered after stream error: {error}"),
+                    });
                     return TurnOutcome {
                         state: state.clone(),
                         events: engine_events,
                         decision: TurnDecision::ContinueWith(
                             Message::user("Retry after reactive compact / fallback recovery."),
                             Continue::ReactiveCompactRetry,
+                        ),
+                    };
+                }
+                if state.transition != Some(Continue::CollapseDrainRetry) {
+                    engine_events.push(EngineEvent::Notice {
+                        kind: "recovery",
+                        message: format!("collapse drain retry triggered after repeated stream error: {error}"),
+                    });
+                    return TurnOutcome {
+                        state: state.clone(),
+                        events: engine_events,
+                        decision: TurnDecision::ContinueWith(
+                            Message::user("Retry after collapse drain recovery."),
+                            Continue::CollapseDrainRetry,
                         ),
                     };
                 }
@@ -478,9 +565,60 @@ async fn execute_tool_phase(
                     engine_events.push(EngineEvent::MessageCommitted(message.clone()));
                     state.messages.push(message);
                 }
+                engine_events.push(EngineEvent::Notice {
+                    kind: "tool",
+                    message: format!("injecting missing tool result after denial for {tool_name}"),
+                });
                 let denial = Message::assistant(format!("tool {tool_name} denied: {reason}"));
+                let missing_tool_result = Message::assistant(format!(
+                    "tool {tool_name} result missing; synthesized denial result preserved"
+                ));
                 engine_events.push(EngineEvent::MessageCommitted(denial.clone()));
+                engine_events.push(EngineEvent::MessageCommitted(missing_tool_result.clone()));
                 state.messages.push(denial);
+                state.messages.push(missing_tool_result);
+                TurnOutcome {
+                    state: state.clone(),
+                    events: engine_events,
+                    decision: TurnDecision::Return(state.clone(), Terminal::AbortedTools),
+                }
+            }
+            Some(crate::tool::definition::ToolResult::Interrupted(reason)) => {
+                engine_events.push(EngineEvent::Notice {
+                    kind: "tool",
+                    message: format!("tool {tool_name} interrupted: {reason}"),
+                });
+                let interrupted = Message::assistant(format!("tool {tool_name} interrupted: {reason}"));
+                engine_events.push(EngineEvent::MessageCommitted(interrupted.clone()));
+                state.messages.push(interrupted);
+                TurnOutcome {
+                    state: state.clone(),
+                    events: engine_events,
+                    decision: TurnDecision::Return(state.clone(), Terminal::AbortedTools),
+                }
+            }
+            Some(crate::tool::definition::ToolResult::Progress(progress)) => {
+                engine_events.push(EngineEvent::Notice {
+                    kind: "tool",
+                    message: format!("tool {tool_name} progress: {progress}"),
+                });
+                TurnOutcome {
+                    state: state.clone(),
+                    events: engine_events,
+                    decision: TurnDecision::ContinueWith(
+                        Message::user(format!("tool progress for {tool_name}: {progress}")),
+                        Continue::ToolUseFollowUp,
+                    ),
+                }
+            }
+            Some(crate::tool::definition::ToolResult::ResultTooLarge(reason)) => {
+                engine_events.push(EngineEvent::Notice {
+                    kind: "tool",
+                    message: format!("tool {tool_name} result too large: {reason}"),
+                });
+                let oversized = Message::assistant(format!("tool {tool_name} result too large: {reason}"));
+                engine_events.push(EngineEvent::MessageCommitted(oversized.clone()));
+                state.messages.push(oversized);
                 TurnOutcome {
                     state: state.clone(),
                     events: engine_events,
@@ -507,9 +645,18 @@ async fn execute_tool_phase(
                 engine_events.push(EngineEvent::MessageCommitted(message.clone()));
                 state.messages.push(message);
             }
+            engine_events.push(EngineEvent::Notice {
+                kind: "tool",
+                message: format!("injecting missing tool result after tool failure for {tool_name}"),
+            });
             let failure = Message::assistant(format!("tool {tool_name} failed: {error}"));
+            let missing_tool_result = Message::assistant(format!(
+                "tool {tool_name} result missing; synthesized failure result preserved"
+            ));
             engine_events.push(EngineEvent::MessageCommitted(failure.clone()));
+            engine_events.push(EngineEvent::MessageCommitted(missing_tool_result.clone()));
             state.messages.push(failure);
+            state.messages.push(missing_tool_result);
             TurnOutcome {
                 state: state.clone(),
                 events: engine_events,
@@ -564,9 +711,25 @@ fn finalize_with_stop_hook(
         HookEvent::Stop
     };
     let stop_hook = run_hook(&context.hook_registry, stop_event);
-    for message in stop_hook.messages {
+    let hook_messages = stop_hook.messages.clone();
+    for message in hook_messages {
         events.push(EngineEvent::MessageCommitted(message.clone()));
         state.messages.push(message);
+    }
+
+    if !stop_hook.messages.is_empty() && !stop_hook.prevent_continuation {
+        events.push(EngineEvent::Notice {
+            kind: "hook",
+            message: "stop hook requested blocking follow-up continuation".into(),
+        });
+        state.transition = Some(Continue::StopHookBlocking);
+    }
+
+    if stop_hook.prevent_continuation {
+        events.push(EngineEvent::Notice {
+            kind: "hook",
+            message: "stop hook prevented continuation".into(),
+        });
     }
 
     let terminal = if stop_hook.prevent_continuation {
@@ -605,6 +768,3 @@ impl QueryLoopStateExt for QueryLoopState {
     }
 }
 
-fn params_max_output_recovery_limit() -> usize {
-    3
-}

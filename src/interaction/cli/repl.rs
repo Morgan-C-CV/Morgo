@@ -1,8 +1,7 @@
 use crate::command::types::CommandResult;
 use crate::core::engine::QueryEngine;
-use crate::core::message::Message;
 use crate::core::events::EngineEvent;
-use crate::history::session::{SessionHistoryEntry, SessionId};
+use crate::core::message::Message;
 use crate::interaction::envelope::NormalizedInput;
 use crate::interaction::router::CommandRouter;
 use crate::state::app_state::AppState;
@@ -11,6 +10,7 @@ use crate::task::types::TaskEvent;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CliDisplayEvent {
     TaskEvent(TaskEvent),
+    RuntimeEvent(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,24 +30,46 @@ pub async fn handle_cli_input(
         app_state.active_session_id.clone(),
         raw,
     );
-    let persisted_messages = match router.route(&input, app_state).await? {
-        CommandResult::Message(message) => vec![Message::assistant(message)],
-        CommandResult::Prompt(prompt) => collect_stream_messages(engine, Message::user(prompt)).await,
-        CommandResult::ContinueToQuery => {
-            collect_stream_messages(engine, Message::user(input.raw.clone())).await
+    let route_result = router.route(&input, app_state).await?;
+    let (persisted_messages, runtime_events, engine_persisted) = match route_result {
+        CommandResult::Message(message) => (vec![Message::assistant(message)], Vec::new(), false),
+        CommandResult::Prompt(prompt) => {
+            let (messages, events) = collect_stream_messages(engine, Message::user(prompt)).await;
+            (messages, events, true)
         }
-        CommandResult::Denied(reason) => vec![Message::assistant(format!("Denied: {reason}"))],
+        CommandResult::ContinueToQuery => {
+            let (messages, events) = collect_stream_messages(engine, Message::user(input.raw.clone())).await;
+            (messages, events, true)
+        }
+        CommandResult::Denied(reason) => (
+            vec![Message::assistant(format!("Denied: {reason}"))],
+            Vec::new(),
+            false,
+        ),
     };
-    persist_cli_turn(app_state, &input.raw, &persisted_messages);
+    if !engine_persisted {
+        engine.persist_messages(
+            Message::user(input.raw.clone()),
+            &persisted_messages,
+            crate::core::events::SessionMilestone::AssistantMessageCommitted,
+        );
+    }
     let primary_text = collect_message_content(persisted_messages.clone());
+
+    let mut events = runtime_events
+        .into_iter()
+        .map(CliDisplayEvent::RuntimeEvent)
+        .collect::<Vec<_>>();
+    events.extend(
+        engine
+            .drain_task_events()
+            .into_iter()
+            .map(CliDisplayEvent::TaskEvent),
+    );
 
     Ok(CliTurnOutput {
         primary_text,
-        events: engine
-            .drain_task_events()
-            .into_iter()
-            .map(CliDisplayEvent::TaskEvent)
-            .collect(),
+        events,
     })
 }
 
@@ -68,40 +90,40 @@ where
     Ok(outputs)
 }
 
-fn persist_cli_turn(app_state: &AppState, raw_input: &str, messages: &[Message]) {
-    let Some(session_store) = &app_state.session_store else {
-        return;
-    };
-    let session_id = SessionId(app_state.active_session_id.clone());
-    session_store.append_entry(
-        &session_id,
-        SessionHistoryEntry {
-            message: Message::user(raw_input.to_string()),
-            timestamp: None,
-            tool_refs: Vec::new(),
-        },
-    );
-    for message in messages {
-        session_store.append_entry(
-            &session_id,
-            SessionHistoryEntry {
-                message: message.clone(),
-                timestamp: None,
-                tool_refs: Vec::new(),
-            },
-        );
-    }
-}
-
-async fn collect_stream_messages(engine: &QueryEngine, input: Message) -> Vec<Message> {
+async fn collect_stream_messages(
+    engine: &QueryEngine,
+    input: Message,
+) -> (Vec<Message>, Vec<String>) {
     let mut receiver = engine.stream_turn(input).await;
     let mut messages = Vec::new();
+    let mut runtime_events = Vec::new();
     while let Some(event) = receiver.recv().await {
-        if let EngineEvent::MessageCommitted(message) = event {
-            messages.push(message);
+        match event {
+            EngineEvent::MessageCommitted(message) => messages.push(message),
+            EngineEvent::AssistantDelta(delta) => {
+                runtime_events.push(format!("[delta] {delta}"));
+            }
+            EngineEvent::ToolCallStarted { tool_name, input } => {
+                runtime_events.push(format!("[tool-start] {tool_name}: {input}"));
+            }
+            EngineEvent::ToolResultCommitted { tool_name, content } => {
+                runtime_events.push(format!("[tool-result] {tool_name}: {content}"));
+            }
+            EngineEvent::Notice { kind, message } => {
+                runtime_events.push(format!("[notice:{kind}] {message}"));
+            }
+            EngineEvent::Transition(transition) => {
+                runtime_events.push(format!("[transition] {:?}", transition));
+            }
+            EngineEvent::Terminal(terminal) => {
+                runtime_events.push(format!("[terminal] {:?}", terminal));
+            }
+            EngineEvent::SessionMilestoneWritten(milestone) => {
+                runtime_events.push(format!("[milestone] {:?}", milestone));
+            }
         }
     }
-    messages
+    (messages, runtime_events)
 }
 
 fn collect_message_content(messages: Vec<Message>) -> String {

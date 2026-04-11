@@ -1,5 +1,6 @@
 use crate::state::permission_context::ToolPermissionContext;
 use crate::tool::definition::{InterruptBehavior, ToolCall, ToolResult};
+use crate::tool::result::{ToolExecutionOutcomeKind, ToolExecutionRecord};
 use crate::tool::registry::ToolRegistry;
 use std::sync::Arc;
 
@@ -13,6 +14,7 @@ pub struct ToolExecutionOutcome {
     pub tool_name: String,
     pub result: ToolResult,
     pub executed_in_batch: bool,
+    pub record: ToolExecutionRecord,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,9 +93,15 @@ impl ToolOrchestrator {
                 }
                 for handle in handles {
                     let (call, result) = handle.await.map_err(|error| anyhow::anyhow!("tool task join failed: {error}"))?;
+                    let result = result?;
                     outcomes.push(ToolExecutionOutcome {
-                        tool_name: call.name,
-                        result: result?,
+                        tool_name: call.name.clone(),
+                        record: ToolExecutionRecord {
+                            tool_name: call.name.clone(),
+                            outcome: format!("{:?}", result),
+                            kind: classify_result(&result),
+                        },
+                        result,
                         executed_in_batch,
                     });
                 }
@@ -108,6 +116,11 @@ impl ToolOrchestrator {
                 let result = self.registry.invoke(&request.call, permissions).await?;
                 outcomes.push(ToolExecutionOutcome {
                     tool_name: request.call.name.clone(),
+                    record: ToolExecutionRecord {
+                        tool_name: request.call.name.clone(),
+                        outcome: format!("{:?}", result),
+                        kind: classify_result(&result),
+                    },
                     result,
                     executed_in_batch,
                 });
@@ -120,5 +133,15 @@ impl ToolOrchestrator {
         }
 
         Ok(outcomes)
+    }
+}
+
+fn classify_result(result: &ToolResult) -> ToolExecutionOutcomeKind {
+    match result {
+        ToolResult::Text(_) => ToolExecutionOutcomeKind::Success,
+        ToolResult::Denied(_) => ToolExecutionOutcomeKind::Denied,
+        ToolResult::Interrupted(_) => ToolExecutionOutcomeKind::Interrupted,
+        ToolResult::Progress(_) => ToolExecutionOutcomeKind::Progress,
+        ToolResult::ResultTooLarge(_) => ToolExecutionOutcomeKind::ResultTooLarge,
     }
 }

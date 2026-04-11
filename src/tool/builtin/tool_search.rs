@@ -23,6 +23,9 @@ impl Tool for ToolSearchTool {
             always_load: true,
             should_defer: false,
             requires_auth: false,
+            requires_user_interaction: false,
+            is_open_world: false,
+            is_search_or_read_command: true,
         }
     }
 

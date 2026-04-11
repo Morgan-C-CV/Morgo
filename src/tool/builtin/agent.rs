@@ -35,6 +35,9 @@ impl Tool for AgentTool {
             always_load: true,
             should_defer: false,
             requires_auth: true,
+            requires_user_interaction: true,
+            is_open_world: false,
+            is_search_or_read_command: false,
         }
     }
 

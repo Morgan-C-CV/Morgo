@@ -21,6 +21,9 @@ pub struct ToolMetadata {
     pub always_load: bool,
     pub should_defer: bool,
     pub requires_auth: bool,
+    pub requires_user_interaction: bool,
+    pub is_open_world: bool,
+    pub is_search_or_read_command: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -73,6 +76,9 @@ pub enum PermissionDecision {
 pub enum ToolResult {
     Text(String),
     Denied(String),
+    Interrupted(String),
+    Progress(String),
+    ResultTooLarge(String),
 }
 
 #[async_trait]

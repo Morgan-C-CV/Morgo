@@ -35,6 +35,9 @@ impl Tool for WebFetchTool {
             always_load: false,
             should_defer: true,
             requires_auth: true,
+            requires_user_interaction: false,
+            is_open_world: true,
+            is_search_or_read_command: true,
         }
     }
 

@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
 use crate::bootstrap::{InteractionSurface, SessionMode};
+use crate::core::events::SessionMilestone;
 use crate::core::message::Message;
 use crate::task::list_types::TaskListSnapshot;
 use serde::{Deserialize, Serialize};
@@ -31,6 +32,7 @@ pub struct SessionHistoryEntry {
     pub message: Message,
     pub timestamp: Option<String>,
     pub tool_refs: Vec<String>,
+    pub milestone: Option<SessionMilestone>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

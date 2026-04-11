@@ -27,3 +27,20 @@ fn destructive_tools_are_denied_in_plan_mode() {
         rust_agent::tool::definition::PermissionDecision::Deny { .. }
     ));
 }
+
+#[test]
+fn ask_rules_force_ask_decision_before_allow() {
+    let mut context = ToolPermissionContext::new(PermissionMode::Default);
+    context.always_allow_rules.push("WebFetch".into());
+    context.always_ask_rules.push("WebFetch".into());
+    let metadata = WebFetchTool.metadata();
+    let call = ToolCall {
+        name: "WebFetch".into(),
+        input: "https://example.com".into(),
+    };
+
+    assert!(matches!(
+        evaluate_tool_permission(&metadata, &call, &context),
+        rust_agent::tool::definition::PermissionDecision::Ask { .. }
+    ));
+}

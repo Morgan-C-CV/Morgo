@@ -50,6 +50,7 @@ fn in_memory_session_store_loads_latest_session_for_continue() {
                 message: Message::assistant("restored"),
                 timestamp: Some("2026-04-11T00:00:01Z".into()),
                 tool_refs: vec!["Read".into()],
+                milestone: None,
             }],
         },
     );
@@ -109,6 +110,7 @@ fn file_backed_session_store_round_trips_across_store_instances() {
             message: Message::assistant("persisted history"),
             timestamp: Some("2026-04-11T12:00:01Z".into()),
             tool_refs: vec!["TaskList".into()],
+            milestone: None,
         }],
     };
     let task_list = TaskListSnapshot {
@@ -156,6 +158,7 @@ async fn runtime_continue_session_uses_restored_snapshot() {
                 message: Message::assistant("hello again"),
                 timestamp: None,
                 tool_refs: Vec::new(),
+                milestone: None,
             }],
         },
     );
@@ -277,6 +280,7 @@ async fn runtime_continue_restores_from_file_backed_store_across_instances() {
                 message: Message::assistant("durable session"),
                 timestamp: None,
                 tool_refs: Vec::new(),
+                milestone: None,
             }],
         },
     );
@@ -372,6 +376,7 @@ fn file_backed_session_store_persists_appended_turns_across_instances() {
             message: Message::user("hello"),
             timestamp: None,
             tool_refs: Vec::new(),
+            milestone: None,
         },
     );
     store_a.append_entry(
@@ -380,6 +385,7 @@ fn file_backed_session_store_persists_appended_turns_across_instances() {
             message: Message::assistant("hi there"),
             timestamp: None,
             tool_refs: Vec::new(),
+            milestone: None,
         },
     );
 

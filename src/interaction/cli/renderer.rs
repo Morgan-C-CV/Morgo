@@ -19,6 +19,7 @@ pub fn render_turn_output(turn: &CliTurnOutput) -> String {
 fn render_event(event: &CliDisplayEvent) -> String {
     match event {
         CliDisplayEvent::TaskEvent(task_event) => render_task_event(task_event),
+        CliDisplayEvent::RuntimeEvent(text) => text.clone(),
     }
 }
 
