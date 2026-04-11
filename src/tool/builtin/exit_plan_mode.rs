@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 
-use crate::state::permission_context::{PendingApproval, PermissionMode, ToolPermissionContext};
+use crate::state::permission_context::ToolPermissionContext;
 use crate::tool::definition::{Tool, ToolCall, ToolMetadata, ToolResult};
 
 pub struct ExitPlanModeTool;
@@ -30,25 +30,9 @@ impl Tool for ExitPlanModeTool {
         call: &ToolCall,
         permissions: &ToolPermissionContext,
     ) -> anyhow::Result<ToolResult> {
-        let summary = call.input.trim();
-        if !matches!(permissions.mode(), PermissionMode::Plan) {
-            return Ok(ToolResult::Denied("cannot exit plan mode when plan mode is inactive".into()));
-        }
-
-        let message = if summary.is_empty() {
-            "approve exiting plan mode".to_string()
-        } else {
-            format!("approve exiting plan mode: {summary}")
-        };
-        permissions.set_pending_approval(Some(PendingApproval {
-            tool_name: self.metadata().name.to_string(),
-            tool_input: call.input.clone(),
-            message: message.clone(),
-        }));
-
-        Ok(ToolResult::PendingApproval {
-            tool_name: self.metadata().name.to_string(),
-            message,
-        })
+        Ok(crate::state::plan_mode::request_exit_plan_mode(
+            permissions,
+            call.input.as_str(),
+        ))
     }
 }

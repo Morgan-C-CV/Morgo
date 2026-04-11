@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 
-use crate::state::permission_context::{PendingApproval, PermissionMode, ToolPermissionContext};
+use crate::state::permission_context::ToolPermissionContext;
 use crate::tool::definition::{Tool, ToolCall, ToolMetadata, ToolResult};
 
 pub struct EnterPlanModeTool;
@@ -30,25 +30,9 @@ impl Tool for EnterPlanModeTool {
         call: &ToolCall,
         permissions: &ToolPermissionContext,
     ) -> anyhow::Result<ToolResult> {
-        let reason = call.input.trim();
-        if matches!(permissions.mode(), PermissionMode::Plan) {
-            return Ok(ToolResult::Text("already in plan mode".into()));
-        }
-
-        let message = if reason.is_empty() {
-            "approve entering plan mode".to_string()
-        } else {
-            format!("approve entering plan mode: {reason}")
-        };
-        permissions.set_pending_approval(Some(PendingApproval {
-            tool_name: self.metadata().name.to_string(),
-            tool_input: call.input.clone(),
-            message: message.clone(),
-        }));
-
-        Ok(ToolResult::PendingApproval {
-            tool_name: self.metadata().name.to_string(),
-            message,
-        })
+        Ok(crate::state::plan_mode::request_enter_plan_mode(
+            permissions,
+            call.input.as_str(),
+        ))
     }
 }
