@@ -60,6 +60,36 @@ fn cli_renderer_marks_task_event_lines() {
 }
 
 #[test]
+fn cli_renderer_surfaces_implement_verify_and_risk_contract_lines() {
+    let rendered = render_turn_output(&CliTurnOutput {
+        primary_text: "final synthesis pending verification".into(),
+        events: vec![
+            CliDisplayEvent::TaskEvent(TaskEvent {
+                owner: TaskOwner {
+                    session_id: "session-1".into(),
+                    surface: InteractionSurface::Cli,
+                },
+                target_task_id: Some("task-2".into()),
+                task_id: "task-2".into(),
+                status: TaskStatus::Completed,
+                summary: "implement worker finished patch".into(),
+                result: "Task completed".into(),
+                next_action: "dispatch verify worker for task-2".into(),
+                worker_role: Some(rust_agent::state::app_state::WorkerRole::Implement),
+                output_file: "/tmp/task-2.log".into(),
+            }),
+            CliDisplayEvent::RuntimeEvent(
+                "Validation pending; final answer must call out unverified risk until verify completes.".into(),
+            ),
+        ],
+    });
+
+    assert!(rendered.contains("[task] worker_role: implement"));
+    assert!(rendered.contains("[task] next_action: dispatch verify worker for task-2"));
+    assert!(rendered.contains("Validation pending; final answer must call out unverified risk until verify completes."));
+}
+
+#[test]
 fn dispatcher_requires_delivery_ready_binding_for_telegram() {
     let dispatcher = NotificationDispatcher::new(TelegramGateway {
         allowed_bindings: vec![SessionBinding {

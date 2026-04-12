@@ -1,14 +1,24 @@
-use rust_agent::bootstrap::InteractionSurface;
+use std::sync::Arc;
+
+use rust_agent::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
+use rust_agent::command::registry::CommandRegistry;
 use rust_agent::coordinator::mode::{is_coordinator_mode, match_session_mode, set_coordinator_mode};
+use rust_agent::coordinator::prompt::build_coordinator_system_prompt;
 use rust_agent::coordinator::worker::{filter_tools_for_worker, notification_to_task_notification, TaskNotification};
+use rust_agent::cost::tracker::CostTracker;
+use rust_agent::interaction::dispatcher::NotificationDispatcher;
 use rust_agent::interaction::notification::{Notification, NotificationType};
-use rust_agent::state::app_state::WorkerRole;
+use rust_agent::interaction::telegram::gateway::TelegramGateway;
+use rust_agent::state::app_state::{AppState, RuntimeRole, WorkerRole};
+use rust_agent::state::permission_context::{PermissionMode, ToolPermissionContext};
 use rust_agent::task::types::{TaskEvent, TaskOwner, TaskStatus};
 use rust_agent::tool::builtin::agent::AgentTool;
 use rust_agent::tool::builtin::ask_user::AskUserQuestionTool;
 use rust_agent::tool::builtin::file_read::FileReadTool;
 use rust_agent::tool::builtin::web_search::WebSearchTool;
 use rust_agent::tool::definition::Tool;
+use rust_agent::tool::registry::ToolRegistry;
+use tokio::sync::RwLock;
 
 #[test]
 fn coordinator_mode_matches_resumed_session() {
@@ -80,4 +90,109 @@ fn coordinator_worker_filter_excludes_interactive_and_deferred_tools() {
     assert!(!names.contains(&"Agent"));
     assert!(!names.contains(&"AskUserQuestion"));
     assert!(!names.contains(&"WebSearch"));
+}
+
+fn coordinator_test_app_state() -> AppState {
+    let permission_context = ToolPermissionContext::new(PermissionMode::Default);
+    AppState {
+        surface: InteractionSurface::Cli,
+        session_mode: SessionMode::Headless,
+        client_type: ClientType::Cli,
+        session_source: SessionSource::LocalCli,
+        runtime_role: RuntimeRole::Coordinator,
+        worker_role: None,
+        permission_context,
+        command_registry: Some(Arc::new(CommandRegistry::default())),
+        runtime_tool_registry: Some(Arc::new(RwLock::new(ToolRegistry::new()))),
+        skill_registry: None,
+        mcp_runtime: None,
+        cost_tracker: CostTracker::default(),
+        notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
+        startup_trace: Vec::new(),
+        active_session_id: "test-session".into(),
+        session_store: None,
+        session: None,
+        history: None,
+        restored_session: None,
+    }
+}
+
+#[test]
+fn coordinator_prompt_describes_parallel_research_fan_out_and_fan_in_contract() {
+    let prompt = build_coordinator_system_prompt(&coordinator_test_app_state());
+
+    assert!(prompt.contains("Parallelize only independent research tasks"));
+    assert!(prompt.contains("wait for their task notifications before synthesizing"));
+    assert!(prompt.contains("allowed_tools"));
+    assert!(prompt.contains("max_turns"));
+    assert!(prompt.contains("reuse_strategy"));
+}
+
+#[test]
+fn coordinator_prompt_requires_verify_after_implement_before_final_answer() {
+    let prompt = build_coordinator_system_prompt(&coordinator_test_app_state());
+
+    assert!(prompt.contains("After a non-trivial implement worker completes, dispatch a fresh verify worker before giving the user a final answer."));
+    assert!(prompt.contains("The final answer belongs to the coordinator"));
+    assert!(prompt.contains("describe validation status"));
+}
+
+#[test]
+fn task_notification_contract_marks_implement_completion_for_verify_follow_up() {
+    let event = TaskEvent {
+        owner: TaskOwner {
+            session_id: "session-1".into(),
+            surface: InteractionSurface::Cli,
+        },
+        target_task_id: Some("task-9".into()),
+        task_id: "task-9".into(),
+        status: TaskStatus::Completed,
+        summary: "Implement worker finished patch".into(),
+        result: "Task completed".into(),
+        next_action: "dispatch verify worker for task-9".into(),
+        worker_role: Some(WorkerRole::Implement),
+        output_file: "/tmp/task-9.log".into(),
+    };
+
+    let notification = TaskNotification::from_task_event(&event);
+    let formatted = notification.format_as_user_message();
+
+    assert_eq!(notification.worker_role, Some(WorkerRole::Implement));
+    assert_eq!(notification.next_action, "dispatch verify worker for task-9");
+    assert!(formatted.contains("<worker-role>implement</worker-role>"));
+    assert!(formatted.contains("<next-action>dispatch verify worker for task-9</next-action>"));
+}
+
+#[test]
+fn task_notification_contract_marks_verify_completion_for_validated_synthesis() {
+    let event = TaskEvent {
+        owner: TaskOwner {
+            session_id: "session-1".into(),
+            surface: InteractionSurface::Cli,
+        },
+        target_task_id: Some("task-10".into()),
+        task_id: "task-10".into(),
+        status: TaskStatus::Completed,
+        summary: "Verify worker finished checks".into(),
+        result: "Task completed".into(),
+        next_action: "synthesize validated result for task-10".into(),
+        worker_role: Some(WorkerRole::Verify),
+        output_file: "/tmp/task-10.log".into(),
+    };
+
+    let notification = TaskNotification::from_task_event(&event);
+    let formatted = notification.format_as_user_message();
+
+    assert_eq!(notification.worker_role, Some(WorkerRole::Verify));
+    assert_eq!(notification.next_action, "synthesize validated result for task-10");
+    assert!(formatted.contains("<worker-role>verify</worker-role>"));
+    assert!(formatted.contains("<next-action>synthesize validated result for task-10</next-action>"));
+}
+
+#[test]
+fn coordinator_prompt_requires_risk_callout_when_verification_is_missing() {
+    let prompt = build_coordinator_system_prompt(&coordinator_test_app_state());
+
+    assert!(prompt.contains("call out any unverified risk"));
+    assert!(prompt.contains("describe validation status"));
 }
