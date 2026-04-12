@@ -10,7 +10,9 @@ use rust_agent::cost::tracker::CostTracker;
 use rust_agent::hook::registry::{HookEvent, HookEventMatcher, HookRegistry, HookRule};
 use rust_agent::interaction::dispatcher::NotificationDispatcher;
 use rust_agent::interaction::telegram::gateway::TelegramGateway;
-use rust_agent::service::api::client::ModelProviderClient;
+use rust_agent::service::api::client::{ModelProviderClient, parse_sse_response};
+use rust_agent::service::api::errors::ApiError;
+use rust_agent::service::api::retry::RetryPolicy;
 use rust_agent::service::api::streaming::{StopReason, StreamEvent, UsageEvent};
 use rust_agent::service::compact::reactive_compact::ReactiveCompactor;
 use rust_agent::state::app_state::WorkerRole;
@@ -584,6 +586,40 @@ async fn query_loop_uses_subagent_stop_hook_for_subagent_context() {
             .recorded_events()
             .contains(&HookEvent::Stop)
     );
+}
+
+#[test]
+fn provider_sse_parsing_maps_standard_events() {
+    let body = concat!(
+        "event: message\n",
+        "data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-test\",\"usage\":{\"input_tokens\":11}}}\n\n",
+        "event: message\n",
+        "data: {\"type\":\"content_block_delta\",\"delta\":{\"text\":\"hello\"}}\n\n",
+        "event: message\n",
+        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":4}}\n\n"
+    );
+
+    let events = parse_sse_response(body, "default-model").expect("provider SSE should parse");
+    assert!(matches!(events[0], StreamEvent::MessageStart));
+    assert!(matches!(events[1], StreamEvent::Usage(_)));
+    assert!(matches!(events[2], StreamEvent::TextDelta(_)));
+    assert!(matches!(events[3], StreamEvent::MessageStop { stop_reason: StopReason::EndTurn }));
+}
+
+#[test]
+fn retry_policy_retries_only_retryable_pre_stream_errors() {
+    let policy = RetryPolicy {
+        max_attempts: 3,
+        initial_backoff_ms: 1,
+        max_backoff_ms: 2,
+    };
+    let retryable = ApiError::http_status(429, "rate limited");
+    let fatal = ApiError::invalid_response("bad json");
+
+    assert!(policy.should_retry(0, &retryable, false));
+    assert!(!policy.should_retry(2, &retryable, false));
+    assert!(!policy.should_retry(0, &retryable, true));
+    assert!(!policy.should_retry(0, &fatal, false));
 }
 
 #[tokio::test]

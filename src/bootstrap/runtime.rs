@@ -26,7 +26,10 @@ use crate::interaction::telegram::gateway::TelegramGateway;
 use crate::plan::manager::PlanManager;
 use crate::plugins::loader::load_plugins;
 use crate::security::authorizer::DefaultSurfaceAuthorizer;
-use crate::service::api::client::{ModelProviderClient, ModelProviderConfig, ModelPricing};
+use crate::service::api::client::{
+    ModelProviderClient, ModelProviderConfig, ModelPricing, ProviderTimeout,
+};
+use crate::service::api::retry::RetryPolicy;
 use crate::service::compact::reactive_compact::ReactiveCompactor;
 use crate::service::mcp::config::load_server_configs_with_diagnostics;
 use crate::service::mcp::runtime::McpRuntime;
@@ -416,10 +419,50 @@ impl RuntimeBootstrap {
     }
 
     fn build_model_provider_config(&self) -> ModelProviderConfig {
+        let provider_id = std::env::var("RUST_AGENT_PROVIDER_ID")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "anthropic".into());
+        let base_url = std::env::var("RUST_AGENT_PROVIDER_BASE_URL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "http://localhost".into());
+        let api_key = std::env::var("RUST_AGENT_PROVIDER_API_KEY")
+            .ok()
+            .filter(|value| !value.trim().is_empty());
+        let model_id = std::env::var("RUST_AGENT_PROVIDER_MODEL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "default-model".into());
+        let request_timeout_ms = std::env::var("RUST_AGENT_PROVIDER_TIMEOUT_MS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(30_000);
+        let max_attempts = std::env::var("RUST_AGENT_PROVIDER_RETRY_MAX_ATTEMPTS")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(3);
+        let initial_backoff_ms = std::env::var("RUST_AGENT_PROVIDER_RETRY_INITIAL_BACKOFF_MS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(200);
+        let max_backoff_ms = std::env::var("RUST_AGENT_PROVIDER_RETRY_MAX_BACKOFF_MS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(1_000);
         ModelProviderConfig {
-            provider_id: "modelprovider".into(),
-            base_url: "http://localhost".into(),
-            model_id: "default-model".into(),
+            provider_id,
+            base_url,
+            api_key,
+            model_id,
+            timeout: ProviderTimeout {
+                request_timeout_ms,
+            },
+            retry_policy: RetryPolicy {
+                max_attempts,
+                initial_backoff_ms,
+                max_backoff_ms,
+            },
             pricing: ModelPricing::default(),
         }
     }

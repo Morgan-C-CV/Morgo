@@ -7,7 +7,7 @@ use rust_agent::cost::tracker::CostTracker;
 use rust_agent::interaction::dispatcher::NotificationDispatcher;
 use rust_agent::interaction::envelope::NormalizedInput;
 use rust_agent::interaction::telegram::gateway::TelegramGateway;
-use rust_agent::service::api::client::{ModelPricing, ModelProviderClient};
+use rust_agent::service::api::client::{ModelPricing, ModelProviderClient, parse_sse_response};
 use rust_agent::state::app_state::{AppState, RuntimeRole};
 use rust_agent::state::permission_context::{PermissionMode, ToolPermissionContext};
 use rust_agent::task::manager::TaskManager;
@@ -70,4 +70,38 @@ async fn cost_command_reports_tracked_usage() {
     assert!(text.contains("cache_read_input_tokens: 5"));
     assert!(text.contains("estimated_cost_usd:"));
     assert!(text.contains("model default-model -> requests: 1"));
+}
+
+#[test]
+fn parsed_usage_event_can_be_recorded_into_cost_tracker() {
+    let cost_tracker = CostTracker::with_default_pricing(
+        "claude-test".into(),
+        ModelPricing::default(),
+    );
+    let body = concat!(
+        "event: message\n",
+        "data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-test\",\"usage\":{\"input_tokens\":50}}}\n\n",
+        "event: message\n",
+        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":12,\"cache_creation_input_tokens\":3,\"cache_read_input_tokens\":1}}\n\n"
+    );
+
+    let events = parse_sse_response(body, "claude-test").expect("usage SSE should parse");
+    for event in events {
+        if let rust_agent::service::api::streaming::StreamEvent::Usage(usage) = event {
+            cost_tracker.record_model_usage(
+                &usage.model,
+                usage.input_tokens,
+                usage.output_tokens,
+                usage.cache_creation_input_tokens,
+                usage.cache_read_input_tokens,
+            );
+        }
+    }
+
+    let report = cost_tracker.format_report();
+    assert!(report.contains("model claude-test -> requests: 2"));
+    assert!(report.contains("input_tokens: 50"));
+    assert!(report.contains("output_tokens: 12"));
+    assert!(report.contains("cache_creation_input_tokens: 3"));
+    assert!(report.contains("cache_read_input_tokens: 1"));
 }
