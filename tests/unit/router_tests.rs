@@ -22,11 +22,11 @@ use rust_agent::security::authorizer::{AuthDecision, DefaultSurfaceAuthorizer, S
 use rust_agent::service::api::client::ModelProviderClient;
 use rust_agent::service::api::streaming::{StopReason, StreamEvent};
 use rust_agent::service::compact::reactive_compact::ReactiveCompactor;
-use rust_agent::state::app_state::{AppState, RuntimeRole};
+use rust_agent::state::app_state::{AppState, RuntimeRole, WorkerRole};
 use rust_agent::state::permission_context::{PermissionMode, ToolPermissionContext};
 use rust_agent::task::list_manager::TaskListManager;
 use rust_agent::task::manager::TaskManager;
-use rust_agent::task::types::TaskOwner;
+use rust_agent::task::types::{TaskOwner, ValidationState, WorkerPhase};
 use rust_agent::tool::registry::ToolRegistry;
 use tokio::sync::RwLock;
 
@@ -1012,8 +1012,15 @@ async fn plan_command_handles_status_noop_and_denied_exit() {
             },
         )
         .expect("mark linked task in progress with blocker");
+    let runtime_task_manager = Arc::new(TaskManager::default());
+    let runtime_task = runtime_task_manager.create("runtime patch task", "cli-session", InteractionSurface::Cli);
+    runtime_task_manager.set_orchestration_group_id(&runtime_task.id, Some(step.id.clone()));
+    runtime_task_manager.set_worker_role(&runtime_task.id, WorkerRole::Implement);
+    runtime_task_manager.set_phase(&runtime_task.id, Some(WorkerPhase::Implement));
+    runtime_task_manager.set_validation_state(&runtime_task.id, Some(ValidationState::PendingVerification));
+    runtime_task_manager.start(&runtime_task.id);
     let active_context = ToolPermissionContext::new(PermissionMode::Plan)
-        .with_task_manager(Arc::new(TaskManager::default()))
+        .with_task_manager(runtime_task_manager.clone())
         .with_task_list_manager(task_list_manager.clone())
         .with_plan_manager(plan_manager.clone());
     let active_state = AppState {
@@ -1063,6 +1070,10 @@ async fn plan_command_handles_status_noop_and_denied_exit() {
     assert!(matches!(show, CommandResult::Message(ref message) if message.contains("owner=planner")));
     assert!(matches!(show, CommandResult::Message(ref message) if message.contains("blocked_by=task-1")));
     assert!(matches!(show, CommandResult::Message(ref message) if message.contains("warning: plan/task status mismatch")));
+    assert!(matches!(show, CommandResult::Message(ref message) if message.contains("Runtime orchestration: groups=1, waiting_for_verification=0, ready_for_synthesis=0, still_in_progress=1")));
+    assert!(matches!(show, CommandResult::Message(ref message) if message.contains(&format!("runtime group: {} — group {} still in progress", step.id, step.id))));
+    assert!(matches!(show, CommandResult::Message(ref message) if message.contains("runtime task: task-0 [Running] role=implement phase=implement validation_state=pending_verification")));
+    assert!(matches!(show, CommandResult::Message(ref message) if message.contains("hint: verification next for task-0")));
 
     let add = router
         .route(
@@ -1092,6 +1103,9 @@ async fn plan_command_handles_status_noop_and_denied_exit() {
     assert!(matches!(history, CommandResult::Message(ref message) if message.contains("Plan history:")));
     assert!(matches!(history, CommandResult::Message(ref message) if message.contains("snapshot: steps=")));
     assert!(matches!(history, CommandResult::Message(ref message) if message.contains("active_step=")));
+    assert!(matches!(history, CommandResult::Message(ref message) if message.contains("Current runtime overlay:")));
+    assert!(matches!(history, CommandResult::Message(ref message) if message.contains("active_runtime_groups=1")));
+    assert!(matches!(history, CommandResult::Message(ref message) if message.contains("still_in_progress_groups=1")));
 
     let reorder = router
         .route(

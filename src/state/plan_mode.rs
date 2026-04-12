@@ -1,5 +1,7 @@
 use crate::plan::types::{PlanState, PlanStepStatus};
 use crate::state::permission_context::{PendingApproval, PermissionMode, ToolPermissionContext};
+use crate::task::manager::TaskGroupSummary;
+use crate::task::types::TaskRecord;
 use crate::tool::definition::ToolResult;
 
 pub fn render_plan_status(permissions: &ToolPermissionContext) -> String {
@@ -31,6 +33,21 @@ pub fn render_plan_show(permissions: &ToolPermissionContext) -> String {
         .task_list_manager
         .as_ref()
         .map(|manager| manager.tasks_grouped_by_plan_step())
+        .unwrap_or_default();
+    let runtime_groups = permissions
+        .task_manager
+        .as_ref()
+        .map(|manager| {
+            if let Some(draft) = state.draft.as_ref() {
+                draft
+                    .steps
+                    .iter()
+                    .filter_map(|step| manager.group_summary(&step.id).map(|group| (step.id.clone(), group)))
+                    .collect::<std::collections::BTreeMap<_, _>>()
+            } else {
+                std::collections::BTreeMap::new()
+            }
+        })
         .unwrap_or_default();
     let mut lines = vec![format!("Plan status: {}", state.status.as_str())];
     if let Some(execution) = state.execution.as_ref() {
@@ -69,6 +86,24 @@ pub fn render_plan_show(permissions: &ToolPermissionContext) -> String {
             linked_count,
             total_steps.saturating_sub(linked_count)
         ));
+        if !runtime_groups.is_empty() {
+            lines.push(format!(
+                "Runtime orchestration: groups={}, waiting_for_verification={}, ready_for_synthesis={}, still_in_progress={}",
+                runtime_groups.len(),
+                runtime_groups
+                    .values()
+                    .filter(|group| group.hint.contains("waiting for verification"))
+                    .count(),
+                runtime_groups
+                    .values()
+                    .filter(|group| group.hint.contains("ready for synthesis"))
+                    .count(),
+                runtime_groups
+                    .values()
+                    .filter(|group| group.hint.contains("still in progress"))
+                    .count()
+            ));
+        }
         if !draft.summary.trim().is_empty() {
             lines.push(format!("Summary: {}", draft.summary.trim()));
         }
@@ -80,7 +115,12 @@ pub fn render_plan_show(permissions: &ToolPermissionContext) -> String {
         } else {
             lines.push("Steps:".into());
             for step in &draft.steps {
-                lines.push(format_plan_step(step, linked_tasks.get(step.id.as_str())));
+                lines.push(format_plan_step(
+                    step,
+                    linked_tasks.get(step.id.as_str()),
+                    runtime_groups.get(step.id.as_str()),
+                    permissions,
+                ));
             }
         }
         let duplicate_links = linked_tasks.values().filter(|tasks| tasks.len() > 1).count();
@@ -143,12 +183,18 @@ pub fn render_plan_history(permissions: &ToolPermissionContext) -> String {
             step_count, completed, active_step, approval
         ));
     }
+    if let Some(runtime_overlay) = render_history_runtime_overlay(permissions) {
+        lines.push("Current runtime overlay:".into());
+        lines.extend(runtime_overlay.into_iter().map(|line| format!("  {line}")));
+    }
     lines.join("\n")
 }
 
 fn format_plan_step(
     step: &crate::plan::types::PlanStep,
     linked_tasks: Option<&Vec<crate::task::list_types::TaskListItem>>,
+    runtime_group: Option<&TaskGroupSummary>,
+    permissions: &ToolPermissionContext,
 ) -> String {
     let details = step
         .details
@@ -190,7 +236,76 @@ fn format_plan_step(
         }
         _ => lines.push("  linked task: none".into()),
     }
+    match runtime_group {
+        Some(group) => {
+            lines.push(format!("  runtime group: {} — {}", group.group_id, group.hint));
+            for task in &group.tasks {
+                lines.extend(format_runtime_task_lines(task, permissions).into_iter().map(|line| format!("  {line}")));
+            }
+        }
+        None => lines.push("  runtime group: none".into()),
+    }
     lines.join("\n")
+}
+
+fn format_runtime_task_lines(task: &TaskRecord, permissions: &ToolPermissionContext) -> Vec<String> {
+    let hint = permissions
+        .task_manager
+        .as_ref()
+        .map(|manager| manager.task_hint(task))
+        .unwrap_or_else(|| "runtime hint unavailable".to_string());
+    let mut lines = vec![format!(
+        "runtime task: {} [{:?}] role={} phase={} validation_state={}",
+        task.id,
+        task.status,
+        task.worker_role.map(|role| role.as_str()).unwrap_or("none"),
+        task.phase.map(|phase| phase.as_str()).unwrap_or("none"),
+        task.validation_state.map(|state| state.as_str()).unwrap_or("none")
+    )];
+    lines.push(format!("hint: {hint}"));
+    if let Some(parent_task_id) = task.parent_task_id.as_deref() {
+        lines.push(format!("parent_task_id: {parent_task_id}"));
+    }
+    lines
+}
+
+fn render_history_runtime_overlay(permissions: &ToolPermissionContext) -> Option<Vec<String>> {
+    let plan_manager = permissions.plan_manager.as_ref()?;
+    let state = plan_manager.state()?;
+    let draft = state.draft.as_ref()?;
+    let task_manager = permissions.task_manager.as_ref()?;
+    let groups = draft
+        .steps
+        .iter()
+        .filter_map(|step| task_manager.group_summary(&step.id))
+        .collect::<Vec<_>>();
+    if groups.is_empty() {
+        return None;
+    }
+    Some(vec![
+        format!("active_runtime_groups={}", groups.len()),
+        format!(
+            "waiting_for_verification_groups={}",
+            groups
+                .iter()
+                .filter(|group| group.hint.contains("waiting for verification"))
+                .count()
+        ),
+        format!(
+            "ready_for_synthesis_groups={}",
+            groups
+                .iter()
+                .filter(|group| group.hint.contains("ready for synthesis"))
+                .count()
+        ),
+        format!(
+            "still_in_progress_groups={}",
+            groups
+                .iter()
+                .filter(|group| group.hint.contains("still in progress"))
+                .count()
+        ),
+    ])
 }
 
 fn plan_task_status_matches(

@@ -200,23 +200,18 @@ impl TaskManager {
         }
         let groups = grouped
             .into_iter()
-            .map(|(group_id, mut tasks)| {
-                tasks.sort_by(|left, right| {
-                    left.parent_task_id
-                        .is_some()
-                        .cmp(&right.parent_task_id.is_some())
-                        .then_with(|| left.id.cmp(&right.id))
-                });
-                let hint = self.group_hint(&group_id, &tasks);
-                TaskGroupSummary {
-                    group_id,
-                    tasks,
-                    hint,
-                }
-            })
+            .map(|(group_id, tasks)| self.build_group_summary(group_id, tasks))
             .collect();
         standalone.sort_by(|left, right| left.id.cmp(&right.id));
         (groups, standalone)
+    }
+
+    pub fn group_summary(&self, orchestration_group_id: &str) -> Option<TaskGroupSummary> {
+        let tasks = self.group_tasks(orchestration_group_id);
+        if tasks.is_empty() {
+            return None;
+        }
+        Some(self.build_group_summary(orchestration_group_id.to_string(), tasks))
     }
 
     pub fn task_hint(&self, task: &TaskRecord) -> String {
@@ -589,6 +584,21 @@ impl TaskManager {
             .find(|task| task.id == parent_task_id)
         {
             parent.validation_state = Some(propagated_state);
+        }
+    }
+
+    fn build_group_summary(&self, group_id: String, mut tasks: Vec<TaskRecord>) -> TaskGroupSummary {
+        tasks.sort_by(|left, right| {
+            left.parent_task_id
+                .is_some()
+                .cmp(&right.parent_task_id.is_some())
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        let hint = self.group_hint(&group_id, &tasks);
+        TaskGroupSummary {
+            group_id,
+            tasks,
+            hint,
         }
     }
 

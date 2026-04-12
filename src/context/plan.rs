@@ -45,6 +45,18 @@ fn render_approved_plan(state: &PlanState, app_state: &AppState) -> String {
                 .as_ref()
                 .map(|tasks| tasks.tasks_grouped_by_plan_step())
                 .unwrap_or_default();
+            let runtime_groups = app_state
+                .permission_context
+                .task_manager
+                .as_ref()
+                .map(|manager| {
+                    draft
+                        .steps
+                        .iter()
+                        .filter_map(|step| manager.group_summary(&step.id).map(|group| (step.id.clone(), group)))
+                        .collect::<std::collections::BTreeMap<_, _>>()
+                })
+                .unwrap_or_default();
             let blocked = linked
                 .values()
                 .flatten()
@@ -64,6 +76,24 @@ fn render_approved_plan(state: &PlanState, app_state: &AppState) -> String {
                 "Linked task summary: linked_steps={}, blocked_tasks={}, in_progress_steps={}, completed_steps={}",
                 linked.len(), blocked, in_progress, completed
             ));
+            if !runtime_groups.is_empty() {
+                lines.push(format!(
+                    "Runtime orchestration summary: groups={}, waiting_for_verification={}, ready_for_synthesis={}, still_in_progress={}",
+                    runtime_groups.len(),
+                    runtime_groups
+                        .values()
+                        .filter(|group| group.hint.contains("waiting for verification"))
+                        .count(),
+                    runtime_groups
+                        .values()
+                        .filter(|group| group.hint.contains("ready for synthesis"))
+                        .count(),
+                    runtime_groups
+                        .values()
+                        .filter(|group| group.hint.contains("still in progress"))
+                        .count()
+                ));
+            }
             if let Some(next_step) = draft
                 .steps
                 .iter()
@@ -72,13 +102,27 @@ fn render_approved_plan(state: &PlanState, app_state: &AppState) -> String {
             {
                 lines.push(format!("Next actionable step: {}", next_step.title));
             }
+            if let Some(active_step_id) = state.execution.as_ref().and_then(|execution| execution.active_step_id.as_deref()) {
+                if let Some(group) = runtime_groups.get(active_step_id) {
+                    lines.push(format!("Active step runtime hint: {}", group.hint));
+                    if let Some(task_manager) = app_state.permission_context.task_manager.as_ref() {
+                        if let Some(task) = group.tasks.first() {
+                            lines.push(format!("Active runtime task hint: {}", task_manager.task_hint(task)));
+                        }
+                    }
+                }
+            }
             lines.push("Plan steps:".to_string());
             for step in &draft.steps {
                 let linkage = linked
                     .get(step.id.as_str())
                     .map(|tasks| format!(" linked_tasks={}", tasks.len()))
                     .unwrap_or_else(|| " linked_tasks=0".to_string());
-                lines.push(format!("- {} [{}]{}", render_step(step), step.status.as_str(), linkage));
+                let runtime = runtime_groups
+                    .get(step.id.as_str())
+                    .map(|group| format!(" runtime_group={} runtime_hint={}", group.group_id, group.hint))
+                    .unwrap_or_else(|| " runtime_group=none".to_string());
+                lines.push(format!("- {} [{}]{}{}", render_step(step), step.status.as_str(), linkage, runtime));
             }
             let mismatches = draft
                 .steps
@@ -87,6 +131,17 @@ fn render_approved_plan(state: &PlanState, app_state: &AppState) -> String {
                 .count();
             if mismatches > 0 {
                 lines.push(format!("Warnings: {} approved step(s) are not yet linked to durable tasks.", mismatches));
+            }
+            let runtime_without_durable = draft
+                .steps
+                .iter()
+                .filter(|step| runtime_groups.contains_key(step.id.as_str()) && !linked.contains_key(step.id.as_str()))
+                .count();
+            if runtime_without_durable > 0 {
+                lines.push(format!(
+                    "Warnings: {} approved step(s) have runtime orchestration without durable task linkage.",
+                    runtime_without_durable
+                ));
             }
         }
         if let Some(notes) = draft.notes.as_ref().map(|value| value.trim()).filter(|value| !value.is_empty()) {

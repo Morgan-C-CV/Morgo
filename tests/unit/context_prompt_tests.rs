@@ -12,6 +12,8 @@ use rust_agent::plan::manager::PlanManager;
 use rust_agent::state::plan_mode;
 use rust_agent::task::list_manager::{TaskListManager, TaskListUpdate};
 use rust_agent::task::list_types::TaskListStatus;
+use rust_agent::task::manager::TaskManager;
+use rust_agent::task::types::{ValidationState, WorkerPhase};
 use rust_agent::interaction::telegram::gateway::TelegramGateway;
 use rust_agent::state::app_state::{AppState, RuntimeRole, WorkerRole};
 use rust_agent::state::permission_context::{PermissionMode, ToolPermissionContext};
@@ -85,7 +87,16 @@ fn build_plan_permissions() -> ToolPermissionContext {
         )
         .expect("start patch task");
 
+    let task_manager = Arc::new(TaskManager::default());
+    let runtime_task = task_manager.create("runtime patch execution", "context-session", InteractionSurface::Cli);
+    task_manager.set_orchestration_group_id(&runtime_task.id, Some(patch.id.clone()));
+    task_manager.set_worker_role(&runtime_task.id, WorkerRole::Implement);
+    task_manager.set_phase(&runtime_task.id, Some(WorkerPhase::Implement));
+    task_manager.set_validation_state(&runtime_task.id, Some(ValidationState::PendingVerification));
+    task_manager.start(&runtime_task.id);
+
     let permissions = ToolPermissionContext::new(PermissionMode::Default)
+        .with_task_manager(task_manager)
         .with_plan_manager(plan_manager.clone())
         .with_task_list_manager(task_list.clone());
     plan_mode::apply_exit_plan_mode(&permissions, "ready to execute").expect("approve plan");
@@ -179,6 +190,10 @@ fn context_prompt_includes_truthy_runtime_sections() {
     assert!(prompt.contains("Active step: step-2"));
     assert!(prompt.contains("Next actionable step: Patch output"));
     assert!(prompt.contains("Linked task summary: linked_steps=2, blocked_tasks=0, in_progress_steps=1, completed_steps=1"));
+    assert!(prompt.contains("Runtime orchestration summary: groups=1, waiting_for_verification=0, ready_for_synthesis=0, still_in_progress=1"));
+    assert!(prompt.contains("Active step runtime hint: group step-2 still in progress"));
+    assert!(prompt.contains("Active runtime task hint: verification next for task-0"));
+    assert!(prompt.contains("runtime_group=step-2 runtime_hint=group step-2 still in progress"));
 }
 
 #[test]
