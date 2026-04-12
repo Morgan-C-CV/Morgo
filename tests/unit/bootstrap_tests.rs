@@ -9,7 +9,7 @@ use rust_agent::history::session::{
     FileBackedSessionStore, InMemorySessionStore, SessionHistory, SessionHistoryEntry, SessionId,
     SessionRestoreRequest, SessionSnapshot, SessionStore,
 };
-use rust_agent::hook::registry::HookEvent;
+use rust_agent::hook::registry::{HookConfigSource, HookEvent, load_hook_registry};
 use rust_agent::task::list_types::{TaskListItem, TaskListSnapshot, TaskListStatus};
 
 fn unique_temp_path(prefix: &str) -> std::path::PathBuf {
@@ -407,4 +407,22 @@ fn file_backed_session_store_persists_appended_turns_across_instances() {
 fn hook_event_enum_exposes_bootstrap_lifecycle_markers() {
     assert_eq!(HookEvent::SessionStart, HookEvent::SessionStart);
     assert_eq!(HookEvent::Setup, HookEvent::Setup);
+}
+
+#[test]
+fn bootstrap_hook_loader_defaults_without_project_config() {
+    let root = unique_temp_path("rust-agent-bootstrap-hooks");
+    std::fs::create_dir_all(&root).expect("create bootstrap hook root");
+
+    let registry = load_hook_registry(&root);
+    let load_result = registry
+        .config_load_result()
+        .expect("bootstrap should retain hook load metadata");
+    assert_eq!(load_result.source, HookConfigSource::Defaults);
+    assert!(load_result
+        .diagnostics
+        .iter()
+        .any(|line| line.contains("No .claude/hooks.json found")));
+
+    std::fs::remove_dir_all(root).expect("cleanup bootstrap hook root");
 }

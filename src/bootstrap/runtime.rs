@@ -17,7 +17,7 @@ use crate::history::session::{
 };
 use crate::history::transcript::Transcript;
 use crate::hook::executor::run_hook;
-use crate::hook::registry::{HookEvent, HookRegistry};
+use crate::hook::registry::{HookEvent, load_hook_registry};
 use crate::interaction::cli::renderer::{render_output, render_turn_output};
 use crate::interaction::cli::repl::handle_cli_input;
 use crate::interaction::dispatcher::NotificationDispatcher;
@@ -111,14 +111,14 @@ impl RuntimeBootstrap {
         state.record_phase(BootstrapPhase::ResolvePermissions);
 
         let task_manager = Arc::new(TaskManager::default());
-        let hook_registry = HookRegistry::default();
-        let _ = run_hook(&hook_registry, HookEvent::SessionStart);
 
         state.record_phase(BootstrapPhase::BuildToolContext);
         let tool_inventory = self.build_tool_registry();
 
         state.record_phase(BootstrapPhase::AssembleTools);
         let setup = SetupContext::detect();
+        let hook_registry = load_hook_registry(&setup.working_directory);
+        let _ = run_hook(&hook_registry, HookEvent::SessionStart);
         let _ = run_hook(&hook_registry, HookEvent::Setup);
         state.record_phase(BootstrapPhase::Setup);
         state.current_cwd = setup.working_directory.clone();
@@ -243,7 +243,8 @@ impl RuntimeBootstrap {
                 provider_config.model_id.clone(),
                 provider_config.pricing.clone(),
             ),
-            notification_dispatcher: NotificationDispatcher::new(self.build_telegram_gateway()),
+            notification_dispatcher: NotificationDispatcher::new(self.build_telegram_gateway())
+                .with_hook_registry(hook_registry.clone()),
             startup_trace: state
                 .phases
                 .iter()

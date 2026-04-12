@@ -2,10 +2,14 @@
 mod acceptance_loop1_tests;
 #[path = "unit/bootstrap_tests.rs"]
 mod bootstrap_tests;
+#[path = "unit/context_prompt_tests.rs"]
+mod context_prompt_tests;
 #[path = "unit/coordinator_tests.rs"]
 mod coordinator_tests;
 #[path = "unit/cost_tests.rs"]
 mod cost_tests;
+#[path = "unit/hook_config_tests.rs"]
+mod hook_config_tests;
 #[path = "unit/hook_loop3_tests.rs"]
 mod hook_loop3_tests;
 #[path = "unit/hook_tests.rs"]

@@ -129,5 +129,6 @@ async fn prompt_command_is_interpreted_before_query_engine() {
 fn query_context_builds_non_empty_prompt_layers() {
     let engine = test_engine();
     assert!(engine.context.system_prompt.contains("surface=Cli"));
-    assert!(engine.context.context_prompt.contains("client_type=Cli"));
+    assert!(engine.context.context_prompt.contains("Runtime context summary:"));
+    assert!(engine.context.context_prompt.contains("- client_type: Cli"));
 }
