@@ -5,8 +5,9 @@ use rust_agent::command::registry::CommandRegistry;
 use rust_agent::cost::tracker::CostTracker;
 use rust_agent::history::session::{InMemorySessionStore, SessionHistory, SessionRestoreRequest, SessionSnapshot, SessionStore};
 use rust_agent::interaction::dispatcher::NotificationDispatcher;
+use rust_agent::interaction::notification::{Notification, NotificationTarget};
 use rust_agent::interaction::remote::{
-    RemoteEventPayload, RemoteRequest, handle_remote_request,
+    RemoteEventPayload, RemoteRequest, drain_remote_notifications, handle_remote_request,
 };
 use rust_agent::interaction::telegram::gateway::TelegramGateway;
 use rust_agent::plan::manager::PlanManager;
@@ -135,6 +136,72 @@ async fn remote_request_runs_minimal_query_chain() {
         history.entries[1].message,
         rust_agent::core::message::Message::assistant("remote integration reply")
     );
+}
+
+#[tokio::test]
+async fn remote_request_drains_async_remote_notifications() {
+    let command_registry = Arc::new(CommandRegistry::new());
+    let _router = rust_agent::interaction::router::CommandRouter::new(
+        command_registry.clone(),
+        Box::new(DefaultSurfaceAuthorizer),
+    );
+    let permission_context = ToolPermissionContext::new(PermissionMode::Default)
+        .with_task_manager(Arc::new(TaskManager::default()))
+        .with_plan_manager(Arc::new(PlanManager::default()));
+    let session_store = Arc::new(InMemorySessionStore::default());
+    let app_state = AppState {
+        surface: InteractionSurface::Remote,
+        session_mode: SessionMode::Interactive,
+        client_type: ClientType::RemoteControl,
+        session_source: SessionSource::RemoteControl,
+        runtime_role: RuntimeRole::Coordinator,
+        worker_role: None,
+        permission_context,
+        command_registry: Some(command_registry),
+        runtime_tool_registry: Some(Arc::new(RwLock::new(ToolRegistry::new()))),
+        skill_registry: None,
+        mcp_runtime: None,
+        plugin_load_result: None,
+        cost_tracker: CostTracker::default(),
+        notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
+        startup_trace: Vec::new(),
+        active_session_id: "remote-async-session".into(),
+        session_store: Some(session_store),
+        session: None,
+        history: None,
+        restored_session: None,
+    };
+
+    let mut actor_notification = Notification::approval_required(
+        "remote-async-session",
+        "Bash",
+        "requires explicit approval",
+    );
+    actor_notification.target = Some(NotificationTarget::RemoteActor {
+        session_id: "remote-async-session".into(),
+        actor_id: "remote-actor".into(),
+    });
+    app_state
+        .notification_dispatcher
+        .dispatch(InteractionSurface::Remote, actor_notification);
+    app_state.notification_dispatcher.dispatch(
+        InteractionSurface::Remote,
+        Notification::runtime_notice("remote-async-session", "tool", "background update"),
+    );
+
+    let drained = drain_remote_notifications(&app_state, "remote-async-session", Some("remote-actor"));
+    assert_eq!(drained.len(), 2);
+    assert!(drained.iter().any(|event| matches!(
+        &event.payload,
+        RemoteEventPayload::ApprovalRequired { tool_name, message }
+            if tool_name == "Bash" && message == "requires explicit approval"
+    )));
+    assert!(drained.iter().any(|event| matches!(
+        &event.payload,
+        RemoteEventPayload::RuntimeNotice { kind, message }
+            if kind == "tool" && message == "background update"
+    )));
+    assert!(drain_remote_notifications(&app_state, "remote-async-session", Some("remote-actor")).is_empty());
 }
 
 #[tokio::test]

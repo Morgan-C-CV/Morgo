@@ -82,7 +82,7 @@ fn terminal_task_states_mark_delivery_notified() {
     assert_eq!(notification.session_id, "session-1");
     assert_eq!(notification.title, "Task completed");
     assert_eq!(notification.task_id.as_deref(), Some("task-0"));
-    assert_eq!(notification.status.as_deref(), Some("Completed"));
+    assert_eq!(notification.status.as_deref(), Some("completed"));
     assert_eq!(notification.next_action.as_deref(), Some("inspect task output for task-0"));
     assert_eq!(notification.worker_role, None);
     assert_eq!(dispatcher.delivered().len(), 1);

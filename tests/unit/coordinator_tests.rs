@@ -70,6 +70,8 @@ fn notification_conversion_preserves_worker_role_and_next_action() {
         phase: Some("verify".into()),
         validation_state: Some("verified".into()),
         output_file: Some("/tmp/task-8.log".into()),
+        tool_name: None,
+        notice_kind: None,
         wake_up: true,
         target: None,
     };

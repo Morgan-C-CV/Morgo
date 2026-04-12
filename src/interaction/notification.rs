@@ -3,11 +3,14 @@ use crate::interaction::telegram::binding::TelegramDeliveryTarget;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NotificationType {
     TaskUpdate,
+    ApprovalRequired,
+    RuntimeNotice,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NotificationTarget {
     Session { session_id: String },
+    RemoteActor { session_id: String, actor_id: String },
     Telegram(TelegramDeliveryTarget),
 }
 
@@ -25,6 +28,8 @@ pub struct Notification {
     pub phase: Option<String>,
     pub validation_state: Option<String>,
     pub output_file: Option<String>,
+    pub tool_name: Option<String>,
+    pub notice_kind: Option<String>,
     pub wake_up: bool,
     pub target: Option<NotificationTarget>,
 }
@@ -56,7 +61,63 @@ impl Notification {
             phase: phase.map(str::to_string),
             validation_state: validation_state.map(str::to_string),
             output_file: Some(output_file.into()),
+            tool_name: None,
+            notice_kind: None,
             wake_up: true,
+            target: None,
+        }
+    }
+
+    pub fn approval_required(
+        session_id: impl Into<String>,
+        tool_name: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        let tool_name = tool_name.into();
+        let message = message.into();
+        Self {
+            session_id: session_id.into(),
+            title: format!("Approval required: {tool_name}"),
+            body: message.clone(),
+            notification_type: NotificationType::ApprovalRequired,
+            task_id: None,
+            status: None,
+            next_action: None,
+            worker_role: None,
+            orchestration_group_id: None,
+            phase: None,
+            validation_state: None,
+            output_file: None,
+            tool_name: Some(tool_name),
+            notice_kind: None,
+            wake_up: true,
+            target: None,
+        }
+    }
+
+    pub fn runtime_notice(
+        session_id: impl Into<String>,
+        kind: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        let kind = kind.into();
+        let message = message.into();
+        Self {
+            session_id: session_id.into(),
+            title: format!("Runtime notice: {kind}"),
+            body: message.clone(),
+            notification_type: NotificationType::RuntimeNotice,
+            task_id: None,
+            status: None,
+            next_action: None,
+            worker_role: None,
+            orchestration_group_id: None,
+            phase: None,
+            validation_state: None,
+            output_file: None,
+            tool_name: None,
+            notice_kind: Some(kind),
+            wake_up: false,
             target: None,
         }
     }

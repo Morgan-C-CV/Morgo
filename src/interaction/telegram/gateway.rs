@@ -31,6 +31,9 @@ impl TelegramGateway {
             Some(NotificationTarget::Session { session_id }) => {
                 self.resolve_delivery_target(session_id)
             }
+            Some(NotificationTarget::RemoteActor { session_id, .. }) => {
+                self.resolve_delivery_target(session_id)
+            }
             None => self.resolve_delivery_target(&notification.session_id),
         }?;
 

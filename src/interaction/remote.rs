@@ -5,6 +5,7 @@ use crate::core::events::SessionMilestone;
 use crate::history::session::{SessionHistory, SessionId, SessionRestoreRequest, SessionSnapshot};
 use crate::interaction::cli::repl::{CliDisplayEvent, CliRuntimeEvent, handle_normalized_input};
 use crate::interaction::envelope::NormalizedInput;
+use crate::interaction::notification::{Notification, NotificationTarget, NotificationType};
 use crate::interaction::router::CommandRouter;
 use crate::state::app_state::AppState;
 use crate::task::types::TaskEvent;
@@ -45,6 +46,12 @@ pub enum RemoteEventPayload {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteNotificationEnvelope {
+    pub event_type: &'static str,
+    pub payload: RemoteEventPayload,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteTaskEvent {
     pub task_id: String,
     pub status: &'static str,
@@ -76,9 +83,11 @@ pub async fn handle_remote_request(
         router,
         &remote_engine,
         &remote_engine.context.app_state,
-        input,
+        input.clone(),
     )
     .await?;
+
+    dispatch_remote_runtime_notifications(&remote_engine.context.app_state, &input, &output.events);
 
     Ok(RemoteResponse {
         primary_text: output.primary_text,
@@ -88,6 +97,19 @@ pub async fn handle_remote_request(
             .map(RemoteEventEnvelope::from)
             .collect(),
     })
+}
+
+pub fn drain_remote_notifications(
+    app_state: &AppState,
+    session_id: &str,
+    actor_id: Option<&str>,
+) -> Vec<RemoteNotificationEnvelope> {
+    app_state
+        .notification_dispatcher
+        .drain_remote_notifications(session_id, actor_id)
+        .into_iter()
+        .map(RemoteNotificationEnvelope::from)
+        .collect()
 }
 
 impl From<CliDisplayEvent> for RemoteEventEnvelope {
@@ -166,6 +188,42 @@ impl From<TaskEvent> for RemoteTaskEvent {
     }
 }
 
+impl From<Notification> for RemoteNotificationEnvelope {
+    fn from(notification: Notification) -> Self {
+        match notification.notification_type {
+            NotificationType::TaskUpdate => Self {
+                event_type: "task_update",
+                payload: RemoteEventPayload::TaskUpdate(RemoteTaskEvent {
+                    task_id: notification.task_id.unwrap_or_default(),
+                    status: leak_string(notification.status.unwrap_or_else(|| "unknown".into())),
+                    summary: notification.body,
+                    result: notification.title,
+                    next_action: notification.next_action.unwrap_or_default(),
+                    worker_role: notification.worker_role.map(leak_string),
+                    orchestration_group_id: notification.orchestration_group_id,
+                    phase: notification.phase.map(leak_string),
+                    validation_state: notification.validation_state.map(leak_string),
+                    output_file: notification.output_file.unwrap_or_default(),
+                }),
+            },
+            NotificationType::ApprovalRequired => Self {
+                event_type: "approval_required",
+                payload: RemoteEventPayload::ApprovalRequired {
+                    tool_name: notification.tool_name.unwrap_or_default(),
+                    message: notification.body,
+                },
+            },
+            NotificationType::RuntimeNotice => Self {
+                event_type: "runtime_notice",
+                payload: RemoteEventPayload::RuntimeNotice {
+                    kind: notification.notice_kind.unwrap_or_else(|| "runtime".into()),
+                    message: notification.body,
+                },
+            },
+        }
+    }
+}
+
 fn stable_transition_kind(text: &str) -> &str {
     match text {
         "next_turn" => "next_turn",
@@ -179,6 +237,56 @@ fn stable_transition_kind(text: &str) -> &str {
         "model_fallback_retry" => "model_fallback_retry",
         _ => "unknown_transition",
     }
+}
+
+fn dispatch_remote_runtime_notifications(
+    app_state: &AppState,
+    input: &NormalizedInput,
+    events: &[CliDisplayEvent],
+) {
+    for event in events {
+        let Some(notification) = notification_from_cli_event(input, event) else {
+            continue;
+        };
+        app_state
+            .notification_dispatcher
+            .dispatch(input.surface, notification);
+    }
+}
+
+fn notification_from_cli_event(input: &NormalizedInput, event: &CliDisplayEvent) -> Option<Notification> {
+    match event {
+        CliDisplayEvent::TaskEvent(_) => None,
+        CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::PendingApproval { tool_name, message }) => {
+            let mut notification = Notification::approval_required(
+                input.session_id.clone(),
+                tool_name.clone(),
+                message.clone(),
+            );
+            notification.target = Some(NotificationTarget::RemoteActor {
+                session_id: input.session_id.clone(),
+                actor_id: input.actor.actor_id.clone(),
+            });
+            Some(notification)
+        }
+        CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::Notice { kind, message }) => {
+            let mut notification = Notification::runtime_notice(
+                input.session_id.clone(),
+                kind.clone(),
+                message.clone(),
+            );
+            notification.target = Some(NotificationTarget::RemoteActor {
+                session_id: input.session_id.clone(),
+                actor_id: input.actor.actor_id.clone(),
+            });
+            Some(notification)
+        }
+        _ => None,
+    }
+}
+
+fn leak_string(value: String) -> &'static str {
+    Box::leak(value.into_boxed_str())
 }
 
 fn stable_terminal_kind(text: &str) -> &str {

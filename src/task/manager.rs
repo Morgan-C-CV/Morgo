@@ -640,7 +640,7 @@ impl TaskManager {
             title,
             event.summary.clone(),
             event.task_id.clone(),
-            format!("{:?}", event.status),
+            event.status.as_str(),
             event.next_action.clone(),
             event.worker_role.map(|role| role.as_str()),
             event.orchestration_group_id.as_deref(),
@@ -648,7 +648,7 @@ impl TaskManager {
             event.validation_state.map(|state| state.as_str()),
             event.output_file.clone(),
         );
-        if matches!(event.owner.surface, InteractionSurface::Telegram) {
+        if matches!(event.owner.surface, InteractionSurface::Telegram | InteractionSurface::Remote) {
             notification.target = Some(crate::interaction::notification::NotificationTarget::Session {
                 session_id: event.owner.session_id.clone(),
             });

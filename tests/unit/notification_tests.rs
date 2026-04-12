@@ -3,7 +3,7 @@ use rust_agent::interaction::cli::renderer::render_turn_output;
 use rust_agent::interaction::cli::repl::{CliDisplayEvent, CliRuntimeEvent, CliTurnOutput};
 use rust_agent::interaction::dispatcher::NotificationDispatcher;
 use rust_agent::interaction::notification::{Notification, NotificationTarget, NotificationType};
-use rust_agent::interaction::remote::{RemoteEventEnvelope, RemoteEventPayload};
+use rust_agent::interaction::remote::{RemoteEventEnvelope, RemoteEventPayload, drain_remote_notifications};
 use rust_agent::interaction::telegram::binding::{SessionBinding, TelegramDeliveryTarget};
 use rust_agent::interaction::telegram::gateway::TelegramGateway;
 use rust_agent::task::types::{TaskEvent, TaskOwner, TaskStatus};
@@ -24,6 +24,8 @@ fn dispatcher_records_cli_notifications() {
         phase: Some("research".into()),
         validation_state: Some("not_needed".into()),
         output_file: Some("/tmp/task-1.log".into()),
+        tool_name: None,
+        notice_kind: None,
         wake_up: true,
         target: None,
     };
@@ -161,6 +163,86 @@ fn remote_event_envelope_preserves_structured_task_payload() {
 }
 
 #[test]
+fn dispatcher_drains_remote_session_and_actor_notifications() {
+    let dispatcher = NotificationDispatcher::new(TelegramGateway::default());
+    dispatcher.dispatch(
+        InteractionSurface::Remote,
+        Notification::runtime_notice("remote-session", "tool", "session scoped"),
+    );
+    let mut actor_notification = Notification::approval_required(
+        "remote-session",
+        "Bash",
+        "requires explicit approval",
+    );
+    actor_notification.target = Some(NotificationTarget::RemoteActor {
+        session_id: "remote-session".into(),
+        actor_id: "actor-1".into(),
+    });
+    dispatcher.dispatch(InteractionSurface::Remote, actor_notification);
+
+    let drained = dispatcher.drain_remote_notifications("remote-session", Some("actor-1"));
+    assert_eq!(drained.len(), 2);
+    assert!(drained
+        .iter()
+        .any(|notification| notification.notification_type == NotificationType::RuntimeNotice));
+    assert!(drained
+        .iter()
+        .any(|notification| notification.notification_type == NotificationType::ApprovalRequired));
+    assert!(dispatcher
+        .drain_remote_notifications("remote-session", Some("actor-1"))
+        .is_empty());
+}
+
+#[test]
+fn drain_remote_notifications_maps_structured_payloads() {
+    let app_state = rust_agent::state::app_state::AppState {
+        surface: InteractionSurface::Remote,
+        session_mode: rust_agent::bootstrap::SessionMode::Interactive,
+        client_type: rust_agent::bootstrap::ClientType::RemoteControl,
+        session_source: rust_agent::bootstrap::SessionSource::RemoteControl,
+        runtime_role: rust_agent::state::app_state::RuntimeRole::Coordinator,
+        worker_role: None,
+        permission_context: rust_agent::state::permission_context::ToolPermissionContext::new(
+            rust_agent::state::permission_context::PermissionMode::Default,
+        ),
+        command_registry: None,
+        runtime_tool_registry: None,
+        skill_registry: None,
+        mcp_runtime: None,
+        plugin_load_result: None,
+        cost_tracker: rust_agent::cost::tracker::CostTracker::default(),
+        notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
+        startup_trace: Vec::new(),
+        active_session_id: "remote-session".into(),
+        session_store: None,
+        session: None,
+        history: None,
+        restored_session: None,
+    };
+    let mut notification = Notification::approval_required(
+        "remote-session",
+        "Bash",
+        "requires explicit approval",
+    );
+    notification.target = Some(NotificationTarget::RemoteActor {
+        session_id: "remote-session".into(),
+        actor_id: "actor-1".into(),
+    });
+    app_state
+        .notification_dispatcher
+        .dispatch(InteractionSurface::Remote, notification);
+
+    let drained = drain_remote_notifications(&app_state, "remote-session", Some("actor-1"));
+    assert_eq!(drained.len(), 1);
+    assert_eq!(drained[0].event_type, "approval_required");
+    assert!(matches!(
+        &drained[0].payload,
+        RemoteEventPayload::ApprovalRequired { tool_name, message }
+            if tool_name == "Bash" && message == "requires explicit approval"
+    ));
+}
+
+#[test]
 fn dispatcher_requires_delivery_ready_binding_for_telegram() {
     let dispatcher = NotificationDispatcher::new(TelegramGateway {
         allowed_bindings: vec![SessionBinding {
@@ -187,6 +269,8 @@ fn dispatcher_requires_delivery_ready_binding_for_telegram() {
         phase: Some("verify".into()),
         validation_state: Some("verified".into()),
         output_file: Some("/tmp/task-1.log".into()),
+        tool_name: None,
+        notice_kind: None,
         wake_up: true,
         target: Some(NotificationTarget::Session {
             session_id: "telegram-session-1".into(),
@@ -210,6 +294,8 @@ fn dispatcher_requires_delivery_ready_binding_for_telegram() {
             phase: Some("verify".into()),
             validation_state: Some("verified".into()),
             output_file: Some("/tmp/task-1.log".into()),
+            tool_name: None,
+            notice_kind: None,
             wake_up: true,
             target: Some(NotificationTarget::Telegram(TelegramDeliveryTarget {
                 chat_id: "chat-1".into(),
