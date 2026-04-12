@@ -1,7 +1,7 @@
 use std::sync::{Arc, RwLock};
 
 use crate::history::session::{SessionId, SessionStore};
-use crate::plan::types::{PlanState, PlanStep, PlanStepStatus};
+use crate::plan::types::{PlanExecutionState, PlanState, PlanStep, PlanStepStatus};
 use crate::task::list_types::{TaskListItem, TaskListSnapshot, TaskListStatus};
 
 #[derive(Debug, Default)]
@@ -185,6 +185,82 @@ impl TaskListManager {
         if changed {
             self.persist_snapshot();
         }
+    }
+
+    pub fn linked_tasks_for_plan_step(&self, step_id: &str) -> Vec<TaskListItem> {
+        self.store
+            .read()
+            .expect("task list store poisoned")
+            .tasks
+            .iter()
+            .filter(|task| task.plan_step_id.as_deref() == Some(step_id))
+            .cloned()
+            .collect()
+    }
+
+    pub fn tasks_grouped_by_plan_step(&self) -> std::collections::BTreeMap<String, Vec<TaskListItem>> {
+        let mut grouped = std::collections::BTreeMap::<String, Vec<TaskListItem>>::new();
+        for task in self.list() {
+            if let Some(step_id) = task.plan_step_id.clone() {
+                grouped.entry(step_id).or_default().push(task);
+            }
+        }
+        grouped
+    }
+
+    pub fn reconcile_plan_state(&self, plan_state: &PlanState) -> Option<PlanState> {
+        let mut next = plan_state.clone();
+        let draft = next.draft.as_mut()?;
+        let grouped = self.tasks_grouped_by_plan_step();
+        let mut changed = false;
+
+        for step in &mut draft.steps {
+            let Some(tasks) = grouped.get(step.id.as_str()) else {
+                continue;
+            };
+            let next_status = if tasks.iter().any(|task| task.status == TaskListStatus::InProgress) {
+                PlanStepStatus::InProgress
+            } else if tasks.iter().all(|task| task.status == TaskListStatus::Completed) {
+                PlanStepStatus::Completed
+            } else {
+                PlanStepStatus::Pending
+            };
+            if step.status != next_status {
+                step.status = next_status;
+                changed = true;
+            }
+        }
+
+        let total_steps = draft.steps.len();
+        let completed_steps = draft
+            .steps
+            .iter()
+            .filter(|step| step.status == PlanStepStatus::Completed)
+            .count();
+        let active_step_id = draft
+            .steps
+            .iter()
+            .find(|step| step.status == PlanStepStatus::InProgress)
+            .or_else(|| draft.steps.iter().find(|step| step.status == PlanStepStatus::Pending))
+            .map(|step| step.id.clone());
+        let progress_percent = if total_steps == 0 {
+            0
+        } else {
+            ((completed_steps * 100) / total_steps) as u8
+        };
+        let next_execution = PlanExecutionState {
+            active_step_id,
+            completed_steps,
+            total_steps,
+            progress_percent,
+            last_updated_at: next.execution.as_ref().and_then(|execution| execution.last_updated_at.clone()),
+        };
+        if next.execution.as_ref() != Some(&next_execution) {
+            next.execution = Some(next_execution);
+            changed = true;
+        }
+
+        changed.then_some(next)
     }
 
     pub fn update(&self, id: &str, update: TaskListUpdate) -> anyhow::Result<TaskListItem> {

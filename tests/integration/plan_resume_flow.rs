@@ -86,8 +86,11 @@ fn approved_plan_reorder_and_task_binding_survive_restore() {
         .with_plan_manager(Arc::new(rehydrated_plan));
     let rendered = rust_agent::state::plan_mode::render_plan_show(&restored_permissions);
     assert!(rendered.contains("Plan status: approved"));
+    assert!(rendered.contains("Step summary: total=2, completed=0, in_progress=0, pending=2, linked=2, unlinked=0"));
     assert!(rendered.contains(&second.id));
     assert!(rendered.contains(&first.id));
+    assert!(rendered.contains("linked task: task-0 [pending]"));
+    assert!(rendered.contains("linked task: task-1 [pending]"));
 
     std::fs::remove_dir_all(root).expect("cleanup durable plan resume store");
 }

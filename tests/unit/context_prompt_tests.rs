@@ -8,6 +8,10 @@ use rust_agent::skills::types::{SkillDefinition, SkillExecutionContext, SkillSou
 use rust_agent::core::message::Message;
 use rust_agent::history::session::{SessionHistory, SessionHistoryEntry, SessionSnapshot};
 use rust_agent::interaction::dispatcher::NotificationDispatcher;
+use rust_agent::plan::manager::PlanManager;
+use rust_agent::state::plan_mode;
+use rust_agent::task::list_manager::{TaskListManager, TaskListUpdate};
+use rust_agent::task::list_types::TaskListStatus;
 use rust_agent::interaction::telegram::gateway::TelegramGateway;
 use rust_agent::state::app_state::{AppState, RuntimeRole, WorkerRole};
 use rust_agent::state::permission_context::{PermissionMode, ToolPermissionContext};
@@ -36,6 +40,76 @@ fn sample_skill() -> SkillDefinition {
     }
 }
 
+fn build_plan_permissions() -> ToolPermissionContext {
+    let plan_manager = Arc::new(PlanManager::default());
+    plan_manager.ensure_draft(None);
+    plan_manager.set_summary("Execute approved plan");
+    let inspect = plan_manager
+        .add_step("Inspect state", Some("collect current signals"))
+        .expect("add inspect step");
+    let patch = plan_manager
+        .add_step("Patch output", Some("apply smallest change"))
+        .expect("add patch step");
+
+    let task_list = Arc::new(TaskListManager::default());
+    let inspect_task = task_list.create(
+        "Inspect state",
+        "collect current signals",
+        None,
+        Some("planner".into()),
+        Some(inspect.id.clone()),
+    );
+    let patch_task = task_list.create(
+        "Patch output",
+        "apply smallest change",
+        None,
+        None,
+        Some(patch.id.clone()),
+    );
+    task_list
+        .update(
+            &inspect_task.id,
+            TaskListUpdate {
+                status: Some(TaskListStatus::Completed),
+                ..Default::default()
+            },
+        )
+        .expect("complete inspect task");
+    task_list
+        .update(
+            &patch_task.id,
+            TaskListUpdate {
+                status: Some(TaskListStatus::InProgress),
+                ..Default::default()
+            },
+        )
+        .expect("start patch task");
+
+    let permissions = ToolPermissionContext::new(PermissionMode::Default)
+        .with_plan_manager(plan_manager.clone())
+        .with_task_list_manager(task_list.clone());
+    plan_mode::apply_exit_plan_mode(&permissions, "ready to execute").expect("approve plan");
+    task_list
+        .update(
+            &inspect_task.id,
+            TaskListUpdate {
+                status: Some(TaskListStatus::Completed),
+                ..Default::default()
+            },
+        )
+        .expect("restore inspect task completion after sync");
+    task_list
+        .update(
+            &patch_task.id,
+            TaskListUpdate {
+                status: Some(TaskListStatus::InProgress),
+                ..Default::default()
+            },
+        )
+        .expect("restore patch task progress after sync");
+    permissions
+}
+
 fn build_app_state() -> AppState {
     AppState {
         surface: InteractionSurface::Cli,
@@ -44,7 +118,7 @@ fn build_app_state() -> AppState {
         session_source: SessionSource::LocalCli,
         runtime_role: RuntimeRole::Worker,
         worker_role: Some(WorkerRole::Verify),
-        permission_context: ToolPermissionContext::new(PermissionMode::Default),
+        permission_context: build_plan_permissions(),
         command_registry: None,
         runtime_tool_registry: Some(Arc::new(RwLock::new(ToolRegistry::new()))),
         skill_registry: Some(Arc::new(SkillRegistry::new(vec![sample_skill()]))),
@@ -100,6 +174,11 @@ fn context_prompt_includes_truthy_runtime_sections() {
     assert!(prompt.contains("- worker_role: verify"));
     assert!(prompt.contains("Available skills:"));
     assert!(prompt.contains("workflow: inspect then summarize | args: target path | use: Use when triaging repo state"));
+    assert!(prompt.contains("Approved plan status: approved"));
+    assert!(prompt.contains("Execution summary: 1/2 completed (50%)"));
+    assert!(prompt.contains("Active step: step-2"));
+    assert!(prompt.contains("Next actionable step: Patch output"));
+    assert!(prompt.contains("Linked task summary: linked_steps=2, blocked_tasks=0, in_progress_steps=1, completed_steps=1"));
 }
 
 #[test]

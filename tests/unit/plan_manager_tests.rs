@@ -5,6 +5,8 @@ use rust_agent::bootstrap::{InteractionSurface, SessionMode};
 use rust_agent::history::session::{FileBackedSessionStore, InMemorySessionStore, SessionHistory, SessionId, SessionSnapshot, SessionStore};
 use rust_agent::plan::manager::PlanManager;
 use rust_agent::plan::types::{PlanState, PlanStatus, PlanStepStatus};
+use rust_agent::task::list_manager::{TaskListManager, TaskListUpdate};
+use rust_agent::task::list_types::TaskListStatus;
 
 fn unique_temp_path(prefix: &str) -> std::path::PathBuf {
     let nanos = SystemTime::now()
@@ -107,6 +109,50 @@ fn persisted_plan_state_round_trips_with_history() {
         .expect("plan state should persist");
     assert_eq!(restored.draft.as_ref().expect("draft").summary, "Persistent plan");
     assert!(!restored.history.is_empty());
+}
+
+#[test]
+fn task_list_reconciliation_updates_plan_execution_view() {
+    let manager = PlanManager::default();
+    manager.ensure_draft(None);
+    manager.set_summary("Reconcile linked tasks");
+    let first = manager.add_step("Inspect", None).expect("add first step");
+    let second = manager.add_step("Patch", None).expect("add second step");
+    let approved = manager.approve(Some("execute")).expect("approve plan");
+
+    let task_list = TaskListManager::default();
+    let first_task = task_list.create("Inspect", "inspect repo", None, None, Some(first.id.clone()));
+    let second_task = task_list.create("Patch", "patch repo", None, None, Some(second.id.clone()));
+    task_list
+        .update(
+            &first_task.id,
+            TaskListUpdate {
+                status: Some(TaskListStatus::Completed),
+                ..Default::default()
+            },
+        )
+        .expect("complete first linked task");
+    task_list
+        .update(
+            &second_task.id,
+            TaskListUpdate {
+                status: Some(TaskListStatus::InProgress),
+                ..Default::default()
+            },
+        )
+        .expect("start second linked task");
+
+    let reconciled = task_list
+        .reconcile_plan_state(&approved)
+        .expect("reconciled plan should change");
+    let draft = reconciled.draft.expect("draft should exist");
+    assert_eq!(draft.steps[0].status, PlanStepStatus::Completed);
+    assert_eq!(draft.steps[1].status, PlanStepStatus::InProgress);
+    let execution = reconciled.execution.expect("execution should exist");
+    assert_eq!(execution.completed_steps, 1);
+    assert_eq!(execution.total_steps, 2);
+    assert_eq!(execution.progress_percent, 50);
+    assert_eq!(execution.active_step_id.as_deref(), Some(second.id.as_str()));
 }
 
 #[test]

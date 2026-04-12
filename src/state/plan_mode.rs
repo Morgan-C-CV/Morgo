@@ -27,6 +27,11 @@ pub fn render_plan_show(permissions: &ToolPermissionContext) -> String {
         return "No plan object exists for this session yet.".into();
     };
 
+    let linked_tasks = permissions
+        .task_list_manager
+        .as_ref()
+        .map(|manager| manager.tasks_grouped_by_plan_step())
+        .unwrap_or_default();
     let mut lines = vec![format!("Plan status: {}", state.status.as_str())];
     if let Some(execution) = state.execution.as_ref() {
         lines.push(format!(
@@ -38,6 +43,32 @@ pub fn render_plan_show(permissions: &ToolPermissionContext) -> String {
         }
     }
     if let Some(draft) = state.draft.as_ref() {
+        let total_steps = draft.steps.len();
+        let completed = draft
+            .steps
+            .iter()
+            .filter(|step| step.status == PlanStepStatus::Completed)
+            .count();
+        let in_progress = draft
+            .steps
+            .iter()
+            .filter(|step| step.status == PlanStepStatus::InProgress)
+            .count();
+        let pending = total_steps.saturating_sub(completed + in_progress);
+        let linked_count = draft
+            .steps
+            .iter()
+            .filter(|step| linked_tasks.contains_key(step.id.as_str()))
+            .count();
+        lines.push(format!(
+            "Step summary: total={}, completed={}, in_progress={}, pending={}, linked={}, unlinked={}",
+            total_steps,
+            completed,
+            in_progress,
+            pending,
+            linked_count,
+            total_steps.saturating_sub(linked_count)
+        ));
         if !draft.summary.trim().is_empty() {
             lines.push(format!("Summary: {}", draft.summary.trim()));
         }
@@ -49,15 +80,12 @@ pub fn render_plan_show(permissions: &ToolPermissionContext) -> String {
         } else {
             lines.push("Steps:".into());
             for step in &draft.steps {
-                let details = step
-                    .details
-                    .as_ref()
-                    .map(|value| value.trim())
-                    .filter(|value| !value.is_empty())
-                    .map(|value| format!(" — {value}"))
-                    .unwrap_or_default();
-                lines.push(format!("- {}: {} [{}]{}", step.id, step.title, step.status.as_str(), details));
+                lines.push(format_plan_step(step, linked_tasks.get(step.id.as_str())));
             }
+        }
+        let duplicate_links = linked_tasks.values().filter(|tasks| tasks.len() > 1).count();
+        if duplicate_links > 0 {
+            lines.push(format!("Warnings: {} duplicated plan-step link(s) detected", duplicate_links));
         }
     } else {
         lines.push("Draft: none".into());
@@ -89,12 +117,100 @@ pub fn render_plan_history(permissions: &ToolPermissionContext) -> String {
 
     let mut lines = vec!["Plan history:".into()];
     for entry in history.iter().rev().take(10) {
+        let step_count = entry.draft.as_ref().map(|draft| draft.steps.len()).unwrap_or(0);
+        let completed = entry
+            .execution
+            .as_ref()
+            .map(|execution| execution.completed_steps)
+            .unwrap_or(0);
+        let active_step = entry
+            .execution
+            .as_ref()
+            .and_then(|execution| execution.active_step_id.as_deref())
+            .unwrap_or("none");
+        let approval = entry
+            .draft
+            .as_ref()
+            .map(|draft| draft.summary.trim())
+            .filter(|value| !value.is_empty())
+            .unwrap_or("(no summary)");
         lines.push(format!(
             "- {} [{}] {} — {}",
             entry.timestamp, entry.status.as_str(), entry.action, entry.summary
         ));
+        lines.push(format!(
+            "  snapshot: steps={}, completed={}, active_step={}, summary={}",
+            step_count, completed, active_step, approval
+        ));
     }
     lines.join("\n")
+}
+
+fn format_plan_step(
+    step: &crate::plan::types::PlanStep,
+    linked_tasks: Option<&Vec<crate::task::list_types::TaskListItem>>,
+) -> String {
+    let details = step
+        .details
+        .as_ref()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(|value| format!(" — {value}"))
+        .unwrap_or_default();
+    let mut lines = vec![format!("- {}: {} [{}]{}", step.id, step.title, step.status.as_str(), details)];
+    match linked_tasks {
+        Some(tasks) if !tasks.is_empty() => {
+            for task in tasks {
+                let owner = task.owner.as_deref().unwrap_or("none");
+                let blocks = if task.blocks.is_empty() {
+                    "none".to_string()
+                } else {
+                    task.blocks.join(", ")
+                };
+                let blocked_by = if task.blocked_by.is_empty() {
+                    "none".to_string()
+                } else {
+                    task.blocked_by.join(", ")
+                };
+                lines.push(format!(
+                    "  linked task: {} [{}] owner={} blocked_by={} blocks={}",
+                    task.id,
+                    task_list_status_label(&task.status),
+                    owner,
+                    blocked_by,
+                    blocks
+                ));
+                if !plan_task_status_matches(step.status, task.status.clone()) {
+                    lines.push("  warning: plan/task status mismatch".into());
+                }
+            }
+            if tasks.len() > 1 {
+                lines.push("  warning: duplicate linked tasks for this step".into());
+            }
+        }
+        _ => lines.push("  linked task: none".into()),
+    }
+    lines.join("\n")
+}
+
+fn plan_task_status_matches(
+    plan_status: PlanStepStatus,
+    task_status: crate::task::list_types::TaskListStatus,
+) -> bool {
+    matches!(
+        (plan_status, task_status),
+        (PlanStepStatus::Pending, crate::task::list_types::TaskListStatus::Pending)
+            | (PlanStepStatus::InProgress, crate::task::list_types::TaskListStatus::InProgress)
+            | (PlanStepStatus::Completed, crate::task::list_types::TaskListStatus::Completed)
+    )
+}
+
+fn task_list_status_label(status: &crate::task::list_types::TaskListStatus) -> &'static str {
+    match status {
+        crate::task::list_types::TaskListStatus::Pending => "pending",
+        crate::task::list_types::TaskListStatus::InProgress => "in_progress",
+        crate::task::list_types::TaskListStatus::Completed => "completed",
+    }
 }
 
 pub fn add_plan_step(

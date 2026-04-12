@@ -993,9 +993,28 @@ async fn plan_command_handles_status_noop_and_denied_exit() {
     let step = plan_manager
         .add_step("Write tests", Some("cover manager and router flows"))
         .expect("add plan step");
+    let task_list_manager = Arc::new(TaskListManager::default());
+    let linked_task = task_list_manager.create(
+        "Write tests",
+        "cover manager and router flows",
+        None,
+        Some("planner".into()),
+        Some(step.id.clone()),
+    );
+    let blocker = task_list_manager.create("Blocker", "upstream dependency", None, None, None);
+    task_list_manager
+        .update(
+            &linked_task.id,
+            rust_agent::task::list_manager::TaskListUpdate {
+                status: Some(rust_agent::task::list_types::TaskListStatus::InProgress),
+                add_blocked_by: vec![blocker.id.clone()],
+                ..Default::default()
+            },
+        )
+        .expect("mark linked task in progress with blocker");
     let active_context = ToolPermissionContext::new(PermissionMode::Plan)
         .with_task_manager(Arc::new(TaskManager::default()))
-        .with_task_list_manager(Arc::new(TaskListManager::default()))
+        .with_task_list_manager(task_list_manager.clone())
         .with_plan_manager(plan_manager.clone());
     let active_state = AppState {
         surface: InteractionSurface::Cli,
@@ -1038,7 +1057,12 @@ async fn plan_command_handles_status_noop_and_denied_exit() {
         .await
         .expect("plan show should render");
     assert!(matches!(show, CommandResult::Message(ref message) if message.contains("Execution: 0/1 completed (0%)")));
+    assert!(matches!(show, CommandResult::Message(ref message) if message.contains("Step summary: total=1, completed=0, in_progress=0, pending=1, linked=1, unlinked=0")));
     assert!(matches!(show, CommandResult::Message(ref message) if message.contains(&step.id)));
+    assert!(matches!(show, CommandResult::Message(ref message) if message.contains("linked task:")));
+    assert!(matches!(show, CommandResult::Message(ref message) if message.contains("owner=planner")));
+    assert!(matches!(show, CommandResult::Message(ref message) if message.contains("blocked_by=task-1")));
+    assert!(matches!(show, CommandResult::Message(ref message) if message.contains("warning: plan/task status mismatch")));
 
     let add = router
         .route(
@@ -1065,7 +1089,9 @@ async fn plan_command_handles_status_noop_and_denied_exit() {
         )
         .await
         .expect("plan history should render");
-    assert!(matches!(history, CommandResult::Message(message) if message.contains("Plan history:")));
+    assert!(matches!(history, CommandResult::Message(ref message) if message.contains("Plan history:")));
+    assert!(matches!(history, CommandResult::Message(ref message) if message.contains("snapshot: steps=")));
+    assert!(matches!(history, CommandResult::Message(ref message) if message.contains("active_step=")));
 
     let reorder = router
         .route(
