@@ -132,7 +132,7 @@ fn telegram_task_notifications_resolve_session_target_to_delivery_target() {
     assert_eq!(delivered[0].worker_role.as_deref(), Some("verify"));
     assert_eq!(
         delivered[0].next_action.as_deref(),
-        Some("inspect task output for task-0")
+        Some("synthesize validated result for task-0")
     );
 }
 
@@ -183,9 +183,9 @@ async fn agent_tool_launches_subagent_and_completes_task() {
     let ToolResult::Text(text) = result else {
         panic!("expected text result");
     };
-    assert!(text.contains("agent task task-0 launched"));
+    assert!(text.contains("agent task task-0 respawned for research worker: inspect repository"));
 
-    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+    tokio::time::timeout(std::time::Duration::from_secs(4), async {
         loop {
             let created = manager.get("task-0").expect("task should be created");
             if created.status == TaskStatus::Completed {
@@ -213,7 +213,10 @@ async fn agent_tool_launches_subagent_and_completes_task() {
         .expect("notification should exist");
     assert_eq!(notification.session_id, "session-7");
     assert_eq!(notification.worker_role.as_deref(), Some("research"));
-    assert_eq!(notification.next_action.as_deref(), Some("inspect task output for task-0"));
+    assert_eq!(
+        notification.next_action.as_deref(),
+        Some("synthesize findings or request follow-up research for task-0")
+    );
 }
 
 #[test]
@@ -308,7 +311,7 @@ async fn non_owner_cannot_continue_existing_task() {
         .await
         .expect("initial launch should succeed");
 
-    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+    tokio::time::timeout(std::time::Duration::from_secs(4), async {
         loop {
             let created = manager.get("task-0").expect("task should be created");
             if created.status == TaskStatus::Completed {
@@ -359,6 +362,114 @@ fn addressed_event_drain_filters_by_target_task() {
         drained[0].target_task_id.as_deref(),
         Some(task_a.id.as_str())
     );
+}
+
+#[tokio::test]
+async fn agent_tool_reuses_running_research_worker_and_respawns_terminal_worker() {
+    let manager = Arc::new(TaskManager::default());
+    let inherited_tools =
+        rust_agent::tool::registry::ToolRegistry::new().register(Arc::new(AgentTool));
+    let permissions = ToolPermissionContext::new(PermissionMode::Default)
+        .with_task_manager(manager.clone())
+        .with_active_session_id("session-10")
+        .with_inherited_tool_registry(inherited_tools)
+        .with_subagent_scripted_turns(vec![
+            vec![
+                rust_agent::service::api::streaming::StreamEvent::MessageStart,
+                rust_agent::service::api::streaming::StreamEvent::TextDelta(
+                    "initial answer".into(),
+                ),
+                rust_agent::service::api::streaming::StreamEvent::MessageStop {
+                    stop_reason: rust_agent::service::api::streaming::StopReason::EndTurn,
+                },
+            ],
+            vec![
+                rust_agent::service::api::streaming::StreamEvent::MessageStart,
+                rust_agent::service::api::streaming::StreamEvent::TextDelta(
+                    "replacement answer".into(),
+                ),
+                rust_agent::service::api::streaming::StreamEvent::MessageStop {
+                    stop_reason: rust_agent::service::api::streaming::StopReason::EndTurn,
+                },
+            ],
+        ]);
+
+    let first = AgentTool
+        .invoke(
+            &ToolCall {
+                name: "Agent".into(),
+                input: serde_json::json!({
+                    "task": "inspect repository",
+                    "role": "research"
+                })
+                .to_string(),
+            },
+            &permissions,
+        )
+        .await
+        .expect("initial spawn should succeed");
+    assert_eq!(
+        first,
+        ToolResult::Text(
+            "agent task task-0 respawned for research worker: inspect repository".into()
+        )
+    );
+
+    let reused = AgentTool
+        .invoke(
+            &ToolCall {
+                name: "Agent".into(),
+                input: serde_json::json!({
+                    "task": "inspect repository",
+                    "role": "research"
+                })
+                .to_string(),
+            },
+            &permissions,
+        )
+        .await
+        .expect("running worker reuse should succeed");
+    assert_eq!(
+        reused,
+        ToolResult::Text(
+            "agent task task-0 reused for research worker: inspect repository".into()
+        )
+    );
+
+    tokio::time::sleep(std::time::Duration::from_millis(2200)).await;
+
+    let respawned = AgentTool
+        .invoke(
+            &ToolCall {
+                name: "Agent".into(),
+                input: serde_json::json!({
+                    "task": "inspect repository",
+                    "role": "research"
+                })
+                .to_string(),
+            },
+            &permissions,
+        )
+        .await
+        .expect("terminal worker should respawn");
+    assert_eq!(
+        respawned,
+        ToolResult::Text(
+            "agent task task-1 respawned for research worker: inspect repository".into()
+        )
+    );
+
+    tokio::time::timeout(std::time::Duration::from_secs(4), async {
+        loop {
+            let replacement = manager.get("task-1").expect("replacement task should exist");
+            if replacement.status == TaskStatus::Completed {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("replacement task should complete");
 }
 
 #[tokio::test]
@@ -418,7 +529,7 @@ async fn agent_tool_allows_owner_to_message_running_task() {
         ToolResult::Text("agent task task-0 accepted message follow-up".into())
     );
 
-    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+    tokio::time::timeout(std::time::Duration::from_secs(4), async {
         loop {
             let output = manager
                 .get_output("task-0", 0)
@@ -488,7 +599,7 @@ async fn agent_tool_respects_allowed_tools_and_max_turns() {
         .await
         .expect("bounded agent launch should succeed");
 
-    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+    tokio::time::timeout(std::time::Duration::from_secs(4), async {
         loop {
             let created = manager.get("task-0").expect("task should be created");
             if matches!(created.status, TaskStatus::Failed) {

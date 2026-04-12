@@ -6,6 +6,8 @@ use crate::hook::registry::HookEvent;
 use crate::service::api::streaming::{StopReason, StreamEvent};
 use tokio::time::{Duration, timeout};
 
+const WORKER_MAILBOX_IDLE_TIMEOUT_MS: u64 = 2_000;
+
 #[derive(Debug, Clone)]
 struct PreparedTurn {
     prompt: String,
@@ -922,7 +924,7 @@ async fn next_worker_mailbox_message(context: &QueryContext) -> Option<Message> 
     let agent_id = context.agent_id.as_deref()?;
     let manager = context.app_state.permission_context.task_manager.as_ref()?;
     timeout(
-        Duration::from_millis(100),
+        Duration::from_millis(WORKER_MAILBOX_IDLE_TIMEOUT_MS),
         manager.wait_for_mailbox_message(agent_id),
     )
     .await

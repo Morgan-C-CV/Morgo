@@ -27,6 +27,13 @@ struct SpawnAgentRequest {
     inherit_context: bool,
     max_turns: Option<usize>,
     allowed_tools: Option<Vec<String>>,
+    reuse_strategy: ReuseStrategy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReuseStrategy {
+    RunningOnly,
+    Fresh,
 }
 
 #[derive(Debug, Deserialize)]
@@ -36,6 +43,7 @@ struct AgentJsonRequest {
     inherit_context: Option<bool>,
     max_turns: Option<usize>,
     allowed_tools: Option<Vec<String>>,
+    reuse_strategy: Option<String>,
     task_id: Option<String>,
     message: Option<String>,
 }
@@ -83,6 +91,18 @@ impl Tool for AgentTool {
             AgentRequest::Spawn(request) => {
                 let role_label = request.role.as_str().to_string();
                 let task_label = request.task.clone();
+                let action = match request.reuse_strategy {
+                    ReuseStrategy::RunningOnly => {
+                        maybe_reuse_running_task(tasks, &session_id, &request.task, request.role)
+                    }
+                    ReuseStrategy::Fresh => None,
+                };
+                if let Some(task_id) = action {
+                    return Ok(ToolResult::Text(format!(
+                        "agent task {} reused for {} worker: {}",
+                        task_id, role_label, task_label
+                    )));
+                }
                 let task = tasks.create(
                     format!("Spawned {} worker for {}", role_label, task_label),
                     session_id.clone(),
@@ -99,7 +119,7 @@ impl Tool for AgentTool {
                     dispatcher,
                 );
                 Ok(ToolResult::Text(format!(
-                    "agent task {} launched for {} worker: {}",
+                    "agent task {} respawned for {} worker: {}",
                     task.id,
                     role_label,
                     task_label
@@ -172,12 +192,14 @@ fn parse_agent_request(input: &str) -> anyhow::Result<AgentRequest> {
             return Ok(AgentRequest::Continue { task_id, message });
         }
         if let Some(task) = request.task {
+            let role = parse_worker_role(request.role.as_deref())?;
             return Ok(AgentRequest::Spawn(SpawnAgentRequest {
                 task,
-                role: parse_worker_role(request.role.as_deref())?,
+                role,
                 inherit_context: request.inherit_context.unwrap_or(true),
                 max_turns: request.max_turns,
                 allowed_tools: request.allowed_tools,
+                reuse_strategy: parse_reuse_strategy(request.reuse_strategy.as_deref(), role)?,
             }));
         }
         anyhow::bail!("agent JSON input must include either task or task_id/message")
@@ -196,6 +218,7 @@ fn parse_agent_request(input: &str) -> anyhow::Result<AgentRequest> {
         inherit_context: true,
         max_turns: None,
         allowed_tools: None,
+        reuse_strategy: ReuseStrategy::RunningOnly,
     }))
 }
 
@@ -206,6 +229,39 @@ fn parse_worker_role(value: Option<&str>) -> anyhow::Result<WorkerRole> {
         "verify" => Ok(WorkerRole::Verify),
         other => anyhow::bail!("unknown worker role: {other}"),
     }
+}
+
+fn parse_reuse_strategy(
+    value: Option<&str>,
+    role: WorkerRole,
+) -> anyhow::Result<ReuseStrategy> {
+    match value {
+        Some("running_only") => Ok(ReuseStrategy::RunningOnly),
+        Some("fresh") => Ok(ReuseStrategy::Fresh),
+        Some(other) => anyhow::bail!("unknown reuse strategy: {other}"),
+        None => Ok(match role {
+            WorkerRole::Research => ReuseStrategy::RunningOnly,
+            WorkerRole::Implement | WorkerRole::Verify => ReuseStrategy::Fresh,
+        }),
+    }
+}
+
+fn maybe_reuse_running_task(
+    tasks: &std::sync::Arc<crate::task::manager::TaskManager>,
+    session_id: &str,
+    task_description: &str,
+    worker_role: WorkerRole,
+) -> Option<String> {
+    tasks.list().into_iter().find_map(|task| {
+        let matches_owner = task.owner.session_id == session_id;
+        let matches_role = task.worker_role == Some(worker_role);
+        let matches_description = task.description == format!("Spawned {} worker for {}", worker_role.as_str(), task_description);
+        if matches_owner && matches_role && matches_description && matches!(task.status, crate::task::types::TaskStatus::Running) {
+            Some(task.id)
+        } else {
+            None
+        }
+    })
 }
 
 fn build_parent_query_context(permissions: ToolPermissionContext) -> QueryContext {

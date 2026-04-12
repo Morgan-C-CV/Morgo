@@ -238,6 +238,14 @@ impl TaskManager {
             .unwrap_or(false)
     }
 
+    pub fn status(&self, id: &str) -> Option<TaskStatus> {
+        self.get(id).map(|task| task.status)
+    }
+
+    pub fn is_terminal(&self, id: &str) -> Option<bool> {
+        self.status(id).map(|status| !matches!(status, TaskStatus::Pending | TaskStatus::Running))
+    }
+
     pub fn send_message(
         &self,
         id: &str,
@@ -342,10 +350,7 @@ impl TaskManager {
         {
             task.status = status.clone();
             task.delivery.notified = true;
-            let next_action = match status {
-                TaskStatus::Running => format!("continue running task {}", task.id),
-                _ => format!("inspect task output for {}", task.id),
-            };
+            let next_action = next_action_for_task(&status, task.worker_role, &task.id);
             let event = TaskEvent {
                 owner: task.owner.clone(),
                 target_task_id: Some(task.id.clone()),
@@ -394,5 +399,30 @@ impl TaskManager {
         }
         dispatcher.dispatch(event.owner.surface, notification.clone());
         notification
+    }
+}
+
+fn next_action_for_task(
+    status: &TaskStatus,
+    worker_role: Option<crate::state::app_state::WorkerRole>,
+    task_id: &str,
+) -> String {
+    match status {
+        TaskStatus::Running => format!("continue running task {}", task_id),
+        TaskStatus::Completed => match worker_role {
+            Some(crate::state::app_state::WorkerRole::Research) => {
+                format!("synthesize findings or request follow-up research for {}", task_id)
+            }
+            Some(crate::state::app_state::WorkerRole::Implement) => {
+                format!("dispatch verify worker for {}", task_id)
+            }
+            Some(crate::state::app_state::WorkerRole::Verify) => {
+                format!("synthesize validated result for {}", task_id)
+            }
+            None => format!("inspect task output for {}", task_id),
+        },
+        TaskStatus::Pending | TaskStatus::Failed | TaskStatus::Killed => {
+            format!("inspect task output for {}", task_id)
+        }
     }
 }

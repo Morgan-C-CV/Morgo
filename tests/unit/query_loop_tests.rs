@@ -714,7 +714,7 @@ async fn worker_query_loop_consumes_mailbox_messages() {
     tokio::task::yield_now().await;
     assert!(manager.send_message(&task.id, "test-session", "follow-up"));
 
-    let result = timeout(Duration::from_secs(1), engine_handle)
+    let result = timeout(Duration::from_secs(4), engine_handle)
         .await
         .expect("worker should finish")
         .expect("join should succeed");
