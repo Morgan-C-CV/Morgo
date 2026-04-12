@@ -44,13 +44,14 @@ impl Tool for TaskGetTool {
             .ok_or_else(|| anyhow::anyhow!("task {task_id} is unknown"))?;
 
         Ok(ToolResult::Text(format!(
-            "id: {}\nsubject: {}\ndescription: {}\nactive_form: {}\nstatus: {:?}\nowner: {}\nblocked_by: {}\nblocks: {}",
+            "id: {}\nsubject: {}\ndescription: {}\nactive_form: {}\nstatus: {:?}\nowner: {}\nplan_step_id: {}\nblocked_by: {}\nblocks: {}",
             task.id,
             task.subject,
             task.description,
             task.active_form.as_deref().unwrap_or(""),
             task.status,
             task.owner.as_deref().unwrap_or(""),
+            task.plan_step_id.as_deref().unwrap_or(""),
             task.blocked_by.join(","),
             task.blocks.join(",")
         )))

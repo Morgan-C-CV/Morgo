@@ -15,6 +15,7 @@ pub struct TaskListItem {
     pub active_form: Option<String>,
     pub status: TaskListStatus,
     pub owner: Option<String>,
+    pub plan_step_id: Option<String>,
     pub blocks: Vec<String>,
     pub blocked_by: Vec<String>,
 }

@@ -65,13 +65,14 @@ impl Tool for TaskUpdateTool {
         )?;
 
         Ok(ToolResult::Text(format!(
-            "id: {}\nsubject: {}\ndescription: {}\nactive_form: {}\nstatus: {:?}\nowner: {}",
+            "id: {}\nsubject: {}\ndescription: {}\nactive_form: {}\nstatus: {:?}\nowner: {}\nplan_step_id: {}",
             updated.id,
             updated.subject,
             updated.description,
             updated.active_form.as_deref().unwrap_or(""),
             updated.status,
-            updated.owner.as_deref().unwrap_or("")
+            updated.owner.as_deref().unwrap_or(""),
+            updated.plan_step_id.as_deref().unwrap_or("")
         )))
     }
 }

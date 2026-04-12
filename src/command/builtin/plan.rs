@@ -96,11 +96,23 @@ impl Command for PlanCommand {
                     step_id,
                 )?));
             }
+            "reorder" => {
+                let ordered_ids = remainder
+                    .split_whitespace()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string)
+                    .collect::<Vec<_>>();
+                return Ok(CommandResult::Message(crate::state::plan_mode::reorder_plan_steps(
+                    &app_state.permission_context,
+                    &ordered_ids,
+                )?));
+            }
             "enter" => {}
             "exit" => {}
             _ => {
                 return Ok(CommandResult::Message(
-                    "Usage: /plan [status|show|history|add <title> [| details]|update <step-id>|<title>|<details or ->|<status>|done <step-id>|enter [reason]|exit [summary]]".into(),
+                    "Usage: /plan [status|show|history|add <title> [| details]|update <step-id>|<title>|<details or ->|<status>|done <step-id>|reorder <step-id> <step-id> ...|enter [reason]|exit [summary]]".into(),
                 ))
             }
         }

@@ -50,7 +50,7 @@ impl Tool for TaskCreateTool {
             anyhow::bail!("task description cannot be empty");
         }
 
-        let task = task_list.create(subject, description, active_form, None);
+        let task = task_list.create(subject, description, active_form, None, None);
         Ok(ToolResult::Text(format!(
             "id: {}\nsubject: {}\nstatus: {:?}",
             task.id, task.subject, task.status

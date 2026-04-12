@@ -131,6 +131,17 @@ pub fn complete_plan_step(permissions: &ToolPermissionContext, step_id: &str) ->
     Ok(format!("Completed plan step {step_id}"))
 }
 
+pub fn reorder_plan_steps(
+    permissions: &ToolPermissionContext,
+    ordered_ids: &[String],
+) -> anyhow::Result<String> {
+    let Some(plan_manager) = permissions.plan_manager.as_ref() else {
+        anyhow::bail!("No plan manager is available in this session.");
+    };
+    plan_manager.reorder_steps(ordered_ids)?;
+    Ok(format!("Reordered {} plan steps", ordered_ids.len()))
+}
+
 pub fn request_enter_plan_mode(
     permissions: &ToolPermissionContext,
     reason: &str,
@@ -212,7 +223,10 @@ pub fn apply_exit_plan_mode(
     summary: &str,
 ) -> anyhow::Result<String> {
     if let Some(plan_manager) = permissions.plan_manager.as_ref() {
-        plan_manager.approve(non_empty(summary))?;
+        let approved = plan_manager.approve(non_empty(summary))?;
+        if let Some(task_list_manager) = permissions.task_list_manager.as_ref() {
+            task_list_manager.sync_plan_state(&approved);
+        }
     }
     permissions.set_mode(PermissionMode::Default);
     Ok(if summary.trim().is_empty() {

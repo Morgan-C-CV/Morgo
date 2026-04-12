@@ -1,6 +1,7 @@
 use std::sync::{Arc, RwLock};
 
 use crate::history::session::{SessionId, SessionStore};
+use crate::plan::types::{PlanState, PlanStep, PlanStepStatus};
 use crate::task::list_types::{TaskListItem, TaskListSnapshot, TaskListStatus};
 
 #[derive(Debug, Default)]
@@ -87,6 +88,7 @@ impl TaskListManager {
         description: impl Into<String>,
         active_form: Option<String>,
         owner: Option<String>,
+        plan_step_id: Option<String>,
     ) -> TaskListItem {
         let task = {
             let mut store = self.store.write().expect("task list store poisoned");
@@ -99,6 +101,7 @@ impl TaskListManager {
                 active_form,
                 status: TaskListStatus::Pending,
                 owner,
+                plan_step_id,
                 blocks: Vec::new(),
                 blocked_by: Vec::new(),
             };
@@ -125,6 +128,63 @@ impl TaskListManager {
             .iter()
             .find(|task| task.id == id)
             .cloned()
+    }
+
+    pub fn sync_plan_state(&self, plan_state: &PlanState) {
+        let Some(draft) = plan_state.draft.as_ref() else {
+            return;
+        };
+
+        let mut changed = false;
+        {
+            let mut store = self.store.write().expect("task list store poisoned");
+            for step in &draft.steps {
+                if let Some(existing) = store
+                    .tasks
+                    .iter_mut()
+                    .find(|task| task.plan_step_id.as_deref() == Some(step.id.as_str()))
+                {
+                    let next_status = task_status_from_plan_step(step.status);
+                    if existing.subject != step.title {
+                        existing.subject = step.title.clone();
+                        changed = true;
+                    }
+                    let description = plan_step_description(step);
+                    if existing.description != description {
+                        existing.description = description;
+                        changed = true;
+                    }
+                    if existing.status != next_status {
+                        existing.status = next_status;
+                        changed = true;
+                    }
+                    continue;
+                }
+
+                let task = TaskListItem {
+                    id: format!("task-{}", store.next_id),
+                    subject: step.title.clone(),
+                    description: plan_step_description(step),
+                    active_form: None,
+                    status: task_status_from_plan_step(step.status),
+                    owner: None,
+                    plan_step_id: Some(step.id.clone()),
+                    blocks: Vec::new(),
+                    blocked_by: Vec::new(),
+                };
+                store.next_id += 1;
+                store.tasks.push(task);
+                changed = true;
+            }
+
+            if changed {
+                reorder_plan_tasks(&mut store.tasks, draft.steps.as_slice());
+            }
+        }
+
+        if changed {
+            self.persist_snapshot();
+        }
     }
 
     pub fn update(&self, id: &str, update: TaskListUpdate) -> anyhow::Result<TaskListItem> {
@@ -246,4 +306,36 @@ fn push_unique(values: &mut Vec<String>, value: String) {
     if !values.contains(&value) {
         values.push(value);
     }
+}
+
+fn task_status_from_plan_step(status: PlanStepStatus) -> TaskListStatus {
+    match status {
+        PlanStepStatus::Pending => TaskListStatus::Pending,
+        PlanStepStatus::InProgress => TaskListStatus::InProgress,
+        PlanStepStatus::Completed => TaskListStatus::Completed,
+    }
+}
+
+fn plan_step_description(step: &PlanStep) -> String {
+    step
+        .details
+        .as_ref()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| step.title.clone())
+}
+
+fn reorder_plan_tasks(tasks: &mut Vec<TaskListItem>, steps: &[PlanStep]) {
+    let mut ordered = Vec::with_capacity(tasks.len());
+    for step in steps {
+        if let Some(index) = tasks
+            .iter()
+            .position(|task| task.plan_step_id.as_deref() == Some(step.id.as_str()))
+        {
+            ordered.push(tasks.remove(index));
+        }
+    }
+    ordered.append(tasks);
+    *tasks = ordered;
 }

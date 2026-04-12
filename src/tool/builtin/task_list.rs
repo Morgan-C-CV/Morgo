@@ -55,12 +55,13 @@ impl Tool for TaskListTool {
                     .cloned()
                     .collect::<Vec<_>>();
                 format!(
-                    "id: {}\nsubject: {}\ndescription: {}\nstatus: {:?}\nowner: {}\nblocked_by: {}\nblocks: {}",
+                    "id: {}\nsubject: {}\ndescription: {}\nstatus: {:?}\nowner: {}\nplan_step_id: {}\nblocked_by: {}\nblocks: {}",
                     task.id,
                     task.subject,
                     task.description,
                     task.status,
                     task.owner.as_deref().unwrap_or(""),
+                    task.plan_step_id.as_deref().unwrap_or(""),
                     visible_blocked_by.join(","),
                     task.blocks.join(",")
                 )

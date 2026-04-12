@@ -42,7 +42,7 @@ fn render_approved_plan(state: &PlanState) -> String {
         lines.push(format!("Approval summary: {summary}"));
     }
 
-    lines.push("During execution, create and maintain Task List entries that track this approved plan.".to_string());
+    lines.push("Approved plan steps are linked to durable Task List entries; continue maintaining that task list during execution.".to_string());
     lines.join("\n")
 }
 

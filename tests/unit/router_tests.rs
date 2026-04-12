@@ -23,6 +23,7 @@ use rust_agent::service::api::streaming::{StopReason, StreamEvent};
 use rust_agent::service::compact::reactive_compact::ReactiveCompactor;
 use rust_agent::state::app_state::{AppState, RuntimeRole};
 use rust_agent::state::permission_context::{PermissionMode, ToolPermissionContext};
+use rust_agent::task::list_manager::TaskListManager;
 use rust_agent::task::manager::TaskManager;
 use rust_agent::task::types::TaskOwner;
 use rust_agent::tool::registry::ToolRegistry;
@@ -726,8 +727,10 @@ async fn plan_command_exit_requests_approval_and_approval_exits_mode() {
     plan_manager
         .add_step("Verify approval flow", None)
         .expect("add plan step");
+    let task_list_manager = Arc::new(TaskListManager::default());
     let permission_context = ToolPermissionContext::new(PermissionMode::Plan)
         .with_task_manager(Arc::new(TaskManager::default()))
+        .with_task_list_manager(task_list_manager.clone())
         .with_plan_manager(plan_manager);
     let app_state = AppState {
         surface: InteractionSurface::Cli,
@@ -784,6 +787,10 @@ async fn plan_command_exit_requests_approval_and_approval_exits_mode() {
     );
     assert_eq!(permission_context.mode(), PermissionMode::Default);
     assert!(permission_context.pending_approval().is_none());
+    let synced_tasks = task_list_manager.list();
+    assert_eq!(synced_tasks.len(), 1);
+    assert_eq!(synced_tasks[0].plan_step_id.as_deref(), Some("step-1"));
+    assert_eq!(synced_tasks[0].subject, "Verify approval flow");
 }
 
 #[tokio::test]
@@ -800,6 +807,7 @@ async fn plan_command_handles_status_noop_and_denied_exit() {
         .expect("add plan step");
     let active_context = ToolPermissionContext::new(PermissionMode::Plan)
         .with_task_manager(Arc::new(TaskManager::default()))
+        .with_task_list_manager(Arc::new(TaskListManager::default()))
         .with_plan_manager(plan_manager.clone());
     let active_state = AppState {
         surface: InteractionSurface::Cli,
@@ -871,6 +879,22 @@ async fn plan_command_handles_status_noop_and_denied_exit() {
         .expect("plan history should render");
     assert!(matches!(history, CommandResult::Message(message) if message.contains("Plan history:")));
 
+    let reorder = router
+        .route(
+            &NormalizedInput::from_raw(
+                InteractionSurface::Cli,
+                "/plan reorder step-2 step-1",
+            ),
+            &active_state,
+        )
+        .await
+        .expect("plan reorder should succeed");
+    assert_eq!(reorder, CommandResult::Message("Reordered 2 plan steps".into()));
+    let reordered_state = plan_manager.state().expect("reordered plan state should exist");
+    let reordered_steps = &reordered_state.draft.expect("draft should exist").steps;
+    assert_eq!(reordered_steps[0].id, "step-2");
+    assert_eq!(reordered_steps[1].id, step.id);
+
     let no_op = router
         .route(
             &NormalizedInput::from_raw(InteractionSurface::Cli, "/plan enter"),
@@ -882,6 +906,7 @@ async fn plan_command_handles_status_noop_and_denied_exit() {
 
     let inactive_context = ToolPermissionContext::new(PermissionMode::Default)
         .with_task_manager(Arc::new(TaskManager::default()))
+        .with_task_list_manager(Arc::new(TaskListManager::default()))
         .with_plan_manager(Arc::new(PlanManager::default()));
     let inactive_state = AppState {
         surface: InteractionSurface::Cli,

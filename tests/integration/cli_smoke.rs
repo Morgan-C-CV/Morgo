@@ -2,6 +2,8 @@ use rust_agent::bootstrap::{BootstrapPhase, BootstrapState, InteractionSurface, 
 
 #[path = "skills_visibility.rs"]
 mod skills_visibility;
+#[path = "plan_resume_flow.rs"]
+mod plan_resume_flow;
 
 #[tokio::test]
 async fn startup_trace_contains_detect_surface_phase() {

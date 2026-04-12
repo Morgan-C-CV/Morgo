@@ -54,7 +54,7 @@ fn apply_lines(task_list: &TaskListManager, input: &str) -> anyhow::Result<usize
         if subject.is_empty() {
             anyhow::bail!("todo entry subject cannot be empty");
         }
-        task_list.create(subject, description, active_form, None);
+        task_list.create(subject, description, active_form, None, None);
         created += 1;
     }
     Ok(created)
