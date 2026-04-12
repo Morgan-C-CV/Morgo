@@ -50,16 +50,23 @@ impl McpConnectionStatus {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct McpToolInfo {
     pub name: String,
+    #[serde(default)]
     pub description: String,
+    #[serde(default)]
+    pub input_schema: Option<Value>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct McpResourceInfo {
     pub name: String,
     pub uri: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub mime_type: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -67,6 +74,7 @@ pub struct McpPeerInfo {
     pub server_name: Option<String>,
     pub server_version: Option<String>,
     pub protocol_version: Option<String>,
+    pub capabilities: Option<Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -88,6 +96,7 @@ pub struct McpServerState {
     pub server_name: Option<String>,
     pub server_version: Option<String>,
     pub server_protocol_version: Option<String>,
+    pub server_capabilities: Option<Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

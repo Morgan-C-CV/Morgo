@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::Mutex;
@@ -102,6 +102,7 @@ impl McpClient for MockMcpClient {
                 server_name: Some(config.name.clone()),
                 server_version: Some("mock".to_string()),
                 protocol_version: Some("mock".to_string()),
+                capabilities: Some(json!({"tools": {}, "resources": {}})),
             },
         })
     }
@@ -114,6 +115,7 @@ impl McpClient for MockMcpClient {
         Ok(vec![McpToolInfo {
             name: format!("{}__echo", config.id),
             description: format!("Echo tool exposed by {}", config.name),
+            input_schema: Some(json!({"type": "object"})),
         }])
     }
 
@@ -121,6 +123,8 @@ impl McpClient for MockMcpClient {
         Ok(vec![McpResourceInfo {
             name: format!("{}-readme", config.id),
             uri: format!("mcp://{}/readme", config.id),
+            description: format!("Readme resource exposed by {}", config.name),
+            mime_type: Some("text/plain".into()),
         }])
     }
 
@@ -178,22 +182,21 @@ impl McpClient for StdioProcessMcpClient {
     }
 
     async fn list_tools(&self, config: &McpServerConfig) -> anyhow::Result<Vec<McpToolInfo>> {
-        self.ensure_process(config).await?;
-        Ok(vec![McpToolInfo {
-            name: format!("{}__process_tool", config.id),
-            description: format!(
-                "Process-backed MCP tool surface exposed by {}",
-                config.name
-            ),
-        }])
+        let mut processes = self.processes.lock().await;
+        let session = self.ensure_process(&mut processes, config).await?;
+        let response = self
+            .send_jsonrpc_request(session, "tools/list", json!({}))
+            .await?;
+        parse_tools_list_response(&response)
     }
 
     async fn list_resources(&self, config: &McpServerConfig) -> anyhow::Result<Vec<McpResourceInfo>> {
-        self.ensure_process(config).await?;
-        Ok(vec![McpResourceInfo {
-            name: format!("{}-process-status", config.id),
-            uri: format!("mcp://{}/process-status", config.id),
-        }])
+        let mut processes = self.processes.lock().await;
+        let session = self.ensure_process(&mut processes, config).await?;
+        let response = self
+            .send_jsonrpc_request(session, "resources/list", json!({}))
+            .await?;
+        parse_resources_list_response(&response)
     }
 
     async fn call_tool(
@@ -202,31 +205,52 @@ impl McpClient for StdioProcessMcpClient {
         tool: &str,
         input: Option<Value>,
     ) -> anyhow::Result<Value> {
-        self.ensure_process(config).await?;
-        Ok(json!({
-            "server": config.id,
-            "tool": tool,
-            "input": input,
-            "ok": true,
-            "transport": config.transport.as_str(),
-            "note": "stdio process completed the initialize handshake skeleton; full MCP method exchange is not implemented yet"
-        }))
+        let mut processes = self.processes.lock().await;
+        let session = self.ensure_process(&mut processes, config).await?;
+        let response = self
+            .send_jsonrpc_request(
+                session,
+                "tools/call",
+                json!({
+                    "name": tool,
+                    "arguments": input.unwrap_or(Value::Null),
+                }),
+            )
+            .await?;
+        parse_tool_call_response(&response)
     }
 
     async fn read_resource(&self, config: &McpServerConfig, resource: &str) -> anyhow::Result<String> {
-        self.ensure_process(config).await?;
-        Ok(format!(
-            "resource:{}:{}:{}",
-            config.id,
-            config.transport.as_str(),
-            resource
-        ))
+        let mut processes = self.processes.lock().await;
+        let session = self.ensure_process(&mut processes, config).await?;
+        let response = self
+            .send_jsonrpc_request(
+                session,
+                "resources/read",
+                json!({
+                    "uri": resource,
+                }),
+            )
+            .await?;
+        parse_resource_read_response(&response)
     }
 }
 
 impl StdioProcessMcpClient {
-    async fn ensure_process(&self, config: &McpServerConfig) -> anyhow::Result<McpConnectInfo> {
-        self.connect(config).await
+    async fn ensure_process<'a>(
+        &self,
+        processes: &'a mut BTreeMap<String, StdioSession>,
+        config: &McpServerConfig,
+    ) -> anyhow::Result<&'a mut StdioSession> {
+        if !processes.contains_key(&config.id) {
+            let mut session = self.spawn_session(config).await?;
+            let connect_info = self.initialize_session(config, &mut session).await?;
+            session.connect_info = connect_info;
+            processes.insert(config.id.clone(), session);
+        }
+        processes
+            .get_mut(&config.id)
+            .ok_or_else(|| anyhow::anyhow!("missing stdio process session for server {}", config.id))
     }
 
     async fn spawn_session(&self, config: &McpServerConfig) -> anyhow::Result<StdioSession> {
@@ -306,6 +330,7 @@ impl StdioProcessMcpClient {
                     .get("protocolVersion")
                     .and_then(Value::as_str)
                     .map(ToString::to_string),
+                capabilities: result.get("capabilities").cloned(),
             },
         })
     }
@@ -385,5 +410,110 @@ impl StdioProcessMcpClient {
         let mut body = vec![0_u8; length];
         session.stdout.read_exact(&mut body).await?;
         Ok(serde_json::from_slice(&body)?)
+    }
+}
+
+fn parse_tools_list_response(response: &Value) -> anyhow::Result<Vec<McpToolInfo>> {
+    let tools = response
+        .get("result")
+        .and_then(|result| result.get("tools"))
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("MCP tools/list response missing result.tools"))?;
+    serde_json::from_value(tools).context("failed to parse MCP tool list")
+}
+
+fn parse_resources_list_response(response: &Value) -> anyhow::Result<Vec<McpResourceInfo>> {
+    let resources = response
+        .get("result")
+        .and_then(|result| result.get("resources"))
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("MCP resources/list response missing result.resources"))?;
+    serde_json::from_value(resources).context("failed to parse MCP resource list")
+}
+
+fn parse_tool_call_response(response: &Value) -> anyhow::Result<Value> {
+    response
+        .get("result")
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("MCP tools/call response missing result"))
+}
+
+fn parse_resource_read_response(response: &Value) -> anyhow::Result<String> {
+    let result = response
+        .get("result")
+        .ok_or_else(|| anyhow::anyhow!("MCP resources/read response missing result"))?;
+    if let Some(text) = result.get("contents").and_then(Value::as_array).and_then(|items| items.first()).and_then(|item| item.get("text")).and_then(Value::as_str) {
+        return Ok(text.to_string());
+    }
+    if let Some(text) = result.get("text").and_then(Value::as_str) {
+        return Ok(text.to_string());
+    }
+    anyhow::bail!("MCP resources/read response missing text content")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        parse_resource_read_response, parse_resources_list_response, parse_tool_call_response,
+        parse_tools_list_response,
+    };
+    use serde_json::json;
+
+    #[test]
+    fn parses_tools_list_response() {
+        let response = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "tools": [
+                    {"name": "echo", "description": "Echo tool", "input_schema": {"type": "object"}}
+                ]
+            }
+        });
+        let tools = parse_tools_list_response(&response).expect("tool list parses");
+        assert_eq!(tools[0].name, "echo");
+        assert_eq!(tools[0].description, "Echo tool");
+    }
+
+    #[test]
+    fn parses_resources_list_response() {
+        let response = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "resources": [
+                    {"name": "readme", "uri": "mcp://server/readme", "description": "Readme", "mime_type": "text/plain"}
+                ]
+            }
+        });
+        let resources = parse_resources_list_response(&response).expect("resource list parses");
+        assert_eq!(resources[0].name, "readme");
+        assert_eq!(resources[0].uri, "mcp://server/readme");
+    }
+
+    #[test]
+    fn parses_tool_call_response() {
+        let response = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {"content": [{"type": "text", "text": "ok"}]}
+        });
+        let value = parse_tool_call_response(&response).expect("tool result parses");
+        assert_eq!(value["content"][0]["text"], "ok");
+    }
+
+    #[test]
+    fn parses_resource_read_response() {
+        let response = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "contents": [
+                    {"uri": "mcp://server/readme", "text": "hello"}
+                ]
+            }
+        });
+        let content = parse_resource_read_response(&response).expect("resource read parses");
+        assert_eq!(content, "hello");
     }
 }

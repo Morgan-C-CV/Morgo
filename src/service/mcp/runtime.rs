@@ -74,6 +74,7 @@ impl McpRuntime {
                 server_name: None,
                 server_version: None,
                 server_protocol_version: None,
+                server_capabilities: None,
             })
             .collect();
         Self {
@@ -94,6 +95,8 @@ impl McpRuntime {
     }
 
     pub async fn reconnect(&self, server: &str) -> anyhow::Result<McpServerState> {
+        let _ = self.set_status(server, McpConnectionStatus::Connecting, None).await;
+        self.invalidate_server_cache(server).await;
         let _ = self.disconnect(server).await;
         self.connect(server).await
     }
@@ -130,8 +133,7 @@ impl McpRuntime {
         if let Err(error) = self.client.disconnect(&config).await {
             return self.fail_server(server, error.to_string()).await;
         }
-        self.cached_tools.write().await.remove(&config.id);
-        self.cached_resources.write().await.remove(&config.id);
+        self.invalidate_server_cache(server).await;
         self.update_disconnected(server).await
     }
 
@@ -248,6 +250,7 @@ impl McpRuntime {
     }
 
     async fn fail_server<T>(&self, server: &str, message: String) -> anyhow::Result<T> {
+        self.invalidate_server_cache(server).await;
         let _ = self
             .set_status(server, McpConnectionStatus::Failed, Some(message.clone()))
             .await;
@@ -275,6 +278,7 @@ impl McpRuntime {
         state.server_name = connect_info.peer.server_name;
         state.server_version = connect_info.peer.server_version;
         state.server_protocol_version = connect_info.peer.protocol_version;
+        state.server_capabilities = connect_info.peer.capabilities;
         Ok(state.clone())
     }
 
@@ -293,6 +297,14 @@ impl McpRuntime {
         state.server_name = None;
         state.server_version = None;
         state.server_protocol_version = None;
+        state.server_capabilities = None;
         Ok(state.clone())
+    }
+
+    async fn invalidate_server_cache(&self, server: &str) {
+        if let Ok(config) = self.server_config(server).await {
+            self.cached_tools.write().await.remove(&config.id);
+            self.cached_resources.write().await.remove(&config.id);
+        }
     }
 }

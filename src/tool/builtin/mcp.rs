@@ -47,6 +47,9 @@ fn render_response(response: McpResponse) -> String {
             let mut lines = vec!["MCP tools:".to_string()];
             for tool in tools {
                 lines.push(format!("- {}: {}", tool.name, tool.description));
+                if let Some(schema) = tool.input_schema.as_ref() {
+                    lines.push(format!("  schema: {}", schema));
+                }
             }
             lines.join("\n")
         }
@@ -54,6 +57,12 @@ fn render_response(response: McpResponse) -> String {
             let mut lines = vec!["MCP resources:".to_string()];
             for resource in resources {
                 lines.push(format!("- {} ({})", resource.name, resource.uri));
+                if !resource.description.trim().is_empty() {
+                    lines.push(format!("  description: {}", resource.description));
+                }
+                if let Some(mime_type) = resource.mime_type.as_deref() {
+                    lines.push(format!("  mime_type: {}", mime_type));
+                }
             }
             lines.join("\n")
         }
