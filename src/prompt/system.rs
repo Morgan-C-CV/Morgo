@@ -7,11 +7,36 @@ pub fn build_system_prompt(app_state: &AppState) -> String {
         return build_worker_system_prompt(app_state);
     }
     if is_coordinator_mode() || matches!(app_state.runtime_role, RuntimeRole::Coordinator) {
-        return build_coordinator_system_prompt(app_state);
+        return build_richer_coordinator_prompt(app_state);
     }
 
+    build_default_system_prompt(app_state)
+}
+
+fn build_richer_coordinator_prompt(app_state: &AppState) -> String {
+    let mut lines = vec![
+        "You are the coordinator runtime for the Rust agent.".to_string(),
+        "Drive the main conversation, preserve scope, choose the right tool or command path, and keep the user informed with concise, evidence-backed results.".to_string(),
+        "Prefer direct execution for local work, but route through command, tool, task, and hook systems rather than bypassing runtime boundaries.".to_string(),
+        String::new(),
+        build_coordinator_system_prompt(app_state),
+        String::new(),
+        format!("surface={:?}", app_state.surface),
+        format!("session_mode={:?}", app_state.session_mode),
+        format!("runtime_role={:?}", app_state.runtime_role),
+    ];
+    if app_state.mcp_runtime.is_some() {
+        lines.push("mcp_runtime=available".to_string());
+    }
+    if app_state.skill_registry.is_some() {
+        lines.push("skill_registry=available".to_string());
+    }
+    lines.join("\n")
+}
+
+fn build_default_system_prompt(app_state: &AppState) -> String {
     format!(
-        "surface={:?}\nsession_mode={:?}\nruntime_role={:?}",
+        "You are the default Rust agent runtime.\nOperate conservatively, use the registered runtime surfaces, and keep results grounded in current session state.\nsurface={:?}\nsession_mode={:?}\nruntime_role={:?}",
         app_state.surface, app_state.session_mode, app_state.runtime_role
     )
 }
@@ -24,7 +49,7 @@ fn build_worker_system_prompt(app_state: &AppState) -> String {
         WorkerRole::Verify => "You are a verify worker. Check correctness, run validation, and report regressions or confidence. Do not expand scope into primary implementation.",
     };
     format!(
-        "{}\nsurface={:?}\nsession_mode={:?}\nruntime_role={:?}\nworker_role={}",
+        "{}\nRespect coordinator intent, use only the delegated runtime capabilities, and return concise execution evidence.\nsurface={:?}\nsession_mode={:?}\nruntime_role={:?}\nworker_role={}",
         role_guidance,
         app_state.surface,
         app_state.session_mode,
