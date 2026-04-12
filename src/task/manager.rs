@@ -434,7 +434,7 @@ impl TaskManager {
         dispatcher: &NotificationDispatcher,
     ) {
         self.clear_running_handle(id);
-        let mut barrier_event = None;
+        let mut barrier_candidate = None;
         if let Some(task) = self
             .store
             .write()
@@ -445,8 +445,10 @@ impl TaskManager {
         {
             task.status = status.clone();
             task.delivery.notified = true;
-            task.validation_state = transition_validation_state(task.worker_role, &status, task.validation_state);
-            let next_action = next_action_for_task(&status, task.worker_role, task.validation_state, &task.id);
+            task.validation_state =
+                transition_validation_state(task.worker_role, &status, task.validation_state);
+            let next_action =
+                next_action_for_task(&status, task.worker_role, task.validation_state, &task.id);
             let event = TaskEvent {
                 owner: task.owner.clone(),
                 target_task_id: Some(task.id.clone()),
@@ -464,28 +466,72 @@ impl TaskManager {
             let notification = self.dispatch_task_notification(title, &event, dispatcher);
             task.delivery.notification = Some(notification);
 
-            if let Some(group_id) = task.orchestration_group_id.clone() {
-                let owner = task.owner.clone();
-                if self.group_ready_for_fan_in(&group_id) {
-                    barrier_event = Some(TaskEvent {
-                        owner,
-                        target_task_id: task.parent_task_id.clone().or(Some(task.id.clone())),
-                        task_id: format!("group-{}", group_id),
-                        status: TaskStatus::Completed,
-                        summary: format!("grouped research tasks completed ({})", group_id),
-                        result: "Task group completed".into(),
-                        next_action: format!("synthesize grouped findings for {}", group_id),
-                        worker_role: None,
-                        phase: None,
-                        validation_state: None,
-                        output_file: task.output_file.clone(),
-                    });
-                }
+            barrier_candidate = task.orchestration_group_id.clone().map(|group_id| {
+                (
+                    group_id,
+                    task.owner.clone(),
+                    task.parent_task_id.clone().or(Some(task.id.clone())),
+                    task.output_file.clone(),
+                )
+            });
+        }
+        if let Some((group_id, owner, target_task_id, output_file)) = barrier_candidate {
+            if self.group_ready_for_fan_in(&group_id) {
+                let event = TaskEvent {
+                    owner,
+                    target_task_id,
+                    task_id: format!("group-{}", group_id),
+                    status: TaskStatus::Completed,
+                    summary: format!("grouped research tasks completed ({})", group_id),
+                    result: "Task group completed".into(),
+                    next_action: format!("synthesize grouped findings for {}", group_id),
+                    worker_role: None,
+                    phase: None,
+                    validation_state: None,
+                    output_file,
+                };
+                self.enqueue_task_event(event.clone());
+                let _ = self.dispatch_task_notification("Task group completed", &event, dispatcher);
             }
         }
-        if let Some(event) = barrier_event {
-            self.enqueue_task_event(event.clone());
-            let _ = self.dispatch_task_notification("Task group completed", &event, dispatcher);
+        self.propagate_verification_to_parent(id);
+    }
+
+    fn propagate_verification_to_parent(&self, id: &str) {
+        let Some(task) = self.get(id) else {
+            return;
+        };
+        let Some(parent_task_id) = task.parent_task_id.clone() else {
+            return;
+        };
+        let propagated_state = match (task.worker_role, task.status, task.validation_state) {
+            (
+                Some(crate::state::app_state::WorkerRole::Verify),
+                TaskStatus::Completed,
+                Some(ValidationState::Verified),
+            ) => Some(ValidationState::Verified),
+            (
+                Some(crate::state::app_state::WorkerRole::Verify),
+                TaskStatus::Failed,
+                Some(ValidationState::VerificationFailed),
+            ) => Some(ValidationState::VerificationFailed),
+            (Some(crate::state::app_state::WorkerRole::Verify), TaskStatus::Killed, _) => {
+                Some(ValidationState::Unverified)
+            }
+            _ => None,
+        };
+        let Some(propagated_state) = propagated_state else {
+            return;
+        };
+        if let Some(parent) = self
+            .store
+            .write()
+            .expect("task store poisoned")
+            .tasks
+            .iter_mut()
+            .find(|task| task.id == parent_task_id)
+        {
+            parent.validation_state = Some(propagated_state);
         }
     }
 
@@ -557,9 +603,21 @@ fn next_action_for_task(
             }
             (None, _) => format!("inspect task output for {}", task_id),
         },
-        TaskStatus::Pending | TaskStatus::Failed | TaskStatus::Killed => {
-            format!("inspect task output for {}", task_id)
-        }
+        TaskStatus::Failed => match (worker_role, validation_state) {
+            (_, Some(ValidationState::VerificationFailed))
+            | (Some(crate::state::app_state::WorkerRole::Verify), _) => {
+                format!("inspect verification failure for {}", task_id)
+            }
+            _ => format!("inspect task output for {}", task_id),
+        },
+        TaskStatus::Killed => match (worker_role, validation_state) {
+            (_, Some(ValidationState::Unverified))
+            | (Some(crate::state::app_state::WorkerRole::Verify), _) => {
+                format!("synthesize with explicit unverified risk for {}", task_id)
+            }
+            _ => format!("inspect task output for {}", task_id),
+        },
+        TaskStatus::Pending => format!("inspect task output for {}", task_id),
     }
 }
 
@@ -569,14 +627,19 @@ fn transition_validation_state(
     current: Option<ValidationState>,
 ) -> Option<ValidationState> {
     match (worker_role, status, current) {
-        (Some(crate::state::app_state::WorkerRole::Implement), TaskStatus::Completed, Some(ValidationState::PendingVerification)) => {
-            Some(ValidationState::PendingVerification)
-        }
+        (
+            Some(crate::state::app_state::WorkerRole::Implement),
+            TaskStatus::Completed,
+            Some(ValidationState::PendingVerification),
+        ) => Some(ValidationState::PendingVerification),
         (Some(crate::state::app_state::WorkerRole::Verify), TaskStatus::Completed, _) => {
             Some(ValidationState::Verified)
         }
         (Some(crate::state::app_state::WorkerRole::Verify), TaskStatus::Failed, _) => {
             Some(ValidationState::VerificationFailed)
+        }
+        (Some(crate::state::app_state::WorkerRole::Verify), TaskStatus::Killed, _) => {
+            Some(ValidationState::Unverified)
         }
         (_, TaskStatus::Completed, Some(state)) => Some(state),
         (_, _, current) => current,

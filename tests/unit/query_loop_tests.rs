@@ -13,7 +13,8 @@ use rust_agent::interaction::telegram::gateway::TelegramGateway;
 use rust_agent::service::api::client::ModelProviderClient;
 use rust_agent::service::api::streaming::{StopReason, StreamEvent, UsageEvent};
 use rust_agent::service::compact::reactive_compact::ReactiveCompactor;
-use rust_agent::task::types::TaskOwner;
+use rust_agent::state::app_state::WorkerRole;
+use rust_agent::task::types::{TaskOwner, ValidationState, WorkerPhase};
 use std::sync::Arc;
 
 use tokio::sync::RwLock;
@@ -891,6 +892,421 @@ async fn query_loop_emits_token_budget_continuation_before_max_budget() {
             budget_usd_cents: expected_budget
         }
     );
+}
+
+#[tokio::test]
+async fn coordinator_waits_for_group_barrier_before_synthesis_follow_up() {
+    let manager = Arc::new(TaskManager::default());
+    let dispatcher = NotificationDispatcher::new(TelegramGateway::default());
+
+    let first = manager.create("research shard a", "test-session", InteractionSurface::Cli);
+    manager.set_worker_role(&first.id, WorkerRole::Research);
+    manager.set_parent_task_id(&first.id, Some("parent-1".into()));
+    manager.set_orchestration_group_id(&first.id, Some("group-1".into()));
+    manager.set_phase(&first.id, Some(WorkerPhase::Research));
+    manager.set_validation_state(&first.id, Some(ValidationState::NotNeeded));
+    manager.start(&first.id);
+
+    let second = manager.create("research shard b", "test-session", InteractionSurface::Cli);
+    manager.set_worker_role(&second.id, WorkerRole::Research);
+    manager.set_parent_task_id(&second.id, Some("parent-1".into()));
+    manager.set_orchestration_group_id(&second.id, Some("group-1".into()));
+    manager.set_phase(&second.id, Some(WorkerPhase::Research));
+    manager.set_validation_state(&second.id, Some(ValidationState::NotNeeded));
+    manager.start(&second.id);
+
+    manager.complete(&first.id, &dispatcher);
+
+    let permission_context = ToolPermissionContext::new(PermissionMode::Default)
+        .with_task_manager(manager.clone());
+    permission_context.add_always_allow_rule("Agent");
+
+    let context = QueryContext {
+        app_state: AppState {
+            surface: InteractionSurface::Cli,
+            session_mode: SessionMode::Headless,
+            client_type: ClientType::Cli,
+            session_source: SessionSource::LocalCli,
+            runtime_role: RuntimeRole::Coordinator,
+            worker_role: None,
+            permission_context,
+            command_registry: None,
+            runtime_tool_registry: Some(Arc::new(RwLock::new(ToolRegistry::new()))),
+            skill_registry: None,
+            mcp_runtime: None,
+            cost_tracker: CostTracker::default(),
+            notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
+            startup_trace: Vec::new(),
+            active_session_id: "test-session".into(),
+            session_store: None,
+            session: None,
+            history: None,
+            restored_session: None,
+        },
+        tool_registry: ToolRegistry::new(),
+        api_client: ModelProviderClient::with_scripted_turns(vec![
+            vec![
+                StreamEvent::MessageStart,
+                StreamEvent::TextDelta("waiting for sibling worker".into()),
+                StreamEvent::MessageStop {
+                    stop_reason: StopReason::EndTurn,
+                },
+            ],
+            vec![
+                StreamEvent::MessageStart,
+                StreamEvent::TextDelta("all research shards merged".into()),
+                StreamEvent::MessageStop {
+                    stop_reason: StopReason::EndTurn,
+                },
+            ],
+        ]),
+        compactor: ReactiveCompactor,
+        hook_registry: HookRegistry::default(),
+        agent_id: None,
+        system_prompt: "test system".into(),
+        tools_prompt: "test tools".into(),
+        context_prompt: "test context".into(),
+    };
+
+    let first_result = QueryEngine::new(context.clone())
+        .submit_turn(Message::user("synthesize research"))
+        .await;
+    assert_eq!(first_result.state, QueryLoopState::Completed);
+    assert_eq!(first_result.terminal, Terminal::Completed);
+    assert_eq!(first_result.transition, Some(Continue::NextTurn));
+    assert!(first_result
+        .messages
+        .iter()
+        .any(|message| message.content.contains("<task-id>task-0</task-id>")));
+    assert!(first_result
+        .messages
+        .iter()
+        .any(|message| message
+            .content
+            .contains("orchestration still pending: wait for grouped research fan-in or verification before final synthesis")));
+    assert!(!first_result
+        .messages
+        .iter()
+        .any(|message| message.content.contains("grouped research tasks completed")));
+    assert!(manager.has_pending_orchestration("test-session"));
+
+    manager.complete(&second.id, &dispatcher);
+
+    let second_result = QueryEngine::new(context)
+        .submit_turn(Message::user("synthesize research"))
+        .await;
+    assert_eq!(second_result.state, QueryLoopState::Completed);
+    assert_eq!(second_result.terminal, Terminal::Completed);
+    assert_eq!(second_result.transition, None);
+    assert!(second_result
+        .messages
+        .iter()
+        .any(|message| message.content.contains("<task-id>group-group-1</task-id>")));
+    assert!(second_result
+        .messages
+        .iter()
+        .any(|message| message.content.contains("synthesize grouped findings for group-1")));
+    assert!(second_result
+        .messages
+        .iter()
+        .any(|message| message.content.contains("all research shards merged")));
+    assert!(!manager.has_pending_orchestration("test-session"));
+}
+
+#[tokio::test]
+async fn coordinator_gates_finalization_until_verification_finishes() {
+    let manager = Arc::new(TaskManager::default());
+    let dispatcher = NotificationDispatcher::new(TelegramGateway::default());
+
+    let implement = manager.create("implement patch", "test-session", InteractionSurface::Cli);
+    manager.set_worker_role(&implement.id, WorkerRole::Implement);
+    manager.set_parent_task_id(&implement.id, Some("parent-2".into()));
+    manager.set_orchestration_group_id(&implement.id, Some("group-verify-1".into()));
+    manager.set_phase(&implement.id, Some(WorkerPhase::Implement));
+    manager.set_validation_state(&implement.id, Some(ValidationState::PendingVerification));
+    manager.start(&implement.id);
+    manager.complete(&implement.id, &dispatcher);
+
+    let permission_context = ToolPermissionContext::new(PermissionMode::Default)
+        .with_task_manager(manager.clone());
+    permission_context.add_always_allow_rule("Agent");
+
+    let context = QueryContext {
+        app_state: AppState {
+            surface: InteractionSurface::Cli,
+            session_mode: SessionMode::Headless,
+            client_type: ClientType::Cli,
+            session_source: SessionSource::LocalCli,
+            runtime_role: RuntimeRole::Coordinator,
+            worker_role: None,
+            permission_context,
+            command_registry: None,
+            runtime_tool_registry: Some(Arc::new(RwLock::new(ToolRegistry::new()))),
+            skill_registry: None,
+            mcp_runtime: None,
+            cost_tracker: CostTracker::default(),
+            notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
+            startup_trace: Vec::new(),
+            active_session_id: "test-session".into(),
+            session_store: None,
+            session: None,
+            history: None,
+            restored_session: None,
+        },
+        tool_registry: ToolRegistry::new(),
+        api_client: ModelProviderClient::with_scripted_turns(vec![
+            vec![
+                StreamEvent::MessageStart,
+                StreamEvent::TextDelta("verification still pending".into()),
+                StreamEvent::MessageStop {
+                    stop_reason: StopReason::EndTurn,
+                },
+            ],
+            vec![
+                StreamEvent::MessageStart,
+                StreamEvent::TextDelta("verified synthesis ready".into()),
+                StreamEvent::MessageStop {
+                    stop_reason: StopReason::EndTurn,
+                },
+            ],
+        ]),
+        compactor: ReactiveCompactor,
+        hook_registry: HookRegistry::default(),
+        agent_id: None,
+        system_prompt: "test system".into(),
+        tools_prompt: "test tools".into(),
+        context_prompt: "test context".into(),
+    };
+
+    let gated = QueryEngine::new(context.clone())
+        .submit_turn(Message::user("finalize implementation"))
+        .await;
+    assert_eq!(gated.state, QueryLoopState::Completed);
+    assert_eq!(gated.terminal, Terminal::Completed);
+    assert_eq!(gated.transition, Some(Continue::NextTurn));
+    assert!(gated
+        .messages
+        .iter()
+        .any(|message| message.content.contains("<worker-role>implement</worker-role>")));
+    assert!(gated
+        .messages
+        .iter()
+        .any(|message| message.content.contains("<phase>implement</phase>")));
+    assert!(gated
+        .messages
+        .iter()
+        .any(|message| message.content.contains("<validation-state>pending_verification</validation-state>")));
+    assert!(gated
+        .messages
+        .iter()
+        .any(|message| message.content.contains("dispatch verify worker for task-0")));
+    assert!(gated
+        .messages
+        .iter()
+        .any(|message| message
+            .content
+            .contains("orchestration still pending: wait for grouped research fan-in or verification before final synthesis")));
+
+    let verify = manager.create("verify patch", "test-session", InteractionSurface::Cli);
+    manager.set_worker_role(&verify.id, WorkerRole::Verify);
+    manager.set_parent_task_id(&verify.id, Some(implement.id.clone()));
+    manager.set_orchestration_group_id(&verify.id, Some("group-verify-1".into()));
+    manager.set_phase(&verify.id, Some(WorkerPhase::Verify));
+    manager.start(&verify.id);
+    manager.complete(&verify.id, &dispatcher);
+
+    let verified = QueryEngine::new(context)
+        .submit_turn(Message::user("finalize implementation"))
+        .await;
+    assert_eq!(verified.state, QueryLoopState::Completed);
+    assert_eq!(verified.terminal, Terminal::Completed);
+    assert_eq!(verified.transition, None);
+    assert!(verified
+        .messages
+        .iter()
+        .any(|message| message.content.contains("<worker-role>verify</worker-role>")));
+    assert!(verified
+        .messages
+        .iter()
+        .any(|message| message.content.contains("<phase>verify</phase>")));
+    assert!(verified
+        .messages
+        .iter()
+        .any(|message| message.content.contains("<validation-state>verified</validation-state>")));
+    assert!(verified
+        .messages
+        .iter()
+        .any(|message| message.content.contains("synthesize validated result for task-1")));
+    assert!(verified
+        .messages
+        .iter()
+        .any(|message| message.content.contains("verified synthesis ready")));
+}
+
+#[tokio::test]
+async fn coordinator_surfaces_verification_failure_and_missing_verification_risk() {
+    let manager = Arc::new(TaskManager::default());
+    let dispatcher = NotificationDispatcher::new(TelegramGateway::default());
+
+    let implement = manager.create("implement risky patch", "test-session", InteractionSurface::Cli);
+    manager.set_worker_role(&implement.id, WorkerRole::Implement);
+    manager.set_parent_task_id(&implement.id, Some("parent-3".into()));
+    manager.set_orchestration_group_id(&implement.id, Some("group-risk-1".into()));
+    manager.set_phase(&implement.id, Some(WorkerPhase::Implement));
+    manager.set_validation_state(&implement.id, Some(ValidationState::PendingVerification));
+    manager.start(&implement.id);
+    manager.complete(&implement.id, &dispatcher);
+
+    let permission_context = ToolPermissionContext::new(PermissionMode::Default)
+        .with_task_manager(manager.clone());
+    permission_context.add_always_allow_rule("Agent");
+
+    let context = QueryContext {
+        app_state: AppState {
+            surface: InteractionSurface::Cli,
+            session_mode: SessionMode::Headless,
+            client_type: ClientType::Cli,
+            session_source: SessionSource::LocalCli,
+            runtime_role: RuntimeRole::Coordinator,
+            worker_role: None,
+            permission_context,
+            command_registry: None,
+            runtime_tool_registry: Some(Arc::new(RwLock::new(ToolRegistry::new()))),
+            skill_registry: None,
+            mcp_runtime: None,
+            cost_tracker: CostTracker::default(),
+            notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
+            startup_trace: Vec::new(),
+            active_session_id: "test-session".into(),
+            session_store: None,
+            session: None,
+            history: None,
+            restored_session: None,
+        },
+        tool_registry: ToolRegistry::new(),
+        api_client: ModelProviderClient::with_scripted_turns(vec![
+            vec![
+                StreamEvent::MessageStart,
+                StreamEvent::TextDelta(
+                    "validation status: pending_verification; unverified risk remains before final answer"
+                        .into(),
+                ),
+                StreamEvent::MessageStop {
+                    stop_reason: StopReason::EndTurn,
+                },
+            ],
+            vec![
+                StreamEvent::MessageStart,
+                StreamEvent::TextDelta(
+                    "validation status: verification_failed; unverified risk remains after verify failure"
+                        .into(),
+                ),
+                StreamEvent::MessageStop {
+                    stop_reason: StopReason::EndTurn,
+                },
+            ],
+            vec![
+                StreamEvent::MessageStart,
+                StreamEvent::TextDelta(
+                    "validation status: unverified; unverified risk remains after verify worker was killed"
+                        .into(),
+                ),
+                StreamEvent::MessageStop {
+                    stop_reason: StopReason::EndTurn,
+                },
+            ],
+        ]),
+        compactor: ReactiveCompactor,
+        hook_registry: HookRegistry::default(),
+        agent_id: None,
+        system_prompt: "test system".into(),
+        tools_prompt: "test tools".into(),
+        context_prompt: "test context".into(),
+    };
+
+    let missing = QueryEngine::new(context.clone())
+        .submit_turn(Message::user("finalize risky implementation"))
+        .await;
+    assert_eq!(missing.transition, Some(Continue::NextTurn));
+    assert!(missing
+        .messages
+        .iter()
+        .any(|message| message.content.contains("validation status: pending_verification")));
+    assert!(missing
+        .messages
+        .iter()
+        .any(|message| message.content.contains("unverified risk remains")));
+    assert!(missing
+        .messages
+        .iter()
+        .any(|message| message.content.contains("dispatch verify worker for task-0")));
+
+    let failed_verify = manager.create("verify risky patch", "test-session", InteractionSurface::Cli);
+    manager.set_worker_role(&failed_verify.id, WorkerRole::Verify);
+    manager.set_parent_task_id(&failed_verify.id, Some(implement.id.clone()));
+    manager.set_orchestration_group_id(&failed_verify.id, Some("group-risk-1".into()));
+    manager.set_phase(&failed_verify.id, Some(WorkerPhase::Verify));
+    manager.start(&failed_verify.id);
+    manager.fail(&failed_verify.id, &dispatcher);
+
+    let failed = QueryEngine::new(context.clone())
+        .submit_turn(Message::user("finalize risky implementation"))
+        .await;
+    assert_eq!(failed.transition, None);
+    assert!(failed
+        .messages
+        .iter()
+        .any(|message| message.content.contains("<validation-state>verification_failed</validation-state>")));
+    assert!(failed
+        .messages
+        .iter()
+        .any(|message| message.content.contains("inspect verification failure for task-1")));
+    assert!(failed
+        .messages
+        .iter()
+        .any(|message| message.content.contains("validation status: verification_failed")));
+    assert!(failed
+        .messages
+        .iter()
+        .any(|message| message.content.contains("unverified risk remains")));
+
+    let second_implement = manager.create("implement another risky patch", "test-session", InteractionSurface::Cli);
+    manager.set_worker_role(&second_implement.id, WorkerRole::Implement);
+    manager.set_parent_task_id(&second_implement.id, Some("parent-4".into()));
+    manager.set_orchestration_group_id(&second_implement.id, Some("group-risk-2".into()));
+    manager.set_phase(&second_implement.id, Some(WorkerPhase::Implement));
+    manager.set_validation_state(&second_implement.id, Some(ValidationState::PendingVerification));
+    manager.start(&second_implement.id);
+    manager.complete(&second_implement.id, &dispatcher);
+
+    let killed_verify = manager.create("verify another risky patch", "test-session", InteractionSurface::Cli);
+    manager.set_worker_role(&killed_verify.id, WorkerRole::Verify);
+    manager.set_parent_task_id(&killed_verify.id, Some(second_implement.id.clone()));
+    manager.set_orchestration_group_id(&killed_verify.id, Some("group-risk-2".into()));
+    manager.set_phase(&killed_verify.id, Some(WorkerPhase::Verify));
+    manager.start(&killed_verify.id);
+    assert!(manager.kill(&killed_verify.id, "test-session", &dispatcher));
+
+    let killed = QueryEngine::new(context)
+        .submit_turn(Message::user("finalize risky implementation"))
+        .await;
+    assert_eq!(killed.transition, None);
+    assert!(killed
+        .messages
+        .iter()
+        .any(|message| message.content.contains("<validation-state>unverified</validation-state>")));
+    assert!(killed
+        .messages
+        .iter()
+        .any(|message| message.content.contains("synthesize with explicit unverified risk for task-3")));
+    assert!(killed
+        .messages
+        .iter()
+        .any(|message| message.content.contains("validation status: unverified")));
+    assert!(killed
+        .messages
+        .iter()
+        .any(|message| message.content.contains("unverified risk remains")));
 }
 
 #[tokio::test]
