@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use async_trait::async_trait;
 
 use crate::command::types::{
@@ -16,18 +18,12 @@ pub fn build_skill_commands(app_state: &AppState) -> Vec<SkillSlashCommand> {
     let cwd = app_state
         .session
         .as_ref()
-        .map(|session| session.cwd.as_str())
-        .unwrap_or_default();
+        .map(|session| Path::new(session.cwd.as_str()))
+        .unwrap_or_else(|| Path::new(""));
     skill_registry
         .list_user_invocable(cwd)
         .into_iter()
-        .map(|skill| {
-            SkillSlashCommand::from_skill(
-                skill.name,
-                skill.description,
-                skill.disable_model_invocation,
-            )
-        })
+        .map(SkillSlashCommand::from_skill)
         .collect()
 }
 
@@ -36,19 +32,17 @@ pub struct SkillSlashCommand {
     description: String,
     category: String,
     disable_model_invocation: bool,
+    aliases: Vec<String>,
 }
 
 impl SkillSlashCommand {
-    pub fn from_skill(
-        skill_name: String,
-        description: String,
-        disable_model_invocation: bool,
-    ) -> Self {
+    pub fn from_skill(skill: crate::skills::types::SkillDefinition) -> Self {
         Self {
-            skill_name,
-            description,
+            skill_name: skill.name,
+            description: skill.description,
             category: "skill".into(),
-            disable_model_invocation,
+            disable_model_invocation: skill.disable_model_invocation,
+            aliases: skill.aliases,
         }
     }
 }
@@ -63,7 +57,7 @@ impl Command for SkillSlashCommand {
             category: self.category.clone(),
             command_type: CommandType::Prompt,
             availability: CommandAvailability::Everywhere,
-            aliases: Vec::new(),
+            aliases: self.aliases.clone(),
             is_hidden: false,
             disable_model_invocation: self.disable_model_invocation,
             immediate: false,
@@ -79,8 +73,14 @@ impl Command for SkillSlashCommand {
         let Some(skill_registry) = app_state.skill_registry.as_ref() else {
             return Ok(CommandResult::Message("No skills registry is available.".into()));
         };
+        let cwd = app_state
+            .session
+            .as_ref()
+            .map(|session| Path::new(session.cwd.as_str()))
+            .unwrap_or_else(|| Path::new(""));
         Ok(CommandResult::Prompt(load_skill_prompt(
             skill_registry,
+            cwd,
             &self.skill_name,
             input.command_args.trim(),
         )?))
@@ -116,8 +116,8 @@ impl Command for SkillsCommand {
         let cwd = app_state
             .session
             .as_ref()
-            .map(|session| session.cwd.as_str())
-            .unwrap_or_default();
+            .map(|session| Path::new(session.cwd.as_str()))
+            .unwrap_or_else(|| Path::new(""));
         let skills = skill_registry.list_user_invocable(cwd);
         if skills.is_empty() {
             return Ok(CommandResult::Message("No skills discovered.".to_string()));
@@ -131,7 +131,14 @@ impl Command for SkillsCommand {
                 .filter(|value| !value.trim().is_empty())
                 .map(|value| format!(" — when to use: {}", value.trim()))
                 .unwrap_or_default();
-            lines.push(format!("- {}: {}{}", skill.name, skill.description, when));
+            let workflow = skill
+                .workflow_hint
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+                .map(|value| format!(" — workflow: {}", value.trim()))
+                .unwrap_or_default();
+            let source = format!(" [{}]", skill.source.as_str());
+            lines.push(format!("- {}{}: {}{}{}", skill.name, source, skill.description, when, workflow));
         }
 
         Ok(CommandResult::Message(lines.join("\n")))

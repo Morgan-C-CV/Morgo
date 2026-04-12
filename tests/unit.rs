@@ -26,6 +26,10 @@ mod router_tests;
 mod security_loop3_tests;
 #[path = "unit/security_tests.rs"]
 mod security_tests;
+#[path = "unit/skills_loader_tests.rs"]
+mod skills_loader_tests;
+#[path = "unit/skills_registry_tests.rs"]
+mod skills_registry_tests;
 #[path = "unit/task_manager_tests.rs"]
 mod task_manager_tests;
 #[path = "unit/tool_behavior_tests.rs"]

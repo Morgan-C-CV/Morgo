@@ -34,7 +34,7 @@ use crate::service::compact::reactive_compact::ReactiveCompactor;
 use crate::service::mcp::config::load_server_configs_with_diagnostics;
 use crate::service::mcp::runtime::McpRuntime;
 use crate::skills::bundled::bundled_skills;
-use crate::skills::loader::load_filesystem_skills;
+use crate::skills::loader::SkillLoaderCache;
 use crate::skills::registry::SkillRegistry;
 use crate::state::app_state::{AppState, RuntimeRole};
 use crate::state::permission_context::{PermissionMode, ToolPermissionContext};
@@ -195,7 +195,11 @@ impl RuntimeBootstrap {
                 .with_persistence(self.session_store.clone(), task_list_session_id),
         );
         let mut discovered_skills = bundled_skills();
-        discovered_skills.extend(load_filesystem_skills(&state.current_cwd).unwrap_or_default());
+        let mut skill_loader_cache = SkillLoaderCache::default();
+        let (loaded_skills, _) = skill_loader_cache
+            .load_or_reload(&state.current_cwd)
+            .unwrap_or_default();
+        discovered_skills.extend(loaded_skills.skills);
         let skill_registry = Arc::new(SkillRegistry::new(discovered_skills));
         let plugin_load_result = Arc::new(load_plugins(&state.current_cwd));
         let mcp_config_result = load_server_configs_with_diagnostics(&state.current_cwd);

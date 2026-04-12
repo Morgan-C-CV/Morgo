@@ -102,11 +102,25 @@ async fn help_command_renders_source_counts_and_execution_kinds() {
         CommandRegistry::new()
             .register(Arc::new(HelpCommand))
             .register(Arc::new(PermissionsCommand))
-            .register(Arc::new(SkillSlashCommand::from_skill(
-                "summarize-skill".into(),
-                "Summarize repository state".into(),
-                true,
-            )))
+            .register(Arc::new(SkillSlashCommand::from_skill(rust_agent::skills::types::SkillDefinition {
+                name: "summarize-skill".into(),
+                description: "Summarize repository state".into(),
+                when_to_use: None,
+                argument_hint: None,
+                workflow_hint: None,
+                allowed_tools: vec![],
+                aliases: vec![],
+                user_invocable: true,
+                disable_model_invocation: true,
+                hidden: false,
+                paths: vec![],
+                exclude_paths: vec![],
+                requires_files: vec![],
+                context: rust_agent::skills::types::SkillExecutionContext::Inline,
+                content: "skill body".into(),
+                source: rust_agent::skills::types::SkillSource::Filesystem,
+                file_path: None,
+            })))
             .register(Arc::new(PluginSlashCommand::new(metadata_rich_plugin_command("plugin-cmd")))),
     );
     let app_state = test_app_state(Some(registry), None, None);
@@ -329,11 +343,25 @@ async fn help_and_status_report_consistent_command_contract_counts() {
         CommandRegistry::new()
             .register(Arc::new(HelpCommand))
             .register(Arc::new(PermissionsCommand))
-            .register(Arc::new(SkillSlashCommand::from_skill(
-                "summarize-skill".into(),
-                "Summarize repository state".into(),
-                true,
-            )))
+            .register(Arc::new(SkillSlashCommand::from_skill(rust_agent::skills::types::SkillDefinition {
+                name: "summarize-skill".into(),
+                description: "Summarize repository state".into(),
+                when_to_use: None,
+                argument_hint: None,
+                workflow_hint: None,
+                allowed_tools: vec![],
+                aliases: vec![],
+                user_invocable: true,
+                disable_model_invocation: true,
+                hidden: false,
+                paths: vec![],
+                exclude_paths: vec![],
+                requires_files: vec![],
+                context: rust_agent::skills::types::SkillExecutionContext::Inline,
+                content: "skill body".into(),
+                source: rust_agent::skills::types::SkillSource::Filesystem,
+                file_path: None,
+            })))
             .register(Arc::new(PluginSlashCommand::new(metadata_rich_plugin_command("plugin-cmd")))),
     );
     let plugin_load_result = Arc::new(PluginLoadResult {

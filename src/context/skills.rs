@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use crate::state::app_state::AppState;
 
 pub fn describe_skills_context(app_state: &AppState) -> String {
@@ -7,8 +9,8 @@ pub fn describe_skills_context(app_state: &AppState) -> String {
     let cwd = app_state
         .session
         .as_ref()
-        .map(|session| session.cwd.as_str())
-        .unwrap_or_default();
+        .map(|session| Path::new(session.cwd.as_str()))
+        .unwrap_or_else(|| Path::new(""));
     let skills = skill_registry.list_model_invocable(cwd);
     if skills.is_empty() {
         return String::new();
@@ -22,7 +24,8 @@ pub fn describe_skills_context(app_state: &AppState) -> String {
             .filter(|value| !value.trim().is_empty())
             .map(|value| format!(" — when to use: {}", value.trim()))
             .unwrap_or_default();
-        lines.push(format!("- {}: {}{}", skill.name, skill.description, when));
+        let source = format!(" [{}]", skill.source.as_str());
+        lines.push(format!("- {}{}: {}{}", skill.name, source, skill.description, when));
     }
     lines.push("Invoke these via the Skill tool when appropriate.".to_string());
     lines.join("\n")

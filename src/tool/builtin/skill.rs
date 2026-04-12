@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use async_trait::async_trait;
 
 use crate::skills::registry::SkillRegistry;
@@ -9,12 +11,16 @@ pub struct SkillTool;
 
 pub fn load_skill_prompt(
     skill_registry: &SkillRegistry,
+    cwd: &Path,
     skill_name: &str,
     args: &str,
 ) -> anyhow::Result<String> {
     let skill = skill_registry
         .find(skill_name)
         .ok_or_else(|| anyhow::anyhow!("unknown skill: {skill_name}"))?;
+    if !skill.matches_project_context(cwd) {
+        anyhow::bail!("skill {} is not active for {}", skill.name, cwd.display());
+    }
     format_skill_prompt(&skill, args)
 }
 
@@ -40,10 +46,22 @@ pub fn format_skill_prompt(skill: &SkillDefinition, args: &str) -> anyhow::Resul
         .filter(|value| !value.trim().is_empty())
         .map(|value| format!("Argument hint: {}\n", value.trim()))
         .unwrap_or_default();
+    let workflow_hint = skill
+        .workflow_hint
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| format!("Workflow hint: {}\n", value.trim()))
+        .unwrap_or_default();
+    let allowed_tools = if skill.allowed_tools.is_empty() {
+        String::new()
+    } else {
+        format!("Allowed tools: {}\n", skill.allowed_tools.join(", "))
+    };
+    let source = format!("Source: {}\n", skill.source.as_str());
 
     Ok(format!(
-        "Loaded skill: {}\n{}{}{}\nSkill instructions:\n{}",
-        skill.name, when_to_use, argument_hint, args_line, skill.content
+        "Loaded skill: {}\n{}{}{}{}{}{}\nSkill instructions:\n{}",
+        skill.name, when_to_use, argument_hint, workflow_hint, allowed_tools, source, args_line, skill.content
     ))
 }
 
@@ -84,6 +102,8 @@ impl Tool for SkillTool {
             .skill_registry
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("skill registry is unavailable in this session"))?;
-        Ok(ToolResult::Text(load_skill_prompt(skill_registry, skill_name, args)?))
+        let cwd = std::env::current_dir()
+            .map_err(|error| anyhow::anyhow!("failed to resolve current directory: {error}"))?;
+        Ok(ToolResult::Text(load_skill_prompt(skill_registry, &cwd, skill_name, args)?))
     }
 }

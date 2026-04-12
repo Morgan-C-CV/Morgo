@@ -77,8 +77,8 @@ impl Command for StatusCommand {
                 let cwd = app_state
                     .session
                     .as_ref()
-                    .map(|session| session.cwd.as_str())
-                    .unwrap_or_default();
+                    .map(|session| std::path::Path::new(session.cwd.as_str()))
+                    .unwrap_or_else(|| std::path::Path::new(""));
                 registry.list_user_invocable(cwd).len()
             })
             .unwrap_or(0);

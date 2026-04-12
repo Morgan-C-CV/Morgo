@@ -28,12 +28,17 @@ pub fn parse_frontmatter(markdown: &str) -> anyhow::Result<(SkillFrontmatter, St
             "description" => frontmatter.description = non_empty(value),
             "when_to_use" => frontmatter.when_to_use = non_empty(value),
             "argument-hint" => frontmatter.argument_hint = non_empty(value),
-            "allowed-tools" => frontmatter.allowed_tools = split_csv(value),
+            "workflow-hint" => frontmatter.workflow_hint = non_empty(value),
+            "allowed-tools" => frontmatter.allowed_tools = split_list(value),
+            "aliases" => frontmatter.aliases = split_list(value),
             "user-invocable" => frontmatter.user_invocable = parse_bool(value).unwrap_or(true),
             "disable-model-invocation" => {
                 frontmatter.disable_model_invocation = parse_bool(value).unwrap_or(false)
             }
-            "paths" => frontmatter.paths = split_csv(value),
+            "hidden" => frontmatter.hidden = parse_bool(value).unwrap_or(false),
+            "paths" => frontmatter.paths = split_list(value),
+            "exclude-paths" => frontmatter.exclude_paths = split_list(value),
+            "requires-files" => frontmatter.requires_files = split_list(value),
             "context" => {
                 frontmatter.context = if value.eq_ignore_ascii_case("fork") {
                     SkillExecutionContext::Fork
@@ -56,10 +61,14 @@ fn parse_bool(value: &str) -> Option<bool> {
     }
 }
 
-fn split_csv(value: &str) -> Vec<String> {
+fn split_list(value: &str) -> Vec<String> {
     value
+        .trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']')
         .split(',')
         .map(str::trim)
+        .map(|part| part.trim_matches('"').trim_matches('\''))
         .filter(|part| !part.is_empty())
         .map(ToOwned::to_owned)
         .collect()

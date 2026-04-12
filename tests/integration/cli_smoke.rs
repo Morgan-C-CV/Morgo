@@ -1,5 +1,8 @@
 use rust_agent::bootstrap::{BootstrapPhase, BootstrapState, InteractionSurface, SessionMode};
 
+#[path = "skills_visibility.rs"]
+mod skills_visibility;
+
 #[tokio::test]
 async fn startup_trace_contains_detect_surface_phase() {
     let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::Print, false);

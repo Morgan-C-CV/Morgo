@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use crate::skills::types::SkillDefinition;
 
@@ -20,15 +21,15 @@ impl SkillRegistry {
         self.skills.values().cloned().collect()
     }
 
-    pub fn list_user_invocable(&self, cwd: &str) -> Vec<SkillDefinition> {
+    pub fn list_user_invocable(&self, cwd: &Path) -> Vec<SkillDefinition> {
         self.skills
             .values()
-            .filter(|skill| skill.user_invocable && skill.matches_project_context(cwd))
+            .filter(|skill| skill.is_user_visible(cwd))
             .cloned()
             .collect()
     }
 
-    pub fn list_model_invocable(&self, cwd: &str) -> Vec<SkillDefinition> {
+    pub fn list_model_invocable(&self, cwd: &Path) -> Vec<SkillDefinition> {
         self.skills
             .values()
             .filter(|skill| skill.is_model_invocable() && skill.matches_project_context(cwd))
@@ -37,7 +38,10 @@ impl SkillRegistry {
     }
 
     pub fn find(&self, name: &str) -> Option<SkillDefinition> {
-        self.skills.get(name).cloned()
+        self.skills
+            .get(name)
+            .cloned()
+            .or_else(|| self.skills.values().find(|skill| skill.aliases.iter().any(|alias| alias == name)).cloned())
     }
 
     pub fn is_empty(&self) -> bool {
