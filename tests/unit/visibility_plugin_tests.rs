@@ -5,6 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use rust_agent::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
 use rust_agent::command::builtin::help::HelpCommand;
+use rust_agent::command::builtin::permissions::PermissionsCommand;
 use rust_agent::command::builtin::plugins::PluginSlashCommand;
 use rust_agent::command::builtin::skills::SkillSlashCommand;
 use rust_agent::command::builtin::status::StatusCommand;
@@ -82,9 +83,11 @@ async fn help_command_renders_source_counts_and_execution_kinds() {
     let registry = Arc::new(
         CommandRegistry::new()
             .register(Arc::new(HelpCommand))
+            .register(Arc::new(PermissionsCommand))
             .register(Arc::new(SkillSlashCommand::from_skill(
                 "summarize-skill".into(),
                 "Summarize repository state".into(),
+                true,
             )))
             .register(Arc::new(PluginSlashCommand::new(sample_plugin_command("plugin-cmd")))),
     );
@@ -100,11 +103,15 @@ async fn help_command_renders_source_counts_and_execution_kinds() {
     };
     assert!(text.contains("Available commands:"));
     assert!(text.contains("Legend: [type=<prompt|local>]"));
-    assert!(text.contains("Built-in (1):"));
+    assert!(text.contains("[sensitive]"));
+    assert!(text.contains("[model_invocation=disabled]"));
+    assert!(text.contains("[immediate]"));
+    assert!(text.contains("Built-in (2):"));
     assert!(text.contains("Skills (1):"));
     assert!(text.contains("Plugins (1):"));
-    assert!(text.contains("/help — Show the available commands [type=local] [builtin:core] aliases=h"));
-    assert!(text.contains("/summarize-skill — Summarize repository state [type=prompt] [skill:skill]"));
+    assert!(text.contains("/help — Show the available commands [type=local] [builtin:core] aliases=h [immediate]"));
+    assert!(text.contains("/permissions — Inspect and update permission mode and explicit tool rules [type=local] [builtin:core] aliases=perms [sensitive] [immediate]"));
+    assert!(text.contains("/summarize-skill — Summarize repository state [type=prompt] [skill:skill] [model_invocation=disabled]"));
     assert!(text.contains("/plugin-cmd — Plugin command description [type=prompt] [plugin:plugin] aliases=plugin-cmd-alias"));
 }
 

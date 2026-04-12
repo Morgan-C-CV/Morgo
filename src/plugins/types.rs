@@ -43,6 +43,8 @@ pub struct PluginCommandDefinition {
     pub category: String,
     pub availability: CommandAvailability,
     pub disable_model_invocation: bool,
+    pub immediate: bool,
+    pub is_sensitive: bool,
     pub aliases: Vec<String>,
     pub prompt: String,
     pub manifest_path: PathBuf,
@@ -67,6 +69,10 @@ pub struct PluginCommandManifest {
     pub availability: Option<String>,
     #[serde(default)]
     pub disable_model_invocation: bool,
+    #[serde(default)]
+    pub immediate: bool,
+    #[serde(default)]
+    pub is_sensitive: bool,
     pub prompt: Option<String>,
     pub prompt_file: Option<String>,
 }

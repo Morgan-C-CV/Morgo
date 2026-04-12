@@ -21,7 +21,13 @@ pub fn build_skill_commands(app_state: &AppState) -> Vec<SkillSlashCommand> {
     skill_registry
         .list_user_invocable(cwd)
         .into_iter()
-        .map(|skill| SkillSlashCommand::from_skill(skill.name, skill.description))
+        .map(|skill| {
+            SkillSlashCommand::from_skill(
+                skill.name,
+                skill.description,
+                skill.disable_model_invocation,
+            )
+        })
         .collect()
 }
 
@@ -29,14 +35,20 @@ pub struct SkillSlashCommand {
     skill_name: String,
     description: String,
     category: String,
+    disable_model_invocation: bool,
 }
 
 impl SkillSlashCommand {
-    pub fn from_skill(skill_name: String, description: String) -> Self {
+    pub fn from_skill(
+        skill_name: String,
+        description: String,
+        disable_model_invocation: bool,
+    ) -> Self {
         Self {
             skill_name,
             description,
             category: "skill".into(),
+            disable_model_invocation,
         }
     }
 }
@@ -53,7 +65,7 @@ impl Command for SkillSlashCommand {
             availability: CommandAvailability::Everywhere,
             aliases: Vec::new(),
             is_hidden: false,
-            disable_model_invocation: false,
+            disable_model_invocation: self.disable_model_invocation,
             immediate: false,
             is_sensitive: false,
         }

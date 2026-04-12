@@ -46,7 +46,7 @@ impl Command for HelpCommand {
 
         let mut lines = vec![
             "Available commands:".to_string(),
-            "Legend: [type=<prompt|local>] [availability=<cli-only|remote-safe>] [source:category]".to_string(),
+            "Legend: [type=<prompt|local>] [availability=<cli-only|remote-safe>] [source:category] [sensitive] [model_invocation=disabled] [immediate]".to_string(),
         ];
         let mut current_source = None;
         for command in &metadata {
@@ -66,15 +66,33 @@ impl Command for HelpCommand {
                 .short_label()
                 .map(|label| format!(" [availability={label}]"))
                 .unwrap_or_default();
+            let sensitivity = if command.is_sensitive {
+                " [sensitive]"
+            } else {
+                ""
+            };
+            let invocation = if command.disable_model_invocation {
+                " [model_invocation=disabled]"
+            } else {
+                ""
+            };
+            let immediacy = if command.immediate {
+                " [immediate]"
+            } else {
+                ""
+            };
             lines.push(format!(
-                "- /{} — {} [type={}] [{}:{}]{}{}",
+                "- /{} — {} [type={}] [{}:{}]{}{}{}{}{}",
                 command.name,
                 command.description,
                 command.command_type.as_str(),
                 command.source.as_str(),
                 command.category,
                 aliases,
-                availability
+                availability,
+                sensitivity,
+                invocation,
+                immediacy
             ));
         }
 

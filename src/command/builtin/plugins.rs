@@ -30,8 +30,8 @@ impl Command for PluginSlashCommand {
             aliases: self.definition.aliases.clone(),
             is_hidden: false,
             disable_model_invocation: self.definition.disable_model_invocation,
-            immediate: false,
-            is_sensitive: false,
+            immediate: self.definition.immediate,
+            is_sensitive: self.definition.is_sensitive,
         }
     }
 

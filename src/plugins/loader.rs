@@ -83,6 +83,8 @@ fn load_plugin_manifest(path: &PathBuf) -> anyhow::Result<PluginDefinition> {
             category: command.category,
             availability,
             disable_model_invocation: command.disable_model_invocation,
+            immediate: command.immediate,
+            is_sensitive: command.is_sensitive,
             aliases: command.aliases,
             prompt,
             manifest_path: path.clone(),
