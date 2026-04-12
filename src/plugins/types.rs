@@ -26,6 +26,33 @@ impl PluginLoadResult {
         self.plugins.iter().map(|plugin| plugin.hooks.len()).sum()
     }
 
+    pub fn active_plugin_count(&self) -> usize {
+        self.plugins.iter().filter(|plugin| plugin.governance.enabled).count()
+    }
+
+    pub fn disabled_plugin_count(&self) -> usize {
+        self.plugins.iter().filter(|plugin| !plugin.governance.enabled).count()
+    }
+
+    pub fn error_plugin_count(&self) -> usize {
+        self.plugins
+            .iter()
+            .filter(|plugin| plugin.lifecycle_state == PluginLifecycleState::Error)
+            .count()
+    }
+
+    pub fn active_command_count(&self) -> usize {
+        self.plugins.iter().map(|plugin| plugin.activation.commands).sum()
+    }
+
+    pub fn active_tool_count(&self) -> usize {
+        self.plugins.iter().map(|plugin| plugin.activation.tools).sum()
+    }
+
+    pub fn active_hook_count(&self) -> usize {
+        self.plugins.iter().map(|plugin| plugin.activation.hooks).sum()
+    }
+
     pub fn diagnostic_count_for_severity(&self, severity: PluginDiagnosticSeverity) -> usize {
         self.diagnostics
             .iter()
@@ -49,17 +76,140 @@ impl PluginConfigSource {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PluginCapability {
+    Commands,
+    Tools,
+    Hooks,
+}
+
+impl PluginCapability {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Commands => "commands",
+            Self::Tools => "tools",
+            Self::Hooks => "hooks",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PluginLifecycleState {
+    Enabled,
+    Disabled,
+    Error,
+}
+
+impl PluginLifecycleState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Enabled => "enabled",
+            Self::Disabled => "disabled",
+            Self::Error => "error",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PluginGovernanceSource {
+    Default,
+    File,
+}
+
+impl PluginGovernanceSource {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::File => "file",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginGovernanceState {
+    pub enabled: bool,
+    pub disable_reason: Option<String>,
+    pub source: PluginGovernanceSource,
+}
+
+impl Default for PluginGovernanceState {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            disable_reason: None,
+            source: PluginGovernanceSource::Default,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PluginActivationSummary {
+    pub commands: usize,
+    pub tools: usize,
+    pub hooks: usize,
+}
+
 #[derive(Debug, Clone)]
 pub struct PluginDefinition {
     pub name: String,
     pub version: Option<String>,
     pub description: String,
     pub manifest_path: PathBuf,
-    pub capabilities: Vec<String>,
+    pub capabilities: Vec<PluginCapability>,
     pub diagnostics_metadata: Option<PluginDiagnosticsMetadata>,
     pub commands: Vec<PluginCommandDefinition>,
     pub tools: Vec<PluginToolDefinition>,
     pub hooks: Vec<PluginHookDefinition>,
+    pub governance: PluginGovernanceState,
+    pub lifecycle_state: PluginLifecycleState,
+    pub activation: PluginActivationSummary,
+}
+
+impl PluginDefinition {
+    pub fn declares_capability(&self, capability: PluginCapability) -> bool {
+        self.capabilities.contains(&capability)
+    }
+
+    pub fn active_commands(&self) -> Vec<PluginCommandDefinition> {
+        if self.lifecycle_state == PluginLifecycleState::Enabled
+            && self.governance.enabled
+            && self.declares_capability(PluginCapability::Commands)
+        {
+            self.commands.clone()
+        } else {
+            Vec::new()
+        }
+    }
+
+    pub fn active_tools(&self) -> Vec<PluginToolDefinition> {
+        if self.lifecycle_state == PluginLifecycleState::Enabled
+            && self.governance.enabled
+            && self.declares_capability(PluginCapability::Tools)
+        {
+            self.tools.clone()
+        } else {
+            Vec::new()
+        }
+    }
+
+    pub fn active_hooks(&self) -> Vec<PluginHookDefinition> {
+        if self.lifecycle_state == PluginLifecycleState::Enabled
+            && self.governance.enabled
+            && self.declares_capability(PluginCapability::Hooks)
+        {
+            self.hooks.clone()
+        } else {
+            Vec::new()
+        }
+    }
+
+    pub fn refresh_activation_summary(&mut self) {
+        self.activation = PluginActivationSummary {
+            commands: self.active_commands().len(),
+            tools: self.active_tools().len(),
+            hooks: self.active_hooks().len(),
+        };
+    }
 }
 
 #[derive(Debug, Clone)]

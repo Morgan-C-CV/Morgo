@@ -27,6 +27,7 @@ use crate::interaction::telegram::gateway::TelegramGateway;
 use crate::plan::manager::PlanManager;
 use crate::plugins::loader::load_plugins;
 use crate::plugins::runtime::{augment_hook_registry_with_plugins, augment_tool_registry_with_plugins};
+use crate::plugins::types::{PluginDefinition, PluginDiagnostic, PluginDiagnosticSeverity, PluginLifecycleState};
 use crate::security::authorizer::DefaultSurfaceAuthorizer;
 use crate::service::api::client::{
     ModelProviderClient, ModelProviderConfig, ModelPricing, ProviderTimeout,
@@ -215,13 +216,29 @@ impl RuntimeBootstrap {
         let plugin_load_result = Arc::new(crate::plugins::types::PluginLoadResult {
             root: plugin_load_result.root.clone(),
             source: plugin_load_result.source,
-            plugins: plugin_load_result.plugins.clone(),
+            plugins: plugin_load_result
+                .plugins
+                .iter()
+                .cloned()
+                .map(|mut plugin| {
+                    if plugin_tool_diagnostics.iter().any(|diagnostic| {
+                        diagnostic.plugin_name.as_deref() == Some(plugin.name.as_str())
+                            && diagnostic.severity == PluginDiagnosticSeverity::Error
+                    }) {
+                        plugin.lifecycle_state = PluginLifecycleState::Error;
+                        plugin.activation.commands = 0;
+                        plugin.activation.tools = 0;
+                        plugin.activation.hooks = 0;
+                    }
+                    plugin
+                })
+                .collect::<Vec<PluginDefinition>>(),
             diagnostics: plugin_load_result
                 .diagnostics
                 .iter()
                 .cloned()
                 .chain(plugin_tool_diagnostics)
-                .collect(),
+                .collect::<Vec<PluginDiagnostic>>(),
         });
         let coordinator_tools = tool_inventory.assemble_for_role(RuntimeRole::Coordinator);
         let permission_context = ToolPermissionContext::new(if self.cli.init_only {
@@ -428,7 +445,7 @@ impl RuntimeBootstrap {
         plugin_load_result
             .plugins
             .iter()
-            .flat_map(|plugin| plugin.commands.iter().cloned())
+            .flat_map(|plugin| plugin.active_commands().into_iter())
             .fold(registry, |registry, command| {
                 registry.register(Arc::new(crate::command::builtin::plugins::PluginSlashCommand::new(command)))
             })

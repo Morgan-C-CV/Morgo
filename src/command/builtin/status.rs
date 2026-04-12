@@ -208,6 +208,9 @@ impl Command for StatusCommand {
             let discovered_plugin_commands = plugin_load_result.discovered_command_count();
             let discovered_plugin_tools = plugin_load_result.discovered_tool_count();
             let discovered_plugin_hooks = plugin_load_result.discovered_hook_count();
+            let enabled_plugins = plugin_load_result.active_plugin_count();
+            let disabled_plugins = plugin_load_result.disabled_plugin_count();
+            let error_plugins = plugin_load_result.error_plugin_count();
             let warning_count = plugin_load_result
                 .diagnostic_count_for_severity(crate::plugins::types::PluginDiagnosticSeverity::Warning);
             let error_count = plugin_load_result
@@ -220,9 +223,15 @@ impl Command for StatusCommand {
                 plugin_load_result.root.display()
             ));
             lines.push(format!("- discovered_plugins: {}", plugin_load_result.plugins.len()));
+            lines.push(format!("- enabled_plugins: {}", enabled_plugins));
+            lines.push(format!("- disabled_plugins: {}", disabled_plugins));
+            lines.push(format!("- error_plugins: {}", error_plugins));
             lines.push(format!("- discovered_plugin_commands: {}", discovered_plugin_commands));
             lines.push(format!("- discovered_plugin_tools: {}", discovered_plugin_tools));
             lines.push(format!("- discovered_plugin_hooks: {}", discovered_plugin_hooks));
+            lines.push(format!("- active_plugin_commands: {}", plugin_load_result.active_command_count()));
+            lines.push(format!("- active_plugin_tools: {}", plugin_load_result.active_tool_count()));
+            lines.push(format!("- active_plugin_hooks: {}", plugin_load_result.active_hook_count()));
             lines.push(format!("- registered_plugin_commands: {}", registered_plugin_commands));
             lines.push(format!("- registered_plugin_tools: {}", registered_plugin_tools));
             lines.push(format!(
@@ -239,16 +248,33 @@ impl Command for StatusCommand {
                     let capabilities = if plugin.capabilities.is_empty() {
                         "none".to_string()
                     } else {
-                        plugin.capabilities.join(",")
+                        plugin
+                            .capabilities
+                            .iter()
+                            .map(|capability| capability.as_str())
+                            .collect::<Vec<_>>()
+                            .join(",")
                     };
+                    let disable_reason = plugin
+                        .governance
+                        .disable_reason
+                        .as_deref()
+                        .unwrap_or("none");
                     lines.push(format!(
-                        "  - {} v{} — commands={}, hooks={}, tools={}, capabilities={} (manifest={})",
+                        "  - {} v{} — state={}, enabled={}, active(commands={}, hooks={}, tools={}), discovered(commands={}, hooks={}, tools={}), capabilities={}, governance_source={}, disable_reason={} (manifest={})",
                         plugin.name,
                         version,
+                        plugin.lifecycle_state.as_str(),
+                        if plugin.governance.enabled { "yes" } else { "no" },
+                        plugin.activation.commands,
+                        plugin.activation.hooks,
+                        plugin.activation.tools,
                         plugin.commands.len(),
                         plugin.hooks.len(),
                         plugin.tools.len(),
                         capabilities,
+                        plugin.governance.source.as_str(),
+                        disable_reason,
                         plugin.manifest_path.display()
                     ));
                 }

@@ -6,12 +6,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rust_agent::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
 use rust_agent::command::builtin::help::HelpCommand;
 use rust_agent::command::builtin::permissions::PermissionsCommand;
-use rust_agent::command::builtin::plugins::PluginSlashCommand;
+use rust_agent::command::builtin::plugins::{PluginSlashCommand, PluginsCommand};
 use rust_agent::command::builtin::skills::{SkillSlashCommand, SkillsCommand};
 use rust_agent::command::builtin::status::StatusCommand;
 use rust_agent::command::builtin::tasks::TasksCommand;
 use rust_agent::command::registry::CommandRegistry;
 use rust_agent::command::types::{Command, CommandAvailability, CommandResult};
+use rust_agent::history::session::{SessionId, SessionSnapshot};
 use rust_agent::interaction::cli::renderer::render_turn_output;
 use rust_agent::interaction::cli::repl::CliTurnOutput;
 use rust_agent::interaction::dispatcher::NotificationDispatcher;
@@ -20,9 +21,10 @@ use rust_agent::interaction::telegram::gateway::TelegramGateway;
 use rust_agent::plugins::loader::load_plugins;
 use rust_agent::plugins::runtime::{augment_hook_registry_with_plugins, augment_tool_registry_with_plugins};
 use rust_agent::plugins::types::{
-    PluginCommandDefinition, PluginConfigSource, PluginDefinition, PluginDiagnostic,
-    PluginDiagnosticSeverity, PluginDiagnosticsMetadata, PluginHookDefinition, PluginLoadResult,
-    PluginToolDefinition,
+    PluginActivationSummary, PluginCapability, PluginCommandDefinition, PluginConfigSource,
+    PluginDefinition, PluginDiagnostic, PluginDiagnosticSeverity, PluginDiagnosticsMetadata,
+    PluginGovernanceSource, PluginGovernanceState, PluginHookDefinition, PluginLifecycleState,
+    PluginLoadResult, PluginToolDefinition,
 };
 use rust_agent::skills::registry::SkillRegistry;
 use rust_agent::skills::types::{SkillDefinition, SkillExecutionContext, SkillSource};
@@ -249,7 +251,7 @@ async fn help_command_surfaces_plugin_diagnostics_hint() {
     let CommandResult::Message(text) = result else {
         panic!("expected help message");
     };
-    assert!(text.contains("Plugin diagnostics: 1 issue(s) detected (warnings=0, errors=1); run /status for details."));
+    assert!(text.contains("Plugin diagnostics: 1 issue(s) detected (warnings=0, errors=1); run /plugins or /status for details."));
 }
 
 #[tokio::test]
@@ -270,7 +272,7 @@ async fn status_command_reports_plugin_discovery_summary() {
                 version: Some("0.1.0".into()),
                 description: "demo".into(),
                 manifest_path: PathBuf::from("/tmp/project/.claude/plugins/demo/plugin.json"),
-                capabilities: vec!["commands".into(), "hooks".into(), "tools".into()],
+                capabilities: vec![PluginCapability::Commands, PluginCapability::Hooks, PluginCapability::Tools],
                 diagnostics_metadata: Some(PluginDiagnosticsMetadata {
                     homepage: None,
                     docs: Some("https://example.com/docs".into()),
@@ -280,6 +282,13 @@ async fn status_command_reports_plugin_discovery_summary() {
                 commands: vec![metadata_rich_plugin_command("plugin-cmd")],
                 tools: vec![sample_plugin_tool("demo_tool")],
                 hooks: vec![sample_plugin_hook()],
+                governance: PluginGovernanceState::default(),
+                lifecycle_state: PluginLifecycleState::Enabled,
+                activation: PluginActivationSummary {
+                    commands: 1,
+                    tools: 1,
+                    hooks: 1,
+                },
             }],
             diagnostics: vec![PluginDiagnostic {
                 plugin_name: Some("broken-plugin".into()),
@@ -298,7 +307,7 @@ async fn status_command_reports_plugin_discovery_summary() {
             version: Some("0.1.0".into()),
             description: "demo".into(),
             manifest_path: PathBuf::from("/tmp/project/.claude/plugins/demo/plugin.json"),
-            capabilities: vec!["commands".into(), "hooks".into(), "tools".into()],
+            capabilities: vec![PluginCapability::Commands, PluginCapability::Hooks, PluginCapability::Tools],
             diagnostics_metadata: Some(PluginDiagnosticsMetadata {
                 homepage: None,
                 docs: Some("https://example.com/docs".into()),
@@ -308,6 +317,13 @@ async fn status_command_reports_plugin_discovery_summary() {
             commands: vec![metadata_rich_plugin_command("plugin-cmd")],
             tools: vec![sample_plugin_tool("demo_tool")],
             hooks: vec![sample_plugin_hook()],
+                governance: PluginGovernanceState::default(),
+                lifecycle_state: PluginLifecycleState::Enabled,
+                activation: PluginActivationSummary {
+                    commands: 1,
+                    tools: 1,
+                    hooks: 1,
+                },
         }],
         diagnostics: vec![PluginDiagnostic {
             plugin_name: Some("broken-plugin".into()),
@@ -343,14 +359,20 @@ async fn status_command_reports_plugin_discovery_summary() {
     assert!(text.contains("- contract: prompt=1, immediate=2, sensitive=1, model_invocation_disabled=1"));
     assert!(text.contains("- plugin_discovery: directory (root=/tmp/project/.claude/plugins)"));
     assert!(text.contains("- discovered_plugins: 1"));
+    assert!(text.contains("- enabled_plugins: 1"));
+    assert!(text.contains("- disabled_plugins: 0"));
+    assert!(text.contains("- error_plugins: 0"));
     assert!(text.contains("- discovered_plugin_commands: 1"));
     assert!(text.contains("- discovered_plugin_tools: 1"));
     assert!(text.contains("- discovered_plugin_hooks: 1"));
+    assert!(text.contains("- active_plugin_commands: 1"));
+    assert!(text.contains("- active_plugin_tools: 1"));
+    assert!(text.contains("- active_plugin_hooks: 1"));
     assert!(text.contains("- registered_plugin_commands: 1"));
     assert!(text.contains("- registered_plugin_tools: 1"));
     assert!(text.contains("- diagnostics: total=1, info=0, warnings=0, errors=1"));
     assert!(text.contains("- plugin_inventory:"));
-    assert!(text.contains("  - demo-plugin v0.1.0 — commands=1, hooks=1, tools=1, capabilities=commands,hooks,tools (manifest=/tmp/project/.claude/plugins/demo/plugin.json)"));
+    assert!(text.contains("  - demo-plugin v0.1.0 — state=enabled, enabled=yes, active(commands=1, hooks=1, tools=1), discovered(commands=1, hooks=1, tools=1), capabilities=commands,hooks,tools, governance_source=default, disable_reason=none (manifest=/tmp/project/.claude/plugins/demo/plugin.json)"));
     assert!(text.contains("- diagnostic_preview:"));
     assert!(text.contains("[error:plugin-manifest-load-failed] plugin=broken-plugin; manifest=/tmp/project/.claude/plugins/broken/plugin.json; bad plugin manifest"));
 
@@ -361,6 +383,137 @@ async fn status_command_reports_plugin_discovery_summary() {
     assert!(rendered.contains("Status"));
     assert!(rendered.contains("Plugins:"));
     assert!(rendered.contains("registered_plugin_tools: 1"));
+}
+
+#[tokio::test]
+async fn plugins_command_lists_show_details_and_persists_governance_state() {
+    let root = unique_temp_path("rust-agent-plugins-command");
+    let plugin_manifest_path = root.join(".claude").join("plugins").join("demo").join("plugin.json");
+    fs::create_dir_all(plugin_manifest_path.parent().expect("plugin parent should exist"))
+        .expect("plugin dir should exist");
+    fs::write(&plugin_manifest_path, "{}") .expect("plugin manifest placeholder should be written");
+
+    let plugin = PluginDefinition {
+        name: "demo-plugin".into(),
+        version: Some("0.1.0".into()),
+        description: "demo plugin".into(),
+        manifest_path: plugin_manifest_path.clone(),
+        capabilities: vec![PluginCapability::Commands, PluginCapability::Tools, PluginCapability::Hooks],
+        diagnostics_metadata: Some(PluginDiagnosticsMetadata {
+            homepage: Some("https://example.com/home".into()),
+            docs: Some("https://example.com/docs".into()),
+            issues: Some("https://example.com/issues".into()),
+            support_level: Some("community".into()),
+        }),
+        commands: vec![sample_plugin_command("plugin-cmd")],
+        tools: vec![sample_plugin_tool("demo_tool")],
+        hooks: vec![sample_plugin_hook()],
+        governance: PluginGovernanceState::default(),
+        lifecycle_state: PluginLifecycleState::Enabled,
+        activation: PluginActivationSummary {
+            commands: 1,
+            tools: 1,
+            hooks: 1,
+        },
+    };
+    let plugin_load_result = Arc::new(PluginLoadResult {
+        root: root.join(".claude").join("plugins"),
+        source: PluginConfigSource::Directory,
+        plugins: vec![plugin],
+        diagnostics: vec![PluginDiagnostic {
+            plugin_name: Some("demo-plugin".into()),
+            manifest_path: Some(plugin_manifest_path.clone()),
+            severity: PluginDiagnosticSeverity::Warning,
+            code: "plugin-capability-tools-empty".into(),
+            message: "plugin declares tools capability but no valid tools were loaded".into(),
+        }],
+    });
+    let registry = Arc::new(CommandRegistry::new().register(Arc::new(PluginsCommand)));
+    let mut app_state = test_app_state(Some(registry), None, Some(plugin_load_result), None);
+    app_state.session = Some(SessionSnapshot {
+        session_id: SessionId("plugin-test-session".into()),
+        surface: InteractionSurface::Cli,
+        session_mode: SessionMode::Interactive,
+        cwd: root.display().to_string(),
+        last_turn_at: None,
+        prompt_seed: None,
+    });
+
+    let list_result = PluginsCommand
+        .execute(&NormalizedInput::from_raw(InteractionSurface::Cli, "/plugins"), &app_state)
+        .await
+        .expect("plugins list should render");
+    let CommandResult::Message(list_text) = list_result else {
+        panic!("expected plugins list message");
+    };
+    assert!(list_text.contains("Plugins:"));
+    assert!(list_text.contains("- inventory: discovered=1, enabled=1, disabled=0, error=0"));
+    assert!(list_text.contains("demo-plugin v0.1.0 — state=enabled, enabled=yes"));
+
+    let show_result = PluginsCommand
+        .execute(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/plugins show demo-plugin"),
+            &app_state,
+        )
+        .await
+        .expect("plugins show should render");
+    let CommandResult::Message(show_text) = show_result else {
+        panic!("expected plugins show message");
+    };
+    assert!(show_text.contains("Plugin: demo-plugin"));
+    assert!(show_text.contains("- manifest:"));
+    assert!(show_text.contains("- diagnostics_metadata:"));
+    assert!(show_text.contains("https://example.com/docs"));
+
+    let diagnostics_result = PluginsCommand
+        .execute(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/plugins diagnostics demo-plugin"),
+            &app_state,
+        )
+        .await
+        .expect("plugins diagnostics should render");
+    let CommandResult::Message(diagnostics_text) = diagnostics_result else {
+        panic!("expected plugins diagnostics message");
+    };
+    assert!(diagnostics_text.contains("Plugin diagnostics for demo-plugin:"));
+    assert!(diagnostics_text.contains("plugin-capability-tools-empty"));
+
+    let disable_result = PluginsCommand
+        .execute(
+            &NormalizedInput::from_raw(
+                InteractionSurface::Cli,
+                "/plugins disable demo-plugin maintenance-window",
+            ),
+            &app_state,
+        )
+        .await
+        .expect("plugins disable should persist state");
+    let CommandResult::Message(disable_text) = disable_result else {
+        panic!("expected plugins disable message");
+    };
+    assert!(disable_text.contains("Disabled plugin demo-plugin"));
+    let persisted = fs::read_to_string(root.join(".claude").join("plugin-state.json"))
+        .expect("plugin state file should exist");
+    assert!(persisted.contains("\"name\": \"demo-plugin\""));
+    assert!(persisted.contains("\"enabled\": false"));
+    assert!(persisted.contains("\"reason\": \"maintenance-window\""));
+
+    let enable_result = PluginsCommand
+        .execute(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/plugins enable demo-plugin"),
+            &app_state,
+        )
+        .await
+        .expect("plugins enable should persist state");
+    let CommandResult::Message(enable_text) = enable_result else {
+        panic!("expected plugins enable message");
+    };
+    assert!(enable_text.contains("Enabled plugin demo-plugin"));
+    let persisted = fs::read_to_string(root.join(".claude").join("plugin-state.json"))
+        .expect("plugin state file should exist after enable");
+    assert!(persisted.contains("\"enabled\": true"));
+
+    fs::remove_dir_all(root).expect("plugins command temp dir should be cleaned up");
 }
 
 #[tokio::test]
@@ -477,7 +630,16 @@ fn plugin_loader_loads_inline_and_file_prompts_and_collects_diagnostics() {
     assert_eq!(result.plugins.len(), 1);
     assert_eq!(result.plugins[0].name, "demo-plugin");
     assert_eq!(result.plugins[0].version.as_deref(), Some("0.1.0"));
-    assert_eq!(result.plugins[0].capabilities, vec!["commands", "hooks", "tools"]);
+    assert_eq!(
+        result.plugins[0].capabilities,
+        vec![PluginCapability::Commands, PluginCapability::Hooks, PluginCapability::Tools]
+    );
+    assert_eq!(result.plugins[0].lifecycle_state, PluginLifecycleState::Enabled);
+    assert_eq!(result.plugins[0].governance.source, PluginGovernanceSource::Default);
+    assert!(result.plugins[0].governance.enabled);
+    assert_eq!(result.plugins[0].activation.commands, 2);
+    assert_eq!(result.plugins[0].activation.tools, 1);
+    assert_eq!(result.plugins[0].activation.hooks, 1);
     assert_eq!(result.plugins[0].commands.len(), 2);
     assert_eq!(result.plugins[0].tools.len(), 1);
     assert_eq!(result.plugins[0].hooks.len(), 1);
@@ -488,8 +650,15 @@ fn plugin_loader_loads_inline_and_file_prompts_and_collects_diagnostics() {
     assert!(result.plugins[0].commands[0].is_sensitive);
     assert_eq!(result.plugins[0].commands[1].prompt, "Prompt loaded from file");
     assert_eq!(result.plugins[0].commands[1].availability, CommandAvailability::CliOnly);
-    assert_eq!(result.diagnostics.len(), 1);
-    assert_eq!(result.diagnostics[0].code, "plugin-manifest-load-failed");
+    assert_eq!(result.diagnostics.len(), 2);
+    assert!(result
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "plugin-manifest-load-failed"));
+    assert!(result
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "plugin-state-defaults"));
 
     fs::remove_dir_all(root).expect("plugin loader temp dir should be cleaned up");
 }
@@ -504,11 +673,18 @@ fn plugin_runtime_augments_hook_and_tool_registries() {
             version: Some("0.1.0".into()),
             description: "demo".into(),
             manifest_path: PathBuf::from("/tmp/project/.claude/plugins/demo/plugin.json"),
-            capabilities: vec!["commands".into(), "hooks".into(), "tools".into()],
+            capabilities: vec![PluginCapability::Commands, PluginCapability::Hooks, PluginCapability::Tools],
             diagnostics_metadata: None,
             commands: vec![sample_plugin_command("plugin-cmd")],
             tools: vec![sample_plugin_tool("demo_tool")],
             hooks: vec![sample_plugin_hook()],
+                governance: PluginGovernanceState::default(),
+                lifecycle_state: PluginLifecycleState::Enabled,
+                activation: PluginActivationSummary {
+                    commands: 1,
+                    tools: 1,
+                    hooks: 1,
+                },
         }],
         diagnostics: vec![],
     };

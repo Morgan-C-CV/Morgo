@@ -3,7 +3,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::hook::registry::HookRegistry;
-use crate::plugins::types::{PluginDiagnostic, PluginDiagnosticSeverity, PluginLoadResult, PluginToolDefinition};
+use crate::plugins::types::{
+    PluginDiagnostic, PluginDiagnosticSeverity, PluginLoadResult, PluginToolDefinition,
+};
 use crate::state::permission_context::ToolPermissionContext;
 use crate::tool::definition::{Tool, ToolCall, ToolMetadata, ToolResult};
 use crate::tool::registry::ToolRegistry;
@@ -15,7 +17,7 @@ pub fn augment_hook_registry_with_plugins(
     for hook in plugin_load_result
         .plugins
         .iter()
-        .flat_map(|plugin| plugin.hooks.iter())
+        .flat_map(|plugin| plugin.active_hooks().into_iter())
     {
         registry = registry.register_rule(hook.to_rule());
     }
@@ -31,7 +33,7 @@ pub fn augment_tool_registry_with_plugins(
     for tool in plugin_load_result
         .plugins
         .iter()
-        .flat_map(|plugin| plugin.tools.iter().cloned())
+        .flat_map(|plugin| plugin.active_tools().into_iter())
     {
         match PluginPromptTool::new(tool.clone()) {
             Ok(tool) => {

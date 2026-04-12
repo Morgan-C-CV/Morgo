@@ -26,6 +26,7 @@ use help::HelpCommand;
 use mcp::McpCommand;
 use permissions::PermissionsCommand;
 use plan::PlanCommand;
+use plugins::PluginsCommand;
 use resume::ResumeCommand;
 use session::SessionCommand;
 use skills::SkillsCommand;
@@ -42,6 +43,7 @@ pub fn register_builtin_commands(registry: CommandRegistry) -> CommandRegistry {
         .register(Arc::new(DoctorCommand))
         .register(Arc::new(PermissionsCommand))
         .register(Arc::new(PlanCommand))
+        .register(Arc::new(PluginsCommand))
         .register(Arc::new(ResumeCommand))
         .register(Arc::new(SessionCommand))
         .register(Arc::new(SkillsCommand))

@@ -5,7 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use rust_agent::bootstrap::{BootstrapCli, ClientType, InteractionSurface, RuntimeBootstrap, SessionMode, SessionSource};
 use rust_agent::command::builtin::help::HelpCommand;
-use rust_agent::command::builtin::plugins::PluginSlashCommand;
+use rust_agent::command::builtin::plugins::{PluginSlashCommand, PluginsCommand};
 use rust_agent::command::builtin::status::StatusCommand;
 use rust_agent::command::registry::CommandRegistry;
 use rust_agent::command::types::{Command, CommandResult};
@@ -113,9 +113,13 @@ async fn plugin_runtime_exposes_command_hook_tool_and_diagnostics() {
             .plugins
             .iter()
             .flat_map(|plugin| plugin.commands.iter().cloned())
-            .fold(CommandRegistry::new().register(Arc::new(HelpCommand)).register(Arc::new(StatusCommand)), |registry, command| {
-                registry.register(Arc::new(PluginSlashCommand::new(command)))
-            }),
+            .fold(
+                CommandRegistry::new()
+                    .register(Arc::new(HelpCommand))
+                    .register(Arc::new(StatusCommand))
+                    .register(Arc::new(PluginsCommand)),
+                |registry, command| registry.register(Arc::new(PluginSlashCommand::new(command))),
+            ),
     );
     let permission_context = ToolPermissionContext::new(PermissionMode::Default)
         .with_task_manager(Arc::new(TaskManager::default()));
@@ -150,6 +154,10 @@ async fn plugin_runtime_exposes_command_hook_tool_and_diagnostics() {
         .execute(&NormalizedInput::from_raw(InteractionSurface::Cli, "/status"), &app_state)
         .await
         .expect("status should render");
+    let plugins = PluginsCommand
+        .execute(&NormalizedInput::from_raw(InteractionSurface::Cli, "/plugins"), &app_state)
+        .await
+        .expect("plugins should render");
 
     let CommandResult::Message(help_text) = help else {
         panic!("expected help message");
@@ -157,11 +165,17 @@ async fn plugin_runtime_exposes_command_hook_tool_and_diagnostics() {
     let CommandResult::Message(status_text) = status else {
         panic!("expected status message");
     };
+    let CommandResult::Message(plugins_text) = plugins else {
+        panic!("expected plugins message");
+    };
 
     assert!(help_text.contains("/demo-plugin-cmd — Demo plugin command"));
-    assert!(status_text.contains("demo-plugin v0.1.0 — commands=1, hooks=1, tools=1, capabilities=commands,hooks,tools"));
+    assert!(help_text.contains("/plugins — Inspect plugin inventory, diagnostics, and governance state"));
+    assert!(status_text.contains("demo-plugin v0.1.0 — state=enabled, enabled=yes, active(commands=1, hooks=1, tools=1), discovered(commands=1, hooks=1, tools=1), capabilities=commands,hooks,tools"));
     assert!(status_text.contains("- discovered_plugin_tools: 1"));
     assert!(status_text.contains("- discovered_plugin_hooks: 1"));
+    assert!(plugins_text.contains("Plugins:"));
+    assert!(plugins_text.contains("demo-plugin v0.1.0 — state=enabled, enabled=yes"));
 
     std::env::set_current_dir(previous_cwd).expect("should restore cwd");
     fs::remove_dir_all(root).expect("temp plugin root should be removed");

@@ -104,7 +104,7 @@ impl Command for HelpCommand {
                     .diagnostic_count_for_severity(crate::plugins::types::PluginDiagnosticSeverity::Error);
                 lines.push(String::new());
                 lines.push(format!(
-                    "Plugin diagnostics: {} issue(s) detected (warnings={}, errors={}); run /status for details.",
+                    "Plugin diagnostics: {} issue(s) detected (warnings={}, errors={}); run /plugins or /status for details.",
                     plugin_load_result.diagnostics.len(),
                     warning_count,
                     error_count

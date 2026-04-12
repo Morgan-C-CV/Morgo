@@ -3,16 +3,32 @@ use std::path::{Path, PathBuf};
 
 use crate::command::types::CommandAvailability;
 use crate::hook::registry::HookEventMatcher;
+use crate::plugins::state::load_plugin_state_with_diagnostics;
 use crate::plugins::types::{
-    PluginCommandDefinition, PluginConfigSource, PluginDefinition, PluginDiagnostic,
-    PluginDiagnosticSeverity, PluginDiagnosticsMetadata, PluginHookDefinition, PluginHookManifest,
-    PluginLoadResult, PluginManifest, PluginToolDefinition,
+    PluginActivationSummary, PluginCapability, PluginConfigSource, PluginDefinition,
+    PluginDiagnostic, PluginDiagnosticSeverity, PluginDiagnosticsMetadata, PluginGovernanceState,
+    PluginHookDefinition, PluginHookManifest, PluginLifecycleState, PluginLoadResult,
+    PluginManifest, PluginToolDefinition,
 };
+use crate::plugins::types::PluginCommandDefinition;
 
 pub fn load_plugins(cwd: &Path) -> PluginLoadResult {
     let root = cwd.join(".claude").join("plugins");
     let mut diagnostics = Vec::new();
     let mut plugins = Vec::new();
+    let governance_state = load_plugin_state_with_diagnostics(cwd);
+    diagnostics.extend(
+        governance_state
+            .diagnostics
+            .into_iter()
+            .map(|message| PluginDiagnostic {
+                plugin_name: None,
+                manifest_path: Some(governance_state.path.clone()),
+                severity: PluginDiagnosticSeverity::Info,
+                code: format!("plugin-state-{}", governance_state.source.as_str()),
+                message,
+            }),
+    );
 
     if !root.exists() {
         return PluginLoadResult {
@@ -23,7 +39,7 @@ pub fn load_plugins(cwd: &Path) -> PluginLoadResult {
         };
     }
 
-    visit_plugin_dirs(&root, &mut plugins, &mut diagnostics);
+    visit_plugin_dirs(&root, &governance_state.states, &mut plugins, &mut diagnostics);
     PluginLoadResult {
         root,
         source: PluginConfigSource::Directory,
@@ -34,6 +50,7 @@ pub fn load_plugins(cwd: &Path) -> PluginLoadResult {
 
 fn visit_plugin_dirs(
     dir: &Path,
+    governance_states: &std::collections::BTreeMap<String, PluginGovernanceState>,
     plugins: &mut Vec<PluginDefinition>,
     diagnostics: &mut Vec<PluginDiagnostic>,
 ) {
@@ -56,7 +73,7 @@ fn visit_plugin_dirs(
         if path.is_dir() {
             let manifest = path.join("plugin.json");
             if manifest.is_file() {
-                match load_plugin_manifest(&manifest) {
+                match load_plugin_manifest(&manifest, governance_states) {
                     Ok((plugin, plugin_diagnostics)) => {
                         diagnostics.extend(plugin_diagnostics);
                         plugins.push(plugin);
@@ -70,12 +87,15 @@ fn visit_plugin_dirs(
                     }),
                 }
             }
-            visit_plugin_dirs(&path, plugins, diagnostics);
+            visit_plugin_dirs(&path, governance_states, plugins, diagnostics);
         }
     }
 }
 
-fn load_plugin_manifest(path: &PathBuf) -> anyhow::Result<(PluginDefinition, Vec<PluginDiagnostic>)> {
+fn load_plugin_manifest(
+    path: &PathBuf,
+    governance_states: &std::collections::BTreeMap<String, PluginGovernanceState>,
+) -> anyhow::Result<(PluginDefinition, Vec<PluginDiagnostic>)> {
     let raw = fs::read_to_string(path)?;
     let manifest: PluginManifest = serde_json::from_str(&raw)?;
     let manifest_dir = path.parent().unwrap_or_else(|| Path::new("."));
@@ -83,6 +103,24 @@ fn load_plugin_manifest(path: &PathBuf) -> anyhow::Result<(PluginDefinition, Vec
     let mut commands = Vec::new();
     let mut tools = Vec::new();
     let mut hooks = Vec::new();
+    let mut capabilities = Vec::new();
+    let governance = governance_states
+        .get(&manifest.name)
+        .cloned()
+        .unwrap_or_default();
+
+    for capability in &manifest.capabilities {
+        match parse_plugin_capability(capability) {
+            Some(capability) => capabilities.push(capability),
+            None => diagnostics.push(plugin_diagnostic(
+                Some(manifest.name.as_str()),
+                Some(path),
+                PluginDiagnosticSeverity::Warning,
+                "plugin-capability-unknown",
+                format!("unknown plugin capability declared: {capability}"),
+            )),
+        }
+    }
 
     for command in manifest.commands {
         let prompt = match load_prompt(&command.prompt, &command.prompt_file, manifest_dir) {
@@ -162,19 +200,38 @@ fn load_plugin_manifest(path: &PathBuf) -> anyhow::Result<(PluginDefinition, Vec
         }
     }
 
-    for capability in &manifest.capabilities {
-        if !matches!(capability.as_str(), "commands" | "tools" | "hooks") {
-            diagnostics.push(plugin_diagnostic(
-                Some(manifest.name.as_str()),
-                Some(path),
-                PluginDiagnosticSeverity::Warning,
-                "plugin-capability-unknown",
-                format!("unknown plugin capability declared: {capability}"),
-            ));
-        }
+    if !commands.is_empty() && !capabilities.contains(&PluginCapability::Commands) {
+        diagnostics.push(plugin_diagnostic(
+            Some(manifest.name.as_str()),
+            Some(path),
+            PluginDiagnosticSeverity::Warning,
+            "plugin-capability-commands-missing",
+            "plugin defines commands but does not declare commands capability; commands will remain inactive"
+                .into(),
+        ));
+    }
+    if !tools.is_empty() && !capabilities.contains(&PluginCapability::Tools) {
+        diagnostics.push(plugin_diagnostic(
+            Some(manifest.name.as_str()),
+            Some(path),
+            PluginDiagnosticSeverity::Warning,
+            "plugin-capability-tools-missing",
+            "plugin defines tools but does not declare tools capability; tools will remain inactive"
+                .into(),
+        ));
+    }
+    if !hooks.is_empty() && !capabilities.contains(&PluginCapability::Hooks) {
+        diagnostics.push(plugin_diagnostic(
+            Some(manifest.name.as_str()),
+            Some(path),
+            PluginDiagnosticSeverity::Warning,
+            "plugin-capability-hooks-missing",
+            "plugin defines hooks but does not declare hooks capability; hooks will remain inactive"
+                .into(),
+        ));
     }
 
-    if manifest.capabilities.iter().any(|capability| capability == "commands") && commands.is_empty() {
+    if capabilities.contains(&PluginCapability::Commands) && commands.is_empty() {
         diagnostics.push(plugin_diagnostic(
             Some(manifest.name.as_str()),
             Some(path),
@@ -183,7 +240,7 @@ fn load_plugin_manifest(path: &PathBuf) -> anyhow::Result<(PluginDefinition, Vec
             "plugin declares commands capability but no valid commands were loaded".into(),
         ));
     }
-    if manifest.capabilities.iter().any(|capability| capability == "tools") && tools.is_empty() {
+    if capabilities.contains(&PluginCapability::Tools) && tools.is_empty() {
         diagnostics.push(plugin_diagnostic(
             Some(manifest.name.as_str()),
             Some(path),
@@ -192,7 +249,7 @@ fn load_plugin_manifest(path: &PathBuf) -> anyhow::Result<(PluginDefinition, Vec
             "plugin declares tools capability but no valid tools were loaded".into(),
         ));
     }
-    if manifest.capabilities.iter().any(|capability| capability == "hooks") && hooks.is_empty() {
+    if capabilities.contains(&PluginCapability::Hooks) && hooks.is_empty() {
         diagnostics.push(plugin_diagnostic(
             Some(manifest.name.as_str()),
             Some(path),
@@ -203,21 +260,34 @@ fn load_plugin_manifest(path: &PathBuf) -> anyhow::Result<(PluginDefinition, Vec
     }
 
     let diagnostics_metadata = manifest.diagnostics.map(PluginDiagnosticsMetadata::from);
+    let lifecycle_state = if !governance.enabled {
+        PluginLifecycleState::Disabled
+    } else if diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.severity == PluginDiagnosticSeverity::Error)
+    {
+        PluginLifecycleState::Error
+    } else {
+        PluginLifecycleState::Enabled
+    };
 
-    Ok((
-        PluginDefinition {
-            name: manifest.name,
-            version: manifest.version,
-            description: manifest.description,
-            manifest_path: path.clone(),
-            capabilities: manifest.capabilities,
-            diagnostics_metadata,
-            commands,
-            tools,
-            hooks,
-        },
-        diagnostics,
-    ))
+    let mut plugin = PluginDefinition {
+        name: manifest.name,
+        version: manifest.version,
+        description: manifest.description,
+        manifest_path: path.clone(),
+        capabilities,
+        diagnostics_metadata,
+        commands,
+        tools,
+        hooks,
+        governance,
+        lifecycle_state,
+        activation: PluginActivationSummary::default(),
+    };
+    plugin.refresh_activation_summary();
+
+    Ok((plugin, diagnostics))
 }
 
 fn normalize_hook_definition(
@@ -282,6 +352,15 @@ fn parse_hook_event_matcher(value: &str) -> Option<HookEventMatcher> {
         "stop" => Some(HookEventMatcher::Stop),
         "subagentstop" | "subagent_stop" => Some(HookEventMatcher::SubagentStop),
         "notification" => Some(HookEventMatcher::Notification),
+        _ => None,
+    }
+}
+
+fn parse_plugin_capability(value: &str) -> Option<PluginCapability> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "commands" => Some(PluginCapability::Commands),
+        "tools" => Some(PluginCapability::Tools),
+        "hooks" => Some(PluginCapability::Hooks),
         _ => None,
     }
 }
