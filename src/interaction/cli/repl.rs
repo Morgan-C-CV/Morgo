@@ -166,17 +166,17 @@ async fn collect_stream_messages(
             }
             EngineEvent::Transition(transition) => {
                 runtime_events.push(CliRuntimeEvent::Transition {
-                    text: format!("{:?}", transition),
+                    text: transition.as_str().to_string(),
                 });
             }
             EngineEvent::Terminal(terminal) => {
                 runtime_events.push(CliRuntimeEvent::Terminal {
-                    text: format!("{:?}", terminal),
+                    text: terminal.as_str().to_string(),
                 });
             }
             EngineEvent::SessionMilestoneWritten(milestone) => {
                 runtime_events.push(CliRuntimeEvent::SessionMilestone {
-                    text: format!("{:?}", milestone),
+                    text: milestone.as_str().to_string(),
                 });
             }
         }

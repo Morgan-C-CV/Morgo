@@ -3,6 +3,7 @@ use rust_agent::interaction::cli::renderer::render_turn_output;
 use rust_agent::interaction::cli::repl::{CliDisplayEvent, CliRuntimeEvent, CliTurnOutput};
 use rust_agent::interaction::dispatcher::NotificationDispatcher;
 use rust_agent::interaction::notification::{Notification, NotificationTarget, NotificationType};
+use rust_agent::interaction::remote::{RemoteEventEnvelope, RemoteEventPayload};
 use rust_agent::interaction::telegram::binding::{SessionBinding, TelegramDeliveryTarget};
 use rust_agent::interaction::telegram::gateway::TelegramGateway;
 use rust_agent::task::types::{TaskEvent, TaskOwner, TaskStatus};
@@ -125,6 +126,38 @@ fn cli_renderer_renders_approval_and_tool_result_panels() {
     assert!(rendered.contains("Tool: Read"));
     assert!(rendered.contains("line one"));
     assert!(rendered.contains("line two"));
+}
+
+#[test]
+fn remote_event_envelope_preserves_structured_task_payload() {
+    let envelope = RemoteEventEnvelope::from(CliDisplayEvent::TaskEvent(TaskEvent {
+        owner: TaskOwner {
+            session_id: "session-1".into(),
+            surface: InteractionSurface::Remote,
+        },
+        target_task_id: Some("task-1".into()),
+        task_id: "task-1".into(),
+        status: TaskStatus::Completed,
+        summary: "demo task".into(),
+        result: "Task completed".into(),
+        next_action: "inspect task output for task-1".into(),
+        worker_role: Some(rust_agent::state::app_state::WorkerRole::Verify),
+        orchestration_group_id: Some("group-1".into()),
+        phase: Some(rust_agent::task::types::WorkerPhase::Verify),
+        validation_state: Some(rust_agent::task::types::ValidationState::Verified),
+        output_file: "/tmp/task-1.log".into(),
+    }));
+
+    assert_eq!(envelope.event_type, "task_update");
+    assert!(matches!(
+        envelope.payload,
+        RemoteEventPayload::TaskUpdate(task)
+            if task.task_id == "task-1"
+                && task.status == "completed"
+                && task.worker_role == Some("verify")
+                && task.phase == Some("verify")
+                && task.validation_state == Some("verified")
+    ));
 }
 
 #[test]

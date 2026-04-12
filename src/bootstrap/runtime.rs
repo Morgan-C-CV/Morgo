@@ -21,7 +21,7 @@ use crate::hook::registry::{HookEvent, load_hook_registry};
 use crate::interaction::cli::renderer::{render_output, render_turn_output};
 use crate::interaction::cli::repl::handle_cli_input;
 use crate::interaction::dispatcher::NotificationDispatcher;
-use crate::interaction::remote::{RemoteRequest, handle_remote_request};
+use crate::interaction::remote::{RemoteRequest, handle_remote_request, render_remote_response_debug};
 use crate::interaction::router::CommandRouter;
 use crate::interaction::telegram::gateway::TelegramGateway;
 use crate::plan::manager::PlanManager;
@@ -334,9 +334,7 @@ impl RuntimeBootstrap {
                     },
                 )
                 .await?;
-                let mut rendered = vec![response.primary_text];
-                rendered.extend(response.events);
-                println!("{}", render_output(&rendered.join("\n")));
+                println!("{}", render_output(&render_remote_response_debug(&response)));
             } else {
                 let output = handle_cli_input(&router, &engine, &app_state, prompt.clone()).await?;
                 println!("{}", render_turn_output(&output));

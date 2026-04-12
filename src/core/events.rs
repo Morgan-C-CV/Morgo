@@ -9,6 +9,17 @@ pub enum SessionMilestone {
     TurnCompleted,
 }
 
+impl SessionMilestone {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::UserInputCommitted => "user_input_committed",
+            Self::AssistantMessageCommitted => "assistant_message_committed",
+            Self::ToolResultCommitted => "tool_result_committed",
+            Self::TurnCompleted => "turn_completed",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EngineEvent {
     AssistantDelta(String),

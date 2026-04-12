@@ -74,6 +74,20 @@ pub enum Terminal {
     ModelError(String),
 }
 
+impl Terminal {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::MaxTurns { .. } => "max_turns",
+            Self::MaxBudget { .. } => "max_budget",
+            Self::StopHookPrevented => "stop_hook_prevented",
+            Self::AbortedStreaming => "aborted_streaming",
+            Self::AbortedTools => "aborted_tools",
+            Self::ModelError(_) => "model_error",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Continue {
     NextTurn,
@@ -85,6 +99,22 @@ pub enum Continue {
     StopHookBlocking,
     TokenBudgetContinuation,
     ModelFallbackRetry,
+}
+
+impl Continue {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::NextTurn => "next_turn",
+            Self::ToolUseFollowUp => "tool_use_follow_up",
+            Self::MaxOutputTokensEscalate => "max_output_tokens_escalate",
+            Self::MaxOutputTokensRecovery => "max_output_tokens_recovery",
+            Self::CollapseDrainRetry => "collapse_drain_retry",
+            Self::ReactiveCompactRetry => "reactive_compact_retry",
+            Self::StopHookBlocking => "stop_hook_blocking",
+            Self::TokenBudgetContinuation => "token_budget_continuation",
+            Self::ModelFallbackRetry => "model_fallback_retry",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
