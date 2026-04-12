@@ -10,6 +10,8 @@ pub struct TaskNotification {
     pub result: String,
     pub next_action: String,
     pub worker_role: Option<crate::state::app_state::WorkerRole>,
+    pub phase: Option<crate::task::types::WorkerPhase>,
+    pub validation_state: Option<crate::task::types::ValidationState>,
     pub output_file: String,
 }
 
@@ -22,6 +24,8 @@ impl TaskNotification {
             result: event.result.clone(),
             next_action: event.next_action.clone(),
             worker_role: event.worker_role,
+            phase: event.phase,
+            validation_state: event.validation_state,
             output_file: event.output_file.clone(),
         }
     }
@@ -39,6 +43,8 @@ impl TaskNotification {
             result: self.result.clone(),
             next_action: self.next_action.clone(),
             worker_role: self.worker_role,
+            phase: self.phase,
+            validation_state: self.validation_state,
             output_file: self.output_file.clone(),
         }
         .format_notification()
@@ -75,6 +81,20 @@ pub fn notification_to_task_notification(notification: &Notification) -> Option<
             "research" => Some(crate::state::app_state::WorkerRole::Research),
             "implement" => Some(crate::state::app_state::WorkerRole::Implement),
             "verify" => Some(crate::state::app_state::WorkerRole::Verify),
+            _ => None,
+        }),
+        phase: notification.phase.as_deref().and_then(|phase| match phase {
+            "research" => Some(crate::task::types::WorkerPhase::Research),
+            "implement" => Some(crate::task::types::WorkerPhase::Implement),
+            "verify" => Some(crate::task::types::WorkerPhase::Verify),
+            _ => None,
+        }),
+        validation_state: notification.validation_state.as_deref().and_then(|state| match state {
+            "not_needed" => Some(crate::task::types::ValidationState::NotNeeded),
+            "pending_verification" => Some(crate::task::types::ValidationState::PendingVerification),
+            "verified" => Some(crate::task::types::ValidationState::Verified),
+            "verification_failed" => Some(crate::task::types::ValidationState::VerificationFailed),
+            "unverified" => Some(crate::task::types::ValidationState::Unverified),
             _ => None,
         }),
         output_file: notification.output_file.clone().unwrap_or_default(),

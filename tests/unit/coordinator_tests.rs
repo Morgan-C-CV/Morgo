@@ -11,7 +11,7 @@ use rust_agent::interaction::notification::{Notification, NotificationType};
 use rust_agent::interaction::telegram::gateway::TelegramGateway;
 use rust_agent::state::app_state::{AppState, RuntimeRole, WorkerRole};
 use rust_agent::state::permission_context::{PermissionMode, ToolPermissionContext};
-use rust_agent::task::types::{TaskEvent, TaskOwner, TaskStatus};
+use rust_agent::task::types::{TaskEvent, TaskOwner, TaskStatus, ValidationState, WorkerPhase};
 use rust_agent::tool::builtin::agent::AgentTool;
 use rust_agent::tool::builtin::ask_user::AskUserQuestionTool;
 use rust_agent::tool::builtin::file_read::FileReadTool;
@@ -42,6 +42,8 @@ fn worker_notification_formats_as_task_notification_xml() {
         result: "Task completed".into(),
         next_action: "inspect task output for task-7".into(),
         worker_role: None,
+        phase: None,
+        validation_state: None,
         output_file: "/tmp/task-7.log".into(),
     };
 
@@ -63,6 +65,8 @@ fn notification_conversion_preserves_worker_role_and_next_action() {
         status: Some("Completed".into()),
         next_action: Some("inspect task output for task-8".into()),
         worker_role: Some("verify".into()),
+        phase: Some("verify".into()),
+        validation_state: Some("verified".into()),
         output_file: Some("/tmp/task-8.log".into()),
         wake_up: true,
         target: None,
@@ -72,6 +76,8 @@ fn notification_conversion_preserves_worker_role_and_next_action() {
     assert_eq!(converted.task_id, "task-8");
     assert_eq!(converted.next_action, "inspect task output for task-8");
     assert_eq!(converted.worker_role, Some(WorkerRole::Verify));
+    assert_eq!(converted.phase, Some(WorkerPhase::Verify));
+    assert_eq!(converted.validation_state, Some(ValidationState::Verified));
 }
 
 #[test]
@@ -151,6 +157,8 @@ fn task_notification_contract_marks_implement_completion_for_verify_follow_up() 
         result: "Task completed".into(),
         next_action: "dispatch verify worker for task-9".into(),
         worker_role: Some(WorkerRole::Implement),
+        phase: Some(WorkerPhase::Implement),
+        validation_state: Some(ValidationState::PendingVerification),
         output_file: "/tmp/task-9.log".into(),
     };
 
@@ -158,8 +166,12 @@ fn task_notification_contract_marks_implement_completion_for_verify_follow_up() 
     let formatted = notification.format_as_user_message();
 
     assert_eq!(notification.worker_role, Some(WorkerRole::Implement));
+    assert_eq!(notification.phase, Some(WorkerPhase::Implement));
+    assert_eq!(notification.validation_state, Some(ValidationState::PendingVerification));
     assert_eq!(notification.next_action, "dispatch verify worker for task-9");
     assert!(formatted.contains("<worker-role>implement</worker-role>"));
+    assert!(formatted.contains("<phase>implement</phase>"));
+    assert!(formatted.contains("<validation-state>pending_verification</validation-state>"));
     assert!(formatted.contains("<next-action>dispatch verify worker for task-9</next-action>"));
 }
 
@@ -177,6 +189,8 @@ fn task_notification_contract_marks_verify_completion_for_validated_synthesis() 
         result: "Task completed".into(),
         next_action: "synthesize validated result for task-10".into(),
         worker_role: Some(WorkerRole::Verify),
+        phase: Some(WorkerPhase::Verify),
+        validation_state: Some(ValidationState::Verified),
         output_file: "/tmp/task-10.log".into(),
     };
 
@@ -184,8 +198,12 @@ fn task_notification_contract_marks_verify_completion_for_validated_synthesis() 
     let formatted = notification.format_as_user_message();
 
     assert_eq!(notification.worker_role, Some(WorkerRole::Verify));
+    assert_eq!(notification.phase, Some(WorkerPhase::Verify));
+    assert_eq!(notification.validation_state, Some(ValidationState::Verified));
     assert_eq!(notification.next_action, "synthesize validated result for task-10");
     assert!(formatted.contains("<worker-role>verify</worker-role>"));
+    assert!(formatted.contains("<phase>verify</phase>"));
+    assert!(formatted.contains("<validation-state>verified</validation-state>"));
     assert!(formatted.contains("<next-action>synthesize validated result for task-10</next-action>"));
 }
 

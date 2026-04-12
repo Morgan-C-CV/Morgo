@@ -242,6 +242,8 @@ fn task_manager_queues_internal_task_notifications() {
             result: "Task completed".into(),
             next_action: format!("inspect task output for {}", task.id),
             worker_role: None,
+            phase: None,
+            validation_state: None,
             output_file: task.output_file.clone(),
         }
     );

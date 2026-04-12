@@ -943,6 +943,28 @@ fn finalize_with_stop_hook(
     state
         .messages
         .extend(inbox_messages(context, context.agent_id.as_deref()));
+    if matches!(context.app_state.runtime_role, crate::state::app_state::RuntimeRole::Coordinator)
+        && matches!(default_terminal, Terminal::Completed)
+        && context
+            .app_state
+            .permission_context
+            .task_manager
+            .as_ref()
+            .is_some_and(|manager| manager.has_pending_orchestration(&context.app_state.active_session_id))
+    {
+        let gating_message = Message::assistant(
+            "orchestration still pending: wait for grouped research fan-in or verification before final synthesis",
+        );
+        events.push(EngineEvent::MessageCommitted(gating_message.clone()));
+        state.messages.push(gating_message);
+        return QueryLoopResult {
+            state: QueryLoopState::Completed,
+            terminal: Terminal::Completed,
+            messages: state.messages,
+            transition: Some(Continue::NextTurn),
+            events,
+        };
+    }
     let stop_event = if context.is_subagent() {
         HookEvent::SubagentStop
     } else {

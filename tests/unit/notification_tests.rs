@@ -19,6 +19,8 @@ fn dispatcher_records_cli_notifications() {
         status: Some("Completed".into()),
         next_action: Some("inspect task output for task-1".into()),
         worker_role: Some("research".into()),
+        phase: Some("research".into()),
+        validation_state: Some("not_needed".into()),
         output_file: Some("/tmp/task-1.log".into()),
         wake_up: true,
         target: None,
@@ -45,6 +47,8 @@ fn cli_renderer_marks_task_event_lines() {
             result: "Task completed".into(),
             next_action: "inspect task output for task-1".into(),
             worker_role: None,
+            phase: None,
+            validation_state: None,
             output_file: "/tmp/task-1.log".into(),
         })],
     });
@@ -76,6 +80,8 @@ fn cli_renderer_surfaces_implement_verify_and_risk_contract_lines() {
                 result: "Task completed".into(),
                 next_action: "dispatch verify worker for task-2".into(),
                 worker_role: Some(rust_agent::state::app_state::WorkerRole::Implement),
+                phase: Some(rust_agent::task::types::WorkerPhase::Implement),
+                validation_state: Some(rust_agent::task::types::ValidationState::PendingVerification),
                 output_file: "/tmp/task-2.log".into(),
             }),
             CliDisplayEvent::RuntimeEvent(
@@ -112,6 +118,8 @@ fn dispatcher_requires_delivery_ready_binding_for_telegram() {
         status: Some("Completed".into()),
         next_action: Some("inspect task output for task-1".into()),
         worker_role: Some("verify".into()),
+        phase: Some("verify".into()),
+        validation_state: Some("verified".into()),
         output_file: Some("/tmp/task-1.log".into()),
         wake_up: true,
         target: Some(NotificationTarget::Session {
@@ -132,6 +140,8 @@ fn dispatcher_requires_delivery_ready_binding_for_telegram() {
             status: Some("Completed".into()),
             next_action: Some("inspect task output for task-1".into()),
             worker_role: Some("verify".into()),
+            phase: Some("verify".into()),
+            validation_state: Some("verified".into()),
             output_file: Some("/tmp/task-1.log".into()),
             wake_up: true,
             target: Some(NotificationTarget::Telegram(TelegramDeliveryTarget {

@@ -11,6 +11,44 @@ pub enum TaskStatus {
     Killed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkerPhase {
+    Research,
+    Implement,
+    Verify,
+}
+
+impl WorkerPhase {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Research => "research",
+            Self::Implement => "implement",
+            Self::Verify => "verify",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValidationState {
+    NotNeeded,
+    PendingVerification,
+    Verified,
+    VerificationFailed,
+    Unverified,
+}
+
+impl ValidationState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::NotNeeded => "not_needed",
+            Self::PendingVerification => "pending_verification",
+            Self::Verified => "verified",
+            Self::VerificationFailed => "verification_failed",
+            Self::Unverified => "unverified",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskDeliveryState {
     pub notified: bool,
@@ -30,6 +68,10 @@ pub struct TaskRecord {
     pub status: TaskStatus,
     pub owner: TaskOwner,
     pub worker_role: Option<WorkerRole>,
+    pub parent_task_id: Option<String>,
+    pub orchestration_group_id: Option<String>,
+    pub phase: Option<WorkerPhase>,
+    pub validation_state: Option<ValidationState>,
     pub output_file: String,
     pub output_offset: usize,
     pub delivery: TaskDeliveryState,
@@ -51,19 +93,25 @@ pub struct TaskEvent {
     pub result: String,
     pub next_action: String,
     pub worker_role: Option<WorkerRole>,
+    pub phase: Option<WorkerPhase>,
+    pub validation_state: Option<ValidationState>,
     pub output_file: String,
 }
 
 impl TaskEvent {
     pub fn format_notification(&self) -> String {
         format!(
-            "<task-notification>\n<task-id>{}</task-id>\n<status>{:?}</status>\n<summary>{}</summary>\n<result>{}</result>\n<next-action>{}</next-action>\n<worker-role>{}</worker-role>\n</task-notification>",
+            "<task-notification>\n<task-id>{}</task-id>\n<status>{:?}</status>\n<summary>{}</summary>\n<result>{}</result>\n<next-action>{}</next-action>\n<worker-role>{}</worker-role>\n<phase>{}</phase>\n<validation-state>{}</validation-state>\n</task-notification>",
             self.task_id,
             self.status,
             self.summary,
             self.result,
             self.next_action,
-            self.worker_role.map(|role| role.as_str()).unwrap_or("none")
+            self.worker_role.map(|role| role.as_str()).unwrap_or("none"),
+            self.phase.map(|phase| phase.as_str()).unwrap_or("none"),
+            self.validation_state
+                .map(|state| state.as_str())
+                .unwrap_or("none")
         )
     }
 }

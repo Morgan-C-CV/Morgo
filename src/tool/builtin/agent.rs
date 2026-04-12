@@ -28,6 +28,10 @@ struct SpawnAgentRequest {
     max_turns: Option<usize>,
     allowed_tools: Option<Vec<String>>,
     reuse_strategy: ReuseStrategy,
+    parent_task_id: Option<String>,
+    orchestration_group_id: Option<String>,
+    phase: Option<crate::task::types::WorkerPhase>,
+    requires_verification: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,6 +48,10 @@ struct AgentJsonRequest {
     max_turns: Option<usize>,
     allowed_tools: Option<Vec<String>>,
     reuse_strategy: Option<String>,
+    parent_task_id: Option<String>,
+    orchestration_group_id: Option<String>,
+    phase: Option<String>,
+    requires_verification: Option<bool>,
     task_id: Option<String>,
     message: Option<String>,
 }
@@ -92,9 +100,13 @@ impl Tool for AgentTool {
                 let role_label = request.role.as_str().to_string();
                 let task_label = request.task.clone();
                 let action = match request.reuse_strategy {
-                    ReuseStrategy::RunningOnly => {
-                        maybe_reuse_running_task(tasks, &session_id, &request.task, request.role)
-                    }
+                    ReuseStrategy::RunningOnly => maybe_reuse_running_task(
+                        tasks,
+                        &session_id,
+                        &request.task,
+                        request.role,
+                        request.orchestration_group_id.as_deref(),
+                    ),
                     ReuseStrategy::Fresh => None,
                 };
                 if let Some(task_id) = action {
@@ -109,6 +121,15 @@ impl Tool for AgentTool {
                     InteractionSurface::Cli,
                 );
                 tasks.set_worker_role(&task.id, request.role);
+                tasks.set_parent_task_id(&task.id, request.parent_task_id.clone());
+                tasks.set_orchestration_group_id(&task.id, request.orchestration_group_id.clone());
+                tasks.set_phase(&task.id, request.phase);
+                if request.requires_verification {
+                    tasks.set_validation_state(
+                        &task.id,
+                        Some(crate::task::types::ValidationState::PendingVerification),
+                    );
+                }
                 crate::coordinator::mode::set_coordinator_mode(true);
                 launch_agent_task(
                     tasks.clone(),
@@ -200,6 +221,10 @@ fn parse_agent_request(input: &str) -> anyhow::Result<AgentRequest> {
                 max_turns: request.max_turns,
                 allowed_tools: request.allowed_tools,
                 reuse_strategy: parse_reuse_strategy(request.reuse_strategy.as_deref(), role)?,
+                parent_task_id: request.parent_task_id,
+                orchestration_group_id: request.orchestration_group_id,
+                phase: parse_worker_phase(request.phase.as_deref())?,
+                requires_verification: request.requires_verification.unwrap_or(false),
             }));
         }
         anyhow::bail!("agent JSON input must include either task or task_id/message")
@@ -219,6 +244,10 @@ fn parse_agent_request(input: &str) -> anyhow::Result<AgentRequest> {
         max_turns: None,
         allowed_tools: None,
         reuse_strategy: ReuseStrategy::RunningOnly,
+        parent_task_id: None,
+        orchestration_group_id: None,
+        phase: None,
+        requires_verification: false,
     }))
 }
 
@@ -228,6 +257,18 @@ fn parse_worker_role(value: Option<&str>) -> anyhow::Result<WorkerRole> {
         "implement" => Ok(WorkerRole::Implement),
         "verify" => Ok(WorkerRole::Verify),
         other => anyhow::bail!("unknown worker role: {other}"),
+    }
+}
+
+fn parse_worker_phase(
+    value: Option<&str>,
+) -> anyhow::Result<Option<crate::task::types::WorkerPhase>> {
+    match value {
+        Some("research") => Ok(Some(crate::task::types::WorkerPhase::Research)),
+        Some("implement") => Ok(Some(crate::task::types::WorkerPhase::Implement)),
+        Some("verify") => Ok(Some(crate::task::types::WorkerPhase::Verify)),
+        Some(other) => anyhow::bail!("unknown worker phase: {other}"),
+        None => Ok(None),
     }
 }
 
@@ -251,12 +292,19 @@ fn maybe_reuse_running_task(
     session_id: &str,
     task_description: &str,
     worker_role: WorkerRole,
+    orchestration_group_id: Option<&str>,
 ) -> Option<String> {
     tasks.list().into_iter().find_map(|task| {
         let matches_owner = task.owner.session_id == session_id;
         let matches_role = task.worker_role == Some(worker_role);
         let matches_description = task.description == format!("Spawned {} worker for {}", worker_role.as_str(), task_description);
-        if matches_owner && matches_role && matches_description && matches!(task.status, crate::task::types::TaskStatus::Running) {
+        let matches_group = task.orchestration_group_id.as_deref() == orchestration_group_id;
+        if matches_owner
+            && matches_role
+            && matches_description
+            && matches_group
+            && matches!(task.status, crate::task::types::TaskStatus::Running)
+        {
             Some(task.id)
         } else {
             None

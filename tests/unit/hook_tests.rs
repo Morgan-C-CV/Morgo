@@ -136,6 +136,8 @@ fn notification_hook_can_match_typed_payload() {
         status: Some("Completed".into()),
         next_action: Some("inspect task output for task-9".into()),
         worker_role: Some("research".into()),
+        phase: Some("research".into()),
+        validation_state: Some("not_needed".into()),
         output_file: Some("/tmp/task-9.log".into()),
         wake_up: true,
         target: None,
