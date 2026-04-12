@@ -13,8 +13,8 @@ pub struct ToolSearchTool;
 impl Tool for ToolSearchTool {
     fn metadata(&self) -> ToolMetadata {
         ToolMetadata {
-            name: "ToolSearch",
-            description: "Search the available tool catalog",
+            name: "ToolSearch".into(),
+            description: "Search the available tool catalog".into(),
             aliases: &[],
             search_hint: Some("search tool catalog"),
             read_only: true,

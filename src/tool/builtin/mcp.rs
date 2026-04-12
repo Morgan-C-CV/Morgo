@@ -10,8 +10,8 @@ pub struct McpTool;
 impl Tool for McpTool {
     fn metadata(&self) -> ToolMetadata {
         ToolMetadata {
-            name: "Mcp",
-            description: "Interact with configured MCP servers",
+            name: "Mcp".into(),
+            description: "Interact with configured MCP servers".into(),
             aliases: &["MCP"],
             search_hint: Some("model context protocol server tools and resources"),
             read_only: false,

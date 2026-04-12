@@ -9,8 +9,8 @@ pub struct WebSearchTool;
 impl Tool for WebSearchTool {
     fn metadata(&self) -> ToolMetadata {
         ToolMetadata {
-            name: "WebSearch",
-            description: "Search the public web for current information",
+            name: "WebSearch".into(),
+            description: "Search the public web for current information".into(),
             aliases: &[],
             search_hint: Some("search internet or web results"),
             read_only: true,

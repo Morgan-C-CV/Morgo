@@ -67,7 +67,7 @@ impl CommandRouter {
                         metadata.name
                     ));
                 }
-                RouteDecision::ExecuteCommand(metadata.name.to_string())
+                RouteDecision::ExecuteCommand(metadata.name)
             }
             None => RouteDecision::ContinueToQueryWithPrompt(input.raw.clone()),
         }

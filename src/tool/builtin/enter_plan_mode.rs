@@ -9,8 +9,8 @@ pub struct EnterPlanModeTool;
 impl Tool for EnterPlanModeTool {
     fn metadata(&self) -> ToolMetadata {
         ToolMetadata {
-            name: "EnterPlanMode",
-            description: "Request plan mode before a non-trivial implementation task",
+            name: "EnterPlanMode".into(),
+            description: "Request plan mode before a non-trivial implementation task".into(),
             aliases: &[],
             search_hint: Some("enter planning mode before implementation"),
             read_only: false,

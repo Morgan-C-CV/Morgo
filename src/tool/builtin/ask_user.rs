@@ -9,8 +9,8 @@ pub struct AskUserQuestionTool;
 impl Tool for AskUserQuestionTool {
     fn metadata(&self) -> ToolMetadata {
         ToolMetadata {
-            name: "AskUserQuestion",
-            description: "Ask the user a structured follow-up question",
+            name: "AskUserQuestion".into(),
+            description: "Ask the user a structured follow-up question".into(),
             aliases: &["AskUser"],
             search_hint: Some("ask user clarification question interactively"),
             read_only: false,

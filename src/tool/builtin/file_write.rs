@@ -26,8 +26,8 @@ fn parse_input(call: &ToolCall) -> anyhow::Result<WriteInput> {
 impl Tool for FileWriteTool {
     fn metadata(&self) -> ToolMetadata {
         ToolMetadata {
-            name: "Write",
-            description: "Write file contents to disk",
+            name: "Write".into(),
+            description: "Write file contents to disk".into(),
             aliases: &["FileWrite"],
             search_hint: Some("write or create file on disk"),
             read_only: false,

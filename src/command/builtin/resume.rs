@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 
 use crate::command::types::{
-    Command, CommandAvailability, CommandMetadata, CommandResult, CommandType,
+    Command, CommandAvailability, CommandMetadata, CommandResult, CommandSource, CommandType,
 };
 use crate::interaction::envelope::NormalizedInput;
 use crate::state::app_state::AppState;
@@ -12,11 +12,13 @@ pub struct ResumeCommand;
 impl Command for ResumeCommand {
     fn metadata(&self) -> CommandMetadata {
         CommandMetadata {
-            name: "resume",
-            description: "Resume a previous conversation",
+            name: "resume".into(),
+            description: "Resume a previous conversation".into(),
+            source: CommandSource::Builtin,
+            category: "core".into(),
             command_type: CommandType::Local,
             availability: CommandAvailability::Everywhere,
-            aliases: &["continue"],
+            aliases: vec!["continue".into()],
             is_hidden: false,
             disable_model_invocation: false,
             immediate: true,

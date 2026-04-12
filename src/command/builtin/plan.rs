@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 
 use crate::command::types::{
-    Command, CommandAvailability, CommandMetadata, CommandResult, CommandType,
+    Command, CommandAvailability, CommandMetadata, CommandResult, CommandSource, CommandType,
 };
 use crate::interaction::envelope::NormalizedInput;
 use crate::state::app_state::AppState;
@@ -13,11 +13,13 @@ pub struct PlanCommand;
 impl Command for PlanCommand {
     fn metadata(&self) -> CommandMetadata {
         CommandMetadata {
-            name: "plan",
-            description: "Enable plan mode or view the current session plan",
+            name: "plan".into(),
+            description: "Enable plan mode or view the current session plan".into(),
+            source: CommandSource::Builtin,
+            category: "orchestration".into(),
             command_type: CommandType::Local,
             availability: CommandAvailability::Everywhere,
-            aliases: &[],
+            aliases: Vec::new(),
             is_hidden: false,
             disable_model_invocation: false,
             immediate: false,

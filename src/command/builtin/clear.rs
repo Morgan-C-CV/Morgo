@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 
 use crate::command::types::{
-    Command, CommandAvailability, CommandMetadata, CommandResult, CommandType,
+    Command, CommandAvailability, CommandMetadata, CommandResult, CommandSource, CommandType,
 };
 use crate::interaction::envelope::NormalizedInput;
 use crate::state::app_state::AppState;
@@ -12,11 +12,13 @@ pub struct ClearCommand;
 impl Command for ClearCommand {
     fn metadata(&self) -> CommandMetadata {
         CommandMetadata {
-            name: "clear",
-            description: "Clear conversation history and free up context",
+            name: "clear".into(),
+            description: "Clear conversation history and free up context".into(),
+            source: CommandSource::Builtin,
+            category: "core".into(),
             command_type: CommandType::Local,
             availability: CommandAvailability::Everywhere,
-            aliases: &["c", "reset", "new"],
+            aliases: vec!["c".into(), "reset".into(), "new".into()],
             is_hidden: false,
             disable_model_invocation: false,
             immediate: false,

@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 
 use crate::command::types::{
-    Command, CommandAvailability, CommandMetadata, CommandResult, CommandType,
+    Command, CommandAvailability, CommandMetadata, CommandResult, CommandSource, CommandType,
 };
 use crate::interaction::envelope::NormalizedInput;
 use crate::state::app_state::AppState;
@@ -13,11 +13,13 @@ pub struct PermissionsCommand;
 impl Command for PermissionsCommand {
     fn metadata(&self) -> CommandMetadata {
         CommandMetadata {
-            name: "permissions",
-            description: "Inspect and update permission mode and explicit tool rules",
+            name: "permissions".into(),
+            description: "Inspect and update permission mode and explicit tool rules".into(),
+            source: CommandSource::Builtin,
+            category: "core".into(),
             command_type: CommandType::Local,
             availability: CommandAvailability::Everywhere,
-            aliases: &["perms"],
+            aliases: vec!["perms".into()],
             is_hidden: false,
             disable_model_invocation: false,
             immediate: true,

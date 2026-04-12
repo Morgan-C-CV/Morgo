@@ -27,8 +27,8 @@ fn parse_pattern(call: &ToolCall) -> anyhow::Result<String> {
 impl Tool for GlobTool {
     fn metadata(&self) -> ToolMetadata {
         ToolMetadata {
-            name: "Glob",
-            description: "Match file paths by glob pattern",
+            name: "Glob".into(),
+            description: "Match file paths by glob pattern".into(),
             aliases: &[],
             search_hint: Some("files glob pattern"),
             read_only: true,

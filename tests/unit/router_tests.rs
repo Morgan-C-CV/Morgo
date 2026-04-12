@@ -7,7 +7,7 @@ use rust_agent::command::builtin::permissions::PermissionsCommand;
 use rust_agent::command::builtin::plan::PlanCommand;
 use rust_agent::command::registry::CommandRegistry;
 use rust_agent::command::types::{
-    Command, CommandAvailability, CommandMetadata, CommandResult, CommandType,
+    Command, CommandAvailability, CommandMetadata, CommandResult, CommandSource, CommandType,
 };
 use rust_agent::cost::tracker::CostTracker;
 use rust_agent::history::session::{InMemorySessionStore, SessionRestoreRequest, SessionStore};
@@ -48,11 +48,13 @@ struct RemoteSafeTestCommand;
 impl Command for RemoteSafeTestCommand {
     fn metadata(&self) -> CommandMetadata {
         CommandMetadata {
-            name: "remote-safe",
-            description: "Test remote-safe command",
+            name: "remote-safe".into(),
+            description: "Test remote-safe command".into(),
+            source: CommandSource::Builtin,
+            category: "test".into(),
             command_type: CommandType::Local,
             availability: CommandAvailability::RemoteSafe,
-            aliases: &[],
+            aliases: Vec::new(),
             is_hidden: false,
             disable_model_invocation: false,
             immediate: true,
@@ -103,10 +105,8 @@ async fn router_denies_unauthenticated_remote_actor() {
 
 #[tokio::test]
 async fn cli_repl_handles_multiple_inputs_in_sequence() {
-    let router = CommandRouter::new(
-        Arc::new(CommandRegistry::new().register(Arc::new(HelpCommand))),
-        Box::new(DefaultSurfaceAuthorizer),
-    );
+    let command_registry = Arc::new(CommandRegistry::new().register(Arc::new(HelpCommand)));
+    let router = CommandRouter::new(command_registry.clone(), Box::new(DefaultSurfaceAuthorizer));
     let permission_context = ToolPermissionContext::new(PermissionMode::Default)
         .with_task_manager(Arc::new(TaskManager::default()));
     let app_state = AppState {
@@ -117,7 +117,7 @@ async fn cli_repl_handles_multiple_inputs_in_sequence() {
         runtime_role: RuntimeRole::Coordinator,
         worker_role: None,
         permission_context,
-        command_registry: None,
+        command_registry: Some(command_registry),
         runtime_tool_registry: Some(Arc::new(RwLock::new(ToolRegistry::new()))),
         skill_registry: None,
         mcp_runtime: None,
@@ -154,7 +154,7 @@ async fn cli_repl_handles_multiple_inputs_in_sequence() {
         .expect("cli repl should handle sequential inputs");
 
     assert_eq!(outputs.len(), 2);
-    assert!(outputs[0].primary_text.contains("help"));
+    assert!(outputs[0].primary_text.contains("Available commands"));
     assert!(outputs[1].primary_text.contains("second reply"));
     assert!(outputs[0].events.is_empty());
     assert!(!outputs[1].events.is_empty());
@@ -162,10 +162,8 @@ async fn cli_repl_handles_multiple_inputs_in_sequence() {
 
 #[tokio::test]
 async fn cli_repl_surfaces_task_events_for_active_session() {
-    let router = CommandRouter::new(
-        Arc::new(CommandRegistry::new().register(Arc::new(HelpCommand))),
-        Box::new(DefaultSurfaceAuthorizer),
-    );
+    let command_registry = Arc::new(CommandRegistry::new().register(Arc::new(HelpCommand)));
+    let router = CommandRouter::new(command_registry.clone(), Box::new(DefaultSurfaceAuthorizer));
     let manager = Arc::new(TaskManager::default());
     let permission_context =
         ToolPermissionContext::new(PermissionMode::Default).with_task_manager(manager.clone());
@@ -177,7 +175,7 @@ async fn cli_repl_surfaces_task_events_for_active_session() {
         runtime_role: RuntimeRole::Coordinator,
         worker_role: None,
         permission_context,
-        command_registry: None,
+        command_registry: Some(command_registry),
         runtime_tool_registry: Some(Arc::new(RwLock::new(ToolRegistry::new()))),
         skill_registry: None,
         mcp_runtime: None,
@@ -233,10 +231,8 @@ async fn cli_repl_surfaces_task_events_for_active_session() {
 
 #[tokio::test]
 async fn cli_repl_persists_history_for_local_and_query_turns() {
-    let router = CommandRouter::new(
-        Arc::new(CommandRegistry::new().register(Arc::new(HelpCommand))),
-        Box::new(DefaultSurfaceAuthorizer),
-    );
+    let command_registry = Arc::new(CommandRegistry::new().register(Arc::new(HelpCommand)));
+    let router = CommandRouter::new(command_registry.clone(), Box::new(DefaultSurfaceAuthorizer));
     let permission_context = ToolPermissionContext::new(PermissionMode::Default)
         .with_task_manager(Arc::new(TaskManager::default()));
     let session_store = Arc::new(InMemorySessionStore::default());
@@ -259,7 +255,7 @@ async fn cli_repl_persists_history_for_local_and_query_turns() {
         runtime_role: RuntimeRole::Coordinator,
         worker_role: None,
         permission_context,
-        command_registry: None,
+        command_registry: Some(command_registry),
         runtime_tool_registry: Some(Arc::new(RwLock::new(ToolRegistry::new()))),
         skill_registry: None,
         mcp_runtime: None,

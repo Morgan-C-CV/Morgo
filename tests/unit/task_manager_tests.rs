@@ -32,7 +32,7 @@ impl Tool for SafeTool {
     fn metadata(&self) -> rust_agent::tool::definition::ToolMetadata {
         rust_agent::tool::definition::ToolMetadata {
             name: self.name,
-            description: "safe test tool",
+            description: "safe test tool".into(),
             aliases: self.aliases,
             search_hint: None,
             read_only: true,
@@ -242,6 +242,7 @@ fn task_manager_queues_internal_task_notifications() {
             result: "Task completed".into(),
             next_action: format!("inspect task output for {}", task.id),
             worker_role: None,
+            orchestration_group_id: None,
             phase: None,
             validation_state: None,
             output_file: task.output_file.clone(),

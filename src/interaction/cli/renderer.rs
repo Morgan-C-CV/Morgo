@@ -33,6 +33,21 @@ fn render_task_event(task_event: &TaskEvent) -> String {
             "[task] worker_role: {}",
             task_event.worker_role.map(|role| role.as_str()).unwrap_or("none")
         ),
+        format!(
+            "[task] orchestration_group: {}",
+            task_event.orchestration_group_id.as_deref().unwrap_or("none")
+        ),
+        format!(
+            "[task] phase: {}",
+            task_event.phase.map(|phase| phase.as_str()).unwrap_or("none")
+        ),
+        format!(
+            "[task] validation_state: {}",
+            task_event
+                .validation_state
+                .map(|state| state.as_str())
+                .unwrap_or("none")
+        ),
         format!("[task] output: {}", task_event.output_file),
         format!("[task] next_action: {}", task_event.next_action),
     ]

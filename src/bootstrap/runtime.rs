@@ -269,7 +269,7 @@ impl RuntimeBootstrap {
             return Ok(());
         }
 
-        let registry = Arc::new(self.build_command_registry());
+        let registry = Arc::new(self.build_command_registry(&app_state));
         
         // Finalize AppState by injecting the CommandRegistry Arc now that it is built
         let mut app_state = app_state;
@@ -351,10 +351,18 @@ impl RuntimeBootstrap {
         }
     }
 
-    fn build_command_registry(&self) -> CommandRegistry {
+    fn build_command_registry(&self, app_state: &AppState) -> CommandRegistry {
         let registry = CommandRegistry::new();
-        let registry = crate::command::builtin::mount_core_commands(registry);
-        let registry = crate::command::coding::mount_coding_commands(registry);
+        let registry = crate::command::builtin::register_builtin_commands(registry);
+        let registry = crate::command::coding::register_coding_commands(registry);
+        let registry = crate::command::builtin::skills::build_skill_commands(app_state)
+            .into_iter()
+            .fold(registry, |registry, command| registry.register(Arc::new(command)));
+        let registry = crate::command::builtin::register_mcp_commands(registry);
+        self.register_plugin_commands(registry)
+    }
+
+    fn register_plugin_commands(&self, registry: CommandRegistry) -> CommandRegistry {
         registry
     }
 

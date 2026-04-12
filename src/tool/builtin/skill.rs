@@ -1,16 +1,58 @@
 use async_trait::async_trait;
 
+use crate::skills::registry::SkillRegistry;
+use crate::skills::types::SkillDefinition;
 use crate::state::permission_context::ToolPermissionContext;
 use crate::tool::definition::{Tool, ToolCall, ToolMetadata, ToolResult};
 
 pub struct SkillTool;
 
+pub fn load_skill_prompt(
+    skill_registry: &SkillRegistry,
+    skill_name: &str,
+    args: &str,
+) -> anyhow::Result<String> {
+    let skill = skill_registry
+        .find(skill_name)
+        .ok_or_else(|| anyhow::anyhow!("unknown skill: {skill_name}"))?;
+    format_skill_prompt(&skill, args)
+}
+
+pub fn format_skill_prompt(skill: &SkillDefinition, args: &str) -> anyhow::Result<String> {
+    if !skill.is_model_invocable() {
+        anyhow::bail!("skill {} cannot be invoked by the model", skill.name);
+    }
+
+    let args_line = if args.trim().is_empty() {
+        "Arguments: (none)".to_string()
+    } else {
+        format!("Arguments: {}", args.trim())
+    };
+    let when_to_use = skill
+        .when_to_use
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| format!("When to use: {}\n", value.trim()))
+        .unwrap_or_default();
+    let argument_hint = skill
+        .argument_hint
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| format!("Argument hint: {}\n", value.trim()))
+        .unwrap_or_default();
+
+    Ok(format!(
+        "Loaded skill: {}\n{}{}{}\nSkill instructions:\n{}",
+        skill.name, when_to_use, argument_hint, args_line, skill.content
+    ))
+}
+
 #[async_trait]
 impl Tool for SkillTool {
     fn metadata(&self) -> ToolMetadata {
         ToolMetadata {
-            name: "Skill",
-            description: "Invoke a user-invocable skill by name",
+            name: "Skill".into(),
+            description: "Invoke a user-invocable skill by name".into(),
             aliases: &[],
             search_hint: Some("run slash-command skill"),
             read_only: false,
@@ -42,38 +84,6 @@ impl Tool for SkillTool {
             .skill_registry
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("skill registry is unavailable in this session"))?;
-        let skill = skill_registry
-            .find(skill_name)
-            .ok_or_else(|| anyhow::anyhow!("unknown skill: {skill_name}"))?;
-        if !skill.is_model_invocable() {
-            anyhow::bail!("skill {skill_name} cannot be invoked by the model");
-        }
-
-        let args_line = if args.is_empty() {
-            "Arguments: (none)".to_string()
-        } else {
-            format!("Arguments: {args}")
-        };
-        let when_to_use = skill
-            .when_to_use
-            .as_deref()
-            .filter(|value| !value.trim().is_empty())
-            .map(|value| format!("When to use: {}\n", value.trim()))
-            .unwrap_or_default();
-        let argument_hint = skill
-            .argument_hint
-            .as_deref()
-            .filter(|value| !value.trim().is_empty())
-            .map(|value| format!("Argument hint: {}\n", value.trim()))
-            .unwrap_or_default();
-
-        Ok(ToolResult::Text(format!(
-            "Loaded skill: {}\n{}{}{}\nSkill instructions:\n{}",
-            skill.name,
-            when_to_use,
-            argument_hint,
-            args_line,
-            skill.content
-        )))
+        Ok(ToolResult::Text(load_skill_prompt(skill_registry, skill_name, args)?))
     }
 }

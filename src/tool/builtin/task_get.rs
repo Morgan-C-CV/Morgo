@@ -9,8 +9,8 @@ pub struct TaskGetTool;
 impl Tool for TaskGetTool {
     fn metadata(&self) -> ToolMetadata {
         ToolMetadata {
-            name: "TaskGet",
-            description: "Get a planning task-list item",
+            name: "TaskGet".into(),
+            description: "Get a planning task-list item".into(),
             aliases: &[],
             search_hint: Some("get task details"),
             read_only: true,

@@ -27,8 +27,8 @@ fn parse_input(call: &ToolCall) -> anyhow::Result<String> {
 impl Tool for FileReadTool {
     fn metadata(&self) -> ToolMetadata {
         ToolMetadata {
-            name: "Read",
-            description: "Read files from disk",
+            name: "Read".into(),
+            description: "Read files from disk".into(),
             aliases: &[],
             search_hint: Some("read file contents"),
             read_only: true,

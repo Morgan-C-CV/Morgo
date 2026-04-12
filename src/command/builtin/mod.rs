@@ -31,7 +31,7 @@ use skills::SkillsCommand;
 use status::StatusCommand;
 use tasks::TasksCommand;
 
-pub fn mount_core_commands(registry: CommandRegistry) -> CommandRegistry {
+pub fn register_builtin_commands(registry: CommandRegistry) -> CommandRegistry {
     registry
         .register(Arc::new(HelpCommand))
         .register(Arc::new(CostCommand))
@@ -39,7 +39,6 @@ pub fn mount_core_commands(registry: CommandRegistry) -> CommandRegistry {
         .register(Arc::new(ClearCommand))
         .register(Arc::new(ConfigCommand))
         .register(Arc::new(DoctorCommand))
-        .register(Arc::new(McpCommand))
         .register(Arc::new(PermissionsCommand))
         .register(Arc::new(PlanCommand))
         .register(Arc::new(ResumeCommand))
@@ -47,5 +46,9 @@ pub fn mount_core_commands(registry: CommandRegistry) -> CommandRegistry {
         .register(Arc::new(SkillsCommand))
         .register(Arc::new(StatusCommand))
         .register(Arc::new(TasksCommand))
+}
+
+pub fn register_mcp_commands(registry: CommandRegistry) -> CommandRegistry {
+    registry.register(Arc::new(McpCommand))
 }
 

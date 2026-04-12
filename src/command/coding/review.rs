@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 
 use crate::command::types::{
-    Command, CommandAvailability, CommandMetadata, CommandResult, CommandType,
+    Command, CommandAvailability, CommandMetadata, CommandResult, CommandSource, CommandType,
 };
 use crate::interaction::envelope::NormalizedInput;
 use crate::state::app_state::AppState;
@@ -12,11 +12,13 @@ pub struct ReviewCommand;
 impl Command for ReviewCommand {
     fn metadata(&self) -> CommandMetadata {
         CommandMetadata {
-            name: "review",
-            description: "Review a pull request",
+            name: "review".into(),
+            description: "Review a pull request".into(),
+            source: CommandSource::Coding,
+            category: "git".into(),
             command_type: CommandType::Prompt,
             availability: CommandAvailability::Everywhere,
-            aliases: &[],
+            aliases: Vec::new(),
             is_hidden: false,
             disable_model_invocation: false,
             immediate: false,

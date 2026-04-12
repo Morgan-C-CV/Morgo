@@ -16,13 +16,46 @@ pub enum CommandAvailability {
     RemoteSafe,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum CommandSource {
+    Builtin,
+    Coding,
+    Skill,
+    Mcp,
+    Plugin,
+}
+
+impl CommandSource {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Builtin => "builtin",
+            Self::Coding => "coding",
+            Self::Skill => "skill",
+            Self::Mcp => "mcp",
+            Self::Plugin => "plugin",
+        }
+    }
+
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            Self::Builtin => "Built-in",
+            Self::Coding => "Coding",
+            Self::Skill => "Skills",
+            Self::Mcp => "MCP",
+            Self::Plugin => "Plugins",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandMetadata {
-    pub name: &'static str,
-    pub description: &'static str,
+    pub name: String,
+    pub description: String,
+    pub source: CommandSource,
+    pub category: String,
     pub command_type: CommandType,
     pub availability: CommandAvailability,
-    pub aliases: &'static [&'static str],
+    pub aliases: Vec<String>,
     pub is_hidden: bool,
     pub disable_model_invocation: bool,
     pub immediate: bool,

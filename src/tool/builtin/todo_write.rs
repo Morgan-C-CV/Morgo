@@ -10,8 +10,8 @@ pub struct TodoWriteTool;
 impl Tool for TodoWriteTool {
     fn metadata(&self) -> ToolMetadata {
         ToolMetadata {
-            name: "TodoWrite",
-            description: "Create or update the structured task list in one call",
+            name: "TodoWrite".into(),
+            description: "Create or update the structured task list in one call".into(),
             aliases: &["Todo"],
             search_hint: Some("write task list or todo list"),
             read_only: false,

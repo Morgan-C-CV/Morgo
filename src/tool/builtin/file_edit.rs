@@ -22,8 +22,8 @@ struct EditInput {
 impl Tool for FileEditTool {
     fn metadata(&self) -> ToolMetadata {
         ToolMetadata {
-            name: "Edit",
-            description: "Edit existing files with safety rails",
+            name: "Edit".into(),
+            description: "Edit existing files with safety rails".into(),
             aliases: &[],
             search_hint: Some("edit file contents"),
             read_only: false,

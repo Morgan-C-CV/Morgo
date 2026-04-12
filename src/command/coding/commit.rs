@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 
 use crate::command::types::{
-    Command, CommandAvailability, CommandMetadata, CommandResult, CommandType,
+    Command, CommandAvailability, CommandMetadata, CommandResult, CommandSource, CommandType,
 };
 use crate::interaction::envelope::NormalizedInput;
 use crate::state::app_state::AppState;
@@ -12,11 +12,13 @@ pub struct CommitCommand;
 impl Command for CommitCommand {
     fn metadata(&self) -> CommandMetadata {
         CommandMetadata {
-            name: "commit",
-            description: "Constructs and executes a git commit automatically",
+            name: "commit".into(),
+            description: "Constructs and executes a git commit automatically".into(),
+            source: CommandSource::Coding,
+            category: "git".into(),
             command_type: CommandType::Prompt,
             availability: CommandAvailability::Everywhere,
-            aliases: &[],
+            aliases: Vec::new(),
             is_hidden: false,
             disable_model_invocation: false,
             immediate: false,

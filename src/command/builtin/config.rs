@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 
 use crate::command::types::{
-    Command, CommandAvailability, CommandMetadata, CommandResult, CommandType,
+    Command, CommandAvailability, CommandMetadata, CommandResult, CommandSource, CommandType,
 };
 use crate::interaction::envelope::NormalizedInput;
 use crate::state::app_state::AppState;
@@ -12,11 +12,13 @@ pub struct ConfigCommand;
 impl Command for ConfigCommand {
     fn metadata(&self) -> CommandMetadata {
         CommandMetadata {
-            name: "config",
-            description: "Open config panel to change models and settings",
+            name: "config".into(),
+            description: "Open config panel to change models and settings".into(),
+            source: CommandSource::Builtin,
+            category: "core".into(),
             command_type: CommandType::Local,
             availability: CommandAvailability::Everywhere,
-            aliases: &["settings", "model"],
+            aliases: vec!["settings".into(), "model".into()],
             is_hidden: false,
             disable_model_invocation: false,
             immediate: true,

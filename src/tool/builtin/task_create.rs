@@ -9,8 +9,8 @@ pub struct TaskCreateTool;
 impl Tool for TaskCreateTool {
     fn metadata(&self) -> ToolMetadata {
         ToolMetadata {
-            name: "TaskCreate",
-            description: "Create a planning task-list item",
+            name: "TaskCreate".into(),
+            description: "Create a planning task-list item".into(),
             aliases: &[],
             search_hint: Some("create task list item"),
             read_only: false,

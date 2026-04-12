@@ -42,8 +42,8 @@ struct BashInput {
 impl Tool for BashTool {
     fn metadata(&self) -> ToolMetadata {
         ToolMetadata {
-            name: "Bash",
-            description: "Execute shell commands with policy checks",
+            name: "Bash".into(),
+            description: "Execute shell commands with policy checks".into(),
             aliases: &[],
             search_hint: Some("shell command execution"),
             read_only: false,

@@ -9,8 +9,8 @@ pub struct NotebookEditTool;
 impl Tool for NotebookEditTool {
     fn metadata(&self) -> ToolMetadata {
         ToolMetadata {
-            name: "NotebookEdit",
-            description: "Edit a notebook cell by id or index",
+            name: "NotebookEdit".into(),
+            description: "Edit a notebook cell by id or index".into(),
             aliases: &[],
             search_hint: Some("edit jupyter notebook cell"),
             read_only: false,

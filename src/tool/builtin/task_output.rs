@@ -9,8 +9,8 @@ pub struct TaskOutputTool;
 impl Tool for TaskOutputTool {
     fn metadata(&self) -> ToolMetadata {
         ToolMetadata {
-            name: "TaskOutput",
-            description: "Read task output by task id and offset",
+            name: "TaskOutput".into(),
+            description: "Read task output by task id and offset".into(),
             aliases: &[],
             search_hint: Some("read task output"),
             read_only: true,

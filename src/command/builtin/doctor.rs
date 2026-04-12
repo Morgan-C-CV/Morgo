@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 
 use crate::command::types::{
-    Command, CommandAvailability, CommandMetadata, CommandResult, CommandType,
+    Command, CommandAvailability, CommandMetadata, CommandResult, CommandSource, CommandType,
 };
 use crate::interaction::envelope::NormalizedInput;
 use crate::state::app_state::AppState;
@@ -12,11 +12,13 @@ pub struct DoctorCommand;
 impl Command for DoctorCommand {
     fn metadata(&self) -> CommandMetadata {
         CommandMetadata {
-            name: "doctor",
-            description: "Diagnose and verify your Claude Code installation and settings",
+            name: "doctor".into(),
+            description: "Diagnose and verify your Claude Code installation and settings".into(),
+            source: CommandSource::Builtin,
+            category: "core".into(),
             command_type: CommandType::Local,
             availability: CommandAvailability::Everywhere,
-            aliases: &[],
+            aliases: Vec::new(),
             is_hidden: false,
             disable_model_invocation: false,
             immediate: false,

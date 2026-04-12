@@ -5,7 +5,7 @@ use tokio::sync::RwLock;
 use async_trait::async_trait;
 use rust_agent::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
 use rust_agent::command::registry::CommandRegistry;
-use rust_agent::command::types::{Command, CommandAvailability, CommandMetadata, CommandResult, CommandType};
+use rust_agent::command::types::{Command, CommandAvailability, CommandMetadata, CommandResult, CommandSource, CommandType};
 use rust_agent::core::context::QueryContext;
 use rust_agent::core::engine::QueryEngine;
 use rust_agent::interaction::dispatcher::NotificationDispatcher;
@@ -26,11 +26,13 @@ struct PromptCommand;
 impl Command for PromptCommand {
     fn metadata(&self) -> CommandMetadata {
         CommandMetadata {
-            name: "prompt-cmd",
-            description: "Prompt command for acceptance routing",
+            name: "prompt-cmd".into(),
+            description: "Prompt command for acceptance routing".into(),
+            source: CommandSource::Builtin,
+            category: "test".into(),
             command_type: CommandType::Prompt,
             availability: CommandAvailability::Everywhere,
-            aliases: &[],
+            aliases: Vec::new(),
             is_hidden: false,
             disable_model_invocation: false,
             immediate: true,

@@ -62,8 +62,8 @@ pub struct AgentTool;
 impl Tool for AgentTool {
     fn metadata(&self) -> ToolMetadata {
         ToolMetadata {
-            name: "Agent",
-            description: "Launch a subagent with isolated context",
+            name: "Agent".into(),
+            description: "Launch a subagent with isolated context".into(),
             aliases: &["TaskAgent"],
             search_hint: Some("spawn or continue subagent"),
             read_only: false,

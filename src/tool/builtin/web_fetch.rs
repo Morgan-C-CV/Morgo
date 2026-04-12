@@ -53,8 +53,8 @@ async fn fetch_text(raw_url: &str) -> anyhow::Result<String> {
 impl Tool for WebFetchTool {
     fn metadata(&self) -> ToolMetadata {
         ToolMetadata {
-            name: "WebFetch",
-            description: "Fetch remote web content",
+            name: "WebFetch".into(),
+            description: "Fetch remote web content".into(),
             aliases: &[],
             search_hint: Some("fetch url"),
             read_only: true,

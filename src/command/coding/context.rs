@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 
 use crate::command::types::{
-    Command, CommandAvailability, CommandMetadata, CommandResult, CommandType,
+    Command, CommandAvailability, CommandMetadata, CommandResult, CommandSource, CommandType,
 };
 use crate::interaction::envelope::NormalizedInput;
 use crate::state::app_state::AppState;
@@ -12,11 +12,13 @@ pub struct ContextCommand;
 impl Command for ContextCommand {
     fn metadata(&self) -> CommandMetadata {
         CommandMetadata {
-            name: "context",
-            description: "Manage pinned files and directories in the session context",
+            name: "context".into(),
+            description: "Manage pinned files and directories in the session context".into(),
+            source: CommandSource::Coding,
+            category: "context".into(),
             command_type: CommandType::Local,
             availability: CommandAvailability::Everywhere,
-            aliases: &[],
+            aliases: Vec::new(),
             is_hidden: false,
             disable_model_invocation: false,
             immediate: false,

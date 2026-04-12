@@ -11,8 +11,8 @@ pub struct TaskUpdateTool;
 impl Tool for TaskUpdateTool {
     fn metadata(&self) -> ToolMetadata {
         ToolMetadata {
-            name: "TaskUpdate",
-            description: "Update a planning task-list item",
+            name: "TaskUpdate".into(),
+            description: "Update a planning task-list item".into(),
             aliases: &[],
             search_hint: Some("update task list item"),
             read_only: false,

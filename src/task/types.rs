@@ -93,6 +93,7 @@ pub struct TaskEvent {
     pub result: String,
     pub next_action: String,
     pub worker_role: Option<WorkerRole>,
+    pub orchestration_group_id: Option<String>,
     pub phase: Option<WorkerPhase>,
     pub validation_state: Option<ValidationState>,
     pub output_file: String,
@@ -101,13 +102,14 @@ pub struct TaskEvent {
 impl TaskEvent {
     pub fn format_notification(&self) -> String {
         format!(
-            "<task-notification>\n<task-id>{}</task-id>\n<status>{:?}</status>\n<summary>{}</summary>\n<result>{}</result>\n<next-action>{}</next-action>\n<worker-role>{}</worker-role>\n<phase>{}</phase>\n<validation-state>{}</validation-state>\n</task-notification>",
+            "<task-notification>\n<task-id>{}</task-id>\n<status>{:?}</status>\n<summary>{}</summary>\n<result>{}</result>\n<next-action>{}</next-action>\n<worker-role>{}</worker-role>\n<orchestration-group>{}</orchestration-group>\n<phase>{}</phase>\n<validation-state>{}</validation-state>\n</task-notification>",
             self.task_id,
             self.status,
             self.summary,
             self.result,
             self.next_action,
             self.worker_role.map(|role| role.as_str()).unwrap_or("none"),
+            self.orchestration_group_id.as_deref().unwrap_or("none"),
             self.phase.map(|phase| phase.as_str()).unwrap_or("none"),
             self.validation_state
                 .map(|state| state.as_str())

@@ -9,8 +9,8 @@ pub struct ExitPlanModeTool;
 impl Tool for ExitPlanModeTool {
     fn metadata(&self) -> ToolMetadata {
         ToolMetadata {
-            name: "ExitPlanMode",
-            description: "Present a completed plan for user approval",
+            name: "ExitPlanMode".into(),
+            description: "Present a completed plan for user approval".into(),
             aliases: &[],
             search_hint: Some("exit planning mode and request approval"),
             read_only: false,

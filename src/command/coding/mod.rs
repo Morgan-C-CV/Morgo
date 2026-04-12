@@ -11,7 +11,7 @@ use context::ContextCommand;
 use diff::DiffCommand;
 use review::ReviewCommand;
 
-pub fn mount_coding_commands(registry: CommandRegistry) -> CommandRegistry {
+pub fn register_coding_commands(registry: CommandRegistry) -> CommandRegistry {
     registry
         .register(Arc::new(DiffCommand))
         .register(Arc::new(CommitCommand))

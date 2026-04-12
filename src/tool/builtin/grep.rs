@@ -27,8 +27,8 @@ fn parse_pattern(call: &ToolCall) -> anyhow::Result<String> {
 impl Tool for GrepTool {
     fn metadata(&self) -> ToolMetadata {
         ToolMetadata {
-            name: "Grep",
-            description: "Search file contents by regex",
+            name: "Grep".into(),
+            description: "Search file contents by regex".into(),
             aliases: &[],
             search_hint: Some("search file contents"),
             read_only: true,

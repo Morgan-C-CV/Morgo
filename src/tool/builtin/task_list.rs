@@ -9,8 +9,8 @@ pub struct TaskListTool;
 impl Tool for TaskListTool {
     fn metadata(&self) -> ToolMetadata {
         ToolMetadata {
-            name: "TaskList",
-            description: "List tasks owned by the active session",
+            name: "TaskList".into(),
+            description: "List tasks owned by the active session".into(),
             aliases: &[],
             search_hint: Some("list tasks"),
             read_only: true,

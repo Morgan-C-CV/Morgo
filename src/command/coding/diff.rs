@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 
 use crate::command::types::{
-    Command, CommandAvailability, CommandMetadata, CommandResult, CommandType,
+    Command, CommandAvailability, CommandMetadata, CommandResult, CommandSource, CommandType,
 };
 use crate::interaction::envelope::NormalizedInput;
 use crate::state::app_state::AppState;
@@ -13,11 +13,13 @@ pub struct DiffCommand;
 impl Command for DiffCommand {
     fn metadata(&self) -> CommandMetadata {
         CommandMetadata {
-            name: "diff",
-            description: "View uncommitted changes and per-turn diffs",
+            name: "diff".into(),
+            description: "View uncommitted changes and per-turn diffs".into(),
+            source: CommandSource::Coding,
+            category: "git".into(),
             command_type: CommandType::Local,
             availability: CommandAvailability::Everywhere,
-            aliases: &[],
+            aliases: Vec::new(),
             is_hidden: false,
             disable_model_invocation: false,
             immediate: false,

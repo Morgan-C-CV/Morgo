@@ -9,8 +9,8 @@ pub struct SendMessageTool;
 impl Tool for SendMessageTool {
     fn metadata(&self) -> ToolMetadata {
         ToolMetadata {
-            name: "SendMessage",
-            description: "Send a message to a running task owned by the active session",
+            name: "SendMessage".into(),
+            description: "Send a message to a running task owned by the active session".into(),
             aliases: &[],
             search_hint: Some("message running task"),
             read_only: false,

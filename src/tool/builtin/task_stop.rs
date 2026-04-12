@@ -11,8 +11,8 @@ pub struct TaskStopTool;
 impl Tool for TaskStopTool {
     fn metadata(&self) -> ToolMetadata {
         ToolMetadata {
-            name: "TaskStop",
-            description: "Stop a running task owned by the active session",
+            name: "TaskStop".into(),
+            description: "Stop a running task owned by the active session".into(),
             aliases: &["KillTask"],
             search_hint: Some("stop background task"),
             read_only: false,
