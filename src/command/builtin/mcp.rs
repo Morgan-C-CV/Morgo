@@ -84,6 +84,12 @@ impl Command for McpCommand {
                     "  inventory: tools={}, resources={}",
                     server.tool_count, server.resource_count
                 ));
+                if !server.tool_names_preview.is_empty() {
+                    lines.push(format!("  tools: {}", server.tool_names_preview.join(", ")));
+                }
+                if !server.resource_names_preview.is_empty() {
+                    lines.push(format!("  resources: {}", server.resource_names_preview.join(", ")));
+                }
                 if let Some(error) = server.last_error.as_deref().filter(|value| !value.trim().is_empty()) {
                     lines.push(format!("  last_error: {}", error.trim()));
                 }

@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum McpTransportKind {
     #[default]
@@ -35,6 +35,7 @@ pub struct McpServerConfig {
 pub enum McpConnectionStatus {
     Disconnected,
     Connecting,
+    Reconnecting,
     Connected,
     Failed,
 }
@@ -44,6 +45,7 @@ impl McpConnectionStatus {
         match self {
             Self::Disconnected => "disconnected",
             Self::Connecting => "connecting",
+            Self::Reconnecting => "reconnecting",
             Self::Connected => "connected",
             Self::Failed => "failed",
         }
@@ -90,6 +92,8 @@ pub struct McpServerState {
     pub status: McpConnectionStatus,
     pub tool_count: usize,
     pub resource_count: usize,
+    pub tool_names_preview: Vec<String>,
+    pub resource_names_preview: Vec<String>,
     pub last_error: Option<String>,
     pub protocol_initialized: bool,
     pub pid: Option<u32>,
