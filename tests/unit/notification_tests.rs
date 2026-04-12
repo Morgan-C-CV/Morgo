@@ -1,6 +1,6 @@
 use rust_agent::bootstrap::InteractionSurface;
 use rust_agent::interaction::cli::renderer::render_turn_output;
-use rust_agent::interaction::cli::repl::{CliDisplayEvent, CliTurnOutput};
+use rust_agent::interaction::cli::repl::{CliDisplayEvent, CliRuntimeEvent, CliTurnOutput};
 use rust_agent::interaction::dispatcher::NotificationDispatcher;
 use rust_agent::interaction::notification::{Notification, NotificationTarget, NotificationType};
 use rust_agent::interaction::telegram::binding::{SessionBinding, TelegramDeliveryTarget};
@@ -56,6 +56,7 @@ fn cli_renderer_marks_task_event_lines() {
     });
 
     assert!(rendered.contains("assistant reply"));
+    assert!(rendered.contains("== Task update =="));
     assert!(rendered.contains("[task] id: task-1"));
     assert!(rendered.contains("[task] summary: demo task"));
     assert!(rendered.contains("[task] status: Completed"));
@@ -87,15 +88,43 @@ fn cli_renderer_surfaces_implement_verify_and_risk_contract_lines() {
                 validation_state: Some(rust_agent::task::types::ValidationState::PendingVerification),
                 output_file: "/tmp/task-2.log".into(),
             }),
-            CliDisplayEvent::RuntimeEvent(
-                "Validation pending; final answer must call out unverified risk until verify completes.".into(),
-            ),
+            CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::Notice {
+                kind: "validation".into(),
+                message: "Validation pending; final answer must call out unverified risk until verify completes.".into(),
+            }),
         ],
     });
 
+    assert!(rendered.contains("== Task update =="));
     assert!(rendered.contains("[task] worker_role: implement"));
     assert!(rendered.contains("[task] next_action: dispatch verify worker for task-2"));
-    assert!(rendered.contains("Validation pending; final answer must call out unverified risk until verify completes."));
+    assert!(rendered.contains("[notice:validation] Validation pending; final answer must call out unverified risk until verify completes."));
+}
+
+#[test]
+fn cli_renderer_renders_approval_and_tool_result_panels() {
+    let rendered = render_turn_output(&CliTurnOutput {
+        primary_text: "assistant reply".into(),
+        events: vec![
+            CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::PendingApproval {
+                tool_name: "Bash".into(),
+                message: "requires explicit approval".into(),
+            }),
+            CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::ToolResult {
+                tool_name: "Read".into(),
+                content: "line one\nline two".into(),
+            }),
+        ],
+    });
+
+    assert!(rendered.contains("assistant reply"));
+    assert!(rendered.contains("== Approval required =="));
+    assert!(rendered.contains("Tool: Bash"));
+    assert!(rendered.contains("requires explicit approval"));
+    assert!(rendered.contains("== Tool result =="));
+    assert!(rendered.contains("Tool: Read"));
+    assert!(rendered.contains("line one"));
+    assert!(rendered.contains("line two"));
 }
 
 #[test]

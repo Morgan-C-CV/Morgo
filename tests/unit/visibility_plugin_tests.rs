@@ -12,6 +12,8 @@ use rust_agent::command::builtin::status::StatusCommand;
 use rust_agent::command::builtin::tasks::TasksCommand;
 use rust_agent::command::registry::CommandRegistry;
 use rust_agent::command::types::{Command, CommandAvailability, CommandResult};
+use rust_agent::interaction::cli::renderer::render_turn_output;
+use rust_agent::interaction::cli::repl::CliTurnOutput;
 use rust_agent::interaction::dispatcher::NotificationDispatcher;
 use rust_agent::interaction::envelope::NormalizedInput;
 use rust_agent::interaction::telegram::gateway::TelegramGateway;
@@ -181,6 +183,13 @@ async fn help_command_renders_source_counts_and_execution_kinds() {
     assert!(text.contains("/permissions — Inspect and update permission mode and explicit tool rules [type=local] [builtin:core] aliases=perms [sensitive] [immediate]"));
     assert!(text.contains("/summarize-skill — Summarize repository state [type=prompt] [skill:skill] [model_invocation=disabled]"));
     assert!(text.contains("/plugin-cmd — Metadata-rich plugin command [type=prompt] [plugin:plugin] aliases=plugin-cmd-alias [availability=cli-only] [sensitive] [model_invocation=disabled] [immediate]"));
+
+    let rendered = render_turn_output(&CliTurnOutput {
+        primary_text: text.clone(),
+        events: vec![],
+    });
+    assert!(rendered.contains("Available commands:"));
+    assert!(rendered.contains("Plugins (1):"));
 }
 
 #[tokio::test]
@@ -312,6 +321,14 @@ async fn status_command_reports_plugin_discovery_summary() {
     assert!(text.contains("  - demo-plugin v0.1.0 — commands=1, hooks=1, tools=1, capabilities=commands,hooks,tools (manifest=/tmp/project/.claude/plugins/demo/plugin.json)"));
     assert!(text.contains("- diagnostic_preview:"));
     assert!(text.contains("[error:plugin-manifest-load-failed] plugin=broken-plugin; manifest=/tmp/project/.claude/plugins/broken/plugin.json; bad plugin manifest"));
+
+    let rendered = render_turn_output(&CliTurnOutput {
+        primary_text: text.clone(),
+        events: vec![],
+    });
+    assert!(rendered.contains("Status"));
+    assert!(rendered.contains("Plugins:"));
+    assert!(rendered.contains("registered_plugin_tools: 1"));
 }
 
 #[tokio::test]
@@ -357,6 +374,14 @@ async fn tasks_command_groups_orchestration_tasks_and_hints() {
     assert!(text.contains("    parent_task_id: task-0"));
     assert!(text.contains("Standalone tasks:"));
     assert!(text.contains("- [task-2] standalone research (Status: Pending)"));
+
+    let rendered = render_turn_output(&CliTurnOutput {
+        primary_text: text.clone(),
+        events: vec![],
+    });
+    assert!(rendered.contains("Agent Tasks:"));
+    assert!(rendered.contains("Summary:"));
+    assert!(rendered.contains("Standalone tasks:"));
 }
 
 #[test]

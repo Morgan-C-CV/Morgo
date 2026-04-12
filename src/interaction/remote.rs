@@ -2,7 +2,7 @@ use crate::bootstrap::SessionMode;
 use crate::core::context::QueryContext;
 use crate::core::engine::QueryEngine;
 use crate::history::session::{SessionHistory, SessionId, SessionRestoreRequest, SessionSnapshot};
-use crate::interaction::cli::repl::{CliDisplayEvent, handle_normalized_input};
+use crate::interaction::cli::repl::{CliDisplayEvent, CliRuntimeEvent, handle_normalized_input};
 use crate::interaction::envelope::NormalizedInput;
 use crate::interaction::router::CommandRouter;
 use crate::state::app_state::AppState;
@@ -54,10 +54,14 @@ pub async fn handle_remote_request(
                     "task:{}:{}:{}",
                     task_event.task_id, task_event.summary, task_event.next_action
                 ),
-                CliDisplayEvent::RuntimeEvent(text) => text,
+                CliDisplayEvent::RuntimeEvent(event) => serialize_remote_runtime_event(&event),
             })
             .collect(),
     })
+}
+
+fn serialize_remote_runtime_event(event: &CliRuntimeEvent) -> String {
+    event.to_legacy_line()
 }
 
 fn bind_remote_engine(engine: &QueryEngine, app_state: &AppState, input: &NormalizedInput) -> QueryEngine {

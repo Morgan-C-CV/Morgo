@@ -8,9 +8,36 @@ use crate::state::app_state::AppState;
 use crate::task::types::TaskEvent;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CliRuntimeEvent {
+    AssistantDelta { text: String },
+    ToolCallStarted { tool_name: String, input: String },
+    ToolResult { tool_name: String, content: String },
+    PendingApproval { tool_name: String, message: String },
+    Notice { kind: String, message: String },
+    Transition { text: String },
+    Terminal { text: String },
+    SessionMilestone { text: String },
+}
+
+impl CliRuntimeEvent {
+    pub fn to_legacy_line(&self) -> String {
+        match self {
+            Self::AssistantDelta { text } => format!("[delta] {text}"),
+            Self::ToolCallStarted { tool_name, input } => format!("[tool-start] {tool_name}: {input}"),
+            Self::ToolResult { tool_name, content } => format!("[tool-result] {tool_name}: {content}"),
+            Self::PendingApproval { tool_name, message } => format!("[approval] {tool_name}: {message}"),
+            Self::Notice { kind, message } => format!("[notice:{kind}] {message}"),
+            Self::Transition { text } => format!("[transition] {text}"),
+            Self::Terminal { text } => format!("[terminal] {text}"),
+            Self::SessionMilestone { text } => format!("[milestone] {text}"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CliDisplayEvent {
     TaskEvent(TaskEvent),
-    RuntimeEvent(String),
+    RuntimeEvent(CliRuntimeEvent),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -112,7 +139,7 @@ where
 async fn collect_stream_messages(
     engine: &QueryEngine,
     input: Message,
-) -> (Vec<Message>, Vec<String>) {
+) -> (Vec<Message>, Vec<CliRuntimeEvent>) {
     let mut receiver = engine.stream_turn(input).await;
     let mut messages = Vec::new();
     let mut runtime_events = Vec::new();
@@ -120,28 +147,37 @@ async fn collect_stream_messages(
         match event {
             EngineEvent::MessageCommitted(message) => messages.push(message),
             EngineEvent::AssistantDelta(delta) => {
-                runtime_events.push(format!("[delta] {delta}"));
+                runtime_events.push(CliRuntimeEvent::AssistantDelta { text: delta });
             }
             EngineEvent::ToolCallStarted { tool_name, input } => {
-                runtime_events.push(format!("[tool-start] {tool_name}: {input}"));
+                runtime_events.push(CliRuntimeEvent::ToolCallStarted { tool_name, input });
             }
             EngineEvent::ToolResultCommitted { tool_name, content } => {
-                runtime_events.push(format!("[tool-result] {tool_name}: {content}"));
+                runtime_events.push(CliRuntimeEvent::ToolResult { tool_name, content });
             }
             EngineEvent::PendingApproval { tool_name, message } => {
-                runtime_events.push(format!("[approval] {tool_name}: {message}"));
+                runtime_events.push(CliRuntimeEvent::PendingApproval { tool_name, message });
             }
             EngineEvent::Notice { kind, message } => {
-                runtime_events.push(format!("[notice:{kind}] {message}"));
+                runtime_events.push(CliRuntimeEvent::Notice {
+                    kind: kind.to_string(),
+                    message,
+                });
             }
             EngineEvent::Transition(transition) => {
-                runtime_events.push(format!("[transition] {:?}", transition));
+                runtime_events.push(CliRuntimeEvent::Transition {
+                    text: format!("{:?}", transition),
+                });
             }
             EngineEvent::Terminal(terminal) => {
-                runtime_events.push(format!("[terminal] {:?}", terminal));
+                runtime_events.push(CliRuntimeEvent::Terminal {
+                    text: format!("{:?}", terminal),
+                });
             }
             EngineEvent::SessionMilestoneWritten(milestone) => {
-                runtime_events.push(format!("[milestone] {:?}", milestone));
+                runtime_events.push(CliRuntimeEvent::SessionMilestone {
+                    text: format!("{:?}", milestone),
+                });
             }
         }
     }
