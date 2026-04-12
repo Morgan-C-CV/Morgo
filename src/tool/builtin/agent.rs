@@ -1,22 +1,43 @@
 use async_trait::async_trait;
+use serde::Deserialize;
 
 use crate::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
-use crate::core::context::QueryContext;
-use crate::core::engine::QueryEngine;
+use crate::core::context::{QueryContext, SubagentConfig};
 use crate::core::message::Message;
+use crate::core::query_loop::{QueryParams, run_query_loop_with_params};
 use crate::cost::tracker::CostTracker;
 use crate::interaction::dispatcher::NotificationDispatcher;
 use crate::interaction::telegram::gateway::TelegramGateway;
 use crate::service::compact::reactive_compact::ReactiveCompactor;
-use crate::state::app_state::{AppState, RuntimeRole};
+use crate::state::app_state::{AppState, RuntimeRole, WorkerRole};
 use crate::state::permission_context::ToolPermissionContext;
 use crate::tool::definition::{Tool, ToolCall, ToolMetadata, ToolResult};
 use crate::tool::registry::ToolRegistry;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum AgentRequest {
-    Spawn { prompt: String },
+    Spawn(SpawnAgentRequest),
     Continue { task_id: String, message: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SpawnAgentRequest {
+    task: String,
+    role: WorkerRole,
+    inherit_context: bool,
+    max_turns: Option<usize>,
+    allowed_tools: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AgentJsonRequest {
+    task: Option<String>,
+    role: Option<String>,
+    inherit_context: Option<bool>,
+    max_turns: Option<usize>,
+    allowed_tools: Option<Vec<String>>,
+    task_id: Option<String>,
+    message: Option<String>,
 }
 
 pub struct AgentTool;
@@ -54,29 +75,34 @@ impl Tool for AgentTool {
             .active_session_id
             .clone()
             .unwrap_or_else(|| "local-session".into());
-        let request = parse_agent_request(&call.input);
+        let request = parse_agent_request(&call.input)?;
         let parent_context = build_parent_query_context(permissions.clone());
         let dispatcher = parent_context.app_state.notification_dispatcher.clone();
 
         match request {
-            AgentRequest::Spawn { prompt } => {
+            AgentRequest::Spawn(request) => {
+                let role_label = request.role.as_str().to_string();
+                let task_label = request.task.clone();
                 let task = tasks.create(
-                    format!("Spawned agent for {}", prompt),
+                    format!("Spawned {} worker for {}", role_label, task_label),
                     session_id.clone(),
                     InteractionSurface::Cli,
                 );
+                tasks.set_worker_role(&task.id, request.role);
                 crate::coordinator::mode::set_coordinator_mode(true);
                 launch_agent_task(
                     tasks.clone(),
                     &parent_context,
                     task.id.clone(),
-                    prompt.clone(),
+                    request,
                     permissions,
                     dispatcher,
                 );
                 Ok(ToolResult::Text(format!(
-                    "agent task {} launched for {}",
-                    task.id, prompt
+                    "agent task {} launched for {} worker: {}",
+                    task.id,
+                    role_label,
+                    task_label
                 )))
             }
             AgentRequest::Continue { task_id, message } => {
@@ -96,23 +122,30 @@ fn launch_agent_task(
     tasks: std::sync::Arc<crate::task::manager::TaskManager>,
     parent_context: &QueryContext,
     task_id: String,
-    task_input: String,
+    request: SpawnAgentRequest,
     permissions: &ToolPermissionContext,
     dispatcher: NotificationDispatcher,
 ) {
+    let task_input = request.task.clone();
     let query_context = parent_context.create_subagent_context(
         task_id.clone(),
         permissions
             .subagent_scripted_turns
             .clone()
             .unwrap_or_default(),
+        SubagentConfig {
+            worker_role: request.role,
+            inherit_context: request.inherit_context,
+            max_turns: request.max_turns,
+            allowed_tools: request.allowed_tools.clone(),
+        },
     );
     let tasks_for_run = tasks.clone();
     let launched_task_id = task_id.clone();
     tasks.launch(&launched_task_id.clone(), task_input.clone(), async move {
-        let result = QueryEngine::new(query_context)
-            .submit_turn(Message::user(task_input.clone()))
-            .await;
+        let mut params = QueryParams::default();
+        params.max_turns = request.max_turns;
+        let result = run_query_loop_with_params(&query_context, Message::user(task_input.clone()), params).await;
 
         if result.messages.is_empty() {
             tasks_for_run.append_output(&launched_task_id, "subagent produced no output");
@@ -133,16 +166,45 @@ fn launch_agent_task(
     });
 }
 
-fn parse_agent_request(input: &str) -> AgentRequest {
+fn parse_agent_request(input: &str) -> anyhow::Result<AgentRequest> {
+    if let Ok(request) = serde_json::from_str::<AgentJsonRequest>(input) {
+        if let (Some(task_id), Some(message)) = (request.task_id, request.message) {
+            return Ok(AgentRequest::Continue { task_id, message });
+        }
+        if let Some(task) = request.task {
+            return Ok(AgentRequest::Spawn(SpawnAgentRequest {
+                task,
+                role: parse_worker_role(request.role.as_deref())?,
+                inherit_context: request.inherit_context.unwrap_or(true),
+                max_turns: request.max_turns,
+                allowed_tools: request.allowed_tools,
+            }));
+        }
+        anyhow::bail!("agent JSON input must include either task or task_id/message")
+    }
+
     if let Some(rest) = input.strip_prefix("continue:") {
         let mut parts = rest.splitn(2, ':');
         let task_id = parts.next().unwrap_or_default().trim().to_string();
         let message = parts.next().unwrap_or_default().trim().to_string();
-        AgentRequest::Continue { task_id, message }
-    } else {
-        AgentRequest::Spawn {
-            prompt: input.to_string(),
-        }
+        return Ok(AgentRequest::Continue { task_id, message });
+    }
+
+    Ok(AgentRequest::Spawn(SpawnAgentRequest {
+        task: input.to_string(),
+        role: WorkerRole::Research,
+        inherit_context: true,
+        max_turns: None,
+        allowed_tools: None,
+    }))
+}
+
+fn parse_worker_role(value: Option<&str>) -> anyhow::Result<WorkerRole> {
+    match value.unwrap_or("research") {
+        "research" => Ok(WorkerRole::Research),
+        "implement" => Ok(WorkerRole::Implement),
+        "verify" => Ok(WorkerRole::Verify),
+        other => anyhow::bail!("unknown worker role: {other}"),
     }
 }
 
@@ -161,13 +223,14 @@ fn build_parent_query_context(permissions: ToolPermissionContext) -> QueryContex
         .inherited_tool_registry
         .clone()
         .unwrap_or_else(|| ToolRegistry::new().register(std::sync::Arc::new(AgentTool)))
-        .assemble_for_role(RuntimeRole::Worker);
+        .assemble_for_role(RuntimeRole::Coordinator);
     let app_state = AppState {
         surface: InteractionSurface::Cli,
         session_mode: SessionMode::Headless,
         client_type: ClientType::Cli,
         session_source: SessionSource::LocalCli,
         runtime_role: RuntimeRole::Coordinator,
+        worker_role: None,
         permission_context: runtime_permissions,
         command_registry: None,
         runtime_tool_registry: Some(std::sync::Arc::new(tokio::sync::RwLock::new(tool_registry.clone()))),

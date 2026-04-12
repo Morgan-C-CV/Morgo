@@ -187,6 +187,9 @@ fn task_manager_queues_internal_task_notifications() {
             task_id: task.id.clone(),
             status: TaskStatus::Completed,
             summary: format!("demo task ({})", task.id),
+            result: "Task completed".into(),
+            next_action: format!("inspect task output for {}", task.id),
+            worker_role: None,
             output_file: task.output_file.clone(),
         }
     );

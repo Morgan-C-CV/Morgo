@@ -251,7 +251,7 @@ fn prepare_turn(
         return Err(result);
     }
 
-    if context.compactor.should_compact(prepared.token_estimate, 512) {
+    if context.compactor.should_compact(prepared.token_estimate, 4096) {
         let compact_message = Message::assistant("compaction requested before continuing the turn");
         events.push(EngineEvent::Notice {
             kind: "compaction",

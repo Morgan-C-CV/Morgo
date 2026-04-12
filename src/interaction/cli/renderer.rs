@@ -24,21 +24,12 @@ fn render_event(event: &CliDisplayEvent) -> String {
 }
 
 fn render_task_event(task_event: &TaskEvent) -> String {
-    let next_action = match task_event.status {
-        crate::task::types::TaskStatus::Running => {
-            format!(
-                "use SendMessage with input '{}:<message>'",
-                task_event.task_id
-            )
-        }
-        _ => format!("use TaskOutput with input '{}:0'", task_event.task_id),
-    };
     [
         format!("[task] id: {}", task_event.task_id),
         format!("[task] summary: {}", task_event.summary),
         format!("[task] status: {:?}", task_event.status),
         format!("[task] output: {}", task_event.output_file),
-        format!("[task] next_action: {}", next_action),
+        format!("[task] next_action: {}", task_event.next_action),
     ]
     .join("\n")
 }

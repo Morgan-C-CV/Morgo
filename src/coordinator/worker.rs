@@ -7,6 +7,9 @@ pub struct TaskNotification {
     pub task_id: String,
     pub status: TaskStatus,
     pub summary: String,
+    pub result: String,
+    pub next_action: String,
+    pub worker_role: Option<crate::state::app_state::WorkerRole>,
     pub output_file: String,
 }
 
@@ -16,15 +19,29 @@ impl TaskNotification {
             task_id: event.task_id.clone(),
             status: event.status.clone(),
             summary: event.summary.clone(),
+            result: event.result.clone(),
+            next_action: event.next_action.clone(),
+            worker_role: event.worker_role,
             output_file: event.output_file.clone(),
         }
     }
 
     pub fn format_as_user_message(&self) -> String {
-        format!(
-            "<task-notification>\n<task-id>{}</task-id>\n<status>{:?}</status>\n<summary>{}</summary>\n<output-file>{}</output-file>\n</task-notification>",
-            self.task_id, self.status, self.summary, self.output_file
-        )
+        TaskEvent {
+            owner: crate::task::types::TaskOwner {
+                session_id: String::new(),
+                surface: crate::bootstrap::InteractionSurface::Cli,
+            },
+            target_task_id: None,
+            task_id: self.task_id.clone(),
+            status: self.status.clone(),
+            summary: self.summary.clone(),
+            result: self.result.clone(),
+            next_action: self.next_action.clone(),
+            worker_role: self.worker_role,
+            output_file: self.output_file.clone(),
+        }
+        .format_notification()
     }
 }
 
@@ -49,6 +66,9 @@ pub fn notification_to_task_notification(notification: &Notification) -> Option<
             _ => TaskStatus::Completed,
         },
         summary: notification.body.clone(),
+        result: notification.title.clone(),
+        next_action: "inspect task notification".to_string(),
+        worker_role: None,
         output_file: notification.output_file.clone().unwrap_or_default(),
     })
 }

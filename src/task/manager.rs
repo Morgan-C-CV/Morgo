@@ -57,6 +57,7 @@ impl TaskManager {
                 session_id: owner_session_id.into(),
                 surface: owner_surface,
             },
+            worker_role: None,
             output_file,
             output_offset: 0,
             delivery: TaskDeliveryState {
@@ -70,6 +71,19 @@ impl TaskManager {
 
     pub fn start(&self, id: &str) {
         self.update_status(id, TaskStatus::Running);
+    }
+
+    pub fn set_worker_role(&self, id: &str, worker_role: crate::state::app_state::WorkerRole) {
+        if let Some(task) = self
+            .store
+            .write()
+            .expect("task store poisoned")
+            .tasks
+            .iter_mut()
+            .find(|task| task.id == id)
+        {
+            task.worker_role = Some(worker_role);
+        }
     }
 
     pub fn launch<F>(&self, id: &str, _input: impl Into<String>, future: F)
@@ -328,12 +342,19 @@ impl TaskManager {
         {
             task.status = status.clone();
             task.delivery.notified = true;
+            let next_action = match status {
+                TaskStatus::Running => format!("continue running task {}", task.id),
+                _ => format!("inspect task output for {}", task.id),
+            };
             let event = TaskEvent {
                 owner: task.owner.clone(),
                 target_task_id: Some(task.id.clone()),
                 task_id: task.id.clone(),
                 status,
                 summary: format!("{} ({})", task.description, task.id),
+                result: title.to_string(),
+                next_action,
+                worker_role: task.worker_role,
                 output_file: task.output_file.clone(),
             };
             self.enqueue_task_event(event.clone());

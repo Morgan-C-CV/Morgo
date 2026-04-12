@@ -20,6 +20,23 @@ pub enum RuntimeRole {
     Worker,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkerRole {
+    Research,
+    Implement,
+    Verify,
+}
+
+impl WorkerRole {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Research => "research",
+            Self::Implement => "implement",
+            Self::Verify => "verify",
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub surface: InteractionSurface,
@@ -27,6 +44,7 @@ pub struct AppState {
     pub client_type: ClientType,
     pub session_source: SessionSource,
     pub runtime_role: RuntimeRole,
+    pub worker_role: Option<WorkerRole>,
     pub permission_context: ToolPermissionContext,
     pub command_registry: Option<Arc<CommandRegistry>>,
     pub runtime_tool_registry: Option<Arc<RwLock<ToolRegistry>>>,
@@ -113,6 +131,7 @@ impl std::fmt::Debug for AppState {
             .field("client_type", &self.client_type)
             .field("session_source", &self.session_source)
             .field("runtime_role", &self.runtime_role)
+            .field("worker_role", &self.worker_role)
             .field("permission_context", &self.permission_context)
             .field("has_command_registry", &self.command_registry.is_some())
             .field("has_runtime_tool_registry", &self.runtime_tool_registry.is_some())

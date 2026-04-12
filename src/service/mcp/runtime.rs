@@ -7,8 +7,8 @@ use crate::service::mcp::config::{
     default_server_configs, McpConfigLoadResult, McpConfigSource,
 };
 use crate::service::mcp::types::{
-    McpAction, McpConnectionStatus, McpRequest, McpResourceInfo, McpResponse, McpServerConfig,
-    McpServerState, McpToolInfo,
+    McpAction, McpConnectInfo, McpConnectionStatus, McpRequest, McpResourceInfo, McpResponse,
+    McpServerConfig, McpServerState, McpToolInfo,
 };
 
 #[derive(Clone)]
@@ -69,6 +69,11 @@ impl McpRuntime {
                 tool_count: 0,
                 resource_count: 0,
                 last_error: None,
+                protocol_initialized: false,
+                pid: None,
+                server_name: None,
+                server_version: None,
+                server_protocol_version: None,
             })
             .collect();
         Self {
@@ -96,9 +101,10 @@ impl McpRuntime {
     pub async fn connect(&self, server: &str) -> anyhow::Result<McpServerState> {
         let config = self.server_config(server).await?;
         self.set_status(server, McpConnectionStatus::Connecting, None).await?;
-        if let Err(error) = self.client.connect(&config).await {
-            return self.fail_server(server, error.to_string()).await;
-        }
+        let connect_info = match self.client.connect(&config).await {
+            Ok(value) => value,
+            Err(error) => return self.fail_server(server, error.to_string()).await,
+        };
         let tools = match self.client.list_tools(&config).await {
             Ok(value) => value,
             Err(error) => return self.fail_server(server, error.to_string()).await,
@@ -115,7 +121,8 @@ impl McpRuntime {
             .write()
             .await
             .insert(config.id.clone(), resources.clone());
-        self.update_connected(server, tools.len(), resources.len()).await
+        self.update_connected(server, tools.len(), resources.len(), connect_info)
+            .await
     }
 
     pub async fn disconnect(&self, server: &str) -> anyhow::Result<McpServerState> {
@@ -252,6 +259,7 @@ impl McpRuntime {
         server: &str,
         tool_count: usize,
         resource_count: usize,
+        connect_info: McpConnectInfo,
     ) -> anyhow::Result<McpServerState> {
         let mut servers = self.servers.write().await;
         let state = servers
@@ -262,6 +270,11 @@ impl McpRuntime {
         state.tool_count = tool_count;
         state.resource_count = resource_count;
         state.last_error = None;
+        state.protocol_initialized = connect_info.protocol_initialized;
+        state.pid = connect_info.pid;
+        state.server_name = connect_info.peer.server_name;
+        state.server_version = connect_info.peer.server_version;
+        state.server_protocol_version = connect_info.peer.protocol_version;
         Ok(state.clone())
     }
 
@@ -275,6 +288,11 @@ impl McpRuntime {
         state.tool_count = 0;
         state.resource_count = 0;
         state.last_error = None;
+        state.protocol_initialized = false;
+        state.pid = None;
+        state.server_name = None;
+        state.server_version = None;
+        state.server_protocol_version = None;
         Ok(state.clone())
     }
 }

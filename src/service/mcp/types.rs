@@ -62,6 +62,20 @@ pub struct McpResourceInfo {
     pub uri: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct McpPeerInfo {
+    pub server_name: Option<String>,
+    pub server_version: Option<String>,
+    pub protocol_version: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct McpConnectInfo {
+    pub protocol_initialized: bool,
+    pub pid: Option<u32>,
+    pub peer: McpPeerInfo,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct McpServerState {
     pub config: McpServerConfig,
@@ -69,6 +83,11 @@ pub struct McpServerState {
     pub tool_count: usize,
     pub resource_count: usize,
     pub last_error: Option<String>,
+    pub protocol_initialized: bool,
+    pub pid: Option<u32>,
+    pub server_name: Option<String>,
+    pub server_version: Option<String>,
+    pub server_protocol_version: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

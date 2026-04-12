@@ -227,6 +227,7 @@ impl RuntimeBootstrap {
             client_type: state.client_type,
             session_source: state.session_source,
             runtime_role: RuntimeRole::Coordinator,
+            worker_role: None,
             permission_context: permission_context.clone(),
             command_registry: None,
             runtime_tool_registry: Some(Arc::new(RwLock::new(coordinator_tools.clone()))),

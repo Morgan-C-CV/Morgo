@@ -1,5 +1,5 @@
 use rust_agent::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
-use rust_agent::core::context::QueryContext;
+use rust_agent::core::context::{QueryContext, SubagentConfig};
 use rust_agent::core::engine::QueryEngine;
 use rust_agent::core::events::EngineEvent;
 use rust_agent::core::message::Message;
@@ -43,6 +43,7 @@ fn test_context_with_turns(
             client_type: ClientType::Cli,
             session_source: SessionSource::LocalCli,
             runtime_role: RuntimeRole::Coordinator,
+            worker_role: None,
             permission_context,
             command_registry: None,
             runtime_tool_registry: Some(Arc::new(RwLock::new(ToolRegistry::new()))),
@@ -219,7 +220,7 @@ async fn query_loop_uses_max_output_escalation_then_recovery() {
 #[tokio::test]
 async fn query_loop_requests_compaction_for_large_input() {
     let engine = QueryEngine::new(test_context(Vec::new()));
-    let oversized = "x".repeat(600);
+    let oversized = "x".repeat(5000);
 
     let result = engine.submit_turn(Message::user(oversized)).await;
 
@@ -294,6 +295,7 @@ async fn query_loop_stop_hook_can_prevent_continuation() {
             client_type: ClientType::Cli,
             session_source: SessionSource::LocalCli,
             runtime_role: RuntimeRole::Coordinator,
+            worker_role: None,
             permission_context,
             command_registry: None,
             runtime_tool_registry: Some(Arc::new(RwLock::new(ToolRegistry::new()))),
@@ -364,6 +366,7 @@ async fn query_loop_respects_pre_tool_hook_denial() {
             client_type: ClientType::Cli,
             session_source: SessionSource::LocalCli,
             runtime_role: RuntimeRole::Coordinator,
+            worker_role: None,
             permission_context,
             command_registry: None,
             runtime_tool_registry: Some(Arc::new(RwLock::new(ToolRegistry::new()))),
@@ -441,6 +444,7 @@ async fn query_loop_runs_permission_request_hook_before_tool_execution() {
             client_type: ClientType::Cli,
             session_source: SessionSource::LocalCli,
             runtime_role: RuntimeRole::Coordinator,
+            worker_role: None,
             permission_context,
             command_registry: None,
             runtime_tool_registry: Some(Arc::new(RwLock::new(ToolRegistry::new()))),
@@ -509,6 +513,7 @@ async fn query_loop_uses_subagent_stop_hook_for_subagent_context() {
             client_type: ClientType::Cli,
             session_source: SessionSource::LocalCli,
             runtime_role: RuntimeRole::Worker,
+            worker_role: None,
             permission_context,
             command_registry: None,
             runtime_tool_registry: Some(Arc::new(RwLock::new(ToolRegistry::new()))),
@@ -593,6 +598,7 @@ async fn engine_drains_internal_task_events() {
             client_type: ClientType::Cli,
             session_source: SessionSource::LocalCli,
             runtime_role: RuntimeRole::Coordinator,
+            worker_role: None,
             permission_context,
             command_registry: None,
             runtime_tool_registry: Some(Arc::new(RwLock::new(ToolRegistry::new()))),
@@ -634,10 +640,11 @@ async fn engine_drains_internal_task_events() {
     let formatted = QueryEngine::format_task_event_message(&events[0]);
     assert!(formatted.content.contains("<task-notification>"));
     assert!(formatted.content.contains("<task-id>task-0</task-id>"));
+    assert!(formatted.content.contains("<result>Task completed</result>"));
     assert!(
         formatted
             .content
-            .contains("TaskOutput with input 'task-0:0'")
+            .contains("<next-action>inspect task output for task-0</next-action>")
     );
     assert!(engine.drain_task_events().is_empty());
 }
@@ -659,6 +666,7 @@ async fn worker_query_loop_consumes_mailbox_messages() {
             client_type: ClientType::Cli,
             session_source: SessionSource::LocalCli,
             runtime_role: RuntimeRole::Worker,
+            worker_role: None,
             permission_context,
             command_registry: None,
             runtime_tool_registry: Some(Arc::new(RwLock::new(ToolRegistry::new()))),
@@ -746,6 +754,7 @@ async fn subagent_context_inherits_parent_tools_and_hooks() {
             client_type: ClientType::Cli,
             session_source: SessionSource::LocalCli,
             runtime_role: RuntimeRole::Coordinator,
+            worker_role: None,
             permission_context,
             command_registry: None,
             runtime_tool_registry: Some(Arc::new(RwLock::new(ToolRegistry::new()))),
@@ -779,6 +788,12 @@ async fn subagent_context_inherits_parent_tools_and_hooks() {
                 stop_reason: StopReason::EndTurn,
             },
         ]],
+        SubagentConfig {
+            worker_role: rust_agent::state::app_state::WorkerRole::Research,
+            inherit_context: true,
+            max_turns: None,
+            allowed_tools: None,
+        },
     );
 
     assert_eq!(child.app_state.runtime_role, RuntimeRole::Worker);

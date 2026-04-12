@@ -70,6 +70,25 @@ impl ToolRegistry {
         self.assemble_for_role(RuntimeRole::Worker)
     }
 
+    pub fn assemble_worker_registry(&self, allowed_tools: Option<&[String]>) -> Self {
+        let worker = self.assemble_for_role(RuntimeRole::Worker);
+        let Some(allowed_tools) = allowed_tools else {
+            return worker;
+        };
+        let tools = worker
+            .tools
+            .iter()
+            .filter(|tool| {
+                let metadata = tool.metadata();
+                allowed_tools.iter().any(|allowed| {
+                    allowed == metadata.name || metadata.aliases.iter().any(|alias| allowed == alias)
+                })
+            })
+            .cloned()
+            .collect();
+        Self { tools }
+    }
+
     pub fn find(&self, call: &ToolCall) -> Option<&Arc<dyn Tool>> {
         self.tools.iter().find(|tool| {
             let metadata = tool.metadata();

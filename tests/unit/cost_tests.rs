@@ -34,6 +34,7 @@ async fn cost_command_reports_tracked_usage() {
         client_type: ClientType::Cli,
         session_source: SessionSource::LocalCli,
         runtime_role: RuntimeRole::Coordinator,
+        worker_role: None,
         permission_context,
         command_registry: None,
         runtime_tool_registry: None,

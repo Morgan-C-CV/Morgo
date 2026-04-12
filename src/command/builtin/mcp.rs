@@ -40,33 +40,48 @@ impl Command for McpCommand {
             let config_load = runtime.config_load_result();
             let mut lines = vec![
                 "MCP servers:".to_string(),
-                format!(
-                    "config_source={} path={}",
-                    config_load.source.as_str(),
-                    config_load.path.display()
-                ),
+                format!("  config source: {}", config_load.source.as_str()),
+                format!("  config path: {}", config_load.path.display()),
             ];
             for diagnostic in &config_load.diagnostics {
-                lines.push(format!("diagnostic: {}", diagnostic));
+                lines.push(format!("  diagnostic: {}", diagnostic));
             }
             for server in servers {
-                let error_suffix = server
-                    .last_error
-                    .as_deref()
-                    .filter(|value| !value.trim().is_empty())
-                    .map(|value| format!("; last_error={}", value.trim()))
-                    .unwrap_or_default();
+                lines.push(String::new());
+                lines.push(format!("- {} ({})", server.config.name, server.config.id));
+                lines.push(format!("  status: {}", server.status.as_str()));
+                lines.push(format!("  transport: {}", server.config.transport.as_str()));
+                lines.push(format!("  command: {} {}", server.config.command, server.config.args.join(" ").trim()));
                 lines.push(format!(
-                    "- {} ({}) cmd={} transport={} status={} tools={} resources={}{}",
-                    server.config.name,
-                    server.config.id,
-                    server.config.command,
-                    server.config.transport.as_str(),
-                    server.status.as_str(),
-                    server.tool_count,
-                    server.resource_count,
-                    error_suffix
+                    "  protocol: {}{}",
+                    if server.protocol_initialized { "initialized" } else { "not-initialized" },
+                    server
+                        .server_protocol_version
+                        .as_deref()
+                        .map(|value| format!(" ({value})"))
+                        .unwrap_or_default()
                 ));
+                if let Some(pid) = server.pid {
+                    lines.push(format!("  pid: {}", pid));
+                }
+                if server.server_name.is_some() || server.server_version.is_some() {
+                    lines.push(format!(
+                        "  peer: {}{}",
+                        server.server_name.as_deref().unwrap_or("unknown"),
+                        server
+                            .server_version
+                            .as_deref()
+                            .map(|value| format!(" v{value}"))
+                            .unwrap_or_default()
+                    ));
+                }
+                lines.push(format!(
+                    "  inventory: tools={}, resources={}",
+                    server.tool_count, server.resource_count
+                ));
+                if let Some(error) = server.last_error.as_deref().filter(|value| !value.trim().is_empty()) {
+                    lines.push(format!("  last_error: {}", error.trim()));
+                }
             }
             return Ok(CommandResult::Message(lines.join("\n")));
         }
@@ -83,8 +98,23 @@ impl Command for McpCommand {
         let result = match action {
             "connect" => runtime.connect(server.trim()).await.map(|state| {
                 format!(
-                    "Connected MCP server {} ({}) with {} tools and {} resources.",
-                    state.config.name, state.config.id, state.tool_count, state.resource_count
+                    "Connected MCP server {} ({}) via {}. protocol={}{}{}; tools={}; resources={}",
+                    state.config.name,
+                    state.config.id,
+                    state.config.transport.as_str(),
+                    if state.protocol_initialized { "initialized" } else { "not-initialized" },
+                    state
+                        .server_protocol_version
+                        .as_deref()
+                        .map(|value| format!("/{value}"))
+                        .unwrap_or_default(),
+                    state
+                        .server_name
+                        .as_deref()
+                        .map(|value| format!("; peer={value}"))
+                        .unwrap_or_default(),
+                    state.tool_count,
+                    state.resource_count
                 )
             }),
             "disconnect" => runtime.disconnect(server.trim()).await.map(|state| {
@@ -95,8 +125,23 @@ impl Command for McpCommand {
             }),
             "reconnect" => runtime.reconnect(server.trim()).await.map(|state| {
                 format!(
-                    "Reconnected MCP server {} ({}) with {} tools and {} resources.",
-                    state.config.name, state.config.id, state.tool_count, state.resource_count
+                    "Reconnected MCP server {} ({}) via {}. protocol={}{}{}; tools={}; resources={}",
+                    state.config.name,
+                    state.config.id,
+                    state.config.transport.as_str(),
+                    if state.protocol_initialized { "initialized" } else { "not-initialized" },
+                    state
+                        .server_protocol_version
+                        .as_deref()
+                        .map(|value| format!("/{value}"))
+                        .unwrap_or_default(),
+                    state
+                        .server_name
+                        .as_deref()
+                        .map(|value| format!("; peer={value}"))
+                        .unwrap_or_default(),
+                    state.tool_count,
+                    state.resource_count
                 )
             }),
             _ => anyhow::bail!("Unknown /mcp action: {action}"),

@@ -40,6 +40,9 @@ fn cli_renderer_marks_task_event_lines() {
             task_id: "task-1".into(),
             status: TaskStatus::Completed,
             summary: "demo task".into(),
+            result: "Task completed".into(),
+            next_action: "inspect task output for task-1".into(),
+            worker_role: None,
             output_file: "/tmp/task-1.log".into(),
         })],
     });
@@ -49,7 +52,7 @@ fn cli_renderer_marks_task_event_lines() {
     assert!(rendered.contains("[task] summary: demo task"));
     assert!(rendered.contains("[task] status: Completed"));
     assert!(rendered.contains("[task] output: /tmp/task-1.log"));
-    assert!(rendered.contains("use TaskOutput with input 'task-1:0'"));
+    assert!(rendered.contains("[task] next_action: inspect task output for task-1"));
 }
 
 #[test]

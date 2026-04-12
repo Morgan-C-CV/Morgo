@@ -150,21 +150,6 @@ impl QueryEngine {
     }
 
     pub fn format_task_event_message(event: &TaskEvent) -> Message {
-        let next_action = match event.status {
-            crate::task::types::TaskStatus::Running => {
-                format!(
-                    "use SendMessage with input '{}:<message>' to continue this task",
-                    event.task_id
-                )
-            }
-            _ => format!(
-                "use TaskOutput with input '{}:0' to inspect task output",
-                event.task_id
-            ),
-        };
-        Message::assistant(format!(
-            "<task-notification>\n<task-id>{}</task-id>\n<summary>{}</summary>\n<status>{:?}</status>\n<output-file>{}</output-file>\n<next-action>{}</next-action>\n</task-notification>",
-            event.task_id, event.summary, event.status, event.output_file, next_action
-        ))
+        Message::assistant(event.format_notification())
     }
 }

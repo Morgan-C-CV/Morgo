@@ -27,6 +27,9 @@ fn worker_notification_formats_as_task_notification_xml() {
         task_id: "task-7".into(),
         status: TaskStatus::Completed,
         summary: "Worker finished research".into(),
+        result: "Task completed".into(),
+        next_action: "inspect task output for task-7".into(),
+        worker_role: None,
         output_file: "/tmp/task-7.log".into(),
     };
 

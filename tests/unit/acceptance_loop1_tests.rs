@@ -54,6 +54,7 @@ fn test_app_state() -> AppState {
         client_type: ClientType::Cli,
         session_source: SessionSource::LocalCli,
         runtime_role: RuntimeRole::Coordinator,
+        worker_role: None,
         permission_context: ToolPermissionContext::new(PermissionMode::Default)
             .with_task_manager(Arc::new(TaskManager::default())),
         command_registry: None,
