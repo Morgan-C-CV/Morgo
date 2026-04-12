@@ -59,6 +59,64 @@ pub enum RemoteDeliveryMode {
     DualChannel,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoteChannelEventKind {
+    TaskUpdate,
+    ApprovalRequired,
+    RuntimeNotice,
+    ToolCallStarted,
+    ToolResult,
+    AssistantDelta,
+    Transition,
+    Terminal,
+    SessionMilestone,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RemoteChannelRule {
+    pub kind: RemoteChannelEventKind,
+    pub mode: RemoteDeliveryMode,
+}
+
+pub const REMOTE_CHANNEL_MATRIX: &[RemoteChannelRule] = &[
+    RemoteChannelRule {
+        kind: RemoteChannelEventKind::TaskUpdate,
+        mode: RemoteDeliveryMode::DualChannel,
+    },
+    RemoteChannelRule {
+        kind: RemoteChannelEventKind::ApprovalRequired,
+        mode: RemoteDeliveryMode::DualChannel,
+    },
+    RemoteChannelRule {
+        kind: RemoteChannelEventKind::RuntimeNotice,
+        mode: RemoteDeliveryMode::DualChannel,
+    },
+    RemoteChannelRule {
+        kind: RemoteChannelEventKind::ToolCallStarted,
+        mode: RemoteDeliveryMode::ResponseOnly,
+    },
+    RemoteChannelRule {
+        kind: RemoteChannelEventKind::ToolResult,
+        mode: RemoteDeliveryMode::ResponseOnly,
+    },
+    RemoteChannelRule {
+        kind: RemoteChannelEventKind::AssistantDelta,
+        mode: RemoteDeliveryMode::ResponseOnly,
+    },
+    RemoteChannelRule {
+        kind: RemoteChannelEventKind::Transition,
+        mode: RemoteDeliveryMode::ResponseOnly,
+    },
+    RemoteChannelRule {
+        kind: RemoteChannelEventKind::Terminal,
+        mode: RemoteDeliveryMode::ResponseOnly,
+    },
+    RemoteChannelRule {
+        kind: RemoteChannelEventKind::SessionMilestone,
+        mode: RemoteDeliveryMode::ResponseOnly,
+    },
+];
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteTaskEvent {
     pub task_id: String,
@@ -76,14 +134,10 @@ pub struct RemoteTaskEvent {
 // Current remote delivery contract:
 // - response channel: turn-scoped assistant/runtime/task events produced during the request
 // - async inbox: session/actor-targeted notifications that may be drained after the request
-// - dual channel: task_update may appear in both response and async inbox; dedupe_key provides idempotence
-// - async-only by practice: out-of-band runtime notices dispatched outside the request lifecycle
+// - dual channel: task_update / approval_required / runtime_notice emitted in-request may appear in both response and async inbox
+// - async-only by practice: out-of-band queued notifications have no response event counterpart unless a request emits them directly
 //
-// Helper policy below is the code-level source of truth for the intended channel split:
-// - CliDisplayEvent::TaskEvent => dual channel
-// - CliRuntimeEvent::{PendingApproval, Notice} => dual channel when emitted in-request
-// - queued Notification values are async inbox deliveries
-// - out-of-band notifications have no response event counterpart unless a request emits them directly
+// REMOTE_CHANNEL_MATRIX is the single source of truth for per-event channel rules.
 pub async fn handle_remote_request(
     router: &CommandRouter,
     engine: &QueryEngine,
@@ -311,29 +365,58 @@ fn notification_from_cli_event(input: &NormalizedInput, event: &CliDisplayEvent)
 }
 
 pub fn remote_delivery_mode_for_cli_event(event: &CliDisplayEvent) -> RemoteDeliveryMode {
-    match event {
-        CliDisplayEvent::TaskEvent(_) => RemoteDeliveryMode::DualChannel,
-        CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::PendingApproval { .. }) => {
-            RemoteDeliveryMode::DualChannel
-        }
-        CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::Notice { .. }) => RemoteDeliveryMode::DualChannel,
-        CliDisplayEvent::RuntimeEvent(
-            CliRuntimeEvent::AssistantDelta { .. }
-            | CliRuntimeEvent::ToolCallStarted { .. }
-            | CliRuntimeEvent::ToolResult { .. }
-            | CliRuntimeEvent::Transition { .. }
-            | CliRuntimeEvent::Terminal { .. }
-            | CliRuntimeEvent::SessionMilestone { .. },
-        ) => RemoteDeliveryMode::ResponseOnly,
-    }
+    remote_delivery_mode_for_kind(remote_channel_kind_for_cli_event(event))
 }
 
 pub fn remote_delivery_mode_for_notification(notification_type: &NotificationType) -> RemoteDeliveryMode {
-    match notification_type {
-        NotificationType::TaskUpdate => RemoteDeliveryMode::DualChannel,
-        NotificationType::ApprovalRequired | NotificationType::RuntimeNotice => {
-            RemoteDeliveryMode::AsyncOnly
+    remote_delivery_mode_for_kind(remote_channel_kind_for_notification(notification_type))
+}
+
+pub fn remote_delivery_mode_for_kind(kind: RemoteChannelEventKind) -> RemoteDeliveryMode {
+    REMOTE_CHANNEL_MATRIX
+        .iter()
+        .find(|rule| rule.kind == kind)
+        .map(|rule| rule.mode)
+        .expect("remote channel matrix must cover every event kind")
+}
+
+pub fn remote_channel_kind_for_cli_event(event: &CliDisplayEvent) -> RemoteChannelEventKind {
+    match event {
+        CliDisplayEvent::TaskEvent(_) => RemoteChannelEventKind::TaskUpdate,
+        CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::PendingApproval { .. }) => {
+            RemoteChannelEventKind::ApprovalRequired
         }
+        CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::Notice { .. }) => {
+            RemoteChannelEventKind::RuntimeNotice
+        }
+        CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::ToolCallStarted { .. }) => {
+            RemoteChannelEventKind::ToolCallStarted
+        }
+        CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::ToolResult { .. }) => {
+            RemoteChannelEventKind::ToolResult
+        }
+        CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::AssistantDelta { .. }) => {
+            RemoteChannelEventKind::AssistantDelta
+        }
+        CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::Transition { .. }) => {
+            RemoteChannelEventKind::Transition
+        }
+        CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::Terminal { .. }) => {
+            RemoteChannelEventKind::Terminal
+        }
+        CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::SessionMilestone { .. }) => {
+            RemoteChannelEventKind::SessionMilestone
+        }
+    }
+}
+
+pub fn remote_channel_kind_for_notification(
+    notification_type: &NotificationType,
+) -> RemoteChannelEventKind {
+    match notification_type {
+        NotificationType::TaskUpdate => RemoteChannelEventKind::TaskUpdate,
+        NotificationType::ApprovalRequired => RemoteChannelEventKind::ApprovalRequired,
+        NotificationType::RuntimeNotice => RemoteChannelEventKind::RuntimeNotice,
     }
 }
 

@@ -4,8 +4,11 @@ use rust_agent::interaction::cli::repl::{CliDisplayEvent, CliRuntimeEvent, CliTu
 use rust_agent::interaction::dispatcher::NotificationDispatcher;
 use rust_agent::interaction::notification::{Notification, NotificationTarget, NotificationType};
 use rust_agent::interaction::remote::{
-    RemoteDeliveryMode, RemoteEventEnvelope, RemoteEventPayload, drain_remote_notifications,
-    remote_delivery_mode_for_cli_event, remote_delivery_mode_for_notification,
+    REMOTE_CHANNEL_MATRIX, RemoteChannelEventKind, RemoteChannelRule, RemoteDeliveryMode,
+    RemoteEventEnvelope, RemoteEventPayload, drain_remote_notifications,
+    remote_channel_kind_for_cli_event, remote_channel_kind_for_notification,
+    remote_delivery_mode_for_cli_event, remote_delivery_mode_for_kind,
+    remote_delivery_mode_for_notification,
 };
 use rust_agent::interaction::telegram::binding::{SessionBinding, TelegramDeliveryTarget};
 use rust_agent::interaction::telegram::gateway::TelegramGateway;
@@ -135,18 +138,95 @@ fn cli_renderer_renders_approval_and_tool_result_panels() {
 }
 
 #[test]
+fn remote_channel_matrix_matches_final_contract() {
+    assert_eq!(
+        REMOTE_CHANNEL_MATRIX,
+        &[
+            RemoteChannelRule {
+                kind: RemoteChannelEventKind::TaskUpdate,
+                mode: RemoteDeliveryMode::DualChannel,
+            },
+            RemoteChannelRule {
+                kind: RemoteChannelEventKind::ApprovalRequired,
+                mode: RemoteDeliveryMode::DualChannel,
+            },
+            RemoteChannelRule {
+                kind: RemoteChannelEventKind::RuntimeNotice,
+                mode: RemoteDeliveryMode::DualChannel,
+            },
+            RemoteChannelRule {
+                kind: RemoteChannelEventKind::ToolCallStarted,
+                mode: RemoteDeliveryMode::ResponseOnly,
+            },
+            RemoteChannelRule {
+                kind: RemoteChannelEventKind::ToolResult,
+                mode: RemoteDeliveryMode::ResponseOnly,
+            },
+            RemoteChannelRule {
+                kind: RemoteChannelEventKind::AssistantDelta,
+                mode: RemoteDeliveryMode::ResponseOnly,
+            },
+            RemoteChannelRule {
+                kind: RemoteChannelEventKind::Transition,
+                mode: RemoteDeliveryMode::ResponseOnly,
+            },
+            RemoteChannelRule {
+                kind: RemoteChannelEventKind::Terminal,
+                mode: RemoteDeliveryMode::ResponseOnly,
+            },
+            RemoteChannelRule {
+                kind: RemoteChannelEventKind::SessionMilestone,
+                mode: RemoteDeliveryMode::ResponseOnly,
+            },
+        ]
+    );
+}
+
+#[test]
 fn remote_delivery_mode_classifies_notification_types() {
+    assert_eq!(
+        remote_channel_kind_for_notification(&NotificationType::TaskUpdate),
+        RemoteChannelEventKind::TaskUpdate
+    );
     assert_eq!(
         remote_delivery_mode_for_notification(&NotificationType::TaskUpdate),
         RemoteDeliveryMode::DualChannel
     );
     assert_eq!(
+        remote_channel_kind_for_notification(&NotificationType::ApprovalRequired),
+        RemoteChannelEventKind::ApprovalRequired
+    );
+    assert_eq!(
         remote_delivery_mode_for_notification(&NotificationType::ApprovalRequired),
-        RemoteDeliveryMode::AsyncOnly
+        RemoteDeliveryMode::DualChannel
+    );
+    assert_eq!(
+        remote_channel_kind_for_notification(&NotificationType::RuntimeNotice),
+        RemoteChannelEventKind::RuntimeNotice
     );
     assert_eq!(
         remote_delivery_mode_for_notification(&NotificationType::RuntimeNotice),
-        RemoteDeliveryMode::AsyncOnly
+        RemoteDeliveryMode::DualChannel
+    );
+}
+
+#[test]
+fn remote_delivery_mode_lookup_uses_matrix() {
+    assert_eq!(
+        remote_delivery_mode_for_kind(RemoteChannelEventKind::TaskUpdate),
+        RemoteDeliveryMode::DualChannel
+    );
+    assert_eq!(
+        remote_delivery_mode_for_kind(RemoteChannelEventKind::ApprovalRequired),
+        RemoteDeliveryMode::DualChannel
+    );
+    assert_eq!(
+        remote_delivery_mode_for_kind(RemoteChannelEventKind::RuntimeNotice),
+        RemoteDeliveryMode::DualChannel
+    );
+    assert_eq!(
+        remote_delivery_mode_for_kind(RemoteChannelEventKind::ToolResult),
+        RemoteDeliveryMode::ResponseOnly
     );
 }
 
@@ -170,6 +250,10 @@ fn remote_delivery_mode_classifies_dual_channel_and_response_only_events() {
         output_file: "/tmp/task-1.log".into(),
     });
     assert_eq!(
+        remote_channel_kind_for_cli_event(&task_event),
+        RemoteChannelEventKind::TaskUpdate
+    );
+    assert_eq!(
         remote_delivery_mode_for_cli_event(&task_event),
         RemoteDeliveryMode::DualChannel
     );
@@ -178,6 +262,10 @@ fn remote_delivery_mode_classifies_dual_channel_and_response_only_events() {
         tool_name: "Bash".into(),
         message: "requires explicit approval".into(),
     });
+    assert_eq!(
+        remote_channel_kind_for_cli_event(&approval_event),
+        RemoteChannelEventKind::ApprovalRequired
+    );
     assert_eq!(
         remote_delivery_mode_for_cli_event(&approval_event),
         RemoteDeliveryMode::DualChannel
@@ -188,6 +276,10 @@ fn remote_delivery_mode_classifies_dual_channel_and_response_only_events() {
         message: "pending verify".into(),
     });
     assert_eq!(
+        remote_channel_kind_for_cli_event(&notice_event),
+        RemoteChannelEventKind::RuntimeNotice
+    );
+    assert_eq!(
         remote_delivery_mode_for_cli_event(&notice_event),
         RemoteDeliveryMode::DualChannel
     );
@@ -195,6 +287,10 @@ fn remote_delivery_mode_classifies_dual_channel_and_response_only_events() {
     let delta_event = CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::AssistantDelta {
         text: "partial reply".into(),
     });
+    assert_eq!(
+        remote_channel_kind_for_cli_event(&delta_event),
+        RemoteChannelEventKind::AssistantDelta
+    );
     assert_eq!(
         remote_delivery_mode_for_cli_event(&delta_event),
         RemoteDeliveryMode::ResponseOnly
