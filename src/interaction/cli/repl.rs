@@ -30,6 +30,15 @@ pub async fn handle_cli_input(
         app_state.active_session_id.clone(),
         raw,
     );
+    handle_normalized_input(router, engine, app_state, input).await
+}
+
+pub async fn handle_normalized_input(
+    router: &CommandRouter,
+    engine: &QueryEngine,
+    app_state: &AppState,
+    input: NormalizedInput,
+) -> anyhow::Result<CliTurnOutput> {
     let route_result = router.route(&input, app_state).await?;
     let (persisted_messages, runtime_events, engine_persisted) = match route_result {
         CommandResult::Message(message) => (vec![Message::assistant(message)], Vec::new(), false),

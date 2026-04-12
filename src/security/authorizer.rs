@@ -24,14 +24,23 @@ impl SurfaceAuthorizer for DefaultSurfaceAuthorizer {
         &self,
         surface: InteractionSurface,
         actor: &ActorIdentity,
-        _raw_input: &str,
+        raw_input: &str,
     ) -> AuthDecision {
-        if matches!(surface, InteractionSurface::Cli) || actor.is_authenticated {
-            AuthDecision::Allow
-        } else {
-            AuthDecision::Deny {
-                reason: "unauthenticated actor for remote surface".into(),
-            }
+        if matches!(surface, InteractionSurface::Cli) {
+            return AuthDecision::Allow;
         }
+        if !actor.is_authenticated {
+            return AuthDecision::Deny {
+                reason: "unauthenticated actor for remote surface".into(),
+            };
+        }
+        if matches!(surface, InteractionSurface::Remote)
+            && matches!(raw_input.trim(), "/permissions" | "/session")
+        {
+            return AuthDecision::Deny {
+                reason: "command is blocked on remote surface".into(),
+            };
+        }
+        AuthDecision::Allow
     }
 }

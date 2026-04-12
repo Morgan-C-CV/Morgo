@@ -4,6 +4,8 @@ use rust_agent::bootstrap::{BootstrapPhase, BootstrapState, InteractionSurface, 
 mod skills_visibility;
 #[path = "plan_resume_flow.rs"]
 mod plan_resume_flow;
+#[path = "remote_flow.rs"]
+mod remote_flow;
 
 #[tokio::test]
 async fn startup_trace_contains_detect_surface_phase() {

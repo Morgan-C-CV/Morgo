@@ -61,6 +61,14 @@ impl CommandRouter {
                         metadata.name
                     ));
                 }
+                if matches!(input.surface, InteractionSurface::Remote)
+                    && (!input.metadata.from_trusted_surface || metadata.is_sensitive)
+                {
+                    return RouteDecision::Deny(format!(
+                        "command {} is not allowed on remote surface",
+                        metadata.name
+                    ));
+                }
                 if metadata.disable_model_invocation {
                     return RouteDecision::Deny(format!(
                         "command {} cannot invoke the model on this surface",

@@ -14,6 +14,7 @@ use rust_agent::history::session::{InMemorySessionStore, SessionRestoreRequest, 
 use rust_agent::interaction::cli::repl::handle_cli_inputs;
 use rust_agent::interaction::dispatcher::NotificationDispatcher;
 use rust_agent::interaction::envelope::NormalizedInput;
+use rust_agent::interaction::remote::{RemoteRequest, handle_remote_request};
 use rust_agent::interaction::router::{CommandRouter, RouteDecision};
 use rust_agent::interaction::telegram::gateway::TelegramGateway;
 use rust_agent::plan::manager::PlanManager;
@@ -45,6 +46,7 @@ impl SurfaceAuthorizer for DenyingAuthorizer {
 }
 
 struct RemoteSafeTestCommand;
+struct SensitiveRemoteCommand;
 
 #[async_trait]
 impl Command for RemoteSafeTestCommand {
@@ -73,6 +75,33 @@ impl Command for RemoteSafeTestCommand {
     }
 }
 
+#[async_trait]
+impl Command for SensitiveRemoteCommand {
+    fn metadata(&self) -> CommandMetadata {
+        CommandMetadata {
+            name: "remote-sensitive".into(),
+            description: "Sensitive test remote command".into(),
+            source: CommandSource::Builtin,
+            category: "test".into(),
+            command_type: CommandType::Local,
+            availability: CommandAvailability::RemoteSafe,
+            aliases: Vec::new(),
+            is_hidden: false,
+            disable_model_invocation: false,
+            immediate: true,
+            is_sensitive: true,
+        }
+    }
+
+    async fn execute(
+        &self,
+        _input: &NormalizedInput,
+        _app_state: &AppState,
+    ) -> anyhow::Result<CommandResult> {
+        Ok(CommandResult::Message("sensitive remote response".into()))
+    }
+}
+
 #[tokio::test]
 async fn router_executes_known_commands_before_query() {
     let registry = Arc::new(CommandRegistry::new().register(Arc::new(HelpCommand)));
@@ -96,12 +125,57 @@ async fn router_falls_back_for_unknown_commands() {
 #[tokio::test]
 async fn router_denies_unauthenticated_remote_actor() {
     let router = CommandRouter::new(Arc::new(CommandRegistry::new()), Box::new(DefaultSurfaceAuthorizer));
-    let mut input = NormalizedInput::from_raw(InteractionSurface::Remote, "/help");
-    input.actor.is_authenticated = false;
+    let input = NormalizedInput::from_remote_raw(
+        "remote-session",
+        "remote-actor",
+        false,
+        true,
+        "/help",
+    );
 
     assert_eq!(
         router.decide(&input).await,
         RouteDecision::Deny("unauthenticated actor for remote surface".into())
+    );
+}
+
+#[tokio::test]
+async fn router_denies_untrusted_remote_command() {
+    let router = CommandRouter::new(
+        Arc::new(CommandRegistry::new().register(Arc::new(RemoteSafeTestCommand))),
+        Box::new(DefaultSurfaceAuthorizer),
+    );
+    let input = NormalizedInput::from_remote_raw(
+        "remote-session",
+        "remote-actor",
+        true,
+        false,
+        "/remote-safe",
+    );
+
+    assert_eq!(
+        router.decide(&input).await,
+        RouteDecision::Deny("command remote-safe is not allowed on remote surface".into())
+    );
+}
+
+#[tokio::test]
+async fn router_denies_sensitive_remote_command() {
+    let router = CommandRouter::new(
+        Arc::new(CommandRegistry::new().register(Arc::new(SensitiveRemoteCommand))),
+        Box::new(DefaultSurfaceAuthorizer),
+    );
+    let input = NormalizedInput::from_remote_raw(
+        "remote-session",
+        "remote-actor",
+        true,
+        true,
+        "/remote-sensitive",
+    );
+
+    assert_eq!(
+        router.decide(&input).await,
+        RouteDecision::Deny("command remote-sensitive is not allowed on remote surface".into())
     );
 }
 
@@ -324,6 +398,120 @@ async fn cli_repl_persists_history_for_local_and_query_turns() {
         history.entries[3].message,
         rust_agent::core::message::Message::assistant("second reply")
     );
+}
+
+#[tokio::test]
+async fn remote_handler_preserves_remote_actor_and_session_for_query_flow() {
+    let command_registry = Arc::new(CommandRegistry::new().register(Arc::new(RemoteSafeTestCommand)));
+    let router = CommandRouter::new(command_registry.clone(), Box::new(DefaultSurfaceAuthorizer));
+    let permission_context = ToolPermissionContext::new(PermissionMode::Default)
+        .with_task_manager(Arc::new(TaskManager::default()))
+        .with_plan_manager(Arc::new(PlanManager::default()));
+    let session_store = Arc::new(InMemorySessionStore::default());
+    session_store.save(
+        rust_agent::history::session::SessionSnapshot {
+            session_id: rust_agent::history::session::SessionId("remote-session".into()),
+            surface: InteractionSurface::Remote,
+            session_mode: SessionMode::Interactive,
+            cwd: "/tmp/remote-handler".into(),
+            last_turn_at: None,
+            prompt_seed: None,
+        },
+        rust_agent::history::session::SessionHistory::default(),
+    );
+    let app_state = AppState {
+        surface: InteractionSurface::Remote,
+        session_mode: SessionMode::Interactive,
+        client_type: ClientType::RemoteControl,
+        session_source: SessionSource::RemoteControl,
+        runtime_role: RuntimeRole::Coordinator,
+        worker_role: None,
+        permission_context,
+        command_registry: Some(command_registry),
+        runtime_tool_registry: Some(Arc::new(RwLock::new(ToolRegistry::new()))),
+        skill_registry: None,
+        mcp_runtime: None,
+        plugin_load_result: None,
+        cost_tracker: CostTracker::default(),
+        notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
+        startup_trace: Vec::new(),
+        active_session_id: "remote-session".into(),
+        session_store: Some(session_store.clone()),
+        session: None,
+        history: None,
+        restored_session: None,
+    };
+    let engine =
+        rust_agent::core::engine::QueryEngine::new(rust_agent::core::context::QueryContext {
+            app_state: app_state.clone(),
+            tool_registry: ToolRegistry::new(),
+            api_client: ModelProviderClient::with_scripted_turns(vec![vec![
+                StreamEvent::MessageStart,
+                StreamEvent::TextDelta("remote query reply".into()),
+                StreamEvent::MessageStop {
+                    stop_reason: StopReason::EndTurn,
+                },
+            ]]),
+            compactor: ReactiveCompactor,
+            hook_registry: rust_agent::hook::registry::HookRegistry::default(),
+            agent_id: None,
+            system_prompt: "test system".into(),
+            tools_prompt: "test tools".into(),
+            context_prompt: "test context".into(),
+        });
+
+    let response = handle_remote_request(
+        &router,
+        &engine,
+        &app_state,
+        RemoteRequest {
+            session_id: "bound-remote-session".into(),
+            actor_id: "actor-42".into(),
+            is_authenticated: true,
+            from_trusted_surface: true,
+            raw: "hello from remote".into(),
+        },
+    )
+    .await
+    .expect("remote handler should succeed");
+
+    assert!(response.primary_text.contains("remote query reply"));
+
+    let (_, default_history) = session_store
+        .load(&SessionRestoreRequest {
+            resume: Some("remote-session".into()),
+            continue_session: false,
+        })
+        .expect("default remote session should still exist");
+    assert!(default_history.entries.is_empty());
+
+    let (_, history) = session_store
+        .load(&SessionRestoreRequest {
+            resume: Some("bound-remote-session".into()),
+            continue_session: false,
+        })
+        .expect("expected bound remote query history");
+    assert_eq!(history.entries.len(), 2);
+    assert_eq!(
+        history.entries[0].message,
+        rust_agent::core::message::Message::user("hello from remote")
+    );
+    assert_eq!(
+        history.entries[1].message,
+        rust_agent::core::message::Message::assistant("remote query reply")
+    );
+
+    let normalized = NormalizedInput::from_remote_raw(
+        "bound-remote-session",
+        "actor-42",
+        true,
+        true,
+        "/remote-safe",
+    );
+    assert_eq!(normalized.session_id, "bound-remote-session");
+    assert_eq!(normalized.actor.actor_id, "actor-42");
+    assert!(normalized.actor.is_authenticated);
+    assert!(normalized.metadata.from_trusted_surface);
 }
 
 #[tokio::test]

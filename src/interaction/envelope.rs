@@ -33,8 +33,51 @@ impl NormalizedInput {
         session_id: impl Into<String>,
         raw: impl Into<String>,
     ) -> Self {
+        Self::from_actor_session_raw(
+            surface,
+            session_id,
+            "local-user",
+            true,
+            true,
+            raw,
+        )
+    }
+
+    pub fn from_remote_raw(
+        session_id: impl Into<String>,
+        actor_id: impl Into<String>,
+        is_authenticated: bool,
+        from_trusted_surface: bool,
+        raw: impl Into<String>,
+    ) -> Self {
+        Self::from_actor_session_raw(
+            InteractionSurface::Remote,
+            session_id,
+            actor_id,
+            is_authenticated,
+            from_trusted_surface,
+            raw,
+        )
+    }
+
+    fn from_actor_session_raw(
+        surface: InteractionSurface,
+        session_id: impl Into<String>,
+        actor_id: impl Into<String>,
+        is_authenticated: bool,
+        from_trusted_surface: bool,
+        raw: impl Into<String>,
+    ) -> Self {
         let session_id = session_id.into();
+        let actor_id = actor_id.into();
         let raw = raw.into();
+        let actor = ActorIdentity {
+            actor_id,
+            is_authenticated,
+        };
+        let metadata = InputMetadata {
+            from_trusted_surface,
+        };
         if let Some(stripped) = raw.strip_prefix('/') {
             let mut parts = stripped.splitn(2, char::is_whitespace);
             let command_name = parts.next().map(str::to_string);
@@ -42,33 +85,23 @@ impl NormalizedInput {
             Self {
                 session_id,
                 surface,
-                actor: ActorIdentity {
-                    actor_id: "local-user".into(),
-                    is_authenticated: true,
-                },
+                actor,
                 raw,
                 command_name,
                 command_args,
                 attachments: Vec::new(),
-                metadata: InputMetadata {
-                    from_trusted_surface: true,
-                },
+                metadata,
             }
         } else {
             Self {
                 session_id,
                 surface,
-                actor: ActorIdentity {
-                    actor_id: "local-user".into(),
-                    is_authenticated: true,
-                },
+                actor,
                 raw,
                 command_name: None,
                 command_args: String::new(),
                 attachments: Vec::new(),
-                metadata: InputMetadata {
-                    from_trusted_surface: true,
-                },
+                metadata,
             }
         }
     }
