@@ -383,6 +383,8 @@ impl TaskManager {
             event.summary.clone(),
             event.task_id.clone(),
             format!("{:?}", event.status),
+            event.next_action.clone(),
+            event.worker_role.map(|role| role.as_str()),
             event.output_file.clone(),
         );
         if matches!(event.owner.surface, InteractionSurface::Telegram) {

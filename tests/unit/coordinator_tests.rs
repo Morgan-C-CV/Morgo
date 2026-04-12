@@ -1,6 +1,8 @@
 use rust_agent::bootstrap::InteractionSurface;
 use rust_agent::coordinator::mode::{is_coordinator_mode, match_session_mode, set_coordinator_mode};
-use rust_agent::coordinator::worker::{filter_tools_for_worker, TaskNotification};
+use rust_agent::coordinator::worker::{filter_tools_for_worker, notification_to_task_notification, TaskNotification};
+use rust_agent::interaction::notification::{Notification, NotificationType};
+use rust_agent::state::app_state::WorkerRole;
 use rust_agent::task::types::{TaskEvent, TaskOwner, TaskStatus};
 use rust_agent::tool::builtin::agent::AgentTool;
 use rust_agent::tool::builtin::ask_user::AskUserQuestionTool;
@@ -38,6 +40,28 @@ fn worker_notification_formats_as_task_notification_xml() {
     assert!(formatted.contains("<task-notification>"));
     assert!(formatted.contains("<task-id>task-7</task-id>"));
     assert!(formatted.contains("<summary>Worker finished research</summary>"));
+}
+
+#[test]
+fn notification_conversion_preserves_worker_role_and_next_action() {
+    let notification = Notification {
+        session_id: "session-1".into(),
+        title: "Task completed".into(),
+        body: "Worker finished verify".into(),
+        notification_type: NotificationType::TaskUpdate,
+        task_id: Some("task-8".into()),
+        status: Some("Completed".into()),
+        next_action: Some("inspect task output for task-8".into()),
+        worker_role: Some("verify".into()),
+        output_file: Some("/tmp/task-8.log".into()),
+        wake_up: true,
+        target: None,
+    };
+
+    let converted = notification_to_task_notification(&notification).expect("should convert");
+    assert_eq!(converted.task_id, "task-8");
+    assert_eq!(converted.next_action, "inspect task output for task-8");
+    assert_eq!(converted.worker_role, Some(WorkerRole::Verify));
 }
 
 #[test]

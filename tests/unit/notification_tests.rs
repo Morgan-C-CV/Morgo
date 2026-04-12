@@ -17,6 +17,8 @@ fn dispatcher_records_cli_notifications() {
         notification_type: NotificationType::TaskUpdate,
         task_id: Some("task-1".into()),
         status: Some("Completed".into()),
+        next_action: Some("inspect task output for task-1".into()),
+        worker_role: Some("research".into()),
         output_file: Some("/tmp/task-1.log".into()),
         wake_up: true,
         target: None,
@@ -51,6 +53,8 @@ fn cli_renderer_marks_task_event_lines() {
     assert!(rendered.contains("[task] id: task-1"));
     assert!(rendered.contains("[task] summary: demo task"));
     assert!(rendered.contains("[task] status: Completed"));
+    assert!(rendered.contains("[task] result: Task completed"));
+    assert!(rendered.contains("[task] worker_role: none"));
     assert!(rendered.contains("[task] output: /tmp/task-1.log"));
     assert!(rendered.contains("[task] next_action: inspect task output for task-1"));
 }
@@ -76,6 +80,8 @@ fn dispatcher_requires_delivery_ready_binding_for_telegram() {
         notification_type: NotificationType::TaskUpdate,
         task_id: Some("task-1".into()),
         status: Some("Completed".into()),
+        next_action: Some("inspect task output for task-1".into()),
+        worker_role: Some("verify".into()),
         output_file: Some("/tmp/task-1.log".into()),
         wake_up: true,
         target: Some(NotificationTarget::Session {
@@ -94,6 +100,8 @@ fn dispatcher_requires_delivery_ready_binding_for_telegram() {
             notification_type: NotificationType::TaskUpdate,
             task_id: Some("task-1".into()),
             status: Some("Completed".into()),
+            next_action: Some("inspect task output for task-1".into()),
+            worker_role: Some("verify".into()),
             output_file: Some("/tmp/task-1.log".into()),
             wake_up: true,
             target: Some(NotificationTarget::Telegram(TelegramDeliveryTarget {

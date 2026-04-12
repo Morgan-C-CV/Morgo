@@ -1,9 +1,11 @@
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use rust_agent::bootstrap::InteractionSurface;
 use rust_agent::history::session::{InMemorySessionStore, SessionId, SessionStore};
 use rust_agent::interaction::dispatcher::NotificationDispatcher;
 use rust_agent::interaction::notification::NotificationTarget;
+use rust_agent::state::app_state::WorkerRole;
 use rust_agent::interaction::telegram::binding::{SessionBinding, TelegramDeliveryTarget};
 use rust_agent::interaction::telegram::gateway::TelegramGateway;
 use rust_agent::state::permission_context::{PermissionMode, ToolPermissionContext};
@@ -18,6 +20,41 @@ use rust_agent::tool::builtin::task_output::TaskOutputTool;
 use rust_agent::tool::builtin::task_stop::TaskStopTool;
 use rust_agent::tool::builtin::task_update::TaskUpdateTool;
 use rust_agent::tool::definition::{Tool, ToolCall, ToolResult};
+use rust_agent::tool::registry::ToolRegistry;
+
+struct SafeTool {
+    name: &'static str,
+    aliases: &'static [&'static str],
+}
+
+#[async_trait]
+impl Tool for SafeTool {
+    fn metadata(&self) -> rust_agent::tool::definition::ToolMetadata {
+        rust_agent::tool::definition::ToolMetadata {
+            name: self.name,
+            description: "safe test tool",
+            aliases: self.aliases,
+            search_hint: None,
+            read_only: true,
+            destructive: false,
+            concurrency_safe: true,
+            always_load: true,
+            should_defer: false,
+            requires_auth: false,
+            requires_user_interaction: false,
+            is_open_world: false,
+            is_search_or_read_command: true,
+        }
+    }
+
+    async fn invoke(
+        &self,
+        _call: &ToolCall,
+        _permissions: &ToolPermissionContext,
+    ) -> anyhow::Result<ToolResult> {
+        Ok(ToolResult::Text(format!("{} ok", self.name)))
+    }
+}
 
 #[test]
 fn terminal_task_states_mark_delivery_notified() {
@@ -46,6 +83,8 @@ fn terminal_task_states_mark_delivery_notified() {
     assert_eq!(notification.title, "Task completed");
     assert_eq!(notification.task_id.as_deref(), Some("task-0"));
     assert_eq!(notification.status.as_deref(), Some("Completed"));
+    assert_eq!(notification.next_action.as_deref(), Some("inspect task output for task-0"));
+    assert_eq!(notification.worker_role, None);
     assert_eq!(dispatcher.delivered().len(), 1);
 }
 
@@ -65,6 +104,8 @@ fn task_manager_tracks_failed_and_killed_states() {
 #[test]
 fn telegram_task_notifications_resolve_session_target_to_delivery_target() {
     let manager = TaskManager::default();
+    let task = manager.create("telegram task", "telegram-session", InteractionSurface::Telegram);
+    manager.set_worker_role(&task.id, WorkerRole::Verify);
     let gateway = TelegramGateway::default().with_bindings(vec![SessionBinding {
         actor_id: "actor-1".into(),
         session_id: "telegram-session".into(),
@@ -76,7 +117,6 @@ fn telegram_task_notifications_resolve_session_target_to_delivery_target() {
         }),
     }]);
     let dispatcher = NotificationDispatcher::new(gateway);
-    let task = manager.create("telegram task", "telegram-session", InteractionSurface::Telegram);
 
     manager.complete(&task.id, &dispatcher);
 
@@ -88,6 +128,11 @@ fn telegram_task_notifications_resolve_session_target_to_delivery_target() {
             chat_id: "chat-1".into(),
             thread_id: Some("thread-9".into()),
         }))
+    );
+    assert_eq!(delivered[0].worker_role.as_deref(), Some("verify"));
+    assert_eq!(
+        delivered[0].next_action.as_deref(),
+        Some("inspect task output for task-0")
     );
 }
 
@@ -124,7 +169,11 @@ async fn agent_tool_launches_subagent_and_completes_task() {
         .invoke(
             &ToolCall {
                 name: "Agent".into(),
-                input: "inspect repository".into(),
+                input: serde_json::json!({
+                    "task": "inspect repository",
+                    "role": "research"
+                })
+                .to_string(),
             },
             &permissions,
         )
@@ -150,21 +199,21 @@ async fn agent_tool_launches_subagent_and_completes_task() {
 
     let created = manager.get("task-0").expect("task should be created");
     assert_eq!(created.status, TaskStatus::Completed);
+    assert_eq!(created.worker_role, Some(WorkerRole::Research));
     let output = manager
         .get_output("task-0", 0)
         .expect("task output should exist");
     assert!(output.content.contains("subagent answer"));
     assert!(output.content.contains("shared hook message"));
     assert!(created.delivery.notified);
-    assert_eq!(
-        created
-            .delivery
-            .notification
-            .as_ref()
-            .expect("notification should exist")
-            .session_id,
-        "session-7"
-    );
+    let notification = created
+        .delivery
+        .notification
+        .as_ref()
+        .expect("notification should exist");
+    assert_eq!(notification.session_id, "session-7");
+    assert_eq!(notification.worker_role.as_deref(), Some("research"));
+    assert_eq!(notification.next_action.as_deref(), Some("inspect task output for task-0"));
 }
 
 #[test]
@@ -382,6 +431,102 @@ async fn agent_tool_allows_owner_to_message_running_task() {
     })
     .await
     .expect("continued worker should produce follow-up output");
+}
+
+#[tokio::test]
+async fn agent_tool_respects_allowed_tools_and_max_turns() {
+    let manager = Arc::new(TaskManager::default());
+    let inherited_tools = ToolRegistry::new()
+        .register(Arc::new(AgentTool))
+        .register(Arc::new(SafeTool {
+            name: "Read",
+            aliases: &["FileRead"],
+        }))
+        .register(Arc::new(SafeTool {
+            name: "Write",
+            aliases: &[],
+        }));
+    let permissions = ToolPermissionContext::new(PermissionMode::Default)
+        .with_task_manager(manager.clone())
+        .with_active_session_id("session-12")
+        .with_inherited_tool_registry(inherited_tools)
+        .with_subagent_scripted_turns(vec![
+            vec![
+                rust_agent::service::api::streaming::StreamEvent::MessageStart,
+                rust_agent::service::api::streaming::StreamEvent::TextDelta(
+                    "first bounded answer".into(),
+                ),
+                rust_agent::service::api::streaming::StreamEvent::MessageStop {
+                    stop_reason: rust_agent::service::api::streaming::StopReason::MaxTokens,
+                },
+            ],
+            vec![
+                rust_agent::service::api::streaming::StreamEvent::MessageStart,
+                rust_agent::service::api::streaming::StreamEvent::TextDelta(
+                    "second bounded answer".into(),
+                ),
+                rust_agent::service::api::streaming::StreamEvent::MessageStop {
+                    stop_reason: rust_agent::service::api::streaming::StopReason::EndTurn,
+                },
+            ],
+        ]);
+
+    AgentTool
+        .invoke(
+            &ToolCall {
+                name: "Agent".into(),
+                input: serde_json::json!({
+                    "task": "bounded inspection",
+                    "role": "verify",
+                    "max_turns": 1,
+                    "allowed_tools": ["Read"]
+                })
+                .to_string(),
+            },
+            &permissions,
+        )
+        .await
+        .expect("bounded agent launch should succeed");
+
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            let created = manager.get("task-0").expect("task should be created");
+            if matches!(created.status, TaskStatus::Failed) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("bounded worker should finish");
+
+    let created = manager.get("task-0").expect("task should be created");
+    assert_eq!(created.worker_role, Some(WorkerRole::Verify));
+    assert_eq!(created.status, TaskStatus::Failed);
+
+    let output = manager
+        .get_output("task-0", 0)
+        .expect("task output should exist");
+    assert!(output.content.contains("first bounded answer"));
+    assert!(!output.content.contains("second bounded answer"));
+
+    let notification = created
+        .delivery
+        .notification
+        .as_ref()
+        .expect("notification should exist");
+    assert_eq!(notification.worker_role.as_deref(), Some("verify"));
+
+    let worker_tools = permissions
+        .inherited_tool_registry
+        .as_ref()
+        .expect("inherited tool registry should exist")
+        .assemble_worker_registry(Some(&["Read".to_string()]))
+        .visible_tools(&permissions)
+        .into_iter()
+        .map(|tool| tool.name)
+        .collect::<Vec<_>>();
+    assert_eq!(worker_tools, vec!["Read"]);
 }
 
 #[tokio::test]

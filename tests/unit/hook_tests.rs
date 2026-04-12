@@ -134,6 +134,8 @@ fn notification_hook_can_match_typed_payload() {
         notification_type: NotificationType::TaskUpdate,
         task_id: Some("task-9".into()),
         status: Some("Completed".into()),
+        next_action: Some("inspect task output for task-9".into()),
+        worker_role: Some("research".into()),
         output_file: Some("/tmp/task-9.log".into()),
         wake_up: true,
         target: None,

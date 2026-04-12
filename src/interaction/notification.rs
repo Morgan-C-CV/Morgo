@@ -19,6 +19,8 @@ pub struct Notification {
     pub notification_type: NotificationType,
     pub task_id: Option<String>,
     pub status: Option<String>,
+    pub next_action: Option<String>,
+    pub worker_role: Option<String>,
     pub output_file: Option<String>,
     pub wake_up: bool,
     pub target: Option<NotificationTarget>,
@@ -31,6 +33,8 @@ impl Notification {
         body: impl Into<String>,
         task_id: impl Into<String>,
         status: impl Into<String>,
+        next_action: impl Into<String>,
+        worker_role: Option<&str>,
         output_file: impl Into<String>,
     ) -> Self {
         Self {
@@ -40,6 +44,8 @@ impl Notification {
             notification_type: NotificationType::TaskUpdate,
             task_id: Some(task_id.into()),
             status: Some(status.into()),
+            next_action: Some(next_action.into()),
+            worker_role: worker_role.map(str::to_string),
             output_file: Some(output_file.into()),
             wake_up: true,
             target: None,

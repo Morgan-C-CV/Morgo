@@ -28,6 +28,11 @@ fn render_task_event(task_event: &TaskEvent) -> String {
         format!("[task] id: {}", task_event.task_id),
         format!("[task] summary: {}", task_event.summary),
         format!("[task] status: {:?}", task_event.status),
+        format!("[task] result: {}", task_event.result),
+        format!(
+            "[task] worker_role: {}",
+            task_event.worker_role.map(|role| role.as_str()).unwrap_or("none")
+        ),
         format!("[task] output: {}", task_event.output_file),
         format!("[task] next_action: {}", task_event.next_action),
     ]

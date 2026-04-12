@@ -67,8 +67,16 @@ pub fn notification_to_task_notification(notification: &Notification) -> Option<
         },
         summary: notification.body.clone(),
         result: notification.title.clone(),
-        next_action: "inspect task notification".to_string(),
-        worker_role: None,
+        next_action: notification
+            .next_action
+            .clone()
+            .unwrap_or_else(|| "inspect task notification".to_string()),
+        worker_role: notification.worker_role.as_deref().and_then(|role| match role {
+            "research" => Some(crate::state::app_state::WorkerRole::Research),
+            "implement" => Some(crate::state::app_state::WorkerRole::Implement),
+            "verify" => Some(crate::state::app_state::WorkerRole::Verify),
+            _ => None,
+        }),
         output_file: notification.output_file.clone().unwrap_or_default(),
     })
 }
