@@ -6,6 +6,7 @@ use crate::history::session::{SessionHistory, SessionId, SessionRestoreRequest, 
 use crate::interaction::cli::repl::{CliDisplayEvent, CliRuntimeEvent, handle_normalized_input};
 use crate::interaction::envelope::NormalizedInput;
 use crate::interaction::notification::{Notification, NotificationTarget, NotificationType};
+use crate::state::permission_context::PendingApproval;
 use crate::interaction::router::CommandRouter;
 use crate::state::app_state::AppState;
 use crate::task::types::TaskEvent;
@@ -248,9 +249,11 @@ fn dispatch_remote_runtime_notifications(
         let Some(notification) = notification_from_cli_event(input, event) else {
             continue;
         };
-        app_state
-            .notification_dispatcher
-            .dispatch(input.surface, notification);
+        if should_enqueue_async_remote_event(event) {
+            app_state
+                .notification_dispatcher
+                .dispatch(input.surface, notification);
+        }
     }
 }
 
@@ -258,16 +261,15 @@ fn notification_from_cli_event(input: &NormalizedInput, event: &CliDisplayEvent)
     match event {
         CliDisplayEvent::TaskEvent(_) => None,
         CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::PendingApproval { tool_name, message }) => {
-            let mut notification = Notification::approval_required(
-                input.session_id.clone(),
-                tool_name.clone(),
-                message.clone(),
-            );
-            notification.target = Some(NotificationTarget::RemoteActor {
-                session_id: input.session_id.clone(),
-                actor_id: input.actor.actor_id.clone(),
-            });
-            Some(notification)
+            Some(notification_from_pending_approval(
+                &input.session_id,
+                &input.actor.actor_id,
+                PendingApproval {
+                    tool_name: tool_name.clone(),
+                    tool_input: String::new(),
+                    message: message.clone(),
+                },
+            ))
         }
         CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::Notice { kind, message }) => {
             let mut notification = Notification::runtime_notice(
@@ -283,6 +285,31 @@ fn notification_from_cli_event(input: &NormalizedInput, event: &CliDisplayEvent)
         }
         _ => None,
     }
+}
+
+fn should_enqueue_async_remote_event(event: &CliDisplayEvent) -> bool {
+    matches!(
+        event,
+        CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::PendingApproval { .. })
+            | CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::Notice { .. })
+    )
+}
+
+fn notification_from_pending_approval(
+    session_id: &str,
+    actor_id: &str,
+    pending: PendingApproval,
+) -> Notification {
+    let mut notification = Notification::approval_required(
+        session_id.to_string(),
+        pending.tool_name,
+        pending.message,
+    );
+    notification.target = Some(NotificationTarget::RemoteActor {
+        session_id: session_id.to_string(),
+        actor_id: actor_id.to_string(),
+    });
+    notification
 }
 
 fn leak_string(value: String) -> &'static str {

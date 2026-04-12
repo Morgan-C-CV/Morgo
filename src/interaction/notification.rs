@@ -30,6 +30,7 @@ pub struct Notification {
     pub output_file: Option<String>,
     pub tool_name: Option<String>,
     pub notice_kind: Option<String>,
+    pub dedupe_key: Option<String>,
     pub wake_up: bool,
     pub target: Option<NotificationTarget>,
 }
@@ -63,6 +64,7 @@ impl Notification {
             output_file: Some(output_file.into()),
             tool_name: None,
             notice_kind: None,
+            dedupe_key: None,
             wake_up: true,
             target: None,
         }
@@ -75,6 +77,7 @@ impl Notification {
     ) -> Self {
         let tool_name = tool_name.into();
         let message = message.into();
+        let dedupe_key = format!("approval_required:{tool_name}:{message}");
         Self {
             session_id: session_id.into(),
             title: format!("Approval required: {tool_name}"),
@@ -90,6 +93,7 @@ impl Notification {
             output_file: None,
             tool_name: Some(tool_name),
             notice_kind: None,
+            dedupe_key: Some(dedupe_key),
             wake_up: true,
             target: None,
         }
@@ -102,6 +106,7 @@ impl Notification {
     ) -> Self {
         let kind = kind.into();
         let message = message.into();
+        let dedupe_key = format!("runtime_notice:{kind}:{message}");
         Self {
             session_id: session_id.into(),
             title: format!("Runtime notice: {kind}"),
@@ -117,6 +122,7 @@ impl Notification {
             output_file: None,
             tool_name: None,
             notice_kind: Some(kind),
+            dedupe_key: Some(dedupe_key),
             wake_up: false,
             target: None,
         }

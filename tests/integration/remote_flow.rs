@@ -205,6 +205,96 @@ async fn remote_request_drains_async_remote_notifications() {
 }
 
 #[tokio::test]
+async fn remote_request_preserves_response_boundary_and_async_inbox_semantics() {
+    let command_registry = Arc::new(CommandRegistry::new());
+    let router = rust_agent::interaction::router::CommandRouter::new(
+        command_registry.clone(),
+        Box::new(DefaultSurfaceAuthorizer),
+    );
+    let permission_context = ToolPermissionContext::new(PermissionMode::Default)
+        .with_task_manager(Arc::new(TaskManager::default()))
+        .with_plan_manager(Arc::new(PlanManager::default()))
+        .with_pending_approval(rust_agent::state::permission_context::PendingApproval {
+            tool_name: "Bash".into(),
+            tool_input: serde_json::json!({"command": "ls"}).to_string(),
+            message: "requires explicit approval".into(),
+        });
+    let session_store = Arc::new(InMemorySessionStore::default());
+    let app_state = AppState {
+        surface: InteractionSurface::Remote,
+        session_mode: SessionMode::Interactive,
+        client_type: ClientType::RemoteControl,
+        session_source: SessionSource::RemoteControl,
+        runtime_role: RuntimeRole::Coordinator,
+        worker_role: None,
+        permission_context,
+        command_registry: Some(command_registry),
+        runtime_tool_registry: Some(Arc::new(RwLock::new(ToolRegistry::new()))),
+        skill_registry: None,
+        mcp_runtime: None,
+        plugin_load_result: None,
+        cost_tracker: CostTracker::default(),
+        notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
+        startup_trace: Vec::new(),
+        active_session_id: "remote-boundary-session".into(),
+        session_store: Some(session_store),
+        session: None,
+        history: None,
+        restored_session: None,
+    };
+    app_state.notification_dispatcher.dispatch(
+        InteractionSurface::Remote,
+        Notification::runtime_notice("remote-boundary-session", "tool", "background only"),
+    );
+    let engine = rust_agent::core::engine::QueryEngine::new(rust_agent::core::context::QueryContext {
+        app_state: app_state.clone(),
+        tool_registry: ToolRegistry::new(),
+        api_client: ModelProviderClient::with_scripted_turns(vec![vec![
+            StreamEvent::MessageStart,
+            StreamEvent::TextDelta("boundary reply".into()),
+            StreamEvent::MessageStop {
+                stop_reason: StopReason::EndTurn,
+            },
+        ]]),
+        compactor: ReactiveCompactor,
+        hook_registry: rust_agent::hook::registry::HookRegistry::default(),
+        agent_id: None,
+        system_prompt: "test system".into(),
+        tools_prompt: "test tools".into(),
+        context_prompt: "test context".into(),
+    });
+
+    let response = handle_remote_request(
+        &router,
+        &engine,
+        &app_state,
+        RemoteRequest {
+            session_id: "remote-boundary-session".into(),
+            actor_id: "actor-a".into(),
+            is_authenticated: true,
+            from_trusted_surface: true,
+            raw: "hello boundary".into(),
+        },
+    )
+    .await
+    .expect("remote request should succeed");
+
+    assert!(response
+        .events
+        .iter()
+        .all(|event| !matches!(event.payload, RemoteEventPayload::RuntimeNotice { .. })));
+
+    let drained = drain_remote_notifications(&app_state, "remote-boundary-session", Some("actor-a"));
+    assert_eq!(drained.len(), 1);
+    assert!(drained.iter().any(|event| matches!(
+        &event.payload,
+        RemoteEventPayload::RuntimeNotice { kind, message }
+            if kind == "tool" && message == "background only"
+    )));
+    assert!(drain_remote_notifications(&app_state, "remote-boundary-session", Some("other-actor")).is_empty());
+}
+
+#[tokio::test]
 async fn remote_request_returns_typed_remote_event_envelopes() {
     let command_registry = Arc::new(CommandRegistry::new());
     let router = rust_agent::interaction::router::CommandRouter::new(

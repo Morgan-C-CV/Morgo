@@ -72,6 +72,7 @@ fn notification_conversion_preserves_worker_role_and_next_action() {
         output_file: Some("/tmp/task-8.log".into()),
         tool_name: None,
         notice_kind: None,
+        dedupe_key: None,
         wake_up: true,
         target: None,
     };

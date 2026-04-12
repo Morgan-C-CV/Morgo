@@ -92,10 +92,20 @@ impl NotificationDispatcher {
         let actor_notifications = actor_id
             .and_then(|actor_id| inboxes.remove(&Self::remote_actor_key(session_id, actor_id)))
             .unwrap_or_default();
-        session_notifications
-            .into_iter()
-            .chain(actor_notifications)
-            .collect()
+
+        let mut seen = std::collections::HashSet::new();
+        let mut drained = Vec::new();
+        for notification in session_notifications.into_iter().chain(actor_notifications) {
+            let dedupe_key = notification.dedupe_key.clone();
+            if dedupe_key
+                .as_ref()
+                .is_some_and(|key| !seen.insert(key.clone()))
+            {
+                continue;
+            }
+            drained.push(notification);
+        }
+        drained
     }
 
     fn enqueue_remote(&self, notification: Notification) {

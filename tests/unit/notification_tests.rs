@@ -26,6 +26,7 @@ fn dispatcher_records_cli_notifications() {
         output_file: Some("/tmp/task-1.log".into()),
         tool_name: None,
         notice_kind: None,
+        dedupe_key: None,
         wake_up: true,
         target: None,
     };
@@ -180,17 +181,45 @@ fn dispatcher_drains_remote_session_and_actor_notifications() {
     });
     dispatcher.dispatch(InteractionSurface::Remote, actor_notification);
 
-    let drained = dispatcher.drain_remote_notifications("remote-session", Some("actor-1"));
-    assert_eq!(drained.len(), 2);
-    assert!(drained
+    let actor_drained = dispatcher.drain_remote_notifications("remote-session", Some("actor-1"));
+    assert_eq!(actor_drained.len(), 2);
+    assert!(actor_drained
         .iter()
         .any(|notification| notification.notification_type == NotificationType::RuntimeNotice));
-    assert!(drained
+    assert!(actor_drained
         .iter()
         .any(|notification| notification.notification_type == NotificationType::ApprovalRequired));
+
+    dispatcher.dispatch(
+        InteractionSurface::Remote,
+        Notification::runtime_notice("remote-session", "tool", "session only"),
+    );
+    let session_only = dispatcher.drain_remote_notifications("remote-session", None);
+    assert_eq!(session_only.len(), 1);
+    assert_eq!(session_only[0].notification_type, NotificationType::RuntimeNotice);
+
     assert!(dispatcher
         .drain_remote_notifications("remote-session", Some("actor-1"))
         .is_empty());
+}
+
+#[test]
+fn remote_drain_dedupes_session_and_actor_notifications() {
+    let dispatcher = NotificationDispatcher::new(TelegramGateway::default());
+    let mut session_notification = Notification::runtime_notice("remote-session", "tool", "same message");
+    session_notification.dedupe_key = Some("notice-1".into());
+    dispatcher.dispatch(InteractionSurface::Remote, session_notification);
+
+    let mut actor_notification = Notification::runtime_notice("remote-session", "tool", "same message");
+    actor_notification.dedupe_key = Some("notice-1".into());
+    actor_notification.target = Some(NotificationTarget::RemoteActor {
+        session_id: "remote-session".into(),
+        actor_id: "actor-1".into(),
+    });
+    dispatcher.dispatch(InteractionSurface::Remote, actor_notification);
+
+    let drained = dispatcher.drain_remote_notifications("remote-session", Some("actor-1"));
+    assert_eq!(drained.len(), 1);
 }
 
 #[test]
@@ -271,6 +300,7 @@ fn dispatcher_requires_delivery_ready_binding_for_telegram() {
         output_file: Some("/tmp/task-1.log".into()),
         tool_name: None,
         notice_kind: None,
+        dedupe_key: None,
         wake_up: true,
         target: Some(NotificationTarget::Session {
             session_id: "telegram-session-1".into(),
@@ -296,6 +326,7 @@ fn dispatcher_requires_delivery_ready_binding_for_telegram() {
             output_file: Some("/tmp/task-1.log".into()),
             tool_name: None,
             notice_kind: None,
+            dedupe_key: None,
             wake_up: true,
             target: Some(NotificationTarget::Telegram(TelegramDeliveryTarget {
                 chat_id: "chat-1".into(),
