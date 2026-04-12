@@ -652,6 +652,14 @@ impl TaskManager {
             notification.target = Some(crate::interaction::notification::NotificationTarget::Session {
                 session_id: event.owner.session_id.clone(),
             });
+            if matches!(event.owner.surface, InteractionSurface::Remote) {
+                notification.dedupe_key = Some(format!(
+                    "task_update:{}:{}:{}",
+                    event.owner.session_id,
+                    event.task_id,
+                    event.status.as_str()
+                ));
+            }
         }
         dispatcher.dispatch(event.owner.surface, notification.clone());
         notification

@@ -1,10 +1,13 @@
 use std::sync::Arc;
 
 use rust_agent::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
+use async_trait::async_trait;
 use rust_agent::command::registry::CommandRegistry;
+use rust_agent::command::types::{Command, CommandAvailability, CommandMetadata, CommandResult, CommandSource, CommandType};
 use rust_agent::cost::tracker::CostTracker;
 use rust_agent::history::session::{InMemorySessionStore, SessionHistory, SessionRestoreRequest, SessionSnapshot, SessionStore};
 use rust_agent::interaction::dispatcher::NotificationDispatcher;
+use rust_agent::interaction::envelope::NormalizedInput;
 use rust_agent::interaction::notification::{Notification, NotificationTarget};
 use rust_agent::interaction::remote::{
     RemoteEventPayload, RemoteRequest, drain_remote_notifications, handle_remote_request,
@@ -20,6 +23,47 @@ use rust_agent::state::permission_context::{PermissionMode, ToolPermissionContex
 use rust_agent::task::manager::TaskManager;
 use rust_agent::tool::registry::ToolRegistry;
 use tokio::sync::RwLock;
+
+struct RemoteSpawnTaskCommand;
+
+#[async_trait]
+impl Command for RemoteSpawnTaskCommand {
+    fn metadata(&self) -> CommandMetadata {
+        CommandMetadata {
+            name: "remote-spawn-task".into(),
+            description: "Spawn a remote-owned task for integration tests".into(),
+            source: CommandSource::Builtin,
+            category: "test".into(),
+            command_type: CommandType::Local,
+            availability: CommandAvailability::RemoteSafe,
+            aliases: Vec::new(),
+            is_hidden: false,
+            disable_model_invocation: false,
+            immediate: true,
+            is_sensitive: false,
+        }
+    }
+
+    async fn execute(
+        &self,
+        _input: &NormalizedInput,
+        app_state: &AppState,
+    ) -> anyhow::Result<CommandResult> {
+        let tasks = app_state
+            .permission_context
+            .task_manager
+            .as_ref()
+            .expect("task manager should exist");
+        let dispatcher = app_state.notification_dispatcher.clone();
+        let task = tasks.create(
+            "remote async task",
+            app_state.active_session_id.clone(),
+            InteractionSurface::Remote,
+        );
+        tasks.complete(&task.id, &dispatcher);
+        Ok(CommandResult::Message(format!("spawned {}", task.id)))
+    }
+}
 
 #[tokio::test]
 async fn remote_request_runs_minimal_query_chain() {
@@ -202,6 +246,85 @@ async fn remote_request_drains_async_remote_notifications() {
             if kind == "tool" && message == "background update"
     )));
     assert!(drain_remote_notifications(&app_state, "remote-async-session", Some("remote-actor")).is_empty());
+}
+
+#[tokio::test]
+async fn remote_request_drains_async_task_update_notifications() {
+    let command_registry = Arc::new(CommandRegistry::new().register(Arc::new(RemoteSpawnTaskCommand)));
+    let router = rust_agent::interaction::router::CommandRouter::new(
+        command_registry.clone(),
+        Box::new(DefaultSurfaceAuthorizer),
+    );
+    let permission_context = ToolPermissionContext::new(PermissionMode::Default)
+        .with_task_manager(Arc::new(TaskManager::default()))
+        .with_plan_manager(Arc::new(PlanManager::default()));
+    let session_store = Arc::new(InMemorySessionStore::default());
+    let app_state = AppState {
+        surface: InteractionSurface::Remote,
+        session_mode: SessionMode::Interactive,
+        client_type: ClientType::RemoteControl,
+        session_source: SessionSource::RemoteControl,
+        runtime_role: RuntimeRole::Coordinator,
+        worker_role: None,
+        permission_context,
+        command_registry: Some(command_registry),
+        runtime_tool_registry: Some(Arc::new(RwLock::new(ToolRegistry::new()))),
+        skill_registry: None,
+        mcp_runtime: None,
+        plugin_load_result: None,
+        cost_tracker: CostTracker::default(),
+        notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
+        startup_trace: Vec::new(),
+        active_session_id: "remote-task-session".into(),
+        session_store: Some(session_store),
+        session: None,
+        history: None,
+        restored_session: None,
+    };
+    let engine = rust_agent::core::engine::QueryEngine::new(rust_agent::core::context::QueryContext {
+        app_state: app_state.clone(),
+        tool_registry: ToolRegistry::new(),
+        api_client: ModelProviderClient::with_scripted_turns(vec![]),
+        compactor: ReactiveCompactor,
+        hook_registry: rust_agent::hook::registry::HookRegistry::default(),
+        agent_id: None,
+        system_prompt: "test system".into(),
+        tools_prompt: "test tools".into(),
+        context_prompt: "test context".into(),
+    });
+
+    let response = handle_remote_request(
+        &router,
+        &engine,
+        &app_state,
+        RemoteRequest {
+            session_id: "remote-task-session".into(),
+            actor_id: "task-actor".into(),
+            is_authenticated: true,
+            from_trusted_surface: true,
+            raw: "/remote-spawn-task".into(),
+        },
+    )
+    .await
+    .expect("remote request should succeed");
+
+    assert!(response.primary_text.contains("spawned task-0"));
+    assert!(response.events.iter().any(|event| matches!(
+        &event.payload,
+        RemoteEventPayload::TaskUpdate(task)
+            if task.task_id == "task-0" && task.status == "completed"
+    )));
+
+    let drained = drain_remote_notifications(&app_state, "remote-task-session", Some("task-actor"));
+    assert_eq!(drained.len(), 1);
+    assert!(matches!(&drained[0].payload, RemoteEventPayload::TaskUpdate(_)));
+    assert!(matches!(
+        &drained[0].payload,
+        RemoteEventPayload::TaskUpdate(task)
+            if task.task_id == "task-0"
+                && task.status == "completed"
+                && task.summary.contains("remote async task")
+    ));
 }
 
 #[tokio::test]

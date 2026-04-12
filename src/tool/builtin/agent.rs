@@ -115,10 +115,11 @@ impl Tool for AgentTool {
                         task_id, role_label, task_label
                     )));
                 }
+                let owner_surface = permissions.active_surface.unwrap_or(InteractionSurface::Cli);
                 let task = tasks.create(
                     format!("Spawned {} worker for {}", role_label, task_label),
                     session_id.clone(),
-                    InteractionSurface::Cli,
+                    owner_surface,
                 );
                 tasks.set_worker_role(&task.id, request.role);
                 tasks.set_parent_task_id(&task.id, request.parent_task_id.clone());

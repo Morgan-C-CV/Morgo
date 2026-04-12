@@ -235,6 +235,11 @@ impl RuntimeBootstrap {
         .with_skill_registry(skill_registry.clone())
         .with_mcp_runtime(mcp_runtime.clone())
         .with_active_session_id(active_session_id.clone())
+        .with_active_surface(state.surface)
+        .with_notification_dispatcher(
+            NotificationDispatcher::new(self.build_telegram_gateway())
+                .with_hook_registry(hook_registry.clone()),
+        )
         .with_deferred_tools(true)
         .with_interactive_tools(true)
         .with_inherited_tool_registry(coordinator_tools.clone())
@@ -263,8 +268,13 @@ impl RuntimeBootstrap {
                 provider_config.model_id.clone(),
                 provider_config.pricing.clone(),
             ),
-            notification_dispatcher: NotificationDispatcher::new(self.build_telegram_gateway())
-                .with_hook_registry(hook_registry.clone()),
+            notification_dispatcher: permission_context
+                .notification_dispatcher
+                .clone()
+                .unwrap_or_else(|| {
+                    NotificationDispatcher::new(self.build_telegram_gateway())
+                        .with_hook_registry(hook_registry.clone())
+                }),
             startup_trace: state
                 .phases
                 .iter()

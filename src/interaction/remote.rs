@@ -52,6 +52,13 @@ pub struct RemoteNotificationEnvelope {
     pub payload: RemoteEventPayload,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoteDeliveryMode {
+    ResponseOnly,
+    AsyncOnly,
+    DualChannel,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteTaskEvent {
     pub task_id: String,
@@ -66,6 +73,17 @@ pub struct RemoteTaskEvent {
     pub output_file: String,
 }
 
+// Current remote delivery contract:
+// - response channel: turn-scoped assistant/runtime/task events produced during the request
+// - async inbox: session/actor-targeted notifications that may be drained after the request
+// - dual channel: task_update may appear in both response and async inbox; dedupe_key provides idempotence
+// - async-only by practice: out-of-band runtime notices dispatched outside the request lifecycle
+//
+// Helper policy below is the code-level source of truth for the intended channel split:
+// - CliDisplayEvent::TaskEvent => dual channel
+// - CliRuntimeEvent::{PendingApproval, Notice} => dual channel when emitted in-request
+// - queued Notification values are async inbox deliveries
+// - out-of-band notifications have no response event counterpart unless a request emits them directly
 pub async fn handle_remote_request(
     router: &CommandRouter,
     engine: &QueryEngine,
@@ -191,6 +209,10 @@ impl From<TaskEvent> for RemoteTaskEvent {
 
 impl From<Notification> for RemoteNotificationEnvelope {
     fn from(notification: Notification) -> Self {
+        debug_assert!(matches!(
+            remote_delivery_mode_for_notification(&notification.notification_type),
+            RemoteDeliveryMode::AsyncOnly | RemoteDeliveryMode::DualChannel
+        ));
         match notification.notification_type {
             NotificationType::TaskUpdate => Self {
                 event_type: "task_update",
@@ -246,14 +268,15 @@ fn dispatch_remote_runtime_notifications(
     events: &[CliDisplayEvent],
 ) {
     for event in events {
+        if !matches!(remote_delivery_mode_for_cli_event(event), RemoteDeliveryMode::DualChannel) {
+            continue;
+        }
         let Some(notification) = notification_from_cli_event(input, event) else {
             continue;
         };
-        if should_enqueue_async_remote_event(event) {
-            app_state
-                .notification_dispatcher
-                .dispatch(input.surface, notification);
-        }
+        app_state
+            .notification_dispatcher
+            .dispatch(input.surface, notification);
     }
 }
 
@@ -287,12 +310,31 @@ fn notification_from_cli_event(input: &NormalizedInput, event: &CliDisplayEvent)
     }
 }
 
-fn should_enqueue_async_remote_event(event: &CliDisplayEvent) -> bool {
-    matches!(
-        event,
-        CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::PendingApproval { .. })
-            | CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::Notice { .. })
-    )
+pub fn remote_delivery_mode_for_cli_event(event: &CliDisplayEvent) -> RemoteDeliveryMode {
+    match event {
+        CliDisplayEvent::TaskEvent(_) => RemoteDeliveryMode::DualChannel,
+        CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::PendingApproval { .. }) => {
+            RemoteDeliveryMode::DualChannel
+        }
+        CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::Notice { .. }) => RemoteDeliveryMode::DualChannel,
+        CliDisplayEvent::RuntimeEvent(
+            CliRuntimeEvent::AssistantDelta { .. }
+            | CliRuntimeEvent::ToolCallStarted { .. }
+            | CliRuntimeEvent::ToolResult { .. }
+            | CliRuntimeEvent::Transition { .. }
+            | CliRuntimeEvent::Terminal { .. }
+            | CliRuntimeEvent::SessionMilestone { .. },
+        ) => RemoteDeliveryMode::ResponseOnly,
+    }
+}
+
+pub fn remote_delivery_mode_for_notification(notification_type: &NotificationType) -> RemoteDeliveryMode {
+    match notification_type {
+        NotificationType::TaskUpdate => RemoteDeliveryMode::DualChannel,
+        NotificationType::ApprovalRequired | NotificationType::RuntimeNotice => {
+            RemoteDeliveryMode::AsyncOnly
+        }
+    }
 }
 
 fn notification_from_pending_approval(

@@ -1,6 +1,8 @@
 use std::sync::{Arc, RwLock};
 
+use crate::bootstrap::InteractionSurface;
 use crate::hook::registry::HookRegistry;
+use crate::interaction::dispatcher::NotificationDispatcher;
 use crate::plan::manager::PlanManager;
 use crate::service::mcp::runtime::McpRuntime;
 use crate::skills::registry::SkillRegistry;
@@ -37,6 +39,8 @@ pub struct ToolPermissionContext {
     pub skill_registry: Option<Arc<SkillRegistry>>,
     pub mcp_runtime: Option<Arc<McpRuntime>>,
     pub active_session_id: Option<String>,
+    pub active_surface: Option<InteractionSurface>,
+    pub notification_dispatcher: Option<NotificationDispatcher>,
     pub pending_approval: Arc<RwLock<Option<PendingApproval>>>,
     pub subagent_scripted_turns: Option<Vec<Vec<crate::service::api::streaming::StreamEvent>>>,
     pub inherited_tool_registry: Option<ToolRegistry>,
@@ -58,6 +62,8 @@ impl ToolPermissionContext {
             skill_registry: None,
             mcp_runtime: None,
             active_session_id: None,
+            active_surface: None,
+            notification_dispatcher: None,
             pending_approval: Arc::new(RwLock::new(None)),
             subagent_scripted_turns: None,
             inherited_tool_registry: None,
@@ -125,6 +131,19 @@ impl ToolPermissionContext {
 
     pub fn with_active_session_id(mut self, active_session_id: impl Into<String>) -> Self {
         self.active_session_id = Some(active_session_id.into());
+        self
+    }
+
+    pub fn with_active_surface(mut self, active_surface: InteractionSurface) -> Self {
+        self.active_surface = Some(active_surface);
+        self
+    }
+
+    pub fn with_notification_dispatcher(
+        mut self,
+        notification_dispatcher: NotificationDispatcher,
+    ) -> Self {
+        self.notification_dispatcher = Some(notification_dispatcher);
         self
     }
 

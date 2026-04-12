@@ -3,7 +3,10 @@ use rust_agent::interaction::cli::renderer::render_turn_output;
 use rust_agent::interaction::cli::repl::{CliDisplayEvent, CliRuntimeEvent, CliTurnOutput};
 use rust_agent::interaction::dispatcher::NotificationDispatcher;
 use rust_agent::interaction::notification::{Notification, NotificationTarget, NotificationType};
-use rust_agent::interaction::remote::{RemoteEventEnvelope, RemoteEventPayload, drain_remote_notifications};
+use rust_agent::interaction::remote::{
+    RemoteDeliveryMode, RemoteEventEnvelope, RemoteEventPayload, drain_remote_notifications,
+    remote_delivery_mode_for_cli_event, remote_delivery_mode_for_notification,
+};
 use rust_agent::interaction::telegram::binding::{SessionBinding, TelegramDeliveryTarget};
 use rust_agent::interaction::telegram::gateway::TelegramGateway;
 use rust_agent::task::types::{TaskEvent, TaskOwner, TaskStatus};
@@ -132,6 +135,73 @@ fn cli_renderer_renders_approval_and_tool_result_panels() {
 }
 
 #[test]
+fn remote_delivery_mode_classifies_notification_types() {
+    assert_eq!(
+        remote_delivery_mode_for_notification(&NotificationType::TaskUpdate),
+        RemoteDeliveryMode::DualChannel
+    );
+    assert_eq!(
+        remote_delivery_mode_for_notification(&NotificationType::ApprovalRequired),
+        RemoteDeliveryMode::AsyncOnly
+    );
+    assert_eq!(
+        remote_delivery_mode_for_notification(&NotificationType::RuntimeNotice),
+        RemoteDeliveryMode::AsyncOnly
+    );
+}
+
+#[test]
+fn remote_delivery_mode_classifies_dual_channel_and_response_only_events() {
+    let task_event = CliDisplayEvent::TaskEvent(TaskEvent {
+        owner: TaskOwner {
+            session_id: "session-1".into(),
+            surface: InteractionSurface::Remote,
+        },
+        target_task_id: Some("task-1".into()),
+        task_id: "task-1".into(),
+        status: TaskStatus::Completed,
+        summary: "demo task".into(),
+        result: "Task completed".into(),
+        next_action: "inspect task output for task-1".into(),
+        worker_role: None,
+        orchestration_group_id: None,
+        phase: None,
+        validation_state: None,
+        output_file: "/tmp/task-1.log".into(),
+    });
+    assert_eq!(
+        remote_delivery_mode_for_cli_event(&task_event),
+        RemoteDeliveryMode::DualChannel
+    );
+
+    let approval_event = CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::PendingApproval {
+        tool_name: "Bash".into(),
+        message: "requires explicit approval".into(),
+    });
+    assert_eq!(
+        remote_delivery_mode_for_cli_event(&approval_event),
+        RemoteDeliveryMode::DualChannel
+    );
+
+    let notice_event = CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::Notice {
+        kind: "validation".into(),
+        message: "pending verify".into(),
+    });
+    assert_eq!(
+        remote_delivery_mode_for_cli_event(&notice_event),
+        RemoteDeliveryMode::DualChannel
+    );
+
+    let delta_event = CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::AssistantDelta {
+        text: "partial reply".into(),
+    });
+    assert_eq!(
+        remote_delivery_mode_for_cli_event(&delta_event),
+        RemoteDeliveryMode::ResponseOnly
+    );
+}
+
+#[test]
 fn remote_event_envelope_preserves_structured_task_payload() {
     let envelope = RemoteEventEnvelope::from(CliDisplayEvent::TaskEvent(TaskEvent {
         owner: TaskOwner {
@@ -220,6 +290,50 @@ fn remote_drain_dedupes_session_and_actor_notifications() {
 
     let drained = dispatcher.drain_remote_notifications("remote-session", Some("actor-1"));
     assert_eq!(drained.len(), 1);
+}
+
+#[test]
+fn remote_task_update_notifications_use_dedupe_key() {
+    let dispatcher = NotificationDispatcher::new(TelegramGateway::default());
+    let mut session_notification = Notification::task_update(
+        "remote-session",
+        "Task completed",
+        "remote task (task-1)",
+        "task-1",
+        "completed",
+        "inspect task output for task-1",
+        None,
+        None,
+        None,
+        None,
+        "/tmp/task-1.log",
+    );
+    session_notification.dedupe_key = Some("task_update:remote-session:task-1:completed".into());
+    dispatcher.dispatch(InteractionSurface::Remote, session_notification);
+
+    let mut actor_notification = Notification::task_update(
+        "remote-session",
+        "Task completed",
+        "remote task (task-1)",
+        "task-1",
+        "completed",
+        "inspect task output for task-1",
+        None,
+        None,
+        None,
+        None,
+        "/tmp/task-1.log",
+    );
+    actor_notification.dedupe_key = Some("task_update:remote-session:task-1:completed".into());
+    actor_notification.target = Some(NotificationTarget::RemoteActor {
+        session_id: "remote-session".into(),
+        actor_id: "actor-1".into(),
+    });
+    dispatcher.dispatch(InteractionSurface::Remote, actor_notification);
+
+    let drained = dispatcher.drain_remote_notifications("remote-session", Some("actor-1"));
+    assert_eq!(drained.len(), 1);
+    assert_eq!(drained[0].notification_type, NotificationType::TaskUpdate);
 }
 
 #[test]

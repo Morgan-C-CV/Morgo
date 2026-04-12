@@ -7,7 +7,6 @@ use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 use tokio::time::timeout;
 
-use crate::interaction::dispatcher::NotificationDispatcher;
 use crate::state::permission_context::{PermissionMode, ToolPermissionContext};
 use crate::tool::definition::{PermissionDecision, Tool, ToolCall, ToolMetadata, ToolResult};
 
@@ -221,20 +220,26 @@ async fn launch_background_command(
         .active_session_id
         .clone()
         .ok_or_else(|| anyhow::anyhow!("background bash execution requires active session id"))?;
+    let owner_surface = permissions
+        .active_surface
+        .unwrap_or(crate::bootstrap::InteractionSurface::Cli);
     let task = task_manager.create(
         input
             .description
             .clone()
             .unwrap_or_else(|| format!("bash: {}", input.command.trim())),
         session_id,
-        crate::bootstrap::InteractionSurface::Cli,
+        owner_surface,
     );
 
     let command = input.command.clone();
     let description = input.description.clone();
     let cwd = cwd.to_path_buf();
     let timeout_ms = input.timeout.unwrap_or(120_000).min(600_000);
-    let dispatcher = NotificationDispatcher::default();
+    let dispatcher = permissions
+        .notification_dispatcher
+        .clone()
+        .unwrap_or_default();
     let manager = task_manager.clone();
     let task_id = task.id.clone();
     task_manager.launch(&task.id, command.clone(), async move {
