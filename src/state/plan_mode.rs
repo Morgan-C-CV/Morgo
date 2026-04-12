@@ -1,4 +1,4 @@
-use crate::plan::types::PlanState;
+use crate::plan::types::{PlanState, PlanStepStatus};
 use crate::state::permission_context::{PendingApproval, PermissionMode, ToolPermissionContext};
 use crate::tool::definition::ToolResult;
 
@@ -28,6 +28,15 @@ pub fn render_plan_show(permissions: &ToolPermissionContext) -> String {
     };
 
     let mut lines = vec![format!("Plan status: {}", state.status.as_str())];
+    if let Some(execution) = state.execution.as_ref() {
+        lines.push(format!(
+            "Execution: {}/{} completed ({}%)",
+            execution.completed_steps, execution.total_steps, execution.progress_percent
+        ));
+        if let Some(active_step_id) = execution.active_step_id.as_ref() {
+            lines.push(format!("Active step: {active_step_id}"));
+        }
+    }
     if let Some(draft) = state.draft.as_ref() {
         if !draft.summary.trim().is_empty() {
             lines.push(format!("Summary: {}", draft.summary.trim()));
@@ -47,7 +56,7 @@ pub fn render_plan_show(permissions: &ToolPermissionContext) -> String {
                     .filter(|value| !value.is_empty())
                     .map(|value| format!(" — {value}"))
                     .unwrap_or_default();
-                lines.push(format!("- {} [{}]{}", step.title, step.status.as_str(), details));
+                lines.push(format!("- {}: {} [{}]{}", step.id, step.title, step.status.as_str(), details));
             }
         }
     } else {
@@ -67,6 +76,59 @@ pub fn render_plan_show(permissions: &ToolPermissionContext) -> String {
     }
 
     lines.join("\n")
+}
+
+pub fn render_plan_history(permissions: &ToolPermissionContext) -> String {
+    let Some(plan_manager) = permissions.plan_manager.as_ref() else {
+        return "No plan manager is available in this session.".into();
+    };
+    let history = plan_manager.history();
+    if history.is_empty() {
+        return "Plan history: none".into();
+    }
+
+    let mut lines = vec!["Plan history:".into()];
+    for entry in history.iter().rev().take(10) {
+        lines.push(format!(
+            "- {} [{}] {} — {}",
+            entry.timestamp, entry.status.as_str(), entry.action, entry.summary
+        ));
+    }
+    lines.join("\n")
+}
+
+pub fn add_plan_step(
+    permissions: &ToolPermissionContext,
+    title: &str,
+    details: Option<&str>,
+) -> anyhow::Result<String> {
+    let Some(plan_manager) = permissions.plan_manager.as_ref() else {
+        anyhow::bail!("No plan manager is available in this session.");
+    };
+    let step = plan_manager.add_step(title, details)?;
+    Ok(format!("Added plan step {}: {}", step.id, step.title))
+}
+
+pub fn update_plan_step(
+    permissions: &ToolPermissionContext,
+    step_id: &str,
+    title: Option<&str>,
+    details: Option<Option<&str>>,
+    status: Option<PlanStepStatus>,
+) -> anyhow::Result<String> {
+    let Some(plan_manager) = permissions.plan_manager.as_ref() else {
+        anyhow::bail!("No plan manager is available in this session.");
+    };
+    plan_manager.update_step(step_id, title, details, status)?;
+    Ok(format!("Updated plan step {step_id}"))
+}
+
+pub fn complete_plan_step(permissions: &ToolPermissionContext, step_id: &str) -> anyhow::Result<String> {
+    let Some(plan_manager) = permissions.plan_manager.as_ref() else {
+        anyhow::bail!("No plan manager is available in this session.");
+    };
+    plan_manager.mark_step_status(step_id, PlanStepStatus::Completed)?;
+    Ok(format!("Completed plan step {step_id}"))
 }
 
 pub fn request_enter_plan_mode(
@@ -172,11 +234,17 @@ fn summarize_plan_state(state: &PlanState) -> String {
         .as_ref()
         .map(|draft| draft.steps.len())
         .unwrap_or(0);
+    let progress = state
+        .execution
+        .as_ref()
+        .map(|execution| execution.progress_percent)
+        .unwrap_or(0);
     format!(
-        "Plan object: status={}, summary={}, steps={}",
+        "Plan object: status={}, summary={}, steps={}, progress={}%%",
         state.status.as_str(),
         summary,
-        steps
+        steps,
+        progress
     )
 }
 

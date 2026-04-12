@@ -16,6 +16,7 @@ use rust_agent::interaction::dispatcher::NotificationDispatcher;
 use rust_agent::interaction::envelope::NormalizedInput;
 use rust_agent::interaction::router::{CommandRouter, RouteDecision};
 use rust_agent::interaction::telegram::gateway::TelegramGateway;
+use rust_agent::plan::manager::PlanManager;
 use rust_agent::security::authorizer::{AuthDecision, DefaultSurfaceAuthorizer, SurfaceAuthorizer};
 use rust_agent::service::api::client::ModelProviderClient;
 use rust_agent::service::api::streaming::{StopReason, StreamEvent};
@@ -108,7 +109,8 @@ async fn cli_repl_handles_multiple_inputs_in_sequence() {
     let command_registry = Arc::new(CommandRegistry::new().register(Arc::new(HelpCommand)));
     let router = CommandRouter::new(command_registry.clone(), Box::new(DefaultSurfaceAuthorizer));
     let permission_context = ToolPermissionContext::new(PermissionMode::Default)
-        .with_task_manager(Arc::new(TaskManager::default()));
+        .with_task_manager(Arc::new(TaskManager::default()))
+        .with_plan_manager(Arc::new(PlanManager::default()));
     let app_state = AppState {
         surface: InteractionSurface::Cli,
         session_mode: SessionMode::Interactive,
@@ -236,7 +238,8 @@ async fn cli_repl_persists_history_for_local_and_query_turns() {
     let command_registry = Arc::new(CommandRegistry::new().register(Arc::new(HelpCommand)));
     let router = CommandRouter::new(command_registry.clone(), Box::new(DefaultSurfaceAuthorizer));
     let permission_context = ToolPermissionContext::new(PermissionMode::Default)
-        .with_task_manager(Arc::new(TaskManager::default()));
+        .with_task_manager(Arc::new(TaskManager::default()))
+        .with_plan_manager(Arc::new(PlanManager::default()));
     let session_store = Arc::new(InMemorySessionStore::default());
     session_store.save(
         rust_agent::history::session::SessionSnapshot {
@@ -329,7 +332,8 @@ async fn cli_repl_persists_denied_turns() {
         Box::new(DenyingAuthorizer),
     );
     let permission_context = ToolPermissionContext::new(PermissionMode::Default)
-        .with_task_manager(Arc::new(TaskManager::default()));
+        .with_task_manager(Arc::new(TaskManager::default()))
+        .with_plan_manager(Arc::new(PlanManager::default()));
     let session_store = Arc::new(InMemorySessionStore::default());
     session_store.save(
         rust_agent::history::session::SessionSnapshot {
@@ -402,6 +406,7 @@ async fn router_approves_pending_plan_mode_request() {
     let router = CommandRouter::new(Arc::new(CommandRegistry::new()), Box::new(DefaultSurfaceAuthorizer));
     let permission_context = ToolPermissionContext::new(PermissionMode::Default)
         .with_task_manager(Arc::new(TaskManager::default()))
+        .with_plan_manager(Arc::new(PlanManager::default()))
         .with_pending_approval(rust_agent::state::permission_context::PendingApproval {
             tool_name: "EnterPlanMode".into(),
             tool_input: "draft feature work".into(),
@@ -448,6 +453,7 @@ async fn router_denies_pending_request_without_session_approval() {
     let router = CommandRouter::new(Arc::new(CommandRegistry::new()), Box::new(DefaultSurfaceAuthorizer));
     let permission_context = ToolPermissionContext::new(PermissionMode::Default)
         .with_task_manager(Arc::new(TaskManager::default()))
+        .with_plan_manager(Arc::new(PlanManager::default()))
         .with_pending_approval(rust_agent::state::permission_context::PendingApproval {
             tool_name: "Bash".into(),
             tool_input: serde_json::json!({"command": "sudo whoami"}).to_string(),
@@ -499,6 +505,7 @@ async fn approval_replay_uses_runtime_tool_registry() {
     let router = CommandRouter::new(Arc::new(CommandRegistry::new()), Box::new(DefaultSurfaceAuthorizer));
     let permission_context = ToolPermissionContext::new(PermissionMode::Default)
         .with_task_manager(Arc::new(TaskManager::default()))
+        .with_plan_manager(Arc::new(PlanManager::default()))
         .with_pending_approval(rust_agent::state::permission_context::PendingApproval {
             tool_name: "Bash".into(),
             tool_input: serde_json::json!({"command": "pwd"}).to_string(),
@@ -551,6 +558,7 @@ async fn permissions_command_reports_session_permission_state() {
     );
     let permission_context = ToolPermissionContext::new(PermissionMode::Plan)
         .with_task_manager(Arc::new(TaskManager::default()))
+        .with_plan_manager(Arc::new(PlanManager::default()))
         .with_pending_approval(rust_agent::state::permission_context::PendingApproval {
             tool_name: "Bash".into(),
             tool_input: serde_json::json!({"command": "pwd"}).to_string(),
@@ -607,7 +615,8 @@ async fn plan_command_reports_inactive_status() {
         Box::new(DefaultSurfaceAuthorizer),
     );
     let permission_context = ToolPermissionContext::new(PermissionMode::Default)
-        .with_task_manager(Arc::new(TaskManager::default()));
+        .with_task_manager(Arc::new(TaskManager::default()))
+        .with_plan_manager(Arc::new(PlanManager::default()));
     let app_state = AppState {
         surface: InteractionSurface::Cli,
         session_mode: SessionMode::Interactive,
@@ -642,7 +651,7 @@ async fn plan_command_reports_inactive_status() {
     assert_eq!(
         result,
         CommandResult::Message(
-            "Plan mode is off. Use /plan enter [reason] to start planning.".into()
+            "Plan mode is off. Use /plan enter [reason] to start planning.\nNo plan object exists for this session yet.".into()
         )
     );
 }
@@ -654,7 +663,8 @@ async fn plan_command_enter_requests_approval_before_switching_mode() {
         Box::new(DefaultSurfaceAuthorizer),
     );
     let permission_context = ToolPermissionContext::new(PermissionMode::Default)
-        .with_task_manager(Arc::new(TaskManager::default()));
+        .with_task_manager(Arc::new(TaskManager::default()))
+        .with_plan_manager(Arc::new(PlanManager::default()));
     let app_state = AppState {
         surface: InteractionSurface::Cli,
         session_mode: SessionMode::Interactive,
@@ -710,8 +720,15 @@ async fn plan_command_exit_requests_approval_and_approval_exits_mode() {
         Arc::new(CommandRegistry::new().register(Arc::new(PlanCommand))),
         Box::new(DefaultSurfaceAuthorizer),
     );
+    let plan_manager = Arc::new(PlanManager::default());
+    plan_manager.ensure_draft(None);
+    plan_manager.set_summary("implementation plan");
+    plan_manager
+        .add_step("Verify approval flow", None)
+        .expect("add plan step");
     let permission_context = ToolPermissionContext::new(PermissionMode::Plan)
-        .with_task_manager(Arc::new(TaskManager::default()));
+        .with_task_manager(Arc::new(TaskManager::default()))
+        .with_plan_manager(plan_manager);
     let app_state = AppState {
         surface: InteractionSurface::Cli,
         session_mode: SessionMode::Interactive,
@@ -775,8 +792,15 @@ async fn plan_command_handles_status_noop_and_denied_exit() {
         Arc::new(CommandRegistry::new().register(Arc::new(PlanCommand))),
         Box::new(DefaultSurfaceAuthorizer),
     );
+    let plan_manager = Arc::new(PlanManager::default());
+    plan_manager.ensure_draft(None);
+    plan_manager.set_summary("Track planning work");
+    let step = plan_manager
+        .add_step("Write tests", Some("cover manager and router flows"))
+        .expect("add plan step");
     let active_context = ToolPermissionContext::new(PermissionMode::Plan)
-        .with_task_manager(Arc::new(TaskManager::default()));
+        .with_task_manager(Arc::new(TaskManager::default()))
+        .with_plan_manager(plan_manager.clone());
     let active_state = AppState {
         surface: InteractionSurface::Cli,
         session_mode: SessionMode::Interactive,
@@ -807,12 +831,45 @@ async fn plan_command_handles_status_noop_and_denied_exit() {
         )
         .await
         .expect("plan status should render");
-    assert_eq!(
-        status,
-        CommandResult::Message(
-            "Plan mode is on. Use /plan exit [summary] when ready to leave.".into()
+    assert!(matches!(status, CommandResult::Message(ref message) if message.contains("Plan mode is on.")));
+    assert!(matches!(status, CommandResult::Message(ref message) if message.contains("steps=1")));
+
+    let show = router
+        .route(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/plan show"),
+            &active_state,
         )
-    );
+        .await
+        .expect("plan show should render");
+    assert!(matches!(show, CommandResult::Message(ref message) if message.contains("Execution: 0/1 completed (0%)")));
+    assert!(matches!(show, CommandResult::Message(ref message) if message.contains(&step.id)));
+
+    let add = router
+        .route(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/plan add Review outputs | confirm summaries"),
+            &active_state,
+        )
+        .await
+        .expect("plan add should succeed");
+    assert!(matches!(add, CommandResult::Message(message) if message.contains("Added plan step step-2")));
+
+    let done = router
+        .route(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, &format!("/plan done {}", step.id)),
+            &active_state,
+        )
+        .await
+        .expect("plan done should succeed");
+    assert_eq!(done, CommandResult::Message(format!("Completed plan step {}", step.id)));
+
+    let history = router
+        .route(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/plan history"),
+            &active_state,
+        )
+        .await
+        .expect("plan history should render");
+    assert!(matches!(history, CommandResult::Message(message) if message.contains("Plan history:")));
 
     let no_op = router
         .route(
@@ -824,7 +881,8 @@ async fn plan_command_handles_status_noop_and_denied_exit() {
     assert_eq!(no_op, CommandResult::Message("Already in plan mode.".into()));
 
     let inactive_context = ToolPermissionContext::new(PermissionMode::Default)
-        .with_task_manager(Arc::new(TaskManager::default()));
+        .with_task_manager(Arc::new(TaskManager::default()))
+        .with_plan_manager(Arc::new(PlanManager::default()));
     let inactive_state = AppState {
         surface: InteractionSurface::Cli,
         session_mode: SessionMode::Interactive,
@@ -864,7 +922,8 @@ async fn permissions_command_mutates_mode_and_rule_lists() {
         Box::new(DefaultSurfaceAuthorizer),
     );
     let permission_context = ToolPermissionContext::new(PermissionMode::Default)
-        .with_task_manager(Arc::new(TaskManager::default()));
+        .with_task_manager(Arc::new(TaskManager::default()))
+        .with_plan_manager(Arc::new(PlanManager::default()));
     let app_state = AppState {
         surface: InteractionSurface::Cli,
         session_mode: SessionMode::Interactive,

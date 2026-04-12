@@ -16,6 +16,8 @@ mod hook_loop3_tests;
 mod hook_tests;
 #[path = "unit/notification_tests.rs"]
 mod notification_tests;
+#[path = "unit/plan_manager_tests.rs"]
+mod plan_manager_tests;
 #[path = "unit/query_loop_tests.rs"]
 mod query_loop_tests;
 #[path = "unit/router_tests.rs"]

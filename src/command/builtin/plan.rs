@@ -4,6 +4,7 @@ use crate::command::types::{
     Command, CommandAvailability, CommandMetadata, CommandResult, CommandSource, CommandType,
 };
 use crate::interaction::envelope::NormalizedInput;
+use crate::plan::types::PlanStepStatus;
 use crate::state::app_state::AppState;
 use crate::tool::definition::ToolResult;
 
@@ -43,10 +44,67 @@ impl Command for PlanCommand {
                 crate::state::plan_mode::render_plan_show(&app_state.permission_context),
             ));
         }
+        if args == "history" {
+            return Ok(CommandResult::Message(
+                crate::state::plan_mode::render_plan_history(&app_state.permission_context),
+            ));
+        }
 
         let mut parts = args.split_whitespace();
         let action = parts.next().unwrap_or_default();
         let remainder = parts.collect::<Vec<_>>().join(" ");
+        match action {
+            "add" => {
+                let mut segments = remainder.splitn(2, '|');
+                let title = segments.next().unwrap_or_default().trim();
+                let details = segments.next().map(str::trim);
+                return Ok(CommandResult::Message(crate::state::plan_mode::add_plan_step(
+                    &app_state.permission_context,
+                    title,
+                    details,
+                )?));
+            }
+            "update" => {
+                let mut segments = remainder.splitn(4, '|');
+                let step_id = segments.next().unwrap_or_default().trim();
+                let title = segments.next().map(str::trim).filter(|value| !value.is_empty());
+                let details_segment = segments.next().map(str::trim);
+                let status = segments
+                    .next()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .and_then(PlanStepStatus::from_str);
+                let details = details_segment.map(|value| {
+                    if value == "-" {
+                        None
+                    } else {
+                        Some(value)
+                    }
+                });
+                return Ok(CommandResult::Message(crate::state::plan_mode::update_plan_step(
+                    &app_state.permission_context,
+                    step_id,
+                    title,
+                    details,
+                    status,
+                )?));
+            }
+            "done" => {
+                let step_id = remainder.trim();
+                return Ok(CommandResult::Message(crate::state::plan_mode::complete_plan_step(
+                    &app_state.permission_context,
+                    step_id,
+                )?));
+            }
+            "enter" => {}
+            "exit" => {}
+            _ => {
+                return Ok(CommandResult::Message(
+                    "Usage: /plan [status|show|history|add <title> [| details]|update <step-id>|<title>|<details or ->|<status>|done <step-id>|enter [reason]|exit [summary]]".into(),
+                ))
+            }
+        }
+
         let result = match action {
             "enter" => crate::state::plan_mode::request_enter_plan_mode(
                 &app_state.permission_context,
@@ -56,11 +114,7 @@ impl Command for PlanCommand {
                 &app_state.permission_context,
                 &remainder,
             ),
-            _ => {
-                return Ok(CommandResult::Message(
-                    "Usage: /plan [status|show|enter [reason]|exit [summary]]".into(),
-                ))
-            }
+            _ => unreachable!("validated above"),
         };
 
         Ok(match result {
