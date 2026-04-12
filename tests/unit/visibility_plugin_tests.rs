@@ -134,6 +134,28 @@ async fn help_command_renders_source_counts_and_execution_kinds() {
 }
 
 #[tokio::test]
+async fn help_command_surfaces_plugin_diagnostics_hint() {
+    let registry = Arc::new(CommandRegistry::new().register(Arc::new(HelpCommand)));
+    let plugin_load_result = Arc::new(PluginLoadResult {
+        root: PathBuf::from("/tmp/project/.claude/plugins"),
+        source: PluginConfigSource::Directory,
+        plugins: vec![],
+        diagnostics: vec!["bad plugin manifest in broken/plugin.json".into()],
+    });
+    let app_state = test_app_state(Some(registry), None, Some(plugin_load_result));
+
+    let result = HelpCommand
+        .execute(&NormalizedInput::from_raw(InteractionSurface::Cli, "/help"), &app_state)
+        .await
+        .expect("help command should render");
+
+    let CommandResult::Message(text) = result else {
+        panic!("expected help message");
+    };
+    assert!(text.contains("Plugin diagnostics: 1 issue(s) detected; run /status for details."));
+}
+
+#[tokio::test]
 async fn status_command_reports_plugin_discovery_summary() {
     let registry = Arc::new(
         CommandRegistry::new()
@@ -172,8 +194,13 @@ async fn status_command_reports_plugin_discovery_summary() {
     assert!(text.contains("- contract: prompt=1, immediate=2, sensitive=1, model_invocation_disabled=1"));
     assert!(text.contains("- plugin_discovery: directory (root=/tmp/project/.claude/plugins)"));
     assert!(text.contains("- discovered_plugins: 1"));
+    assert!(text.contains("- discovered_plugin_commands: 1"));
     assert!(text.contains("- registered_plugin_commands: 1"));
     assert!(text.contains("- diagnostics: 1"));
+    assert!(text.contains("- plugin_inventory:"));
+    assert!(text.contains("  - demo-plugin — commands=1 (manifest=/tmp/project/.claude/plugins/demo/plugin.json)"));
+    assert!(text.contains("- diagnostic_preview:"));
+    assert!(text.contains("  - bad plugin manifest in broken/plugin.json"));
 }
 
 #[tokio::test]
@@ -294,6 +321,113 @@ async fn plugin_slash_command_returns_prompt_result() {
     assert!(text.contains("Plugin: demo-plugin"));
     assert!(text.contains("Arguments: --target demo"));
     assert!(text.contains("Plugin instructions:\nFollow the plugin instructions carefully."));
+}
+
+#[tokio::test]
+async fn help_and_status_report_consistent_command_contract_counts() {
+    let registry = Arc::new(
+        CommandRegistry::new()
+            .register(Arc::new(HelpCommand))
+            .register(Arc::new(PermissionsCommand))
+            .register(Arc::new(SkillSlashCommand::from_skill(
+                "summarize-skill".into(),
+                "Summarize repository state".into(),
+                true,
+            )))
+            .register(Arc::new(PluginSlashCommand::new(metadata_rich_plugin_command("plugin-cmd")))),
+    );
+    let plugin_load_result = Arc::new(PluginLoadResult {
+        root: PathBuf::from("/tmp/project/.claude/plugins"),
+        source: PluginConfigSource::Directory,
+        plugins: vec![PluginDefinition {
+            name: "demo-plugin".into(),
+            description: "demo".into(),
+            manifest_path: PathBuf::from("/tmp/project/.claude/plugins/demo/plugin.json"),
+            commands: vec![metadata_rich_plugin_command("plugin-cmd")],
+        }],
+        diagnostics: vec![],
+    });
+    let app_state = test_app_state(Some(registry), Some(Arc::new(TaskManager::default())), Some(plugin_load_result));
+
+    let help = HelpCommand
+        .execute(&NormalizedInput::from_raw(InteractionSurface::Cli, "/help"), &app_state)
+        .await
+        .expect("help should render");
+    let status = StatusCommand
+        .execute(&NormalizedInput::from_raw(InteractionSurface::Cli, "/status"), &app_state)
+        .await
+        .expect("status should render");
+
+    let CommandResult::Message(help_text) = help else {
+        panic!("expected help message");
+    };
+    let CommandResult::Message(status_text) = status else {
+        panic!("expected status message");
+    };
+
+    assert!(help_text.contains("Built-in (2):"));
+    assert!(help_text.contains("Skills (1):"));
+    assert!(help_text.contains("Plugins (1):"));
+    assert!(status_text.contains("- total: 4"));
+    assert!(status_text.contains("- source builtin: 2"));
+    assert!(status_text.contains("- source skill: 1"));
+    assert!(status_text.contains("- source plugin: 1"));
+    assert!(status_text.contains("- contract: prompt=2, immediate=3, sensitive=2, model_invocation_disabled=2"));
+    assert!(status_text.contains("- discovered_plugin_commands: 1"));
+    assert!(status_text.contains("- plugin_inventory:"));
+}
+
+#[tokio::test]
+async fn status_and_tasks_report_consistent_orchestration_summaries() {
+    let manager = Arc::new(TaskManager::default());
+    let dispatcher = NotificationDispatcher::new(TelegramGateway::default());
+
+    let implement = manager.create("implement feature", "test-session", InteractionSurface::Cli);
+    manager.set_worker_role(&implement.id, WorkerRole::Implement);
+    manager.set_orchestration_group_id(&implement.id, Some("group-1".into()));
+    manager.set_validation_state(
+        &implement.id,
+        Some(rust_agent::task::types::ValidationState::PendingVerification),
+    );
+    manager.complete(&implement.id, &dispatcher);
+
+    let verify = manager.create("verify feature", "test-session", InteractionSurface::Cli);
+    manager.set_worker_role(&verify.id, WorkerRole::Verify);
+    manager.set_parent_task_id(&verify.id, Some(implement.id.clone()));
+    manager.set_orchestration_group_id(&verify.id, Some("group-1".into()));
+    manager.start(&verify.id);
+
+    let standalone = manager.create("standalone research", "test-session", InteractionSurface::Cli);
+    manager.set_worker_role(&standalone.id, WorkerRole::Research);
+
+    let app_state = test_app_state(None, Some(manager), None);
+
+    let status = StatusCommand
+        .execute(&NormalizedInput::from_raw(InteractionSurface::Cli, "/status"), &app_state)
+        .await
+        .expect("status should render");
+    let tasks = TasksCommand
+        .execute(&NormalizedInput::from_raw(InteractionSurface::Cli, "/tasks"), &app_state)
+        .await
+        .expect("tasks should render");
+
+    let CommandResult::Message(status_text) = status else {
+        panic!("expected status message");
+    };
+    let CommandResult::Message(tasks_text) = tasks else {
+        panic!("expected tasks message");
+    };
+
+    assert!(status_text.contains("- pending_orchestration: yes"));
+    assert!(status_text.contains("- tasks: total=3, running=1, completed=1, failed=0, killed=0"));
+    assert!(status_text.contains("- pending_verification: 1"));
+    assert!(status_text.contains("- orchestration_groups: 1"));
+
+    assert!(tasks_text.contains("- total: 3"));
+    assert!(tasks_text.contains("- orchestration_groups: 1"));
+    assert!(tasks_text.contains("- by_validation_state: none=2, pending_verification=1"));
+    assert!(tasks_text.contains("- orchestration_contract: groups_in_progress=1, waiting_for_verification=0, ready_for_synthesis=0"));
+    assert!(tasks_text.contains("- group-1 — group group-1 still in progress"));
 }
 
 #[test]

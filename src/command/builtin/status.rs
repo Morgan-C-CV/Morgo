@@ -194,17 +194,41 @@ impl Command for StatusCommand {
                         .count()
                 })
                 .unwrap_or(0);
+            let discovered_plugin_commands = plugin_load_result
+                .plugins
+                .iter()
+                .map(|plugin| plugin.commands.len())
+                .sum::<usize>();
             lines.push(format!(
                 "- plugin_discovery: {} (root={})",
                 plugin_load_result.source.as_str(),
                 plugin_load_result.root.display()
             ));
             lines.push(format!("- discovered_plugins: {}", plugin_load_result.plugins.len()));
+            lines.push(format!("- discovered_plugin_commands: {}", discovered_plugin_commands));
             lines.push(format!("- registered_plugin_commands: {}", registered_plugin_commands));
             lines.push(format!("- diagnostics: {}", plugin_load_result.diagnostics.len()));
+            if !plugin_load_result.plugins.is_empty() {
+                lines.push("- plugin_inventory:".to_string());
+                for plugin in &plugin_load_result.plugins {
+                    lines.push(format!(
+                        "  - {} — commands={} (manifest={})",
+                        plugin.name,
+                        plugin.commands.len(),
+                        plugin.manifest_path.display()
+                    ));
+                }
+            }
+            if !plugin_load_result.diagnostics.is_empty() {
+                lines.push("- diagnostic_preview:".to_string());
+                for diagnostic in plugin_load_result.diagnostics.iter().take(3) {
+                    lines.push(format!("  - {}", diagnostic));
+                }
+            }
         } else {
             lines.push("- plugin_discovery: unavailable".to_string());
             lines.push("- discovered_plugins: 0".to_string());
+            lines.push("- discovered_plugin_commands: 0".to_string());
             lines.push("- registered_plugin_commands: 0".to_string());
             lines.push("- diagnostics: 0".to_string());
         }

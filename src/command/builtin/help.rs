@@ -96,6 +96,16 @@ impl Command for HelpCommand {
             ));
         }
 
+        if let Some(plugin_load_result) = app_state.plugin_load_result.as_ref() {
+            if !plugin_load_result.diagnostics.is_empty() {
+                lines.push(String::new());
+                lines.push(format!(
+                    "Plugin diagnostics: {} issue(s) detected; run /status for details.",
+                    plugin_load_result.diagnostics.len()
+                ));
+            }
+        }
+
         if lines.len() == 2 {
             lines.push(String::new());
             lines.push("No commands are currently visible.".to_string());
