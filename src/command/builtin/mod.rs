@@ -9,6 +9,7 @@ pub mod session;
 pub mod doctor;
 pub mod mcp;
 pub mod permissions;
+pub mod plugins;
 pub mod skills;
 pub mod status;
 pub mod tasks;

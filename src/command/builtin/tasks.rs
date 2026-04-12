@@ -37,34 +37,105 @@ impl Command for TasksCommand {
                 return Ok(CommandResult::Message("No active or completed child tasks.".into()));
             }
 
-            let mut summary = String::from("Agent Tasks:\n");
-            for task in tasks {
-                summary.push_str(&format!(
-                    "- [{}] {} (Status: {:?})\n",
-                    task.id, task.description, task.status
-                ));
-                summary.push_str(&format!(
-                    "  worker_role: {}\n",
-                    task.worker_role.map(|role| role.as_str()).unwrap_or("none")
-                ));
-                summary.push_str(&format!(
-                    "  phase: {}\n",
-                    task.phase.map(|phase| phase.as_str()).unwrap_or("none")
-                ));
-                summary.push_str(&format!(
-                    "  validation_state: {}\n",
-                    task.validation_state
-                        .map(|state| state.as_str())
-                        .unwrap_or("none")
-                ));
-                if let Some(parent_task_id) = task.parent_task_id.as_deref() {
-                    summary.push_str(&format!("  parent_task_id: {}\n", parent_task_id));
-                }
-                if let Some(group_id) = task.orchestration_group_id.as_deref() {
-                    summary.push_str(&format!("  orchestration_group_id: {}\n", group_id));
+            let (groups, standalone_tasks) = task_manager.grouped_tasks();
+            let mut status_counts = std::collections::BTreeMap::<String, usize>::new();
+            let mut role_counts = std::collections::BTreeMap::<String, usize>::new();
+            let mut validation_counts = std::collections::BTreeMap::<String, usize>::new();
+            for task in &tasks {
+                *status_counts.entry(format!("{:?}", task.status)).or_insert(0) += 1;
+                *role_counts
+                    .entry(task.worker_role.map(|role| role.as_str()).unwrap_or("none").to_string())
+                    .or_insert(0) += 1;
+                *validation_counts
+                    .entry(
+                        task.validation_state
+                            .map(|state| state.as_str())
+                            .unwrap_or("none")
+                            .to_string(),
+                    )
+                    .or_insert(0) += 1;
+            }
+
+            let mut lines = vec!["Agent Tasks:".to_string(), String::new(), "Summary:".to_string()];
+            lines.push(format!("- total: {}", tasks.len()));
+            lines.push(format!("- orchestration_groups: {}", groups.len()));
+            lines.push(format!(
+                "- by_status: {}",
+                status_counts
+                    .iter()
+                    .map(|(status, count)| format!("{status}={count}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+            lines.push(format!(
+                "- by_worker_role: {}",
+                role_counts
+                    .iter()
+                    .map(|(role, count)| format!("{role}={count}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+            lines.push(format!(
+                "- by_validation_state: {}",
+                validation_counts
+                    .iter()
+                    .map(|(state, count)| format!("{state}={count}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+
+            if !groups.is_empty() {
+                lines.push(String::new());
+                lines.push("Orchestration groups:".to_string());
+                for group in groups {
+                    lines.push(format!("- {} — {}", group.group_id, group.hint));
+                    for task in group.tasks {
+                        lines.push(format!("  - [{}] {} (Status: {:?})", task.id, task.description, task.status));
+                        lines.push(format!(
+                            "    worker_role: {}",
+                            task.worker_role.map(|role| role.as_str()).unwrap_or("none")
+                        ));
+                        lines.push(format!(
+                            "    phase: {}",
+                            task.phase.map(|phase| phase.as_str()).unwrap_or("none")
+                        ));
+                        lines.push(format!(
+                            "    validation_state: {}",
+                            task.validation_state.map(|state| state.as_str()).unwrap_or("none")
+                        ));
+                        lines.push(format!("    hint: {}", task_manager.task_hint(&task)));
+                        if let Some(parent_task_id) = task.parent_task_id.as_deref() {
+                            lines.push(format!("    parent_task_id: {}", parent_task_id));
+                        }
+                    }
                 }
             }
-            Ok(CommandResult::Message(summary))
+
+            if !standalone_tasks.is_empty() {
+                lines.push(String::new());
+                lines.push("Standalone tasks:".to_string());
+                for task in standalone_tasks {
+                    lines.push(format!("- [{}] {} (Status: {:?})", task.id, task.description, task.status));
+                    lines.push(format!(
+                        "  worker_role: {}",
+                        task.worker_role.map(|role| role.as_str()).unwrap_or("none")
+                    ));
+                    lines.push(format!(
+                        "  phase: {}",
+                        task.phase.map(|phase| phase.as_str()).unwrap_or("none")
+                    ));
+                    lines.push(format!(
+                        "  validation_state: {}",
+                        task.validation_state.map(|state| state.as_str()).unwrap_or("none")
+                    ));
+                    lines.push(format!("  hint: {}", task_manager.task_hint(&task)));
+                    if let Some(parent_task_id) = task.parent_task_id.as_deref() {
+                        lines.push(format!("  parent_task_id: {}", parent_task_id));
+                    }
+                }
+            }
+
+            Ok(CommandResult::Message(lines.join("\n")))
         } else {
             Ok(CommandResult::Message(
                 "Task manager is not attached to current session.".into(),

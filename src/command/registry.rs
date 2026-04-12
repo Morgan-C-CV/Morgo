@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use crate::command::types::{Command, CommandMetadata};
+use crate::command::types::{Command, CommandMetadata, CommandSource, CommandType};
 
 #[derive(Clone, Default)]
 pub struct CommandRegistry {
@@ -64,6 +64,22 @@ impl CommandRegistry {
 
     pub fn names(&self) -> Vec<String> {
         self.commands.keys().cloned().collect()
+    }
+
+    pub fn count_by_source(&self) -> BTreeMap<CommandSource, usize> {
+        let mut counts = BTreeMap::new();
+        for metadata in self.metadata() {
+            *counts.entry(metadata.source).or_insert(0) += 1;
+        }
+        counts
+    }
+
+    pub fn count_by_type(&self) -> BTreeMap<CommandType, usize> {
+        let mut counts = BTreeMap::new();
+        for metadata in self.metadata() {
+            *counts.entry(metadata.command_type).or_insert(0) += 1;
+        }
+        counts
     }
 
     fn resolve_name(&self, name: &str) -> Option<String> {

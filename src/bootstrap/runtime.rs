@@ -24,6 +24,7 @@ use crate::interaction::dispatcher::NotificationDispatcher;
 use crate::interaction::router::CommandRouter;
 use crate::interaction::telegram::gateway::TelegramGateway;
 use crate::plan::manager::PlanManager;
+use crate::plugins::loader::load_plugins;
 use crate::security::authorizer::DefaultSurfaceAuthorizer;
 use crate::service::api::client::{ModelProviderClient, ModelProviderConfig, ModelPricing};
 use crate::service::compact::reactive_compact::ReactiveCompactor;
@@ -193,6 +194,7 @@ impl RuntimeBootstrap {
         let mut discovered_skills = bundled_skills();
         discovered_skills.extend(load_filesystem_skills(&state.current_cwd).unwrap_or_default());
         let skill_registry = Arc::new(SkillRegistry::new(discovered_skills));
+        let plugin_load_result = Arc::new(load_plugins(&state.current_cwd));
         let mcp_config_result = load_server_configs_with_diagnostics(&state.current_cwd);
         let mcp_runtime = Arc::new(McpRuntime::new_with_config_result(
             Arc::new(crate::service::mcp::client::RoutingMcpClient::default()),
@@ -233,6 +235,7 @@ impl RuntimeBootstrap {
             runtime_tool_registry: Some(Arc::new(RwLock::new(coordinator_tools.clone()))),
             skill_registry: Some(skill_registry.clone()),
             mcp_runtime: Some(mcp_runtime.clone()),
+            plugin_load_result: Some(plugin_load_result.clone()),
             cost_tracker: CostTracker::with_default_pricing(
                 provider_config.model_id.clone(),
                 provider_config.pricing.clone(),
@@ -269,7 +272,7 @@ impl RuntimeBootstrap {
             return Ok(());
         }
 
-        let registry = Arc::new(self.build_command_registry(&app_state));
+        let registry = Arc::new(self.build_command_registry(&app_state, plugin_load_result.as_ref()));
         
         // Finalize AppState by injecting the CommandRegistry Arc now that it is built
         let mut app_state = app_state;
@@ -351,7 +354,11 @@ impl RuntimeBootstrap {
         }
     }
 
-    fn build_command_registry(&self, app_state: &AppState) -> CommandRegistry {
+    fn build_command_registry(
+        &self,
+        app_state: &AppState,
+        plugin_load_result: &crate::plugins::types::PluginLoadResult,
+    ) -> CommandRegistry {
         let registry = CommandRegistry::new();
         let registry = crate::command::builtin::register_builtin_commands(registry);
         let registry = crate::command::coding::register_coding_commands(registry);
@@ -359,11 +366,21 @@ impl RuntimeBootstrap {
             .into_iter()
             .fold(registry, |registry, command| registry.register(Arc::new(command)));
         let registry = crate::command::builtin::register_mcp_commands(registry);
-        self.register_plugin_commands(registry)
+        self.register_plugin_commands(registry, plugin_load_result)
     }
 
-    fn register_plugin_commands(&self, registry: CommandRegistry) -> CommandRegistry {
-        registry
+    fn register_plugin_commands(
+        &self,
+        registry: CommandRegistry,
+        plugin_load_result: &crate::plugins::types::PluginLoadResult,
+    ) -> CommandRegistry {
+        plugin_load_result
+            .plugins
+            .iter()
+            .flat_map(|plugin| plugin.commands.iter().cloned())
+            .fold(registry, |registry, command| {
+                registry.register(Arc::new(crate::command::builtin::plugins::PluginSlashCommand::new(command)))
+            })
     }
 
     fn build_tool_registry(&self) -> ToolRegistry {

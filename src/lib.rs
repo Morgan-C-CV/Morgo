@@ -8,6 +8,7 @@ pub mod history;
 pub mod hook;
 pub mod interaction;
 pub mod plan;
+pub mod plugins;
 pub mod prompt;
 pub mod security;
 pub mod service;

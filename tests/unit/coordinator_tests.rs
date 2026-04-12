@@ -114,6 +114,7 @@ fn coordinator_test_app_state() -> AppState {
         runtime_tool_registry: Some(Arc::new(RwLock::new(ToolRegistry::new()))),
         skill_registry: None,
         mcp_runtime: None,
+        plugin_load_result: None,
         cost_tracker: CostTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
         startup_trace: Vec::new(),

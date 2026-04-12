@@ -3,10 +3,19 @@ use async_trait::async_trait;
 use crate::interaction::envelope::NormalizedInput;
 use crate::state::app_state::AppState;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum CommandType {
     Prompt,
     Local,
+}
+
+impl CommandType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Prompt => "prompt",
+            Self::Local => "local",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -14,6 +23,16 @@ pub enum CommandAvailability {
     Everywhere,
     CliOnly,
     RemoteSafe,
+}
+
+impl CommandAvailability {
+    pub fn short_label(&self) -> Option<&'static str> {
+        match self {
+            Self::Everywhere => None,
+            Self::CliOnly => Some("cli-only"),
+            Self::RemoteSafe => Some("remote-safe"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]

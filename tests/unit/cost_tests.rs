@@ -40,6 +40,7 @@ async fn cost_command_reports_tracked_usage() {
         runtime_tool_registry: None,
         skill_registry: None,
         mcp_runtime: None,
+        plugin_load_result: None,
         cost_tracker,
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
         startup_trace: Vec::new(),

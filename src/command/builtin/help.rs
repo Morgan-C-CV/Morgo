@@ -44,33 +44,43 @@ impl Command for HelpCommand {
                 .then_with(|| left.name.cmp(&right.name))
         });
 
-        let mut lines = vec!["Available commands:".to_string()];
+        let mut lines = vec![
+            "Available commands:".to_string(),
+            "Legend: [type=<prompt|local>] [availability=<cli-only|remote-safe>] [source:category]".to_string(),
+        ];
         let mut current_source = None;
-        for command in metadata {
+        for command in &metadata {
             if current_source != Some(command.source) {
-                lines.push(String::new());
-                lines.push(format!("{}:", command.source.display_name()));
                 current_source = Some(command.source);
+                let source_count = metadata.iter().filter(|item| item.source == command.source).count();
+                lines.push(String::new());
+                lines.push(format!("{} ({source_count}):", command.source.display_name()));
             }
             let aliases = if command.aliases.is_empty() {
                 String::new()
             } else {
-                format!(" (aliases: {})", command.aliases.join(", "))
+                format!(" aliases={}", command.aliases.join(", "))
             };
-            let availability = match command.availability {
-                CommandAvailability::Everywhere => String::new(),
-                CommandAvailability::CliOnly => " [cli-only]".to_string(),
-                CommandAvailability::RemoteSafe => " [remote-safe]".to_string(),
-            };
+            let availability = command
+                .availability
+                .short_label()
+                .map(|label| format!(" [availability={label}]"))
+                .unwrap_or_default();
             lines.push(format!(
-                "- /{} — {} [{}:{}]{}{}",
+                "- /{} — {} [type={}] [{}:{}]{}{}",
                 command.name,
                 command.description,
+                command.command_type.as_str(),
                 command.source.as_str(),
                 command.category,
                 aliases,
                 availability
             ));
+        }
+
+        if lines.len() == 2 {
+            lines.push(String::new());
+            lines.push("No commands are currently visible.".to_string());
         }
 
         Ok(CommandResult::Message(lines.join("\n")))

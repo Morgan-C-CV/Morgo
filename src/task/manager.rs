@@ -14,6 +14,13 @@ use crate::task::types::{
     ValidationState, WorkerPhase,
 };
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskGroupSummary {
+    pub group_id: String,
+    pub tasks: Vec<TaskRecord>,
+    pub hint: String,
+}
+
 #[derive(Debug, Default)]
 struct TaskStore {
     next_id: usize,
@@ -178,6 +185,54 @@ impl TaskManager {
                         !self.group_ready_for_fan_in(group_id)
                     }))
         })
+    }
+
+    pub fn grouped_tasks(&self) -> (Vec<TaskGroupSummary>, Vec<TaskRecord>) {
+        let tasks = self.list();
+        let mut grouped = std::collections::BTreeMap::<String, Vec<TaskRecord>>::new();
+        let mut standalone = Vec::new();
+        for task in tasks {
+            if let Some(group_id) = task.orchestration_group_id.clone() {
+                grouped.entry(group_id).or_default().push(task);
+            } else {
+                standalone.push(task);
+            }
+        }
+        let groups = grouped
+            .into_iter()
+            .map(|(group_id, mut tasks)| {
+                tasks.sort_by(|left, right| {
+                    left.parent_task_id
+                        .is_some()
+                        .cmp(&right.parent_task_id.is_some())
+                        .then_with(|| left.id.cmp(&right.id))
+                });
+                let hint = self.group_hint(&group_id, &tasks);
+                TaskGroupSummary {
+                    group_id,
+                    tasks,
+                    hint,
+                }
+            })
+            .collect();
+        standalone.sort_by(|left, right| left.id.cmp(&right.id));
+        (groups, standalone)
+    }
+
+    pub fn task_hint(&self, task: &TaskRecord) -> String {
+        match task.validation_state {
+            Some(ValidationState::PendingVerification) => {
+                format!("verification next for {}", task.id)
+            }
+            Some(ValidationState::Verified) => format!("ready for validated synthesis for {}", task.id),
+            Some(ValidationState::VerificationFailed) => {
+                format!("verification failure needs inspection for {}", task.id)
+            }
+            Some(ValidationState::Unverified) => {
+                format!("synthesize with explicit unverified risk for {}", task.id)
+            }
+            _ => next_action_for_task(&task.status, task.worker_role, task.validation_state, &task.id),
+        }
     }
 
     pub fn launch<F>(&self, id: &str, _input: impl Into<String>, future: F)
@@ -535,6 +590,25 @@ impl TaskManager {
         {
             parent.validation_state = Some(propagated_state);
         }
+    }
+
+    fn group_hint(&self, group_id: &str, tasks: &[TaskRecord]) -> String {
+        if tasks
+            .iter()
+            .any(|task| matches!(task.status, TaskStatus::Pending | TaskStatus::Running))
+        {
+            return format!("group {} still in progress", group_id);
+        }
+        if tasks
+            .iter()
+            .any(|task| task.validation_state == Some(ValidationState::PendingVerification))
+        {
+            return format!("group {} is waiting for verification", group_id);
+        }
+        if self.group_ready_for_fan_in(group_id) {
+            return format!("group {} is ready for synthesis", group_id);
+        }
+        format!("group {} needs follow-up inspection", group_id)
     }
 
     fn enqueue_task_event(&self, event: TaskEvent) {

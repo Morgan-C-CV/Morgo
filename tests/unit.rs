@@ -28,3 +28,5 @@ mod tool_behavior_tests;
 mod tool_orchestrator_tests;
 #[path = "unit/tool_tests.rs"]
 mod tool_tests;
+#[path = "unit/visibility_plugin_tests.rs"]
+mod visibility_plugin_tests;
