@@ -41,6 +41,19 @@ impl Command for TasksCommand {
             let mut status_counts = std::collections::BTreeMap::<String, usize>::new();
             let mut role_counts = std::collections::BTreeMap::<String, usize>::new();
             let mut validation_counts = std::collections::BTreeMap::<String, usize>::new();
+            let mut phase_counts = std::collections::BTreeMap::<String, usize>::new();
+            let fan_in_ready_groups = groups
+                .iter()
+                .filter(|group| group.hint.contains("ready for synthesis"))
+                .count();
+            let verification_waiting_groups = groups
+                .iter()
+                .filter(|group| group.hint.contains("waiting for verification"))
+                .count();
+            let in_progress_groups = groups
+                .iter()
+                .filter(|group| group.hint.contains("still in progress"))
+                .count();
             for task in &tasks {
                 *status_counts.entry(format!("{:?}", task.status)).or_insert(0) += 1;
                 *role_counts
@@ -53,6 +66,9 @@ impl Command for TasksCommand {
                             .unwrap_or("none")
                             .to_string(),
                     )
+                    .or_insert(0) += 1;
+                *phase_counts
+                    .entry(task.phase.map(|phase| phase.as_str()).unwrap_or("none").to_string())
                     .or_insert(0) += 1;
             }
 
@@ -82,6 +98,20 @@ impl Command for TasksCommand {
                     .map(|(state, count)| format!("{state}={count}"))
                     .collect::<Vec<_>>()
                     .join(", ")
+            ));
+            lines.push(format!(
+                "- by_phase: {}",
+                phase_counts
+                    .iter()
+                    .map(|(phase, count)| format!("{phase}={count}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+            lines.push(format!(
+                "- orchestration_contract: groups_in_progress={}, waiting_for_verification={}, ready_for_synthesis={}",
+                in_progress_groups,
+                verification_waiting_groups,
+                fan_in_ready_groups
             ));
 
             if !groups.is_empty() {

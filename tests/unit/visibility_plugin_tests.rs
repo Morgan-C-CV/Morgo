@@ -72,6 +72,24 @@ fn sample_plugin_command(name: &str) -> PluginCommandDefinition {
         category: "plugin".into(),
         availability: CommandAvailability::Everywhere,
         disable_model_invocation: false,
+        immediate: false,
+        is_sensitive: false,
+        aliases: vec![format!("{name}-alias")],
+        prompt: "Follow the plugin instructions carefully.".into(),
+        manifest_path: PathBuf::from("/tmp/demo/plugin.json"),
+    }
+}
+
+fn metadata_rich_plugin_command(name: &str) -> PluginCommandDefinition {
+    PluginCommandDefinition {
+        plugin_name: "demo-plugin".into(),
+        name: name.into(),
+        description: "Metadata-rich plugin command".into(),
+        category: "plugin".into(),
+        availability: CommandAvailability::CliOnly,
+        disable_model_invocation: true,
+        immediate: true,
+        is_sensitive: true,
         aliases: vec![format!("{name}-alias")],
         prompt: "Follow the plugin instructions carefully.".into(),
         manifest_path: PathBuf::from("/tmp/demo/plugin.json"),
@@ -89,7 +107,7 @@ async fn help_command_renders_source_counts_and_execution_kinds() {
                 "Summarize repository state".into(),
                 true,
             )))
-            .register(Arc::new(PluginSlashCommand::new(sample_plugin_command("plugin-cmd")))),
+            .register(Arc::new(PluginSlashCommand::new(metadata_rich_plugin_command("plugin-cmd")))),
     );
     let app_state = test_app_state(Some(registry), None, None);
 
@@ -112,7 +130,7 @@ async fn help_command_renders_source_counts_and_execution_kinds() {
     assert!(text.contains("/help — Show the available commands [type=local] [builtin:core] aliases=h [immediate]"));
     assert!(text.contains("/permissions — Inspect and update permission mode and explicit tool rules [type=local] [builtin:core] aliases=perms [sensitive] [immediate]"));
     assert!(text.contains("/summarize-skill — Summarize repository state [type=prompt] [skill:skill] [model_invocation=disabled]"));
-    assert!(text.contains("/plugin-cmd — Plugin command description [type=prompt] [plugin:plugin] aliases=plugin-cmd-alias"));
+    assert!(text.contains("/plugin-cmd — Metadata-rich plugin command [type=prompt] [plugin:plugin] aliases=plugin-cmd-alias [availability=cli-only] [sensitive] [model_invocation=disabled] [immediate]"));
 }
 
 #[tokio::test]
@@ -120,7 +138,7 @@ async fn status_command_reports_plugin_discovery_summary() {
     let registry = Arc::new(
         CommandRegistry::new()
             .register(Arc::new(HelpCommand))
-            .register(Arc::new(PluginSlashCommand::new(sample_plugin_command("plugin-cmd")))),
+            .register(Arc::new(PluginSlashCommand::new(metadata_rich_plugin_command("plugin-cmd")))),
     );
     let plugin_load_result = Arc::new(PluginLoadResult {
         root: PathBuf::from("/tmp/project/.claude/plugins"),
@@ -129,7 +147,7 @@ async fn status_command_reports_plugin_discovery_summary() {
             name: "demo-plugin".into(),
             description: "demo".into(),
             manifest_path: PathBuf::from("/tmp/project/.claude/plugins/demo/plugin.json"),
-            commands: vec![sample_plugin_command("plugin-cmd")],
+            commands: vec![metadata_rich_plugin_command("plugin-cmd")],
         }],
         diagnostics: vec!["bad plugin manifest in broken/plugin.json".into()],
     });
@@ -151,6 +169,7 @@ async fn status_command_reports_plugin_discovery_summary() {
     assert!(text.contains("- source plugin: 1"));
     assert!(text.contains("- type local: 1"));
     assert!(text.contains("- type prompt: 1"));
+    assert!(text.contains("- contract: prompt=1, immediate=2, sensitive=1, model_invocation_disabled=1"));
     assert!(text.contains("- plugin_discovery: directory (root=/tmp/project/.claude/plugins)"));
     assert!(text.contains("- discovered_plugins: 1"));
     assert!(text.contains("- registered_plugin_commands: 1"));
@@ -190,6 +209,8 @@ async fn tasks_command_groups_orchestration_tasks_and_hints() {
     assert!(text.contains("Summary:"));
     assert!(text.contains("- total: 3"));
     assert!(text.contains("- orchestration_groups: 1"));
+    assert!(text.contains("- by_phase: implement=1, research=1, verify=1"));
+    assert!(text.contains("- orchestration_contract: groups_in_progress=1, waiting_for_verification=0, ready_for_synthesis=0"));
     assert!(text.contains("Orchestration groups:"));
     assert!(text.contains("- group-1 — group group-1 still in progress"));
     assert!(text.contains("  - [task-0] implement feature (Status: Completed)"));
@@ -218,7 +239,10 @@ fn plugin_loader_loads_inline_and_file_prompts_and_collects_diagnostics() {
     {
       "name": "inline-plugin",
       "description": "Uses inline prompt",
-      "prompt": "Inline prompt body"
+      "prompt": "Inline prompt body",
+      "disable_model_invocation": true,
+      "immediate": true,
+      "is_sensitive": true
     },
     {
       "name": "file-plugin",
@@ -239,6 +263,9 @@ fn plugin_loader_loads_inline_and_file_prompts_and_collects_diagnostics() {
     assert_eq!(result.plugins[0].name, "demo-plugin");
     assert_eq!(result.plugins[0].commands.len(), 2);
     assert_eq!(result.plugins[0].commands[0].prompt, "Inline prompt body");
+    assert!(result.plugins[0].commands[0].disable_model_invocation);
+    assert!(result.plugins[0].commands[0].immediate);
+    assert!(result.plugins[0].commands[0].is_sensitive);
     assert_eq!(result.plugins[0].commands[1].prompt, "Prompt loaded from file");
     assert_eq!(result.plugins[0].commands[1].availability, CommandAvailability::CliOnly);
     assert_eq!(result.diagnostics.len(), 1);
@@ -267,4 +294,14 @@ async fn plugin_slash_command_returns_prompt_result() {
     assert!(text.contains("Plugin: demo-plugin"));
     assert!(text.contains("Arguments: --target demo"));
     assert!(text.contains("Plugin instructions:\nFollow the plugin instructions carefully."));
+}
+
+#[test]
+fn plugin_slash_command_metadata_preserves_contract_flags() {
+    let metadata = PluginSlashCommand::new(metadata_rich_plugin_command("plugin-cmd")).metadata();
+
+    assert_eq!(metadata.availability, CommandAvailability::CliOnly);
+    assert!(metadata.disable_model_invocation);
+    assert!(metadata.immediate);
+    assert!(metadata.is_sensitive);
 }

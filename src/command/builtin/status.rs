@@ -98,6 +98,21 @@ impl Command for StatusCommand {
             .as_ref()
             .map(|registry| registry.count_by_type())
             .unwrap_or_default();
+        let metadata = app_state
+            .command_registry
+            .as_ref()
+            .map(|registry| registry.metadata())
+            .unwrap_or_default();
+        let prompt_command_count = metadata
+            .iter()
+            .filter(|command| command.command_type == CommandType::Prompt)
+            .count();
+        let immediate_command_count = metadata.iter().filter(|command| command.immediate).count();
+        let sensitive_command_count = metadata.iter().filter(|command| command.is_sensitive).count();
+        let model_invocation_disabled_count = metadata
+            .iter()
+            .filter(|command| command.disable_model_invocation)
+            .count();
 
         let mut lines = vec!["Status".to_string(), String::new(), "Runtime:".to_string()];
         lines.push(format!("- session_id: {}", app_state.active_session_id));
@@ -126,6 +141,13 @@ impl Command for StatusCommand {
                 lines.push(format!("- type {}: {}", command_type.as_str(), count));
             }
         }
+        lines.push(format!(
+            "- contract: prompt={}, immediate={}, sensitive={}, model_invocation_disabled={}",
+            prompt_command_count,
+            immediate_command_count,
+            sensitive_command_count,
+            model_invocation_disabled_count
+        ));
 
         lines.push(String::new());
         lines.push("Orchestration:".to_string());
