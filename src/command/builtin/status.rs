@@ -194,11 +194,26 @@ impl Command for StatusCommand {
                         .count()
                 })
                 .unwrap_or(0);
-            let discovered_plugin_commands = plugin_load_result
-                .plugins
-                .iter()
-                .map(|plugin| plugin.commands.len())
-                .sum::<usize>();
+            let registered_plugin_tools = if let Some(registry) = app_state.runtime_tool_registry.as_ref() {
+                registry
+                    .read()
+                    .await
+                    .all_metadata()
+                    .into_iter()
+                    .filter(|tool| tool.name.starts_with("plugin."))
+                    .count()
+            } else {
+                0
+            };
+            let discovered_plugin_commands = plugin_load_result.discovered_command_count();
+            let discovered_plugin_tools = plugin_load_result.discovered_tool_count();
+            let discovered_plugin_hooks = plugin_load_result.discovered_hook_count();
+            let warning_count = plugin_load_result
+                .diagnostic_count_for_severity(crate::plugins::types::PluginDiagnosticSeverity::Warning);
+            let error_count = plugin_load_result
+                .diagnostic_count_for_severity(crate::plugins::types::PluginDiagnosticSeverity::Error);
+            let info_count = plugin_load_result
+                .diagnostic_count_for_severity(crate::plugins::types::PluginDiagnosticSeverity::Info);
             lines.push(format!(
                 "- plugin_discovery: {} (root={})",
                 plugin_load_result.source.as_str(),
@@ -206,15 +221,34 @@ impl Command for StatusCommand {
             ));
             lines.push(format!("- discovered_plugins: {}", plugin_load_result.plugins.len()));
             lines.push(format!("- discovered_plugin_commands: {}", discovered_plugin_commands));
+            lines.push(format!("- discovered_plugin_tools: {}", discovered_plugin_tools));
+            lines.push(format!("- discovered_plugin_hooks: {}", discovered_plugin_hooks));
             lines.push(format!("- registered_plugin_commands: {}", registered_plugin_commands));
-            lines.push(format!("- diagnostics: {}", plugin_load_result.diagnostics.len()));
+            lines.push(format!("- registered_plugin_tools: {}", registered_plugin_tools));
+            lines.push(format!(
+                "- diagnostics: total={}, info={}, warnings={}, errors={}",
+                plugin_load_result.diagnostics.len(),
+                info_count,
+                warning_count,
+                error_count
+            ));
             if !plugin_load_result.plugins.is_empty() {
                 lines.push("- plugin_inventory:".to_string());
                 for plugin in &plugin_load_result.plugins {
+                    let version = plugin.version.as_deref().unwrap_or("unknown");
+                    let capabilities = if plugin.capabilities.is_empty() {
+                        "none".to_string()
+                    } else {
+                        plugin.capabilities.join(",")
+                    };
                     lines.push(format!(
-                        "  - {} — commands={} (manifest={})",
+                        "  - {} v{} — commands={}, hooks={}, tools={}, capabilities={} (manifest={})",
                         plugin.name,
+                        version,
                         plugin.commands.len(),
+                        plugin.hooks.len(),
+                        plugin.tools.len(),
+                        capabilities,
                         plugin.manifest_path.display()
                     ));
                 }
@@ -222,7 +256,7 @@ impl Command for StatusCommand {
             if !plugin_load_result.diagnostics.is_empty() {
                 lines.push("- diagnostic_preview:".to_string());
                 for diagnostic in plugin_load_result.diagnostics.iter().take(3) {
-                    lines.push(format!("  - {}", diagnostic));
+                    lines.push(format!("  - {}", diagnostic.render_line()));
                 }
             }
         } else {

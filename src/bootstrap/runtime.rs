@@ -26,6 +26,7 @@ use crate::interaction::router::CommandRouter;
 use crate::interaction::telegram::gateway::TelegramGateway;
 use crate::plan::manager::PlanManager;
 use crate::plugins::loader::load_plugins;
+use crate::plugins::runtime::{augment_hook_registry_with_plugins, augment_tool_registry_with_plugins};
 use crate::security::authorizer::DefaultSurfaceAuthorizer;
 use crate::service::api::client::{
     ModelProviderClient, ModelProviderConfig, ModelPricing, ProviderTimeout,
@@ -114,11 +115,12 @@ impl RuntimeBootstrap {
         let task_manager = Arc::new(TaskManager::default());
 
         state.record_phase(BootstrapPhase::BuildToolContext);
-        let tool_inventory = self.build_tool_registry();
 
         state.record_phase(BootstrapPhase::AssembleTools);
         let setup = SetupContext::detect();
-        let hook_registry = load_hook_registry(&setup.working_directory);
+        let base_hook_registry = load_hook_registry(&setup.working_directory);
+        let plugin_load_result = Arc::new(load_plugins(&setup.working_directory));
+        let hook_registry = augment_hook_registry_with_plugins(base_hook_registry, plugin_load_result.as_ref());
         let _ = run_hook(&hook_registry, HookEvent::SessionStart);
         let _ = run_hook(&hook_registry, HookEvent::Setup);
         state.record_phase(BootstrapPhase::Setup);
@@ -202,12 +204,25 @@ impl RuntimeBootstrap {
             .unwrap_or_default();
         discovered_skills.extend(loaded_skills.skills);
         let skill_registry = Arc::new(SkillRegistry::new(discovered_skills));
-        let plugin_load_result = Arc::new(load_plugins(&state.current_cwd));
         let mcp_config_result = load_server_configs_with_diagnostics(&state.current_cwd);
         let mcp_runtime = Arc::new(McpRuntime::new_with_config_result(
             Arc::new(crate::service::mcp::client::RoutingMcpClient::default()),
             mcp_config_result,
         ));
+        let tool_inventory = self.build_tool_registry();
+        let (tool_inventory, plugin_tool_diagnostics) =
+            augment_tool_registry_with_plugins(tool_inventory, plugin_load_result.as_ref());
+        let plugin_load_result = Arc::new(crate::plugins::types::PluginLoadResult {
+            root: plugin_load_result.root.clone(),
+            source: plugin_load_result.source,
+            plugins: plugin_load_result.plugins.clone(),
+            diagnostics: plugin_load_result
+                .diagnostics
+                .iter()
+                .cloned()
+                .chain(plugin_tool_diagnostics)
+                .collect(),
+        });
         let coordinator_tools = tool_inventory.assemble_for_role(RuntimeRole::Coordinator);
         let permission_context = ToolPermissionContext::new(if self.cli.init_only {
             PermissionMode::Plan

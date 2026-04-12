@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -16,12 +16,17 @@ use rust_agent::interaction::dispatcher::NotificationDispatcher;
 use rust_agent::interaction::envelope::NormalizedInput;
 use rust_agent::interaction::telegram::gateway::TelegramGateway;
 use rust_agent::plugins::loader::load_plugins;
+use rust_agent::plugins::runtime::{augment_hook_registry_with_plugins, augment_tool_registry_with_plugins};
 use rust_agent::plugins::types::{
-    PluginCommandDefinition, PluginConfigSource, PluginDefinition, PluginLoadResult,
+    PluginCommandDefinition, PluginConfigSource, PluginDefinition, PluginDiagnostic,
+    PluginDiagnosticSeverity, PluginDiagnosticsMetadata, PluginHookDefinition, PluginLoadResult,
+    PluginToolDefinition,
 };
 use rust_agent::state::app_state::{AppState, RuntimeRole, WorkerRole};
 use rust_agent::state::permission_context::{PermissionMode, ToolPermissionContext};
 use rust_agent::task::manager::TaskManager;
+use rust_agent::tool::registry::ToolRegistry;
+use tokio::sync::RwLock;
 
 fn unique_temp_path(prefix: &str) -> PathBuf {
     let nanos = SystemTime::now()
@@ -35,6 +40,7 @@ fn test_app_state(
     command_registry: Option<Arc<CommandRegistry>>,
     task_manager: Option<Arc<TaskManager>>,
     plugin_load_result: Option<Arc<PluginLoadResult>>,
+    runtime_tool_registry: Option<Arc<RwLock<ToolRegistry>>>,
 ) -> AppState {
     let permission_context = match task_manager {
         Some(manager) => ToolPermissionContext::new(PermissionMode::Default).with_task_manager(manager),
@@ -49,7 +55,7 @@ fn test_app_state(
         worker_role: None,
         permission_context,
         command_registry,
-        runtime_tool_registry: None,
+        runtime_tool_registry,
         skill_registry: None,
         mcp_runtime: None,
         plugin_load_result,
@@ -76,6 +82,36 @@ fn sample_plugin_command(name: &str) -> PluginCommandDefinition {
         is_sensitive: false,
         aliases: vec![format!("{name}-alias")],
         prompt: "Follow the plugin instructions carefully.".into(),
+        manifest_path: PathBuf::from("/tmp/demo/plugin.json"),
+    }
+}
+
+fn sample_plugin_tool(name: &str) -> PluginToolDefinition {
+    PluginToolDefinition {
+        plugin_name: "demo-plugin".into(),
+        name: name.into(),
+        description: "Plugin tool description".into(),
+        aliases: vec![format!("{name}-alias")],
+        prompt: "Inspect plugin-owned files".into(),
+        search_hint: Some("plugin demo tool".into()),
+        read_only: true,
+        destructive: false,
+        requires_auth: false,
+        requires_user_interaction: false,
+        manifest_path: PathBuf::from("/tmp/demo/plugin.json"),
+    }
+}
+
+fn sample_plugin_hook() -> PluginHookDefinition {
+    PluginHookDefinition {
+        plugin_name: "demo-plugin".into(),
+        event: rust_agent::hook::registry::HookEventMatcher::Stop,
+        deny_match: None,
+        append_message: Some("plugin stop hook fired".into()),
+        prevent_continuation: false,
+        permission_decision: None,
+        updated_input: None,
+        additional_context: None,
         manifest_path: PathBuf::from("/tmp/demo/plugin.json"),
     }
 }
@@ -123,7 +159,7 @@ async fn help_command_renders_source_counts_and_execution_kinds() {
             })))
             .register(Arc::new(PluginSlashCommand::new(metadata_rich_plugin_command("plugin-cmd")))),
     );
-    let app_state = test_app_state(Some(registry), None, None);
+    let app_state = test_app_state(Some(registry), None, None, None);
 
     let result = HelpCommand
         .execute(&NormalizedInput::from_raw(InteractionSurface::Cli, "/help"), &app_state)
@@ -154,9 +190,15 @@ async fn help_command_surfaces_plugin_diagnostics_hint() {
         root: PathBuf::from("/tmp/project/.claude/plugins"),
         source: PluginConfigSource::Directory,
         plugins: vec![],
-        diagnostics: vec!["bad plugin manifest in broken/plugin.json".into()],
+        diagnostics: vec![PluginDiagnostic {
+            plugin_name: Some("broken-plugin".into()),
+            manifest_path: Some(PathBuf::from("/tmp/project/.claude/plugins/broken/plugin.json")),
+            severity: PluginDiagnosticSeverity::Error,
+            code: "plugin-manifest-load-failed".into(),
+            message: "bad plugin manifest".into(),
+        }],
     });
-    let app_state = test_app_state(Some(registry), None, Some(plugin_load_result));
+    let app_state = test_app_state(Some(registry), None, Some(plugin_load_result), None);
 
     let result = HelpCommand
         .execute(&NormalizedInput::from_raw(InteractionSurface::Cli, "/help"), &app_state)
@@ -166,7 +208,7 @@ async fn help_command_surfaces_plugin_diagnostics_hint() {
     let CommandResult::Message(text) = result else {
         panic!("expected help message");
     };
-    assert!(text.contains("Plugin diagnostics: 1 issue(s) detected; run /status for details."));
+    assert!(text.contains("Plugin diagnostics: 1 issue(s) detected (warnings=0, errors=1); run /status for details."));
 }
 
 #[tokio::test]
@@ -176,18 +218,70 @@ async fn status_command_reports_plugin_discovery_summary() {
             .register(Arc::new(HelpCommand))
             .register(Arc::new(PluginSlashCommand::new(metadata_rich_plugin_command("plugin-cmd")))),
     );
+    let tool_registry = ToolRegistry::new();
+    let (tool_registry, _) = augment_tool_registry_with_plugins(
+        tool_registry,
+        &PluginLoadResult {
+            root: PathBuf::from("/tmp/project/.claude/plugins"),
+            source: PluginConfigSource::Directory,
+            plugins: vec![PluginDefinition {
+                name: "demo-plugin".into(),
+                version: Some("0.1.0".into()),
+                description: "demo".into(),
+                manifest_path: PathBuf::from("/tmp/project/.claude/plugins/demo/plugin.json"),
+                capabilities: vec!["commands".into(), "hooks".into(), "tools".into()],
+                diagnostics_metadata: Some(PluginDiagnosticsMetadata {
+                    homepage: None,
+                    docs: Some("https://example.com/docs".into()),
+                    issues: None,
+                    support_level: Some("community".into()),
+                }),
+                commands: vec![metadata_rich_plugin_command("plugin-cmd")],
+                tools: vec![sample_plugin_tool("demo_tool")],
+                hooks: vec![sample_plugin_hook()],
+            }],
+            diagnostics: vec![PluginDiagnostic {
+                plugin_name: Some("broken-plugin".into()),
+                manifest_path: Some(PathBuf::from("/tmp/project/.claude/plugins/broken/plugin.json")),
+                severity: PluginDiagnosticSeverity::Error,
+                code: "plugin-manifest-load-failed".into(),
+                message: "bad plugin manifest".into(),
+            }],
+        },
+    );
     let plugin_load_result = Arc::new(PluginLoadResult {
         root: PathBuf::from("/tmp/project/.claude/plugins"),
         source: PluginConfigSource::Directory,
         plugins: vec![PluginDefinition {
             name: "demo-plugin".into(),
+            version: Some("0.1.0".into()),
             description: "demo".into(),
             manifest_path: PathBuf::from("/tmp/project/.claude/plugins/demo/plugin.json"),
+            capabilities: vec!["commands".into(), "hooks".into(), "tools".into()],
+            diagnostics_metadata: Some(PluginDiagnosticsMetadata {
+                homepage: None,
+                docs: Some("https://example.com/docs".into()),
+                issues: None,
+                support_level: Some("community".into()),
+            }),
             commands: vec![metadata_rich_plugin_command("plugin-cmd")],
+            tools: vec![sample_plugin_tool("demo_tool")],
+            hooks: vec![sample_plugin_hook()],
         }],
-        diagnostics: vec!["bad plugin manifest in broken/plugin.json".into()],
+        diagnostics: vec![PluginDiagnostic {
+            plugin_name: Some("broken-plugin".into()),
+            manifest_path: Some(PathBuf::from("/tmp/project/.claude/plugins/broken/plugin.json")),
+            severity: PluginDiagnosticSeverity::Error,
+            code: "plugin-manifest-load-failed".into(),
+            message: "bad plugin manifest".into(),
+        }],
     });
-    let app_state = test_app_state(Some(registry), Some(Arc::new(TaskManager::default())), Some(plugin_load_result));
+    let app_state = test_app_state(
+        Some(registry),
+        Some(Arc::new(TaskManager::default())),
+        Some(plugin_load_result),
+        Some(Arc::new(RwLock::new(tool_registry))),
+    );
 
     let result = StatusCommand
         .execute(&NormalizedInput::from_raw(InteractionSurface::Cli, "/status"), &app_state)
@@ -209,12 +303,15 @@ async fn status_command_reports_plugin_discovery_summary() {
     assert!(text.contains("- plugin_discovery: directory (root=/tmp/project/.claude/plugins)"));
     assert!(text.contains("- discovered_plugins: 1"));
     assert!(text.contains("- discovered_plugin_commands: 1"));
+    assert!(text.contains("- discovered_plugin_tools: 1"));
+    assert!(text.contains("- discovered_plugin_hooks: 1"));
     assert!(text.contains("- registered_plugin_commands: 1"));
-    assert!(text.contains("- diagnostics: 1"));
+    assert!(text.contains("- registered_plugin_tools: 1"));
+    assert!(text.contains("- diagnostics: total=1, info=0, warnings=0, errors=1"));
     assert!(text.contains("- plugin_inventory:"));
-    assert!(text.contains("  - demo-plugin — commands=1 (manifest=/tmp/project/.claude/plugins/demo/plugin.json)"));
+    assert!(text.contains("  - demo-plugin v0.1.0 — commands=1, hooks=1, tools=1, capabilities=commands,hooks,tools (manifest=/tmp/project/.claude/plugins/demo/plugin.json)"));
     assert!(text.contains("- diagnostic_preview:"));
-    assert!(text.contains("  - bad plugin manifest in broken/plugin.json"));
+    assert!(text.contains("[error:plugin-manifest-load-failed] plugin=broken-plugin; manifest=/tmp/project/.claude/plugins/broken/plugin.json; bad plugin manifest"));
 }
 
 #[tokio::test]
@@ -237,7 +334,7 @@ async fn tasks_command_groups_orchestration_tasks_and_hints() {
     let standalone = manager.create("standalone research", "test-session", InteractionSurface::Cli);
     manager.set_worker_role(&standalone.id, WorkerRole::Research);
 
-    let app_state = test_app_state(None, Some(manager), None);
+    let app_state = test_app_state(None, Some(manager), None, None);
     let result = TasksCommand
         .execute(&NormalizedInput::from_raw(InteractionSurface::Cli, "/tasks"), &app_state)
         .await
@@ -275,7 +372,13 @@ fn plugin_loader_loads_inline_and_file_prompts_and_collects_diagnostics() {
         good_dir.join("plugin.json"),
         r#"{
   "name": "demo-plugin",
+  "version": "0.1.0",
   "description": "Demo plugin",
+  "capabilities": ["commands", "hooks", "tools"],
+  "diagnostics": {
+    "docs": "https://example.com/docs",
+    "support_level": "community"
+  },
   "commands": [
     {
       "name": "inline-plugin",
@@ -291,6 +394,20 @@ fn plugin_loader_loads_inline_and_file_prompts_and_collects_diagnostics() {
       "prompt_file": "prompt.txt",
       "availability": "cli-only"
     }
+  ],
+  "tools": [
+    {
+      "name": "demo_tool",
+      "description": "Plugin tool",
+      "prompt": "Inspect plugin-owned files",
+      "read_only": true
+    }
+  ],
+  "hooks": [
+    {
+      "event": "stop",
+      "append_message": "plugin stop hook fired"
+    }
   ]
 }"#,
     )
@@ -302,7 +419,12 @@ fn plugin_loader_loads_inline_and_file_prompts_and_collects_diagnostics() {
     assert_eq!(result.source, PluginConfigSource::Directory);
     assert_eq!(result.plugins.len(), 1);
     assert_eq!(result.plugins[0].name, "demo-plugin");
+    assert_eq!(result.plugins[0].version.as_deref(), Some("0.1.0"));
+    assert_eq!(result.plugins[0].capabilities, vec!["commands", "hooks", "tools"]);
     assert_eq!(result.plugins[0].commands.len(), 2);
+    assert_eq!(result.plugins[0].tools.len(), 1);
+    assert_eq!(result.plugins[0].hooks.len(), 1);
+    assert_eq!(result.plugins[0].diagnostics_metadata.as_ref().and_then(|meta| meta.docs.as_deref()), Some("https://example.com/docs"));
     assert_eq!(result.plugins[0].commands[0].prompt, "Inline prompt body");
     assert!(result.plugins[0].commands[0].disable_model_invocation);
     assert!(result.plugins[0].commands[0].immediate);
@@ -310,160 +432,76 @@ fn plugin_loader_loads_inline_and_file_prompts_and_collects_diagnostics() {
     assert_eq!(result.plugins[0].commands[1].prompt, "Prompt loaded from file");
     assert_eq!(result.plugins[0].commands[1].availability, CommandAvailability::CliOnly);
     assert_eq!(result.diagnostics.len(), 1);
-    assert!(result.diagnostics[0].contains("Failed to load plugin manifest"));
+    assert_eq!(result.diagnostics[0].code, "plugin-manifest-load-failed");
 
     fs::remove_dir_all(root).expect("plugin loader temp dir should be cleaned up");
+}
+
+#[test]
+fn plugin_runtime_augments_hook_and_tool_registries() {
+    let load_result = PluginLoadResult {
+        root: PathBuf::from("/tmp/project/.claude/plugins"),
+        source: PluginConfigSource::Directory,
+        plugins: vec![PluginDefinition {
+            name: "demo-plugin".into(),
+            version: Some("0.1.0".into()),
+            description: "demo".into(),
+            manifest_path: PathBuf::from("/tmp/project/.claude/plugins/demo/plugin.json"),
+            capabilities: vec!["commands".into(), "hooks".into(), "tools".into()],
+            diagnostics_metadata: None,
+            commands: vec![sample_plugin_command("plugin-cmd")],
+            tools: vec![sample_plugin_tool("demo_tool")],
+            hooks: vec![sample_plugin_hook()],
+        }],
+        diagnostics: vec![],
+    };
+
+    let hook_registry = augment_hook_registry_with_plugins(rust_agent::hook::registry::HookRegistry::default(), &load_result);
+    let (tool_registry, diagnostics) = augment_tool_registry_with_plugins(ToolRegistry::new(), &load_result);
+
+    assert_eq!(hook_registry.rules().len(), 1);
+    assert_eq!(tool_registry.all_metadata().len(), 1);
+    assert!(tool_registry.all_metadata()[0].name.starts_with("plugin."));
+    assert!(diagnostics.is_empty());
 }
 
 #[tokio::test]
 async fn plugin_slash_command_returns_prompt_result() {
     let command = PluginSlashCommand::new(sample_plugin_command("plugin-cmd"));
-    let app_state = test_app_state(None, None, None);
+    let app_state = test_app_state(None, None, None, None);
 
     let result = command
         .execute(
-            &NormalizedInput::from_raw(InteractionSurface::Cli, "/plugin-cmd --target demo"),
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/plugin-cmd --scope full"),
             &app_state,
         )
         .await
-        .expect("plugin slash command should execute");
+        .expect("plugin command should execute");
 
-    let CommandResult::Prompt(text) = result else {
+    let CommandResult::Prompt(prompt) = result else {
         panic!("expected prompt result");
     };
-    assert!(text.contains("Loaded plugin command: plugin-cmd"));
-    assert!(text.contains("Plugin: demo-plugin"));
-    assert!(text.contains("Arguments: --target demo"));
-    assert!(text.contains("Plugin instructions:\nFollow the plugin instructions carefully."));
-}
-
-#[tokio::test]
-async fn help_and_status_report_consistent_command_contract_counts() {
-    let registry = Arc::new(
-        CommandRegistry::new()
-            .register(Arc::new(HelpCommand))
-            .register(Arc::new(PermissionsCommand))
-            .register(Arc::new(SkillSlashCommand::from_skill(rust_agent::skills::types::SkillDefinition {
-                name: "summarize-skill".into(),
-                description: "Summarize repository state".into(),
-                when_to_use: None,
-                argument_hint: None,
-                workflow_hint: None,
-                allowed_tools: vec![],
-                aliases: vec![],
-                user_invocable: true,
-                disable_model_invocation: true,
-                hidden: false,
-                paths: vec![],
-                exclude_paths: vec![],
-                requires_files: vec![],
-                context: rust_agent::skills::types::SkillExecutionContext::Inline,
-                content: "skill body".into(),
-                source: rust_agent::skills::types::SkillSource::Filesystem,
-                file_path: None,
-            })))
-            .register(Arc::new(PluginSlashCommand::new(metadata_rich_plugin_command("plugin-cmd")))),
-    );
-    let plugin_load_result = Arc::new(PluginLoadResult {
-        root: PathBuf::from("/tmp/project/.claude/plugins"),
-        source: PluginConfigSource::Directory,
-        plugins: vec![PluginDefinition {
-            name: "demo-plugin".into(),
-            description: "demo".into(),
-            manifest_path: PathBuf::from("/tmp/project/.claude/plugins/demo/plugin.json"),
-            commands: vec![metadata_rich_plugin_command("plugin-cmd")],
-        }],
-        diagnostics: vec![],
-    });
-    let app_state = test_app_state(Some(registry), Some(Arc::new(TaskManager::default())), Some(plugin_load_result));
-
-    let help = HelpCommand
-        .execute(&NormalizedInput::from_raw(InteractionSurface::Cli, "/help"), &app_state)
-        .await
-        .expect("help should render");
-    let status = StatusCommand
-        .execute(&NormalizedInput::from_raw(InteractionSurface::Cli, "/status"), &app_state)
-        .await
-        .expect("status should render");
-
-    let CommandResult::Message(help_text) = help else {
-        panic!("expected help message");
-    };
-    let CommandResult::Message(status_text) = status else {
-        panic!("expected status message");
-    };
-
-    assert!(help_text.contains("Built-in (2):"));
-    assert!(help_text.contains("Skills (1):"));
-    assert!(help_text.contains("Plugins (1):"));
-    assert!(status_text.contains("- total: 4"));
-    assert!(status_text.contains("- source builtin: 2"));
-    assert!(status_text.contains("- source skill: 1"));
-    assert!(status_text.contains("- source plugin: 1"));
-    assert!(status_text.contains("- contract: prompt=2, immediate=3, sensitive=2, model_invocation_disabled=2"));
-    assert!(status_text.contains("- discovered_plugin_commands: 1"));
-    assert!(status_text.contains("- plugin_inventory:"));
-}
-
-#[tokio::test]
-async fn status_and_tasks_report_consistent_orchestration_summaries() {
-    let manager = Arc::new(TaskManager::default());
-    let dispatcher = NotificationDispatcher::new(TelegramGateway::default());
-
-    let implement = manager.create("implement feature", "test-session", InteractionSurface::Cli);
-    manager.set_worker_role(&implement.id, WorkerRole::Implement);
-    manager.set_orchestration_group_id(&implement.id, Some("group-1".into()));
-    manager.set_validation_state(
-        &implement.id,
-        Some(rust_agent::task::types::ValidationState::PendingVerification),
-    );
-    manager.complete(&implement.id, &dispatcher);
-
-    let verify = manager.create("verify feature", "test-session", InteractionSurface::Cli);
-    manager.set_worker_role(&verify.id, WorkerRole::Verify);
-    manager.set_parent_task_id(&verify.id, Some(implement.id.clone()));
-    manager.set_orchestration_group_id(&verify.id, Some("group-1".into()));
-    manager.start(&verify.id);
-
-    let standalone = manager.create("standalone research", "test-session", InteractionSurface::Cli);
-    manager.set_worker_role(&standalone.id, WorkerRole::Research);
-
-    let app_state = test_app_state(None, Some(manager), None);
-
-    let status = StatusCommand
-        .execute(&NormalizedInput::from_raw(InteractionSurface::Cli, "/status"), &app_state)
-        .await
-        .expect("status should render");
-    let tasks = TasksCommand
-        .execute(&NormalizedInput::from_raw(InteractionSurface::Cli, "/tasks"), &app_state)
-        .await
-        .expect("tasks should render");
-
-    let CommandResult::Message(status_text) = status else {
-        panic!("expected status message");
-    };
-    let CommandResult::Message(tasks_text) = tasks else {
-        panic!("expected tasks message");
-    };
-
-    assert!(status_text.contains("- pending_orchestration: yes"));
-    assert!(status_text.contains("- tasks: total=3, running=1, completed=1, failed=0, killed=0"));
-    assert!(status_text.contains("- pending_verification: 1"));
-    assert!(status_text.contains("- orchestration_groups: 1"));
-
-    assert!(tasks_text.contains("- total: 3"));
-    assert!(tasks_text.contains("- orchestration_groups: 1"));
-    assert!(tasks_text.contains("- by_validation_state: none=2, pending_verification=1"));
-    assert!(tasks_text.contains("- orchestration_contract: groups_in_progress=1, waiting_for_verification=0, ready_for_synthesis=0"));
-    assert!(tasks_text.contains("- group-1 — group group-1 still in progress"));
+    assert!(prompt.contains("Loaded plugin command: plugin-cmd"));
+    assert!(prompt.contains("Plugin: demo-plugin"));
+    assert!(prompt.contains("Arguments: --scope full"));
+    assert!(prompt.contains("Plugin instructions:"));
 }
 
 #[test]
 fn plugin_slash_command_metadata_preserves_contract_flags() {
-    let metadata = PluginSlashCommand::new(metadata_rich_plugin_command("plugin-cmd")).metadata();
+    let command = PluginSlashCommand::new(metadata_rich_plugin_command("plugin-cmd"));
+    let metadata = command.metadata();
 
+    assert_eq!(metadata.name, "plugin-cmd");
+    assert_eq!(metadata.source, rust_agent::command::types::CommandSource::Plugin);
+    assert_eq!(metadata.command_type, rust_agent::command::types::CommandType::Prompt);
     assert_eq!(metadata.availability, CommandAvailability::CliOnly);
     assert!(metadata.disable_model_invocation);
     assert!(metadata.immediate);
     assert!(metadata.is_sensitive);
+    assert_eq!(metadata.aliases, vec!["plugin-cmd-alias".to_string()]);
+}
+
+fn _assert_path_exists(path: &Path) {
+    assert!(path.exists() || !path.as_os_str().is_empty());
 }

@@ -98,10 +98,16 @@ impl Command for HelpCommand {
 
         if let Some(plugin_load_result) = app_state.plugin_load_result.as_ref() {
             if !plugin_load_result.diagnostics.is_empty() {
+                let warning_count = plugin_load_result
+                    .diagnostic_count_for_severity(crate::plugins::types::PluginDiagnosticSeverity::Warning);
+                let error_count = plugin_load_result
+                    .diagnostic_count_for_severity(crate::plugins::types::PluginDiagnosticSeverity::Error);
                 lines.push(String::new());
                 lines.push(format!(
-                    "Plugin diagnostics: {} issue(s) detected; run /status for details.",
-                    plugin_load_result.diagnostics.len()
+                    "Plugin diagnostics: {} issue(s) detected (warnings={}, errors={}); run /status for details.",
+                    plugin_load_result.diagnostics.len(),
+                    warning_count,
+                    error_count
                 ));
             }
         }

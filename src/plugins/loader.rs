@@ -2,9 +2,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::command::types::CommandAvailability;
+use crate::hook::registry::HookEventMatcher;
 use crate::plugins::types::{
-    PluginCommandDefinition, PluginConfigSource, PluginDefinition, PluginLoadResult,
-    PluginManifest,
+    PluginCommandDefinition, PluginConfigSource, PluginDefinition, PluginDiagnostic,
+    PluginDiagnosticSeverity, PluginDiagnosticsMetadata, PluginHookDefinition, PluginHookManifest,
+    PluginLoadResult, PluginManifest, PluginToolDefinition,
 };
 
 pub fn load_plugins(cwd: &Path) -> PluginLoadResult {
@@ -30,11 +32,21 @@ pub fn load_plugins(cwd: &Path) -> PluginLoadResult {
     }
 }
 
-fn visit_plugin_dirs(dir: &Path, plugins: &mut Vec<PluginDefinition>, diagnostics: &mut Vec<String>) {
+fn visit_plugin_dirs(
+    dir: &Path,
+    plugins: &mut Vec<PluginDefinition>,
+    diagnostics: &mut Vec<PluginDiagnostic>,
+) {
     let entries = match fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(error) => {
-            diagnostics.push(format!("Failed to read plugin directory {}: {error}", dir.display()));
+            diagnostics.push(PluginDiagnostic {
+                plugin_name: None,
+                manifest_path: None,
+                severity: PluginDiagnosticSeverity::Error,
+                code: "plugin-directory-read-failed".into(),
+                message: format!("Failed to read plugin directory {}: {error}", dir.display()),
+            });
             return;
         }
     };
@@ -45,11 +57,17 @@ fn visit_plugin_dirs(dir: &Path, plugins: &mut Vec<PluginDefinition>, diagnostic
             let manifest = path.join("plugin.json");
             if manifest.is_file() {
                 match load_plugin_manifest(&manifest) {
-                    Ok(plugin) => plugins.push(plugin),
-                    Err(error) => diagnostics.push(format!(
-                        "Failed to load plugin manifest {}: {error}",
-                        manifest.display()
-                    )),
+                    Ok((plugin, plugin_diagnostics)) => {
+                        diagnostics.extend(plugin_diagnostics);
+                        plugins.push(plugin);
+                    }
+                    Err(error) => diagnostics.push(PluginDiagnostic {
+                        plugin_name: None,
+                        manifest_path: Some(manifest.clone()),
+                        severity: PluginDiagnosticSeverity::Error,
+                        code: "plugin-manifest-load-failed".into(),
+                        message: error.to_string(),
+                    }),
                 }
             }
             visit_plugin_dirs(&path, plugins, diagnostics);
@@ -57,24 +75,41 @@ fn visit_plugin_dirs(dir: &Path, plugins: &mut Vec<PluginDefinition>, diagnostic
     }
 }
 
-fn load_plugin_manifest(path: &PathBuf) -> anyhow::Result<PluginDefinition> {
+fn load_plugin_manifest(path: &PathBuf) -> anyhow::Result<(PluginDefinition, Vec<PluginDiagnostic>)> {
     let raw = fs::read_to_string(path)?;
     let manifest: PluginManifest = serde_json::from_str(&raw)?;
     let manifest_dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let mut diagnostics = Vec::new();
     let mut commands = Vec::new();
+    let mut tools = Vec::new();
+    let mut hooks = Vec::new();
 
     for command in manifest.commands {
-        let prompt = match (command.prompt, command.prompt_file) {
-            (Some(prompt), None) => prompt,
-            (None, Some(prompt_file)) => fs::read_to_string(manifest_dir.join(prompt_file))?,
-            (Some(prompt), Some(_)) => prompt,
-            (None, None) => anyhow::bail!("plugin command {} is missing prompt or prompt_file", command.name),
+        let prompt = match load_prompt(&command.prompt, &command.prompt_file, manifest_dir) {
+            Ok(prompt) => prompt,
+            Err(error) => {
+                diagnostics.push(plugin_diagnostic(
+                    Some(manifest.name.as_str()),
+                    Some(path),
+                    PluginDiagnosticSeverity::Error,
+                    "plugin-command-prompt-invalid",
+                    format!("plugin command {}: {error}", command.name),
+                ));
+                continue;
+            }
         };
-        let availability = match command.availability.as_deref() {
-            Some("cli-only") => CommandAvailability::CliOnly,
-            Some("remote-safe") => CommandAvailability::RemoteSafe,
-            Some("everywhere") | None => CommandAvailability::Everywhere,
-            Some(other) => anyhow::bail!("unknown plugin command availability: {other}"),
+        let availability = match parse_command_availability(command.availability.as_deref()) {
+            Ok(availability) => availability,
+            Err(error) => {
+                diagnostics.push(plugin_diagnostic(
+                    Some(manifest.name.as_str()),
+                    Some(path),
+                    PluginDiagnosticSeverity::Error,
+                    "plugin-command-availability-invalid",
+                    format!("plugin command {}: {error}", command.name),
+                ));
+                continue;
+            }
         };
         commands.push(PluginCommandDefinition {
             plugin_name: manifest.name.clone(),
@@ -91,10 +126,178 @@ fn load_plugin_manifest(path: &PathBuf) -> anyhow::Result<PluginDefinition> {
         });
     }
 
-    Ok(PluginDefinition {
-        name: manifest.name,
-        description: manifest.description,
-        manifest_path: path.clone(),
-        commands,
+    for tool in manifest.tools {
+        let prompt = match load_prompt(&tool.prompt, &tool.prompt_file, manifest_dir) {
+            Ok(prompt) => prompt,
+            Err(error) => {
+                diagnostics.push(plugin_diagnostic(
+                    Some(manifest.name.as_str()),
+                    Some(path),
+                    PluginDiagnosticSeverity::Error,
+                    "plugin-tool-prompt-invalid",
+                    format!("plugin tool {}: {error}", tool.name),
+                ));
+                continue;
+            }
+        };
+        tools.push(PluginToolDefinition {
+            plugin_name: manifest.name.clone(),
+            name: tool.name,
+            description: tool.description,
+            aliases: tool.aliases,
+            prompt,
+            search_hint: tool.search_hint,
+            read_only: tool.read_only,
+            destructive: tool.destructive,
+            requires_auth: tool.requires_auth,
+            requires_user_interaction: tool.requires_user_interaction,
+            manifest_path: path.clone(),
+        });
+    }
+
+    for hook in manifest.hooks {
+        match normalize_hook_definition(&manifest.name, path, hook) {
+            Ok(hook) => hooks.push(hook),
+            Err(diagnostic) => diagnostics.push(diagnostic),
+        }
+    }
+
+    for capability in &manifest.capabilities {
+        if !matches!(capability.as_str(), "commands" | "tools" | "hooks") {
+            diagnostics.push(plugin_diagnostic(
+                Some(manifest.name.as_str()),
+                Some(path),
+                PluginDiagnosticSeverity::Warning,
+                "plugin-capability-unknown",
+                format!("unknown plugin capability declared: {capability}"),
+            ));
+        }
+    }
+
+    if manifest.capabilities.iter().any(|capability| capability == "commands") && commands.is_empty() {
+        diagnostics.push(plugin_diagnostic(
+            Some(manifest.name.as_str()),
+            Some(path),
+            PluginDiagnosticSeverity::Warning,
+            "plugin-capability-commands-empty",
+            "plugin declares commands capability but no valid commands were loaded".into(),
+        ));
+    }
+    if manifest.capabilities.iter().any(|capability| capability == "tools") && tools.is_empty() {
+        diagnostics.push(plugin_diagnostic(
+            Some(manifest.name.as_str()),
+            Some(path),
+            PluginDiagnosticSeverity::Warning,
+            "plugin-capability-tools-empty",
+            "plugin declares tools capability but no valid tools were loaded".into(),
+        ));
+    }
+    if manifest.capabilities.iter().any(|capability| capability == "hooks") && hooks.is_empty() {
+        diagnostics.push(plugin_diagnostic(
+            Some(manifest.name.as_str()),
+            Some(path),
+            PluginDiagnosticSeverity::Warning,
+            "plugin-capability-hooks-empty",
+            "plugin declares hooks capability but no valid hooks were loaded".into(),
+        ));
+    }
+
+    let diagnostics_metadata = manifest.diagnostics.map(PluginDiagnosticsMetadata::from);
+
+    Ok((
+        PluginDefinition {
+            name: manifest.name,
+            version: manifest.version,
+            description: manifest.description,
+            manifest_path: path.clone(),
+            capabilities: manifest.capabilities,
+            diagnostics_metadata,
+            commands,
+            tools,
+            hooks,
+        },
+        diagnostics,
+    ))
+}
+
+fn normalize_hook_definition(
+    plugin_name: &str,
+    manifest_path: &Path,
+    hook: PluginHookManifest,
+) -> Result<PluginHookDefinition, PluginDiagnostic> {
+    let event = parse_hook_event_matcher(&hook.event).ok_or_else(|| {
+        plugin_diagnostic(
+            Some(plugin_name),
+            Some(manifest_path),
+            PluginDiagnosticSeverity::Error,
+            "plugin-hook-event-invalid",
+            format!("unknown hook event: {}", hook.event),
+        )
+    })?;
+    Ok(PluginHookDefinition {
+        plugin_name: plugin_name.to_string(),
+        event,
+        deny_match: hook.deny_match,
+        append_message: hook.append_message,
+        prevent_continuation: hook.prevent_continuation,
+        permission_decision: hook.permission_decision,
+        updated_input: hook.updated_input,
+        additional_context: hook.additional_context,
+        manifest_path: manifest_path.to_path_buf(),
     })
+}
+
+fn load_prompt(
+    inline_prompt: &Option<String>,
+    prompt_file: &Option<String>,
+    manifest_dir: &Path,
+) -> anyhow::Result<String> {
+    match (inline_prompt, prompt_file) {
+        (Some(prompt), None) => Ok(prompt.clone()),
+        (None, Some(prompt_file)) => Ok(fs::read_to_string(manifest_dir.join(prompt_file))?),
+        (Some(prompt), Some(_)) => Ok(prompt.clone()),
+        (None, None) => anyhow::bail!("missing prompt or prompt_file"),
+    }
+}
+
+fn parse_command_availability(value: Option<&str>) -> anyhow::Result<CommandAvailability> {
+    Ok(match value {
+        Some("cli-only") => CommandAvailability::CliOnly,
+        Some("remote-safe") => CommandAvailability::RemoteSafe,
+        Some("everywhere") | None => CommandAvailability::Everywhere,
+        Some(other) => anyhow::bail!("unknown plugin command availability: {other}"),
+    })
+}
+
+fn parse_hook_event_matcher(value: &str) -> Option<HookEventMatcher> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "sessionstart" | "session_start" => Some(HookEventMatcher::SessionStart),
+        "setup" => Some(HookEventMatcher::Setup),
+        "userpromptsubmit" | "user_prompt_submit" => Some(HookEventMatcher::UserPromptSubmit),
+        "pretooluse" | "pre_tool_use" => Some(HookEventMatcher::PreToolUse),
+        "posttooluse" | "post_tool_use" => Some(HookEventMatcher::PostToolUse),
+        "posttoolusefailure" | "post_tool_use_failure" => Some(HookEventMatcher::PostToolUseFailure),
+        "permissionrequest" | "permission_request" => Some(HookEventMatcher::PermissionRequest),
+        "permissiondenied" | "permission_denied" => Some(HookEventMatcher::PermissionDenied),
+        "stop" => Some(HookEventMatcher::Stop),
+        "subagentstop" | "subagent_stop" => Some(HookEventMatcher::SubagentStop),
+        "notification" => Some(HookEventMatcher::Notification),
+        _ => None,
+    }
+}
+
+fn plugin_diagnostic(
+    plugin_name: Option<&str>,
+    manifest_path: Option<&Path>,
+    severity: PluginDiagnosticSeverity,
+    code: &str,
+    message: String,
+) -> PluginDiagnostic {
+    PluginDiagnostic {
+        plugin_name: plugin_name.map(str::to_string),
+        manifest_path: manifest_path.map(Path::to_path_buf),
+        severity,
+        code: code.into(),
+        message,
+    }
 }

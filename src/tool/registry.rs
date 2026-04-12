@@ -24,6 +24,20 @@ impl ToolRegistry {
     }
 
     pub fn register(mut self, tool: Arc<dyn Tool>) -> Self {
+        let metadata = tool.metadata();
+        assert!(
+            self.tools.iter().all(|existing| {
+                let existing_metadata = existing.metadata();
+                existing_metadata.name != metadata.name
+                    && !existing_metadata.aliases.iter().any(|alias| *alias == metadata.name)
+                    && !metadata.aliases.iter().any(|alias| {
+                        *alias == existing_metadata.name
+                            || existing_metadata.aliases.iter().any(|existing_alias| existing_alias == alias)
+                    })
+            }),
+            "duplicate or conflicting tool registration: {}",
+            metadata.name
+        );
         self.tools.push(tool);
         self.tools.sort_by_key(|tool| tool.metadata().name);
         self

@@ -4,6 +4,8 @@ use rust_agent::bootstrap::{BootstrapPhase, BootstrapState, InteractionSurface, 
 mod skills_visibility;
 #[path = "plan_resume_flow.rs"]
 mod plan_resume_flow;
+#[path = "plugin_flow.rs"]
+mod plugin_flow;
 #[path = "remote_flow.rs"]
 mod remote_flow;
 
