@@ -47,7 +47,7 @@ pub fn format_skill_prompt(skill: &SkillDefinition, args: &str) -> anyhow::Resul
         .map(|value| format!("Argument hint: {}\n", value.trim()))
         .unwrap_or_default();
     let workflow_hint = skill
-        .workflow_hint
+        .workflow_summary
         .as_deref()
         .filter(|value| !value.trim().is_empty())
         .map(|value| format!("Workflow hint: {}\n", value.trim()))

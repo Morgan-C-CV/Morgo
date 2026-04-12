@@ -10,6 +10,7 @@ fn sample_skill(name: &str) -> SkillDefinition {
         when_to_use: Some(format!("Use when {name} is relevant")),
         argument_hint: None,
         workflow_hint: None,
+        workflow_summary: None,
         allowed_tools: vec!["Read".into()],
         aliases: Vec::new(),
         user_invocable: true,

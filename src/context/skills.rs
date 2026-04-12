@@ -24,8 +24,14 @@ pub fn describe_skills_context(app_state: &AppState) -> String {
             .filter(|value| !value.trim().is_empty())
             .map(|value| format!(" — when to use: {}", value.trim()))
             .unwrap_or_default();
+        let workflow = skill
+            .workflow_summary
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| format!(" — workflow: {}", value.trim()))
+            .unwrap_or_default();
         let source = format!(" [{}]", skill.source.as_str());
-        lines.push(format!("- {}{}: {}{}", skill.name, source, skill.description, when));
+        lines.push(format!("- {}{}: {}{}{}", skill.name, source, skill.description, when, workflow));
     }
     lines.push("Invoke these via the Skill tool when appropriate.".to_string());
     lines.join("\n")

@@ -30,6 +30,8 @@ mod security_tests;
 mod skills_loader_tests;
 #[path = "unit/skills_registry_tests.rs"]
 mod skills_registry_tests;
+#[path = "unit/skill_prompt_tests.rs"]
+mod skill_prompt_tests;
 #[path = "unit/task_manager_tests.rs"]
 mod task_manager_tests;
 #[path = "unit/tool_behavior_tests.rs"]

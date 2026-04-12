@@ -46,6 +46,30 @@ Skill body
 }
 
 #[test]
+fn skill_loader_builds_normalized_workflow_summary() {
+    let root = unique_temp_path("rust-agent-skill-workflow-summary");
+    let skill_dir = root.join(".claude/skills/workflow-skill");
+    fs::create_dir_all(&skill_dir).expect("create skill dir");
+    fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\ndescription: workflow skill\nwhen_to_use:   Use when inspecting state   \nargument-hint:   path target   \nworkflow-hint:   inspect then patch   \n---\nbody\n",
+    )
+    .expect("write workflow skill");
+
+    let result = load_skills_with_diagnostics(&root).expect("skill load should succeed");
+    let skill = &result.skills[0];
+    assert_eq!(skill.when_to_use.as_deref(), Some("Use when inspecting state"));
+    assert_eq!(skill.argument_hint.as_deref(), Some("path target"));
+    assert_eq!(skill.workflow_hint.as_deref(), Some("inspect then patch"));
+    assert_eq!(
+        skill.workflow_summary.as_deref(),
+        Some("inspect then patch | args: path target | use: Use when inspecting state")
+    );
+
+    fs::remove_dir_all(root).expect("cleanup workflow summary root");
+}
+
+#[test]
 fn skill_loader_merges_user_and_project_sources_with_project_override() {
     let root = unique_temp_path("rust-agent-skill-loader");
     let project_skill_dir = root.join(".claude/skills/project-skill");
@@ -79,6 +103,7 @@ fn skill_loader_merges_user_and_project_sources_with_project_override() {
     assert_eq!(skill.name, "project-skill");
     assert_eq!(skill.description, "project copy");
     assert_eq!(skill.workflow_hint.as_deref(), Some("local workflow"));
+    assert_eq!(skill.workflow_summary.as_deref(), Some("local workflow"));
     assert_eq!(skill.source, SkillSource::Filesystem);
     assert_eq!(skill.content, "project body");
 

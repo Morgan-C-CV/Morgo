@@ -48,6 +48,7 @@ pub struct SkillDefinition {
     pub when_to_use: Option<String>,
     pub argument_hint: Option<String>,
     pub workflow_hint: Option<String>,
+    pub workflow_summary: Option<String>,
     pub allowed_tools: Vec<String>,
     pub aliases: Vec<String>,
     pub user_invocable: bool,
@@ -65,6 +66,15 @@ pub struct SkillDefinition {
 impl SkillDefinition {
     pub fn is_model_invocable(&self) -> bool {
         !self.disable_model_invocation && !self.hidden
+    }
+
+    pub fn augmented_description(&self) -> String {
+        match self.workflow_summary.as_deref() {
+            Some(summary) if !summary.trim().is_empty() => {
+                format!("{} — workflow: {}", self.description, summary.trim())
+            }
+            _ => self.description.clone(),
+        }
     }
 
     pub fn matches_project_context(&self, cwd: &Path) -> bool {

@@ -37,9 +37,10 @@ pub struct SkillSlashCommand {
 
 impl SkillSlashCommand {
     pub fn from_skill(skill: crate::skills::types::SkillDefinition) -> Self {
+        let description = skill.augmented_description();
         Self {
             skill_name: skill.name,
-            description: skill.description,
+            description,
             category: "skill".into(),
             disable_model_invocation: skill.disable_model_invocation,
             aliases: skill.aliases,
@@ -132,7 +133,7 @@ impl Command for SkillsCommand {
                 .map(|value| format!(" — when to use: {}", value.trim()))
                 .unwrap_or_default();
             let workflow = skill
-                .workflow_hint
+                .workflow_summary
                 .as_deref()
                 .filter(|value| !value.trim().is_empty())
                 .map(|value| format!(" — workflow: {}", value.trim()))

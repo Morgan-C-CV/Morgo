@@ -123,13 +123,22 @@ fn load_skill_file(path: &PathBuf, source: SkillSource) -> anyhow::Result<SkillD
     let description = frontmatter
         .description
         .unwrap_or_else(|| format!("Skill loaded from {}", path.display()));
+    let when_to_use = normalized_field(frontmatter.when_to_use);
+    let argument_hint = normalized_field(frontmatter.argument_hint);
+    let workflow_hint = normalized_field(frontmatter.workflow_hint);
+    let workflow_summary = build_workflow_summary(
+        when_to_use.as_deref(),
+        argument_hint.as_deref(),
+        workflow_hint.as_deref(),
+    );
 
     Ok(SkillDefinition {
         name,
         description,
-        when_to_use: frontmatter.when_to_use,
-        argument_hint: frontmatter.argument_hint,
-        workflow_hint: frontmatter.workflow_hint,
+        when_to_use,
+        argument_hint,
+        workflow_hint,
+        workflow_summary,
         allowed_tools: frontmatter.allowed_tools,
         aliases: frontmatter.aliases,
         user_invocable: frontmatter.user_invocable,
@@ -143,6 +152,31 @@ fn load_skill_file(path: &PathBuf, source: SkillSource) -> anyhow::Result<SkillD
         source,
         file_path: Some(path.clone()),
     })
+}
+
+fn normalized_field(value: Option<String>) -> Option<String> {
+    value.and_then(|value| {
+        let trimmed = value.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
+    })
+}
+
+fn build_workflow_summary(
+    when_to_use: Option<&str>,
+    argument_hint: Option<&str>,
+    workflow_hint: Option<&str>,
+) -> Option<String> {
+    let mut parts = Vec::new();
+    if let Some(value) = workflow_hint {
+        parts.push(value.trim().to_string());
+    }
+    if let Some(value) = argument_hint {
+        parts.push(format!("args: {}", value.trim()));
+    }
+    if let Some(value) = when_to_use {
+        parts.push(format!("use: {}", value.trim()));
+    }
+    (!parts.is_empty()).then(|| parts.join(" | "))
 }
 
 fn compute_fingerprint(roots: &[(PathBuf, SkillSource)]) -> u64 {

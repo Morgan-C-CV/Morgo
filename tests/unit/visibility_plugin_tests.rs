@@ -7,7 +7,7 @@ use rust_agent::bootstrap::{ClientType, InteractionSurface, SessionMode, Session
 use rust_agent::command::builtin::help::HelpCommand;
 use rust_agent::command::builtin::permissions::PermissionsCommand;
 use rust_agent::command::builtin::plugins::PluginSlashCommand;
-use rust_agent::command::builtin::skills::SkillSlashCommand;
+use rust_agent::command::builtin::skills::{SkillSlashCommand, SkillsCommand};
 use rust_agent::command::builtin::status::StatusCommand;
 use rust_agent::command::builtin::tasks::TasksCommand;
 use rust_agent::command::registry::CommandRegistry;
@@ -24,6 +24,8 @@ use rust_agent::plugins::types::{
     PluginDiagnosticSeverity, PluginDiagnosticsMetadata, PluginHookDefinition, PluginLoadResult,
     PluginToolDefinition,
 };
+use rust_agent::skills::registry::SkillRegistry;
+use rust_agent::skills::types::{SkillDefinition, SkillExecutionContext, SkillSource};
 use rust_agent::state::app_state::{AppState, RuntimeRole, WorkerRole};
 use rust_agent::state::permission_context::{PermissionMode, ToolPermissionContext};
 use rust_agent::task::manager::TaskManager;
@@ -88,6 +90,29 @@ fn sample_plugin_command(name: &str) -> PluginCommandDefinition {
     }
 }
 
+fn sample_skill_definition(name: &str) -> SkillDefinition {
+    SkillDefinition {
+        name: name.into(),
+        description: "Summarize repository state".into(),
+        when_to_use: Some("Use when triaging repo state".into()),
+        argument_hint: Some("target path".into()),
+        workflow_hint: Some("inspect then summarize".into()),
+        workflow_summary: Some("inspect then summarize | args: target path | use: Use when triaging repo state".into()),
+        allowed_tools: vec!["Read".into()],
+        aliases: vec![],
+        user_invocable: true,
+        disable_model_invocation: true,
+        hidden: false,
+        paths: vec![],
+        exclude_paths: vec![],
+        requires_files: vec![],
+        context: SkillExecutionContext::Inline,
+        content: "skill body".into(),
+        source: SkillSource::Filesystem,
+        file_path: None,
+    }
+}
+
 fn sample_plugin_tool(name: &str) -> PluginToolDefinition {
     PluginToolDefinition {
         plugin_name: "demo-plugin".into(),
@@ -140,25 +165,7 @@ async fn help_command_renders_source_counts_and_execution_kinds() {
         CommandRegistry::new()
             .register(Arc::new(HelpCommand))
             .register(Arc::new(PermissionsCommand))
-            .register(Arc::new(SkillSlashCommand::from_skill(rust_agent::skills::types::SkillDefinition {
-                name: "summarize-skill".into(),
-                description: "Summarize repository state".into(),
-                when_to_use: None,
-                argument_hint: None,
-                workflow_hint: None,
-                allowed_tools: vec![],
-                aliases: vec![],
-                user_invocable: true,
-                disable_model_invocation: true,
-                hidden: false,
-                paths: vec![],
-                exclude_paths: vec![],
-                requires_files: vec![],
-                context: rust_agent::skills::types::SkillExecutionContext::Inline,
-                content: "skill body".into(),
-                source: rust_agent::skills::types::SkillSource::Filesystem,
-                file_path: None,
-            })))
+            .register(Arc::new(SkillSlashCommand::from_skill(sample_skill_definition("summarize-skill"))))
             .register(Arc::new(PluginSlashCommand::new(metadata_rich_plugin_command("plugin-cmd")))),
     );
     let app_state = test_app_state(Some(registry), None, None, None);
@@ -181,7 +188,7 @@ async fn help_command_renders_source_counts_and_execution_kinds() {
     assert!(text.contains("Plugins (1):"));
     assert!(text.contains("/help — Show the available commands [type=local] [builtin:core] aliases=h [immediate]"));
     assert!(text.contains("/permissions — Inspect and update permission mode and explicit tool rules [type=local] [builtin:core] aliases=perms [sensitive] [immediate]"));
-    assert!(text.contains("/summarize-skill — Summarize repository state [type=prompt] [skill:skill] [model_invocation=disabled]"));
+    assert!(text.contains("/summarize-skill — Summarize repository state — workflow: inspect then summarize | args: target path | use: Use when triaging repo state [type=prompt] [skill:skill] [model_invocation=disabled]"));
     assert!(text.contains("/plugin-cmd — Metadata-rich plugin command [type=prompt] [plugin:plugin] aliases=plugin-cmd-alias [availability=cli-only] [sensitive] [model_invocation=disabled] [immediate]"));
 
     let rendered = render_turn_output(&CliTurnOutput {
@@ -190,6 +197,31 @@ async fn help_command_renders_source_counts_and_execution_kinds() {
     });
     assert!(rendered.contains("Available commands:"));
     assert!(rendered.contains("Plugins (1):"));
+}
+
+#[tokio::test]
+async fn skills_command_and_slash_command_share_augmented_workflow_metadata() {
+    let skill = sample_skill_definition("summarize-skill");
+    let app_state = AppState {
+        skill_registry: Some(Arc::new(SkillRegistry::new(vec![skill.clone()]))),
+        ..test_app_state(None, None, None, None)
+    };
+
+    let list_result = SkillsCommand
+        .execute(&NormalizedInput::from_raw(InteractionSurface::Cli, "/skills"), &app_state)
+        .await
+        .expect("skills command should render");
+    let CommandResult::Message(list_text) = list_result else {
+        panic!("expected skills message");
+    };
+    assert!(list_text.contains("workflow: inspect then summarize | args: target path | use: Use when triaging repo state"));
+
+    let slash = SkillSlashCommand::from_skill(skill);
+    let metadata = slash.metadata();
+    assert_eq!(
+        metadata.description,
+        "Summarize repository state — workflow: inspect then summarize | args: target path | use: Use when triaging repo state"
+    );
 }
 
 #[tokio::test]
