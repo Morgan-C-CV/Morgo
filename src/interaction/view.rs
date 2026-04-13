@@ -147,6 +147,62 @@ pub struct TelegramTaskItem {
     pub output_file: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WebView {
+    pub primary_text: String,
+    pub items: Vec<WebItem>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WebItem {
+    TaskUpdate(WebTaskItem),
+    ApprovalRequired {
+        tool_name: String,
+        message: String,
+    },
+    RuntimeNotice {
+        notice_kind: String,
+        message: String,
+    },
+    ToolCallStarted {
+        tool_name: String,
+        input: String,
+    },
+    ToolResult {
+        tool_name: String,
+        content: String,
+    },
+    AssistantDelta {
+        text: String,
+    },
+    Transition {
+        transition_kind: String,
+        text: String,
+    },
+    Terminal {
+        terminal_kind: String,
+        text: String,
+    },
+    SessionMilestone {
+        milestone_kind: String,
+        text: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WebTaskItem {
+    pub task_id: String,
+    pub status: &'static str,
+    pub summary: String,
+    pub result: String,
+    pub next_action: String,
+    pub worker_role: Option<&'static str>,
+    pub orchestration_group_id: Option<String>,
+    pub phase: Option<&'static str>,
+    pub validation_state: Option<&'static str>,
+    pub output_file: String,
+}
+
 pub fn build_telegram_view(view: &SurfaceView) -> TelegramView {
     TelegramView {
         primary_text: view.primary_text.clone(),
@@ -185,6 +241,59 @@ pub fn telegram_item_from_surface_item(item: &SurfaceItem) -> Option<TelegramIte
         | SurfaceItem::Transition { .. }
         | SurfaceItem::Terminal { .. }
         | SurfaceItem::SessionMilestone { .. } => None,
+    }
+}
+
+pub fn build_web_view(view: &SurfaceView) -> WebView {
+    WebView {
+        primary_text: view.primary_text.clone(),
+        items: view.items.iter().map(web_item_from_surface_item).collect(),
+    }
+}
+
+pub fn web_item_from_surface_item(item: &SurfaceItem) -> WebItem {
+    match item {
+        SurfaceItem::TaskUpdate(task) => WebItem::TaskUpdate(WebTaskItem {
+            task_id: task.task_id.clone(),
+            status: task.status,
+            summary: task.summary.clone(),
+            result: task.result.clone(),
+            next_action: task.next_action.clone(),
+            worker_role: task.worker_role,
+            orchestration_group_id: task.orchestration_group_id.clone(),
+            phase: task.phase,
+            validation_state: task.validation_state,
+            output_file: task.output_file.clone(),
+        }),
+        SurfaceItem::ApprovalRequired { tool_name, message } => WebItem::ApprovalRequired {
+            tool_name: tool_name.clone(),
+            message: message.clone(),
+        },
+        SurfaceItem::RuntimeNotice { kind, message } => WebItem::RuntimeNotice {
+            notice_kind: kind.clone(),
+            message: message.clone(),
+        },
+        SurfaceItem::ToolCallStarted { tool_name, input } => WebItem::ToolCallStarted {
+            tool_name: tool_name.clone(),
+            input: input.clone(),
+        },
+        SurfaceItem::ToolResult { tool_name, content } => WebItem::ToolResult {
+            tool_name: tool_name.clone(),
+            content: content.clone(),
+        },
+        SurfaceItem::AssistantDelta { text } => WebItem::AssistantDelta { text: text.clone() },
+        SurfaceItem::Transition { kind, text } => WebItem::Transition {
+            transition_kind: kind.clone(),
+            text: text.clone(),
+        },
+        SurfaceItem::Terminal { kind, text } => WebItem::Terminal {
+            terminal_kind: kind.clone(),
+            text: text.clone(),
+        },
+        SurfaceItem::SessionMilestone { kind, text } => WebItem::SessionMilestone {
+            milestone_kind: kind.clone(),
+            text: text.clone(),
+        },
     }
 }
 

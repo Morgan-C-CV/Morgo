@@ -18,7 +18,8 @@ use rust_agent::interaction::telegram::binding::{
 };
 use rust_agent::interaction::telegram::gateway::TelegramGateway;
 use rust_agent::interaction::view::{
-    SurfaceItem, build_surface_view, build_telegram_view, surface_item_from_cli_event,
+    SurfaceItem, WebItem, build_surface_view, build_telegram_view, build_web_view,
+    surface_item_from_cli_event,
 };
 use rust_agent::task::types::{TaskEvent, TaskOwner, TaskStatus};
 
@@ -649,6 +650,82 @@ fn telegram_gateway_builds_semantic_outgoing_messages_without_cli_renderer_types
             }
         ]
     );
+}
+
+#[test]
+fn web_view_is_derived_from_surface_view_with_frontend_friendly_kinds() {
+    let turn = CliTurnOutput {
+        primary_text: "Primary reply".into(),
+        events: vec![
+            CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::Notice {
+                kind: "runtime".into(),
+                message: "background work still running".into(),
+            }),
+            CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::Transition {
+                text: "next_turn".into(),
+            }),
+            CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::ToolResult {
+                tool_name: "Read".into(),
+                content: "line one".into(),
+            }),
+        ],
+    };
+
+    let web_view = build_web_view(&build_surface_view(&turn));
+
+    assert_eq!(web_view.primary_text, "Primary reply");
+    assert_eq!(web_view.items.len(), 3);
+    assert!(matches!(
+        &web_view.items[0],
+        WebItem::RuntimeNotice { notice_kind, message }
+            if notice_kind == "runtime" && message == "background work still running"
+    ));
+    assert!(matches!(
+        &web_view.items[1],
+        WebItem::Transition { transition_kind, text }
+            if transition_kind == "next_turn" && text == "next_turn"
+    ));
+    assert!(matches!(
+        &web_view.items[2],
+        WebItem::ToolResult { tool_name, content }
+            if tool_name == "Read" && content == "line one"
+    ));
+}
+
+#[test]
+fn same_surface_view_feeds_remote_telegram_and_web_without_cli_renderer_types() {
+    let view = build_surface_view(&CliTurnOutput {
+        primary_text: "Shared reply".into(),
+        events: vec![
+            CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::PendingApproval {
+                tool_name: "Bash".into(),
+                message: "requires explicit approval".into(),
+            }),
+            CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::Notice {
+                kind: "runtime".into(),
+                message: "background work still running".into(),
+            }),
+        ],
+    });
+
+    let remote_events = view
+        .items
+        .clone()
+        .into_iter()
+        .map(RemoteEventEnvelope::from)
+        .collect::<Vec<_>>();
+    let telegram_view = build_telegram_view(&view);
+    let web_view = build_web_view(&view);
+
+    assert_eq!(remote_events.len(), 2);
+    assert_eq!(telegram_view.items.len(), 2);
+    assert_eq!(web_view.items.len(), 2);
+    assert!(matches!(remote_events[0].payload, RemoteEventPayload::ApprovalRequired { .. }));
+    assert!(matches!(
+        &telegram_view.items[0],
+        rust_agent::interaction::view::TelegramItem::ApprovalRequired { .. }
+    ));
+    assert!(matches!(&web_view.items[0], WebItem::ApprovalRequired { .. }));
 }
 
 #[test]
