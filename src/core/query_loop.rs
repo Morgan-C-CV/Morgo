@@ -5,6 +5,8 @@ use crate::hook::executor::{HookDecision, run_hook};
 use crate::hook::registry::HookEvent;
 use crate::service::api::streaming::{StopReason, StreamEvent};
 use crate::service::compact::CompactPlanKind;
+use crate::tool::orchestrator::ToolExecutionOutcome;
+use crate::tool::result::{ToolExecutionRecord, ToolReportModifier};
 use tokio::time::{Duration, timeout};
 
 const WORKER_MAILBOX_IDLE_TIMEOUT_MS: u64 = 2_000;
@@ -907,153 +909,162 @@ async fn execute_tool_phase(
         .await;
 
     match tool_result {
-        Ok(outcomes) => match outcomes.into_iter().next().map(|outcome| outcome.result) {
-            Some(crate::tool::definition::ToolResult::Text(text)) => {
-                let post_tool_hook = run_hook(
-                    &context.hook_registry,
-                    HookEvent::PostToolUse {
-                        tool_name: tool_name.clone(),
-                    },
-                );
-                for message in post_tool_hook.messages.clone() {
-                    engine_events.push(EngineEvent::MessageCommitted(message.clone()));
-                    state.messages.push(message);
-                }
-                let tool_message = Message::assistant(format!("tool {tool_name} result: {text}"));
-                engine_events.push(EngineEvent::ToolResultCommitted {
-                    tool_name: tool_name.clone(),
-                    content: text.clone(),
-                });
-                engine_events.push(EngineEvent::MessageCommitted(tool_message.clone()));
-                state.messages.push(tool_message);
-                if post_tool_hook.prevent_continuation {
-                    state.stop_hook_active = true;
-                    state.transition = Some(Continue::StopHookBlocking);
-                    return TurnOutcome {
+        Ok(outcomes) => match outcomes.into_iter().next() {
+            Some(ToolExecutionOutcome { result, record, .. }) => match result {
+                crate::tool::definition::ToolResult::Text(text) => {
+                    let post_tool_hook = run_hook(
+                        &context.hook_registry,
+                        HookEvent::PostToolUse {
+                            tool_name: tool_name.clone(),
+                        },
+                    );
+                    for message in post_tool_hook.messages.clone() {
+                        engine_events.push(EngineEvent::MessageCommitted(message.clone()));
+                        state.messages.push(message);
+                    }
+                    let tool_message = Message::assistant(format!(
+                        "tool {tool_name} result: {}",
+                        record_detail_or_summary(&record)
+                    ));
+                    engine_events.push(tool_result_committed_event(&tool_name, &text, &record));
+                    engine_events.push(EngineEvent::MessageCommitted(tool_message.clone()));
+                    state.messages.push(tool_message);
+                    if post_tool_hook.prevent_continuation {
+                        state.stop_hook_active = true;
+                        state.transition = Some(Continue::StopHookBlocking);
+                        return TurnOutcome {
+                            state: state.clone(),
+                            events: engine_events,
+                            decision: TurnDecision::Return(state.clone(), Terminal::StopHookPrevented),
+                        };
+                    }
+                    state.pending_tool_use_summary = Some(record.summary.clone());
+                    TurnOutcome {
                         state: state.clone(),
                         events: engine_events,
-                        decision: TurnDecision::Return(state.clone(), Terminal::StopHookPrevented),
-                    };
+                        decision: TurnDecision::ContinueWith(
+                            Message::user(format!(
+                                "tool result for {tool_name}: {}",
+                                record_detail_or_summary(&record)
+                            )),
+                            Continue::ToolUseFollowUp,
+                        ),
+                    }
                 }
-                state.pending_tool_use_summary = Some(format!("tool {tool_name} result committed"));
-                TurnOutcome {
-                    state: state.clone(),
-                    events: engine_events,
-                    decision: TurnDecision::ContinueWith(
-                        Message::user(format!("tool result for {tool_name}: {text}")),
-                        Continue::ToolUseFollowUp,
-                    ),
-                }
-            }
-            Some(crate::tool::definition::ToolResult::Denied(reason)) => {
-                let permission_denied_hook = run_hook(
-                    &context.hook_registry,
-                    HookEvent::PermissionDenied {
-                        tool_name: tool_name.clone(),
-                        reason: reason.clone(),
-                    },
-                );
-                let post_failure_hook = run_hook(
-                    &context.hook_registry,
-                    HookEvent::PostToolUseFailure {
-                        tool_name: tool_name.clone(),
-                    },
-                );
-                for message in permission_denied_hook.messages {
-                    engine_events.push(EngineEvent::MessageCommitted(message.clone()));
-                    state.messages.push(message);
-                }
-                for message in post_failure_hook.messages {
-                    engine_events.push(EngineEvent::MessageCommitted(message.clone()));
-                    state.messages.push(message);
-                }
-                engine_events.push(EngineEvent::Notice {
-                    kind: "tool",
-                    message: format!("injecting missing tool result after denial for {tool_name}"),
-                });
-                let denial = Message::assistant(format!("tool {tool_name} denied: {reason}"));
-                let missing_tool_result = Message::assistant(format!(
-                    "tool {tool_name} result missing; synthesized denial result preserved"
-                ));
-                engine_events.push(EngineEvent::MessageCommitted(denial.clone()));
-                engine_events.push(EngineEvent::MessageCommitted(missing_tool_result.clone()));
-                state.messages.push(denial);
-                state.messages.push(missing_tool_result);
-                TurnOutcome {
-                    state: state.clone(),
-                    events: engine_events,
-                    decision: TurnDecision::Return(state.clone(), Terminal::AbortedTools),
-                }
-            }
-            Some(crate::tool::definition::ToolResult::PendingApproval { tool_name, message }) => {
-                context
-                    .app_state
-                    .permission_context
-                    .set_pending_approval(Some(
-                        crate::state::permission_context::PendingApproval {
+                crate::tool::definition::ToolResult::Denied(reason) => {
+                    let permission_denied_hook = run_hook(
+                        &context.hook_registry,
+                        HookEvent::PermissionDenied {
                             tool_name: tool_name.clone(),
-                            tool_input: effective_tool_input.clone(),
-                            message: message.clone(),
+                            reason: reason.clone(),
                         },
+                    );
+                    let post_failure_hook = run_hook(
+                        &context.hook_registry,
+                        HookEvent::PostToolUseFailure {
+                            tool_name: tool_name.clone(),
+                        },
+                    );
+                    for message in permission_denied_hook.messages {
+                        engine_events.push(EngineEvent::MessageCommitted(message.clone()));
+                        state.messages.push(message);
+                    }
+                    for message in post_failure_hook.messages {
+                        engine_events.push(EngineEvent::MessageCommitted(message.clone()));
+                        state.messages.push(message);
+                    }
+                    engine_events.push(tool_notice_event(&record));
+                    let denial = Message::assistant(format!(
+                        "tool {tool_name} denied: {}",
+                        record_detail_or_summary(&record)
                     ));
-                engine_events.push(EngineEvent::PendingApproval {
-                    tool_name: tool_name.clone(),
-                    message: message.clone(),
-                });
-                let approval_message =
-                    Message::assistant(format!("approval required for {tool_name}: {message}"));
-                engine_events.push(EngineEvent::MessageCommitted(approval_message.clone()));
-                state.messages.push(approval_message);
-                TurnOutcome {
-                    state: state.clone(),
-                    events: engine_events,
-                    decision: TurnDecision::Return(state.clone(), Terminal::AbortedTools),
+                    let missing_tool_result = Message::assistant(format!(
+                        "tool {tool_name} result missing; synthesized denial result preserved"
+                    ));
+                    engine_events.push(EngineEvent::MessageCommitted(denial.clone()));
+                    engine_events.push(EngineEvent::MessageCommitted(missing_tool_result.clone()));
+                    state.messages.push(denial);
+                    state.messages.push(missing_tool_result);
+                    TurnOutcome {
+                        state: state.clone(),
+                        events: engine_events,
+                        decision: TurnDecision::Return(state.clone(), Terminal::AbortedTools),
+                    }
                 }
-            }
-            Some(crate::tool::definition::ToolResult::Interrupted(reason)) => {
-                engine_events.push(EngineEvent::Notice {
-                    kind: "tool",
-                    message: format!("tool {tool_name} interrupted: {reason}"),
-                });
-                let interrupted =
-                    Message::assistant(format!("tool {tool_name} interrupted: {reason}"));
-                engine_events.push(EngineEvent::MessageCommitted(interrupted.clone()));
-                state.messages.push(interrupted);
-                TurnOutcome {
-                    state: state.clone(),
-                    events: engine_events,
-                    decision: TurnDecision::Return(state.clone(), Terminal::AbortedTools),
+                crate::tool::definition::ToolResult::PendingApproval { tool_name, message } => {
+                    let pending_message = record.detail.clone().unwrap_or(message.clone());
+                    context
+                        .app_state
+                        .permission_context
+                        .set_pending_approval(Some(
+                            crate::state::permission_context::PendingApproval {
+                                tool_name: tool_name.clone(),
+                                tool_input: effective_tool_input.clone(),
+                                message: pending_message.clone(),
+                            },
+                        ));
+                    engine_events.push(EngineEvent::PendingApproval {
+                        tool_name: tool_name.clone(),
+                        message: pending_message.clone(),
+                        summary: record.summary.clone(),
+                        detail: record.detail.clone(),
+                        report_modifier: record.report_modifier.clone(),
+                    });
+                    let approval_message = Message::assistant(format!(
+                        "approval required for {tool_name}: {}",
+                        record_detail_or_summary(&record)
+                    ));
+                    engine_events.push(EngineEvent::MessageCommitted(approval_message.clone()));
+                    state.messages.push(approval_message);
+                    TurnOutcome {
+                        state: state.clone(),
+                        events: engine_events,
+                        decision: TurnDecision::Return(state.clone(), Terminal::AbortedTools),
+                    }
                 }
-            }
-            Some(crate::tool::definition::ToolResult::Progress(progress)) => {
-                engine_events.push(EngineEvent::Notice {
-                    kind: "tool",
-                    message: format!("tool {tool_name} progress: {progress}"),
-                });
-                TurnOutcome {
-                    state: state.clone(),
-                    events: engine_events,
-                    decision: TurnDecision::ContinueWith(
-                        Message::user(format!("tool progress for {tool_name}: {progress}")),
-                        Continue::ToolUseFollowUp,
-                    ),
+                crate::tool::definition::ToolResult::Interrupted(_reason) => {
+                    engine_events.push(tool_notice_event(&record));
+                    let interrupted = Message::assistant(format!(
+                        "tool {tool_name} interrupted: {}",
+                        record_detail_or_summary(&record)
+                    ));
+                    engine_events.push(EngineEvent::MessageCommitted(interrupted.clone()));
+                    state.messages.push(interrupted);
+                    TurnOutcome {
+                        state: state.clone(),
+                        events: engine_events,
+                        decision: TurnDecision::Return(state.clone(), Terminal::AbortedTools),
+                    }
                 }
-            }
-            Some(crate::tool::definition::ToolResult::ResultTooLarge(reason)) => {
-                engine_events.push(EngineEvent::Notice {
-                    kind: "tool",
-                    message: format!("tool {tool_name} result too large: {reason}"),
-                });
-                let oversized =
-                    Message::assistant(format!("tool {tool_name} result too large: {reason}"));
-                engine_events.push(EngineEvent::MessageCommitted(oversized.clone()));
-                state.messages.push(oversized);
-                TurnOutcome {
-                    state: state.clone(),
-                    events: engine_events,
-                    decision: TurnDecision::Return(state.clone(), Terminal::AbortedTools),
+                crate::tool::definition::ToolResult::Progress(_progress) => {
+                    engine_events.push(tool_notice_event(&record));
+                    TurnOutcome {
+                        state: state.clone(),
+                        events: engine_events,
+                        decision: TurnDecision::ContinueWith(
+                            Message::user(format!(
+                                "tool progress for {tool_name}: {}",
+                                record_detail_or_summary(&record)
+                            )),
+                            Continue::ToolUseFollowUp,
+                        ),
+                    }
                 }
-            }
+                crate::tool::definition::ToolResult::ResultTooLarge(_reason) => {
+                    engine_events.push(tool_notice_event(&record));
+                    let oversized = Message::assistant(format!(
+                        "tool {tool_name} result too large: {}",
+                        record_detail_or_summary(&record)
+                    ));
+                    engine_events.push(EngineEvent::MessageCommitted(oversized.clone()));
+                    state.messages.push(oversized);
+                    TurnOutcome {
+                        state: state.clone(),
+                        events: engine_events,
+                        decision: TurnDecision::Return(state.clone(), Terminal::AbortedTools),
+                    }
+                }
+            },
             None => TurnOutcome {
                 state: state.clone(),
                 events: engine_events,
@@ -1094,6 +1105,38 @@ async fn execute_tool_phase(
                 decision: TurnDecision::Return(state.clone(), Terminal::AbortedTools),
             }
         }
+    }
+}
+
+fn record_detail_or_summary(record: &ToolExecutionRecord) -> String {
+    record.detail.clone().unwrap_or_else(|| record.summary.clone())
+}
+
+fn tool_notice_event(record: &ToolExecutionRecord) -> EngineEvent {
+    let kind = match record.report_modifier {
+        ToolReportModifier::Progress => "tool-progress",
+        ToolReportModifier::Pending => "tool-pending",
+        ToolReportModifier::NeedsAttention => "tool-attention",
+        ToolReportModifier::None => "tool",
+    };
+    EngineEvent::Notice {
+        kind,
+        message: format!("{}: {}", record.summary, record_detail_or_summary(record)),
+    }
+}
+
+fn tool_result_committed_event(
+    tool_name: &str,
+    content: &str,
+    record: &ToolExecutionRecord,
+) -> EngineEvent {
+    EngineEvent::ToolResultCommitted {
+        tool_name: tool_name.to_string(),
+        content: content.to_string(),
+        summary: record.summary.clone(),
+        detail: record.detail.clone(),
+        kind: record.kind.clone(),
+        report_modifier: record.report_modifier.clone(),
     }
 }
 

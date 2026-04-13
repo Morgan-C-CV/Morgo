@@ -127,20 +127,35 @@ impl QueryEngine {
                         persisted_events.push(event.clone());
                     }
                 }
-                EngineEvent::ToolResultCommitted { tool_name, content } => {
+                EngineEvent::ToolResultCommitted {
+                    tool_name,
+                    content,
+                    summary,
+                    detail,
+                    kind,
+                    report_modifier,
+                } => {
                     if let Some(session_store) = session_store {
                         session_store.append_entry(
                             &session_id,
                             SessionHistoryEntry {
                                 message: Message::assistant(format!(
-                                    "tool {tool_name} result: {content}"
+                                    "tool {tool_name} result: {}",
+                                    detail.clone().unwrap_or_else(|| summary.clone())
                                 )),
                                 timestamp: None,
                                 tool_refs: vec![tool_name.clone()],
                                 milestone: Some(SessionMilestone::ToolResultCommitted),
                             },
                         );
-                        persisted_events.push(event.clone());
+                        persisted_events.push(EngineEvent::ToolResultCommitted {
+                            tool_name: tool_name.clone(),
+                            content: content.clone(),
+                            summary: summary.clone(),
+                            detail: detail.clone(),
+                            kind: kind.clone(),
+                            report_modifier: report_modifier.clone(),
+                        });
                         persisted_events.push(EngineEvent::SessionMilestoneWritten(
                             SessionMilestone::ToolResultCommitted,
                         ));

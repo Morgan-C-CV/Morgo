@@ -1,3 +1,4 @@
+use async_trait::async_trait;
 use rust_agent::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
 use rust_agent::core::context::{QueryContext, SubagentConfig};
 use rust_agent::core::engine::QueryEngine;
@@ -26,7 +27,39 @@ use rust_agent::state::app_state::{AppState, RuntimeRole};
 use rust_agent::state::permission_context::{PermissionMode, ToolPermissionContext};
 use rust_agent::task::manager::TaskManager;
 use rust_agent::tool::builtin::agent::AgentTool;
+use rust_agent::tool::definition::{Tool, ToolCall, ToolMetadata, ToolResult};
 use rust_agent::tool::registry::ToolRegistry;
+
+struct ProgressFixtureTool;
+
+#[async_trait]
+impl Tool for ProgressFixtureTool {
+    fn metadata(&self) -> ToolMetadata {
+        ToolMetadata {
+            name: "ProgressFixture".into(),
+            description: "Returns progress updates".into(),
+            aliases: &[],
+            search_hint: None,
+            read_only: true,
+            destructive: false,
+            concurrency_safe: true,
+            always_load: true,
+            should_defer: false,
+            requires_auth: false,
+            requires_user_interaction: false,
+            is_open_world: false,
+            is_search_or_read_command: false,
+        }
+    }
+
+    async fn invoke(
+        &self,
+        _call: &ToolCall,
+        _permissions: &ToolPermissionContext,
+    ) -> anyhow::Result<ToolResult> {
+        Ok(ToolResult::Progress("42% complete".into()))
+    }
+}
 
 fn test_context(events: Vec<StreamEvent>) -> QueryContext {
     test_context_with_turns(vec![events], ToolRegistry::new())
@@ -182,12 +215,65 @@ async fn query_loop_invokes_tool_and_continues_follow_up_turn() {
     assert_eq!(result.messages[0], Message::assistant("planning..."));
     assert!(result.messages[1].content.contains("tool Agent result:"));
     assert_eq!(result.messages[2], Message::assistant("done after tool"));
+    assert!(result.events.iter().any(|event| matches!(
+        event,
+        EngineEvent::ToolResultCommitted {
+            tool_name,
+            content,
+            summary,
+            detail,
+            ..
+        } if tool_name == "Agent"
+            && !content.is_empty()
+            && summary == "Agent succeeded"
+            && detail.as_deref().is_some_and(|detail| !detail.is_empty())
+    )));
     assert!(
         result
             .events
             .iter()
             .any(|event| matches!(event, EngineEvent::Transition(Continue::ToolUseFollowUp)))
     );
+}
+
+#[tokio::test]
+async fn query_loop_surfaces_progress_record_summary_and_detail() {
+    let registry = ToolRegistry::new().register(Arc::new(ProgressFixtureTool));
+    let engine = QueryEngine::new(test_context_with_turns(
+        vec![
+            vec![
+                StreamEvent::MessageStart,
+                StreamEvent::ToolUse {
+                    tool_name: "ProgressFixture".into(),
+                    input: "payload".into(),
+                },
+                StreamEvent::MessageStop {
+                    stop_reason: StopReason::ToolUse,
+                },
+            ],
+            vec![
+                StreamEvent::MessageStart,
+                StreamEvent::TextDelta("done after progress".into()),
+                StreamEvent::MessageStop {
+                    stop_reason: StopReason::EndTurn,
+                },
+            ],
+        ],
+        registry,
+    ));
+
+    let result = engine.submit_turn(Message::user("show progress")).await;
+
+    assert_eq!(result.state, QueryLoopState::Completed);
+    assert_eq!(result.terminal, Terminal::Completed);
+    assert_eq!(result.transition, Some(Continue::ToolUseFollowUp));
+    assert!(result.events.iter().any(|event| matches!(
+        event,
+        EngineEvent::Notice { kind, message }
+            if kind == &"tool-progress"
+                && message.contains("ProgressFixture in progress")
+                && message.contains("42% complete")
+    )));
 }
 
 #[tokio::test]

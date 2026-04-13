@@ -183,11 +183,27 @@ async fn collect_stream_messages(
             EngineEvent::ToolCallStarted { tool_name, input } => {
                 runtime_events.push(CliRuntimeEvent::ToolCallStarted { tool_name, input });
             }
-            EngineEvent::ToolResultCommitted { tool_name, content } => {
-                runtime_events.push(CliRuntimeEvent::ToolResult { tool_name, content });
+            EngineEvent::ToolResultCommitted {
+                tool_name,
+                summary,
+                detail,
+                ..
+            } => {
+                runtime_events.push(CliRuntimeEvent::ToolResult {
+                    tool_name,
+                    content: detail.unwrap_or(summary),
+                });
             }
-            EngineEvent::PendingApproval { tool_name, message } => {
-                runtime_events.push(CliRuntimeEvent::PendingApproval { tool_name, message });
+            EngineEvent::PendingApproval {
+                tool_name,
+                message,
+                detail,
+                ..
+            } => {
+                runtime_events.push(CliRuntimeEvent::PendingApproval {
+                    tool_name,
+                    message: detail.unwrap_or(message),
+                });
             }
             EngineEvent::Notice { kind, message } => {
                 runtime_events.push(CliRuntimeEvent::Notice {

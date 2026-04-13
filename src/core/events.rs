@@ -1,6 +1,7 @@
 use crate::core::message::Message;
 use crate::core::query_loop::{Continue, Terminal};
 use crate::service::compact::CompactPlanKind;
+use crate::tool::result::{ToolExecutionOutcomeKind, ToolReportModifier};
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SessionMilestone {
@@ -42,8 +43,21 @@ pub enum EngineEvent {
     AssistantDelta(String),
     MessageCommitted(Message),
     ToolCallStarted { tool_name: String, input: String },
-    ToolResultCommitted { tool_name: String, content: String },
-    PendingApproval { tool_name: String, message: String },
+    ToolResultCommitted {
+        tool_name: String,
+        content: String,
+        summary: String,
+        detail: Option<String>,
+        kind: ToolExecutionOutcomeKind,
+        report_modifier: ToolReportModifier,
+    },
+    PendingApproval {
+        tool_name: String,
+        message: String,
+        summary: String,
+        detail: Option<String>,
+        report_modifier: ToolReportModifier,
+    },
     Notice { kind: &'static str, message: String },
     CompactPlanIssued {
         kind: CompactPlanKind,
