@@ -331,7 +331,10 @@ fn build_parent_query_context(permissions: ToolPermissionContext) -> QueryContex
         .inherited_tool_registry
         .clone()
         .unwrap_or_else(|| ToolRegistry::new().register(std::sync::Arc::new(AgentTool)))
-        .assemble_for_role(RuntimeRole::Coordinator);
+        .assemble(crate::tool::registry::ToolAssemblyContext::coordinator(
+            InteractionSurface::Cli,
+            SessionMode::Headless,
+        ));
     let app_state = AppState {
         surface: InteractionSurface::Cli,
         session_mode: SessionMode::Headless,

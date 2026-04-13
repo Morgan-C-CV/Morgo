@@ -67,7 +67,7 @@ use crate::tool::builtin::{
     todo_write::TodoWriteTool, tool_search::ToolSearchTool, web_fetch::WebFetchTool,
     web_search::WebSearchTool,
 };
-use crate::tool::registry::ToolRegistry;
+use crate::tool::registry::{ToolAssemblyContext, ToolRegistry};
 
 pub fn is_tui_exit_input(input: &str) -> bool {
     matches!(input.trim(), "/exit" | "exit" | "quit")
@@ -488,7 +488,10 @@ impl RuntimeBootstrap {
                 .collect::<Vec<PluginDiagnostic>>(),
             orphaned_governance_entries: plugin_load_result.orphaned_governance_entries.clone(),
         });
-        let coordinator_tools = tool_inventory.assemble_for_role(RuntimeRole::Coordinator);
+        let coordinator_tools = tool_inventory.assemble(ToolAssemblyContext::coordinator(
+            state.surface,
+            state.session_mode,
+        ));
         let runtime_tool_registry = Arc::new(RwLock::new(coordinator_tools.clone()));
         let notification_dispatcher = NotificationDispatcher::new(self.build_telegram_gateway())
             .with_hook_registry(hook_registry.clone());

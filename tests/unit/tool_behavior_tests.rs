@@ -18,7 +18,7 @@ use rust_agent::tool::builtin::web_fetch::{WebFetchTool, fetch_text_with};
 use rust_agent::tool::builtin::web_search::WebSearchTool;
 use rust_agent::tool::definition::{Tool, ToolCall, ToolResult};
 use rust_agent::tool::permission::is_tool_allowed;
-use rust_agent::tool::registry::ToolRegistry;
+use rust_agent::tool::registry::{ToolAssemblyContext, ToolRegistry};
 use tokio::fs;
 
 fn unique_name(prefix: &str) -> String {
@@ -602,4 +602,48 @@ fn worker_tool_filter_excludes_agent_and_interactive_tools() {
     assert!(!names.contains(&"AskUserQuestion"));
     assert!(!names.contains(&"Bash"));
     assert!(!names.contains(&"WebSearch"));
+}
+
+#[test]
+fn assembly_context_controls_deferred_and_interactive_visibility() {
+    let registry = ToolRegistry::new()
+        .register(Arc::new(BashTool))
+        .register(Arc::new(FileReadTool))
+        .register(Arc::new(WebSearchTool));
+
+    let headless_remote = registry.assemble(ToolAssemblyContext::worker(
+        rust_agent::bootstrap::InteractionSurface::Remote,
+        rust_agent::bootstrap::SessionMode::Headless,
+    ));
+    let names = headless_remote
+        .all_metadata()
+        .iter()
+        .map(|tool| tool.name)
+        .collect::<Vec<_>>();
+
+    assert!(names.contains(&"Read"));
+    assert!(!names.contains(&"Bash"));
+    assert!(!names.contains(&"WebSearch"));
+}
+
+#[test]
+fn coordinator_assembly_keeps_always_load_and_deferred_tools_visible() {
+    let registry = ToolRegistry::new()
+        .register(Arc::new(BashTool))
+        .register(Arc::new(FileReadTool))
+        .register(Arc::new(WebSearchTool));
+
+    let assembled = registry.assemble(ToolAssemblyContext::coordinator(
+        rust_agent::bootstrap::InteractionSurface::Cli,
+        rust_agent::bootstrap::SessionMode::Interactive,
+    ));
+    let names = assembled
+        .all_metadata()
+        .iter()
+        .map(|tool| tool.name)
+        .collect::<Vec<_>>();
+
+    assert!(names.contains(&"Bash"));
+    assert!(names.contains(&"Read"));
+    assert!(names.contains(&"WebSearch"));
 }

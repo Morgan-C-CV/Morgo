@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use crate::bootstrap::{InteractionSurface, SessionMode};
 use crate::state::app_state::RuntimeRole;
 use crate::state::permission_context::ToolPermissionContext;
 use crate::tool::definition::{InterruptBehavior, Tool, ToolCall, ToolMetadata, ToolResult};
@@ -15,6 +16,44 @@ impl std::fmt::Debug for ToolRegistry {
         f.debug_struct("ToolRegistry")
             .field("tool_count", &self.tools.len())
             .finish()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ToolAssemblyContext {
+    pub runtime_role: RuntimeRole,
+    pub surface: InteractionSurface,
+    pub session_mode: SessionMode,
+    pub include_deferred_tools: bool,
+    pub include_interactive_tools: bool,
+}
+
+impl ToolAssemblyContext {
+    pub fn coordinator(surface: InteractionSurface, session_mode: SessionMode) -> Self {
+        Self {
+            runtime_role: RuntimeRole::Coordinator,
+            surface,
+            session_mode,
+            include_deferred_tools: true,
+            include_interactive_tools: true,
+        }
+    }
+
+    pub fn worker(surface: InteractionSurface, session_mode: SessionMode) -> Self {
+        Self {
+            runtime_role: RuntimeRole::Worker,
+            surface,
+            session_mode,
+            include_deferred_tools: false,
+            include_interactive_tools: false,
+        }
+    }
+
+    pub fn permission_context(&self, mode: crate::state::permission_context::PermissionMode) -> ToolPermissionContext {
+        ToolPermissionContext::new(mode)
+            .with_active_surface(self.surface)
+            .with_deferred_tools(self.include_deferred_tools)
+            .with_interactive_tools(self.include_interactive_tools)
     }
 }
 
@@ -68,22 +107,35 @@ impl ToolRegistry {
         self.tools.iter().map(|tool| tool.metadata()).collect()
     }
 
-    pub fn assemble_for_role(&self, role: RuntimeRole) -> Self {
+    pub fn assemble(&self, context: ToolAssemblyContext) -> Self {
+        let permissions = context.permission_context(crate::state::permission_context::PermissionMode::Default);
         let tools = self
             .tools
             .iter()
-            .filter(|tool| match role {
-                RuntimeRole::Coordinator => true,
-                RuntimeRole::Worker => {
-                    let metadata = tool.metadata();
-                    metadata.name != "Agent"
-                        && !metadata.requires_user_interaction
-                        && (!metadata.should_defer || metadata.always_load)
+            .filter(|tool| {
+                let metadata = tool.metadata();
+                match context.runtime_role {
+                    RuntimeRole::Coordinator => is_tool_allowed(&metadata, &permissions),
+                    RuntimeRole::Worker => {
+                        metadata.name != "Agent" && is_tool_allowed(&metadata, &permissions)
+                    }
                 }
             })
             .cloned()
             .collect();
         Self { tools }
+    }
+
+    pub fn assemble_for_role(&self, role: RuntimeRole) -> Self {
+        let context = match role {
+            RuntimeRole::Coordinator => {
+                ToolAssemblyContext::coordinator(InteractionSurface::Cli, SessionMode::Interactive)
+            }
+            RuntimeRole::Worker => {
+                ToolAssemblyContext::worker(InteractionSurface::Cli, SessionMode::Headless)
+            }
+        };
+        self.assemble(context)
     }
 
     pub fn filter_for_worker(&self) -> Self {

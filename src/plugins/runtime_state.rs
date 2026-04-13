@@ -17,7 +17,7 @@ use crate::plugins::types::{
     PluginLifecycleState, PluginLoadResult, PluginRuntimeApplyOutcome, PluginRuntimeApplyReport,
 };
 use crate::security::authorizer::DefaultSurfaceAuthorizer;
-use crate::state::app_state::{AppState, RuntimeRole};
+use crate::state::app_state::AppState;
 use crate::tool::builtin::{
     agent::AgentTool, ask_user::AskUserQuestionTool, bash::BashTool,
     enter_plan_mode::EnterPlanModeTool, exit_plan_mode::ExitPlanModeTool, file_edit::FileEditTool,
@@ -142,7 +142,10 @@ pub fn build_runtime_plugin_snapshot(app_state: &AppState) -> RuntimePluginSnaps
         orphaned_governance_entries: plugin_load_result.orphaned_governance_entries.clone(),
     });
 
-    let coordinator_tools = tool_inventory.assemble_for_role(RuntimeRole::Coordinator);
+    let coordinator_tools = tool_inventory.assemble(crate::tool::registry::ToolAssemblyContext::coordinator(
+        app_state.surface,
+        app_state.session_mode,
+    ));
     let command_registry = Arc::new(build_command_registry(
         app_state,
         plugin_load_result.as_ref(),
