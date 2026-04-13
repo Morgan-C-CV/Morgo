@@ -11,8 +11,8 @@ use crate::interaction::router::CommandRouter;
 use crate::plugins::loader::load_plugins;
 use crate::plugins::runtime::{augment_hook_registry_with_plugins, augment_tool_registry_with_plugins};
 use crate::plugins::types::{
-    PluginDefinition, PluginDiagnostic, PluginDiagnosticSeverity, PluginLifecycleState,
-    PluginLoadResult,
+    PluginApplyStatus, PluginDefinition, PluginDiagnostic, PluginDiagnosticSeverity,
+    PluginLifecycleState, PluginLoadResult, PluginRuntimeApplyOutcome, PluginRuntimeApplyReport,
 };
 use crate::security::authorizer::DefaultSurfaceAuthorizer;
 use crate::state::app_state::{AppState, RuntimeRole};
@@ -31,6 +31,7 @@ use crate::tool::registry::ToolRegistry;
 #[derive(Clone)]
 pub struct RuntimePluginState {
     inner: Arc<RwLock<RuntimePluginSnapshot>>,
+    generation: Arc<RwLock<u64>>,
 }
 
 #[derive(Clone)]
@@ -53,6 +54,7 @@ impl RuntimePluginState {
     pub fn new(snapshot: RuntimePluginSnapshot) -> Self {
         Self {
             inner: Arc::new(RwLock::new(snapshot)),
+            generation: Arc::new(RwLock::new(0)),
         }
     }
 
@@ -60,8 +62,15 @@ impl RuntimePluginState {
         self.inner.read().await.clone()
     }
 
-    pub async fn replace(&self, snapshot: RuntimePluginSnapshot) {
+    pub async fn replace(&self, snapshot: RuntimePluginSnapshot) -> u64 {
         *self.inner.write().await = snapshot;
+        let mut generation = self.generation.write().await;
+        *generation += 1;
+        *generation
+    }
+
+    pub async fn generation(&self) -> u64 {
+        *self.generation.read().await
     }
 }
 
@@ -88,6 +97,7 @@ pub fn build_runtime_plugin_snapshot(app_state: &AppState) -> RuntimePluginSnaps
                         && diagnostic.severity == PluginDiagnosticSeverity::Error
                 }) {
                     plugin.lifecycle_state = PluginLifecycleState::Error;
+                    plugin.apply_status = PluginApplyStatus::ApplyFailed;
                     plugin.activation.commands = 0;
                     plugin.activation.tools = 0;
                     plugin.activation.hooks = 0;
@@ -101,6 +111,7 @@ pub fn build_runtime_plugin_snapshot(app_state: &AppState) -> RuntimePluginSnaps
             .cloned()
             .chain(plugin_tool_diagnostics)
             .collect::<Vec<PluginDiagnostic>>(),
+        orphaned_governance_entries: plugin_load_result.orphaned_governance_entries.clone(),
     });
 
     let coordinator_tools = tool_inventory.assemble_for_role(RuntimeRole::Coordinator);
@@ -119,13 +130,34 @@ pub fn build_runtime_plugin_snapshot(app_state: &AppState) -> RuntimePluginSnaps
     }
 }
 
-pub async fn rebuild_runtime_plugin_state(app_state: &AppState) -> anyhow::Result<()> {
+pub async fn rebuild_runtime_plugin_state(
+    app_state: &AppState,
+) -> anyhow::Result<PluginRuntimeApplyReport> {
     let Some(runtime_plugin_state) = app_state.permission_context.runtime_plugin_state.as_ref() else {
-        return Ok(());
+        return Ok(PluginRuntimeApplyReport {
+            outcome: PluginRuntimeApplyOutcome::Applied,
+            generation: 0,
+            message: "runtime plugin state is unavailable; nothing was applied".into(),
+            diagnostics: Vec::new(),
+            orphaned_governance_entries: Vec::new(),
+        });
     };
     let snapshot = build_runtime_plugin_snapshot(app_state);
-    runtime_plugin_state.replace(snapshot).await;
-    Ok(())
+    let generation = runtime_plugin_state.replace(snapshot.clone()).await;
+    Ok(PluginRuntimeApplyReport {
+        outcome: PluginRuntimeApplyOutcome::Applied,
+        generation,
+        message: format!(
+            "applied runtime plugin snapshot generation {} (plugins={}, active_commands={}, active_tools={}, active_hooks={})",
+            generation,
+            snapshot.plugin_load_result.plugins.len(),
+            snapshot.plugin_load_result.active_command_count(),
+            snapshot.plugin_load_result.active_tool_count(),
+            snapshot.plugin_load_result.active_hook_count(),
+        ),
+        diagnostics: snapshot.plugin_load_result.diagnostics.clone(),
+        orphaned_governance_entries: snapshot.plugin_load_result.orphaned_governance_entries.clone(),
+    })
 }
 
 pub fn build_turn_engine(

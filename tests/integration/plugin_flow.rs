@@ -103,6 +103,7 @@ async fn plugin_runtime_exposes_command_hook_tool_and_diagnostics() {
             .cloned()
             .chain(plugin_tool_diagnostics)
             .collect(),
+        orphaned_governance_entries: plugin_load_result.orphaned_governance_entries.clone(),
     });
     let _hook_registry = augment_hook_registry_with_plugins(
         rust_agent::hook::registry::HookRegistry::default(),
@@ -171,11 +172,11 @@ async fn plugin_runtime_exposes_command_hook_tool_and_diagnostics() {
 
     assert!(help_text.contains("/demo-plugin-cmd — Demo plugin command"));
     assert!(help_text.contains("/plugins — Inspect plugin inventory, diagnostics, and governance state"));
-    assert!(status_text.contains("demo-plugin v0.1.0 — state=enabled, enabled=yes, active(commands=1, hooks=1, tools=1), discovered(commands=1, hooks=1, tools=1), capabilities=commands,hooks,tools"));
+    assert!(status_text.contains("demo-plugin v0.1.0 — state=enabled, applied=applied, enabled=yes, active(commands=1, hooks=1, tools=1), discovered(commands=1, hooks=1, tools=1), capabilities=commands,hooks,tools"));
     assert!(status_text.contains("- discovered_plugin_tools: 1"));
     assert!(status_text.contains("- discovered_plugin_hooks: 1"));
     assert!(plugins_text.contains("Plugins:"));
-    assert!(plugins_text.contains("demo-plugin v0.1.0 — state=enabled, enabled=yes"));
+    assert!(plugins_text.contains("demo-plugin v0.1.0 — state=enabled, applied=applied, enabled=yes"));
 
     std::env::set_current_dir(previous_cwd).expect("should restore cwd");
     fs::remove_dir_all(root).expect("temp plugin root should be removed");

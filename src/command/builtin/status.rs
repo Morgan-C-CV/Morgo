@@ -223,6 +223,10 @@ impl Command for StatusCommand {
                 plugin_load_result.root.display()
             ));
             lines.push(format!("- discovered_plugins: {}", plugin_load_result.plugins.len()));
+            lines.push(format!(
+                "- orphaned_governance_entries: {}",
+                plugin_load_result.orphaned_governance_entries.len()
+            ));
             lines.push(format!("- enabled_plugins: {}", enabled_plugins));
             lines.push(format!("- disabled_plugins: {}", disabled_plugins));
             lines.push(format!("- error_plugins: {}", error_plugins));
@@ -261,10 +265,11 @@ impl Command for StatusCommand {
                         .as_deref()
                         .unwrap_or("none");
                     lines.push(format!(
-                        "  - {} v{} — state={}, enabled={}, active(commands={}, hooks={}, tools={}), discovered(commands={}, hooks={}, tools={}), capabilities={}, governance_source={}, disable_reason={} (manifest={})",
+                        "  - {} v{} — state={}, applied={}, enabled={}, active(commands={}, hooks={}, tools={}), discovered(commands={}, hooks={}, tools={}), capabilities={}, governance_source={}, disable_reason={} (manifest={})",
                         plugin.name,
                         version,
                         plugin.lifecycle_state.as_str(),
+                        plugin.apply_status.as_str(),
                         if plugin.governance.enabled { "yes" } else { "no" },
                         plugin.activation.commands,
                         plugin.activation.hooks,
@@ -283,6 +288,12 @@ impl Command for StatusCommand {
                 lines.push("- diagnostic_preview:".to_string());
                 for diagnostic in plugin_load_result.diagnostics.iter().take(3) {
                     lines.push(format!("  - {}", diagnostic.render_line()));
+                }
+            }
+            if !plugin_load_result.orphaned_governance_entries.is_empty() {
+                lines.push("- orphaned_governance_preview:".to_string());
+                for entry in plugin_load_result.orphaned_governance_entries.iter().take(3) {
+                    lines.push(format!("  - {}", entry));
                 }
             }
         } else {

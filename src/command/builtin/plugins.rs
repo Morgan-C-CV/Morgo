@@ -11,7 +11,7 @@ use crate::plugins::runtime_state::rebuild_runtime_plugin_state;
 use crate::plugins::state::{load_plugin_state_with_diagnostics, write_plugin_state};
 use crate::plugins::types::{
     PluginCommandDefinition, PluginDiagnostic, PluginDiagnosticSeverity, PluginGovernanceSource,
-    PluginGovernanceState,
+    PluginGovernanceState, PluginRuntimeApplyOutcome,
 };
 use crate::state::app_state::AppState;
 
@@ -70,7 +70,7 @@ impl Command for PluginsCommand {
                 let plugin_name = parts.collect::<Vec<_>>().join(" ");
                 if plugin_name.trim().is_empty() {
                     return Ok(CommandResult::Message(
-                        "Usage: /plugins [list|show <plugin>|diagnostics [plugin]|enable <plugin>|disable <plugin> [reason]]"
+                        "Usage: /plugins [list|show <plugin>|diagnostics [plugin]|reload [plugin|all]|enable <plugin>|disable <plugin> [reason]]"
                             .into(),
                     ));
                 }
@@ -107,6 +107,25 @@ impl Command for PluginsCommand {
                     &filtered,
                 )))
             }
+            "reload" => {
+                let target = parts.next().unwrap_or("all").trim().to_string();
+                let report = rebuild_runtime_plugin_state(app_state).await?;
+                Ok(CommandResult::Message(format!(
+                    "Reloaded plugins for target {}. Runtime outcome={} generation={}. {}{}",
+                    target,
+                    report.outcome.as_str(),
+                    report.generation,
+                    report.message,
+                    if report.orphaned_governance_entries.is_empty() {
+                        String::new()
+                    } else {
+                        format!(
+                            " Orphaned governance entries: {}.",
+                            report.orphaned_governance_entries.join(", ")
+                        )
+                    }
+                )))
+            }
             "enable" => {
                 let plugin_name = parts.collect::<Vec<_>>().join(" ");
                 if plugin_name.trim().is_empty() {
@@ -125,11 +144,11 @@ impl Command for PluginsCommand {
                     )));
                 };
                 let path = update_plugin_state(cwd, plugin.name.as_str(), true, None)?;
-                rebuild_runtime_plugin_state(app_state).await?;
-                Ok(CommandResult::Message(format!(
-                    "Enabled plugin {}. Persisted governance to {} and applied it to the current runtime.",
-                    plugin.name,
-                    path.display()
+                let report = rebuild_runtime_plugin_state(app_state).await?;
+                Ok(CommandResult::Message(render_governance_apply_message(
+                    format!("Enabled plugin {}.", plugin.name),
+                    &path,
+                    &report,
                 )))
             }
             "disable" => {
@@ -153,19 +172,22 @@ impl Command for PluginsCommand {
                     Some(reason.trim().to_string())
                 };
                 let path = update_plugin_state(cwd, plugin.name.as_str(), false, disable_reason.clone())?;
-                rebuild_runtime_plugin_state(app_state).await?;
-                Ok(CommandResult::Message(format!(
-                    "Disabled plugin {}{}. Persisted governance to {} and applied it to the current runtime.",
-                    plugin.name,
-                    disable_reason
-                        .as_deref()
-                        .map(|value| format!(" (reason: {value})"))
-                        .unwrap_or_default(),
-                    path.display()
+                let report = rebuild_runtime_plugin_state(app_state).await?;
+                Ok(CommandResult::Message(render_governance_apply_message(
+                    format!(
+                        "Disabled plugin {}{}.",
+                        plugin.name,
+                        disable_reason
+                            .as_deref()
+                            .map(|value| format!(" (reason: {value})"))
+                            .unwrap_or_default()
+                    ),
+                    &path,
+                    &report,
                 )))
             }
             _ => Ok(CommandResult::Message(format!(
-                "Unknown /plugins action: {action}. Usage: /plugins [list|show <plugin>|diagnostics [plugin]|enable <plugin>|disable <plugin> [reason]]"
+                "Unknown /plugins action: {action}. Usage: /plugins [list|show <plugin>|diagnostics [plugin]|reload [plugin|all]|enable <plugin>|disable <plugin> [reason]]"
             ))),
         }
     }
@@ -242,6 +264,13 @@ fn render_plugin_list(plugin_load_result: &crate::plugins::types::PluginLoadResu
         ),
     ];
 
+    if !plugin_load_result.orphaned_governance_entries.is_empty() {
+        lines.push(format!(
+            "- orphaned_governance_entries: {}",
+            plugin_load_result.orphaned_governance_entries.join(", ")
+        ));
+    }
+
     if plugin_load_result.plugins.is_empty() {
         lines.push("- plugins: none discovered".to_string());
     } else {
@@ -258,10 +287,11 @@ fn render_plugin_list(plugin_load_result: &crate::plugins::types::PluginLoadResu
                     .join(",")
             };
             lines.push(format!(
-                "  - {} v{} — state={}, enabled={}, active(commands={}, hooks={}, tools={}), discovered(commands={}, hooks={}, tools={}), capabilities={}",
+                "  - {} v{} — state={}, applied={}, enabled={}, active(commands={}, hooks={}, tools={}), discovered(commands={}, hooks={}, tools={}), capabilities={}",
                 plugin.name,
                 plugin.version.as_deref().unwrap_or("unknown"),
                 plugin.lifecycle_state.as_str(),
+                plugin.apply_status.as_str(),
                 if plugin.governance.enabled { "yes" } else { "no" },
                 plugin.activation.commands,
                 plugin.activation.hooks,
@@ -301,6 +331,7 @@ fn render_plugin_show(
         format!("- description: {}", plugin.description),
         format!("- manifest: {}", plugin.manifest_path.display()),
         format!("- lifecycle_state: {}", plugin.lifecycle_state.as_str()),
+        format!("- apply_status: {}", plugin.apply_status.as_str()),
         format!("- enabled: {}", if plugin.governance.enabled { "yes" } else { "no" }),
         format!("- governance_source: {}", plugin.governance.source.as_str()),
         format!(
@@ -386,6 +417,36 @@ fn render_diagnostics(
     }
 
     lines.join("\n")
+}
+
+fn render_governance_apply_message(
+    prefix: String,
+    path: &Path,
+    report: &crate::plugins::types::PluginRuntimeApplyReport,
+) -> String {
+    let outcome = match report.outcome {
+        PluginRuntimeApplyOutcome::Applied => "applied to the current runtime",
+        PluginRuntimeApplyOutcome::RetainedPreviousSnapshot => {
+            "persisted, but the previous runtime snapshot was retained"
+        }
+    };
+    let orphaned = if report.orphaned_governance_entries.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " Orphaned governance entries: {}.",
+            report.orphaned_governance_entries.join(", ")
+        )
+    };
+    format!(
+        "{} Persisted governance to {} and {} (generation={}). {}{}",
+        prefix,
+        path.display(),
+        outcome,
+        report.generation,
+        report.message,
+        orphaned
+    )
 }
 
 fn update_plugin_state(

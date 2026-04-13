@@ -11,6 +11,7 @@ pub struct PluginLoadResult {
     pub source: PluginConfigSource,
     pub plugins: Vec<PluginDefinition>,
     pub diagnostics: Vec<PluginDiagnostic>,
+    pub orphaned_governance_entries: Vec<String>,
 }
 
 impl PluginLoadResult {
@@ -100,12 +101,31 @@ pub enum PluginLifecycleState {
     Error,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PluginApplyStatus {
+    Applied,
+    SkippedDisabled,
+    SkippedError,
+    ApplyFailed,
+}
+
 impl PluginLifecycleState {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Enabled => "enabled",
             Self::Disabled => "disabled",
             Self::Error => "error",
+        }
+    }
+}
+
+impl PluginApplyStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Applied => "applied",
+            Self::SkippedDisabled => "skipped_disabled",
+            Self::SkippedError => "skipped_error",
+            Self::ApplyFailed => "apply_failed",
         }
     }
 }
@@ -162,6 +182,7 @@ pub struct PluginDefinition {
     pub hooks: Vec<PluginHookDefinition>,
     pub governance: PluginGovernanceState,
     pub lifecycle_state: PluginLifecycleState,
+    pub apply_status: PluginApplyStatus,
     pub activation: PluginActivationSummary,
 }
 
@@ -292,6 +313,21 @@ pub struct PluginDiagnostic {
     pub message: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PluginRuntimeApplyOutcome {
+    Applied,
+    RetainedPreviousSnapshot,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginRuntimeApplyReport {
+    pub outcome: PluginRuntimeApplyOutcome,
+    pub generation: u64,
+    pub message: String,
+    pub diagnostics: Vec<PluginDiagnostic>,
+    pub orphaned_governance_entries: Vec<String>,
+}
+
 impl PluginDiagnostic {
     pub fn render_line(&self) -> String {
         let plugin = self
@@ -312,6 +348,15 @@ impl PluginDiagnostic {
             manifest,
             self.message
         )
+    }
+}
+
+impl PluginRuntimeApplyOutcome {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Applied => "applied",
+            Self::RetainedPreviousSnapshot => "retained_previous_snapshot",
+        }
     }
 }
 

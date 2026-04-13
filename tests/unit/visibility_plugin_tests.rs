@@ -22,10 +22,10 @@ use rust_agent::plugins::loader::load_plugins;
 use rust_agent::plugins::runtime::{augment_hook_registry_with_plugins, augment_tool_registry_with_plugins};
 use rust_agent::plugins::runtime_state::{RuntimePluginState, build_runtime_plugin_snapshot};
 use rust_agent::plugins::types::{
-    PluginActivationSummary, PluginCapability, PluginCommandDefinition, PluginConfigSource,
-    PluginDefinition, PluginDiagnostic, PluginDiagnosticSeverity, PluginDiagnosticsMetadata,
-    PluginGovernanceSource, PluginGovernanceState, PluginHookDefinition, PluginLifecycleState,
-    PluginLoadResult, PluginToolDefinition,
+    PluginActivationSummary, PluginApplyStatus, PluginCapability, PluginCommandDefinition,
+    PluginConfigSource, PluginDefinition, PluginDiagnostic, PluginDiagnosticSeverity,
+    PluginDiagnosticsMetadata, PluginGovernanceSource, PluginGovernanceState,
+    PluginHookDefinition, PluginLifecycleState, PluginLoadResult, PluginToolDefinition,
 };
 use rust_agent::skills::registry::SkillRegistry;
 use rust_agent::skills::types::{SkillDefinition, SkillExecutionContext, SkillSource};
@@ -241,6 +241,7 @@ async fn help_command_surfaces_plugin_diagnostics_hint() {
             code: "plugin-manifest-load-failed".into(),
             message: "bad plugin manifest".into(),
         }],
+        orphaned_governance_entries: vec![],
     });
     let app_state = test_app_state(Some(registry), None, Some(plugin_load_result), None);
 
@@ -285,6 +286,7 @@ async fn status_command_reports_plugin_discovery_summary() {
                 hooks: vec![sample_plugin_hook()],
                 governance: PluginGovernanceState::default(),
                 lifecycle_state: PluginLifecycleState::Enabled,
+                apply_status: PluginApplyStatus::Applied,
                 activation: PluginActivationSummary {
                     commands: 1,
                     tools: 1,
@@ -298,6 +300,7 @@ async fn status_command_reports_plugin_discovery_summary() {
                 code: "plugin-manifest-load-failed".into(),
                 message: "bad plugin manifest".into(),
             }],
+            orphaned_governance_entries: vec![],
         },
     );
     let plugin_load_result = Arc::new(PluginLoadResult {
@@ -318,13 +321,14 @@ async fn status_command_reports_plugin_discovery_summary() {
             commands: vec![metadata_rich_plugin_command("plugin-cmd")],
             tools: vec![sample_plugin_tool("demo_tool")],
             hooks: vec![sample_plugin_hook()],
-                governance: PluginGovernanceState::default(),
-                lifecycle_state: PluginLifecycleState::Enabled,
-                activation: PluginActivationSummary {
-                    commands: 1,
-                    tools: 1,
-                    hooks: 1,
-                },
+            governance: PluginGovernanceState::default(),
+            lifecycle_state: PluginLifecycleState::Enabled,
+            apply_status: PluginApplyStatus::Applied,
+            activation: PluginActivationSummary {
+                commands: 1,
+                tools: 1,
+                hooks: 1,
+            },
         }],
         diagnostics: vec![PluginDiagnostic {
             plugin_name: Some("broken-plugin".into()),
@@ -333,6 +337,7 @@ async fn status_command_reports_plugin_discovery_summary() {
             code: "plugin-manifest-load-failed".into(),
             message: "bad plugin manifest".into(),
         }],
+        orphaned_governance_entries: vec![],
     });
     let app_state = test_app_state(
         Some(registry),
@@ -373,7 +378,7 @@ async fn status_command_reports_plugin_discovery_summary() {
     assert!(text.contains("- registered_plugin_tools: 1"));
     assert!(text.contains("- diagnostics: total=1, info=0, warnings=0, errors=1"));
     assert!(text.contains("- plugin_inventory:"));
-    assert!(text.contains("  - demo-plugin v0.1.0 — state=enabled, enabled=yes, active(commands=1, hooks=1, tools=1), discovered(commands=1, hooks=1, tools=1), capabilities=commands,hooks,tools, governance_source=default, disable_reason=none (manifest=/tmp/project/.claude/plugins/demo/plugin.json)"));
+    assert!(text.contains("  - demo-plugin v0.1.0 — state=enabled, applied=applied, enabled=yes, active(commands=1, hooks=1, tools=1), discovered(commands=1, hooks=1, tools=1), capabilities=commands,hooks,tools, governance_source=default, disable_reason=none (manifest=/tmp/project/.claude/plugins/demo/plugin.json)"));
     assert!(text.contains("- diagnostic_preview:"));
     assert!(text.contains("[error:plugin-manifest-load-failed] plugin=broken-plugin; manifest=/tmp/project/.claude/plugins/broken/plugin.json; bad plugin manifest"));
 
@@ -411,6 +416,7 @@ async fn plugins_command_lists_show_details_and_persists_governance_state() {
         hooks: vec![sample_plugin_hook()],
         governance: PluginGovernanceState::default(),
         lifecycle_state: PluginLifecycleState::Enabled,
+        apply_status: PluginApplyStatus::Applied,
         activation: PluginActivationSummary {
             commands: 1,
             tools: 1,
@@ -428,6 +434,7 @@ async fn plugins_command_lists_show_details_and_persists_governance_state() {
             code: "plugin-capability-tools-empty".into(),
             message: "plugin declares tools capability but no valid tools were loaded".into(),
         }],
+        orphaned_governance_entries: vec![],
     });
     let registry = Arc::new(CommandRegistry::new().register(Arc::new(PluginsCommand)));
     let mut app_state = test_app_state(Some(registry), None, Some(plugin_load_result), None);
@@ -454,7 +461,7 @@ async fn plugins_command_lists_show_details_and_persists_governance_state() {
     };
     assert!(list_text.contains("Plugins:"));
     assert!(list_text.contains("- inventory: discovered=1, enabled=1, disabled=0, error=0"));
-    assert!(list_text.contains("demo-plugin v0.1.0 — state=enabled, enabled=yes"));
+    assert!(list_text.contains("demo-plugin v0.1.0 — state=enabled, applied=applied, enabled=yes"));
 
     let show_result = PluginsCommand
         .execute(
@@ -684,15 +691,17 @@ fn plugin_runtime_augments_hook_and_tool_registries() {
             commands: vec![sample_plugin_command("plugin-cmd")],
             tools: vec![sample_plugin_tool("demo_tool")],
             hooks: vec![sample_plugin_hook()],
-                governance: PluginGovernanceState::default(),
-                lifecycle_state: PluginLifecycleState::Enabled,
-                activation: PluginActivationSummary {
-                    commands: 1,
-                    tools: 1,
-                    hooks: 1,
-                },
+            governance: PluginGovernanceState::default(),
+            lifecycle_state: PluginLifecycleState::Enabled,
+            apply_status: PluginApplyStatus::Applied,
+            activation: PluginActivationSummary {
+                commands: 1,
+                tools: 1,
+                hooks: 1,
+            },
         }],
         diagnostics: vec![],
+        orphaned_governance_entries: vec![],
     };
 
     let hook_registry = augment_hook_registry_with_plugins(rust_agent::hook::registry::HookRegistry::default(), &load_result);

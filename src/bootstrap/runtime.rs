@@ -227,6 +227,7 @@ impl RuntimeBootstrap {
                             && diagnostic.severity == PluginDiagnosticSeverity::Error
                     }) {
                         plugin.lifecycle_state = PluginLifecycleState::Error;
+                        plugin.apply_status = crate::plugins::types::PluginApplyStatus::ApplyFailed;
                         plugin.activation.commands = 0;
                         plugin.activation.tools = 0;
                         plugin.activation.hooks = 0;
@@ -240,6 +241,7 @@ impl RuntimeBootstrap {
                 .cloned()
                 .chain(plugin_tool_diagnostics)
                 .collect::<Vec<PluginDiagnostic>>(),
+            orphaned_governance_entries: plugin_load_result.orphaned_governance_entries.clone(),
         });
         let coordinator_tools = tool_inventory.assemble_for_role(RuntimeRole::Coordinator);
         let permission_context = ToolPermissionContext::new(if self.cli.init_only {

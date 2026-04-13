@@ -5,10 +5,10 @@ use crate::command::types::CommandAvailability;
 use crate::hook::registry::HookEventMatcher;
 use crate::plugins::state::load_plugin_state_with_diagnostics;
 use crate::plugins::types::{
-    PluginActivationSummary, PluginCapability, PluginConfigSource, PluginDefinition,
-    PluginDiagnostic, PluginDiagnosticSeverity, PluginDiagnosticsMetadata, PluginGovernanceState,
-    PluginHookDefinition, PluginHookManifest, PluginLifecycleState, PluginLoadResult,
-    PluginManifest, PluginToolDefinition,
+    PluginActivationSummary, PluginApplyStatus, PluginCapability, PluginConfigSource,
+    PluginDefinition, PluginDiagnostic, PluginDiagnosticSeverity, PluginDiagnosticsMetadata,
+    PluginGovernanceState, PluginHookDefinition, PluginHookManifest, PluginLifecycleState,
+    PluginLoadResult, PluginManifest, PluginToolDefinition,
 };
 use crate::plugins::types::PluginCommandDefinition;
 
@@ -36,15 +36,37 @@ pub fn load_plugins(cwd: &Path) -> PluginLoadResult {
             source: PluginConfigSource::Missing,
             plugins,
             diagnostics,
+            orphaned_governance_entries: governance_state.states.keys().cloned().collect(),
         };
     }
 
     visit_plugin_dirs(&root, &governance_state.states, &mut plugins, &mut diagnostics);
+    let discovered_names = plugins
+        .iter()
+        .map(|plugin| plugin.name.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    let orphaned_governance_entries = governance_state
+        .states
+        .keys()
+        .filter(|name| !discovered_names.contains(*name))
+        .cloned()
+        .collect::<Vec<_>>();
+    diagnostics.extend(orphaned_governance_entries.iter().map(|name| PluginDiagnostic {
+        plugin_name: Some(name.clone()),
+        manifest_path: Some(governance_state.path.clone()),
+        severity: PluginDiagnosticSeverity::Warning,
+        code: "plugin-governance-orphaned".into(),
+        message: format!(
+            "persisted governance exists for plugin {} but no plugin manifest is currently discoverable",
+            name
+        ),
+    }));
     PluginLoadResult {
         root,
         source: PluginConfigSource::Directory,
         plugins,
         diagnostics,
+        orphaned_governance_entries,
     }
 }
 
@@ -271,6 +293,12 @@ fn load_plugin_manifest(
         PluginLifecycleState::Enabled
     };
 
+    let apply_status = match lifecycle_state {
+        PluginLifecycleState::Enabled => PluginApplyStatus::Applied,
+        PluginLifecycleState::Disabled => PluginApplyStatus::SkippedDisabled,
+        PluginLifecycleState::Error => PluginApplyStatus::SkippedError,
+    };
+
     let mut plugin = PluginDefinition {
         name: manifest.name,
         version: manifest.version,
@@ -283,6 +311,7 @@ fn load_plugin_manifest(
         hooks,
         governance,
         lifecycle_state,
+        apply_status,
         activation: PluginActivationSummary::default(),
     };
     plugin.refresh_activation_summary();
