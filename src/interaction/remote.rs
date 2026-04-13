@@ -1,9 +1,11 @@
 use crate::bootstrap::SessionMode;
 use crate::core::context::QueryContext;
 use crate::core::engine::QueryEngine;
-use crate::core::events::SessionMilestone;
 use crate::history::session::{SessionHistory, SessionId, SessionRestoreRequest, SessionSnapshot};
 use crate::interaction::cli::repl::{CliDisplayEvent, CliRuntimeEvent, handle_normalized_input};
+use crate::interaction::view::{
+    SurfaceItem, TaskView, build_surface_view, surface_item_from_cli_event,
+};
 use crate::interaction::envelope::NormalizedInput;
 use crate::interaction::notification::{Notification, NotificationTarget, NotificationType};
 use crate::interaction::router::CommandRouter;
@@ -162,13 +164,11 @@ pub async fn handle_remote_request(
 
     dispatch_remote_runtime_notifications(&remote_engine.context.app_state, &input, &output.events);
 
+    let view = build_surface_view(&output);
+
     Ok(RemoteResponse {
-        primary_text: output.primary_text,
-        events: output
-            .events
-            .into_iter()
-            .map(RemoteEventEnvelope::from)
-            .collect(),
+        primary_text: view.primary_text,
+        events: view.items.into_iter().map(RemoteEventEnvelope::from).collect(),
     })
 }
 
@@ -187,58 +187,54 @@ pub fn drain_remote_notifications(
 
 impl From<CliDisplayEvent> for RemoteEventEnvelope {
     fn from(event: CliDisplayEvent) -> Self {
-        match event {
-            CliDisplayEvent::TaskEvent(task_event) => Self {
-                event_type: "task_update",
-                payload: RemoteEventPayload::TaskUpdate(RemoteTaskEvent::from(task_event)),
-            },
-            CliDisplayEvent::RuntimeEvent(runtime_event) => Self::from(runtime_event),
-        }
+        Self::from(surface_item_from_cli_event(&event))
     }
 }
 
 impl From<CliRuntimeEvent> for RemoteEventEnvelope {
     fn from(event: CliRuntimeEvent) -> Self {
-        match event {
-            CliRuntimeEvent::AssistantDelta { text } => Self {
-                event_type: "assistant_delta",
-                payload: RemoteEventPayload::AssistantDelta { text },
+        Self::from(surface_item_from_cli_event(&CliDisplayEvent::RuntimeEvent(event)))
+    }
+}
+
+impl From<SurfaceItem> for RemoteEventEnvelope {
+    fn from(item: SurfaceItem) -> Self {
+        match item {
+            SurfaceItem::TaskUpdate(task) => Self {
+                event_type: "task_update",
+                payload: RemoteEventPayload::TaskUpdate(RemoteTaskEvent::from(task)),
             },
-            CliRuntimeEvent::ToolCallStarted { tool_name, input } => Self {
-                event_type: "tool_call_started",
-                payload: RemoteEventPayload::ToolCallStarted { tool_name, input },
-            },
-            CliRuntimeEvent::ToolResult { tool_name, content } => Self {
-                event_type: "tool_result",
-                payload: RemoteEventPayload::ToolResult { tool_name, content },
-            },
-            CliRuntimeEvent::PendingApproval { tool_name, message } => Self {
+            SurfaceItem::ApprovalRequired { tool_name, message } => Self {
                 event_type: "approval_required",
                 payload: RemoteEventPayload::ApprovalRequired { tool_name, message },
             },
-            CliRuntimeEvent::Notice { kind, message } => Self {
+            SurfaceItem::RuntimeNotice { kind, message } => Self {
                 event_type: "runtime_notice",
                 payload: RemoteEventPayload::RuntimeNotice { kind, message },
             },
-            CliRuntimeEvent::Transition { text } => Self {
+            SurfaceItem::ToolCallStarted { tool_name, input } => Self {
+                event_type: "tool_call_started",
+                payload: RemoteEventPayload::ToolCallStarted { tool_name, input },
+            },
+            SurfaceItem::ToolResult { tool_name, content } => Self {
+                event_type: "tool_result",
+                payload: RemoteEventPayload::ToolResult { tool_name, content },
+            },
+            SurfaceItem::AssistantDelta { text } => Self {
+                event_type: "assistant_delta",
+                payload: RemoteEventPayload::AssistantDelta { text },
+            },
+            SurfaceItem::Transition { kind, text } => Self {
                 event_type: "transition",
-                payload: RemoteEventPayload::Transition {
-                    kind: stable_transition_kind(&text).to_string(),
-                    text,
-                },
+                payload: RemoteEventPayload::Transition { kind, text },
             },
-            CliRuntimeEvent::Terminal { text } => Self {
+            SurfaceItem::Terminal { kind, text } => Self {
                 event_type: "terminal",
-                payload: RemoteEventPayload::Terminal {
-                    kind: stable_terminal_kind(&text).to_string(),
-                    text,
-                },
+                payload: RemoteEventPayload::Terminal { kind, text },
             },
-            CliRuntimeEvent::SessionMilestone { text } => Self {
+            SurfaceItem::SessionMilestone { kind, .. } => Self {
                 event_type: "session_milestone",
-                payload: RemoteEventPayload::SessionMilestone {
-                    kind: stable_session_milestone_kind(&text).to_string(),
-                },
+                payload: RemoteEventPayload::SessionMilestone { kind },
             },
         }
     }
@@ -256,6 +252,23 @@ impl From<TaskEvent> for RemoteTaskEvent {
             orchestration_group_id: value.orchestration_group_id,
             phase: value.phase.map(|phase| phase.as_str()),
             validation_state: value.validation_state.map(|state| state.as_str()),
+            output_file: value.output_file,
+        }
+    }
+}
+
+impl From<TaskView> for RemoteTaskEvent {
+    fn from(value: TaskView) -> Self {
+        Self {
+            task_id: value.task_id,
+            status: value.status,
+            summary: value.summary,
+            result: value.result,
+            next_action: value.next_action,
+            worker_role: value.worker_role,
+            orchestration_group_id: value.orchestration_group_id,
+            phase: value.phase,
+            validation_state: value.validation_state,
             output_file: value.output_file,
         }
     }
@@ -298,21 +311,6 @@ impl From<Notification> for RemoteNotificationEnvelope {
                 },
             },
         }
-    }
-}
-
-fn stable_transition_kind(text: &str) -> &str {
-    match text {
-        "next_turn" => "next_turn",
-        "tool_use_follow_up" => "tool_use_follow_up",
-        "max_output_tokens_escalate" => "max_output_tokens_escalate",
-        "max_output_tokens_recovery" => "max_output_tokens_recovery",
-        "collapse_drain_retry" => "collapse_drain_retry",
-        "reactive_compact_retry" => "reactive_compact_retry",
-        "stop_hook_blocking" => "stop_hook_blocking",
-        "token_budget_continuation" => "token_budget_continuation",
-        "model_fallback_retry" => "model_fallback_retry",
-        _ => "unknown_transition",
     }
 }
 
@@ -444,29 +442,6 @@ fn notification_from_pending_approval(
 
 fn leak_string(value: String) -> &'static str {
     Box::leak(value.into_boxed_str())
-}
-
-fn stable_terminal_kind(text: &str) -> &str {
-    match text {
-        "completed" => "completed",
-        "max_turns" => "max_turns",
-        "max_budget" => "max_budget",
-        "stop_hook_prevented" => "stop_hook_prevented",
-        "aborted_streaming" => "aborted_streaming",
-        "aborted_tools" => "aborted_tools",
-        "model_error" => "model_error",
-        _ => "unknown_terminal",
-    }
-}
-
-fn stable_session_milestone_kind(text: &str) -> &'static str {
-    match text {
-        "user_input_committed" => SessionMilestone::UserInputCommitted.as_str(),
-        "assistant_message_committed" => SessionMilestone::AssistantMessageCommitted.as_str(),
-        "tool_result_committed" => SessionMilestone::ToolResultCommitted.as_str(),
-        "turn_completed" => SessionMilestone::TurnCompleted.as_str(),
-        _ => "unknown_milestone",
-    }
 }
 
 pub fn render_remote_response_debug(response: &RemoteResponse) -> String {

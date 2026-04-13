@@ -5,3 +5,4 @@ pub mod notification;
 pub mod remote;
 pub mod router;
 pub mod telegram;
+pub mod view;

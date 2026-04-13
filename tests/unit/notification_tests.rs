@@ -13,6 +13,7 @@ use rust_agent::interaction::remote::{
     remote_delivery_mode_for_cli_event, remote_delivery_mode_for_kind,
     remote_delivery_mode_for_notification,
 };
+use rust_agent::interaction::view::{build_surface_view, surface_item_from_cli_event};
 use rust_agent::interaction::telegram::binding::{SessionBinding, TelegramDeliveryTarget};
 use rust_agent::interaction::telegram::gateway::TelegramGateway;
 use rust_agent::task::types::{TaskEvent, TaskOwner, TaskStatus};
@@ -500,8 +501,40 @@ fn remote_delivery_mode_classifies_dual_channel_and_response_only_events() {
 }
 
 #[test]
+fn surface_view_classifies_cli_events_for_cli_and_remote_reuse() {
+    let turn = CliTurnOutput {
+        primary_text: "Status".into(),
+        events: vec![
+            CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::Notice {
+                kind: "validation".into(),
+                message: "pending verify".into(),
+            }),
+            CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::ToolResult {
+                tool_name: "Read".into(),
+                content: "line one".into(),
+            }),
+        ],
+    };
+
+    let view = build_surface_view(&turn);
+
+    assert_eq!(view.primary_text, "Status");
+    assert_eq!(view.items.len(), 2);
+    assert!(matches!(
+        &view.items[0],
+        rust_agent::interaction::view::SurfaceItem::RuntimeNotice { kind, message }
+            if kind == "validation" && message == "pending verify"
+    ));
+    assert!(matches!(
+        &view.items[1],
+        rust_agent::interaction::view::SurfaceItem::ToolResult { tool_name, content }
+            if tool_name == "Read" && content == "line one"
+    ));
+}
+
+#[test]
 fn remote_event_envelope_preserves_structured_task_payload() {
-    let envelope = RemoteEventEnvelope::from(CliDisplayEvent::TaskEvent(TaskEvent {
+    let event = CliDisplayEvent::TaskEvent(TaskEvent {
         owner: TaskOwner {
             session_id: "session-1".into(),
             surface: InteractionSurface::Remote,
@@ -517,7 +550,8 @@ fn remote_event_envelope_preserves_structured_task_payload() {
         phase: Some(rust_agent::task::types::WorkerPhase::Verify),
         validation_state: Some(rust_agent::task::types::ValidationState::Verified),
         output_file: "/tmp/task-1.log".into(),
-    }));
+    });
+    let envelope = RemoteEventEnvelope::from(surface_item_from_cli_event(&event));
 
     assert_eq!(envelope.event_type, "task_update");
     assert!(matches!(

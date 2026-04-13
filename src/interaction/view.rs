@@ -1,0 +1,177 @@
+use crate::interaction::cli::repl::{CliDisplayEvent, CliRuntimeEvent, CliTurnOutput};
+use crate::task::types::TaskEvent;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SurfaceView {
+    pub primary_text: String,
+    pub items: Vec<SurfaceItem>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SurfaceItem {
+    TaskUpdate(TaskView),
+    ApprovalRequired {
+        tool_name: String,
+        message: String,
+    },
+    RuntimeNotice {
+        kind: String,
+        message: String,
+    },
+    ToolCallStarted {
+        tool_name: String,
+        input: String,
+    },
+    ToolResult {
+        tool_name: String,
+        content: String,
+    },
+    AssistantDelta {
+        text: String,
+    },
+    Transition {
+        kind: String,
+        text: String,
+    },
+    Terminal {
+        kind: String,
+        text: String,
+    },
+    SessionMilestone {
+        kind: String,
+        text: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskView {
+    pub task_id: String,
+    pub status: &'static str,
+    pub summary: String,
+    pub result: String,
+    pub next_action: String,
+    pub worker_role: Option<&'static str>,
+    pub orchestration_group_id: Option<String>,
+    pub phase: Option<&'static str>,
+    pub validation_state: Option<&'static str>,
+    pub output_file: String,
+}
+
+pub fn build_surface_view(turn: &CliTurnOutput) -> SurfaceView {
+    SurfaceView {
+        primary_text: turn.primary_text.clone(),
+        items: turn.events.iter().map(surface_item_from_cli_event).collect(),
+    }
+}
+
+pub fn surface_item_from_cli_event(event: &CliDisplayEvent) -> SurfaceItem {
+    match event {
+        CliDisplayEvent::TaskEvent(task_event) => SurfaceItem::TaskUpdate(TaskView::from(task_event)),
+        CliDisplayEvent::RuntimeEvent(runtime_event) => surface_item_from_runtime_event(runtime_event),
+    }
+}
+
+fn surface_item_from_runtime_event(event: &CliRuntimeEvent) -> SurfaceItem {
+    match event {
+        CliRuntimeEvent::AssistantDelta { text } => SurfaceItem::AssistantDelta { text: text.clone() },
+        CliRuntimeEvent::ToolCallStarted { tool_name, input } => SurfaceItem::ToolCallStarted {
+            tool_name: tool_name.clone(),
+            input: input.clone(),
+        },
+        CliRuntimeEvent::ToolResult { tool_name, content } => SurfaceItem::ToolResult {
+            tool_name: tool_name.clone(),
+            content: content.clone(),
+        },
+        CliRuntimeEvent::PendingApproval { tool_name, message } => SurfaceItem::ApprovalRequired {
+            tool_name: tool_name.clone(),
+            message: message.clone(),
+        },
+        CliRuntimeEvent::Notice { kind, message } => SurfaceItem::RuntimeNotice {
+            kind: kind.clone(),
+            message: message.clone(),
+        },
+        CliRuntimeEvent::Transition { text } => SurfaceItem::Transition {
+            kind: stable_transition_kind(text).to_string(),
+            text: text.clone(),
+        },
+        CliRuntimeEvent::Terminal { text } => SurfaceItem::Terminal {
+            kind: stable_terminal_kind(text).to_string(),
+            text: text.clone(),
+        },
+        CliRuntimeEvent::SessionMilestone { text } => SurfaceItem::SessionMilestone {
+            kind: stable_session_milestone_kind(text).to_string(),
+            text: text.clone(),
+        },
+    }
+}
+
+impl SurfaceItem {
+    pub fn to_legacy_line(&self) -> String {
+        match self {
+            Self::TaskUpdate(task) => format!("[task] {} {}", task.task_id, task.summary),
+            Self::ApprovalRequired { tool_name, message } => format!("[approval] {tool_name}: {message}"),
+            Self::RuntimeNotice { kind, message } => format!("[notice:{kind}] {message}"),
+            Self::ToolCallStarted { tool_name, input } => format!("[tool-start] {tool_name}: {input}"),
+            Self::ToolResult { tool_name, content } => format!("[tool-result] {tool_name}: {content}"),
+            Self::AssistantDelta { text } => format!("[delta] {text}"),
+            Self::Transition { text, .. } => format!("[transition] {text}"),
+            Self::Terminal { text, .. } => format!("[terminal] {text}"),
+            Self::SessionMilestone { text, .. } => format!("[milestone] {text}"),
+        }
+    }
+}
+
+impl From<&TaskEvent> for TaskView {
+    fn from(value: &TaskEvent) -> Self {
+        Self {
+            task_id: value.task_id.clone(),
+            status: value.status.as_str(),
+            summary: value.summary.clone(),
+            result: value.result.clone(),
+            next_action: value.next_action.clone(),
+            worker_role: value.worker_role.map(|role| role.as_str()),
+            orchestration_group_id: value.orchestration_group_id.clone(),
+            phase: value.phase.map(|phase| phase.as_str()),
+            validation_state: value.validation_state.map(|state| state.as_str()),
+            output_file: value.output_file.clone(),
+        }
+    }
+}
+
+pub fn stable_transition_kind(text: &str) -> &str {
+    match text {
+        "next_turn" => "next_turn",
+        "tool_use_follow_up" => "tool_use_follow_up",
+        "max_output_tokens_escalate" => "max_output_tokens_escalate",
+        "max_output_tokens_recovery" => "max_output_tokens_recovery",
+        "collapse_drain_retry" => "collapse_drain_retry",
+        "reactive_compact_retry" => "reactive_compact_retry",
+        "stop_hook_blocking" => "stop_hook_blocking",
+        "token_budget_continuation" => "token_budget_continuation",
+        "model_fallback_retry" => "model_fallback_retry",
+        _ => "unknown_transition",
+    }
+}
+
+pub fn stable_terminal_kind(text: &str) -> &str {
+    match text {
+        "completed" => "completed",
+        "max_turns" => "max_turns",
+        "max_budget" => "max_budget",
+        "stop_hook_prevented" => "stop_hook_prevented",
+        "aborted_streaming" => "aborted_streaming",
+        "aborted_tools" => "aborted_tools",
+        "model_error" => "model_error",
+        _ => "unknown_terminal",
+    }
+}
+
+pub fn stable_session_milestone_kind(text: &str) -> &str {
+    match text {
+        "user_input_committed" => "user_input_committed",
+        "assistant_message_committed" => "assistant_message_committed",
+        "tool_result_committed" => "tool_result_committed",
+        "turn_completed" => "turn_completed",
+        _ => "unknown_milestone",
+    }
+}

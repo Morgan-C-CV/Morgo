@@ -1,5 +1,5 @@
-use crate::interaction::cli::repl::{CliDisplayEvent, CliRuntimeEvent, CliTurnOutput};
-use crate::task::types::TaskEvent;
+use crate::interaction::cli::repl::CliTurnOutput;
+use crate::interaction::view::{SurfaceItem, SurfaceView, TaskView, build_surface_view};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RenderDocument {
@@ -47,11 +47,11 @@ pub fn render_output(output: &str) -> String {
 }
 
 pub fn render_turn_output(turn: &CliTurnOutput) -> String {
-    render_document_to_text(&build_render_document(turn))
+    render_document_to_text(&build_render_document(&build_surface_view(turn)))
 }
 
 pub fn render_turn_document(turn: &CliTurnOutput) -> RenderDocument {
-    build_render_document(turn)
+    build_render_document(&build_surface_view(turn))
 }
 
 pub fn render_document_output(document: &RenderDocument) -> String {
@@ -59,7 +59,7 @@ pub fn render_document_output(document: &RenderDocument) -> String {
 }
 
 pub fn render_turn_tui_output(turn: &CliTurnOutput) -> String {
-    render_document_to_tui_text(&build_render_document(turn))
+    render_document_to_tui_text(&build_render_document(&build_surface_view(turn)))
 }
 
 pub fn render_document_tui_output(document: &RenderDocument) -> String {
@@ -115,58 +115,51 @@ pub fn build_tui_screen(document: &RenderDocument) -> TuiScreen {
     }
 }
 
-fn build_render_document(turn: &CliTurnOutput) -> RenderDocument {
+fn build_render_document(view: &SurfaceView) -> RenderDocument {
     let mut blocks = Vec::new();
-    if !turn.primary_text.is_empty() {
-        blocks.push(RenderBlock::PrimaryText(turn.primary_text.clone()));
+    if !view.primary_text.is_empty() {
+        blocks.push(RenderBlock::PrimaryText(view.primary_text.clone()));
     }
-    for event in &turn.events {
-        blocks.push(render_block_for_event(event));
+    for item in &view.items {
+        blocks.push(render_block_for_surface_item(item));
     }
     RenderDocument { blocks }
 }
 
-fn render_block_for_event(event: &CliDisplayEvent) -> RenderBlock {
-    match event {
-        CliDisplayEvent::TaskEvent(task_event) => RenderBlock::Panel(render_task_panel(task_event)),
-        CliDisplayEvent::RuntimeEvent(runtime_event) => match runtime_event {
-            CliRuntimeEvent::PendingApproval { tool_name, message } => {
-                RenderBlock::Panel(render_panel(
-                    PanelKind::Approval,
-                    "Approval required",
-                    vec![format!("Tool: {tool_name}"), message.clone()],
-                ))
-            }
-            CliRuntimeEvent::Notice { kind, message } => RenderBlock::Panel(render_panel(
-                PanelKind::Notice,
-                format!("Notice: {kind}"),
-                vec![message.clone()],
-            )),
-            CliRuntimeEvent::ToolResult { tool_name, content } => {
-                let mut lines = vec![format!("Tool: {tool_name}")];
-                lines.extend(content.lines().map(|line| line.to_string()));
-                RenderBlock::Panel(render_panel(PanelKind::ToolResult, "Tool result", lines))
-            }
-            other => RenderBlock::RawRuntime(other.to_legacy_line()),
-        },
+fn render_block_for_surface_item(item: &SurfaceItem) -> RenderBlock {
+    match item {
+        SurfaceItem::TaskUpdate(task) => RenderBlock::Panel(render_task_panel(task)),
+        SurfaceItem::ApprovalRequired { tool_name, message } => RenderBlock::Panel(render_panel(
+            PanelKind::Approval,
+            "Approval required",
+            vec![format!("Tool: {tool_name}"), message.clone()],
+        )),
+        SurfaceItem::RuntimeNotice { kind, message } => RenderBlock::Panel(render_panel(
+            PanelKind::Notice,
+            format!("Notice: {kind}"),
+            vec![message.clone()],
+        )),
+        SurfaceItem::ToolResult { tool_name, content } => {
+            let mut lines = vec![format!("Tool: {tool_name}")];
+            lines.extend(content.lines().map(|line| line.to_string()));
+            RenderBlock::Panel(render_panel(PanelKind::ToolResult, "Tool result", lines))
+        }
+        other => RenderBlock::RawRuntime(other.to_legacy_line()),
     }
 }
 
-fn render_task_panel(task_event: &TaskEvent) -> RenderPanel {
+fn render_task_panel(task_event: &TaskView) -> RenderPanel {
     render_panel(
         PanelKind::TaskSummary,
         "Task update",
         vec![
             format!("[task] id: {}", task_event.task_id),
             format!("[task] summary: {}", task_event.summary),
-            format!("[task] status: {:?}", task_event.status),
+            format!("[task] status: {}", title_case_label(task_event.status)),
             format!("[task] result: {}", task_event.result),
             format!(
                 "[task] worker_role: {}",
-                task_event
-                    .worker_role
-                    .map(|role| role.as_str())
-                    .unwrap_or("none")
+                task_event.worker_role.unwrap_or("none")
             ),
             format!(
                 "[task] orchestration_group: {}",
@@ -177,17 +170,11 @@ fn render_task_panel(task_event: &TaskEvent) -> RenderPanel {
             ),
             format!(
                 "[task] phase: {}",
-                task_event
-                    .phase
-                    .map(|phase| phase.as_str())
-                    .unwrap_or("none")
+                task_event.phase.unwrap_or("none")
             ),
             format!(
                 "[task] validation_state: {}",
-                task_event
-                    .validation_state
-                    .map(|state| state.as_str())
-                    .unwrap_or("none")
+                task_event.validation_state.unwrap_or("none")
             ),
             format!("[task] output: {}", task_event.output_file),
             format!("[task] next_action: {}", task_event.next_action),
@@ -300,4 +287,12 @@ fn render_tui_section(title: &str, lines: Vec<&str>) -> String {
     let mut section_lines = vec![format!("[{}]", title)];
     section_lines.extend(lines.into_iter().map(|line| format!("  {line}")));
     section_lines.join("\n")
+}
+
+fn title_case_label(label: &str) -> String {
+    let mut chars = label.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
 }
