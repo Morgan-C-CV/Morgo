@@ -1,6 +1,7 @@
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use async_trait::async_trait;
 use rust_agent::state::permission_context::{PermissionMode, ToolPermissionContext};
 use rust_agent::tool::builtin::agent::AgentTool;
 use rust_agent::tool::builtin::ask_user::AskUserQuestionTool;
@@ -16,10 +17,55 @@ use rust_agent::tool::builtin::task_update::TaskUpdateTool;
 use rust_agent::tool::builtin::tool_search::ToolSearchTool;
 use rust_agent::tool::builtin::web_fetch::{WebFetchTool, fetch_text_with};
 use rust_agent::tool::builtin::web_search::WebSearchTool;
-use rust_agent::tool::definition::{Tool, ToolCall, ToolResult};
+use rust_agent::tool::definition::{Tool, ToolCall, ToolMetadata, ToolResult};
 use rust_agent::tool::permission::is_tool_allowed;
 use rust_agent::tool::registry::{ToolAssemblyContext, ToolAssemblyEnvironment, ToolRegistry};
 use tokio::fs;
+
+struct MetadataFixtureTool {
+    metadata: ToolMetadata,
+}
+
+#[async_trait]
+impl Tool for MetadataFixtureTool {
+    fn metadata(&self) -> ToolMetadata {
+        self.metadata.clone()
+    }
+
+    async fn invoke(
+        &self,
+        _call: &ToolCall,
+        _permissions: &ToolPermissionContext,
+    ) -> anyhow::Result<ToolResult> {
+        Ok(ToolResult::Text("fixture".into()))
+    }
+}
+
+fn metadata_fixture(
+    name: &'static str,
+    always_load: bool,
+    should_defer: bool,
+    requires_user_interaction: bool,
+    is_open_world: bool,
+) -> Arc<dyn Tool> {
+    Arc::new(MetadataFixtureTool {
+        metadata: ToolMetadata {
+            name,
+            description: "metadata fixture",
+            aliases: &[],
+            search_hint: None,
+            read_only: true,
+            destructive: false,
+            concurrency_safe: true,
+            always_load,
+            should_defer,
+            requires_auth: false,
+            requires_user_interaction,
+            is_open_world,
+            is_search_or_read_command: false,
+        },
+    })
+}
 
 fn unique_name(prefix: &str) -> String {
     let nanos = SystemTime::now()
@@ -705,4 +751,123 @@ fn assembly_environment_can_explicitly_disable_open_world_tools() {
 
     assert!(names.contains(&"Read"));
     assert!(!names.contains(&"WebSearch"));
+}
+
+#[test]
+fn always_load_overrides_defer_but_not_interactive_gating() {
+    let registry = ToolRegistry::new()
+        .register(metadata_fixture(
+            "DeferredAlwaysLoaded",
+            true,
+            true,
+            false,
+            false,
+        ))
+        .register(metadata_fixture(
+            "InteractiveAlwaysLoaded",
+            true,
+            false,
+            true,
+            false,
+        ));
+
+    let visible = registry.visible_tools(
+        &ToolPermissionContext::new(PermissionMode::Default)
+            .with_deferred_tools(false)
+            .with_interactive_tools(false),
+    );
+    let names = visible.iter().map(|tool| tool.name).collect::<Vec<_>>();
+
+    assert!(names.contains(&"DeferredAlwaysLoaded"));
+    assert!(!names.contains(&"InteractiveAlwaysLoaded"));
+}
+
+#[test]
+fn combined_always_load_defer_and_interactive_flags_follow_context() {
+    let registry = ToolRegistry::new().register(metadata_fixture(
+        "HybridFixture",
+        true,
+        true,
+        true,
+        false,
+    ));
+
+    let coordinator = registry.assemble(ToolAssemblyContext::coordinator(
+        rust_agent::bootstrap::InteractionSurface::Cli,
+        rust_agent::bootstrap::SessionMode::Interactive,
+    ));
+    let coordinator_names = coordinator
+        .visible_tools(&ToolAssemblyContext::coordinator(
+            rust_agent::bootstrap::InteractionSurface::Cli,
+            rust_agent::bootstrap::SessionMode::Interactive,
+        )
+        .permission_context(PermissionMode::Default))
+        .iter()
+        .map(|tool| tool.name)
+        .collect::<Vec<_>>();
+    assert!(coordinator_names.contains(&"HybridFixture"));
+
+    let worker = registry.assemble(ToolAssemblyContext::worker(
+        rust_agent::bootstrap::InteractionSurface::Cli,
+        rust_agent::bootstrap::SessionMode::Headless,
+    ));
+    let worker_names = worker
+        .visible_tools(&ToolAssemblyContext::worker(
+            rust_agent::bootstrap::InteractionSurface::Cli,
+            rust_agent::bootstrap::SessionMode::Headless,
+        )
+        .permission_context(PermissionMode::Default))
+        .iter()
+        .map(|tool| tool.name)
+        .collect::<Vec<_>>();
+    assert!(!worker_names.contains(&"HybridFixture"));
+}
+
+#[test]
+fn open_world_remains_independent_assembly_gate_under_always_load() {
+    let registry = ToolRegistry::new().register(metadata_fixture(
+        "OpenWorldAlwaysLoaded",
+        true,
+        false,
+        false,
+        true,
+    ));
+
+    let cli_interactive = registry.assemble(ToolAssemblyContext::coordinator(
+        rust_agent::bootstrap::InteractionSurface::Cli,
+        rust_agent::bootstrap::SessionMode::Interactive,
+    ));
+    let cli_names = cli_interactive
+        .all_metadata()
+        .iter()
+        .map(|tool| tool.name)
+        .collect::<Vec<_>>();
+    assert!(cli_names.contains(&"OpenWorldAlwaysLoaded"));
+
+    let remote = registry.assemble(ToolAssemblyContext::coordinator(
+        rust_agent::bootstrap::InteractionSurface::Remote,
+        rust_agent::bootstrap::SessionMode::Interactive,
+    ));
+    let remote_names = remote
+        .all_metadata()
+        .iter()
+        .map(|tool| tool.name)
+        .collect::<Vec<_>>();
+    assert!(!remote_names.contains(&"OpenWorldAlwaysLoaded"));
+
+    let restricted = registry.assemble(ToolAssemblyContext {
+        runtime_role: rust_agent::state::app_state::RuntimeRole::Coordinator,
+        surface: rust_agent::bootstrap::InteractionSurface::Cli,
+        session_mode: rust_agent::bootstrap::SessionMode::Interactive,
+        environment: ToolAssemblyEnvironment::Restricted,
+        include_deferred_tools: true,
+        include_interactive_tools: true,
+        include_open_world_tools: false,
+    });
+    let restricted_names = restricted
+        .all_metadata()
+        .iter()
+        .map(|tool| tool.name)
+        .collect::<Vec<_>>();
+    assert!(!restricted_names.contains(&"OpenWorldAlwaysLoaded"));
 }

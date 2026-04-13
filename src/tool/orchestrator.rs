@@ -1,7 +1,9 @@
 use crate::state::permission_context::ToolPermissionContext;
 use crate::tool::definition::{InterruptBehavior, ToolCall, ToolResult};
 use crate::tool::registry::ToolRegistry;
-use crate::tool::result::{ToolExecutionOutcomeKind, ToolExecutionRecord};
+use crate::tool::result::{
+    ToolExecutionOutcomeKind, ToolExecutionRecord, ToolReportModifier,
+};
 use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -149,11 +151,15 @@ fn build_outcome(
     batch_size: usize,
     executed_in_batch: bool,
 ) -> ToolExecutionOutcome {
+    let (kind, summary, detail, report_modifier) = summarize_result(&tool_name, &result);
     ToolExecutionOutcome {
         record: ToolExecutionRecord {
             tool_name: tool_name.clone(),
             outcome: format!("{:?}", result),
-            kind: classify_result(&result),
+            kind,
+            summary,
+            detail,
+            report_modifier,
             observable_input,
             batch_context: crate::tool::result::ToolBatchContext {
                 batch_index,
@@ -177,13 +183,51 @@ fn should_stop_serial_execution(
     }
 }
 
-fn classify_result(result: &ToolResult) -> ToolExecutionOutcomeKind {
+fn summarize_result(
+    tool_name: &str,
+    result: &ToolResult,
+) -> (
+    ToolExecutionOutcomeKind,
+    String,
+    Option<String>,
+    ToolReportModifier,
+) {
     match result {
-        ToolResult::Text(_) => ToolExecutionOutcomeKind::Success,
-        ToolResult::Denied(_) => ToolExecutionOutcomeKind::Denied,
-        ToolResult::PendingApproval { .. } => ToolExecutionOutcomeKind::PendingApproval,
-        ToolResult::Interrupted(_) => ToolExecutionOutcomeKind::Interrupted,
-        ToolResult::Progress(_) => ToolExecutionOutcomeKind::Progress,
-        ToolResult::ResultTooLarge(_) => ToolExecutionOutcomeKind::ResultTooLarge,
+        ToolResult::Text(text) => (
+            ToolExecutionOutcomeKind::Success,
+            format!("{tool_name} succeeded"),
+            Some(text.clone()),
+            ToolReportModifier::None,
+        ),
+        ToolResult::Denied(message) => (
+            ToolExecutionOutcomeKind::Denied,
+            format!("{tool_name} denied"),
+            Some(message.clone()),
+            ToolReportModifier::NeedsAttention,
+        ),
+        ToolResult::PendingApproval { message, .. } => (
+            ToolExecutionOutcomeKind::PendingApproval,
+            format!("{tool_name} pending approval"),
+            Some(message.clone()),
+            ToolReportModifier::Pending,
+        ),
+        ToolResult::Interrupted(message) => (
+            ToolExecutionOutcomeKind::Interrupted,
+            format!("{tool_name} interrupted"),
+            Some(message.clone()),
+            ToolReportModifier::NeedsAttention,
+        ),
+        ToolResult::Progress(message) => (
+            ToolExecutionOutcomeKind::Progress,
+            format!("{tool_name} in progress"),
+            Some(message.clone()),
+            ToolReportModifier::Progress,
+        ),
+        ToolResult::ResultTooLarge(message) => (
+            ToolExecutionOutcomeKind::ResultTooLarge,
+            format!("{tool_name} result too large"),
+            Some(message.clone()),
+            ToolReportModifier::NeedsAttention,
+        ),
     }
 }

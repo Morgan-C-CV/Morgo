@@ -495,23 +495,22 @@ impl RuntimeBootstrap {
         let runtime_tool_registry = Arc::new(RwLock::new(coordinator_tools.clone()));
         let notification_dispatcher = NotificationDispatcher::new(self.build_telegram_gateway())
             .with_hook_registry(hook_registry.clone());
-        let permission_context = ToolPermissionContext::new(if self.cli.init_only {
-            PermissionMode::Plan
-        } else {
-            PermissionMode::Default
-        })
-        .with_task_manager(task_manager)
-        .with_task_list_manager(task_list_manager)
-        .with_plan_manager(plan_manager)
-        .with_skill_registry(skill_registry.clone())
-        .with_mcp_runtime(mcp_runtime.clone())
-        .with_active_session_id(active_session_id)
-        .with_active_surface(state.surface)
-        .with_notification_dispatcher(notification_dispatcher.clone())
-        .with_deferred_tools(true)
-        .with_interactive_tools(true)
-        .with_inherited_tool_registry(coordinator_tools.clone())
-        .with_inherited_hook_registry(hook_registry.clone());
+        let permission_context = ToolAssemblyContext::coordinator(state.surface, state.session_mode)
+            .permission_context(if self.cli.init_only {
+                PermissionMode::Plan
+            } else {
+                PermissionMode::Default
+            })
+            .with_task_manager(task_manager)
+            .with_task_list_manager(task_list_manager)
+            .with_plan_manager(plan_manager)
+            .with_skill_registry(skill_registry.clone())
+            .with_mcp_runtime(mcp_runtime.clone())
+            .with_active_session_id(active_session_id)
+            .with_active_surface(state.surface)
+            .with_notification_dispatcher(notification_dispatcher.clone())
+            .with_inherited_tool_registry(coordinator_tools.clone())
+            .with_inherited_hook_registry(hook_registry.clone());
         let app_state = AppState {
             surface: state.surface,
             session_mode: state.session_mode,

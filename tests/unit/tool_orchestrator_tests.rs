@@ -8,12 +8,14 @@ use rust_agent::tool::builtin::glob::GlobTool;
 use rust_agent::tool::definition::{InterruptBehavior, ObservableInput, ObservableInputSource, PermissionDecision, Tool, ToolCall, ToolMetadata, ToolResult};
 use rust_agent::tool::orchestrator::{ToolExecutionRequest, ToolOrchestrator};
 use rust_agent::tool::registry::ToolRegistry;
-use rust_agent::tool::result::ToolExecutionOutcomeKind;
+use rust_agent::tool::result::{ToolExecutionOutcomeKind, ToolReportModifier};
 
 struct CancelOnDenyTool;
 struct BlockOnDenyTool;
 struct BackfillObservableInputTool;
 struct ProgressTool;
+struct PendingApprovalTool;
+struct ResultTooLargeTool;
 struct PassiveTool;
 
 #[async_trait]
@@ -170,6 +172,75 @@ impl Tool for ProgressTool {
 }
 
 #[async_trait]
+impl Tool for PendingApprovalTool {
+    fn metadata(&self) -> ToolMetadata {
+        ToolMetadata {
+            name: "PendingApprovalTool",
+            description: "Test tool that requests approval",
+            aliases: &[],
+            search_hint: None,
+            read_only: true,
+            destructive: false,
+            concurrency_safe: true,
+            always_load: true,
+            should_defer: false,
+            requires_auth: false,
+            requires_user_interaction: false,
+            is_open_world: false,
+            is_search_or_read_command: false,
+        }
+    }
+
+    async fn check_permissions(
+        &self,
+        _call: &ToolCall,
+        _permissions: &ToolPermissionContext,
+    ) -> PermissionDecision {
+        PermissionDecision::Ask {
+            message: "approval required by test policy".into(),
+            reason: rust_agent::tool::definition::PermissionDecisionReason::Tool,
+        }
+    }
+
+    async fn invoke(
+        &self,
+        _call: &ToolCall,
+        _permissions: &ToolPermissionContext,
+    ) -> anyhow::Result<ToolResult> {
+        Ok(ToolResult::Text("should not execute".into()))
+    }
+}
+
+#[async_trait]
+impl Tool for ResultTooLargeTool {
+    fn metadata(&self) -> ToolMetadata {
+        ToolMetadata {
+            name: "ResultTooLargeTool",
+            description: "Test tool that returns oversized result",
+            aliases: &[],
+            search_hint: None,
+            read_only: true,
+            destructive: false,
+            concurrency_safe: true,
+            always_load: true,
+            should_defer: false,
+            requires_auth: false,
+            requires_user_interaction: false,
+            is_open_world: false,
+            is_search_or_read_command: false,
+        }
+    }
+
+    async fn invoke(
+        &self,
+        _call: &ToolCall,
+        _permissions: &ToolPermissionContext,
+    ) -> anyhow::Result<ToolResult> {
+        Ok(ToolResult::ResultTooLarge("result exceeded test limit".into()))
+    }
+}
+
+#[async_trait]
 impl Tool for PassiveTool {
     fn metadata(&self) -> ToolMetadata {
         ToolMetadata {
@@ -261,6 +332,9 @@ async fn orchestrator_executes_single_request_through_registry() {
         outcomes[0].record.kind,
         rust_agent::tool::result::ToolExecutionOutcomeKind::Success
     );
+    assert_eq!(outcomes[0].record.summary, "Read succeeded");
+    assert_eq!(outcomes[0].record.detail, Some("hello orchestrator".into()));
+    assert_eq!(outcomes[0].record.report_modifier, ToolReportModifier::None);
     assert_eq!(
         outcomes[0].record.observable_input,
         Some(ObservableInput {
@@ -305,6 +379,15 @@ async fn orchestrator_cancels_remaining_serial_requests_after_cancel_denial() {
     assert_eq!(
         outcomes[0].result,
         ToolResult::Denied("cancelled by test policy".into())
+    );
+    assert_eq!(outcomes[0].record.summary, "CancelOnDeny denied");
+    assert_eq!(
+        outcomes[0].record.detail,
+        Some("cancelled by test policy".into())
+    );
+    assert_eq!(
+        outcomes[0].record.report_modifier,
+        ToolReportModifier::NeedsAttention
     );
 }
 
@@ -443,6 +526,12 @@ async fn orchestrator_records_progress_results_in_execution_record() {
     assert_eq!(outcomes[0].tool_name, "ProgressTool");
     assert_eq!(outcomes[0].result, ToolResult::Progress("still running".into()));
     assert_eq!(outcomes[0].record.kind, ToolExecutionOutcomeKind::Progress);
+    assert_eq!(outcomes[0].record.summary, "ProgressTool in progress");
+    assert_eq!(outcomes[0].record.detail, Some("still running".into()));
+    assert_eq!(
+        outcomes[0].record.report_modifier,
+        ToolReportModifier::Progress
+    );
     assert_eq!(
         outcomes[0].record.observable_input,
         Some(ObservableInput {
@@ -453,4 +542,78 @@ async fn orchestrator_records_progress_results_in_execution_record() {
     assert_eq!(outcomes[0].record.batch_context.batch_index, 0);
     assert_eq!(outcomes[0].record.batch_context.batch_size, 1);
     assert!(!outcomes[0].record.batch_context.executed_in_batch);
+}
+
+#[tokio::test]
+async fn orchestrator_records_pending_approval_results_in_execution_record() {
+    let registry = ToolRegistry::new().register(Arc::new(PendingApprovalTool));
+    let orchestrator = ToolOrchestrator::new(&registry);
+    let outcomes = orchestrator
+        .execute(
+            &[ToolExecutionRequest {
+                call: ToolCall::new("PendingApprovalTool", "approval-input"),
+            }],
+            &ToolPermissionContext::new(PermissionMode::Default),
+        )
+        .await
+        .expect("execute tool request");
+
+    assert_eq!(outcomes.len(), 1);
+    assert_eq!(
+        outcomes[0].result,
+        ToolResult::PendingApproval {
+            tool_name: "PendingApprovalTool".into(),
+            message: "approval required by test policy".into(),
+        }
+    );
+    assert_eq!(
+        outcomes[0].record.kind,
+        ToolExecutionOutcomeKind::PendingApproval
+    );
+    assert_eq!(
+        outcomes[0].record.summary,
+        "PendingApprovalTool pending approval"
+    );
+    assert_eq!(
+        outcomes[0].record.detail,
+        Some("approval required by test policy".into())
+    );
+    assert_eq!(outcomes[0].record.report_modifier, ToolReportModifier::Pending);
+}
+
+#[tokio::test]
+async fn orchestrator_records_result_too_large_results_in_execution_record() {
+    let registry = ToolRegistry::new().register(Arc::new(ResultTooLargeTool));
+    let orchestrator = ToolOrchestrator::new(&registry);
+    let outcomes = orchestrator
+        .execute(
+            &[ToolExecutionRequest {
+                call: ToolCall::new("ResultTooLargeTool", "oversized-input"),
+            }],
+            &ToolPermissionContext::new(PermissionMode::Default),
+        )
+        .await
+        .expect("execute tool request");
+
+    assert_eq!(outcomes.len(), 1);
+    assert_eq!(
+        outcomes[0].result,
+        ToolResult::ResultTooLarge("result exceeded test limit".into())
+    );
+    assert_eq!(
+        outcomes[0].record.kind,
+        ToolExecutionOutcomeKind::ResultTooLarge
+    );
+    assert_eq!(
+        outcomes[0].record.summary,
+        "ResultTooLargeTool result too large"
+    );
+    assert_eq!(
+        outcomes[0].record.detail,
+        Some("result exceeded test limit".into())
+    );
+    assert_eq!(
+        outcomes[0].record.report_modifier,
+        ToolReportModifier::NeedsAttention
+    );
 }

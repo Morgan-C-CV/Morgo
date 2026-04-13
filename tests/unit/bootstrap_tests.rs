@@ -19,6 +19,7 @@ use rust_agent::history::session::{
 };
 use rust_agent::hook::registry::{HookConfigSource, HookEvent, load_hook_registry};
 use rust_agent::task::list_types::{TaskListItem, TaskListSnapshot, TaskListStatus};
+use rust_agent::tool::registry::ToolAssemblyContext;
 
 fn unique_temp_path(prefix: &str) -> std::path::PathBuf {
     let nanos = SystemTime::now()
@@ -303,6 +304,10 @@ fn initialize_runtime_builds_consistent_runtime_bundle_shape() {
     assert!(!bundle.command_registry.names().is_empty());
     assert!(!bundle.coordinator_tools.all_metadata().is_empty());
     assert_eq!(bundle.api_client.provider_config(), bundle.provider_config);
+    assert_eq!(
+        bundle.coordinator_tools.all_metadata(),
+        bundle.runtime_tool_registry.blocking_read().all_metadata()
+    );
 }
 
 #[test]
@@ -635,6 +640,146 @@ async fn runtime_resume_prefers_restored_surface_and_mode() {
         .run()
         .await
         .expect("runtime should run with restored mode");
+}
+
+#[test]
+fn initialize_runtime_tracks_surface_mode_visibility_matrix() {
+    let runtime = RuntimeBootstrap::from_cli(BootstrapCli {
+        print: None,
+        interactive: true,
+        init_only: false,
+        continue_session: false,
+        resume: None,
+        trace_startup: false,
+        show_tools: false,
+        tui: false,
+        surface: "cli".into(),
+    });
+
+    let mut cli_state = BootstrapState::new(InteractionSurface::Cli, SessionMode::Interactive, false);
+    cli_state.current_cwd = std::env::current_dir().expect("cwd available");
+    let cli_bundle = runtime.initialize_runtime(
+        &cli_state,
+        "session-cli-matrix".into(),
+        Arc::new(rust_agent::task::manager::TaskManager::default()),
+        Arc::new(rust_agent::task::list_manager::TaskListManager::default()),
+        Arc::new(rust_agent::plan::manager::PlanManager::default()),
+    );
+    let cli_names = cli_bundle
+        .coordinator_tools
+        .visible_tools(
+            &ToolPermissionContext::new(PermissionMode::Default)
+                .with_active_surface(InteractionSurface::Cli)
+                .with_deferred_tools(cli_state.session_mode == SessionMode::Interactive)
+                .with_interactive_tools(cli_state.session_mode == SessionMode::Interactive),
+        )
+        .iter()
+        .map(|tool| tool.name)
+        .collect::<Vec<_>>();
+    assert!(cli_names.contains(&"Agent"));
+    assert!(cli_names.contains(&"WebSearch"));
+
+    let mut remote_state = BootstrapState::new(InteractionSurface::Remote, SessionMode::Interactive, false);
+    remote_state.current_cwd = std::env::current_dir().expect("cwd available");
+    let remote_bundle = runtime.initialize_runtime(
+        &remote_state,
+        "session-remote-matrix".into(),
+        Arc::new(rust_agent::task::manager::TaskManager::default()),
+        Arc::new(rust_agent::task::list_manager::TaskListManager::default()),
+        Arc::new(rust_agent::plan::manager::PlanManager::default()),
+    );
+    let remote_names = remote_bundle
+        .coordinator_tools
+        .visible_tools(
+            &ToolPermissionContext::new(PermissionMode::Default)
+                .with_active_surface(InteractionSurface::Remote)
+                .with_deferred_tools(remote_state.session_mode == SessionMode::Interactive)
+                .with_interactive_tools(remote_state.session_mode == SessionMode::Interactive),
+        )
+        .iter()
+        .map(|tool| tool.name)
+        .collect::<Vec<_>>();
+    assert!(remote_names.contains(&"Agent"));
+    assert!(!remote_names.contains(&"WebSearch"));
+
+    let worker_names = remote_bundle
+        .coordinator_tools
+        .filter_for_worker()
+        .visible_tools(&ToolPermissionContext::new(PermissionMode::Default))
+        .iter()
+        .map(|tool| tool.name)
+        .collect::<Vec<_>>();
+    assert!(!worker_names.contains(&"Agent"));
+    assert!(!worker_names.contains(&"WebSearch"));
+}
+
+#[tokio::test]
+async fn runtime_resume_keeps_restored_surface_visibility_contract() {
+    let store = Arc::new(InMemorySessionStore::default());
+    let session_id = SessionId("session-remote-contract".into());
+    store.save(
+        SessionSnapshot {
+            session_id: session_id.clone(),
+            surface: InteractionSurface::Remote,
+            session_mode: SessionMode::Interactive,
+            cwd: "/tmp/remote-contract".into(),
+            last_turn_at: None,
+            prompt_seed: None,
+        },
+        SessionHistory::default(),
+    );
+
+    let runtime = RuntimeBootstrap::from_cli(BootstrapCli {
+        print: Some("Read /tmp/demo".into()),
+        interactive: false,
+        init_only: false,
+        continue_session: false,
+        resume: Some(session_id.0.clone()),
+        trace_startup: false,
+        show_tools: false,
+        tui: false,
+        surface: "cli".into(),
+    })
+    .with_session_store(store.clone());
+
+    let resolved = resolve_session_state(
+        store.as_ref(),
+        Some(&RestoreRequest {
+            source: RestoreSource::ResumeSession,
+            session_id: Some(session_id.0.clone()),
+        }),
+        InteractionSurface::Cli,
+        SessionMode::Headless,
+        std::path::Path::new("/tmp/remote-contract"),
+    );
+    let mut state = BootstrapState::new(
+        resolved.snapshot.surface,
+        resolved.snapshot.session_mode,
+        false,
+    );
+    state.current_cwd = std::env::current_dir().expect("cwd available");
+    let bundle = runtime.initialize_runtime(
+        &state,
+        resolved.active_session_id(),
+        Arc::new(rust_agent::task::manager::TaskManager::default()),
+        Arc::new(rust_agent::task::list_manager::TaskListManager::default()),
+        Arc::new(rust_agent::plan::manager::PlanManager::default()),
+    );
+
+    let permission_context = ToolAssemblyContext::coordinator(state.surface, state.session_mode)
+        .permission_context(PermissionMode::Default)
+        .with_active_surface(state.surface);
+    let visible_names = bundle
+        .coordinator_tools
+        .visible_tools(&permission_context)
+        .iter()
+        .map(|tool| tool.name)
+        .collect::<Vec<_>>();
+
+    assert_eq!(state.surface, InteractionSurface::Remote);
+    assert_eq!(state.session_mode, SessionMode::Interactive);
+    assert!(visible_names.contains(&"Agent"));
+    assert!(!visible_names.contains(&"WebSearch"));
 }
 
 #[tokio::test]
