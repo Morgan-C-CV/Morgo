@@ -346,6 +346,7 @@ async fn query_loop_stop_hook_can_prevent_continuation() {
             deny_match: None,
             append_message: Some("stop hook appended message".into()),
             prevent_continuation: true,
+            block_continuation: false,
             permission_decision: None,
             updated_input: None,
             additional_context: None,
@@ -423,6 +424,7 @@ async fn query_loop_respects_pre_tool_hook_denial() {
             deny_match: Some("Agent".into()),
             append_message: None,
             prevent_continuation: false,
+            block_continuation: false,
             permission_decision: None,
             updated_input: None,
             additional_context: None,
@@ -501,6 +503,7 @@ async fn query_loop_runs_permission_request_hook_before_tool_execution() {
             deny_match: None,
             append_message: Some("permission request observed".into()),
             prevent_continuation: false,
+            block_continuation: false,
             permission_decision: Some("deny".into()),
             updated_input: None,
             additional_context: None,
@@ -531,6 +534,97 @@ async fn query_loop_runs_permission_request_hook_before_tool_execution() {
             tool_name: "Agent".into(),
         }
     ));
+}
+
+#[tokio::test]
+async fn query_loop_stop_hook_blocking_continues_with_follow_up_turn() {
+    let permission_context = ToolPermissionContext::new(PermissionMode::Default)
+        .with_task_manager(Arc::new(TaskManager::default()));
+    permission_context.add_always_allow_rule("Agent");
+
+    let context = QueryContext {
+        app_state: AppState {
+            surface: InteractionSurface::Cli,
+            session_mode: SessionMode::Headless,
+            client_type: ClientType::Cli,
+            session_source: SessionSource::LocalCli,
+            runtime_role: RuntimeRole::Coordinator,
+            worker_role: None,
+            permission_context,
+            command_registry: None,
+            runtime_tool_registry: Some(Arc::new(RwLock::new(ToolRegistry::new()))),
+            skill_registry: None,
+            mcp_runtime: None,
+            plugin_load_result: None,
+            cost_tracker: CostTracker::default(),
+            notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
+            startup_trace: Vec::new(),
+            active_session_id: "test-session".into(),
+            session_store: None,
+            session: None,
+            history: None,
+            restored_session: None,
+        },
+        tool_registry: ToolRegistry::new(),
+        api_client: ModelProviderClient::with_scripted_turns(vec![
+            vec![
+                StreamEvent::MessageStart,
+                StreamEvent::TextDelta("draft answer".into()),
+                StreamEvent::MessageStop {
+                    stop_reason: StopReason::EndTurn,
+                },
+            ],
+            vec![
+                StreamEvent::MessageStart,
+                StreamEvent::TextDelta("revised answer".into()),
+                StreamEvent::MessageStop {
+                    stop_reason: StopReason::EndTurn,
+                },
+            ],
+        ]),
+        compactor: ReactiveCompactor,
+        hook_registry: HookRegistry::default().register_rule(HookRule {
+            event: HookEventMatcher::Stop,
+            deny_match: None,
+            append_message: Some("stop hook requires revision".into()),
+            prevent_continuation: false,
+            block_continuation: true,
+            permission_decision: None,
+            updated_input: None,
+            additional_context: None,
+        }),
+        agent_id: None,
+        system_prompt: "test system".into(),
+        tools_prompt: "test tools".into(),
+        context_prompt: "test context".into(),
+    };
+
+    let engine = QueryEngine::new(context);
+    let result = engine.submit_turn(Message::user("inspect file")).await;
+
+    assert_eq!(result.state, QueryLoopState::Completed);
+    assert_eq!(result.terminal, Terminal::Completed);
+    assert_eq!(result.transition, Some(Continue::StopHookBlocking));
+    assert_eq!(
+        result.messages,
+        vec![
+            Message::assistant("draft answer"),
+            Message::assistant("stop hook requires revision"),
+            Message::assistant("revised answer"),
+            Message::assistant("stop hook requires revision")
+        ]
+    );
+    assert!(result.events.iter().any(|event| matches!(
+        event,
+        EngineEvent::Transition(Continue::StopHookBlocking)
+    )));
+    assert!(result.events.iter().any(|event| matches!(
+        event,
+        EngineEvent::Notice {
+            kind: "hook",
+            message,
+        } if message.contains("blocking continuation retry")
+    )));
 }
 
 #[tokio::test]
@@ -576,6 +670,7 @@ async fn query_loop_uses_subagent_stop_hook_for_subagent_context() {
             deny_match: None,
             append_message: Some("subagent stop appended message".into()),
             prevent_continuation: true,
+            block_continuation: false,
             permission_decision: None,
             updated_input: None,
             additional_context: None,
@@ -820,6 +915,7 @@ async fn subagent_context_inherits_parent_tools_and_hooks() {
         deny_match: None,
         append_message: Some("inherited stop hook".into()),
         prevent_continuation: false,
+        block_continuation: false,
         permission_decision: None,
         updated_input: None,
         additional_context: None,
@@ -1444,6 +1540,118 @@ async fn coordinator_surfaces_verification_failure_and_missing_verification_risk
             .iter()
             .any(|message| message.content.contains("unverified risk remains"))
     );
+}
+
+#[tokio::test]
+async fn query_loop_retries_with_model_fallback_before_other_stream_recovery() {
+    let context = test_context_with_turns(
+        vec![
+            vec![StreamEvent::Error("fallback:model_error: upstream overloaded".into())],
+            vec![
+                StreamEvent::MessageStart,
+                StreamEvent::TextDelta("fallback recovered".into()),
+                StreamEvent::MessageStop {
+                    stop_reason: StopReason::EndTurn,
+                },
+            ],
+        ],
+        ToolRegistry::new(),
+    );
+
+    let result = run_query_loop_with_params(
+        &context,
+        Message::user("needs fallback"),
+        QueryParams::default(),
+    )
+    .await;
+
+    assert_eq!(result.state, QueryLoopState::Completed);
+    assert_eq!(result.terminal, Terminal::Completed);
+    assert_eq!(result.transition, Some(Continue::ModelFallbackRetry));
+    assert!(result.events.iter().any(|event| matches!(
+        event,
+        EngineEvent::Transition(Continue::ModelFallbackRetry)
+    )));
+    assert!(result.events.iter().any(|event| matches!(
+        event,
+        EngineEvent::Notice {
+            kind: "recovery",
+            message,
+        } if message.contains("model fallback retry")
+    )));
+}
+
+#[tokio::test]
+async fn query_loop_escalates_fallback_failure_to_terminal_model_error() {
+    let context = test_context_with_turns(
+        vec![
+            vec![StreamEvent::Error("fallback:model_error: upstream overloaded".into())],
+            vec![StreamEvent::Error("fallback:model_error: still failing".into())],
+            vec![StreamEvent::Error("residual collapse failure".into())],
+            vec![StreamEvent::Error("fatal after retries".into())],
+        ],
+        ToolRegistry::new(),
+    );
+
+    let result = run_query_loop_with_params(
+        &context,
+        Message::user("needs fallback failure"),
+        QueryParams::default(),
+    )
+    .await;
+
+    assert_eq!(result.state, QueryLoopState::Failed);
+    assert_eq!(result.terminal, Terminal::ModelError("fatal after retries".into()));
+    assert_eq!(result.transition, Some(Continue::CollapseDrainRetry));
+}
+
+#[tokio::test]
+async fn query_loop_second_max_tokens_hit_uses_recovery_branch() {
+    let context = test_context_with_turns(
+        vec![
+            vec![
+                StreamEvent::MessageStart,
+                StreamEvent::TextDelta("partial one".into()),
+                StreamEvent::MessageStop {
+                    stop_reason: StopReason::MaxTokens,
+                },
+            ],
+            vec![
+                StreamEvent::MessageStart,
+                StreamEvent::TextDelta("partial two".into()),
+                StreamEvent::MessageStop {
+                    stop_reason: StopReason::MaxTokens,
+                },
+            ],
+            vec![
+                StreamEvent::MessageStart,
+                StreamEvent::TextDelta("finished".into()),
+                StreamEvent::MessageStop {
+                    stop_reason: StopReason::EndTurn,
+                },
+            ],
+        ],
+        ToolRegistry::new(),
+    );
+
+    let result = run_query_loop_with_params(
+        &context,
+        Message::user("needs explicit recovery branch"),
+        QueryParams::default(),
+    )
+    .await;
+
+    assert_eq!(result.state, QueryLoopState::Completed);
+    assert_eq!(result.terminal, Terminal::Completed);
+    assert_eq!(result.transition, Some(Continue::MaxOutputTokensRecovery));
+    assert!(result.events.iter().any(|event| matches!(
+        event,
+        EngineEvent::Transition(Continue::MaxOutputTokensEscalate)
+    )));
+    assert!(result.events.iter().any(|event| matches!(
+        event,
+        EngineEvent::Transition(Continue::MaxOutputTokensRecovery)
+    )));
 }
 
 #[tokio::test]

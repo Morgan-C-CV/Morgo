@@ -13,6 +13,7 @@ pub struct HookResult {
     pub decision: HookDecision,
     pub messages: Vec<Message>,
     pub prevent_continuation: bool,
+    pub block_continuation: bool,
     pub payload: HookPayload,
 }
 
@@ -22,6 +23,7 @@ impl HookResult {
             decision: HookDecision::Allow,
             messages: Vec::new(),
             prevent_continuation: false,
+            block_continuation: false,
             payload: HookPayload::default(),
         }
     }
@@ -42,6 +44,9 @@ pub fn run_hook(registry: &HookRegistry, event: HookEvent) -> HookResult {
         }
         if rule.prevent_continuation {
             result.prevent_continuation = true;
+        }
+        if rule.block_continuation {
+            result.block_continuation = true;
         }
         if let Some(permission_decision) = &rule.permission_decision {
             let updated_input = rule.updated_input.clone();

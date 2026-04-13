@@ -145,6 +145,7 @@ fn sample_plugin_hook() -> PluginHookDefinition {
         deny_match: None,
         append_message: Some("plugin stop hook fired".into()),
         prevent_continuation: false,
+        block_continuation: false,
         permission_decision: None,
         updated_input: None,
         additional_context: None,

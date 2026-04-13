@@ -1,5 +1,7 @@
 use crate::core::context::QueryContext;
-use crate::core::events::{EngineEvent, SessionMilestone};
+use crate::core::events::{
+    EngineEvent, RuntimeEventEnvelope, RuntimeEventKind, SessionMilestone,
+};
 use crate::core::message::Message;
 use crate::core::query_loop::{QueryLoopResult, run_query_loop};
 use crate::history::session::{SessionHistoryEntry, SessionId};
@@ -138,11 +140,23 @@ impl QueryEngine {
                         SessionMilestone::ToolResultCommitted,
                     ));
                 }
-                EngineEvent::Terminal(_) => {
+                EngineEvent::CompactPlanIssued { .. } => {
+                    persisted_events.push(event.clone());
+                }
+                EngineEvent::Terminal(terminal) => {
+                    persisted_events.push(EngineEvent::RuntimeEvent(runtime_event_for_terminal(
+                        terminal,
+                    )));
                     persisted_events.push(event.clone());
                     persisted_events.push(EngineEvent::SessionMilestoneWritten(
                         SessionMilestone::TurnCompleted,
                     ));
+                }
+                EngineEvent::Transition(transition) => {
+                    persisted_events.push(EngineEvent::RuntimeEvent(runtime_event_for_transition(
+                        transition,
+                    )));
+                    persisted_events.push(event.clone());
                 }
                 _ => persisted_events.push(event.clone()),
             }

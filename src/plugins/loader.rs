@@ -344,6 +344,7 @@ fn normalize_hook_definition(
         deny_match: hook.deny_match,
         append_message: hook.append_message,
         prevent_continuation: hook.prevent_continuation,
+        block_continuation: hook.block_continuation,
         permission_decision: hook.permission_decision,
         updated_input: hook.updated_input,
         additional_context: hook.additional_context,

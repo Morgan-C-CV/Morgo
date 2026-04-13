@@ -158,9 +158,9 @@ pub async fn run_query_loop_with_params(
             Ok(prepared) => prepared,
             Err(result) => return result,
         };
-        let streamed = stream_model_turn(context, &prepared).await;
+        let streamed = stream_model_turn(context, &prepared, state.transition.as_ref()).await;
         if streamed.is_empty() {
-            return finalize_with_stop_hook(
+            return finalize_turn(
                 context,
                 state,
                 QueryLoopState::Completed,
@@ -202,6 +202,7 @@ struct TurnOutcome {
 
 enum TurnDecision {
     Return(LoopState, Terminal),
+    FinalizeNormalTurn(LoopState),
     ContinueWith(Message, Continue),
     AwaitMailbox,
 }
@@ -209,6 +210,15 @@ enum TurnDecision {
 enum NextTurnDecision {
     Return(QueryLoopResult),
     Continue,
+}
+
+enum NormalTurnFinalization {
+    Return(QueryLoopResult),
+    Continue {
+        loop_state: LoopState,
+        next_input: Message,
+        events: Vec<EngineEvent>,
+    },
 }
 
 fn check_turn_limits(
@@ -220,7 +230,7 @@ fn check_turn_limits(
     if let Some(max_turns) = params.max_turns {
         if state.turn_count >= max_turns {
             let count = state.turn_count;
-            return Some(finalize_with_stop_hook(
+            return Some(finalize_turn(
                 context,
                 state.clone(),
                 QueryLoopState::Failed,
@@ -267,7 +277,7 @@ fn prepare_turn(
             if !params.messages.is_empty()
                 || state.transition == Some(Continue::TokenBudgetContinuation)
             {
-                return Err(finalize_with_stop_hook(
+                return Err(finalize_turn(
                     context,
                     state.clone(),
                     QueryLoopState::Failed,
@@ -278,7 +288,7 @@ fn prepare_turn(
                 ));
             }
             state.transition = Some(Continue::TokenBudgetContinuation);
-            return Err(finalize_with_stop_hook(
+            return Err(finalize_turn(
                 context,
                 state.clone(),
                 QueryLoopState::Completed,
@@ -307,7 +317,7 @@ fn prepare_turn(
         state.transition = Some(Continue::ReactiveCompactRetry);
         state.has_attempted_reactive_compact = true;
         state.messages.push(compact_message);
-        return Err(finalize_with_stop_hook(
+        return Err(finalize_turn(
             context,
             state.clone(),
             QueryLoopState::Compacting,
@@ -344,11 +354,29 @@ fn process_user_input(
     None
 }
 
-async fn stream_model_turn(context: &QueryContext, prepared: &PreparedTurn) -> Vec<StreamEvent> {
-    context
+async fn stream_model_turn(
+    context: &QueryContext,
+    prepared: &PreparedTurn,
+    transition: Option<&Continue>,
+) -> Vec<StreamEvent> {
+    let mut streamed = context
         .api_client
         .stream_message(&Message::user(prepared.prompt.clone()))
-        .await
+        .await;
+    if matches!(transition, Some(Continue::ModelFallbackRetry)) {
+        if let Some(index) = streamed.iter().position(|event| {
+            matches!(event, StreamEvent::Error(error) if error.contains("fallback:model_error:"))
+                || matches!(
+                    event,
+                    StreamEvent::MessageStop {
+                        stop_reason: StopReason::Error
+                    }
+                )
+        }) {
+            streamed[index] = StreamEvent::Error("model fallback retry failed".into());
+        }
+    }
+    streamed
 }
 
 async fn decide_next_turn(
@@ -359,14 +387,33 @@ async fn decide_next_turn(
     events: &mut Vec<EngineEvent>,
 ) -> NextTurnDecision {
     match turn_outcome.decision {
-        TurnDecision::Return(loop_state, terminal) => {
-            NextTurnDecision::Return(finalize_with_stop_hook(
-                context,
-                loop_state,
-                terminal_state(&terminal),
-                terminal,
-                turn_outcome.events,
-            ))
+        TurnDecision::Return(loop_state, terminal) => NextTurnDecision::Return(finalize_turn(
+            context,
+            loop_state,
+            terminal_state(&terminal),
+            terminal,
+            turn_outcome.events,
+        )),
+        TurnDecision::FinalizeNormalTurn(loop_state) => {
+            match finalize_normal_turn(context, loop_state, turn_outcome.events) {
+                NormalTurnFinalization::Return(result) => NextTurnDecision::Return(result),
+                NormalTurnFinalization::Continue {
+                    loop_state,
+                    next_input,
+                    events: next_events,
+                } => {
+                    *state = loop_state;
+                    state.turn_count += 1;
+                    state.transition = Some(Continue::StopHookBlocking);
+                    *events = next_events;
+                    events.push(EngineEvent::Transition(Continue::StopHookBlocking));
+                    *current_input = next_input;
+                    state
+                        .messages
+                        .extend(inbox_messages(context, context.agent_id.as_deref()));
+                    NextTurnDecision::Continue
+                }
+            }
         }
         TurnDecision::ContinueWith(next_input, continue_reason) => {
             *state = turn_outcome.state;
@@ -393,13 +440,25 @@ async fn decide_next_turn(
                     .extend(inbox_messages(context, context.agent_id.as_deref()));
                 return NextTurnDecision::Continue;
             }
-            NextTurnDecision::Return(finalize_with_stop_hook(
-                context,
-                turn_outcome.state,
-                QueryLoopState::Completed,
-                Terminal::Completed,
-                turn_outcome.events,
-            ))
+            match finalize_normal_turn(context, turn_outcome.state, turn_outcome.events) {
+                NormalTurnFinalization::Return(result) => NextTurnDecision::Return(result),
+                NormalTurnFinalization::Continue {
+                    loop_state,
+                    next_input,
+                    events: next_events,
+                } => {
+                    *state = loop_state;
+                    state.turn_count += 1;
+                    state.transition = Some(Continue::StopHookBlocking);
+                    *events = next_events;
+                    events.push(EngineEvent::Transition(Continue::StopHookBlocking));
+                    *current_input = next_input;
+                    state
+                        .messages
+                        .extend(inbox_messages(context, context.agent_id.as_deref()));
+                    NextTurnDecision::Continue
+                }
+            }
         }
     }
 }
@@ -461,7 +520,7 @@ async fn consume_model_stream(
                     return TurnOutcome {
                         state: state.clone(),
                         events: engine_events,
-                        decision: TurnDecision::Return(state.clone(), Terminal::Completed),
+                        decision: TurnDecision::FinalizeNormalTurn(state.clone()),
                     };
                 }
                 StopReason::ToolUse => {
@@ -541,18 +600,32 @@ async fn consume_model_stream(
                         engine_events.push(EngineEvent::MessageCommitted(message.clone()));
                         state.messages.push(message);
                     }
-                    if !state.has_attempted_reactive_compact {
-                        state.has_attempted_reactive_compact = true;
+                    if state.transition != Some(Continue::ModelFallbackRetry) {
                         engine_events.push(EngineEvent::Notice {
                             kind: "recovery",
-                            message: "stream stop error triggered fallback retry".into(),
+                            message: "stream stop error triggered model fallback retry".into(),
                         });
                         return TurnOutcome {
                             state: state.clone(),
                             events: engine_events,
                             decision: TurnDecision::ContinueWith(
-                                Message::user("Retry after reactive compact / fallback recovery."),
+                                Message::user("Retry after model fallback recovery."),
                                 Continue::ModelFallbackRetry,
+                            ),
+                        };
+                    }
+                    if !state.has_attempted_reactive_compact {
+                        state.has_attempted_reactive_compact = true;
+                        engine_events.push(EngineEvent::Notice {
+                            kind: "recovery",
+                            message: "stream stop error triggered reactive compact retry".into(),
+                        });
+                        return TurnOutcome {
+                            state: state.clone(),
+                            events: engine_events,
+                            decision: TurnDecision::ContinueWith(
+                                Message::user("Retry after reactive compact recovery."),
+                                Continue::ReactiveCompactRetry,
                             ),
                         };
                     }
@@ -584,6 +657,24 @@ async fn consume_model_stream(
                 let error_message = Message::assistant(format!("stream error: {error}"));
                 engine_events.push(EngineEvent::MessageCommitted(error_message.clone()));
                 state.messages.push(error_message);
+                if state.transition != Some(Continue::ModelFallbackRetry)
+                    && error.contains("fallback:model_error:")
+                {
+                    engine_events.push(EngineEvent::Notice {
+                        kind: "recovery",
+                        message: format!(
+                            "model fallback retry triggered after stream error: {error}"
+                        ),
+                    });
+                    return TurnOutcome {
+                        state: state.clone(),
+                        events: engine_events,
+                        decision: TurnDecision::ContinueWith(
+                            Message::user("Retry after model fallback recovery."),
+                            Continue::ModelFallbackRetry,
+                        ),
+                    };
+                }
                 if !state.has_attempted_reactive_compact {
                     state.has_attempted_reactive_compact = true;
                     engine_events.push(EngineEvent::Notice {
@@ -596,7 +687,7 @@ async fn consume_model_stream(
                         state: state.clone(),
                         events: engine_events,
                         decision: TurnDecision::ContinueWith(
-                            Message::user("Retry after reactive compact / fallback recovery."),
+                            Message::user("Retry after reactive compact recovery."),
                             Continue::ReactiveCompactRetry,
                         ),
                     };
@@ -1005,50 +1096,45 @@ async fn next_worker_mailbox_message(context: &QueryContext) -> Option<Message> 
     .map(Message::user)
 }
 
-fn finalize_with_stop_hook(
+fn finalize_normal_turn(
     context: &QueryContext,
     mut state: LoopState,
-    default_state: QueryLoopState,
-    default_terminal: Terminal,
     mut events: Vec<EngineEvent>,
-) -> QueryLoopResult {
+) -> NormalTurnFinalization {
     state
         .messages
         .extend(inbox_messages(context, context.agent_id.as_deref()));
     if matches!(
         context.app_state.runtime_role,
         crate::state::app_state::RuntimeRole::Coordinator
-    ) && matches!(default_terminal, Terminal::Completed)
-        && context
-            .app_state
-            .permission_context
-            .task_manager
-            .as_ref()
-            .is_some_and(|manager| {
-                manager.has_pending_orchestration(&context.app_state.active_session_id)
-            })
+    ) && context
+        .app_state
+        .permission_context
+        .task_manager
+        .as_ref()
+        .is_some_and(|manager| manager.has_pending_orchestration(&context.app_state.active_session_id))
     {
         let gating_message = Message::assistant(
             "orchestration still pending: wait for grouped research fan-in or verification before final synthesis",
         );
         events.push(EngineEvent::MessageCommitted(gating_message.clone()));
         state.messages.push(gating_message);
-        return QueryLoopResult {
+        return NormalTurnFinalization::Return(QueryLoopResult {
             state: QueryLoopState::Completed,
             terminal: Terminal::Completed,
             messages: state.messages,
             transition: Some(Continue::NextTurn),
             events,
-        };
+        });
     }
+
     let stop_event = if context.is_subagent() {
         HookEvent::SubagentStop
     } else {
         HookEvent::Stop
     };
     let stop_hook = run_hook(&context.hook_registry, stop_event);
-    let hook_messages = stop_hook.messages.clone();
-    for message in hook_messages {
+    for message in stop_hook.messages.clone() {
         events.push(EngineEvent::MessageCommitted(message.clone()));
         state.messages.push(message);
     }
@@ -1058,13 +1144,52 @@ fn finalize_with_stop_hook(
             kind: "hook",
             message: "stop hook prevented continuation".into(),
         });
+        let terminal = Terminal::StopHookPrevented;
+        events.push(EngineEvent::Terminal(terminal.clone()));
+        return NormalTurnFinalization::Return(QueryLoopResult {
+            state: terminal_state(&terminal),
+            terminal,
+            messages: state.messages,
+            transition: state.transition,
+            events,
+        });
     }
 
-    let terminal = if stop_hook.prevent_continuation {
-        Terminal::StopHookPrevented
-    } else {
-        default_terminal
-    };
+    if stop_hook.block_continuation {
+        state.stop_hook_active = true;
+        state.transition = Some(Continue::StopHookBlocking);
+        events.push(EngineEvent::Notice {
+            kind: "hook",
+            message: "stop hook requested blocking continuation retry".into(),
+        });
+        return NormalTurnFinalization::Continue {
+            loop_state: state,
+            next_input: Message::user("Address the stop-hook blocking feedback and continue."),
+            events,
+        };
+    }
+
+    let terminal = Terminal::Completed;
+    events.push(EngineEvent::Terminal(terminal.clone()));
+    NormalTurnFinalization::Return(QueryLoopResult {
+        state: QueryLoopState::Completed,
+        terminal,
+        messages: state.messages,
+        transition: state.transition,
+        events,
+    })
+}
+
+fn finalize_turn(
+    context: &QueryContext,
+    mut state: LoopState,
+    default_state: QueryLoopState,
+    terminal: Terminal,
+    mut events: Vec<EngineEvent>,
+) -> QueryLoopResult {
+    state
+        .messages
+        .extend(inbox_messages(context, context.agent_id.as_deref()));
     events.push(EngineEvent::Terminal(terminal.clone()));
 
     QueryLoopResult {

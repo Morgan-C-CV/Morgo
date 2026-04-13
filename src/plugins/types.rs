@@ -298,6 +298,7 @@ pub struct PluginHookDefinition {
     pub deny_match: Option<String>,
     pub append_message: Option<String>,
     pub prevent_continuation: bool,
+    pub block_continuation: bool,
     pub permission_decision: Option<String>,
     pub updated_input: Option<String>,
     pub additional_context: Option<String>,
@@ -311,6 +312,7 @@ impl PluginHookDefinition {
             deny_match: self.deny_match.clone(),
             append_message: self.append_message.clone(),
             prevent_continuation: self.prevent_continuation,
+            block_continuation: self.block_continuation,
             permission_decision: self.permission_decision.clone(),
             updated_input: self.updated_input.clone(),
             additional_context: self.additional_context.clone(),
@@ -464,6 +466,8 @@ pub struct PluginHookManifest {
     pub append_message: Option<String>,
     #[serde(default)]
     pub prevent_continuation: bool,
+    #[serde(default)]
+    pub block_continuation: bool,
     #[serde(default)]
     pub permission_decision: Option<String>,
     #[serde(default)]

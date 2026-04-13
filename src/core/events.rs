@@ -1,5 +1,6 @@
 use crate::core::message::Message;
 use crate::core::query_loop::{Continue, Terminal};
+use crate::service::compact::CompactPlanKind;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SessionMilestone {
@@ -21,6 +22,22 @@ impl SessionMilestone {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimeEventKind {
+    NormalTerminal,
+    RetryScheduled,
+    ModelError,
+    StopHookPrevented,
+    StopHookBlocking,
+    CompactPlan,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeEventEnvelope {
+    pub kind: RuntimeEventKind,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EngineEvent {
     AssistantDelta(String),
     MessageCommitted(Message),
@@ -28,7 +45,12 @@ pub enum EngineEvent {
     ToolResultCommitted { tool_name: String, content: String },
     PendingApproval { tool_name: String, message: String },
     Notice { kind: &'static str, message: String },
+    CompactPlanIssued {
+        kind: CompactPlanKind,
+        message: String,
+    },
     Transition(Continue),
+    RuntimeEvent(RuntimeEventEnvelope),
     Terminal(Terminal),
     SessionMilestoneWritten(SessionMilestone),
 }

@@ -42,6 +42,7 @@ pub struct HookRule {
     pub deny_match: Option<String>,
     pub append_message: Option<String>,
     pub prevent_continuation: bool,
+    pub block_continuation: bool,
     pub permission_decision: Option<String>,
     pub updated_input: Option<String>,
     pub additional_context: Option<String>,
@@ -204,6 +205,8 @@ struct HookRuleConfig {
     #[serde(default)]
     prevent_continuation: bool,
     #[serde(default)]
+    block_continuation: bool,
+    #[serde(default)]
     permission_decision: Option<String>,
     #[serde(default)]
     updated_input: Option<String>,
@@ -218,6 +221,7 @@ impl HookRuleConfig {
             deny_match: self.deny_match,
             append_message: self.append_message,
             prevent_continuation: self.prevent_continuation,
+            block_continuation: self.block_continuation,
             permission_decision: self.permission_decision,
             updated_input: self.updated_input,
             additional_context: self.additional_context,

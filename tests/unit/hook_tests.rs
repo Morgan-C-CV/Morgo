@@ -52,6 +52,7 @@ fn pre_tool_hook_can_deny_specific_tool() {
         deny_match: Some("Agent".into()),
         append_message: None,
         prevent_continuation: false,
+        block_continuation: false,
         permission_decision: None,
         updated_input: None,
         additional_context: None,
@@ -77,6 +78,7 @@ fn unrelated_tool_is_allowed() {
         deny_match: Some("Agent".into()),
         append_message: None,
         prevent_continuation: false,
+        block_continuation: false,
         permission_decision: None,
         updated_input: None,
         additional_context: None,
@@ -99,6 +101,7 @@ fn hook_rule_can_append_message_and_prevent_continuation() {
         deny_match: None,
         append_message: Some("stop hook says wait".into()),
         prevent_continuation: true,
+        block_continuation: false,
         permission_decision: None,
         updated_input: None,
         additional_context: None,
@@ -108,9 +111,34 @@ fn hook_rule_can_append_message_and_prevent_continuation() {
 
     assert_eq!(result.decision, HookDecision::Allow);
     assert!(result.prevent_continuation);
+    assert!(!result.block_continuation);
     assert_eq!(
         result.messages,
         vec![Message::assistant("stop hook says wait")]
+    );
+}
+
+#[test]
+fn hook_rule_can_block_continuation_without_preventing() {
+    let registry = HookRegistry::default().register_rule(HookRule {
+        event: HookEventMatcher::Stop,
+        deny_match: None,
+        append_message: Some("stop hook needs revision".into()),
+        prevent_continuation: false,
+        block_continuation: true,
+        permission_decision: None,
+        updated_input: None,
+        additional_context: None,
+    });
+
+    let result = run_hook(&registry, HookEvent::Stop);
+
+    assert_eq!(result.decision, HookDecision::Allow);
+    assert!(!result.prevent_continuation);
+    assert!(result.block_continuation);
+    assert_eq!(
+        result.messages,
+        vec![Message::assistant("stop hook needs revision")]
     );
 }
 
@@ -121,6 +149,7 @@ fn notification_hook_can_match_typed_payload() {
         deny_match: Some("task-9".into()),
         append_message: None,
         prevent_continuation: false,
+        block_continuation: false,
         permission_decision: None,
         updated_input: None,
         additional_context: None,
@@ -172,6 +201,7 @@ fn hook_rule_can_provide_typed_payload() {
         deny_match: None,
         append_message: None,
         prevent_continuation: false,
+        block_continuation: false,
         permission_decision: Some("deny".into()),
         updated_input: Some("patched-input".into()),
         additional_context: Some("extra context".into()),

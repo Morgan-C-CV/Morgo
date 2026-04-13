@@ -154,6 +154,7 @@ async fn agent_tool_launches_subagent_and_completes_task() {
             deny_match: None,
             append_message: Some("shared hook message".into()),
             prevent_continuation: false,
+            block_continuation: false,
             permission_decision: None,
             updated_input: None,
             additional_context: None,

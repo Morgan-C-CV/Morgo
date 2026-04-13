@@ -4,7 +4,7 @@ use crate::prompt::{
 };
 use crate::service::api::client::ModelProviderClient;
 use crate::service::api::streaming::StreamEvent;
-use crate::service::compact::reactive_compact::ReactiveCompactor;
+use crate::service::compact::ReactiveCompactor;
 use crate::state::app_state::{AppState, RuntimeRole, WorkerRole};
 use crate::tool::registry::ToolRegistry;
 
