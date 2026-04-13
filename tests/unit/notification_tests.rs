@@ -106,9 +106,12 @@ fn cli_renderer_surfaces_implement_verify_and_risk_contract_lines() {
     });
 
     assert!(rendered.contains("== Task update =="));
+    assert!(rendered.contains("[panel:task]"));
     assert!(rendered.contains("[task] worker_role: implement"));
     assert!(rendered.contains("[task] next_action: dispatch verify worker for task-2"));
-    assert!(rendered.contains("[notice:validation] Validation pending; final answer must call out unverified risk until verify completes."));
+    assert!(rendered.contains("== Notice: validation =="));
+    assert!(rendered.contains("[panel:notice]"));
+    assert!(rendered.contains("Validation pending; final answer must call out unverified risk until verify completes."));
 }
 
 #[test]
@@ -129,9 +132,11 @@ fn cli_renderer_renders_approval_and_tool_result_panels() {
 
     assert!(rendered.contains("assistant reply"));
     assert!(rendered.contains("== Approval required =="));
+    assert!(rendered.contains("[panel:approval]"));
     assert!(rendered.contains("Tool: Bash"));
     assert!(rendered.contains("requires explicit approval"));
     assert!(rendered.contains("== Tool result =="));
+    assert!(rendered.contains("[panel:tool]"));
     assert!(rendered.contains("Tool: Read"));
     assert!(rendered.contains("line one"));
     assert!(rendered.contains("line two"));

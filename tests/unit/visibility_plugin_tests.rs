@@ -200,6 +200,7 @@ async fn help_command_renders_source_counts_and_execution_kinds() {
     });
     assert!(rendered.contains("Available commands:"));
     assert!(rendered.contains("Plugins (1):"));
+    assert!(!rendered.contains("[panel:"));
 }
 
 #[tokio::test]
@@ -396,6 +397,7 @@ async fn status_command_reports_plugin_discovery_summary() {
     assert!(rendered.contains("Status"));
     assert!(rendered.contains("Plugins:"));
     assert!(rendered.contains("registered_plugin_tools: 1"));
+    assert!(!rendered.contains("[panel:"));
 }
 
 #[tokio::test]
@@ -590,6 +592,7 @@ async fn tasks_command_groups_orchestration_tasks_and_hints() {
     assert!(rendered.contains("Agent Tasks:"));
     assert!(rendered.contains("Summary:"));
     assert!(rendered.contains("Standalone tasks:"));
+    assert!(!rendered.contains("[panel:"));
 }
 
 #[test]
