@@ -1,4 +1,7 @@
+use std::fs;
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use rust_agent::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
@@ -17,7 +20,10 @@ use rust_agent::interaction::dispatcher::NotificationDispatcher;
 use rust_agent::interaction::envelope::NormalizedInput;
 use rust_agent::interaction::remote::{RemoteRequest, handle_remote_request};
 use rust_agent::interaction::router::{CommandRouter, RouteDecision};
-use rust_agent::plugins::runtime_state::{RuntimePluginState, build_runtime_plugin_snapshot};
+use rust_agent::plugins::runtime_state::{
+    RuntimePluginState, build_runtime_plugin_snapshot, build_turn_engine, build_turn_router,
+    hydrate_app_state_from_snapshot, rebuild_runtime_plugin_state,
+};
 use rust_agent::interaction::telegram::gateway::TelegramGateway;
 use rust_agent::plan::manager::PlanManager;
 use rust_agent::security::authorizer::{AuthDecision, DefaultSurfaceAuthorizer, SurfaceAuthorizer};
@@ -31,6 +37,14 @@ use rust_agent::task::manager::TaskManager;
 use rust_agent::task::types::{TaskOwner, ValidationState, WorkerPhase};
 use rust_agent::tool::registry::ToolRegistry;
 use tokio::sync::RwLock;
+
+fn unique_temp_path(prefix: &str) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock should be after unix epoch")
+        .as_nanos();
+    std::env::temp_dir().join(format!("{prefix}-{nanos}"))
+}
 
 struct DenyingAuthorizer;
 
@@ -523,6 +537,518 @@ async fn remote_handler_preserves_remote_actor_and_session_for_query_flow() {
     assert_eq!(normalized.actor.actor_id, "actor-42");
     assert!(normalized.actor.is_authenticated);
     assert!(normalized.metadata.from_trusted_surface);
+}
+
+#[tokio::test]
+async fn cli_repl_uses_next_turn_plugin_snapshot_after_reload_updates_manifest_surface() {
+    let root = unique_temp_path("rust-agent-cli-plugin-reload-update");
+    let plugin_dir = root.join(".claude").join("plugins").join("demo");
+    fs::create_dir_all(&plugin_dir).expect("plugin dir should exist");
+    let manifest_path = plugin_dir.join("plugin.json");
+    fs::write(
+        &manifest_path,
+        r#"{
+  "name": "demo-plugin",
+  "version": "0.1.0",
+  "description": "Demo plugin",
+  "capabilities": ["commands"],
+  "commands": [
+    {
+      "name": "demo-plugin-cmd",
+      "description": "Demo plugin command",
+      "prompt": "Do plugin command work"
+    }
+  ]
+}"#,
+    )
+    .expect("plugin manifest should be written");
+
+    let command_registry = Arc::new(
+        CommandRegistry::new()
+            .register(Arc::new(HelpCommand))
+            .register(Arc::new(PluginsCommand)),
+    );
+    let permission_context = ToolPermissionContext::new(PermissionMode::Default)
+        .with_task_manager(Arc::new(TaskManager::default()))
+        .with_plan_manager(Arc::new(PlanManager::default()));
+    let mut app_state = AppState {
+        surface: InteractionSurface::Cli,
+        session_mode: SessionMode::Interactive,
+        client_type: ClientType::Cli,
+        session_source: SessionSource::LocalCli,
+        runtime_role: RuntimeRole::Coordinator,
+        worker_role: None,
+        permission_context,
+        command_registry: Some(command_registry.clone()),
+        runtime_tool_registry: Some(Arc::new(RwLock::new(ToolRegistry::new()))),
+        skill_registry: None,
+        mcp_runtime: None,
+        plugin_load_result: None,
+        cost_tracker: CostTracker::default(),
+        notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
+        startup_trace: Vec::new(),
+        active_session_id: "cli-session".into(),
+        session_store: None,
+        session: Some(rust_agent::history::session::SessionSnapshot {
+            session_id: rust_agent::history::session::SessionId("cli-session".into()),
+            surface: InteractionSurface::Cli,
+            session_mode: SessionMode::Interactive,
+            cwd: root.display().to_string(),
+            last_turn_at: None,
+            prompt_seed: None,
+        }),
+        history: None,
+        restored_session: None,
+    };
+
+    let initial_snapshot = build_runtime_plugin_snapshot(&app_state);
+    let runtime_plugin_state = RuntimePluginState::new(initial_snapshot.clone());
+    app_state.permission_context = app_state
+        .permission_context
+        .clone()
+        .with_runtime_plugin_state(runtime_plugin_state.clone());
+    hydrate_app_state_from_snapshot(&mut app_state, &initial_snapshot);
+
+    let router = build_turn_router(&initial_snapshot);
+    let base_engine = rust_agent::core::engine::QueryEngine::new(rust_agent::core::context::QueryContext {
+        app_state: app_state.clone(),
+        tool_registry: initial_snapshot.tool_registry.clone(),
+        api_client: ModelProviderClient::default(),
+        compactor: ReactiveCompactor,
+        hook_registry: initial_snapshot.hook_registry.clone(),
+        agent_id: None,
+        system_prompt: "test system".into(),
+        tools_prompt: "test tools".into(),
+        context_prompt: "test context".into(),
+    });
+    let engine = build_turn_engine(&app_state, &initial_snapshot, &base_engine);
+
+    let first = handle_cli_inputs(&router, &engine, &app_state, vec!["/help"])
+        .await
+        .expect("first turn should succeed");
+    assert!(first[0].primary_text.contains("/demo-plugin-cmd — Demo plugin command"));
+    assert!(!first[0].primary_text.contains("/demo-plugin-cmd-v2 — Updated plugin command"));
+
+    fs::write(
+        &manifest_path,
+        r#"{
+  "name": "demo-plugin",
+  "version": "0.1.1",
+  "description": "Demo plugin",
+  "capabilities": ["commands"],
+  "commands": [
+    {
+      "name": "demo-plugin-cmd-v2",
+      "description": "Updated plugin command",
+      "prompt": "Do updated plugin command work"
+    }
+  ]
+}"#,
+    )
+    .expect("updated plugin manifest should be written");
+    let report = rebuild_runtime_plugin_state(&app_state)
+        .await
+        .expect("reload should succeed after manifest update");
+    assert_eq!(report.outcome.as_str(), "applied");
+    assert_eq!(report.generation, 1);
+
+    let second = handle_cli_inputs(&router, &engine, &app_state, vec!["/help"])
+        .await
+        .expect("second turn should succeed");
+    assert!(!second[0].primary_text.contains("/demo-plugin-cmd — Demo plugin command"));
+    assert!(second[0].primary_text.contains("/demo-plugin-cmd-v2 — Updated plugin command"));
+
+    fs::remove_dir_all(root).expect("cleanup plugin reload update root");
+}
+
+#[tokio::test]
+async fn cli_repl_uses_next_turn_plugin_snapshot_after_reload_removes_deleted_plugin() {
+    let root = unique_temp_path("rust-agent-cli-plugin-reload-removal");
+    let plugin_dir = root.join(".claude").join("plugins").join("demo");
+    fs::create_dir_all(&plugin_dir).expect("plugin dir should exist");
+    fs::write(
+        plugin_dir.join("plugin.json"),
+        r#"{
+  "name": "demo-plugin",
+  "version": "0.1.0",
+  "description": "Demo plugin",
+  "capabilities": ["commands"],
+  "commands": [
+    {
+      "name": "demo-plugin-cmd",
+      "description": "Demo plugin command",
+      "prompt": "Do plugin command work"
+    }
+  ]
+}"#,
+    )
+    .expect("plugin manifest should be written");
+
+    let command_registry = Arc::new(
+        CommandRegistry::new()
+            .register(Arc::new(HelpCommand))
+            .register(Arc::new(PluginsCommand)),
+    );
+    let permission_context = ToolPermissionContext::new(PermissionMode::Default)
+        .with_task_manager(Arc::new(TaskManager::default()))
+        .with_plan_manager(Arc::new(PlanManager::default()));
+    let mut app_state = AppState {
+        surface: InteractionSurface::Cli,
+        session_mode: SessionMode::Interactive,
+        client_type: ClientType::Cli,
+        session_source: SessionSource::LocalCli,
+        runtime_role: RuntimeRole::Coordinator,
+        worker_role: None,
+        permission_context,
+        command_registry: Some(command_registry.clone()),
+        runtime_tool_registry: Some(Arc::new(RwLock::new(ToolRegistry::new()))),
+        skill_registry: None,
+        mcp_runtime: None,
+        plugin_load_result: None,
+        cost_tracker: CostTracker::default(),
+        notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
+        startup_trace: Vec::new(),
+        active_session_id: "cli-session".into(),
+        session_store: None,
+        session: Some(rust_agent::history::session::SessionSnapshot {
+            session_id: rust_agent::history::session::SessionId("cli-session".into()),
+            surface: InteractionSurface::Cli,
+            session_mode: SessionMode::Interactive,
+            cwd: root.display().to_string(),
+            last_turn_at: None,
+            prompt_seed: None,
+        }),
+        history: None,
+        restored_session: None,
+    };
+
+    let initial_snapshot = build_runtime_plugin_snapshot(&app_state);
+    let runtime_plugin_state = RuntimePluginState::new(initial_snapshot.clone());
+    app_state.permission_context = app_state
+        .permission_context
+        .clone()
+        .with_runtime_plugin_state(runtime_plugin_state.clone());
+    hydrate_app_state_from_snapshot(&mut app_state, &initial_snapshot);
+
+    let router = build_turn_router(&initial_snapshot);
+    let base_engine = rust_agent::core::engine::QueryEngine::new(rust_agent::core::context::QueryContext {
+        app_state: app_state.clone(),
+        tool_registry: initial_snapshot.tool_registry.clone(),
+        api_client: ModelProviderClient::default(),
+        compactor: ReactiveCompactor,
+        hook_registry: initial_snapshot.hook_registry.clone(),
+        agent_id: None,
+        system_prompt: "test system".into(),
+        tools_prompt: "test tools".into(),
+        context_prompt: "test context".into(),
+    });
+    let engine = build_turn_engine(&app_state, &initial_snapshot, &base_engine);
+
+    let first = handle_cli_inputs(&router, &engine, &app_state, vec!["/help"])
+        .await
+        .expect("first turn should succeed");
+    assert!(first[0].primary_text.contains("/demo-plugin-cmd — Demo plugin command"));
+
+    fs::remove_dir_all(&plugin_dir).expect("plugin dir should be removed");
+    let report = rebuild_runtime_plugin_state(&app_state)
+        .await
+        .expect("reload should succeed after plugin deletion");
+    assert_eq!(report.outcome.as_str(), "applied");
+    assert_eq!(report.generation, 1);
+
+    let second = handle_cli_inputs(&router, &engine, &app_state, vec!["/help"])
+        .await
+        .expect("second turn should succeed");
+    assert!(second[0].primary_text.contains("Available commands"));
+    assert!(!second[0]
+        .primary_text
+        .contains("/demo-plugin-cmd — Demo plugin command"));
+
+    fs::remove_dir_all(root).expect("cleanup plugin reload root");
+}
+
+#[tokio::test]
+async fn cli_repl_applies_disable_and_enable_only_on_next_turn_boundaries() {
+    let root = unique_temp_path("rust-agent-cli-plugin-visibility-matrix");
+    let plugin_dir = root.join(".claude").join("plugins").join("demo");
+    fs::create_dir_all(&plugin_dir).expect("plugin dir should exist");
+    fs::write(
+        plugin_dir.join("plugin.json"),
+        r#"{
+  "name": "demo-plugin",
+  "version": "0.1.0",
+  "description": "Demo plugin",
+  "capabilities": ["commands"],
+  "commands": [
+    {
+      "name": "demo-plugin-cmd",
+      "description": "Demo plugin command",
+      "prompt": "Do plugin command work"
+    }
+  ]
+}"#,
+    )
+    .expect("plugin manifest should be written");
+
+    let command_registry = Arc::new(
+        CommandRegistry::new()
+            .register(Arc::new(HelpCommand))
+            .register(Arc::new(PluginsCommand)),
+    );
+    let permission_context = ToolPermissionContext::new(PermissionMode::Default)
+        .with_task_manager(Arc::new(TaskManager::default()))
+        .with_plan_manager(Arc::new(PlanManager::default()));
+    let mut app_state = AppState {
+        surface: InteractionSurface::Cli,
+        session_mode: SessionMode::Interactive,
+        client_type: ClientType::Cli,
+        session_source: SessionSource::LocalCli,
+        runtime_role: RuntimeRole::Coordinator,
+        worker_role: None,
+        permission_context,
+        command_registry: Some(command_registry.clone()),
+        runtime_tool_registry: Some(Arc::new(RwLock::new(ToolRegistry::new()))),
+        skill_registry: None,
+        mcp_runtime: None,
+        plugin_load_result: None,
+        cost_tracker: CostTracker::default(),
+        notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
+        startup_trace: Vec::new(),
+        active_session_id: "cli-session".into(),
+        session_store: None,
+        session: Some(rust_agent::history::session::SessionSnapshot {
+            session_id: rust_agent::history::session::SessionId("cli-session".into()),
+            surface: InteractionSurface::Cli,
+            session_mode: SessionMode::Interactive,
+            cwd: root.display().to_string(),
+            last_turn_at: None,
+            prompt_seed: None,
+        }),
+        history: None,
+        restored_session: None,
+    };
+
+    let initial_snapshot = build_runtime_plugin_snapshot(&app_state);
+    let runtime_plugin_state = RuntimePluginState::new(initial_snapshot.clone());
+    app_state.permission_context = app_state
+        .permission_context
+        .clone()
+        .with_runtime_plugin_state(runtime_plugin_state.clone());
+    hydrate_app_state_from_snapshot(&mut app_state, &initial_snapshot);
+
+    let router = build_turn_router(&initial_snapshot);
+    let base_engine = rust_agent::core::engine::QueryEngine::new(rust_agent::core::context::QueryContext {
+        app_state: app_state.clone(),
+        tool_registry: initial_snapshot.tool_registry.clone(),
+        api_client: ModelProviderClient::default(),
+        compactor: ReactiveCompactor,
+        hook_registry: initial_snapshot.hook_registry.clone(),
+        agent_id: None,
+        system_prompt: "test system".into(),
+        tools_prompt: "test tools".into(),
+        context_prompt: "test context".into(),
+    });
+    let engine = build_turn_engine(&app_state, &initial_snapshot, &base_engine);
+
+    assert_eq!(
+        router.decide(&NormalizedInput::from_raw(InteractionSurface::Cli, "/demo-plugin-cmd")).await,
+        RouteDecision::ExecuteCommand("demo-plugin-cmd".into())
+    );
+
+    let disable_result = PluginsCommand
+        .execute(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/plugins disable demo-plugin"),
+            &app_state,
+        )
+        .await
+        .expect("disable should succeed");
+    let CommandResult::Message(disable_text) = disable_result else {
+        panic!("expected disable message");
+    };
+    assert!(disable_text.contains("Disabled plugin demo-plugin."));
+
+    assert_eq!(
+        router.decide(&NormalizedInput::from_raw(InteractionSurface::Cli, "/demo-plugin-cmd")).await,
+        RouteDecision::ExecuteCommand("demo-plugin-cmd".into())
+    );
+
+    let after_disable = handle_cli_inputs(&router, &engine, &app_state, vec!["/help"])
+        .await
+        .expect("help after disable should succeed");
+    assert!(!after_disable[0]
+        .primary_text
+        .contains("/demo-plugin-cmd — Demo plugin command"));
+
+    let disabled_snapshot = runtime_plugin_state.snapshot().await;
+    let disabled_router = build_turn_router(&disabled_snapshot);
+    assert_eq!(
+        disabled_router.decide(&NormalizedInput::from_raw(InteractionSurface::Cli, "/demo-plugin-cmd")).await,
+        RouteDecision::ContinueToQuery
+    );
+
+    let enable_result = PluginsCommand
+        .execute(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/plugins enable demo-plugin"),
+            &app_state,
+        )
+        .await
+        .expect("enable should succeed");
+    let CommandResult::Message(enable_text) = enable_result else {
+        panic!("expected enable message");
+    };
+    assert!(enable_text.contains("Enabled plugin demo-plugin."));
+
+    assert_eq!(
+        disabled_router.decide(&NormalizedInput::from_raw(InteractionSurface::Cli, "/demo-plugin-cmd")).await,
+        RouteDecision::ContinueToQuery
+    );
+
+    let after_enable = handle_cli_inputs(&router, &engine, &app_state, vec!["/help"])
+        .await
+        .expect("help after enable should succeed");
+    assert!(after_enable[0]
+        .primary_text
+        .contains("/demo-plugin-cmd — Demo plugin command"));
+
+    fs::remove_dir_all(root).expect("cleanup visibility matrix root");
+}
+
+#[tokio::test]
+async fn remote_handler_uses_next_turn_plugin_snapshot_after_reload_removes_deleted_plugin() {
+    let root = unique_temp_path("rust-agent-remote-plugin-reload-removal");
+    let plugin_dir = root.join(".claude").join("plugins").join("demo");
+    fs::create_dir_all(&plugin_dir).expect("plugin dir should exist");
+    fs::write(
+        plugin_dir.join("plugin.json"),
+        r#"{
+  "name": "demo-plugin",
+  "version": "0.1.0",
+  "description": "Demo plugin",
+  "capabilities": ["commands"],
+  "commands": [
+    {
+      "name": "demo-plugin-cmd",
+      "description": "Demo plugin command",
+      "prompt": "Do plugin command work"
+    }
+  ]
+}"#,
+    )
+    .expect("plugin manifest should be written");
+
+    let command_registry = Arc::new(
+        CommandRegistry::new()
+            .register(Arc::new(HelpCommand))
+            .register(Arc::new(PluginsCommand)),
+    );
+    let permission_context = ToolPermissionContext::new(PermissionMode::Default)
+        .with_task_manager(Arc::new(TaskManager::default()))
+        .with_plan_manager(Arc::new(PlanManager::default()));
+    let session_store = Arc::new(InMemorySessionStore::default());
+    session_store.save(
+        rust_agent::history::session::SessionSnapshot {
+            session_id: rust_agent::history::session::SessionId("remote-session".into()),
+            surface: InteractionSurface::Remote,
+            session_mode: SessionMode::Interactive,
+            cwd: root.display().to_string(),
+            last_turn_at: None,
+            prompt_seed: None,
+        },
+        rust_agent::history::session::SessionHistory::default(),
+    );
+    let mut app_state = AppState {
+        surface: InteractionSurface::Remote,
+        session_mode: SessionMode::Interactive,
+        client_type: ClientType::RemoteControl,
+        session_source: SessionSource::RemoteControl,
+        runtime_role: RuntimeRole::Coordinator,
+        worker_role: None,
+        permission_context,
+        command_registry: Some(command_registry.clone()),
+        runtime_tool_registry: Some(Arc::new(RwLock::new(ToolRegistry::new()))),
+        skill_registry: None,
+        mcp_runtime: None,
+        plugin_load_result: None,
+        cost_tracker: CostTracker::default(),
+        notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
+        startup_trace: Vec::new(),
+        active_session_id: "remote-session".into(),
+        session_store: Some(session_store),
+        session: Some(rust_agent::history::session::SessionSnapshot {
+            session_id: rust_agent::history::session::SessionId("remote-session".into()),
+            surface: InteractionSurface::Remote,
+            session_mode: SessionMode::Interactive,
+            cwd: root.display().to_string(),
+            last_turn_at: None,
+            prompt_seed: None,
+        }),
+        history: None,
+        restored_session: None,
+    };
+
+    let initial_snapshot = build_runtime_plugin_snapshot(&app_state);
+    let runtime_plugin_state = RuntimePluginState::new(initial_snapshot.clone());
+    app_state.permission_context = app_state
+        .permission_context
+        .clone()
+        .with_runtime_plugin_state(runtime_plugin_state.clone());
+    hydrate_app_state_from_snapshot(&mut app_state, &initial_snapshot);
+
+    let router = build_turn_router(&initial_snapshot);
+    let base_engine = rust_agent::core::engine::QueryEngine::new(rust_agent::core::context::QueryContext {
+        app_state: app_state.clone(),
+        tool_registry: initial_snapshot.tool_registry.clone(),
+        api_client: ModelProviderClient::default(),
+        compactor: ReactiveCompactor,
+        hook_registry: initial_snapshot.hook_registry.clone(),
+        agent_id: None,
+        system_prompt: "test system".into(),
+        tools_prompt: "test tools".into(),
+        context_prompt: "test context".into(),
+    });
+    let engine = build_turn_engine(&app_state, &initial_snapshot, &base_engine);
+
+    let first = handle_remote_request(
+        &router,
+        &engine,
+        &app_state,
+        RemoteRequest {
+            session_id: "remote-session".into(),
+            actor_id: "actor-42".into(),
+            is_authenticated: true,
+            from_trusted_surface: true,
+            raw: "/help".into(),
+        },
+    )
+    .await
+    .expect("first remote turn should succeed");
+    assert!(first.primary_text.contains("/demo-plugin-cmd — Demo plugin command"));
+
+    fs::remove_dir_all(&plugin_dir).expect("plugin dir should be removed");
+    let report = rebuild_runtime_plugin_state(&app_state)
+        .await
+        .expect("reload should succeed after plugin deletion");
+    assert_eq!(report.outcome.as_str(), "applied");
+    assert_eq!(report.generation, 1);
+
+    let second = handle_remote_request(
+        &router,
+        &engine,
+        &app_state,
+        RemoteRequest {
+            session_id: "remote-session".into(),
+            actor_id: "actor-42".into(),
+            is_authenticated: true,
+            from_trusted_surface: true,
+            raw: "/help".into(),
+        },
+    )
+    .await
+    .expect("second remote turn should succeed");
+    assert!(second.primary_text.contains("Available commands"));
+    assert!(!second.primary_text.contains("/demo-plugin-cmd — Demo plugin command"));
+
+    fs::remove_dir_all(root).expect("cleanup remote plugin reload root");
 }
 
 #[tokio::test]
