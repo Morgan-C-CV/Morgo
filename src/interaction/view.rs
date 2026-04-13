@@ -13,6 +13,8 @@ pub enum SurfaceItem {
     ApprovalRequired {
         tool_name: String,
         message: String,
+        summary: Option<String>,
+        detail: Option<String>,
     },
     RuntimeNotice {
         kind: String,
@@ -25,6 +27,8 @@ pub enum SurfaceItem {
     ToolResult {
         tool_name: String,
         content: String,
+        summary: Option<String>,
+        detail: Option<String>,
     },
     AssistantDelta {
         text: String,
@@ -78,13 +82,27 @@ fn surface_item_from_runtime_event(event: &CliRuntimeEvent) -> SurfaceItem {
             tool_name: tool_name.clone(),
             input: input.clone(),
         },
-        CliRuntimeEvent::ToolResult { tool_name, content } => SurfaceItem::ToolResult {
+        CliRuntimeEvent::ToolResult {
+            tool_name,
+            content,
+            summary,
+            detail,
+        } => SurfaceItem::ToolResult {
             tool_name: tool_name.clone(),
             content: content.clone(),
+            summary: summary.clone(),
+            detail: detail.clone(),
         },
-        CliRuntimeEvent::PendingApproval { tool_name, message } => SurfaceItem::ApprovalRequired {
+        CliRuntimeEvent::PendingApproval {
+            tool_name,
+            message,
+            summary,
+            detail,
+        } => SurfaceItem::ApprovalRequired {
             tool_name: tool_name.clone(),
             message: message.clone(),
+            summary: summary.clone(),
+            detail: detail.clone(),
         },
         CliRuntimeEvent::Notice { kind, message } => SurfaceItem::RuntimeNotice {
             kind: kind.clone(),
@@ -109,10 +127,10 @@ impl SurfaceItem {
     pub fn to_legacy_line(&self) -> String {
         match self {
             Self::TaskUpdate(task) => format!("[task] {} {}", task.task_id, task.summary),
-            Self::ApprovalRequired { tool_name, message } => format!("[approval] {tool_name}: {message}"),
+            Self::ApprovalRequired { tool_name, message, .. } => format!("[approval] {tool_name}: {message}"),
             Self::RuntimeNotice { kind, message } => format!("[notice:{kind}] {message}"),
             Self::ToolCallStarted { tool_name, input } => format!("[tool-start] {tool_name}: {input}"),
-            Self::ToolResult { tool_name, content } => format!("[tool-result] {tool_name}: {content}"),
+            Self::ToolResult { tool_name, content, .. } => format!("[tool-result] {tool_name}: {content}"),
             Self::AssistantDelta { text } => format!("[delta] {text}"),
             Self::Transition { text, .. } => format!("[transition] {text}"),
             Self::Terminal { text, .. } => format!("[terminal] {text}"),
@@ -159,6 +177,8 @@ pub enum WebItem {
     ApprovalRequired {
         tool_name: String,
         message: String,
+        summary: Option<String>,
+        detail: Option<String>,
     },
     RuntimeNotice {
         notice_kind: String,
@@ -171,6 +191,8 @@ pub enum WebItem {
     ToolResult {
         tool_name: String,
         content: String,
+        summary: Option<String>,
+        detail: Option<String>,
     },
     AssistantDelta {
         text: String,
@@ -227,7 +249,7 @@ pub fn telegram_item_from_surface_item(item: &SurfaceItem) -> Option<TelegramIte
             validation_state: task.validation_state,
             output_file: task.output_file.clone(),
         })),
-        SurfaceItem::ApprovalRequired { tool_name, message } => Some(TelegramItem::ApprovalRequired {
+        SurfaceItem::ApprovalRequired { tool_name, message, .. } => Some(TelegramItem::ApprovalRequired {
             tool_name: tool_name.clone(),
             message: message.clone(),
         }),
@@ -265,9 +287,16 @@ pub fn web_item_from_surface_item(item: &SurfaceItem) -> WebItem {
             validation_state: task.validation_state,
             output_file: task.output_file.clone(),
         }),
-        SurfaceItem::ApprovalRequired { tool_name, message } => WebItem::ApprovalRequired {
+        SurfaceItem::ApprovalRequired {
+            tool_name,
+            message,
+            summary,
+            detail,
+        } => WebItem::ApprovalRequired {
             tool_name: tool_name.clone(),
             message: message.clone(),
+            summary: summary.clone(),
+            detail: detail.clone(),
         },
         SurfaceItem::RuntimeNotice { kind, message } => WebItem::RuntimeNotice {
             notice_kind: kind.clone(),
@@ -277,9 +306,16 @@ pub fn web_item_from_surface_item(item: &SurfaceItem) -> WebItem {
             tool_name: tool_name.clone(),
             input: input.clone(),
         },
-        SurfaceItem::ToolResult { tool_name, content } => WebItem::ToolResult {
+        SurfaceItem::ToolResult {
+            tool_name,
+            content,
+            summary,
+            detail,
+        } => WebItem::ToolResult {
             tool_name: tool_name.clone(),
             content: content.clone(),
+            summary: summary.clone(),
+            detail: detail.clone(),
         },
         SurfaceItem::AssistantDelta { text } => WebItem::AssistantDelta { text: text.clone() },
         SurfaceItem::Transition { kind, text } => WebItem::Transition {

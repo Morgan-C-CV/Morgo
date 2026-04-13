@@ -12,8 +12,18 @@ use crate::task::types::TaskEvent;
 pub enum CliRuntimeEvent {
     AssistantDelta { text: String },
     ToolCallStarted { tool_name: String, input: String },
-    ToolResult { tool_name: String, content: String },
-    PendingApproval { tool_name: String, message: String },
+    ToolResult {
+        tool_name: String,
+        content: String,
+        summary: Option<String>,
+        detail: Option<String>,
+    },
+    PendingApproval {
+        tool_name: String,
+        message: String,
+        summary: Option<String>,
+        detail: Option<String>,
+    },
     Notice { kind: String, message: String },
     Transition { text: String },
     Terminal { text: String },
@@ -27,10 +37,10 @@ impl CliRuntimeEvent {
             Self::ToolCallStarted { tool_name, input } => {
                 format!("[tool-start] {tool_name}: {input}")
             }
-            Self::ToolResult { tool_name, content } => {
+            Self::ToolResult { tool_name, content, .. } => {
                 format!("[tool-result] {tool_name}: {content}")
             }
-            Self::PendingApproval { tool_name, message } => {
+            Self::PendingApproval { tool_name, message, .. } => {
                 format!("[approval] {tool_name}: {message}")
             }
             Self::Notice { kind, message } => format!("[notice:{kind}] {message}"),
@@ -185,24 +195,30 @@ async fn collect_stream_messages(
             }
             EngineEvent::ToolResultCommitted {
                 tool_name,
+                content,
                 summary,
                 detail,
                 ..
             } => {
                 runtime_events.push(CliRuntimeEvent::ToolResult {
                     tool_name,
-                    content: detail.unwrap_or(summary),
+                    content: detail.clone().unwrap_or_else(|| content.clone()),
+                    summary: Some(summary),
+                    detail,
                 });
             }
             EngineEvent::PendingApproval {
                 tool_name,
                 message,
+                summary,
                 detail,
                 ..
             } => {
                 runtime_events.push(CliRuntimeEvent::PendingApproval {
                     tool_name,
-                    message: detail.unwrap_or(message),
+                    message: detail.clone().unwrap_or(message),
+                    summary: Some(summary),
+                    detail,
                 });
             }
             EngineEvent::Notice { kind, message } => {

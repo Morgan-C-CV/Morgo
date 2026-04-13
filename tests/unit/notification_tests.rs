@@ -133,10 +133,14 @@ fn cli_renderer_renders_approval_and_tool_result_panels() {
             CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::PendingApproval {
                 tool_name: "Bash".into(),
                 message: "requires explicit approval".into(),
+                summary: Some("Bash pending approval".into()),
+                detail: Some("requires explicit approval".into()),
             }),
             CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::ToolResult {
                 tool_name: "Read".into(),
                 content: "line one\nline two".into(),
+                summary: Some("Read succeeded".into()),
+                detail: Some("line one\nline two".into()),
             }),
         ],
     });
@@ -151,6 +155,79 @@ fn cli_renderer_renders_approval_and_tool_result_panels() {
     assert!(rendered.contains("Tool: Read"));
     assert!(rendered.contains("line one"));
     assert!(rendered.contains("line two"));
+}
+
+#[test]
+fn surface_and_remote_views_preserve_structured_tool_fields() {
+    let turn = CliTurnOutput {
+        primary_text: "Status".into(),
+        events: vec![
+            CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::PendingApproval {
+                tool_name: "Bash".into(),
+                message: "requires explicit approval".into(),
+                summary: Some("Bash pending approval".into()),
+                detail: Some("requires explicit approval".into()),
+            }),
+            CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::ToolResult {
+                tool_name: "Read".into(),
+                content: "line one".into(),
+                summary: Some("Read succeeded".into()),
+                detail: Some("line one".into()),
+            }),
+        ],
+    };
+
+    let view = build_surface_view(&turn);
+    assert!(matches!(
+        &view.items[0],
+        SurfaceItem::ApprovalRequired {
+            tool_name,
+            message,
+            summary,
+            detail,
+        } if tool_name == "Bash"
+            && message == "requires explicit approval"
+            && summary.as_deref() == Some("Bash pending approval")
+            && detail.as_deref() == Some("requires explicit approval")
+    ));
+    assert!(matches!(
+        &view.items[1],
+        SurfaceItem::ToolResult {
+            tool_name,
+            content,
+            summary,
+            detail,
+        } if tool_name == "Read"
+            && content == "line one"
+            && summary.as_deref() == Some("Read succeeded")
+            && detail.as_deref() == Some("line one")
+    ));
+
+    let remote_events = view.items.into_iter().map(RemoteEventEnvelope::from).collect::<Vec<_>>();
+    assert!(matches!(
+        &remote_events[0].payload,
+        RemoteEventPayload::ApprovalRequired {
+            tool_name,
+            message,
+            summary,
+            detail,
+        } if tool_name == "Bash"
+            && message == "requires explicit approval"
+            && summary.as_deref() == Some("Bash pending approval")
+            && detail.as_deref() == Some("requires explicit approval")
+    ));
+    assert!(matches!(
+        &remote_events[1].payload,
+        RemoteEventPayload::ToolResult {
+            tool_name,
+            content,
+            summary,
+            detail,
+        } if tool_name == "Read"
+            && content == "line one"
+            && summary.as_deref() == Some("Read succeeded")
+            && detail.as_deref() == Some("line one")
+    ));
 }
 
 #[test]
@@ -184,6 +261,8 @@ fn cli_renderer_keeps_primary_text_before_mixed_panels_in_order() {
             CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::ToolResult {
                 tool_name: "Read".into(),
                 content: "plugin manifest updated".into(),
+                summary: None,
+                detail: None,
             }),
         ],
     });
@@ -216,6 +295,8 @@ fn cli_renderer_supports_help_style_primary_text_with_mixed_panels() {
             CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::PendingApproval {
                 tool_name: "Bash".into(),
                 message: "approval needed for follow-up".into(),
+                summary: None,
+                detail: None,
             }),
             CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::Notice {
                 kind: "runtime".into(),
@@ -266,10 +347,14 @@ fn cli_renderer_tui_output_keeps_main_panels_and_footer_in_order() {
             CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::PendingApproval {
                 tool_name: "Bash".into(),
                 message: "approval needed for follow-up".into(),
+                summary: None,
+                detail: None,
             }),
             CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::ToolResult {
                 tool_name: "Read".into(),
                 content: "line one\nline two".into(),
+                summary: None,
+                detail: None,
             }),
         ],
     };
@@ -311,6 +396,8 @@ fn cli_renderer_builds_tui_screen_with_fixed_layout_sections() {
             CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::ToolResult {
                 tool_name: "Read".into(),
                 content: "plugin manifest updated".into(),
+                summary: None,
+                detail: None,
             }),
         ],
     };
@@ -464,6 +551,8 @@ fn remote_delivery_mode_classifies_dual_channel_and_response_only_surface_items(
     let approval_item = SurfaceItem::ApprovalRequired {
         tool_name: "Bash".into(),
         message: "requires explicit approval".into(),
+        summary: None,
+        detail: None,
     };
     assert_eq!(
         remote_channel_kind_for_surface_item(&approval_item),
@@ -512,6 +601,8 @@ fn surface_view_classifies_cli_events_for_cli_and_remote_reuse() {
             CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::ToolResult {
                 tool_name: "Read".into(),
                 content: "line one".into(),
+                summary: None,
+                detail: None,
             }),
         ],
     };
@@ -527,7 +618,7 @@ fn surface_view_classifies_cli_events_for_cli_and_remote_reuse() {
     ));
     assert!(matches!(
         &view.items[1],
-        rust_agent::interaction::view::SurfaceItem::ToolResult { tool_name, content }
+        rust_agent::interaction::view::SurfaceItem::ToolResult { tool_name, content, .. }
             if tool_name == "Read" && content == "line one"
     ));
 }
@@ -577,10 +668,14 @@ fn telegram_view_keeps_only_telegram_relevant_semantic_items() {
             CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::ToolResult {
                 tool_name: "Read".into(),
                 content: "line one".into(),
+                summary: None,
+                detail: None,
             }),
             CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::PendingApproval {
                 tool_name: "Bash".into(),
                 message: "requires explicit approval".into(),
+                summary: None,
+                detail: None,
             }),
         ],
     };
@@ -625,6 +720,8 @@ fn telegram_gateway_builds_semantic_outgoing_messages_without_cli_renderer_types
             CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::ToolResult {
                 tool_name: "Read".into(),
                 content: "secret lines".into(),
+                summary: None,
+                detail: None,
             }),
         ],
     });
@@ -667,6 +764,8 @@ fn web_view_is_derived_from_surface_view_with_frontend_friendly_kinds() {
             CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::ToolResult {
                 tool_name: "Read".into(),
                 content: "line one".into(),
+                summary: None,
+                detail: None,
             }),
         ],
     };
@@ -687,7 +786,7 @@ fn web_view_is_derived_from_surface_view_with_frontend_friendly_kinds() {
     ));
     assert!(matches!(
         &web_view.items[2],
-        WebItem::ToolResult { tool_name, content }
+        WebItem::ToolResult { tool_name, content, .. }
             if tool_name == "Read" && content == "line one"
     ));
 }
@@ -700,6 +799,8 @@ fn same_surface_view_feeds_remote_telegram_and_web_without_cli_renderer_types() 
             CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::PendingApproval {
                 tool_name: "Bash".into(),
                 message: "requires explicit approval".into(),
+                summary: None,
+                detail: None,
             }),
             CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::Notice {
                 kind: "runtime".into(),
@@ -880,7 +981,7 @@ fn drain_remote_notifications_maps_structured_payloads() {
     assert_eq!(drained[0].event_type, "approval_required");
     assert!(matches!(
         &drained[0].payload,
-        RemoteEventPayload::ApprovalRequired { tool_name, message }
+        RemoteEventPayload::ApprovalRequired { tool_name, message, .. }
             if tool_name == "Bash" && message == "requires explicit approval"
     ));
 }

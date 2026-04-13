@@ -129,7 +129,7 @@ fn build_render_document(view: &SurfaceView) -> RenderDocument {
 fn render_block_for_surface_item(item: &SurfaceItem) -> RenderBlock {
     match item {
         SurfaceItem::TaskUpdate(task) => RenderBlock::Panel(render_task_panel(task)),
-        SurfaceItem::ApprovalRequired { tool_name, message } => RenderBlock::Panel(render_panel(
+        SurfaceItem::ApprovalRequired { tool_name, message, .. } => RenderBlock::Panel(render_panel(
             PanelKind::Approval,
             "Approval required",
             vec![format!("Tool: {tool_name}"), message.clone()],
@@ -139,7 +139,7 @@ fn render_block_for_surface_item(item: &SurfaceItem) -> RenderBlock {
             format!("Notice: {kind}"),
             vec![message.clone()],
         )),
-        SurfaceItem::ToolResult { tool_name, content } => {
+        SurfaceItem::ToolResult { tool_name, content, .. } => {
             let mut lines = vec![format!("Tool: {tool_name}")];
             lines.extend(content.lines().map(|line| line.to_string()));
             RenderBlock::Panel(render_panel(PanelKind::ToolResult, "Tool result", lines))

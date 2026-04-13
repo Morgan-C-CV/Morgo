@@ -39,10 +39,20 @@ pub struct RemoteEventEnvelope {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RemoteEventPayload {
     TaskUpdate(RemoteTaskEvent),
-    ApprovalRequired { tool_name: String, message: String },
+    ApprovalRequired {
+        tool_name: String,
+        message: String,
+        summary: Option<String>,
+        detail: Option<String>,
+    },
     RuntimeNotice { kind: String, message: String },
     ToolCallStarted { tool_name: String, input: String },
-    ToolResult { tool_name: String, content: String },
+    ToolResult {
+        tool_name: String,
+        content: String,
+        summary: Option<String>,
+        detail: Option<String>,
+    },
     AssistantDelta { text: String },
     Transition { kind: String, text: String },
     Terminal { kind: String, text: String },
@@ -192,9 +202,19 @@ impl From<SurfaceItem> for RemoteEventEnvelope {
                 event_type: "task_update",
                 payload: RemoteEventPayload::TaskUpdate(RemoteTaskEvent::from(task)),
             },
-            SurfaceItem::ApprovalRequired { tool_name, message } => Self {
+            SurfaceItem::ApprovalRequired {
+                tool_name,
+                message,
+                summary,
+                detail,
+            } => Self {
                 event_type: "approval_required",
-                payload: RemoteEventPayload::ApprovalRequired { tool_name, message },
+                payload: RemoteEventPayload::ApprovalRequired {
+                    tool_name,
+                    message,
+                    summary,
+                    detail,
+                },
             },
             SurfaceItem::RuntimeNotice { kind, message } => Self {
                 event_type: "runtime_notice",
@@ -204,9 +224,19 @@ impl From<SurfaceItem> for RemoteEventEnvelope {
                 event_type: "tool_call_started",
                 payload: RemoteEventPayload::ToolCallStarted { tool_name, input },
             },
-            SurfaceItem::ToolResult { tool_name, content } => Self {
+            SurfaceItem::ToolResult {
+                tool_name,
+                content,
+                summary,
+                detail,
+            } => Self {
                 event_type: "tool_result",
-                payload: RemoteEventPayload::ToolResult { tool_name, content },
+                payload: RemoteEventPayload::ToolResult {
+                    tool_name,
+                    content,
+                    summary,
+                    detail,
+                },
             },
             SurfaceItem::AssistantDelta { text } => Self {
                 event_type: "assistant_delta",
@@ -289,6 +319,8 @@ impl From<Notification> for RemoteNotificationEnvelope {
                 payload: RemoteEventPayload::ApprovalRequired {
                     tool_name: notification.tool_name.unwrap_or_default(),
                     message: notification.body,
+                    summary: None,
+                    detail: None,
                 },
             },
             NotificationType::RuntimeNotice => Self {
@@ -329,7 +361,7 @@ fn notification_from_surface_item(
 ) -> Option<Notification> {
     match item {
         SurfaceItem::TaskUpdate(_) => None,
-        SurfaceItem::ApprovalRequired { tool_name, message } => {
+        SurfaceItem::ApprovalRequired { tool_name, message, .. } => {
             Some(notification_from_pending_approval(
                 &input.session_id,
                 &input.actor.actor_id,
@@ -440,9 +472,21 @@ pub fn render_remote_response_debug(response: &RemoteResponse) -> String {
                 )
                 .expect("write task event");
             }
-            RemoteEventPayload::ApprovalRequired { tool_name, message } => {
-                write!(&mut output, "tool_name={} message={}", tool_name, message)
-                    .expect("write approval event");
+            RemoteEventPayload::ApprovalRequired {
+                tool_name,
+                message,
+                summary,
+                detail,
+            } => {
+                write!(
+                    &mut output,
+                    "tool_name={} message={} summary={:?} detail={:?}",
+                    tool_name,
+                    message,
+                    summary,
+                    detail
+                )
+                .expect("write approval event");
             }
             RemoteEventPayload::RuntimeNotice { kind, message } => {
                 write!(&mut output, "kind={} message={}", kind, message)
@@ -452,9 +496,21 @@ pub fn render_remote_response_debug(response: &RemoteResponse) -> String {
                 write!(&mut output, "tool_name={} input={}", tool_name, input)
                     .expect("write tool call event");
             }
-            RemoteEventPayload::ToolResult { tool_name, content } => {
-                write!(&mut output, "tool_name={} content={}", tool_name, content)
-                    .expect("write tool result event");
+            RemoteEventPayload::ToolResult {
+                tool_name,
+                content,
+                summary,
+                detail,
+            } => {
+                write!(
+                    &mut output,
+                    "tool_name={} content={} summary={:?} detail={:?}",
+                    tool_name,
+                    content,
+                    summary,
+                    detail
+                )
+                .expect("write tool result event");
             }
             RemoteEventPayload::AssistantDelta { text } => {
                 write!(&mut output, "text={}", text).expect("write delta event");
