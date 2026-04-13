@@ -87,60 +87,71 @@ impl QueryEngine {
     }
 
     fn persist_turn(&self, input: Message, events: Vec<EngineEvent>) -> Vec<EngineEvent> {
-        let Some(session_store) = &self.context.app_state.session_store else {
-            return events;
-        };
+        let session_store = self.context.app_state.session_store.as_ref();
         let session_id = SessionId(self.context.app_state.active_session_id.clone());
         let mut persisted_events = Vec::new();
 
-        session_store.append_entry(
-            &session_id,
-            SessionHistoryEntry {
-                message: input,
-                timestamp: None,
-                tool_refs: Vec::new(),
-                milestone: Some(SessionMilestone::UserInputCommitted),
-            },
-        );
-        persisted_events.push(EngineEvent::SessionMilestoneWritten(
-            SessionMilestone::UserInputCommitted,
-        ));
+        if let Some(session_store) = session_store {
+            session_store.append_entry(
+                &session_id,
+                SessionHistoryEntry {
+                    message: input,
+                    timestamp: None,
+                    tool_refs: Vec::new(),
+                    milestone: Some(SessionMilestone::UserInputCommitted),
+                },
+            );
+            persisted_events.push(EngineEvent::SessionMilestoneWritten(
+                SessionMilestone::UserInputCommitted,
+            ));
+        }
 
         for event in events {
             match &event {
                 EngineEvent::MessageCommitted(message) => {
-                    session_store.append_entry(
-                        &session_id,
-                        SessionHistoryEntry {
-                            message: message.clone(),
-                            timestamp: None,
-                            tool_refs: Vec::new(),
-                            milestone: Some(SessionMilestone::AssistantMessageCommitted),
-                        },
-                    );
-                    persisted_events.push(event.clone());
-                    persisted_events.push(EngineEvent::SessionMilestoneWritten(
-                        SessionMilestone::AssistantMessageCommitted,
-                    ));
+                    if let Some(session_store) = session_store {
+                        session_store.append_entry(
+                            &session_id,
+                            SessionHistoryEntry {
+                                message: message.clone(),
+                                timestamp: None,
+                                tool_refs: Vec::new(),
+                                milestone: Some(SessionMilestone::AssistantMessageCommitted),
+                            },
+                        );
+                        persisted_events.push(event.clone());
+                        persisted_events.push(EngineEvent::SessionMilestoneWritten(
+                            SessionMilestone::AssistantMessageCommitted,
+                        ));
+                    } else {
+                        persisted_events.push(event.clone());
+                    }
                 }
                 EngineEvent::ToolResultCommitted { tool_name, content } => {
-                    session_store.append_entry(
-                        &session_id,
-                        SessionHistoryEntry {
-                            message: Message::assistant(format!(
-                                "tool {tool_name} result: {content}"
-                            )),
-                            timestamp: None,
-                            tool_refs: vec![tool_name.clone()],
-                            milestone: Some(SessionMilestone::ToolResultCommitted),
-                        },
-                    );
-                    persisted_events.push(event.clone());
-                    persisted_events.push(EngineEvent::SessionMilestoneWritten(
-                        SessionMilestone::ToolResultCommitted,
-                    ));
+                    if let Some(session_store) = session_store {
+                        session_store.append_entry(
+                            &session_id,
+                            SessionHistoryEntry {
+                                message: Message::assistant(format!(
+                                    "tool {tool_name} result: {content}"
+                                )),
+                                timestamp: None,
+                                tool_refs: vec![tool_name.clone()],
+                                milestone: Some(SessionMilestone::ToolResultCommitted),
+                            },
+                        );
+                        persisted_events.push(event.clone());
+                        persisted_events.push(EngineEvent::SessionMilestoneWritten(
+                            SessionMilestone::ToolResultCommitted,
+                        ));
+                    } else {
+                        persisted_events.push(event.clone());
+                    }
                 }
-                EngineEvent::CompactPlanIssued { .. } => {
+                EngineEvent::CompactPlanIssued { kind, message } => {
+                    persisted_events.push(EngineEvent::RuntimeEvent(
+                        runtime_event_for_compact_plan(kind, message),
+                    ));
                     persisted_events.push(event.clone());
                 }
                 EngineEvent::Terminal(terminal) => {
@@ -148,9 +159,11 @@ impl QueryEngine {
                         terminal,
                     )));
                     persisted_events.push(event.clone());
-                    persisted_events.push(EngineEvent::SessionMilestoneWritten(
-                        SessionMilestone::TurnCompleted,
-                    ));
+                    if session_store.is_some() {
+                        persisted_events.push(EngineEvent::SessionMilestoneWritten(
+                            SessionMilestone::TurnCompleted,
+                        ));
+                    }
                 }
                 EngineEvent::Transition(transition) => {
                     persisted_events.push(EngineEvent::RuntimeEvent(runtime_event_for_transition(
@@ -167,5 +180,49 @@ impl QueryEngine {
 
     pub fn format_task_event_message(event: &TaskEvent) -> Message {
         Message::assistant(event.format_notification())
+    }
+}
+
+fn runtime_event_for_transition(transition: &crate::core::query_loop::Continue) -> RuntimeEventEnvelope {
+    let kind = match transition {
+        crate::core::query_loop::Continue::ReactiveCompactRetry
+        | crate::core::query_loop::Continue::CollapseDrainRetry
+        | crate::core::query_loop::Continue::MaxOutputTokensEscalate
+        | crate::core::query_loop::Continue::MaxOutputTokensRecovery
+        | crate::core::query_loop::Continue::ModelFallbackRetry
+        | crate::core::query_loop::Continue::TokenBudgetContinuation => RuntimeEventKind::RetryScheduled,
+        crate::core::query_loop::Continue::StopHookBlocking => RuntimeEventKind::StopHookBlocking,
+        crate::core::query_loop::Continue::NextTurn
+        | crate::core::query_loop::Continue::ToolUseFollowUp => RuntimeEventKind::NormalTerminal,
+    };
+    RuntimeEventEnvelope {
+        kind,
+        detail: transition.as_str().into(),
+    }
+}
+
+fn runtime_event_for_terminal(terminal: &crate::core::query_loop::Terminal) -> RuntimeEventEnvelope {
+    let kind = match terminal {
+        crate::core::query_loop::Terminal::Completed => RuntimeEventKind::NormalTerminal,
+        crate::core::query_loop::Terminal::StopHookPrevented => RuntimeEventKind::StopHookPrevented,
+        crate::core::query_loop::Terminal::ModelError(_) => RuntimeEventKind::ModelError,
+        crate::core::query_loop::Terminal::MaxTurns { .. }
+        | crate::core::query_loop::Terminal::MaxBudget { .. }
+        | crate::core::query_loop::Terminal::AbortedStreaming
+        | crate::core::query_loop::Terminal::AbortedTools => RuntimeEventKind::RetryScheduled,
+    };
+    RuntimeEventEnvelope {
+        kind,
+        detail: terminal.as_str().into(),
+    }
+}
+
+fn runtime_event_for_compact_plan(
+    kind: &crate::service::compact::CompactPlanKind,
+    message: &str,
+) -> RuntimeEventEnvelope {
+    RuntimeEventEnvelope {
+        kind: RuntimeEventKind::CompactPlan,
+        detail: format!("{:?}: {}", kind, message),
     }
 }

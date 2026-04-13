@@ -1655,6 +1655,172 @@ async fn query_loop_second_max_tokens_hit_uses_recovery_branch() {
 }
 
 #[tokio::test]
+async fn submit_turn_emits_runtime_events_for_compact_recovery_and_terminal_paths() {
+    let engine = QueryEngine::new(test_context_with_turns(
+        vec![
+            vec![StreamEvent::Error("fallback:model_error: upstream overloaded".into())],
+            vec![StreamEvent::Error("still overloaded".into())],
+            vec![
+                StreamEvent::MessageStart,
+                StreamEvent::TextDelta("final answer".into()),
+                StreamEvent::MessageStop {
+                    stop_reason: StopReason::EndTurn,
+                },
+            ],
+        ],
+        ToolRegistry::new(),
+    ));
+
+    let result = engine.submit_turn(Message::user("needs layered recovery")).await;
+
+    assert_eq!(result.terminal, Terminal::Completed);
+    assert!(result.events.iter().any(|event| matches!(
+        event,
+        EngineEvent::RuntimeEvent(runtime)
+            if runtime.kind == rust_agent::core::events::RuntimeEventKind::CompactPlan
+                && runtime.detail.contains("ReactiveCompact")
+    )));
+    assert!(result.events.iter().any(|event| matches!(
+        event,
+        EngineEvent::RuntimeEvent(runtime)
+            if runtime.kind == rust_agent::core::events::RuntimeEventKind::RetryScheduled
+                && runtime.detail == Continue::ModelFallbackRetry.as_str()
+    )));
+    assert!(result.events.iter().any(|event| matches!(
+        event,
+        EngineEvent::RuntimeEvent(runtime)
+            if runtime.kind == rust_agent::core::events::RuntimeEventKind::NormalTerminal
+                && runtime.detail == Terminal::Completed.as_str()
+    )));
+}
+
+#[tokio::test]
+async fn submit_turn_distinguishes_stop_hook_prevented_and_blocking_runtime_events() {
+    let permission_context = ToolPermissionContext::new(PermissionMode::Default)
+        .with_task_manager(Arc::new(TaskManager::default()));
+    permission_context.add_always_allow_rule("Agent");
+
+    let prevented_engine = QueryEngine::new(QueryContext {
+        app_state: AppState {
+            surface: InteractionSurface::Cli,
+            session_mode: SessionMode::Headless,
+            client_type: ClientType::Cli,
+            session_source: SessionSource::LocalCli,
+            runtime_role: RuntimeRole::Coordinator,
+            worker_role: None,
+            permission_context: permission_context.clone(),
+            command_registry: None,
+            runtime_tool_registry: Some(Arc::new(RwLock::new(ToolRegistry::new()))),
+            skill_registry: None,
+            mcp_runtime: None,
+            plugin_load_result: None,
+            cost_tracker: CostTracker::default(),
+            notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
+            startup_trace: Vec::new(),
+            active_session_id: "test-session".into(),
+            session_store: None,
+            session: None,
+            history: None,
+            restored_session: None,
+        },
+        tool_registry: ToolRegistry::new(),
+        api_client: ModelProviderClient::with_scripted_turns(vec![vec![
+            StreamEvent::MessageStart,
+            StreamEvent::TextDelta("done".into()),
+            StreamEvent::MessageStop {
+                stop_reason: StopReason::EndTurn,
+            },
+        ]]),
+        compactor: ReactiveCompactor,
+        hook_registry: HookRegistry::default().register_rule(HookRule {
+            event: HookEventMatcher::Stop,
+            deny_match: None,
+            append_message: Some("stop hook appended message".into()),
+            prevent_continuation: true,
+            block_continuation: false,
+            permission_decision: None,
+            updated_input: None,
+            additional_context: None,
+        }),
+        agent_id: None,
+        system_prompt: "test system".into(),
+        tools_prompt: "test tools".into(),
+        context_prompt: "test context".into(),
+    });
+
+    let blocking_engine = QueryEngine::new(QueryContext {
+        app_state: AppState {
+            surface: InteractionSurface::Cli,
+            session_mode: SessionMode::Headless,
+            client_type: ClientType::Cli,
+            session_source: SessionSource::LocalCli,
+            runtime_role: RuntimeRole::Coordinator,
+            worker_role: None,
+            permission_context,
+            command_registry: None,
+            runtime_tool_registry: Some(Arc::new(RwLock::new(ToolRegistry::new()))),
+            skill_registry: None,
+            mcp_runtime: None,
+            plugin_load_result: None,
+            cost_tracker: CostTracker::default(),
+            notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
+            startup_trace: Vec::new(),
+            active_session_id: "test-session".into(),
+            session_store: None,
+            session: None,
+            history: None,
+            restored_session: None,
+        },
+        tool_registry: ToolRegistry::new(),
+        api_client: ModelProviderClient::with_scripted_turns(vec![
+            vec![
+                StreamEvent::MessageStart,
+                StreamEvent::TextDelta("draft answer".into()),
+                StreamEvent::MessageStop {
+                    stop_reason: StopReason::EndTurn,
+                },
+            ],
+            vec![
+                StreamEvent::MessageStart,
+                StreamEvent::TextDelta("revised answer".into()),
+                StreamEvent::MessageStop {
+                    stop_reason: StopReason::EndTurn,
+                },
+            ],
+        ]),
+        compactor: ReactiveCompactor,
+        hook_registry: HookRegistry::default().register_rule(HookRule {
+            event: HookEventMatcher::Stop,
+            deny_match: None,
+            append_message: Some("stop hook requires revision".into()),
+            prevent_continuation: false,
+            block_continuation: true,
+            permission_decision: None,
+            updated_input: None,
+            additional_context: None,
+        }),
+        agent_id: None,
+        system_prompt: "test system".into(),
+        tools_prompt: "test tools".into(),
+        context_prompt: "test context".into(),
+    });
+
+    let prevented = prevented_engine.submit_turn(Message::user("prevent")).await;
+    let blocking = blocking_engine.submit_turn(Message::user("block")).await;
+
+    assert!(prevented.events.iter().any(|event| matches!(
+        event,
+        EngineEvent::RuntimeEvent(runtime)
+            if runtime.kind == rust_agent::core::events::RuntimeEventKind::StopHookPrevented
+    )));
+    assert!(blocking.events.iter().any(|event| matches!(
+        event,
+        EngineEvent::RuntimeEvent(runtime)
+            if runtime.kind == rust_agent::core::events::RuntimeEventKind::StopHookBlocking
+    )));
+}
+
+#[tokio::test]
 async fn query_loop_uses_param_max_output_recovery_limit() {
     let context = test_context_with_turns(
         vec![

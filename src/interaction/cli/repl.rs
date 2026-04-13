@@ -195,9 +195,26 @@ async fn collect_stream_messages(
                     message,
                 });
             }
+            EngineEvent::CompactPlanIssued { kind, message } => {
+                runtime_events.push(CliRuntimeEvent::Notice {
+                    kind: format!("compact:{}", match kind {
+                        crate::service::compact::CompactPlanKind::AutoCompact => "auto",
+                        crate::service::compact::CompactPlanKind::ReactiveCompact => "reactive",
+                        crate::service::compact::CompactPlanKind::CollapseDrain => "collapse_drain",
+                        crate::service::compact::CompactPlanKind::Exhausted => "exhausted",
+                    }),
+                    message,
+                });
+            }
             EngineEvent::Transition(transition) => {
                 runtime_events.push(CliRuntimeEvent::Transition {
                     text: transition.as_str().to_string(),
+                });
+            }
+            EngineEvent::RuntimeEvent(runtime) => {
+                runtime_events.push(CliRuntimeEvent::Notice {
+                    kind: "runtime".into(),
+                    message: format!("{:?}: {}", runtime.kind, runtime.detail),
                 });
             }
             EngineEvent::Terminal(terminal) => {

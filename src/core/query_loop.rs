@@ -4,6 +4,7 @@ use crate::core::message::Message;
 use crate::hook::executor::{HookDecision, run_hook};
 use crate::hook::registry::HookEvent;
 use crate::service::api::streaming::{StopReason, StreamEvent};
+use crate::service::compact::CompactPlanKind;
 use tokio::time::{Duration, timeout};
 
 const WORKER_MAILBOX_IDLE_TIMEOUT_MS: u64 = 2_000;
@@ -303,27 +304,36 @@ fn prepare_turn(
         return Err(result);
     }
 
-    if context
-        .compactor
-        .should_compact(prepared.token_estimate, 4096)
-    {
-        let compact_message = Message::assistant("compaction requested before continuing the turn");
-        events.push(EngineEvent::Notice {
-            kind: "compaction",
-            message: "reactive compact requested before continuing the turn".into(),
-        });
-        events.push(EngineEvent::Transition(Continue::ReactiveCompactRetry));
-        events.push(EngineEvent::MessageCommitted(compact_message.clone()));
-        state.transition = Some(Continue::ReactiveCompactRetry);
-        state.has_attempted_reactive_compact = true;
-        state.messages.push(compact_message);
-        return Err(finalize_turn(
-            context,
-            state.clone(),
-            QueryLoopState::Compacting,
-            Terminal::Completed,
-            events.clone(),
-        ));
+    if let Some(plan) = context.compactor.plan_auto_compact(prepared.token_estimate, 4096) {
+        if let Some(compact_message) = plan.assistant_message.clone() {
+            let compact_message = Message::assistant(compact_message);
+            events.push(EngineEvent::CompactPlanIssued {
+                kind: plan.kind.clone(),
+                message: plan.notice_message.clone(),
+            });
+            events.push(EngineEvent::Notice {
+                kind: plan.notice_kind,
+                message: plan.notice_message,
+            });
+            events.push(EngineEvent::Transition(Continue::ReactiveCompactRetry));
+            events.push(EngineEvent::MessageCommitted(compact_message.clone()));
+            state.transition = Some(Continue::ReactiveCompactRetry);
+            state.has_attempted_reactive_compact = true;
+            state.auto_compact_tracking = Some(match plan.kind {
+                CompactPlanKind::AutoCompact => "auto_compact".into(),
+                CompactPlanKind::ReactiveCompact => "reactive_compact".into(),
+                CompactPlanKind::CollapseDrain => "collapse_drain".into(),
+                CompactPlanKind::Exhausted => "exhausted".into(),
+            });
+            state.messages.push(compact_message);
+            return Err(finalize_turn(
+                context,
+                state.clone(),
+                QueryLoopState::Compacting,
+                Terminal::Completed,
+                events.clone(),
+            ));
+        }
     }
 
     Ok(prepared)
@@ -614,43 +624,58 @@ async fn consume_model_stream(
                             ),
                         };
                     }
-                    if !state.has_attempted_reactive_compact {
-                        state.has_attempted_reactive_compact = true;
-                        engine_events.push(EngineEvent::Notice {
-                            kind: "recovery",
-                            message: "stream stop error triggered reactive compact retry".into(),
-                        });
-                        return TurnOutcome {
-                            state: state.clone(),
-                            events: engine_events,
-                            decision: TurnDecision::ContinueWith(
-                                Message::user("Retry after reactive compact recovery."),
-                                Continue::ReactiveCompactRetry,
-                            ),
-                        };
+                    let plan = context.compactor.plan_stream_error_recovery(
+                        state.has_attempted_reactive_compact,
+                        state.transition == Some(Continue::CollapseDrainRetry),
+                        None,
+                    );
+                    engine_events.push(EngineEvent::CompactPlanIssued {
+                        kind: plan.kind.clone(),
+                        message: plan.notice_message.clone(),
+                    });
+                    engine_events.push(EngineEvent::Notice {
+                        kind: plan.notice_kind,
+                        message: plan.notice_message.clone(),
+                    });
+                    match plan.kind {
+                        CompactPlanKind::ReactiveCompact => {
+                            state.has_attempted_reactive_compact = true;
+                            state.auto_compact_tracking = Some("reactive_compact".into());
+                            return TurnOutcome {
+                                state: state.clone(),
+                                events: engine_events,
+                                decision: TurnDecision::ContinueWith(
+                                    Message::user(
+                                        plan.retry_prompt.expect("reactive compact prompt"),
+                                    ),
+                                    Continue::ReactiveCompactRetry,
+                                ),
+                            };
+                        }
+                        CompactPlanKind::CollapseDrain => {
+                            state.auto_compact_tracking = Some("collapse_drain".into());
+                            return TurnOutcome {
+                                state: state.clone(),
+                                events: engine_events,
+                                decision: TurnDecision::ContinueWith(
+                                    Message::user(plan.retry_prompt.expect("collapse drain prompt")),
+                                    Continue::CollapseDrainRetry,
+                                ),
+                            };
+                        }
+                        CompactPlanKind::Exhausted => {
+                            state.auto_compact_tracking = Some("exhausted".into());
+                            return TurnOutcome {
+                                state: state.clone(),
+                                events: engine_events,
+                                decision: TurnDecision::Return(
+                                    state.clone(),
+                                    Terminal::ModelError("stream stopped with error".into()),
+                                ),
+                            };
+                        }
+                        CompactPlanKind::AutoCompact => unreachable!("auto compact is pre-stream only"),
                     }
-                    if state.transition != Some(Continue::CollapseDrainRetry) {
-                        engine_events.push(EngineEvent::Notice {
-                            kind: "recovery",
-                            message: "draining collapsed context before final model error".into(),
-                        });
-                        return TurnOutcome {
-                            state: state.clone(),
-                            events: engine_events,
-                            decision: TurnDecision::ContinueWith(
-                                Message::user("Retry after collapse drain recovery."),
-                                Continue::CollapseDrainRetry,
-                            ),
-                        };
-                    }
-                    return TurnOutcome {
-                        state: state.clone(),
-                        events: engine_events,
-                        decision: TurnDecision::Return(
-                            state.clone(),
-                            Terminal::ModelError("stream stopped with error".into()),
-                        ),
-                    };
                 }
             },
             StreamEvent::Error(error) => {
@@ -675,44 +700,53 @@ async fn consume_model_stream(
                         ),
                     };
                 }
-                if !state.has_attempted_reactive_compact {
-                    state.has_attempted_reactive_compact = true;
-                    engine_events.push(EngineEvent::Notice {
-                        kind: "recovery",
-                        message: format!(
-                            "reactive compact retry triggered after stream error: {error}"
-                        ),
-                    });
-                    return TurnOutcome {
-                        state: state.clone(),
-                        events: engine_events,
-                        decision: TurnDecision::ContinueWith(
-                            Message::user("Retry after reactive compact recovery."),
-                            Continue::ReactiveCompactRetry,
-                        ),
-                    };
+                let plan = context.compactor.plan_stream_error_recovery(
+                    state.has_attempted_reactive_compact,
+                    state.transition == Some(Continue::CollapseDrainRetry),
+                    Some(&error),
+                );
+                engine_events.push(EngineEvent::CompactPlanIssued {
+                    kind: plan.kind.clone(),
+                    message: plan.notice_message.clone(),
+                });
+                engine_events.push(EngineEvent::Notice {
+                    kind: plan.notice_kind,
+                    message: plan.notice_message.clone(),
+                });
+                match plan.kind {
+                    CompactPlanKind::ReactiveCompact => {
+                        state.has_attempted_reactive_compact = true;
+                        state.auto_compact_tracking = Some("reactive_compact".into());
+                        return TurnOutcome {
+                            state: state.clone(),
+                            events: engine_events,
+                            decision: TurnDecision::ContinueWith(
+                                Message::user(plan.retry_prompt.expect("reactive compact prompt")),
+                                Continue::ReactiveCompactRetry,
+                            ),
+                        };
+                    }
+                    CompactPlanKind::CollapseDrain => {
+                        state.auto_compact_tracking = Some("collapse_drain".into());
+                        return TurnOutcome {
+                            state: state.clone(),
+                            events: engine_events,
+                            decision: TurnDecision::ContinueWith(
+                                Message::user(plan.retry_prompt.expect("collapse drain prompt")),
+                                Continue::CollapseDrainRetry,
+                            ),
+                        };
+                    }
+                    CompactPlanKind::Exhausted => {
+                        state.auto_compact_tracking = Some("exhausted".into());
+                        return TurnOutcome {
+                            state: state.clone(),
+                            events: engine_events,
+                            decision: TurnDecision::Return(state.clone(), Terminal::ModelError(error)),
+                        };
+                    }
+                    CompactPlanKind::AutoCompact => unreachable!("auto compact is pre-stream only"),
                 }
-                if state.transition != Some(Continue::CollapseDrainRetry) {
-                    engine_events.push(EngineEvent::Notice {
-                        kind: "recovery",
-                        message: format!(
-                            "collapse drain retry triggered after repeated stream error: {error}"
-                        ),
-                    });
-                    return TurnOutcome {
-                        state: state.clone(),
-                        events: engine_events,
-                        decision: TurnDecision::ContinueWith(
-                            Message::user("Retry after collapse drain recovery."),
-                            Continue::CollapseDrainRetry,
-                        ),
-                    };
-                }
-                return TurnOutcome {
-                    state: state.clone(),
-                    events: engine_events,
-                    decision: TurnDecision::Return(state.clone(), Terminal::ModelError(error)),
-                };
             }
         }
     }
