@@ -180,6 +180,7 @@ async fn remote_request_runs_minimal_query_chain() {
         .expect("remote request session should persist");
     assert_eq!(remote_snapshot.session_id.0, "remote-bound-session");
     assert_eq!(remote_snapshot.surface, InteractionSurface::Remote);
+    assert_eq!(remote_snapshot.session_mode, SessionMode::Interactive);
     assert_eq!(history.entries.len(), 2);
     assert_eq!(
         history.entries[0].message,
@@ -189,6 +190,125 @@ async fn remote_request_runs_minimal_query_chain() {
         history.entries[1].message,
         rust_agent::core::message::Message::assistant("remote integration reply")
     );
+}
+
+#[tokio::test]
+async fn remote_request_uses_shared_session_apply_contract() {
+    let command_registry = Arc::new(CommandRegistry::new());
+    let router = rust_agent::interaction::router::CommandRouter::new(
+        command_registry.clone(),
+        Box::new(DefaultSurfaceAuthorizer),
+    );
+    let permission_context = ToolPermissionContext::new(PermissionMode::Default)
+        .with_task_manager(Arc::new(TaskManager::default()))
+        .with_plan_manager(Arc::new(PlanManager::default()));
+    let session_store = Arc::new(InMemorySessionStore::default());
+    session_store.save(
+        SessionSnapshot {
+            session_id: rust_agent::history::session::SessionId("remote-shared-session".into()),
+            surface: InteractionSurface::Remote,
+            session_mode: SessionMode::Interactive,
+            cwd: "/tmp/remote-shared".into(),
+            last_turn_at: None,
+            prompt_seed: None,
+        },
+        SessionHistory::default(),
+    );
+    session_store.save(
+        SessionSnapshot {
+            session_id: rust_agent::history::session::SessionId("bootstrap-session".into()),
+            surface: InteractionSurface::Cli,
+            session_mode: SessionMode::Headless,
+            cwd: "/tmp/bootstrap".into(),
+            last_turn_at: None,
+            prompt_seed: None,
+        },
+        SessionHistory::default(),
+    );
+    let app_state = AppState {
+        surface: InteractionSurface::Cli,
+        session_mode: SessionMode::Headless,
+        client_type: ClientType::Cli,
+        session_source: SessionSource::LocalCli,
+        runtime_role: RuntimeRole::Coordinator,
+        worker_role: None,
+        permission_context,
+        command_registry: Some(command_registry),
+        runtime_tool_registry: Some(Arc::new(RwLock::new(ToolRegistry::new()))),
+        skill_registry: None,
+        mcp_runtime: None,
+        plugin_load_result: None,
+        cost_tracker: CostTracker::default(),
+        notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
+        startup_trace: Vec::new(),
+        active_session_id: "bootstrap-session".into(),
+        session_store: Some(session_store.clone()),
+        session: Some(SessionSnapshot {
+            session_id: rust_agent::history::session::SessionId("bootstrap-session".into()),
+            surface: InteractionSurface::Cli,
+            session_mode: SessionMode::Headless,
+            cwd: "/tmp/bootstrap".into(),
+            last_turn_at: None,
+            prompt_seed: None,
+        }),
+        history: Some(SessionHistory::default()),
+        restored_session: None,
+    };
+    let engine =
+        rust_agent::core::engine::QueryEngine::new(rust_agent::core::context::QueryContext {
+            app_state: app_state.clone(),
+            tool_registry: ToolRegistry::new(),
+            api_client: ModelProviderClient::with_scripted_turns(vec![vec![
+                StreamEvent::MessageStart,
+                StreamEvent::TextDelta("shared contract reply".into()),
+                StreamEvent::MessageStop {
+                    stop_reason: StopReason::EndTurn,
+                },
+            ]]),
+            compactor: ReactiveCompactor,
+            hook_registry: rust_agent::hook::registry::HookRegistry::default(),
+            agent_id: None,
+            system_prompt: "test system".into(),
+            tools_prompt: "test tools".into(),
+            context_prompt: "test context".into(),
+        });
+
+    let response = handle_remote_request(
+        &router,
+        &engine,
+        &app_state,
+        RemoteRequest {
+            session_id: "remote-shared-session".into(),
+            actor_id: "actor-a".into(),
+            is_authenticated: true,
+            from_trusted_surface: true,
+            raw: "hello shared contract".into(),
+        },
+    )
+    .await
+    .expect("remote request should succeed");
+
+    assert!(response.primary_text.contains("shared contract reply"));
+    let (snapshot, history) = session_store
+        .load(&SessionRestoreRequest {
+            resume: Some("remote-shared-session".into()),
+            continue_session: false,
+        })
+        .expect("shared remote session should persist");
+    assert_eq!(snapshot.surface, InteractionSurface::Remote);
+    assert_eq!(snapshot.session_mode, SessionMode::Interactive);
+    assert_eq!(snapshot.cwd, "/tmp/remote-shared");
+    assert_eq!(history.entries.len(), 2);
+
+    let (bootstrap_snapshot, bootstrap_history) = session_store
+        .load(&SessionRestoreRequest {
+            resume: Some("bootstrap-session".into()),
+            continue_session: false,
+        })
+        .expect("bootstrap session should stay untouched");
+    assert_eq!(bootstrap_snapshot.surface, InteractionSurface::Cli);
+    assert_eq!(bootstrap_snapshot.session_mode, SessionMode::Headless);
+    assert!(bootstrap_history.entries.is_empty());
 }
 
 #[tokio::test]

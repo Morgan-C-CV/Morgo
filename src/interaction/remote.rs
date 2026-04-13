@@ -1,7 +1,10 @@
 use crate::bootstrap::SessionMode;
 use crate::core::context::QueryContext;
 use crate::core::engine::QueryEngine;
-use crate::history::session::{SessionHistory, SessionId, SessionRestoreRequest, SessionSnapshot};
+use crate::history::resume::{
+    ResolvedSessionState, RestoreRequest, RestoreSource, resolve_session_state,
+    resolved_from_snapshot,
+};
 use crate::interaction::cli::repl::handle_normalized_input;
 use crate::interaction::view::{SurfaceItem, SurfaceView, TaskView, build_surface_view};
 use crate::interaction::envelope::NormalizedInput;
@@ -476,17 +479,9 @@ fn bind_remote_engine(
     input: &NormalizedInput,
 ) -> QueryEngine {
     let mut remote_app_state = engine.context.app_state.clone();
-    let (session_snapshot, session_history) = ensure_remote_session(app_state, input);
-    remote_app_state.active_session_id = input.session_id.clone();
-    remote_app_state.surface = input.surface;
-    remote_app_state.session_mode = SessionMode::Interactive;
-    remote_app_state.session = Some(session_snapshot);
-    remote_app_state.history = Some(session_history);
-    remote_app_state.restored_session = None;
-    remote_app_state.permission_context = remote_app_state
-        .permission_context
-        .clone()
-        .with_active_session_id(input.session_id.clone());
+    let resolved = resolve_remote_session_state(app_state, input);
+    remote_app_state.apply_resolved_session_state(&resolved);
+    remote_app_state.persist_resolved_session_state(&resolved);
 
     QueryEngine::new(QueryContext {
         app_state: remote_app_state,
@@ -501,48 +496,38 @@ fn bind_remote_engine(
     })
 }
 
-fn ensure_remote_session(
+fn resolve_remote_session_state(
     app_state: &AppState,
     input: &NormalizedInput,
-) -> (SessionSnapshot, SessionHistory) {
-    if let Some(session_store) = &app_state.session_store {
-        if let Some((snapshot, history)) = session_store.load(&SessionRestoreRequest {
-            resume: Some(input.session_id.clone()),
-            continue_session: false,
-        }) {
-            return (snapshot, history);
-        }
-
-        let snapshot = SessionSnapshot {
-            session_id: SessionId(input.session_id.clone()),
-            surface: input.surface,
-            session_mode: SessionMode::Interactive,
-            cwd: app_state
-                .session
-                .as_ref()
-                .map(|existing| existing.cwd.clone())
-                .unwrap_or_default(),
-            last_turn_at: None,
-            prompt_seed: None,
-        };
-        let history = SessionHistory::default();
-        session_store.save(snapshot.clone(), history.clone());
-        return (snapshot, history);
+) -> ResolvedSessionState {
+    let fallback_cwd = app_state
+        .session
+        .as_ref()
+        .map(|existing| existing.cwd.clone())
+        .unwrap_or_default();
+    if let Some(session_store) = app_state.session_store.as_deref() {
+        return resolve_session_state(
+            session_store,
+            Some(&RestoreRequest {
+                source: RestoreSource::ResumeSession,
+                session_id: Some(input.session_id.clone()),
+            }),
+            input.surface,
+            SessionMode::Interactive,
+            std::path::Path::new(&fallback_cwd),
+        );
     }
 
-    (
-        SessionSnapshot {
-            session_id: SessionId(input.session_id.clone()),
+    resolved_from_snapshot(
+        crate::history::session::SessionSnapshot {
+            session_id: crate::history::session::SessionId(input.session_id.clone()),
             surface: input.surface,
             session_mode: SessionMode::Interactive,
-            cwd: app_state
-                .session
-                .as_ref()
-                .map(|existing| existing.cwd.clone())
-                .unwrap_or_default(),
+            cwd: fallback_cwd,
             last_turn_at: None,
             prompt_seed: None,
         },
-        SessionHistory::default(),
+        crate::history::session::SessionHistory::default(),
+        false,
     )
 }

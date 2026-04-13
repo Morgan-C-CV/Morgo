@@ -6,28 +6,30 @@ use clap::Parser;
 
 use crate::bootstrap::setup::SetupContext;
 use crate::bootstrap::{BootstrapPhase, BootstrapState, InteractionSurface, SessionMode};
+use crate::command::registry::CommandRegistry;
 use crate::core::context::QueryContext;
 use crate::core::engine::QueryEngine;
 use crate::cost::tracker::CostTracker;
-use crate::history::resume::{RestoreRequest, RestoreSource, RestoredSession};
-use crate::history::session::{
-    FileBackedSessionStore, SessionHistory, SessionId, SessionRestoreRequest, SessionSnapshot,
-    SessionStore,
+use crate::history::resume::{
+    ResolvedSessionState, RestoreRequest, RestoreSource, resolve_session_state,
 };
-use crate::history::transcript::Transcript;
+use crate::history::session::{FileBackedSessionStore, SessionId, SessionStore};
 use crate::hook::executor::run_hook;
-use crate::hook::registry::{HookEvent, load_hook_registry};
+use crate::hook::registry::{HookEvent, HookRegistry, load_hook_registry};
 use crate::interaction::cli::renderer::{
     build_tui_screen, render_document_output, render_document_tui_output, render_output,
     render_tui_screen_output, render_turn_document,
 };
 use crate::interaction::cli::repl::{CliTurnOutput, handle_cli_input};
 use crate::interaction::dispatcher::NotificationDispatcher;
+use crate::interaction::envelope::NormalizedInput;
+use crate::interaction::router::CommandRouter;
 use crate::interaction::remote::{
     RemoteRequest, handle_remote_request, render_remote_response_debug,
 };
 use crate::interaction::telegram::gateway::TelegramGateway;
 use crate::plan::manager::PlanManager;
+use crate::plugins::runtime_state::RuntimePluginSnapshot;
 use crate::plugins::loader::load_plugins;
 use crate::plugins::runtime::{
     augment_hook_registry_with_plugins, augment_tool_registry_with_plugins,
@@ -45,11 +47,13 @@ use crate::service::api::client::{
 use crate::service::api::retry::RetryPolicy;
 use crate::service::compact::reactive_compact::ReactiveCompactor;
 use crate::service::mcp::config::load_server_configs_with_diagnostics;
+use crate::security::authorizer::{AuthDecision, DefaultSurfaceAuthorizer, SurfaceAuthorizer};
 use crate::service::mcp::runtime::McpRuntime;
 use crate::skills::bundled::bundled_skills;
 use crate::skills::loader::SkillLoaderCache;
 use crate::skills::registry::SkillRegistry;
 use crate::state::app_state::{AppState, RuntimeRole};
+use crate::state::store::AppStateStore;
 use crate::state::permission_context::{PermissionMode, ToolPermissionContext};
 use crate::task::list_manager::TaskListManager;
 use crate::task::manager::TaskManager;
@@ -110,6 +114,66 @@ impl std::fmt::Debug for RuntimeBootstrap {
     }
 }
 
+pub struct RuntimeInitializeBundle {
+    pub hook_registry: HookRegistry,
+    pub notification_dispatcher: NotificationDispatcher,
+    pub skill_registry: Arc<SkillRegistry>,
+    pub mcp_runtime: Arc<McpRuntime>,
+    pub plugin_load_result: Arc<crate::plugins::types::PluginLoadResult>,
+    pub coordinator_tools: ToolRegistry,
+    pub runtime_tool_registry: Arc<RwLock<ToolRegistry>>,
+    pub command_registry: Arc<CommandRegistry>,
+    pub provider_config: ModelProviderConfig,
+    pub api_client: ModelProviderClient,
+    pub compactor: ReactiveCompactor,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromptAugmentation {
+    pub system_prompt: String,
+    pub tools_prompt: String,
+    pub context_prompt: String,
+    pub metadata: PromptAugmentationMetadata,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromptAugmentationMetadata {
+    pub active_session_id: String,
+    pub surface: InteractionSurface,
+    pub session_mode: SessionMode,
+    pub visible_tool_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserAccessDecision {
+    pub allowed: bool,
+    pub reason: Option<String>,
+}
+
+pub struct FinalizedRuntime {
+    pub app_state: AppState,
+    #[allow(dead_code)]
+    pub store: AppStateStore<AppState>,
+    pub snapshot: RuntimePluginSnapshot,
+    pub router: CommandRouter,
+    pub engine: QueryEngine,
+    #[allow(dead_code)]
+    pub prompts: PromptAugmentation,
+}
+
+impl std::fmt::Debug for RuntimeInitializeBundle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RuntimeInitializeBundle")
+            .field("skill_registry", &self.skill_registry)
+            .field("mcp_runtime", &self.mcp_runtime)
+            .field("plugin_load_result", &self.plugin_load_result)
+            .field("coordinator_tool_count", &self.coordinator_tools.all_metadata().len())
+            .field("command_count", &self.command_registry.names().len())
+            .field("provider_config", &self.provider_config)
+            .finish_non_exhaustive()
+    }
+}
+
 impl RuntimeBootstrap {
     pub fn from_cli(cli: BootstrapCli) -> Self {
         Self {
@@ -136,74 +200,22 @@ impl RuntimeBootstrap {
         let task_manager = Arc::new(TaskManager::default());
 
         state.record_phase(BootstrapPhase::BuildToolContext);
-
         state.record_phase(BootstrapPhase::AssembleTools);
         let setup = SetupContext::detect();
-        let base_hook_registry = load_hook_registry(&setup.working_directory);
-        let plugin_load_result = Arc::new(load_plugins(&setup.working_directory));
-        let hook_registry =
-            augment_hook_registry_with_plugins(base_hook_registry, plugin_load_result.as_ref());
-        let _ = run_hook(&hook_registry, HookEvent::SessionStart);
-        let _ = run_hook(&hook_registry, HookEvent::Setup);
         state.record_phase(BootstrapPhase::Setup);
         state.current_cwd = setup.working_directory.clone();
 
         let restore_request = self.restore_request();
-        let restored_session = self.restore_session(&state, restore_request.as_ref());
-        if let Some(restored) = &restored_session {
-            state.surface = restored.snapshot.surface;
-            state.session_mode = restored.snapshot.session_mode;
-            let (client_type, session_source) = match restored.snapshot.surface {
-                InteractionSurface::Cli => (
-                    crate::bootstrap::ClientType::Cli,
-                    crate::bootstrap::SessionSource::LocalCli,
-                ),
-                InteractionSurface::Telegram => (
-                    crate::bootstrap::ClientType::Bot,
-                    crate::bootstrap::SessionSource::Telegram,
-                ),
-                InteractionSurface::Remote => (
-                    crate::bootstrap::ClientType::RemoteControl,
-                    crate::bootstrap::SessionSource::RemoteControl,
-                ),
-            };
-            state.client_type = client_type;
-            state.session_source = session_source;
-        }
-        let active_session_id = restored_session
-            .as_ref()
-            .map(|session| session.snapshot.session_id.0.clone())
-            .unwrap_or_else(|| "local-session".into());
-        let session_snapshot = restored_session
-            .as_ref()
-            .map(|session| session.snapshot.clone());
-        let session_history = restored_session
-            .as_ref()
-            .map(|session| session.history.clone());
-        if session_snapshot.is_none() {
-            self.session_store.save(
-                SessionSnapshot {
-                    session_id: SessionId(active_session_id.clone()),
-                    surface: state.surface,
-                    session_mode: state.session_mode,
-                    cwd: state.current_cwd.display().to_string(),
-                    last_turn_at: None,
-                    prompt_seed: None,
-                },
-                SessionHistory::default(),
-            );
-        }
-        let session_snapshot = session_snapshot.or_else(|| {
-            Some(SessionSnapshot {
-                session_id: SessionId(active_session_id.clone()),
-                surface: state.surface,
-                session_mode: state.session_mode,
-                cwd: state.current_cwd.display().to_string(),
-                last_turn_at: None,
-                prompt_seed: None,
-            })
-        });
-        let session_history = session_history.or_else(|| Some(SessionHistory::default()));
+        let resolved_session = self.resolve_bootstrap_session_state(&state, restore_request.as_ref());
+        self.session_store.save(
+            resolved_session.snapshot.clone(),
+            resolved_session.history.clone(),
+        );
+        state.surface = resolved_session.snapshot.surface;
+        state.session_mode = resolved_session.snapshot.session_mode;
+        state.client_type = resolved_session.client_type;
+        state.session_source = resolved_session.session_source;
+        let active_session_id = resolved_session.active_session_id();
         let task_list_session_id = SessionId(active_session_id.clone());
         let task_list_snapshot = self.session_store.load_task_list(&task_list_session_id);
         let task_list_manager = Arc::new(
@@ -219,120 +231,52 @@ impl RuntimeBootstrap {
                 .unwrap_or_default()
                 .with_persistence(self.session_store.clone(), task_list_session_id),
         );
-        let mut discovered_skills = bundled_skills();
-        let mut skill_loader_cache = SkillLoaderCache::default();
-        let (loaded_skills, _) = skill_loader_cache
-            .load_or_reload(&state.current_cwd)
-            .unwrap_or_default();
-        discovered_skills.extend(loaded_skills.skills);
-        let skill_registry = Arc::new(SkillRegistry::new(discovered_skills));
-        let mcp_config_result = load_server_configs_with_diagnostics(&state.current_cwd);
-        let mcp_runtime = Arc::new(McpRuntime::new_with_config_result(
-            Arc::new(crate::service::mcp::client::RoutingMcpClient::default()),
-            mcp_config_result,
-        ));
-        let tool_inventory = self.build_tool_registry();
-        let (tool_inventory, plugin_tool_diagnostics) =
-            augment_tool_registry_with_plugins(tool_inventory, plugin_load_result.as_ref());
-        let plugin_load_result = Arc::new(crate::plugins::types::PluginLoadResult {
-            root: plugin_load_result.root.clone(),
-            source: plugin_load_result.source,
-            plugins: plugin_load_result
-                .plugins
-                .iter()
-                .cloned()
-                .map(|mut plugin| {
-                    if plugin_tool_diagnostics.iter().any(|diagnostic| {
-                        diagnostic.plugin_name.as_deref() == Some(plugin.name.as_str())
-                            && diagnostic.severity == PluginDiagnosticSeverity::Error
-                    }) {
-                        plugin.lifecycle_state = PluginLifecycleState::Error;
-                        plugin.apply_status = crate::plugins::types::PluginApplyStatus::ApplyFailed;
-                        plugin.activation.commands = 0;
-                        plugin.activation.tools = 0;
-                        plugin.activation.hooks = 0;
-                    }
-                    plugin
-                })
-                .collect::<Vec<PluginDefinition>>(),
-            diagnostics: plugin_load_result
-                .diagnostics
-                .iter()
-                .cloned()
-                .chain(plugin_tool_diagnostics)
-                .collect::<Vec<PluginDiagnostic>>(),
-            orphaned_governance_entries: plugin_load_result.orphaned_governance_entries.clone(),
-        });
-        let coordinator_tools = tool_inventory.assemble_for_role(RuntimeRole::Coordinator);
-        let permission_context = ToolPermissionContext::new(if self.cli.init_only {
-            PermissionMode::Plan
-        } else {
-            PermissionMode::Default
-        })
-        .with_task_manager(task_manager.clone())
-        .with_task_list_manager(task_list_manager.clone())
-        .with_plan_manager(plan_manager.clone())
-        .with_skill_registry(skill_registry.clone())
-        .with_mcp_runtime(mcp_runtime.clone())
-        .with_active_session_id(active_session_id.clone())
-        .with_active_surface(state.surface)
-        .with_notification_dispatcher(
-            NotificationDispatcher::new(self.build_telegram_gateway())
-                .with_hook_registry(hook_registry.clone()),
-        )
-        .with_deferred_tools(true)
-        .with_interactive_tools(true)
-        .with_inherited_tool_registry(coordinator_tools.clone())
-        .with_inherited_hook_registry(hook_registry.clone());
 
         state.record_phase(BootstrapPhase::InitializeRuntime);
-        state.record_phase(BootstrapPhase::AugmentPrompt);
-        state.record_phase(BootstrapPhase::GateUserAccess);
-        let state = state.finalize();
+        let initialize_bundle = self.initialize_runtime(
+            &state,
+            active_session_id.clone(),
+            task_manager.clone(),
+            task_list_manager.clone(),
+            plan_manager.clone(),
+        );
 
-        let provider_config = self.build_model_provider_config();
-        let mut app_state = AppState {
-            surface: state.surface,
-            session_mode: state.session_mode,
-            client_type: state.client_type,
-            session_source: state.session_source,
-            runtime_role: RuntimeRole::Coordinator,
-            worker_role: None,
-            permission_context: permission_context.clone(),
-            command_registry: None,
-            runtime_tool_registry: Some(Arc::new(RwLock::new(coordinator_tools.clone()))),
-            skill_registry: Some(skill_registry.clone()),
-            mcp_runtime: Some(mcp_runtime.clone()),
-            plugin_load_result: Some(plugin_load_result.clone()),
-            cost_tracker: CostTracker::with_default_pricing(
-                provider_config.model_id.clone(),
-                provider_config.pricing.clone(),
-            ),
-            notification_dispatcher: permission_context
-                .notification_dispatcher
-                .clone()
-                .unwrap_or_else(|| {
-                    NotificationDispatcher::new(self.build_telegram_gateway())
-                        .with_hook_registry(hook_registry.clone())
-                }),
-            startup_trace: state
-                .phases
-                .iter()
-                .map(|phase| format!("{phase:?}"))
-                .collect(),
+        state.record_phase(BootstrapPhase::AugmentPrompt);
+        let prompt_seed_state = self.build_runtime_seed_state(
+            &state,
+            &resolved_session,
+            &initialize_bundle,
+            active_session_id.clone(),
+            initialize_bundle.notification_dispatcher.clone(),
+        );
+        let prompts = self.augment_prompts(&prompt_seed_state, &initialize_bundle);
+
+        state.record_phase(BootstrapPhase::GateUserAccess);
+        let access_decision = self.gate_user_access(&state, None);
+        if !access_decision.allowed {
+            anyhow::bail!(
+                access_decision
+                    .reason
+                    .unwrap_or_else(|| "access denied during bootstrap".into())
+            );
+        }
+
+        let state = state.finalize();
+        let finalized = self.finalize_runtime_state(
+            &state,
+            resolved_session,
+            initialize_bundle,
+            prompts,
             active_session_id,
-            session_store: Some(self.session_store.clone()),
-            session: session_snapshot,
-            history: session_history,
-            restored_session,
-        };
-        let initial_snapshot = build_runtime_plugin_snapshot(&app_state);
-        let runtime_plugin_state = RuntimePluginState::new(initial_snapshot.clone());
-        app_state.permission_context = app_state
-            .permission_context
-            .clone()
-            .with_runtime_plugin_state(runtime_plugin_state);
-        hydrate_app_state_from_snapshot(&mut app_state, &initial_snapshot);
+        );
+        let app_state = finalized.app_state.clone();
+        let initial_snapshot = finalized.snapshot.clone();
+        let router = finalized.router;
+        let engine = finalized.engine;
+
+        if self.cli.trace_startup {
+            println!("startup: {}", state.startup_trace());
+        }
 
         if self.cli.show_tools {
             for tool in initial_snapshot
@@ -344,10 +288,6 @@ impl RuntimeBootstrap {
             return Ok(());
         }
 
-        if self.cli.trace_startup {
-            println!("startup: {}", state.startup_trace());
-        }
-
         if self.cli.init_only {
             println!(
                 "initialized {} runtime in {:?} mode",
@@ -355,27 +295,6 @@ impl RuntimeBootstrap {
             );
             return Ok(());
         }
-
-        let router = build_turn_router(&initial_snapshot);
-        let base_query_context = QueryContext {
-            app_state: app_state.clone(),
-            tool_registry: initial_snapshot.tool_registry.clone(),
-            api_client: ModelProviderClient::from_config(provider_config),
-            compactor: ReactiveCompactor,
-            hook_registry: initial_snapshot.hook_registry.clone(),
-            agent_id: None,
-            system_prompt: crate::prompt::system::build_system_prompt(&app_state),
-            tools_prompt: crate::prompt::tools::build_tools_prompt(
-                &initial_snapshot.tool_registry,
-                &app_state.permission_context,
-            ),
-            context_prompt: crate::prompt::context::build_context_prompt(&app_state),
-        };
-        let engine = build_turn_engine(
-            &app_state,
-            &initial_snapshot,
-            &QueryEngine::new(base_query_context),
-        );
 
         if let Some(prompt) = &self.cli.print {
             if matches!(app_state.surface, InteractionSurface::Remote) {
@@ -510,6 +429,285 @@ impl RuntimeBootstrap {
         }
     }
 
+    pub fn initialize_runtime(
+        &self,
+        state: &BootstrapState,
+        active_session_id: String,
+        task_manager: Arc<TaskManager>,
+        task_list_manager: Arc<TaskListManager>,
+        plan_manager: Arc<PlanManager>,
+    ) -> RuntimeInitializeBundle {
+        let base_hook_registry = load_hook_registry(&state.current_cwd);
+        let plugin_load_result = Arc::new(load_plugins(&state.current_cwd));
+        let hook_registry =
+            augment_hook_registry_with_plugins(base_hook_registry, plugin_load_result.as_ref());
+        let _ = run_hook(&hook_registry, HookEvent::SessionStart);
+        let _ = run_hook(&hook_registry, HookEvent::Setup);
+
+        let mut discovered_skills = bundled_skills();
+        let mut skill_loader_cache = SkillLoaderCache::default();
+        let (loaded_skills, _) = skill_loader_cache
+            .load_or_reload(&state.current_cwd)
+            .unwrap_or_default();
+        discovered_skills.extend(loaded_skills.skills);
+        let skill_registry = Arc::new(SkillRegistry::new(discovered_skills));
+        let mcp_config_result = load_server_configs_with_diagnostics(&state.current_cwd);
+        let mcp_runtime = Arc::new(McpRuntime::new_with_config_result(
+            Arc::new(crate::service::mcp::client::RoutingMcpClient::default()),
+            mcp_config_result,
+        ));
+        let tool_inventory = self.build_tool_registry();
+        let (tool_inventory, plugin_tool_diagnostics) =
+            augment_tool_registry_with_plugins(tool_inventory, plugin_load_result.as_ref());
+        let plugin_load_result = Arc::new(crate::plugins::types::PluginLoadResult {
+            root: plugin_load_result.root.clone(),
+            source: plugin_load_result.source,
+            plugins: plugin_load_result
+                .plugins
+                .iter()
+                .cloned()
+                .map(|mut plugin| {
+                    if plugin_tool_diagnostics.iter().any(|diagnostic| {
+                        diagnostic.plugin_name.as_deref() == Some(plugin.name.as_str())
+                            && diagnostic.severity == PluginDiagnosticSeverity::Error
+                    }) {
+                        plugin.lifecycle_state = PluginLifecycleState::Error;
+                        plugin.apply_status = crate::plugins::types::PluginApplyStatus::ApplyFailed;
+                        plugin.activation.commands = 0;
+                        plugin.activation.tools = 0;
+                        plugin.activation.hooks = 0;
+                    }
+                    plugin
+                })
+                .collect::<Vec<PluginDefinition>>(),
+            diagnostics: plugin_load_result
+                .diagnostics
+                .iter()
+                .cloned()
+                .chain(plugin_tool_diagnostics)
+                .collect::<Vec<PluginDiagnostic>>(),
+            orphaned_governance_entries: plugin_load_result.orphaned_governance_entries.clone(),
+        });
+        let coordinator_tools = tool_inventory.assemble_for_role(RuntimeRole::Coordinator);
+        let runtime_tool_registry = Arc::new(RwLock::new(coordinator_tools.clone()));
+        let notification_dispatcher = NotificationDispatcher::new(self.build_telegram_gateway())
+            .with_hook_registry(hook_registry.clone());
+        let permission_context = ToolPermissionContext::new(if self.cli.init_only {
+            PermissionMode::Plan
+        } else {
+            PermissionMode::Default
+        })
+        .with_task_manager(task_manager)
+        .with_task_list_manager(task_list_manager)
+        .with_plan_manager(plan_manager)
+        .with_skill_registry(skill_registry.clone())
+        .with_mcp_runtime(mcp_runtime.clone())
+        .with_active_session_id(active_session_id)
+        .with_active_surface(state.surface)
+        .with_notification_dispatcher(notification_dispatcher.clone())
+        .with_deferred_tools(true)
+        .with_interactive_tools(true)
+        .with_inherited_tool_registry(coordinator_tools.clone())
+        .with_inherited_hook_registry(hook_registry.clone());
+        let app_state = AppState {
+            surface: state.surface,
+            session_mode: state.session_mode,
+            client_type: state.client_type,
+            session_source: state.session_source,
+            runtime_role: RuntimeRole::Coordinator,
+            worker_role: None,
+            permission_context,
+            command_registry: None,
+            runtime_tool_registry: Some(runtime_tool_registry.clone()),
+            skill_registry: Some(skill_registry.clone()),
+            mcp_runtime: Some(mcp_runtime.clone()),
+            plugin_load_result: Some(plugin_load_result.clone()),
+            cost_tracker: CostTracker::default(),
+            notification_dispatcher: notification_dispatcher.clone(),
+            startup_trace: state
+                .phases
+                .iter()
+                .map(|phase| format!("{phase:?}"))
+                .collect(),
+            active_session_id: String::new(),
+            session_store: None,
+            session: None,
+            history: None,
+            restored_session: None,
+        };
+        let snapshot = build_runtime_plugin_snapshot(&app_state);
+        let command_registry = snapshot.command_registry.clone();
+        let provider_config = self.build_model_provider_config();
+        let api_client = ModelProviderClient::from_config(provider_config.clone());
+
+        RuntimeInitializeBundle {
+            hook_registry,
+            notification_dispatcher,
+            skill_registry,
+            mcp_runtime,
+            plugin_load_result,
+            coordinator_tools,
+            runtime_tool_registry,
+            command_registry,
+            provider_config,
+            api_client,
+            compactor: ReactiveCompactor,
+        }
+    }
+
+    fn build_runtime_seed_state(
+        &self,
+        state: &BootstrapState,
+        resolved_session: &ResolvedSessionState,
+        initialize_bundle: &RuntimeInitializeBundle,
+        active_session_id: String,
+        notification_dispatcher: NotificationDispatcher,
+    ) -> AppState {
+        let permission_context = ToolPermissionContext::new(if self.cli.init_only {
+            PermissionMode::Plan
+        } else {
+            PermissionMode::Default
+        })
+        .with_skill_registry(initialize_bundle.skill_registry.clone())
+        .with_mcp_runtime(initialize_bundle.mcp_runtime.clone())
+        .with_active_session_id(active_session_id.clone())
+        .with_active_surface(state.surface)
+        .with_notification_dispatcher(notification_dispatcher)
+        .with_deferred_tools(true)
+        .with_interactive_tools(true)
+        .with_inherited_tool_registry(initialize_bundle.coordinator_tools.clone())
+        .with_inherited_hook_registry(initialize_bundle.hook_registry.clone());
+        let mut app_state = AppState {
+            surface: state.surface,
+            session_mode: state.session_mode,
+            client_type: state.client_type,
+            session_source: state.session_source,
+            runtime_role: RuntimeRole::Coordinator,
+            worker_role: None,
+            permission_context,
+            command_registry: Some(initialize_bundle.command_registry.clone()),
+            runtime_tool_registry: Some(initialize_bundle.runtime_tool_registry.clone()),
+            skill_registry: Some(initialize_bundle.skill_registry.clone()),
+            mcp_runtime: Some(initialize_bundle.mcp_runtime.clone()),
+            plugin_load_result: Some(initialize_bundle.plugin_load_result.clone()),
+            cost_tracker: CostTracker::with_default_pricing(
+                initialize_bundle.provider_config.model_id.clone(),
+                initialize_bundle.provider_config.pricing.clone(),
+            ),
+            notification_dispatcher: initialize_bundle.notification_dispatcher.clone(),
+            startup_trace: state
+                .phases
+                .iter()
+                .map(|phase| format!("{phase:?}"))
+                .collect(),
+            active_session_id,
+            session_store: Some(self.session_store.clone()),
+            session: None,
+            history: None,
+            restored_session: None,
+        };
+        app_state.apply_resolved_session_state(resolved_session);
+        app_state
+    }
+
+    pub fn augment_prompts(
+        &self,
+        app_state: &AppState,
+        initialize_bundle: &RuntimeInitializeBundle,
+    ) -> PromptAugmentation {
+        PromptAugmentation {
+            system_prompt: crate::prompt::system::build_system_prompt(app_state),
+            tools_prompt: crate::prompt::tools::build_tools_prompt(
+                &initialize_bundle.coordinator_tools,
+                &app_state.permission_context,
+            ),
+            context_prompt: crate::prompt::context::build_context_prompt(app_state),
+            metadata: PromptAugmentationMetadata {
+                active_session_id: app_state.active_session_id.clone(),
+                surface: app_state.surface,
+                session_mode: app_state.session_mode,
+                visible_tool_count: initialize_bundle
+                    .coordinator_tools
+                    .visible_tools(&app_state.permission_context)
+                    .len(),
+            },
+        }
+    }
+
+    pub fn gate_user_access(
+        &self,
+        state: &BootstrapState,
+        input: Option<&NormalizedInput>,
+    ) -> UserAccessDecision {
+        let authorizer = DefaultSurfaceAuthorizer;
+        let Some(input) = input else {
+            return UserAccessDecision {
+                allowed: true,
+                reason: None,
+            };
+        };
+        match authorizer.authorize(state.surface, &input.actor, &input.raw) {
+            AuthDecision::Allow => UserAccessDecision {
+                allowed: true,
+                reason: None,
+            },
+            AuthDecision::Deny { reason } => UserAccessDecision {
+                allowed: false,
+                reason: Some(reason),
+            },
+        }
+    }
+
+    pub fn finalize_runtime_state(
+        &self,
+        state: &BootstrapState,
+        resolved_session: ResolvedSessionState,
+        initialize_bundle: RuntimeInitializeBundle,
+        prompts: PromptAugmentation,
+        active_session_id: String,
+    ) -> FinalizedRuntime {
+        let mut app_state = self.build_runtime_seed_state(
+            state,
+            &resolved_session,
+            &initialize_bundle,
+            active_session_id,
+            initialize_bundle.notification_dispatcher.clone(),
+        );
+        let initial_snapshot = build_runtime_plugin_snapshot(&app_state);
+        let runtime_plugin_state = RuntimePluginState::new(initial_snapshot.clone());
+        app_state.permission_context = app_state
+            .permission_context
+            .clone()
+            .with_runtime_plugin_state(runtime_plugin_state);
+        hydrate_app_state_from_snapshot(&mut app_state, &initial_snapshot);
+        let store = AppStateStore::new(app_state.clone());
+        let router = build_turn_router(&initial_snapshot);
+        let base_query_context = QueryContext {
+            app_state: app_state.clone(),
+            tool_registry: initial_snapshot.tool_registry.clone(),
+            api_client: initialize_bundle.api_client.clone(),
+            compactor: initialize_bundle.compactor.clone(),
+            hook_registry: initial_snapshot.hook_registry.clone(),
+            agent_id: None,
+            system_prompt: prompts.system_prompt.clone(),
+            tools_prompt: prompts.tools_prompt.clone(),
+            context_prompt: prompts.context_prompt.clone(),
+        };
+        let engine = build_turn_engine(
+            &app_state,
+            &initial_snapshot,
+            &QueryEngine::new(base_query_context),
+        );
+        FinalizedRuntime {
+            app_state,
+            store,
+            snapshot: initial_snapshot,
+            router,
+            engine,
+            prompts,
+        }
+    }
+
     fn build_tool_registry(&self) -> ToolRegistry {
         ToolRegistry::new()
             .register(Arc::new(AgentTool))
@@ -603,43 +801,17 @@ impl RuntimeBootstrap {
         }
     }
 
-    fn restore_session(
+    fn resolve_bootstrap_session_state(
         &self,
         state: &BootstrapState,
         request: Option<&RestoreRequest>,
-    ) -> Option<RestoredSession> {
-        let request = request?;
-        let store_request = SessionRestoreRequest {
-            resume: request.session_id.clone(),
-            continue_session: matches!(request.source, RestoreSource::ContinueSession),
-        };
-
-        if let Some((snapshot, history)) = self.session_store.load(&store_request) {
-            let transcript = Transcript::from(history.clone());
-            return Some(RestoredSession {
-                snapshot,
-                history,
-                transcript,
-            });
-        }
-
-        let session_id = request
-            .session_id
-            .clone()
-            .or_else(|| Some("latest-session".into()))?;
-        let snapshot = SessionSnapshot {
-            session_id: SessionId(session_id.clone()),
-            surface: state.surface,
-            session_mode: state.session_mode,
-            cwd: state.current_cwd.display().to_string(),
-            last_turn_at: None,
-            prompt_seed: None,
-        };
-        let history = SessionHistory::default();
-        Some(RestoredSession {
-            snapshot,
-            history,
-            transcript: Transcript::default(),
-        })
+    ) -> ResolvedSessionState {
+        resolve_session_state(
+            self.session_store.as_ref(),
+            request,
+            state.surface,
+            state.session_mode,
+            &state.current_cwd,
+        )
     }
 }

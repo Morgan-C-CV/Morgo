@@ -10,11 +10,25 @@ use crate::tool::registry::ToolRegistry;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-use crate::history::resume::RestoredSession;
-use crate::history::session::{SessionHistory, SessionSnapshot, SessionStore};
+use crate::history::resume::{ResolvedSessionState, RestoredSession};
+use crate::history::session::{SessionHistory, SessionId, SessionSnapshot, SessionStore};
 use crate::interaction::dispatcher::NotificationDispatcher;
 use crate::state::permission_context::ToolPermissionContext;
 use std::path::PathBuf;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AppStateRuntimeChange {
+    PermissionChanged,
+    SurfaceBindingChanged,
+    SessionLifecycleChanged,
+    PluginSnapshotChanged,
+    Noop,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppStateChangeSet {
+    pub changes: Vec<AppStateRuntimeChange>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeRole {
@@ -70,6 +84,86 @@ impl AppState {
             .map(|session| PathBuf::from(session.cwd.clone()))
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_else(|| PathBuf::from("."))
+    }
+
+    pub fn classify_runtime_changes(previous: &Self, current: &Self) -> AppStateChangeSet {
+        let mut changes = Vec::new();
+        if previous.permission_context.mode() != current.permission_context.mode() {
+            changes.push(AppStateRuntimeChange::PermissionChanged);
+        }
+        if previous.surface != current.surface
+            || previous.client_type != current.client_type
+            || previous.session_source != current.session_source
+            || previous.active_session_id != current.active_session_id
+        {
+            changes.push(AppStateRuntimeChange::SurfaceBindingChanged);
+        }
+        if previous.session != current.session
+            || previous.history != current.history
+            || previous.restored_session != current.restored_session
+        {
+            changes.push(AppStateRuntimeChange::SessionLifecycleChanged);
+        }
+        let previous_plugin = previous.plugin_load_result.as_ref().map(Arc::as_ptr);
+        let current_plugin = current.plugin_load_result.as_ref().map(Arc::as_ptr);
+        if previous_plugin != current_plugin {
+            changes.push(AppStateRuntimeChange::PluginSnapshotChanged);
+        }
+        if changes.is_empty() {
+            changes.push(AppStateRuntimeChange::Noop);
+        }
+        AppStateChangeSet { changes }
+    }
+
+    pub fn bind_surface_session(
+        &mut self,
+        surface: InteractionSurface,
+        client_type: ClientType,
+        session_source: SessionSource,
+        active_session_id: impl Into<String>,
+    ) {
+        self.surface = surface;
+        self.client_type = client_type;
+        self.session_source = session_source;
+        self.active_session_id = active_session_id.into();
+        self.permission_context = self
+            .permission_context
+            .clone()
+            .with_active_surface(surface)
+            .with_active_session_id(self.active_session_id.clone());
+    }
+
+    pub fn apply_restored_session(&mut self, restored_session: Option<RestoredSession>) {
+        self.restored_session = restored_session.clone();
+        self.session = restored_session.as_ref().map(|restored| restored.snapshot.clone());
+        self.history = restored_session.map(|restored| restored.history);
+    }
+
+    pub fn apply_resolved_session_state(&mut self, resolved: &ResolvedSessionState) {
+        self.bind_surface_session(
+            resolved.snapshot.surface,
+            resolved.client_type,
+            resolved.session_source,
+            resolved.snapshot.session_id.0.clone(),
+        );
+        self.session_mode = resolved.snapshot.session_mode;
+        self.session = Some(resolved.snapshot.clone());
+        self.history = Some(resolved.history.clone());
+        self.restored_session = resolved.restored_session.clone();
+    }
+
+    pub fn persist_resolved_session_state(&self, resolved: &ResolvedSessionState) {
+        let Some(session_store) = &self.session_store else {
+            return;
+        };
+        session_store.save(resolved.snapshot.clone(), resolved.history.clone());
+    }
+
+    pub fn current_session_id(&self) -> SessionId {
+        self.session
+            .as_ref()
+            .map(|session| session.session_id.clone())
+            .unwrap_or_else(|| SessionId(self.active_session_id.clone()))
     }
 
     pub async fn resolve_pending_approval(&self, approved: bool) -> anyhow::Result<CommandResult> {

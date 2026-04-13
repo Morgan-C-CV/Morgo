@@ -2,10 +2,17 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rust_agent::bootstrap::{
-    BootstrapCli, BootstrapPhase, BootstrapState, InteractionSurface, RuntimeBootstrap,
-    SessionMode, is_tui_exit_input, tui_clear_screen_prefix,
+    BootstrapCli, BootstrapPhase, BootstrapState, InteractionSurface, PromptAugmentationMetadata,
+    RuntimeBootstrap, SessionMode, SessionSource, UserAccessDecision, is_tui_exit_input,
+    tui_clear_screen_prefix,
 };
+use rust_agent::state::app_state::{AppState, AppStateRuntimeChange, RuntimeRole};
+use rust_agent::state::permission_context::{PermissionMode, ToolPermissionContext};
+use rust_agent::state::store::AppStateStore;
 use rust_agent::core::message::Message;
+use rust_agent::history::resume::{
+    RestoreRequest, RestoreSource, resolve_session_state,
+};
 use rust_agent::history::session::{
     FileBackedSessionStore, InMemorySessionStore, SessionHistory, SessionHistoryEntry, SessionId,
     SessionRestoreRequest, SessionSnapshot, SessionStore,
@@ -32,6 +39,116 @@ fn bootstrap_state_records_phase_order() {
         state.startup_trace(),
         "DetectSurface -> ResolvePermissions -> FinalizeState"
     );
+}
+
+#[test]
+fn app_state_store_notifies_subscribers_after_committed_update() {
+    let app_state = AppState {
+        surface: InteractionSurface::Cli,
+        session_mode: SessionMode::Interactive,
+        client_type: rust_agent::bootstrap::ClientType::Cli,
+        session_source: SessionSource::LocalCli,
+        runtime_role: RuntimeRole::Coordinator,
+        worker_role: None,
+        permission_context: ToolPermissionContext::new(PermissionMode::Default),
+        command_registry: None,
+        runtime_tool_registry: None,
+        skill_registry: None,
+        mcp_runtime: None,
+        plugin_load_result: None,
+        cost_tracker: rust_agent::cost::tracker::CostTracker::default(),
+        notification_dispatcher: rust_agent::interaction::dispatcher::NotificationDispatcher::new(
+            rust_agent::interaction::telegram::gateway::TelegramGateway::default(),
+        ),
+        startup_trace: Vec::new(),
+        active_session_id: "session-1".into(),
+        session_store: None,
+        session: None,
+        history: None,
+        restored_session: None,
+    };
+    let store = AppStateStore::new(app_state);
+    let observed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let observed_clone = observed.clone();
+    store.subscribe(move |update| {
+        observed_clone
+            .lock()
+            .expect("observation lock")
+            .push((update.generation, update.current.permission_context.mode()));
+    });
+
+    let update = store.update(|state| {
+        state.permission_context.set_mode(PermissionMode::Plan);
+    });
+
+    assert_eq!(update.generation, 1);
+    assert_eq!(store.generation(), 1);
+    assert_eq!(store.get().permission_context.mode(), PermissionMode::Plan);
+    assert_eq!(
+        observed.lock().expect("observation lock").as_slice(),
+        &[(1, PermissionMode::Plan)]
+    );
+}
+
+#[test]
+fn app_state_classifies_runtime_visible_changes() {
+    let previous = AppState {
+        surface: InteractionSurface::Cli,
+        session_mode: SessionMode::Interactive,
+        client_type: rust_agent::bootstrap::ClientType::Cli,
+        session_source: SessionSource::LocalCli,
+        runtime_role: RuntimeRole::Coordinator,
+        worker_role: None,
+        permission_context: ToolPermissionContext::new(PermissionMode::Default),
+        command_registry: None,
+        runtime_tool_registry: None,
+        skill_registry: None,
+        mcp_runtime: None,
+        plugin_load_result: None,
+        cost_tracker: rust_agent::cost::tracker::CostTracker::default(),
+        notification_dispatcher: rust_agent::interaction::dispatcher::NotificationDispatcher::new(
+            rust_agent::interaction::telegram::gateway::TelegramGateway::default(),
+        ),
+        startup_trace: Vec::new(),
+        active_session_id: "session-1".into(),
+        session_store: None,
+        session: None,
+        history: None,
+        restored_session: None,
+    };
+    let mut current = AppState {
+        surface: previous.surface,
+        session_mode: previous.session_mode,
+        client_type: previous.client_type,
+        session_source: previous.session_source,
+        runtime_role: previous.runtime_role,
+        worker_role: previous.worker_role,
+        permission_context: ToolPermissionContext::new(PermissionMode::Plan),
+        command_registry: previous.command_registry.clone(),
+        runtime_tool_registry: previous.runtime_tool_registry.clone(),
+        skill_registry: previous.skill_registry.clone(),
+        mcp_runtime: previous.mcp_runtime.clone(),
+        plugin_load_result: previous.plugin_load_result.clone(),
+        cost_tracker: previous.cost_tracker.clone(),
+        notification_dispatcher: previous.notification_dispatcher.clone(),
+        startup_trace: previous.startup_trace.clone(),
+        active_session_id: previous.active_session_id.clone(),
+        session_store: previous.session_store.clone(),
+        session: previous.session.clone(),
+        history: previous.history.clone(),
+        restored_session: previous.restored_session.clone(),
+    };
+    current.bind_surface_session(
+        InteractionSurface::Remote,
+        rust_agent::bootstrap::ClientType::RemoteControl,
+        SessionSource::RemoteControl,
+        "remote-session",
+    );
+
+    let change_set = AppState::classify_runtime_changes(&previous, &current);
+
+    assert!(change_set.changes.contains(&AppStateRuntimeChange::PermissionChanged));
+    assert!(change_set.changes.contains(&AppStateRuntimeChange::SurfaceBindingChanged));
 }
 
 #[test]
@@ -95,6 +212,227 @@ fn in_memory_session_store_round_trips_task_lists_by_session() {
 }
 
 #[test]
+fn resolve_session_state_reuses_store_for_continue_resume_and_fresh_start() {
+    let store = InMemorySessionStore::default();
+    store.save(
+        SessionSnapshot {
+            session_id: SessionId("session-restore".into()),
+            surface: InteractionSurface::Remote,
+            session_mode: SessionMode::Interactive,
+            cwd: "/tmp/restore".into(),
+            last_turn_at: None,
+            prompt_seed: None,
+        },
+        SessionHistory {
+            entries: vec![SessionHistoryEntry {
+                message: Message::assistant("restored"),
+                timestamp: None,
+                tool_refs: Vec::new(),
+                milestone: None,
+            }],
+        },
+    );
+
+    let continued = resolve_session_state(
+        &store,
+        Some(&RestoreRequest {
+            source: RestoreSource::ContinueSession,
+            session_id: None,
+        }),
+        InteractionSurface::Cli,
+        SessionMode::Headless,
+        std::path::Path::new("/tmp/fresh"),
+    );
+    assert_eq!(continued.snapshot.session_id.0, "session-restore");
+    assert_eq!(continued.snapshot.surface, InteractionSurface::Remote);
+    assert!(continued.restored_session.is_some());
+
+    let resumed_missing = resolve_session_state(
+        &store,
+        Some(&RestoreRequest {
+            source: RestoreSource::ResumeSession,
+            session_id: Some("missing-session".into()),
+        }),
+        InteractionSurface::Cli,
+        SessionMode::Headless,
+        std::path::Path::new("/tmp/fallback"),
+    );
+    assert_eq!(resumed_missing.snapshot.session_id.0, "missing-session");
+    assert_eq!(resumed_missing.snapshot.surface, InteractionSurface::Cli);
+    assert_eq!(resumed_missing.snapshot.session_mode, SessionMode::Headless);
+    assert!(resumed_missing.restored_session.is_some());
+
+    let fresh = resolve_session_state(
+        &store,
+        None,
+        InteractionSurface::Cli,
+        SessionMode::InitOnly,
+        std::path::Path::new("/tmp/fresh-start"),
+    );
+    assert_eq!(fresh.snapshot.session_id.0, "local-session");
+    assert_eq!(fresh.snapshot.surface, InteractionSurface::Cli);
+    assert_eq!(fresh.snapshot.session_mode, SessionMode::InitOnly);
+    assert!(fresh.history.entries.is_empty());
+    assert!(fresh.restored_session.is_none());
+}
+
+#[test]
+fn initialize_runtime_builds_consistent_runtime_bundle_shape() {
+    let runtime = RuntimeBootstrap::from_cli(BootstrapCli {
+        print: None,
+        interactive: false,
+        init_only: false,
+        continue_session: false,
+        resume: None,
+        trace_startup: false,
+        show_tools: false,
+        tui: false,
+        surface: "cli".into(),
+    });
+    let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::Headless, false);
+    state.current_cwd = std::env::current_dir().expect("cwd available");
+
+    let bundle = runtime.initialize_runtime(
+        &state,
+        "session-init".into(),
+        Arc::new(rust_agent::task::manager::TaskManager::default()),
+        Arc::new(rust_agent::task::list_manager::TaskListManager::default()),
+        Arc::new(rust_agent::plan::manager::PlanManager::default()),
+    );
+
+    assert!(!bundle.command_registry.names().is_empty());
+    assert!(!bundle.coordinator_tools.all_metadata().is_empty());
+    assert_eq!(bundle.api_client.provider_config(), bundle.provider_config);
+}
+
+#[test]
+fn augment_prompt_depends_on_input_state_without_mutating_store() {
+    let runtime = RuntimeBootstrap::from_cli(BootstrapCli {
+        print: None,
+        interactive: false,
+        init_only: false,
+        continue_session: false,
+        resume: None,
+        trace_startup: false,
+        show_tools: false,
+        tui: false,
+        surface: "cli".into(),
+    });
+    let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::Headless, false);
+    state.current_cwd = std::env::current_dir().expect("cwd available");
+    let bundle = runtime.initialize_runtime(
+        &state,
+        "session-prompts".into(),
+        Arc::new(rust_agent::task::manager::TaskManager::default()),
+        Arc::new(rust_agent::task::list_manager::TaskListManager::default()),
+        Arc::new(rust_agent::plan::manager::PlanManager::default()),
+    );
+    let resolved = resolve_session_state(
+        &InMemorySessionStore::default(),
+        None,
+        InteractionSurface::Cli,
+        SessionMode::Headless,
+        std::path::Path::new("/tmp/prompt"),
+    );
+    let app_state = AppState {
+        surface: InteractionSurface::Cli,
+        session_mode: SessionMode::Headless,
+        client_type: rust_agent::bootstrap::ClientType::Cli,
+        session_source: SessionSource::LocalCli,
+        runtime_role: RuntimeRole::Coordinator,
+        worker_role: None,
+        permission_context: ToolPermissionContext::new(PermissionMode::Default),
+        command_registry: Some(bundle.command_registry.clone()),
+        runtime_tool_registry: Some(bundle.runtime_tool_registry.clone()),
+        skill_registry: Some(bundle.skill_registry.clone()),
+        mcp_runtime: Some(bundle.mcp_runtime.clone()),
+        plugin_load_result: Some(bundle.plugin_load_result.clone()),
+        cost_tracker: rust_agent::cost::tracker::CostTracker::default(),
+        notification_dispatcher: bundle.notification_dispatcher.clone(),
+        startup_trace: Vec::new(),
+        active_session_id: "session-prompts".into(),
+        session_store: Some(Arc::new(InMemorySessionStore::default())),
+        session: Some(resolved.snapshot.clone()),
+        history: Some(resolved.history.clone()),
+        restored_session: resolved.restored_session.clone(),
+    };
+    let store = AppStateStore::new(app_state.clone());
+    let before = store.generation();
+    let prompts = runtime.augment_prompts(&app_state, &bundle);
+    let after = store.generation();
+
+    assert_eq!(before, after);
+    assert_eq!(
+        prompts.metadata,
+        PromptAugmentationMetadata {
+            active_session_id: "session-prompts".into(),
+            surface: InteractionSurface::Cli,
+            session_mode: SessionMode::Headless,
+            visible_tool_count: bundle
+                .coordinator_tools
+                .visible_tools(&app_state.permission_context)
+                .len(),
+        }
+    );
+    assert!(!prompts.system_prompt.is_empty());
+    assert!(!prompts.tools_prompt.is_empty());
+    assert!(!prompts.context_prompt.is_empty());
+}
+
+#[test]
+fn gate_user_access_matches_cli_remote_and_telegram_expectations() {
+    let runtime = RuntimeBootstrap::from_cli(BootstrapCli {
+        print: None,
+        interactive: false,
+        init_only: false,
+        continue_session: false,
+        resume: None,
+        trace_startup: false,
+        show_tools: false,
+        tui: false,
+        surface: "cli".into(),
+    });
+
+    let cli_state = BootstrapState::new(InteractionSurface::Cli, SessionMode::Interactive, false);
+    let cli_input = rust_agent::interaction::envelope::NormalizedInput::from_session_raw(
+        InteractionSurface::Cli,
+        "session-cli",
+        "/permissions",
+    );
+    assert_eq!(
+        runtime.gate_user_access(&cli_state, Some(&cli_input)),
+        UserAccessDecision {
+            allowed: true,
+            reason: None,
+        }
+    );
+
+    let remote_state = BootstrapState::new(InteractionSurface::Remote, SessionMode::Interactive, false);
+    let remote_input = rust_agent::interaction::envelope::NormalizedInput::from_remote_raw(
+        "session-remote",
+        "actor-a",
+        true,
+        true,
+        "/permissions",
+    );
+    assert_eq!(runtime.gate_user_access(&remote_state, Some(&remote_input)).allowed, false);
+
+    let telegram_state = BootstrapState::new(InteractionSurface::Telegram, SessionMode::Interactive, false);
+    let telegram_input = rust_agent::interaction::envelope::NormalizedInput::from_session_raw(
+        InteractionSurface::Telegram,
+        "session-telegram",
+        "hello",
+    );
+    assert_eq!(
+        runtime.gate_user_access(&telegram_state, Some(&telegram_input)),
+        UserAccessDecision {
+            allowed: true,
+            reason: None,
+        }
+    );
+}
+
+#[test]
 fn file_backed_session_store_round_trips_across_store_instances() {
     let root = unique_temp_path("rust-agent-session-store");
     let store_a = FileBackedSessionStore::new(root.clone());
@@ -142,6 +480,89 @@ fn file_backed_session_store_round_trips_across_store_instances() {
     assert_eq!(store_b.load_task_list(&session_id), Some(task_list));
 
     std::fs::remove_dir_all(root).expect("cleanup file-backed session store");
+}
+
+#[test]
+fn finalize_runtime_state_is_single_writeback_entrypoint() {
+    let runtime = RuntimeBootstrap::from_cli(BootstrapCli {
+        print: None,
+        interactive: false,
+        init_only: false,
+        continue_session: false,
+        resume: None,
+        trace_startup: false,
+        show_tools: false,
+        tui: false,
+        surface: "cli".into(),
+    });
+    let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::Headless, false);
+    state.record_phase(BootstrapPhase::InitializeRuntime);
+    state.record_phase(BootstrapPhase::AugmentPrompt);
+    state.record_phase(BootstrapPhase::GateUserAccess);
+    let state = state.finalize();
+
+    let resolved = resolve_session_state(
+        &InMemorySessionStore::default(),
+        None,
+        InteractionSurface::Cli,
+        SessionMode::Headless,
+        std::path::Path::new("/tmp/finalize"),
+    );
+    let bundle = runtime.initialize_runtime(
+        &state,
+        resolved.active_session_id(),
+        Arc::new(rust_agent::task::manager::TaskManager::default()),
+        Arc::new(rust_agent::task::list_manager::TaskListManager::default()),
+        Arc::new(rust_agent::plan::manager::PlanManager::default()),
+    );
+    let prompt_state = AppState {
+        surface: state.surface,
+        session_mode: state.session_mode,
+        client_type: state.client_type,
+        session_source: state.session_source,
+        runtime_role: RuntimeRole::Coordinator,
+        worker_role: None,
+        permission_context: ToolPermissionContext::new(PermissionMode::Default)
+            .with_active_session_id(resolved.active_session_id())
+            .with_active_surface(state.surface),
+        command_registry: Some(bundle.command_registry.clone()),
+        runtime_tool_registry: Some(bundle.runtime_tool_registry.clone()),
+        skill_registry: Some(bundle.skill_registry.clone()),
+        mcp_runtime: Some(bundle.mcp_runtime.clone()),
+        plugin_load_result: Some(bundle.plugin_load_result.clone()),
+        cost_tracker: rust_agent::cost::tracker::CostTracker::default(),
+        notification_dispatcher: bundle.notification_dispatcher.clone(),
+        startup_trace: state
+            .phases
+            .iter()
+            .map(|phase| format!("{phase:?}"))
+            .collect(),
+        active_session_id: resolved.active_session_id(),
+        session_store: Some(Arc::new(InMemorySessionStore::default())),
+        session: Some(resolved.snapshot.clone()),
+        history: Some(resolved.history.clone()),
+        restored_session: resolved.restored_session.clone(),
+    };
+    let prompts = runtime.augment_prompts(&prompt_state, &bundle);
+    let finalized = runtime.finalize_runtime_state(
+        &state,
+        resolved.clone(),
+        bundle,
+        prompts.clone(),
+        resolved.active_session_id(),
+    );
+
+    assert_eq!(finalized.app_state.active_session_id, resolved.active_session_id());
+    assert_eq!(finalized.store.generation(), 0);
+    assert_eq!(finalized.engine.context.system_prompt, prompts.system_prompt);
+    assert_eq!(
+        finalized.engine.context.tools_prompt,
+        rust_agent::prompt::tools::build_tools_prompt(
+            &finalized.engine.context.tool_registry,
+            &finalized.app_state.permission_context,
+        )
+    );
+    assert_eq!(finalized.engine.context.context_prompt, prompts.context_prompt);
 }
 
 #[tokio::test]

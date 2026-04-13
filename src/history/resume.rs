@@ -1,5 +1,7 @@
-use crate::history::session::{SessionHistory, SessionSnapshot};
+use crate::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
+use crate::history::session::{SessionHistory, SessionId, SessionRestoreRequest, SessionSnapshot, SessionStore};
 use crate::history::transcript::Transcript;
+use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RestoreSource {
@@ -18,4 +20,95 @@ pub struct RestoredSession {
     pub snapshot: SessionSnapshot,
     pub history: SessionHistory,
     pub transcript: Transcript,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedSessionState {
+    pub snapshot: SessionSnapshot,
+    pub history: SessionHistory,
+    pub restored_session: Option<RestoredSession>,
+    pub client_type: ClientType,
+    pub session_source: SessionSource,
+}
+
+impl ResolvedSessionState {
+    pub fn active_session_id(&self) -> String {
+        self.snapshot.session_id.0.clone()
+    }
+}
+
+pub fn resolve_session_state(
+    session_store: &dyn SessionStore,
+    request: Option<&RestoreRequest>,
+    detected_surface: InteractionSurface,
+    detected_mode: SessionMode,
+    current_cwd: &Path,
+) -> ResolvedSessionState {
+    if let Some(request) = request {
+        let store_request = SessionRestoreRequest {
+            resume: request.session_id.clone(),
+            continue_session: matches!(request.source, RestoreSource::ContinueSession),
+        };
+        if let Some((snapshot, history)) = session_store.load(&store_request) {
+            return resolved_from_snapshot(snapshot, history, true);
+        }
+
+        let fallback_session_id = request
+            .session_id
+            .clone()
+            .unwrap_or_else(|| "latest-session".into());
+        return resolved_from_snapshot(
+            SessionSnapshot {
+                session_id: SessionId(fallback_session_id),
+                surface: detected_surface,
+                session_mode: detected_mode,
+                cwd: current_cwd.display().to_string(),
+                last_turn_at: None,
+                prompt_seed: None,
+            },
+            SessionHistory::default(),
+            true,
+        );
+    }
+
+    resolved_from_snapshot(
+        SessionSnapshot {
+            session_id: SessionId("local-session".into()),
+            surface: detected_surface,
+            session_mode: detected_mode,
+            cwd: current_cwd.display().to_string(),
+            last_turn_at: None,
+            prompt_seed: None,
+        },
+        SessionHistory::default(),
+        false,
+    )
+}
+
+pub fn resolved_from_snapshot(
+    snapshot: SessionSnapshot,
+    history: SessionHistory,
+    restored: bool,
+) -> ResolvedSessionState {
+    let restored_session = restored.then(|| RestoredSession {
+        snapshot: snapshot.clone(),
+        history: history.clone(),
+        transcript: Transcript::from(history.clone()),
+    });
+    let (client_type, session_source) = surface_binding(snapshot.surface);
+    ResolvedSessionState {
+        snapshot,
+        history,
+        restored_session,
+        client_type,
+        session_source,
+    }
+}
+
+pub fn surface_binding(surface: InteractionSurface) -> (ClientType, SessionSource) {
+    match surface {
+        InteractionSurface::Cli => (ClientType::Cli, SessionSource::LocalCli),
+        InteractionSurface::Telegram => (ClientType::Bot, SessionSource::Telegram),
+        InteractionSurface::Remote => (ClientType::RemoteControl, SessionSource::RemoteControl),
+    }
 }
