@@ -20,6 +20,7 @@ use rust_agent::interaction::envelope::NormalizedInput;
 use rust_agent::interaction::telegram::gateway::TelegramGateway;
 use rust_agent::plugins::loader::load_plugins;
 use rust_agent::plugins::runtime::{augment_hook_registry_with_plugins, augment_tool_registry_with_plugins};
+use rust_agent::plugins::runtime_state::{RuntimePluginState, build_runtime_plugin_snapshot};
 use rust_agent::plugins::types::{
     PluginActivationSummary, PluginCapability, PluginCommandDefinition, PluginConfigSource,
     PluginDefinition, PluginDiagnostic, PluginDiagnosticSeverity, PluginDiagnosticsMetadata,
@@ -438,6 +439,11 @@ async fn plugins_command_lists_show_details_and_persists_governance_state() {
         last_turn_at: None,
         prompt_seed: None,
     });
+    let runtime_plugin_state = RuntimePluginState::new(build_runtime_plugin_snapshot(&app_state));
+    app_state.permission_context = app_state
+        .permission_context
+        .clone()
+        .with_runtime_plugin_state(runtime_plugin_state);
 
     let list_result = PluginsCommand
         .execute(&NormalizedInput::from_raw(InteractionSurface::Cli, "/plugins"), &app_state)

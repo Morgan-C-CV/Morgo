@@ -7,6 +7,7 @@ use crate::command::types::{
     Command, CommandAvailability, CommandMetadata, CommandResult, CommandSource, CommandType,
 };
 use crate::interaction::envelope::NormalizedInput;
+use crate::plugins::runtime_state::rebuild_runtime_plugin_state;
 use crate::plugins::state::{load_plugin_state_with_diagnostics, write_plugin_state};
 use crate::plugins::types::{
     PluginCommandDefinition, PluginDiagnostic, PluginDiagnosticSeverity, PluginGovernanceSource,
@@ -124,8 +125,9 @@ impl Command for PluginsCommand {
                     )));
                 };
                 let path = update_plugin_state(cwd, plugin.name.as_str(), true, None)?;
+                rebuild_runtime_plugin_state(app_state).await?;
                 Ok(CommandResult::Message(format!(
-                    "Enabled plugin {}. Persisted governance to {}. Restart/bootstrap again to apply.",
+                    "Enabled plugin {}. Persisted governance to {} and applied it to the current runtime.",
                     plugin.name,
                     path.display()
                 )))
@@ -151,8 +153,9 @@ impl Command for PluginsCommand {
                     Some(reason.trim().to_string())
                 };
                 let path = update_plugin_state(cwd, plugin.name.as_str(), false, disable_reason.clone())?;
+                rebuild_runtime_plugin_state(app_state).await?;
                 Ok(CommandResult::Message(format!(
-                    "Disabled plugin {}{}. Persisted governance to {}. Restart/bootstrap again to apply.",
+                    "Disabled plugin {}{}. Persisted governance to {} and applied it to the current runtime.",
                     plugin.name,
                     disable_reason
                         .as_deref()

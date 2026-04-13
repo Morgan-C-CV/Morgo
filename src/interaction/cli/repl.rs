@@ -4,6 +4,7 @@ use crate::core::events::EngineEvent;
 use crate::core::message::Message;
 use crate::interaction::envelope::NormalizedInput;
 use crate::interaction::router::CommandRouter;
+use crate::plugins::runtime_state::{build_turn_engine, build_turn_router};
 use crate::state::app_state::AppState;
 use crate::task::types::TaskEvent;
 
@@ -66,6 +67,20 @@ pub async fn handle_normalized_input(
     app_state: &AppState,
     input: NormalizedInput,
 ) -> anyhow::Result<CliTurnOutput> {
+    let turn_router;
+    let turn_engine;
+    let turn_app_state;
+    let (router, engine, app_state) = if let Some(runtime_plugin_state) =
+        app_state.permission_context.runtime_plugin_state.as_ref()
+    {
+        let snapshot = runtime_plugin_state.snapshot().await;
+        turn_router = build_turn_router(&snapshot);
+        turn_engine = build_turn_engine(app_state, &snapshot, engine);
+        turn_app_state = turn_engine.context.app_state.clone();
+        (&turn_router, &turn_engine, &turn_app_state)
+    } else {
+        (router, engine, app_state)
+    };
     let route_result = router.route(&input, app_state).await?;
     let (persisted_messages, runtime_events, engine_persisted) = match route_result {
         CommandResult::Message(message) => (vec![Message::assistant(message)], Vec::new(), false),

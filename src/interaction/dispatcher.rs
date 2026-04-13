@@ -30,6 +30,10 @@ impl NotificationDispatcher {
         self
     }
 
+    pub fn set_hook_registry(&mut self, hook_registry: HookRegistry) {
+        self.hook_registry = hook_registry;
+    }
+
     pub fn dispatch(&self, surface: InteractionSurface, notification: Notification) {
         let notification_event = HookEvent::Notification {
             title: notification.title.clone(),

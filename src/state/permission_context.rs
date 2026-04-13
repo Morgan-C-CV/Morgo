@@ -3,6 +3,7 @@ use std::sync::{Arc, RwLock};
 use crate::bootstrap::InteractionSurface;
 use crate::hook::registry::HookRegistry;
 use crate::interaction::dispatcher::NotificationDispatcher;
+use crate::plugins::runtime_state::RuntimePluginState;
 use crate::plan::manager::PlanManager;
 use crate::service::mcp::runtime::McpRuntime;
 use crate::skills::registry::SkillRegistry;
@@ -45,6 +46,7 @@ pub struct ToolPermissionContext {
     pub subagent_scripted_turns: Option<Vec<Vec<crate::service::api::streaming::StreamEvent>>>,
     pub inherited_tool_registry: Option<ToolRegistry>,
     pub inherited_hook_registry: Option<HookRegistry>,
+    pub runtime_plugin_state: Option<RuntimePluginState>,
 }
 
 impl ToolPermissionContext {
@@ -68,6 +70,7 @@ impl ToolPermissionContext {
             subagent_scripted_turns: None,
             inherited_tool_registry: None,
             inherited_hook_registry: None,
+            runtime_plugin_state: None,
         }
     }
 
@@ -189,6 +192,11 @@ impl ToolPermissionContext {
 
     pub fn with_inherited_hook_registry(mut self, hook_registry: HookRegistry) -> Self {
         self.inherited_hook_registry = Some(hook_registry);
+        self
+    }
+
+    pub fn with_runtime_plugin_state(mut self, runtime_plugin_state: RuntimePluginState) -> Self {
+        self.runtime_plugin_state = Some(runtime_plugin_state);
         self
     }
 

@@ -6,9 +6,9 @@ use crate::history::session::{SessionHistory, SessionId, SessionRestoreRequest, 
 use crate::interaction::cli::repl::{CliDisplayEvent, CliRuntimeEvent, handle_normalized_input};
 use crate::interaction::envelope::NormalizedInput;
 use crate::interaction::notification::{Notification, NotificationTarget, NotificationType};
-use crate::state::permission_context::PendingApproval;
 use crate::interaction::router::CommandRouter;
 use crate::state::app_state::AppState;
+use crate::state::permission_context::PendingApproval;
 use crate::task::types::TaskEvent;
 use std::fmt::Write as _;
 

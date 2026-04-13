@@ -5,6 +5,7 @@ use rust_agent::bootstrap::{ClientType, InteractionSurface, SessionMode, Session
 use rust_agent::command::builtin::help::HelpCommand;
 use rust_agent::command::builtin::permissions::PermissionsCommand;
 use rust_agent::command::builtin::plan::PlanCommand;
+use rust_agent::command::builtin::plugins::PluginsCommand;
 use rust_agent::command::registry::CommandRegistry;
 use rust_agent::command::types::{
     Command, CommandAvailability, CommandMetadata, CommandResult, CommandSource, CommandType,
@@ -16,6 +17,7 @@ use rust_agent::interaction::dispatcher::NotificationDispatcher;
 use rust_agent::interaction::envelope::NormalizedInput;
 use rust_agent::interaction::remote::{RemoteRequest, handle_remote_request};
 use rust_agent::interaction::router::{CommandRouter, RouteDecision};
+use rust_agent::plugins::runtime_state::{RuntimePluginState, build_runtime_plugin_snapshot};
 use rust_agent::interaction::telegram::gateway::TelegramGateway;
 use rust_agent::plan::manager::PlanManager;
 use rust_agent::security::authorizer::{AuthDecision, DefaultSurfaceAuthorizer, SurfaceAuthorizer};
@@ -402,7 +404,11 @@ async fn cli_repl_persists_history_for_local_and_query_turns() {
 
 #[tokio::test]
 async fn remote_handler_preserves_remote_actor_and_session_for_query_flow() {
-    let command_registry = Arc::new(CommandRegistry::new().register(Arc::new(RemoteSafeTestCommand)));
+    let command_registry = Arc::new(
+        CommandRegistry::new()
+            .register(Arc::new(RemoteSafeTestCommand))
+            .register(Arc::new(PluginsCommand)),
+    );
     let router = CommandRouter::new(command_registry.clone(), Box::new(DefaultSurfaceAuthorizer));
     let permission_context = ToolPermissionContext::new(PermissionMode::Default)
         .with_task_manager(Arc::new(TaskManager::default()))
@@ -419,7 +425,7 @@ async fn remote_handler_preserves_remote_actor_and_session_for_query_flow() {
         },
         rust_agent::history::session::SessionHistory::default(),
     );
-    let app_state = AppState {
+    let mut app_state = AppState {
         surface: InteractionSurface::Remote,
         session_mode: SessionMode::Interactive,
         client_type: ClientType::RemoteControl,
@@ -441,6 +447,11 @@ async fn remote_handler_preserves_remote_actor_and_session_for_query_flow() {
         history: None,
         restored_session: None,
     };
+    let runtime_plugin_state = RuntimePluginState::new(build_runtime_plugin_snapshot(&app_state));
+    app_state.permission_context = app_state
+        .permission_context
+        .clone()
+        .with_runtime_plugin_state(runtime_plugin_state);
     let engine =
         rust_agent::core::engine::QueryEngine::new(rust_agent::core::context::QueryContext {
             app_state: app_state.clone(),

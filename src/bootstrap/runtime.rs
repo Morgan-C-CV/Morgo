@@ -6,7 +6,6 @@ use clap::Parser;
 
 use crate::bootstrap::setup::SetupContext;
 use crate::bootstrap::{BootstrapPhase, BootstrapState, InteractionSurface, SessionMode};
-use crate::command::registry::CommandRegistry;
 use crate::core::context::QueryContext;
 use crate::core::engine::QueryEngine;
 use crate::cost::tracker::CostTracker;
@@ -22,13 +21,15 @@ use crate::interaction::cli::renderer::{render_output, render_turn_output};
 use crate::interaction::cli::repl::handle_cli_input;
 use crate::interaction::dispatcher::NotificationDispatcher;
 use crate::interaction::remote::{RemoteRequest, handle_remote_request, render_remote_response_debug};
-use crate::interaction::router::CommandRouter;
 use crate::interaction::telegram::gateway::TelegramGateway;
 use crate::plan::manager::PlanManager;
 use crate::plugins::loader::load_plugins;
 use crate::plugins::runtime::{augment_hook_registry_with_plugins, augment_tool_registry_with_plugins};
+use crate::plugins::runtime_state::{
+    RuntimePluginState, build_runtime_plugin_snapshot, build_turn_engine, build_turn_router,
+    hydrate_app_state_from_snapshot,
+};
 use crate::plugins::types::{PluginDefinition, PluginDiagnostic, PluginDiagnosticSeverity, PluginLifecycleState};
-use crate::security::authorizer::DefaultSurfaceAuthorizer;
 use crate::service::api::client::{
     ModelProviderClient, ModelProviderConfig, ModelPricing, ProviderTimeout,
 };
@@ -268,7 +269,7 @@ impl RuntimeBootstrap {
         let state = state.finalize();
 
         let provider_config = self.build_model_provider_config();
-        let app_state = AppState {
+        let mut app_state = AppState {
             surface: state.surface,
             session_mode: state.session_mode,
             client_type: state.client_type,
@@ -303,9 +304,16 @@ impl RuntimeBootstrap {
             history: session_history,
             restored_session,
         };
+        let initial_snapshot = build_runtime_plugin_snapshot(&app_state);
+        let runtime_plugin_state = RuntimePluginState::new(initial_snapshot.clone());
+        app_state.permission_context = app_state
+            .permission_context
+            .clone()
+            .with_runtime_plugin_state(runtime_plugin_state);
+        hydrate_app_state_from_snapshot(&mut app_state, &initial_snapshot);
 
         if self.cli.show_tools {
-            for tool in coordinator_tools.visible_tools(&permission_context) {
+            for tool in initial_snapshot.tool_registry.visible_tools(&app_state.permission_context) {
                 println!("{} - {}", tool.name, tool.description);
             }
             return Ok(());
@@ -323,28 +331,22 @@ impl RuntimeBootstrap {
             return Ok(());
         }
 
-        let registry = Arc::new(self.build_command_registry(&app_state, plugin_load_result.as_ref()));
-        
-        // Finalize AppState by injecting the CommandRegistry Arc now that it is built
-        let mut app_state = app_state;
-        app_state.command_registry = Some(registry.clone());
-
-        let router = CommandRouter::new(registry, Box::new(DefaultSurfaceAuthorizer));
-        let tools_prompt = crate::prompt::tools::build_tools_prompt(&coordinator_tools, &permission_context);
-        let context_prompt = crate::prompt::context::build_context_prompt(&app_state);
-        let system_prompt = crate::prompt::system::build_system_prompt(&app_state);
-        let query_context = QueryContext {
+        let router = build_turn_router(&initial_snapshot);
+        let base_query_context = QueryContext {
             app_state: app_state.clone(),
-            tool_registry: coordinator_tools,
+            tool_registry: initial_snapshot.tool_registry.clone(),
             api_client: ModelProviderClient::from_config(provider_config),
             compactor: ReactiveCompactor,
-            hook_registry,
+            hook_registry: initial_snapshot.hook_registry.clone(),
             agent_id: None,
-            system_prompt,
-            tools_prompt,
-            context_prompt,
+            system_prompt: crate::prompt::system::build_system_prompt(&app_state),
+            tools_prompt: crate::prompt::tools::build_tools_prompt(
+                &initial_snapshot.tool_registry,
+                &app_state.permission_context,
+            ),
+            context_prompt: crate::prompt::context::build_context_prompt(&app_state),
         };
-        let engine = QueryEngine::new(query_context);
+        let engine = build_turn_engine(&app_state, &initial_snapshot, &QueryEngine::new(base_query_context));
 
         if let Some(prompt) = &self.cli.print {
             if matches!(app_state.surface, InteractionSurface::Remote) {
@@ -420,35 +422,6 @@ impl RuntimeBootstrap {
         } else {
             SessionMode::Headless
         }
-    }
-
-    fn build_command_registry(
-        &self,
-        app_state: &AppState,
-        plugin_load_result: &crate::plugins::types::PluginLoadResult,
-    ) -> CommandRegistry {
-        let registry = CommandRegistry::new();
-        let registry = crate::command::builtin::register_builtin_commands(registry);
-        let registry = crate::command::coding::register_coding_commands(registry);
-        let registry = crate::command::builtin::skills::build_skill_commands(app_state)
-            .into_iter()
-            .fold(registry, |registry, command| registry.register(Arc::new(command)));
-        let registry = crate::command::builtin::register_mcp_commands(registry);
-        self.register_plugin_commands(registry, plugin_load_result)
-    }
-
-    fn register_plugin_commands(
-        &self,
-        registry: CommandRegistry,
-        plugin_load_result: &crate::plugins::types::PluginLoadResult,
-    ) -> CommandRegistry {
-        plugin_load_result
-            .plugins
-            .iter()
-            .flat_map(|plugin| plugin.active_commands().into_iter())
-            .fold(registry, |registry, command| {
-                registry.register(Arc::new(crate::command::builtin::plugins::PluginSlashCommand::new(command)))
-            })
     }
 
     fn build_tool_registry(&self) -> ToolRegistry {

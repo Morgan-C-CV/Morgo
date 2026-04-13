@@ -14,6 +14,7 @@ use crate::history::resume::RestoredSession;
 use crate::history::session::{SessionHistory, SessionSnapshot, SessionStore};
 use crate::interaction::dispatcher::NotificationDispatcher;
 use crate::state::permission_context::ToolPermissionContext;
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeRole {
@@ -63,6 +64,14 @@ pub struct AppState {
 }
 
 impl AppState {
+    pub fn current_working_directory(&self) -> PathBuf {
+        self.session
+            .as_ref()
+            .map(|session| PathBuf::from(session.cwd.clone()))
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| PathBuf::from("."))
+    }
+
     pub async fn resolve_pending_approval(&self, approved: bool) -> anyhow::Result<CommandResult> {
         let Some(pending) = self.permission_context.pending_approval() else {
             return Ok(CommandResult::Denied("no pending approval in this session".into()));
