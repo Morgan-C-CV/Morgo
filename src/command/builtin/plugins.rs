@@ -84,9 +84,17 @@ impl Command for PluginsCommand {
                         plugin_name.trim()
                     )));
                 };
+                let last_apply_report = if let Some(state) =
+                    app_state.permission_context.runtime_plugin_state.as_ref()
+                {
+                    state.last_apply_report().await
+                } else {
+                    None
+                };
                 Ok(CommandResult::Message(render_plugin_show(
                     plugin,
                     &plugin_load_result.diagnostics,
+                    last_apply_report,
                 )))
             }
             "diagnostics" => {
@@ -310,6 +318,7 @@ fn render_plugin_list(plugin_load_result: &crate::plugins::types::PluginLoadResu
 fn render_plugin_show(
     plugin: &crate::plugins::types::PluginDefinition,
     diagnostics: &[PluginDiagnostic],
+    last_apply_report: Option<crate::plugins::types::PluginRuntimeApplyReport>,
 ) -> String {
     let capabilities = if plugin.capabilities.is_empty() {
         "none".to_string()
@@ -363,6 +372,16 @@ fn render_plugin_show(
         if let Some(support_level) = metadata.support_level.as_deref() {
             lines.push(format!("  - support_level: {support_level}"));
         }
+    }
+
+    if let Some(report) = last_apply_report {
+        lines.push("- runtime_apply:".to_string());
+        lines.push(format!(
+            "  - outcome: {}",
+            report.outcome.as_str()
+        ));
+        lines.push(format!("  - generation: {}", report.generation));
+        lines.push(format!("  - summary: {}", report.message));
     }
 
     lines.push(format!("- diagnostics: {}", plugin_diagnostics.len()));

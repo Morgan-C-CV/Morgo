@@ -32,6 +32,7 @@ use crate::tool::registry::ToolRegistry;
 pub struct RuntimePluginState {
     inner: Arc<RwLock<RuntimePluginSnapshot>>,
     generation: Arc<RwLock<u64>>,
+    last_apply_report: Arc<RwLock<Option<PluginRuntimeApplyReport>>>,
 }
 
 #[derive(Clone)]
@@ -52,9 +53,23 @@ impl std::fmt::Debug for RuntimePluginState {
 
 impl RuntimePluginState {
     pub fn new(snapshot: RuntimePluginSnapshot) -> Self {
+        let initial_report = PluginRuntimeApplyReport {
+            outcome: PluginRuntimeApplyOutcome::Applied,
+            generation: 0,
+            message: format!(
+                "applied runtime plugin snapshot generation 0 (plugins={}, active_commands={}, active_tools={}, active_hooks={})",
+                snapshot.plugin_load_result.plugins.len(),
+                snapshot.plugin_load_result.active_command_count(),
+                snapshot.plugin_load_result.active_tool_count(),
+                snapshot.plugin_load_result.active_hook_count(),
+            ),
+            diagnostics: snapshot.plugin_load_result.diagnostics.clone(),
+            orphaned_governance_entries: snapshot.plugin_load_result.orphaned_governance_entries.clone(),
+        };
         Self {
             inner: Arc::new(RwLock::new(snapshot)),
             generation: Arc::new(RwLock::new(0)),
+            last_apply_report: Arc::new(RwLock::new(Some(initial_report))),
         }
     }
 
@@ -71,6 +86,14 @@ impl RuntimePluginState {
 
     pub async fn generation(&self) -> u64 {
         *self.generation.read().await
+    }
+
+    pub async fn last_apply_report(&self) -> Option<PluginRuntimeApplyReport> {
+        self.last_apply_report.read().await.clone()
+    }
+
+    pub async fn set_last_apply_report(&self, report: PluginRuntimeApplyReport) {
+        *self.last_apply_report.write().await = Some(report);
     }
 }
 
@@ -144,7 +167,7 @@ pub async fn rebuild_runtime_plugin_state(
     };
     let snapshot = build_runtime_plugin_snapshot(app_state);
     let generation = runtime_plugin_state.replace(snapshot.clone()).await;
-    Ok(PluginRuntimeApplyReport {
+    let report = PluginRuntimeApplyReport {
         outcome: PluginRuntimeApplyOutcome::Applied,
         generation,
         message: format!(
@@ -157,7 +180,9 @@ pub async fn rebuild_runtime_plugin_state(
         ),
         diagnostics: snapshot.plugin_load_result.diagnostics.clone(),
         orphaned_governance_entries: snapshot.plugin_load_result.orphaned_governance_entries.clone(),
-    })
+    };
+    runtime_plugin_state.set_last_apply_report(report.clone()).await;
+    Ok(report)
 }
 
 pub fn build_turn_engine(

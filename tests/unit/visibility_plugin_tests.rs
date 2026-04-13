@@ -339,12 +339,17 @@ async fn status_command_reports_plugin_discovery_summary() {
         }],
         orphaned_governance_entries: vec![],
     });
-    let app_state = test_app_state(
+    let mut app_state = test_app_state(
         Some(registry),
         Some(Arc::new(TaskManager::default())),
         Some(plugin_load_result),
         Some(Arc::new(RwLock::new(tool_registry))),
     );
+    let runtime_plugin_state = RuntimePluginState::new(build_runtime_plugin_snapshot(&app_state));
+    app_state.permission_context = app_state
+        .permission_context
+        .clone()
+        .with_runtime_plugin_state(runtime_plugin_state);
 
     let result = StatusCommand
         .execute(&NormalizedInput::from_raw(InteractionSurface::Cli, "/status"), &app_state)
@@ -377,6 +382,8 @@ async fn status_command_reports_plugin_discovery_summary() {
     assert!(text.contains("- registered_plugin_commands: 1"));
     assert!(text.contains("- registered_plugin_tools: 1"));
     assert!(text.contains("- diagnostics: total=1, info=0, warnings=0, errors=1"));
+    assert!(text.contains("- runtime_apply: outcome=applied, generation=0"));
+    assert!(text.contains("- runtime_apply_summary: applied runtime plugin snapshot generation 0"));
     assert!(text.contains("- plugin_inventory:"));
     assert!(text.contains("  - demo-plugin v0.1.0 — state=enabled, applied=applied, enabled=yes, active(commands=1, hooks=1, tools=1), discovered(commands=1, hooks=1, tools=1), capabilities=commands,hooks,tools, governance_source=default, disable_reason=none (manifest=/tmp/project/.claude/plugins/demo/plugin.json)"));
     assert!(text.contains("- diagnostic_preview:"));
@@ -477,6 +484,9 @@ async fn plugins_command_lists_show_details_and_persists_governance_state() {
     assert!(show_text.contains("- manifest:"));
     assert!(show_text.contains("- diagnostics_metadata:"));
     assert!(show_text.contains("https://example.com/docs"));
+    assert!(show_text.contains("- runtime_apply:"));
+    assert!(show_text.contains("  - outcome: applied"));
+    assert!(show_text.contains("  - generation: 0"));
 
     let diagnostics_result = PluginsCommand
         .execute(

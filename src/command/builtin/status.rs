@@ -182,6 +182,13 @@ impl Command for StatusCommand {
 
         lines.push(String::new());
         lines.push("Plugins:".to_string());
+        let last_apply_report = if let Some(runtime_plugin_state) =
+            app_state.permission_context.runtime_plugin_state.as_ref()
+        {
+            runtime_plugin_state.last_apply_report().await
+        } else {
+            None
+        };
         if let Some(plugin_load_result) = app_state.plugin_load_result.as_ref() {
             let registered_plugin_commands = app_state
                 .command_registry
@@ -245,6 +252,14 @@ impl Command for StatusCommand {
                 warning_count,
                 error_count
             ));
+            if let Some(report) = last_apply_report.as_ref() {
+                lines.push(format!(
+                    "- runtime_apply: outcome={}, generation={}",
+                    report.outcome.as_str(),
+                    report.generation
+                ));
+                lines.push(format!("- runtime_apply_summary: {}", report.message));
+            }
             if !plugin_load_result.plugins.is_empty() {
                 lines.push("- plugin_inventory:".to_string());
                 for plugin in &plugin_load_result.plugins {
