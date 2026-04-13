@@ -3,7 +3,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rust_agent::bootstrap::{BootstrapCli, ClientType, InteractionSurface, RuntimeBootstrap, SessionMode, SessionSource};
+use rust_agent::bootstrap::{
+    BootstrapCli, ClientType, InteractionSurface, RuntimeBootstrap, SessionMode, SessionSource,
+};
 use rust_agent::command::builtin::help::HelpCommand;
 use rust_agent::command::builtin::plugins::{PluginSlashCommand, PluginsCommand};
 use rust_agent::command::builtin::status::StatusCommand;
@@ -14,7 +16,9 @@ use rust_agent::interaction::dispatcher::NotificationDispatcher;
 use rust_agent::interaction::envelope::NormalizedInput;
 use rust_agent::interaction::telegram::gateway::TelegramGateway;
 use rust_agent::plugins::loader::load_plugins;
-use rust_agent::plugins::runtime::{augment_hook_registry_with_plugins, augment_tool_registry_with_plugins};
+use rust_agent::plugins::runtime::{
+    augment_hook_registry_with_plugins, augment_tool_registry_with_plugins,
+};
 use rust_agent::state::app_state::{AppState, RuntimeRole};
 use rust_agent::state::permission_context::{PermissionMode, ToolPermissionContext};
 use rust_agent::task::manager::TaskManager;
@@ -84,6 +88,7 @@ async fn plugin_runtime_exposes_command_hook_tool_and_diagnostics() {
         resume: None,
         trace_startup: false,
         show_tools: false,
+        tui: false,
         surface: "cli".into(),
     })
     .with_session_store(session_store);
@@ -148,15 +153,24 @@ async fn plugin_runtime_exposes_command_hook_tool_and_diagnostics() {
     };
 
     let help = HelpCommand
-        .execute(&NormalizedInput::from_raw(InteractionSurface::Cli, "/help"), &app_state)
+        .execute(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/help"),
+            &app_state,
+        )
         .await
         .expect("help should render");
     let status = StatusCommand
-        .execute(&NormalizedInput::from_raw(InteractionSurface::Cli, "/status"), &app_state)
+        .execute(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/status"),
+            &app_state,
+        )
         .await
         .expect("status should render");
     let plugins = PluginsCommand
-        .execute(&NormalizedInput::from_raw(InteractionSurface::Cli, "/plugins"), &app_state)
+        .execute(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/plugins"),
+            &app_state,
+        )
         .await
         .expect("plugins should render");
 
@@ -171,12 +185,17 @@ async fn plugin_runtime_exposes_command_hook_tool_and_diagnostics() {
     };
 
     assert!(help_text.contains("/demo-plugin-cmd — Demo plugin command"));
-    assert!(help_text.contains("/plugins — Inspect plugin inventory, diagnostics, and governance state"));
+    assert!(
+        help_text
+            .contains("/plugins — Inspect plugin inventory, diagnostics, and governance state")
+    );
     assert!(status_text.contains("demo-plugin v0.1.0 — state=enabled, applied=applied, enabled=yes, active(commands=1, hooks=1, tools=1), discovered(commands=1, hooks=1, tools=1), capabilities=commands,hooks,tools"));
     assert!(status_text.contains("- discovered_plugin_tools: 1"));
     assert!(status_text.contains("- discovered_plugin_hooks: 1"));
     assert!(plugins_text.contains("Plugins:"));
-    assert!(plugins_text.contains("demo-plugin v0.1.0 — state=enabled, applied=applied, enabled=yes"));
+    assert!(
+        plugins_text.contains("demo-plugin v0.1.0 — state=enabled, applied=applied, enabled=yes")
+    );
 
     std::env::set_current_dir(previous_cwd).expect("should restore cwd");
     fs::remove_dir_all(root).expect("temp plugin root should be removed");

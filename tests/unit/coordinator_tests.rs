@@ -2,9 +2,13 @@ use std::sync::Arc;
 
 use rust_agent::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
 use rust_agent::command::registry::CommandRegistry;
-use rust_agent::coordinator::mode::{is_coordinator_mode, match_session_mode, set_coordinator_mode};
+use rust_agent::coordinator::mode::{
+    is_coordinator_mode, match_session_mode, set_coordinator_mode,
+};
 use rust_agent::coordinator::prompt::build_coordinator_system_prompt;
-use rust_agent::coordinator::worker::{filter_tools_for_worker, notification_to_task_notification, TaskNotification};
+use rust_agent::coordinator::worker::{
+    TaskNotification, filter_tools_for_worker, notification_to_task_notification,
+};
 use rust_agent::cost::tracker::CostTracker;
 use rust_agent::interaction::dispatcher::NotificationDispatcher;
 use rust_agent::interaction::notification::{Notification, NotificationType};
@@ -25,7 +29,10 @@ fn coordinator_mode_matches_resumed_session() {
     set_coordinator_mode(false);
     let message = match_session_mode(Some("coordinator"));
     assert!(is_coordinator_mode());
-    assert_eq!(message.as_deref(), Some("Entered coordinator mode to match resumed session."));
+    assert_eq!(
+        message.as_deref(),
+        Some("Entered coordinator mode to match resumed session.")
+    );
 }
 
 #[test]
@@ -174,8 +181,14 @@ fn task_notification_contract_marks_implement_completion_for_verify_follow_up() 
 
     assert_eq!(notification.worker_role, Some(WorkerRole::Implement));
     assert_eq!(notification.phase, Some(WorkerPhase::Implement));
-    assert_eq!(notification.validation_state, Some(ValidationState::PendingVerification));
-    assert_eq!(notification.next_action, "dispatch verify worker for task-9");
+    assert_eq!(
+        notification.validation_state,
+        Some(ValidationState::PendingVerification)
+    );
+    assert_eq!(
+        notification.next_action,
+        "dispatch verify worker for task-9"
+    );
     assert!(formatted.contains("<worker-role>implement</worker-role>"));
     assert!(formatted.contains("<phase>implement</phase>"));
     assert!(formatted.contains("<validation-state>pending_verification</validation-state>"));
@@ -207,12 +220,20 @@ fn task_notification_contract_marks_verify_completion_for_validated_synthesis() 
 
     assert_eq!(notification.worker_role, Some(WorkerRole::Verify));
     assert_eq!(notification.phase, Some(WorkerPhase::Verify));
-    assert_eq!(notification.validation_state, Some(ValidationState::Verified));
-    assert_eq!(notification.next_action, "synthesize validated result for task-10");
+    assert_eq!(
+        notification.validation_state,
+        Some(ValidationState::Verified)
+    );
+    assert_eq!(
+        notification.next_action,
+        "synthesize validated result for task-10"
+    );
     assert!(formatted.contains("<worker-role>verify</worker-role>"));
     assert!(formatted.contains("<phase>verify</phase>"));
     assert!(formatted.contains("<validation-state>verified</validation-state>"));
-    assert!(formatted.contains("<next-action>synthesize validated result for task-10</next-action>"));
+    assert!(
+        formatted.contains("<next-action>synthesize validated result for task-10</next-action>")
+    );
 }
 
 #[test]

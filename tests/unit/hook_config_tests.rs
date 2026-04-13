@@ -54,7 +54,10 @@ fn hook_loader_reads_external_rules_from_project_config() {
         HookDecision::Deny("tool Bash denied by hook policy".into())
     );
     assert!(result.prevent_continuation);
-    assert_eq!(result.payload.additional_context.as_deref(), Some("loaded from disk"));
+    assert_eq!(
+        result.payload.additional_context.as_deref(),
+        Some("loaded from disk")
+    );
 
     fs::remove_dir_all(root).expect("cleanup hooks config root");
 }
@@ -71,10 +74,12 @@ fn hook_loader_reports_parse_failures_and_uses_empty_defaults() {
     assert_eq!(load_result.source, HookConfigSource::Defaults);
     assert!(load_result.rules.is_empty());
     assert_eq!(load_result.path, claude_dir.join("hooks.json"));
-    assert!(load_result
-        .diagnostics
-        .iter()
-        .any(|line| line.contains("Failed to parse .claude/hooks.json")));
+    assert!(
+        load_result
+            .diagnostics
+            .iter()
+            .any(|line| line.contains("Failed to parse .claude/hooks.json"))
+    );
 
     fs::remove_dir_all(root).expect("cleanup invalid hooks root");
 }
@@ -90,11 +95,16 @@ fn hook_registry_without_external_file_uses_empty_defaults() {
         .expect("config load result should be captured");
     assert_eq!(load_result.source, HookConfigSource::Defaults);
     assert!(registry.rules().is_empty());
-    assert!(load_result
-        .diagnostics
-        .iter()
-        .any(|line| line.contains("No .claude/hooks.json found")));
-    assert_eq!(run_hook(&registry, HookEvent::Setup).decision, HookDecision::Allow);
+    assert!(
+        load_result
+            .diagnostics
+            .iter()
+            .any(|line| line.contains("No .claude/hooks.json found"))
+    );
+    assert_eq!(
+        run_hook(&registry, HookEvent::Setup).decision,
+        HookDecision::Allow
+    );
 
     fs::remove_dir_all(root).expect("cleanup missing hooks root");
 }
@@ -102,6 +112,9 @@ fn hook_registry_without_external_file_uses_empty_defaults() {
 #[test]
 fn hook_registry_can_still_be_built_programmatically() {
     let registry = HookRegistry::from_rules(Vec::new());
-    assert_eq!(run_hook(&registry, HookEvent::Stop).decision, HookDecision::Allow);
+    assert_eq!(
+        run_hook(&registry, HookEvent::Stop).decision,
+        HookDecision::Allow
+    );
     assert!(registry.config_load_result().is_none());
 }

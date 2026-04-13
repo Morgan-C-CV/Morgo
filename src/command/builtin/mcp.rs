@@ -53,10 +53,18 @@ impl Command for McpCommand {
                 lines.push(format!("- {} ({})", server.config.name, server.config.id));
                 lines.push(format!("  status: {}", server.status.as_str()));
                 lines.push(format!("  transport: {}", server.config.transport.as_str()));
-                lines.push(format!("  command: {} {}", server.config.command, server.config.args.join(" ").trim()));
+                lines.push(format!(
+                    "  command: {} {}",
+                    server.config.command,
+                    server.config.args.join(" ").trim()
+                ));
                 lines.push(format!(
                     "  protocol: {}{}",
-                    if server.protocol_initialized { "initialized" } else { "not-initialized" },
+                    if server.protocol_initialized {
+                        "initialized"
+                    } else {
+                        "not-initialized"
+                    },
                     server
                         .server_protocol_version
                         .as_deref()
@@ -88,9 +96,16 @@ impl Command for McpCommand {
                     lines.push(format!("  tools: {}", server.tool_names_preview.join(", ")));
                 }
                 if !server.resource_names_preview.is_empty() {
-                    lines.push(format!("  resources: {}", server.resource_names_preview.join(", ")));
+                    lines.push(format!(
+                        "  resources: {}",
+                        server.resource_names_preview.join(", ")
+                    ));
                 }
-                if let Some(error) = server.last_error.as_deref().filter(|value| !value.trim().is_empty()) {
+                if let Some(error) = server
+                    .last_error
+                    .as_deref()
+                    .filter(|value| !value.trim().is_empty())
+                {
                     lines.push(format!("  last_error: {}", error.trim()));
                 }
             }
@@ -102,7 +117,8 @@ impl Command for McpCommand {
         let server = parts.collect::<Vec<_>>().join(" ");
         if server.trim().is_empty() {
             return Ok(CommandResult::Message(
-                "Usage: /mcp [list|status|connect <server>|disconnect <server>|reconnect <server>]".to_string(),
+                "Usage: /mcp [list|status|connect <server>|disconnect <server>|reconnect <server>]"
+                    .to_string(),
             ));
         }
 

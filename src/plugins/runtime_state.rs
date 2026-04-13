@@ -5,11 +5,13 @@ use tokio::sync::RwLock;
 use crate::command::registry::CommandRegistry;
 use crate::core::context::QueryContext;
 use crate::core::engine::QueryEngine;
-use crate::hook::registry::{load_hook_registry, HookRegistry};
+use crate::hook::registry::{HookRegistry, load_hook_registry};
 use crate::interaction::dispatcher::NotificationDispatcher;
 use crate::interaction::router::CommandRouter;
 use crate::plugins::loader::load_plugins;
-use crate::plugins::runtime::{augment_hook_registry_with_plugins, augment_tool_registry_with_plugins};
+use crate::plugins::runtime::{
+    augment_hook_registry_with_plugins, augment_tool_registry_with_plugins,
+};
 use crate::plugins::types::{
     PluginApplyStatus, PluginDefinition, PluginDiagnostic, PluginDiagnosticSeverity,
     PluginLifecycleState, PluginLoadResult, PluginRuntimeApplyOutcome, PluginRuntimeApplyReport,
@@ -18,13 +20,13 @@ use crate::security::authorizer::DefaultSurfaceAuthorizer;
 use crate::state::app_state::{AppState, RuntimeRole};
 use crate::tool::builtin::{
     agent::AgentTool, ask_user::AskUserQuestionTool, bash::BashTool,
-    enter_plan_mode::EnterPlanModeTool, exit_plan_mode::ExitPlanModeTool,
-    file_edit::FileEditTool, file_read::FileReadTool, file_write::FileWriteTool, glob::GlobTool,
-    grep::GrepTool, mcp::McpTool, notebook_edit::NotebookEditTool,
-    send_message::SendMessageTool, skill::SkillTool, task_create::TaskCreateTool,
-    task_get::TaskGetTool, task_list::TaskListTool, task_output::TaskOutputTool,
-    task_stop::TaskStopTool, task_update::TaskUpdateTool, todo_write::TodoWriteTool,
-    tool_search::ToolSearchTool, web_fetch::WebFetchTool, web_search::WebSearchTool,
+    enter_plan_mode::EnterPlanModeTool, exit_plan_mode::ExitPlanModeTool, file_edit::FileEditTool,
+    file_read::FileReadTool, file_write::FileWriteTool, glob::GlobTool, grep::GrepTool,
+    mcp::McpTool, notebook_edit::NotebookEditTool, send_message::SendMessageTool, skill::SkillTool,
+    task_create::TaskCreateTool, task_get::TaskGetTool, task_list::TaskListTool,
+    task_output::TaskOutputTool, task_stop::TaskStopTool, task_update::TaskUpdateTool,
+    todo_write::TodoWriteTool, tool_search::ToolSearchTool, web_fetch::WebFetchTool,
+    web_search::WebSearchTool,
 };
 use crate::tool::registry::ToolRegistry;
 
@@ -64,7 +66,10 @@ impl RuntimePluginState {
                 snapshot.plugin_load_result.active_hook_count(),
             ),
             diagnostics: snapshot.plugin_load_result.diagnostics.clone(),
-            orphaned_governance_entries: snapshot.plugin_load_result.orphaned_governance_entries.clone(),
+            orphaned_governance_entries: snapshot
+                .plugin_load_result
+                .orphaned_governance_entries
+                .clone(),
         };
         Self {
             inner: Arc::new(RwLock::new(snapshot)),
@@ -138,7 +143,10 @@ pub fn build_runtime_plugin_snapshot(app_state: &AppState) -> RuntimePluginSnaps
     });
 
     let coordinator_tools = tool_inventory.assemble_for_role(RuntimeRole::Coordinator);
-    let command_registry = Arc::new(build_command_registry(app_state, plugin_load_result.as_ref()));
+    let command_registry = Arc::new(build_command_registry(
+        app_state,
+        plugin_load_result.as_ref(),
+    ));
     let runtime_tool_registry = Arc::new(RwLock::new(coordinator_tools.clone()));
     let mut notification_dispatcher = app_state.notification_dispatcher.clone();
     notification_dispatcher.set_hook_registry(hook_registry.clone());
@@ -156,7 +164,8 @@ pub fn build_runtime_plugin_snapshot(app_state: &AppState) -> RuntimePluginSnaps
 pub async fn rebuild_runtime_plugin_state(
     app_state: &AppState,
 ) -> anyhow::Result<PluginRuntimeApplyReport> {
-    let Some(runtime_plugin_state) = app_state.permission_context.runtime_plugin_state.as_ref() else {
+    let Some(runtime_plugin_state) = app_state.permission_context.runtime_plugin_state.as_ref()
+    else {
         return Ok(PluginRuntimeApplyReport {
             outcome: PluginRuntimeApplyOutcome::Applied,
             generation: 0,
@@ -179,9 +188,14 @@ pub async fn rebuild_runtime_plugin_state(
             snapshot.plugin_load_result.active_hook_count(),
         ),
         diagnostics: snapshot.plugin_load_result.diagnostics.clone(),
-        orphaned_governance_entries: snapshot.plugin_load_result.orphaned_governance_entries.clone(),
+        orphaned_governance_entries: snapshot
+            .plugin_load_result
+            .orphaned_governance_entries
+            .clone(),
     };
-    runtime_plugin_state.set_last_apply_report(report.clone()).await;
+    runtime_plugin_state
+        .set_last_apply_report(report.clone())
+        .await;
     Ok(report)
 }
 
@@ -209,7 +223,10 @@ pub fn build_turn_engine(
 }
 
 pub fn build_turn_router(snapshot: &RuntimePluginSnapshot) -> CommandRouter {
-    CommandRouter::new(snapshot.command_registry.clone(), Box::new(DefaultSurfaceAuthorizer))
+    CommandRouter::new(
+        snapshot.command_registry.clone(),
+        Box::new(DefaultSurfaceAuthorizer),
+    )
 }
 
 pub fn hydrate_app_state_from_snapshot(app_state: &mut AppState, snapshot: &RuntimePluginSnapshot) {
@@ -219,21 +236,26 @@ pub fn hydrate_app_state_from_snapshot(app_state: &mut AppState, snapshot: &Runt
     app_state.notification_dispatcher = snapshot.notification_dispatcher.clone();
 }
 
-fn build_command_registry(app_state: &AppState, plugin_load_result: &PluginLoadResult) -> CommandRegistry {
+fn build_command_registry(
+    app_state: &AppState,
+    plugin_load_result: &PluginLoadResult,
+) -> CommandRegistry {
     let registry = crate::command::builtin::register_builtin_commands(CommandRegistry::new());
     let registry = crate::command::coding::register_coding_commands(registry);
     let registry = crate::command::builtin::skills::build_skill_commands(app_state)
         .into_iter()
-        .fold(registry, |registry, command| registry.register(Arc::new(command)));
+        .fold(registry, |registry, command| {
+            registry.register(Arc::new(command))
+        });
     let registry = crate::command::builtin::register_mcp_commands(registry);
     plugin_load_result
         .plugins
         .iter()
         .flat_map(|plugin| plugin.active_commands().into_iter())
         .fold(registry, |registry, command| {
-            registry.register(Arc::new(crate::command::builtin::plugins::PluginSlashCommand::new(
-                command,
-            )))
+            registry.register(Arc::new(
+                crate::command::builtin::plugins::PluginSlashCommand::new(command),
+            ))
         })
 }
 

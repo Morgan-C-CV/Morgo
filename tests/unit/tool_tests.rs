@@ -51,7 +51,8 @@ fn deferred_tools_are_hidden_until_explicitly_included() {
     let context = ToolPermissionContext::new(PermissionMode::Default);
     assert!(!is_tool_allowed(&WebFetchTool.metadata(), &context));
 
-    let with_deferred = ToolPermissionContext::new(PermissionMode::Default).with_deferred_tools(true);
+    let with_deferred =
+        ToolPermissionContext::new(PermissionMode::Default).with_deferred_tools(true);
     assert!(is_tool_allowed(&WebFetchTool.metadata(), &with_deferred));
 }
 

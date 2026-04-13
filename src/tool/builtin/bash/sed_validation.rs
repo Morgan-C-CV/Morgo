@@ -13,7 +13,9 @@ pub fn analyze_sed_safety(command: &str) -> SedSafety {
     }
 
     let tokens = trimmed.split_whitespace().collect::<Vec<_>>();
-    let in_place = tokens.iter().any(|token| *token == "-i" || token.starts_with("-i"));
+    let in_place = tokens
+        .iter()
+        .any(|token| *token == "-i" || token.starts_with("-i"));
     let expr = tokens
         .windows(2)
         .find(|window| window[0] == "-e")

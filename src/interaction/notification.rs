@@ -9,8 +9,13 @@ pub enum NotificationType {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NotificationTarget {
-    Session { session_id: String },
-    RemoteActor { session_id: String, actor_id: String },
+    Session {
+        session_id: String,
+    },
+    RemoteActor {
+        session_id: String,
+        actor_id: String,
+    },
     Telegram(TelegramDeliveryTarget),
 }
 

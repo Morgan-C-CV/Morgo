@@ -22,10 +22,8 @@ fn default_provider_client_uses_production_boundary() {
 async fn cost_command_reports_tracked_usage() {
     let permission_context = ToolPermissionContext::new(PermissionMode::Default)
         .with_task_manager(Arc::new(TaskManager::default()));
-    let cost_tracker = CostTracker::with_default_pricing(
-        "default-model".into(),
-        ModelPricing::default(),
-    );
+    let cost_tracker =
+        CostTracker::with_default_pricing("default-model".into(), ModelPricing::default());
     cost_tracker.record_model_usage("default-model", 123, 45, 10, 5);
 
     let app_state = AppState {
@@ -74,10 +72,8 @@ async fn cost_command_reports_tracked_usage() {
 
 #[test]
 fn parsed_usage_event_can_be_recorded_into_cost_tracker() {
-    let cost_tracker = CostTracker::with_default_pricing(
-        "claude-test".into(),
-        ModelPricing::default(),
-    );
+    let cost_tracker =
+        CostTracker::with_default_pricing("claude-test".into(), ModelPricing::default());
     let body = concat!(
         "event: message\n",
         "data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-test\",\"usage\":{\"input_tokens\":50}}}\n\n",

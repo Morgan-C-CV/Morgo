@@ -5,7 +5,9 @@ use tokio::sync::RwLock;
 use async_trait::async_trait;
 use rust_agent::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
 use rust_agent::command::registry::CommandRegistry;
-use rust_agent::command::types::{Command, CommandAvailability, CommandMetadata, CommandResult, CommandSource, CommandType};
+use rust_agent::command::types::{
+    Command, CommandAvailability, CommandMetadata, CommandResult, CommandSource, CommandType,
+};
 use rust_agent::core::context::QueryContext;
 use rust_agent::core::engine::QueryEngine;
 use rust_agent::interaction::dispatcher::NotificationDispatcher;
@@ -80,7 +82,10 @@ fn test_engine() -> QueryEngine {
     let tool_registry = ToolRegistry::new();
     QueryEngine::new(QueryContext {
         system_prompt: rust_agent::prompt::system::build_system_prompt(&app_state),
-        tools_prompt: rust_agent::prompt::tools::build_tools_prompt(&tool_registry, &app_state.permission_context),
+        tools_prompt: rust_agent::prompt::tools::build_tools_prompt(
+            &tool_registry,
+            &app_state.permission_context,
+        ),
         context_prompt: rust_agent::prompt::context::build_context_prompt(&app_state),
         app_state,
         tool_registry,
@@ -93,14 +98,20 @@ fn test_engine() -> QueryEngine {
 
 #[tokio::test]
 async fn unknown_slash_command_still_falls_back_to_query() {
-    let router = CommandRouter::new(Arc::new(CommandRegistry::new()), Box::new(DefaultSurfaceAuthorizer));
+    let router = CommandRouter::new(
+        Arc::new(CommandRegistry::new()),
+        Box::new(DefaultSurfaceAuthorizer),
+    );
     let input = NormalizedInput::from_raw(InteractionSurface::Cli, "/unknown foo");
     assert_eq!(router.decide(&input).await, RouteDecision::ContinueToQuery);
 }
 
 #[tokio::test]
 async fn plain_user_input_routes_through_query_prompt_path() {
-    let router = CommandRouter::new(Arc::new(CommandRegistry::new()), Box::new(DefaultSurfaceAuthorizer));
+    let router = CommandRouter::new(
+        Arc::new(CommandRegistry::new()),
+        Box::new(DefaultSurfaceAuthorizer),
+    );
     let input = NormalizedInput::from_raw(InteractionSurface::Cli, "hello world");
     assert_eq!(
         router.decide(&input).await,
@@ -129,6 +140,11 @@ async fn prompt_command_is_interpreted_before_query_engine() {
 fn query_context_builds_non_empty_prompt_layers() {
     let engine = test_engine();
     assert!(engine.context.system_prompt.contains("surface=Cli"));
-    assert!(engine.context.context_prompt.contains("Runtime context summary:"));
+    assert!(
+        engine
+            .context
+            .context_prompt
+            .contains("Runtime context summary:")
+    );
     assert!(engine.context.context_prompt.contains("- client_type: Cli"));
 }

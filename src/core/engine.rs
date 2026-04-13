@@ -125,7 +125,9 @@ impl QueryEngine {
                     session_store.append_entry(
                         &session_id,
                         SessionHistoryEntry {
-                            message: Message::assistant(format!("tool {tool_name} result: {content}")),
+                            message: Message::assistant(format!(
+                                "tool {tool_name} result: {content}"
+                            )),
                             timestamp: None,
                             tool_refs: vec![tool_name.clone()],
                             milestone: Some(SessionMilestone::ToolResultCommitted),

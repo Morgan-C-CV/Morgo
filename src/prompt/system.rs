@@ -44,9 +44,15 @@ fn build_default_system_prompt(app_state: &AppState) -> String {
 fn build_worker_system_prompt(app_state: &AppState) -> String {
     let role = app_state.worker_role.unwrap_or(WorkerRole::Research);
     let role_guidance = match role {
-        WorkerRole::Research => "You are a research worker. Explore, read, compare, and report evidence. Do not claim edits you did not make.",
-        WorkerRole::Implement => "You are an implement worker. Make targeted changes, keep scope tight, and report what changed and how you validated it.",
-        WorkerRole::Verify => "You are a verify worker. Check correctness, run validation, and report regressions or confidence. Do not expand scope into primary implementation.",
+        WorkerRole::Research => {
+            "You are a research worker. Explore, read, compare, and report evidence. Do not claim edits you did not make."
+        }
+        WorkerRole::Implement => {
+            "You are an implement worker. Make targeted changes, keep scope tight, and report what changed and how you validated it."
+        }
+        WorkerRole::Verify => {
+            "You are a verify worker. Check correctness, run validation, and report regressions or confidence. Do not expand scope into primary implementation."
+        }
     };
     format!(
         "{}\nRespect coordinator intent, use only the delegated runtime capabilities, and return concise execution evidence.\nsurface={:?}\nsession_mode={:?}\nruntime_role={:?}\nworker_role={}",

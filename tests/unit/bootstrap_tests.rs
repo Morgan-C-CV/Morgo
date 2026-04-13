@@ -173,6 +173,7 @@ async fn runtime_continue_session_uses_restored_snapshot() {
         resume: None,
         trace_startup: false,
         show_tools: false,
+        tui: false,
         surface: "cli".into(),
     })
     .with_session_store(store);
@@ -203,6 +204,7 @@ async fn runtime_resume_prefers_restored_surface_and_mode() {
         resume: Some("session-remote".into()),
         trace_startup: false,
         show_tools: false,
+        tui: false,
         surface: "cli".into(),
     })
     .with_session_store(store);
@@ -254,6 +256,7 @@ async fn runtime_restores_persisted_task_list_for_resumed_session() {
         resume: Some("session-with-tasks".into()),
         trace_startup: false,
         show_tools: false,
+        tui: false,
         surface: "cli".into(),
     })
     .with_session_store(store);
@@ -314,6 +317,7 @@ async fn runtime_continue_restores_from_file_backed_store_across_instances() {
         resume: None,
         trace_startup: false,
         show_tools: false,
+        tui: false,
         surface: "cli".into(),
     })
     .with_session_store(store_b);
@@ -338,6 +342,7 @@ async fn runtime_initializes_fresh_session_record_in_store() {
         resume: None,
         trace_startup: false,
         show_tools: false,
+        tui: false,
         surface: "cli".into(),
     })
     .with_session_store(store.clone());
@@ -423,10 +428,12 @@ fn bootstrap_hook_loader_defaults_without_project_config() {
         .config_load_result()
         .expect("bootstrap should retain hook load metadata");
     assert_eq!(load_result.source, HookConfigSource::Defaults);
-    assert!(load_result
-        .diagnostics
-        .iter()
-        .any(|line| line.contains("No .claude/hooks.json found")));
+    assert!(
+        load_result
+            .diagnostics
+            .iter()
+            .any(|line| line.contains("No .claude/hooks.json found"))
+    );
 
     std::fs::remove_dir_all(root).expect("cleanup bootstrap hook root");
 }

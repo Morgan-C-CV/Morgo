@@ -34,7 +34,9 @@ fn skill_visibility_changes_with_cwd_and_cache_invalidation() {
     assert!(registry.list_user_invocable(&project_b).is_empty());
 
     let mut cache = SkillLoaderCache::default();
-    let (first, reloaded_first) = cache.load_or_reload(&project_a).expect("initial cache load");
+    let (first, reloaded_first) = cache
+        .load_or_reload(&project_a)
+        .expect("initial cache load");
     assert!(reloaded_first);
     let (_, reloaded_second) = cache.load_or_reload(&project_a).expect("cached load");
     assert!(!reloaded_second);
@@ -45,7 +47,9 @@ fn skill_visibility_changes_with_cwd_and_cache_invalidation() {
     )
     .expect("rewrite skill file");
 
-    let (second, reloaded_third) = cache.load_or_reload(&project_a).expect("reload after mutation");
+    let (second, reloaded_third) = cache
+        .load_or_reload(&project_a)
+        .expect("reload after mutation");
     assert!(reloaded_third);
     assert_ne!(first.fingerprint, second.fingerprint);
     assert_eq!(second.skills[0].description, "contextual skill updated");

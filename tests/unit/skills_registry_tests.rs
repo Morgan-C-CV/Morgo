@@ -64,7 +64,10 @@ fn registry_resolves_aliases_and_model_visibility() {
     let cwd = Path::new("/tmp/skills-alias");
     std::fs::create_dir_all(cwd).expect("create cwd");
 
-    assert_eq!(registry.find("scan").expect("alias should resolve").name, "analyze");
+    assert_eq!(
+        registry.find("scan").expect("alias should resolve").name,
+        "analyze"
+    );
     let model_visible = registry.list_model_invocable(cwd);
     assert_eq!(model_visible.len(), 1);
     assert_eq!(model_visible[0].name, "analyze");

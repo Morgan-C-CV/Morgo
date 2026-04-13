@@ -19,7 +19,8 @@ fn parse_input(call: &ToolCall) -> anyhow::Result<WriteInput> {
     let json = call
         .json_input()
         .ok_or_else(|| anyhow::anyhow!("file write requires JSON input"))?;
-    serde_json::from_value(json).map_err(|error| anyhow::anyhow!("invalid file write input: {error}"))
+    serde_json::from_value(json)
+        .map_err(|error| anyhow::anyhow!("invalid file write input: {error}"))
 }
 
 #[async_trait]

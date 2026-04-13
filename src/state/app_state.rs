@@ -1,4 +1,5 @@
 use crate::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
+use crate::command::registry::CommandRegistry;
 use crate::command::types::CommandResult;
 use crate::cost::tracker::CostTracker;
 use crate::plugins::types::PluginLoadResult;
@@ -8,7 +9,6 @@ use crate::tool::definition::{ToolCall, ToolResult};
 use crate::tool::registry::ToolRegistry;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use crate::command::registry::CommandRegistry;
 
 use crate::history::resume::RestoredSession;
 use crate::history::session::{SessionHistory, SessionSnapshot, SessionStore};
@@ -74,7 +74,9 @@ impl AppState {
 
     pub async fn resolve_pending_approval(&self, approved: bool) -> anyhow::Result<CommandResult> {
         let Some(pending) = self.permission_context.pending_approval() else {
-            return Ok(CommandResult::Denied("no pending approval in this session".into()));
+            return Ok(CommandResult::Denied(
+                "no pending approval in this session".into(),
+            ));
         };
 
         if !approved {
@@ -106,10 +108,13 @@ impl AppState {
                 let registry = self
                     .runtime_tool_registry
                     .as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("runtime tool registry unavailable for approval"))?
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("runtime tool registry unavailable for approval")
+                    })?
                     .read()
                     .await;
-                let result = registry.invoke_with_approval(
+                let result = registry
+                    .invoke_with_approval(
                         &ToolCall::new(tool_name, pending.tool_input.clone()),
                         &self.permission_context,
                     )
@@ -118,16 +123,16 @@ impl AppState {
                 match result {
                     ToolResult::Text(text) => Ok(CommandResult::Message(text)),
                     ToolResult::Denied(reason) => Ok(CommandResult::Denied(reason)),
-                    ToolResult::PendingApproval { message, .. } => {
-                        Ok(CommandResult::Message(format!("approval still required: {message}")))
-                    }
+                    ToolResult::PendingApproval { message, .. } => Ok(CommandResult::Message(
+                        format!("approval still required: {message}"),
+                    )),
                     ToolResult::Interrupted(reason) => {
                         Ok(CommandResult::Message(format!("Interrupted: {reason}")))
                     }
                     ToolResult::Progress(progress) => Ok(CommandResult::Message(progress)),
-                    ToolResult::ResultTooLarge(reason) => {
-                        Ok(CommandResult::Message(format!("Result too large: {reason}")))
-                    }
+                    ToolResult::ResultTooLarge(reason) => Ok(CommandResult::Message(format!(
+                        "Result too large: {reason}"
+                    ))),
                 }
             }
         }
@@ -145,7 +150,10 @@ impl std::fmt::Debug for AppState {
             .field("worker_role", &self.worker_role)
             .field("permission_context", &self.permission_context)
             .field("has_command_registry", &self.command_registry.is_some())
-            .field("has_runtime_tool_registry", &self.runtime_tool_registry.is_some())
+            .field(
+                "has_runtime_tool_registry",
+                &self.runtime_tool_registry.is_some(),
+            )
             .field("has_skill_registry", &self.skill_registry.is_some())
             .field("has_mcp_runtime", &self.mcp_runtime.is_some())
             .field("has_plugin_load_result", &self.plugin_load_result.is_some())

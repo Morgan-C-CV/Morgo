@@ -1,5 +1,7 @@
 use rust_agent::hook::output::HookPermissionResult;
-use rust_agent::hook::permission_resolution::{resolve_hook_permission_decision, updated_input_from_hook};
+use rust_agent::hook::permission_resolution::{
+    resolve_hook_permission_decision, updated_input_from_hook,
+};
 use rust_agent::tool::definition::{PermissionDecision, PermissionDecisionReason};
 
 #[test]

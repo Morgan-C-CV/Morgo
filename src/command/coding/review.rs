@@ -32,7 +32,7 @@ impl Command for ReviewCommand {
         _app_state: &AppState,
     ) -> anyhow::Result<CommandResult> {
         let args = input.command_args.clone();
-        
+
         let prompt = format!(
             r#"You are an expert code reviewer. Follow these steps:
 

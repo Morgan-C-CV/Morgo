@@ -198,7 +198,9 @@ impl TaskListManager {
             .collect()
     }
 
-    pub fn tasks_grouped_by_plan_step(&self) -> std::collections::BTreeMap<String, Vec<TaskListItem>> {
+    pub fn tasks_grouped_by_plan_step(
+        &self,
+    ) -> std::collections::BTreeMap<String, Vec<TaskListItem>> {
         let mut grouped = std::collections::BTreeMap::<String, Vec<TaskListItem>>::new();
         for task in self.list() {
             if let Some(step_id) = task.plan_step_id.clone() {
@@ -218,9 +220,15 @@ impl TaskListManager {
             let Some(tasks) = grouped.get(step.id.as_str()) else {
                 continue;
             };
-            let next_status = if tasks.iter().any(|task| task.status == TaskListStatus::InProgress) {
+            let next_status = if tasks
+                .iter()
+                .any(|task| task.status == TaskListStatus::InProgress)
+            {
                 PlanStepStatus::InProgress
-            } else if tasks.iter().all(|task| task.status == TaskListStatus::Completed) {
+            } else if tasks
+                .iter()
+                .all(|task| task.status == TaskListStatus::Completed)
+            {
                 PlanStepStatus::Completed
             } else {
                 PlanStepStatus::Pending
@@ -241,7 +249,12 @@ impl TaskListManager {
             .steps
             .iter()
             .find(|step| step.status == PlanStepStatus::InProgress)
-            .or_else(|| draft.steps.iter().find(|step| step.status == PlanStepStatus::Pending))
+            .or_else(|| {
+                draft
+                    .steps
+                    .iter()
+                    .find(|step| step.status == PlanStepStatus::Pending)
+            })
             .map(|step| step.id.clone());
         let progress_percent = if total_steps == 0 {
             0
@@ -253,7 +266,10 @@ impl TaskListManager {
             completed_steps,
             total_steps,
             progress_percent,
-            last_updated_at: next.execution.as_ref().and_then(|execution| execution.last_updated_at.clone()),
+            last_updated_at: next
+                .execution
+                .as_ref()
+                .and_then(|execution| execution.last_updated_at.clone()),
         };
         if next.execution.as_ref() != Some(&next_execution) {
             next.execution = Some(next_execution);
@@ -393,8 +409,7 @@ fn task_status_from_plan_step(status: PlanStepStatus) -> TaskListStatus {
 }
 
 fn plan_step_description(step: &PlanStep) -> String {
-    step
-        .details
+    step.details
         .as_ref()
         .map(|value| value.trim())
         .filter(|value| !value.is_empty())

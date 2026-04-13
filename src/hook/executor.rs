@@ -66,7 +66,9 @@ pub fn run_hook(registry: &HookRegistry, event: HookEvent) -> HookResult {
         }
         if let Some(additional_context) = &rule.additional_context {
             result.payload.additional_context = Some(additional_context.clone());
-            result.messages.push(Message::assistant(additional_context.clone()));
+            result
+                .messages
+                .push(Message::assistant(additional_context.clone()));
         }
 
         if let Some(deny_match) = &rule.deny_match {
@@ -134,10 +136,9 @@ fn matches_denial(event: &HookEvent, deny_match: &str) -> bool {
         | HookEvent::PostToolUse { tool_name }
         | HookEvent::PostToolUseFailure { tool_name }
         | HookEvent::PermissionRequest { tool_name } => tool_name == deny_match,
-        HookEvent::PermissionDenied {
-            tool_name,
-            reason,
-        } => tool_name == deny_match || reason.contains(deny_match),
+        HookEvent::PermissionDenied { tool_name, reason } => {
+            tool_name == deny_match || reason.contains(deny_match)
+        }
         HookEvent::Notification {
             title,
             body,

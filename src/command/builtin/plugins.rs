@@ -51,7 +51,9 @@ impl Command for PluginsCommand {
         app_state: &AppState,
     ) -> anyhow::Result<CommandResult> {
         let Some(plugin_load_result) = app_state.plugin_load_result.as_ref() else {
-            return Ok(CommandResult::Message("Plugins are unavailable in this runtime.".into()));
+            return Ok(CommandResult::Message(
+                "Plugins are unavailable in this runtime.".into(),
+            ));
         };
         let cwd = app_state
             .session
@@ -105,7 +107,9 @@ impl Command for PluginsCommand {
                     plugin_load_result
                         .diagnostics
                         .iter()
-                        .filter(|diagnostic| diagnostic.plugin_name.as_deref() == Some(plugin_name.trim()))
+                        .filter(|diagnostic| {
+                            diagnostic.plugin_name.as_deref() == Some(plugin_name.trim())
+                        })
                         .cloned()
                         .collect()
                 };
@@ -172,14 +176,17 @@ impl Command for PluginsCommand {
                     .iter()
                     .find(|plugin| plugin.name == plugin_name)
                 else {
-                    return Ok(CommandResult::Message(format!("Plugin not found: {plugin_name}")));
+                    return Ok(CommandResult::Message(format!(
+                        "Plugin not found: {plugin_name}"
+                    )));
                 };
                 let disable_reason = if reason.trim().is_empty() {
                     None
                 } else {
                     Some(reason.trim().to_string())
                 };
-                let path = update_plugin_state(cwd, plugin.name.as_str(), false, disable_reason.clone())?;
+                let path =
+                    update_plugin_state(cwd, plugin.name.as_str(), false, disable_reason.clone())?;
                 let report = rebuild_runtime_plugin_state(app_state).await?;
                 Ok(CommandResult::Message(render_governance_apply_message(
                     format!(
@@ -336,16 +343,30 @@ fn render_plugin_show(
         .collect::<Vec<_>>();
     let mut lines = vec![
         format!("Plugin: {}", plugin.name),
-        format!("- version: {}", plugin.version.as_deref().unwrap_or("unknown")),
+        format!(
+            "- version: {}",
+            plugin.version.as_deref().unwrap_or("unknown")
+        ),
         format!("- description: {}", plugin.description),
         format!("- manifest: {}", plugin.manifest_path.display()),
         format!("- lifecycle_state: {}", plugin.lifecycle_state.as_str()),
         format!("- apply_status: {}", plugin.apply_status.as_str()),
-        format!("- enabled: {}", if plugin.governance.enabled { "yes" } else { "no" }),
+        format!(
+            "- enabled: {}",
+            if plugin.governance.enabled {
+                "yes"
+            } else {
+                "no"
+            }
+        ),
         format!("- governance_source: {}", plugin.governance.source.as_str()),
         format!(
             "- disable_reason: {}",
-            plugin.governance.disable_reason.as_deref().unwrap_or("none")
+            plugin
+                .governance
+                .disable_reason
+                .as_deref()
+                .unwrap_or("none")
         ),
         format!("- capabilities: {}", capabilities),
         format!(
@@ -354,7 +375,9 @@ fn render_plugin_show(
         ),
         format!(
             "- discovered: commands={}, tools={}, hooks={}",
-            plugin.commands.len(), plugin.tools.len(), plugin.hooks.len()
+            plugin.commands.len(),
+            plugin.tools.len(),
+            plugin.hooks.len()
         ),
     ];
 
@@ -376,10 +399,7 @@ fn render_plugin_show(
 
     if let Some(report) = last_apply_report {
         lines.push("- runtime_apply:".to_string());
-        lines.push(format!(
-            "  - outcome: {}",
-            report.outcome.as_str()
-        ));
+        lines.push(format!("  - outcome: {}", report.outcome.as_str()));
         lines.push(format!("  - generation: {}", report.generation));
         lines.push(format!("  - summary: {}", report.message));
     }

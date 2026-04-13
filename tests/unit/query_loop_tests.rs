@@ -4,7 +4,7 @@ use rust_agent::core::engine::QueryEngine;
 use rust_agent::core::events::EngineEvent;
 use rust_agent::core::message::Message;
 use rust_agent::core::query_loop::{
-    run_query_loop, run_query_loop_with_params, Continue, QueryLoopState, QueryParams, Terminal,
+    Continue, QueryLoopState, QueryParams, Terminal, run_query_loop, run_query_loop_with_params,
 };
 use rust_agent::cost::tracker::CostTracker;
 use rust_agent::hook::registry::{HookEvent, HookEventMatcher, HookRegistry, HookRule};
@@ -93,10 +93,12 @@ async fn query_loop_records_usage_events_into_cost_tracker() {
     let result = run_query_loop(&context, Message::user("track usage")).await;
 
     assert_eq!(result.state, QueryLoopState::Completed);
-    assert!(result
-        .events
-        .iter()
-        .any(|event| matches!(event, EngineEvent::Notice { kind, .. } if kind == &"usage")));
+    assert!(
+        result
+            .events
+            .iter()
+            .any(|event| matches!(event, EngineEvent::Notice { kind, .. } if kind == &"usage"))
+    );
     let report = context.app_state.cost_tracker.format_report();
     assert!(report.contains("model default-model -> requests: 1"));
     assert!(report.contains("cache_creation_input_tokens: 10"));
@@ -217,7 +219,10 @@ async fn query_loop_uses_max_output_escalation_then_recovery() {
     assert_eq!(result.transition, Some(Continue::MaxOutputTokensEscalate));
     assert_eq!(
         result.messages,
-        vec![Message::assistant("partial"), Message::assistant("completed")]
+        vec![
+            Message::assistant("partial"),
+            Message::assistant("completed")
+        ]
     );
 }
 
@@ -255,7 +260,11 @@ async fn query_loop_surfaces_stream_errors_after_recovery_attempt() {
     assert_eq!(result.terminal, Terminal::Completed);
     assert_eq!(result.transition, Some(Continue::CollapseDrainRetry));
     assert!(result.messages[0].content.contains("stream error: boom"));
-    assert!(result.messages[1].content.contains("stream error: boom again"));
+    assert!(
+        result.messages[1]
+            .content
+            .contains("stream error: boom again")
+    );
     assert!(result.events.iter().any(|event| matches!(
         event,
         EngineEvent::Notice { kind: "recovery", message }
@@ -282,8 +291,16 @@ async fn query_loop_fails_when_tool_is_unknown() {
 
     assert_eq!(result.state, QueryLoopState::Interrupted);
     assert_eq!(result.terminal, Terminal::AbortedTools);
-    assert!(result.messages[0].content.contains("tool MissingTool failed"));
-    assert!(result.messages[1].content.contains("result missing; synthesized failure result"));
+    assert!(
+        result.messages[0]
+            .content
+            .contains("tool MissingTool failed")
+    );
+    assert!(
+        result.messages[1]
+            .content
+            .contains("result missing; synthesized failure result")
+    );
 }
 
 #[tokio::test]
@@ -351,10 +368,12 @@ async fn query_loop_stop_hook_can_prevent_continuation() {
             Message::assistant("stop hook appended message")
         ]
     );
-    assert!(result.events.iter().any(|event| matches!(
-        event,
-        EngineEvent::Notice { kind: "hook", .. }
-    )));
+    assert!(
+        result
+            .events
+            .iter()
+            .any(|event| matches!(event, EngineEvent::Notice { kind: "hook", .. }))
+    );
 }
 
 #[tokio::test]
@@ -435,7 +454,6 @@ async fn query_loop_respects_pre_tool_hook_denial() {
     ));
 }
 
-
 #[tokio::test]
 async fn query_loop_runs_permission_request_hook_before_tool_execution() {
     let registry = ToolRegistry::new().register(Arc::new(AgentTool));
@@ -498,8 +516,16 @@ async fn query_loop_runs_permission_request_hook_before_tool_execution() {
 
     assert_eq!(result.state, QueryLoopState::Interrupted);
     assert_eq!(result.terminal, Terminal::AbortedTools);
-    assert!(result.messages[0].content.contains("permission request observed"));
-    assert!(result.messages[1].content.contains("denied before execution"));
+    assert!(
+        result.messages[0]
+            .content
+            .contains("permission request observed")
+    );
+    assert!(
+        result.messages[1]
+            .content
+            .contains("denied before execution")
+    );
     assert!(engine.context.hook_registry.recorded_events().contains(
         &HookEvent::PermissionRequest {
             tool_name: "Agent".into(),
@@ -603,7 +629,12 @@ fn provider_sse_parsing_maps_standard_events() {
     assert!(matches!(events[0], StreamEvent::MessageStart));
     assert!(matches!(events[1], StreamEvent::Usage(_)));
     assert!(matches!(events[2], StreamEvent::TextDelta(_)));
-    assert!(matches!(events[3], StreamEvent::MessageStop { stop_reason: StopReason::EndTurn }));
+    assert!(matches!(
+        events[3],
+        StreamEvent::MessageStop {
+            stop_reason: StopReason::EndTurn
+        }
+    ));
 }
 
 #[test]
@@ -683,7 +714,11 @@ async fn engine_drains_internal_task_events() {
     let formatted = QueryEngine::format_task_event_message(&events[0]);
     assert!(formatted.content.contains("<task-notification>"));
     assert!(formatted.content.contains("<task-id>task-0</task-id>"));
-    assert!(formatted.content.contains("<result>Task completed</result>"));
+    assert!(
+        formatted
+            .content
+            .contains("<result>Task completed</result>")
+    );
     assert!(
         formatted
             .content
@@ -961,8 +996,8 @@ async fn coordinator_waits_for_group_barrier_before_synthesis_follow_up() {
 
     manager.complete(&first.id, &dispatcher);
 
-    let permission_context = ToolPermissionContext::new(PermissionMode::Default)
-        .with_task_manager(manager.clone());
+    let permission_context =
+        ToolPermissionContext::new(PermissionMode::Default).with_task_manager(manager.clone());
     permission_context.add_always_allow_rule("Agent");
 
     let context = QueryContext {
@@ -1019,20 +1054,24 @@ async fn coordinator_waits_for_group_barrier_before_synthesis_follow_up() {
     assert_eq!(first_result.state, QueryLoopState::Completed);
     assert_eq!(first_result.terminal, Terminal::Completed);
     assert_eq!(first_result.transition, Some(Continue::NextTurn));
-    assert!(first_result
-        .messages
-        .iter()
-        .any(|message| message.content.contains("<task-id>task-0</task-id>")));
+    assert!(
+        first_result
+            .messages
+            .iter()
+            .any(|message| message.content.contains("<task-id>task-0</task-id>"))
+    );
     assert!(first_result
         .messages
         .iter()
         .any(|message| message
             .content
             .contains("orchestration still pending: wait for grouped research fan-in or verification before final synthesis")));
-    assert!(!first_result
-        .messages
-        .iter()
-        .any(|message| message.content.contains("grouped research tasks completed")));
+    assert!(
+        !first_result
+            .messages
+            .iter()
+            .any(|message| message.content.contains("grouped research tasks completed"))
+    );
     assert!(manager.has_pending_orchestration("test-session"));
 
     manager.complete(&second.id, &dispatcher);
@@ -1043,18 +1082,23 @@ async fn coordinator_waits_for_group_barrier_before_synthesis_follow_up() {
     assert_eq!(second_result.state, QueryLoopState::Completed);
     assert_eq!(second_result.terminal, Terminal::Completed);
     assert_eq!(second_result.transition, None);
-    assert!(second_result
-        .messages
-        .iter()
-        .any(|message| message.content.contains("<task-id>group-group-1</task-id>")));
-    assert!(second_result
-        .messages
-        .iter()
-        .any(|message| message.content.contains("synthesize grouped findings for group-1")));
-    assert!(second_result
-        .messages
-        .iter()
-        .any(|message| message.content.contains("all research shards merged")));
+    assert!(
+        second_result
+            .messages
+            .iter()
+            .any(|message| message.content.contains("<task-id>group-group-1</task-id>"))
+    );
+    assert!(second_result.messages.iter().any(|message| {
+        message
+            .content
+            .contains("synthesize grouped findings for group-1")
+    }));
+    assert!(
+        second_result
+            .messages
+            .iter()
+            .any(|message| message.content.contains("all research shards merged"))
+    );
     assert!(!manager.has_pending_orchestration("test-session"));
 }
 
@@ -1072,8 +1116,8 @@ async fn coordinator_gates_finalization_until_verification_finishes() {
     manager.start(&implement.id);
     manager.complete(&implement.id, &dispatcher);
 
-    let permission_context = ToolPermissionContext::new(PermissionMode::Default)
-        .with_task_manager(manager.clone());
+    let permission_context =
+        ToolPermissionContext::new(PermissionMode::Default).with_task_manager(manager.clone());
     permission_context.add_always_allow_rule("Agent");
 
     let context = QueryContext {
@@ -1130,22 +1174,27 @@ async fn coordinator_gates_finalization_until_verification_finishes() {
     assert_eq!(gated.state, QueryLoopState::Completed);
     assert_eq!(gated.terminal, Terminal::Completed);
     assert_eq!(gated.transition, Some(Continue::NextTurn));
-    assert!(gated
-        .messages
-        .iter()
-        .any(|message| message.content.contains("<worker-role>implement</worker-role>")));
-    assert!(gated
-        .messages
-        .iter()
-        .any(|message| message.content.contains("<phase>implement</phase>")));
-    assert!(gated
-        .messages
-        .iter()
-        .any(|message| message.content.contains("<validation-state>pending_verification</validation-state>")));
-    assert!(gated
-        .messages
-        .iter()
-        .any(|message| message.content.contains("dispatch verify worker for task-0")));
+    assert!(gated.messages.iter().any(|message| {
+        message
+            .content
+            .contains("<worker-role>implement</worker-role>")
+    }));
+    assert!(
+        gated
+            .messages
+            .iter()
+            .any(|message| message.content.contains("<phase>implement</phase>"))
+    );
+    assert!(gated.messages.iter().any(|message| {
+        message
+            .content
+            .contains("<validation-state>pending_verification</validation-state>")
+    }));
+    assert!(gated.messages.iter().any(|message| {
+        message
+            .content
+            .contains("dispatch verify worker for task-0")
+    }));
     assert!(gated
         .messages
         .iter()
@@ -1167,26 +1216,33 @@ async fn coordinator_gates_finalization_until_verification_finishes() {
     assert_eq!(verified.state, QueryLoopState::Completed);
     assert_eq!(verified.terminal, Terminal::Completed);
     assert_eq!(verified.transition, None);
-    assert!(verified
-        .messages
-        .iter()
-        .any(|message| message.content.contains("<worker-role>verify</worker-role>")));
-    assert!(verified
-        .messages
-        .iter()
-        .any(|message| message.content.contains("<phase>verify</phase>")));
-    assert!(verified
-        .messages
-        .iter()
-        .any(|message| message.content.contains("<validation-state>verified</validation-state>")));
-    assert!(verified
-        .messages
-        .iter()
-        .any(|message| message.content.contains("synthesize validated result for task-1")));
-    assert!(verified
-        .messages
-        .iter()
-        .any(|message| message.content.contains("verified synthesis ready")));
+    assert!(verified.messages.iter().any(|message| {
+        message
+            .content
+            .contains("<worker-role>verify</worker-role>")
+    }));
+    assert!(
+        verified
+            .messages
+            .iter()
+            .any(|message| message.content.contains("<phase>verify</phase>"))
+    );
+    assert!(verified.messages.iter().any(|message| {
+        message
+            .content
+            .contains("<validation-state>verified</validation-state>")
+    }));
+    assert!(verified.messages.iter().any(|message| {
+        message
+            .content
+            .contains("synthesize validated result for task-1")
+    }));
+    assert!(
+        verified
+            .messages
+            .iter()
+            .any(|message| message.content.contains("verified synthesis ready"))
+    );
 }
 
 #[tokio::test]
@@ -1194,7 +1250,11 @@ async fn coordinator_surfaces_verification_failure_and_missing_verification_risk
     let manager = Arc::new(TaskManager::default());
     let dispatcher = NotificationDispatcher::new(TelegramGateway::default());
 
-    let implement = manager.create("implement risky patch", "test-session", InteractionSurface::Cli);
+    let implement = manager.create(
+        "implement risky patch",
+        "test-session",
+        InteractionSurface::Cli,
+    );
     manager.set_worker_role(&implement.id, WorkerRole::Implement);
     manager.set_parent_task_id(&implement.id, Some("parent-3".into()));
     manager.set_orchestration_group_id(&implement.id, Some("group-risk-1".into()));
@@ -1203,8 +1263,8 @@ async fn coordinator_surfaces_verification_failure_and_missing_verification_risk
     manager.start(&implement.id);
     manager.complete(&implement.id, &dispatcher);
 
-    let permission_context = ToolPermissionContext::new(PermissionMode::Default)
-        .with_task_manager(manager.clone());
+    let permission_context =
+        ToolPermissionContext::new(PermissionMode::Default).with_task_manager(manager.clone());
     permission_context.add_always_allow_rule("Agent");
 
     let context = QueryContext {
@@ -1275,20 +1335,28 @@ async fn coordinator_surfaces_verification_failure_and_missing_verification_risk
         .submit_turn(Message::user("finalize risky implementation"))
         .await;
     assert_eq!(missing.transition, Some(Continue::NextTurn));
-    assert!(missing
-        .messages
-        .iter()
-        .any(|message| message.content.contains("validation status: pending_verification")));
-    assert!(missing
-        .messages
-        .iter()
-        .any(|message| message.content.contains("unverified risk remains")));
-    assert!(missing
-        .messages
-        .iter()
-        .any(|message| message.content.contains("dispatch verify worker for task-0")));
+    assert!(missing.messages.iter().any(|message| {
+        message
+            .content
+            .contains("validation status: pending_verification")
+    }));
+    assert!(
+        missing
+            .messages
+            .iter()
+            .any(|message| message.content.contains("unverified risk remains"))
+    );
+    assert!(missing.messages.iter().any(|message| {
+        message
+            .content
+            .contains("dispatch verify worker for task-0")
+    }));
 
-    let failed_verify = manager.create("verify risky patch", "test-session", InteractionSurface::Cli);
+    let failed_verify = manager.create(
+        "verify risky patch",
+        "test-session",
+        InteractionSurface::Cli,
+    );
     manager.set_worker_role(&failed_verify.id, WorkerRole::Verify);
     manager.set_parent_task_id(&failed_verify.id, Some(implement.id.clone()));
     manager.set_orchestration_group_id(&failed_verify.id, Some("group-risk-1".into()));
@@ -1300,33 +1368,49 @@ async fn coordinator_surfaces_verification_failure_and_missing_verification_risk
         .submit_turn(Message::user("finalize risky implementation"))
         .await;
     assert_eq!(failed.transition, None);
-    assert!(failed
-        .messages
-        .iter()
-        .any(|message| message.content.contains("<validation-state>verification_failed</validation-state>")));
-    assert!(failed
-        .messages
-        .iter()
-        .any(|message| message.content.contains("inspect verification failure for task-1")));
-    assert!(failed
-        .messages
-        .iter()
-        .any(|message| message.content.contains("validation status: verification_failed")));
-    assert!(failed
-        .messages
-        .iter()
-        .any(|message| message.content.contains("unverified risk remains")));
+    assert!(failed.messages.iter().any(|message| {
+        message
+            .content
+            .contains("<validation-state>verification_failed</validation-state>")
+    }));
+    assert!(failed.messages.iter().any(|message| {
+        message
+            .content
+            .contains("inspect verification failure for task-1")
+    }));
+    assert!(failed.messages.iter().any(|message| {
+        message
+            .content
+            .contains("validation status: verification_failed")
+    }));
+    assert!(
+        failed
+            .messages
+            .iter()
+            .any(|message| message.content.contains("unverified risk remains"))
+    );
 
-    let second_implement = manager.create("implement another risky patch", "test-session", InteractionSurface::Cli);
+    let second_implement = manager.create(
+        "implement another risky patch",
+        "test-session",
+        InteractionSurface::Cli,
+    );
     manager.set_worker_role(&second_implement.id, WorkerRole::Implement);
     manager.set_parent_task_id(&second_implement.id, Some("parent-4".into()));
     manager.set_orchestration_group_id(&second_implement.id, Some("group-risk-2".into()));
     manager.set_phase(&second_implement.id, Some(WorkerPhase::Implement));
-    manager.set_validation_state(&second_implement.id, Some(ValidationState::PendingVerification));
+    manager.set_validation_state(
+        &second_implement.id,
+        Some(ValidationState::PendingVerification),
+    );
     manager.start(&second_implement.id);
     manager.complete(&second_implement.id, &dispatcher);
 
-    let killed_verify = manager.create("verify another risky patch", "test-session", InteractionSurface::Cli);
+    let killed_verify = manager.create(
+        "verify another risky patch",
+        "test-session",
+        InteractionSurface::Cli,
+    );
     manager.set_worker_role(&killed_verify.id, WorkerRole::Verify);
     manager.set_parent_task_id(&killed_verify.id, Some(second_implement.id.clone()));
     manager.set_orchestration_group_id(&killed_verify.id, Some("group-risk-2".into()));
@@ -1338,22 +1422,28 @@ async fn coordinator_surfaces_verification_failure_and_missing_verification_risk
         .submit_turn(Message::user("finalize risky implementation"))
         .await;
     assert_eq!(killed.transition, None);
-    assert!(killed
-        .messages
-        .iter()
-        .any(|message| message.content.contains("<validation-state>unverified</validation-state>")));
-    assert!(killed
-        .messages
-        .iter()
-        .any(|message| message.content.contains("synthesize with explicit unverified risk for task-3")));
-    assert!(killed
-        .messages
-        .iter()
-        .any(|message| message.content.contains("validation status: unverified")));
-    assert!(killed
-        .messages
-        .iter()
-        .any(|message| message.content.contains("unverified risk remains")));
+    assert!(killed.messages.iter().any(|message| {
+        message
+            .content
+            .contains("<validation-state>unverified</validation-state>")
+    }));
+    assert!(killed.messages.iter().any(|message| {
+        message
+            .content
+            .contains("synthesize with explicit unverified risk for task-3")
+    }));
+    assert!(
+        killed
+            .messages
+            .iter()
+            .any(|message| message.content.contains("validation status: unverified"))
+    );
+    assert!(
+        killed
+            .messages
+            .iter()
+            .any(|message| message.content.contains("unverified risk remains"))
+    );
 }
 
 #[tokio::test]

@@ -33,14 +33,7 @@ impl NormalizedInput {
         session_id: impl Into<String>,
         raw: impl Into<String>,
     ) -> Self {
-        Self::from_actor_session_raw(
-            surface,
-            session_id,
-            "local-user",
-            true,
-            true,
-            raw,
-        )
+        Self::from_actor_session_raw(surface, session_id, "local-user", true, true, raw)
     }
 
     pub fn from_remote_raw(

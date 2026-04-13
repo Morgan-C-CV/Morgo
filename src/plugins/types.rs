@@ -16,7 +16,10 @@ pub struct PluginLoadResult {
 
 impl PluginLoadResult {
     pub fn discovered_command_count(&self) -> usize {
-        self.plugins.iter().map(|plugin| plugin.commands.len()).sum()
+        self.plugins
+            .iter()
+            .map(|plugin| plugin.commands.len())
+            .sum()
     }
 
     pub fn discovered_tool_count(&self) -> usize {
@@ -28,11 +31,17 @@ impl PluginLoadResult {
     }
 
     pub fn active_plugin_count(&self) -> usize {
-        self.plugins.iter().filter(|plugin| plugin.governance.enabled).count()
+        self.plugins
+            .iter()
+            .filter(|plugin| plugin.governance.enabled)
+            .count()
     }
 
     pub fn disabled_plugin_count(&self) -> usize {
-        self.plugins.iter().filter(|plugin| !plugin.governance.enabled).count()
+        self.plugins
+            .iter()
+            .filter(|plugin| !plugin.governance.enabled)
+            .count()
     }
 
     pub fn error_plugin_count(&self) -> usize {
@@ -43,15 +52,24 @@ impl PluginLoadResult {
     }
 
     pub fn active_command_count(&self) -> usize {
-        self.plugins.iter().map(|plugin| plugin.activation.commands).sum()
+        self.plugins
+            .iter()
+            .map(|plugin| plugin.activation.commands)
+            .sum()
     }
 
     pub fn active_tool_count(&self) -> usize {
-        self.plugins.iter().map(|plugin| plugin.activation.tools).sum()
+        self.plugins
+            .iter()
+            .map(|plugin| plugin.activation.tools)
+            .sum()
     }
 
     pub fn active_hook_count(&self) -> usize {
-        self.plugins.iter().map(|plugin| plugin.activation.hooks).sum()
+        self.plugins
+            .iter()
+            .map(|plugin| plugin.activation.hooks)
+            .sum()
     }
 
     pub fn diagnostic_count_for_severity(&self, severity: PluginDiagnosticSeverity) -> usize {
@@ -265,7 +283,11 @@ pub struct PluginToolDefinition {
 
 impl PluginToolDefinition {
     pub fn qualified_tool_name(&self) -> String {
-        format!("plugin.{}.{}", sanitize_plugin_identifier(&self.plugin_name), self.name)
+        format!(
+            "plugin.{}.{}",
+            sanitize_plugin_identifier(&self.plugin_name),
+            self.name
+        )
     }
 }
 

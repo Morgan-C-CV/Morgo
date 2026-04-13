@@ -188,5 +188,8 @@ fn hook_rule_can_provide_typed_payload() {
         result.payload.permission_result,
         rust_agent::hook::output::HookPermissionResult::Deny { .. }
     ));
-    assert_eq!(result.payload.additional_context.as_deref(), Some("extra context"));
+    assert_eq!(
+        result.payload.additional_context.as_deref(),
+        Some("extra context")
+    );
 }

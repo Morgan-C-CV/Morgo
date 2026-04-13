@@ -179,7 +179,11 @@ impl ModelProviderClient {
             .header(ACCEPT, "text/event-stream")
             .header(CONTENT_TYPE, "application/json")
             .json(&build_request_payload(config, input));
-        if let Some(api_key) = config.api_key.as_ref().filter(|value| !value.trim().is_empty()) {
+        if let Some(api_key) = config
+            .api_key
+            .as_ref()
+            .filter(|value| !value.trim().is_empty())
+        {
             request = request.header(AUTHORIZATION, format!("Bearer {api_key}"));
         }
 
@@ -199,7 +203,10 @@ impl ModelProviderClient {
                 .unwrap_or_else(|_| "<unavailable>".into());
             return Err(ApiError::http_status(
                 status.as_u16(),
-                format!("provider request failed with status {}: {body}", status.as_u16()),
+                format!(
+                    "provider request failed with status {}: {body}",
+                    status.as_u16()
+                ),
             ));
         }
 
@@ -237,7 +244,10 @@ pub fn parse_sse_response(body: &str, default_model: &str) -> Result<Vec<StreamE
     let mut saw_message_start = false;
     let normalized = body.replace("\r\n", "\n");
 
-    for frame in normalized.split("\n\n").filter(|frame| !frame.trim().is_empty()) {
+    for frame in normalized
+        .split("\n\n")
+        .filter(|frame| !frame.trim().is_empty())
+    {
         let payload = frame
             .lines()
             .filter_map(|line| line.strip_prefix("data:"))
@@ -247,8 +257,9 @@ pub fn parse_sse_response(body: &str, default_model: &str) -> Result<Vec<StreamE
         if payload.is_empty() || payload == "[DONE]" {
             continue;
         }
-        let json: Value = serde_json::from_str(&payload)
-            .map_err(|error| ApiError::sse_protocol(format!("invalid SSE JSON payload: {error}")))?;
+        let json: Value = serde_json::from_str(&payload).map_err(|error| {
+            ApiError::sse_protocol(format!("invalid SSE JSON payload: {error}"))
+        })?;
         map_provider_event(&json, default_model, &mut saw_message_start, &mut events)?;
     }
 
@@ -272,8 +283,14 @@ fn map_provider_event(
                 output.push(StreamEvent::MessageStart);
                 *saw_message_start = true;
             }
-            if let Some(usage) = payload.get("message").and_then(|message| message.get("usage")) {
-                output.push(StreamEvent::Usage(parse_usage(usage, payload_model(payload).unwrap_or(default_model))));
+            if let Some(usage) = payload
+                .get("message")
+                .and_then(|message| message.get("usage"))
+            {
+                output.push(StreamEvent::Usage(parse_usage(
+                    usage,
+                    payload_model(payload).unwrap_or(default_model),
+                )));
             }
         }
         "content_block_start" => {
@@ -281,9 +298,9 @@ fn map_provider_event(
                 output.push(StreamEvent::MessageStart);
                 *saw_message_start = true;
             }
-            let block = payload
-                .get("content_block")
-                .ok_or_else(|| ApiError::invalid_response("content_block_start missing content_block"))?;
+            let block = payload.get("content_block").ok_or_else(|| {
+                ApiError::invalid_response("content_block_start missing content_block")
+            })?;
             match block.get("type").and_then(Value::as_str) {
                 Some("text") => {
                     if let Some(text) = block.get("text").and_then(Value::as_str) {
@@ -291,11 +308,14 @@ fn map_provider_event(
                     }
                 }
                 Some("tool_use") => {
-                    let tool_name = block
-                        .get("name")
-                        .and_then(Value::as_str)
-                        .ok_or_else(|| ApiError::invalid_response("tool_use content block missing name"))?;
-                    let tool_input = block.get("input").cloned().unwrap_or(Value::Null).to_string();
+                    let tool_name = block.get("name").and_then(Value::as_str).ok_or_else(|| {
+                        ApiError::invalid_response("tool_use content block missing name")
+                    })?;
+                    let tool_input = block
+                        .get("input")
+                        .cloned()
+                        .unwrap_or(Value::Null)
+                        .to_string();
                     output.push(StreamEvent::ToolUse {
                         tool_name: tool_name.to_string(),
                         input: tool_input,
@@ -331,7 +351,10 @@ fn map_provider_event(
             }
         }
         "message_stop" => {
-            if !output.iter().any(|event| matches!(event, StreamEvent::MessageStop { .. })) {
+            if !output
+                .iter()
+                .any(|event| matches!(event, StreamEvent::MessageStop { .. }))
+            {
                 output.push(StreamEvent::MessageStop {
                     stop_reason: StopReason::EndTurn,
                 });
@@ -392,7 +415,10 @@ fn map_stop_reason(reason: &str) -> StopReason {
 
 #[cfg(test)]
 mod tests {
-    use super::{ModelProviderConfig, ProviderTimeout, build_messages_url, map_stop_reason, parse_sse_response};
+    use super::{
+        ModelProviderConfig, ProviderTimeout, build_messages_url, map_stop_reason,
+        parse_sse_response,
+    };
     use crate::service::api::retry::RetryPolicy;
     use crate::service::api::streaming::{StopReason, StreamEvent};
 
@@ -424,7 +450,12 @@ mod tests {
         assert!(matches!(events[1], StreamEvent::Usage(_)));
         assert!(matches!(events[2], StreamEvent::TextDelta(_)));
         assert!(matches!(events[3], StreamEvent::ToolUse { .. }));
-        assert!(matches!(events[4], StreamEvent::MessageStop { stop_reason: StopReason::ToolUse }));
+        assert!(matches!(
+            events[4],
+            StreamEvent::MessageStop {
+                stop_reason: StopReason::ToolUse
+            }
+        ));
     }
 
     #[test]
@@ -432,6 +463,9 @@ mod tests {
         let config = ModelProviderConfig::default();
         assert_eq!(config.timeout, ProviderTimeout::default());
         assert_eq!(config.retry_policy, RetryPolicy::default());
-        assert_eq!(build_messages_url(&config.base_url), "http://localhost/v1/messages");
+        assert_eq!(
+            build_messages_url(&config.base_url),
+            "http://localhost/v1/messages"
+        );
     }
 }

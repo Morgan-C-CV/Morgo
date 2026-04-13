@@ -29,10 +29,16 @@ impl ToolRegistry {
             self.tools.iter().all(|existing| {
                 let existing_metadata = existing.metadata();
                 existing_metadata.name != metadata.name
-                    && !existing_metadata.aliases.iter().any(|alias| *alias == metadata.name)
+                    && !existing_metadata
+                        .aliases
+                        .iter()
+                        .any(|alias| *alias == metadata.name)
                     && !metadata.aliases.iter().any(|alias| {
                         *alias == existing_metadata.name
-                            || existing_metadata.aliases.iter().any(|existing_alias| existing_alias == alias)
+                            || existing_metadata
+                                .aliases
+                                .iter()
+                                .any(|existing_alias| existing_alias == alias)
                     })
             }),
             "duplicate or conflicting tool registration: {}",
@@ -95,7 +101,8 @@ impl ToolRegistry {
             .filter(|tool| {
                 let metadata = tool.metadata();
                 allowed_tools.iter().any(|allowed| {
-                    allowed == metadata.name || metadata.aliases.iter().any(|alias| allowed == alias)
+                    allowed == metadata.name
+                        || metadata.aliases.iter().any(|alias| allowed == alias)
                 })
             })
             .cloned()

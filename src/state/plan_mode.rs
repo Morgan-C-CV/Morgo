@@ -42,7 +42,11 @@ pub fn render_plan_show(permissions: &ToolPermissionContext) -> String {
                 draft
                     .steps
                     .iter()
-                    .filter_map(|step| manager.group_summary(&step.id).map(|group| (step.id.clone(), group)))
+                    .filter_map(|step| {
+                        manager
+                            .group_summary(&step.id)
+                            .map(|group| (step.id.clone(), group))
+                    })
                     .collect::<std::collections::BTreeMap<_, _>>()
             } else {
                 std::collections::BTreeMap::new()
@@ -107,7 +111,12 @@ pub fn render_plan_show(permissions: &ToolPermissionContext) -> String {
         if !draft.summary.trim().is_empty() {
             lines.push(format!("Summary: {}", draft.summary.trim()));
         }
-        if let Some(notes) = draft.notes.as_ref().map(|value| value.trim()).filter(|value| !value.is_empty()) {
+        if let Some(notes) = draft
+            .notes
+            .as_ref()
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+        {
             lines.push(format!("Notes: {notes}"));
         }
         if draft.steps.is_empty() {
@@ -123,9 +132,15 @@ pub fn render_plan_show(permissions: &ToolPermissionContext) -> String {
                 ));
             }
         }
-        let duplicate_links = linked_tasks.values().filter(|tasks| tasks.len() > 1).count();
+        let duplicate_links = linked_tasks
+            .values()
+            .filter(|tasks| tasks.len() > 1)
+            .count();
         if duplicate_links > 0 {
-            lines.push(format!("Warnings: {} duplicated plan-step link(s) detected", duplicate_links));
+            lines.push(format!(
+                "Warnings: {} duplicated plan-step link(s) detected",
+                duplicate_links
+            ));
         }
     } else {
         lines.push("Draft: none".into());
@@ -157,7 +172,11 @@ pub fn render_plan_history(permissions: &ToolPermissionContext) -> String {
 
     let mut lines = vec!["Plan history:".into()];
     for entry in history.iter().rev().take(10) {
-        let step_count = entry.draft.as_ref().map(|draft| draft.steps.len()).unwrap_or(0);
+        let step_count = entry
+            .draft
+            .as_ref()
+            .map(|draft| draft.steps.len())
+            .unwrap_or(0);
         let completed = entry
             .execution
             .as_ref()
@@ -176,7 +195,10 @@ pub fn render_plan_history(permissions: &ToolPermissionContext) -> String {
             .unwrap_or("(no summary)");
         lines.push(format!(
             "- {} [{}] {} — {}",
-            entry.timestamp, entry.status.as_str(), entry.action, entry.summary
+            entry.timestamp,
+            entry.status.as_str(),
+            entry.action,
+            entry.summary
         ));
         lines.push(format!(
             "  snapshot: steps={}, completed={}, active_step={}, summary={}",
@@ -203,7 +225,13 @@ fn format_plan_step(
         .filter(|value| !value.is_empty())
         .map(|value| format!(" — {value}"))
         .unwrap_or_default();
-    let mut lines = vec![format!("- {}: {} [{}]{}", step.id, step.title, step.status.as_str(), details)];
+    let mut lines = vec![format!(
+        "- {}: {} [{}]{}",
+        step.id,
+        step.title,
+        step.status.as_str(),
+        details
+    )];
     match linked_tasks {
         Some(tasks) if !tasks.is_empty() => {
             for task in tasks {
@@ -238,9 +266,16 @@ fn format_plan_step(
     }
     match runtime_group {
         Some(group) => {
-            lines.push(format!("  runtime group: {} — {}", group.group_id, group.hint));
+            lines.push(format!(
+                "  runtime group: {} — {}",
+                group.group_id, group.hint
+            ));
             for task in &group.tasks {
-                lines.extend(format_runtime_task_lines(task, permissions).into_iter().map(|line| format!("  {line}")));
+                lines.extend(
+                    format_runtime_task_lines(task, permissions)
+                        .into_iter()
+                        .map(|line| format!("  {line}")),
+                );
             }
         }
         None => lines.push("  runtime group: none".into()),
@@ -248,7 +283,10 @@ fn format_plan_step(
     lines.join("\n")
 }
 
-fn format_runtime_task_lines(task: &TaskRecord, permissions: &ToolPermissionContext) -> Vec<String> {
+fn format_runtime_task_lines(
+    task: &TaskRecord,
+    permissions: &ToolPermissionContext,
+) -> Vec<String> {
     let hint = permissions
         .task_manager
         .as_ref()
@@ -260,7 +298,9 @@ fn format_runtime_task_lines(task: &TaskRecord, permissions: &ToolPermissionCont
         task.status,
         task.worker_role.map(|role| role.as_str()).unwrap_or("none"),
         task.phase.map(|phase| phase.as_str()).unwrap_or("none"),
-        task.validation_state.map(|state| state.as_str()).unwrap_or("none")
+        task.validation_state
+            .map(|state| state.as_str())
+            .unwrap_or("none")
     )];
     lines.push(format!("hint: {hint}"));
     if let Some(parent_task_id) = task.parent_task_id.as_deref() {
@@ -314,9 +354,16 @@ fn plan_task_status_matches(
 ) -> bool {
     matches!(
         (plan_status, task_status),
-        (PlanStepStatus::Pending, crate::task::list_types::TaskListStatus::Pending)
-            | (PlanStepStatus::InProgress, crate::task::list_types::TaskListStatus::InProgress)
-            | (PlanStepStatus::Completed, crate::task::list_types::TaskListStatus::Completed)
+        (
+            PlanStepStatus::Pending,
+            crate::task::list_types::TaskListStatus::Pending
+        ) | (
+            PlanStepStatus::InProgress,
+            crate::task::list_types::TaskListStatus::InProgress
+        ) | (
+            PlanStepStatus::Completed,
+            crate::task::list_types::TaskListStatus::Completed
+        )
     )
 }
 
@@ -354,7 +401,10 @@ pub fn update_plan_step(
     Ok(format!("Updated plan step {step_id}"))
 }
 
-pub fn complete_plan_step(permissions: &ToolPermissionContext, step_id: &str) -> anyhow::Result<String> {
+pub fn complete_plan_step(
+    permissions: &ToolPermissionContext,
+    step_id: &str,
+) -> anyhow::Result<String> {
     let Some(plan_manager) = permissions.plan_manager.as_ref() else {
         anyhow::bail!("No plan manager is available in this session.");
     };
@@ -373,10 +423,7 @@ pub fn reorder_plan_steps(
     Ok(format!("Reordered {} plan steps", ordered_ids.len()))
 }
 
-pub fn request_enter_plan_mode(
-    permissions: &ToolPermissionContext,
-    reason: &str,
-) -> ToolResult {
+pub fn request_enter_plan_mode(permissions: &ToolPermissionContext, reason: &str) -> ToolResult {
     if matches!(permissions.mode(), PermissionMode::Plan) {
         return ToolResult::Text("Already in plan mode.".into());
     }
@@ -398,10 +445,7 @@ pub fn request_enter_plan_mode(
     }
 }
 
-pub fn request_exit_plan_mode(
-    permissions: &ToolPermissionContext,
-    summary: &str,
-) -> ToolResult {
+pub fn request_exit_plan_mode(permissions: &ToolPermissionContext, summary: &str) -> ToolResult {
     if !matches!(permissions.mode(), PermissionMode::Plan) {
         return ToolResult::Denied("Plan mode is not active.".into());
     }

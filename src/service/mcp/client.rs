@@ -10,8 +10,7 @@ use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::Mutex;
 
 use crate::service::mcp::types::{
-    McpConnectInfo, McpPeerInfo, McpResourceInfo, McpServerConfig, McpToolInfo,
-    McpTransportKind,
+    McpConnectInfo, McpPeerInfo, McpResourceInfo, McpServerConfig, McpToolInfo, McpTransportKind,
 };
 
 #[async_trait]
@@ -19,14 +18,21 @@ pub trait McpClient: Send + Sync {
     async fn connect(&self, config: &McpServerConfig) -> anyhow::Result<McpConnectInfo>;
     async fn disconnect(&self, config: &McpServerConfig) -> anyhow::Result<()>;
     async fn list_tools(&self, config: &McpServerConfig) -> anyhow::Result<Vec<McpToolInfo>>;
-    async fn list_resources(&self, config: &McpServerConfig) -> anyhow::Result<Vec<McpResourceInfo>>;
+    async fn list_resources(
+        &self,
+        config: &McpServerConfig,
+    ) -> anyhow::Result<Vec<McpResourceInfo>>;
     async fn call_tool(
         &self,
         config: &McpServerConfig,
         tool: &str,
         input: Option<Value>,
     ) -> anyhow::Result<Value>;
-    async fn read_resource(&self, config: &McpServerConfig, resource: &str) -> anyhow::Result<String>;
+    async fn read_resource(
+        &self,
+        config: &McpServerConfig,
+        resource: &str,
+    ) -> anyhow::Result<String>;
 }
 
 #[derive(Debug, Default)]
@@ -67,8 +73,13 @@ impl McpClient for RoutingMcpClient {
         self.client_for(config.transport).list_tools(config).await
     }
 
-    async fn list_resources(&self, config: &McpServerConfig) -> anyhow::Result<Vec<McpResourceInfo>> {
-        self.client_for(config.transport).list_resources(config).await
+    async fn list_resources(
+        &self,
+        config: &McpServerConfig,
+    ) -> anyhow::Result<Vec<McpResourceInfo>> {
+        self.client_for(config.transport)
+            .list_resources(config)
+            .await
     }
 
     async fn call_tool(
@@ -82,7 +93,11 @@ impl McpClient for RoutingMcpClient {
             .await
     }
 
-    async fn read_resource(&self, config: &McpServerConfig, resource: &str) -> anyhow::Result<String> {
+    async fn read_resource(
+        &self,
+        config: &McpServerConfig,
+        resource: &str,
+    ) -> anyhow::Result<String> {
         self.client_for(config.transport)
             .read_resource(config, resource)
             .await
@@ -119,7 +134,10 @@ impl McpClient for MockMcpClient {
         }])
     }
 
-    async fn list_resources(&self, config: &McpServerConfig) -> anyhow::Result<Vec<McpResourceInfo>> {
+    async fn list_resources(
+        &self,
+        config: &McpServerConfig,
+    ) -> anyhow::Result<Vec<McpResourceInfo>> {
         Ok(vec![McpResourceInfo {
             name: format!("{}-readme", config.id),
             uri: format!("mcp://{}/readme", config.id),
@@ -143,7 +161,11 @@ impl McpClient for MockMcpClient {
         }))
     }
 
-    async fn read_resource(&self, config: &McpServerConfig, resource: &str) -> anyhow::Result<String> {
+    async fn read_resource(
+        &self,
+        config: &McpServerConfig,
+        resource: &str,
+    ) -> anyhow::Result<String> {
         Ok(format!("resource:{}:{}", config.id, resource))
     }
 }
@@ -190,7 +212,10 @@ impl McpClient for StdioProcessMcpClient {
         parse_tools_list_response(&response)
     }
 
-    async fn list_resources(&self, config: &McpServerConfig) -> anyhow::Result<Vec<McpResourceInfo>> {
+    async fn list_resources(
+        &self,
+        config: &McpServerConfig,
+    ) -> anyhow::Result<Vec<McpResourceInfo>> {
         let mut processes = self.processes.lock().await;
         let session = self.ensure_process(&mut processes, config).await?;
         let response = self
@@ -220,7 +245,11 @@ impl McpClient for StdioProcessMcpClient {
         parse_tool_call_response(&response)
     }
 
-    async fn read_resource(&self, config: &McpServerConfig, resource: &str) -> anyhow::Result<String> {
+    async fn read_resource(
+        &self,
+        config: &McpServerConfig,
+        resource: &str,
+    ) -> anyhow::Result<String> {
         let mut processes = self.processes.lock().await;
         let session = self.ensure_process(&mut processes, config).await?;
         let response = self
@@ -248,9 +277,9 @@ impl StdioProcessMcpClient {
             session.connect_info = connect_info;
             processes.insert(config.id.clone(), session);
         }
-        processes
-            .get_mut(&config.id)
-            .ok_or_else(|| anyhow::anyhow!("missing stdio process session for server {}", config.id))
+        processes.get_mut(&config.id).ok_or_else(|| {
+            anyhow::anyhow!("missing stdio process session for server {}", config.id)
+        })
     }
 
     async fn spawn_session(&self, config: &McpServerConfig) -> anyhow::Result<StdioSession> {
@@ -267,14 +296,18 @@ impl StdioProcessMcpClient {
                 config.command, config.id
             )
         })?;
-        let stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| anyhow::anyhow!("MCP stdio process did not provide stdin for server {}", config.id))?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| anyhow::anyhow!("MCP stdio process did not provide stdout for server {}", config.id))?;
+        let stdin = child.stdin.take().ok_or_else(|| {
+            anyhow::anyhow!(
+                "MCP stdio process did not provide stdin for server {}",
+                config.id
+            )
+        })?;
+        let stdout = child.stdout.take().ok_or_else(|| {
+            anyhow::anyhow!(
+                "MCP stdio process did not provide stdout for server {}",
+                config.id
+            )
+        })?;
 
         Ok(StdioSession {
             child,
@@ -308,10 +341,12 @@ impl StdioProcessMcpClient {
         self.send_jsonrpc_notification(session, "notifications/initialized", json!({}))
             .await?;
 
-        let result = response
-            .get("result")
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!("MCP initialize response for server {} was missing result", config.id))?;
+        let result = response.get("result").cloned().ok_or_else(|| {
+            anyhow::anyhow!(
+                "MCP initialize response for server {} was missing result",
+                config.id
+            )
+        })?;
         let server_info = result.get("serverInfo").cloned().unwrap_or(Value::Null);
 
         Ok(McpConnectInfo {
@@ -395,7 +430,9 @@ impl StdioProcessMcpClient {
             let mut line = String::new();
             let bytes = session.stdout.read_line(&mut line).await?;
             if bytes == 0 {
-                anyhow::bail!("MCP stdio process closed stdout before completing a JSON-RPC response");
+                anyhow::bail!(
+                    "MCP stdio process closed stdout before completing a JSON-RPC response"
+                );
             }
             if line == "\r\n" {
                 break;
@@ -405,8 +442,9 @@ impl StdioProcessMcpClient {
             }
         }
 
-        let length = content_length
-            .ok_or_else(|| anyhow::anyhow!("MCP stdio response did not include Content-Length header"))?;
+        let length = content_length.ok_or_else(|| {
+            anyhow::anyhow!("MCP stdio response did not include Content-Length header")
+        })?;
         let mut body = vec![0_u8; length];
         session.stdout.read_exact(&mut body).await?;
         Ok(serde_json::from_slice(&body)?)
@@ -442,7 +480,13 @@ fn parse_resource_read_response(response: &Value) -> anyhow::Result<String> {
     let result = response
         .get("result")
         .ok_or_else(|| anyhow::anyhow!("MCP resources/read response missing result"))?;
-    if let Some(text) = result.get("contents").and_then(Value::as_array).and_then(|items| items.first()).and_then(|item| item.get("text")).and_then(Value::as_str) {
+    if let Some(text) = result
+        .get("contents")
+        .and_then(Value::as_array)
+        .and_then(|items| items.first())
+        .and_then(|item| item.get("text"))
+        .and_then(Value::as_str)
+    {
         return Ok(text.to_string());
     }
     if let Some(text) = result.get("text").and_then(Value::as_str) {

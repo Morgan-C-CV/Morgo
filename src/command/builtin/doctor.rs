@@ -48,7 +48,11 @@ impl Command for DoctorCommand {
             \n(NOTE: Component UI is currently running in a purely unrendered text CLI loop.)",
             surface_info,
             session_id,
-            if app_state.session_store.is_some() { "Enabled" } else { "Disabled" }
+            if app_state.session_store.is_some() {
+                "Enabled"
+            } else {
+                "Disabled"
+            }
         );
 
         Ok(CommandResult::Message(message))

@@ -32,7 +32,7 @@ impl Command for ContextCommand {
         _app_state: &AppState,
     ) -> anyhow::Result<CommandResult> {
         let args = input.command_args.trim();
-        
+
         if args.is_empty() {
             Ok(CommandResult::Message(
                 "Context Manager:\nCurrently, the agent automatically maintains the context window contextually through tool interactions.\n(TUI interactive file picker for manual pinning is pending implementation)".into(),

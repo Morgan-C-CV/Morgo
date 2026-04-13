@@ -14,7 +14,13 @@ pub fn describe_memory_context(app_state: &AppState) -> String {
         .iter()
         .rev()
         .take(3)
-        .map(|entry| format!("{}: {}", format_role(&entry.message.role), truncate(&entry.message.content, 60)))
+        .map(|entry| {
+            format!(
+                "{}: {}",
+                format_role(&entry.message.role),
+                truncate(&entry.message.content, 60)
+            )
+        })
         .collect::<Vec<_>>();
     let tool_refs = history
         .entries
@@ -30,7 +36,10 @@ pub fn describe_memory_context(app_state: &AppState) -> String {
         format!("- history_entries: {entry_count}"),
     ];
     if !recent_messages.is_empty() {
-        lines.push(format!("- recent_messages: {}", recent_messages.join(" | ")));
+        lines.push(format!(
+            "- recent_messages: {}",
+            recent_messages.join(" | ")
+        ));
     }
     if !tool_refs.is_empty() {
         lines.push(format!("- context_files: {}", tool_refs.join(", ")));

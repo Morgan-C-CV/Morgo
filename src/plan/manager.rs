@@ -75,7 +75,11 @@ impl PlanManager {
                 }
             }
             recalculate_execution(&mut state);
-            push_history(&mut state, "ensure_draft", "entered or refreshed draft state");
+            push_history(
+                &mut state,
+                "ensure_draft",
+                "entered or refreshed draft state",
+            );
             *slot = Some(state.clone());
             state
         };
@@ -181,7 +185,11 @@ impl PlanManager {
         Ok(updated)
     }
 
-    pub fn mark_step_status(&self, step_id: &str, status: PlanStepStatus) -> anyhow::Result<PlanState> {
+    pub fn mark_step_status(
+        &self,
+        step_id: &str,
+        status: PlanStepStatus,
+    ) -> anyhow::Result<PlanState> {
         let updated = self.update_step(step_id, None, None, Some(status))?;
         Ok(updated)
     }
@@ -234,7 +242,11 @@ impl PlanManager {
             draft.updated_at = Some(timestamp_now());
             sync_status_from_draft(&mut state);
             recalculate_execution(&mut state);
-            push_history(&mut state, "reorder_steps", format!("reordered {} steps", ordered_ids.len()));
+            push_history(
+                &mut state,
+                "reorder_steps",
+                format!("reordered {} steps", ordered_ids.len()),
+            );
             *slot = Some(state.clone());
             state
         };
@@ -243,9 +255,7 @@ impl PlanManager {
     }
 
     pub fn history(&self) -> Vec<PlanHistoryEntry> {
-        self.state()
-            .map(|state| state.history)
-            .unwrap_or_default()
+        self.state().map(|state| state.history).unwrap_or_default()
     }
 
     pub fn approve(&self, summary: Option<&str>) -> anyhow::Result<PlanState> {
@@ -259,7 +269,12 @@ impl PlanManager {
             if draft.summary.trim().is_empty() && draft.steps.is_empty() {
                 anyhow::bail!("cannot approve an empty plan draft");
             }
-            state.status = if draft.steps.iter().all(|step| step.status == PlanStepStatus::Completed) && !draft.steps.is_empty() {
+            state.status = if draft
+                .steps
+                .iter()
+                .all(|step| step.status == PlanStepStatus::Completed)
+                && !draft.steps.is_empty()
+            {
                 PlanStatus::Completed
             } else {
                 PlanStatus::Approved
@@ -298,9 +313,15 @@ fn sync_status_from_draft(state: &mut PlanState) {
         .unwrap_or(&[]);
     state.status = if steps.is_empty() {
         PlanStatus::Drafting
-    } else if steps.iter().all(|step| step.status == PlanStepStatus::Completed) {
+    } else if steps
+        .iter()
+        .all(|step| step.status == PlanStepStatus::Completed)
+    {
         PlanStatus::Completed
-    } else if steps.iter().any(|step| step.status == PlanStepStatus::InProgress) {
+    } else if steps
+        .iter()
+        .any(|step| step.status == PlanStepStatus::InProgress)
+    {
         PlanStatus::Executing
     } else {
         PlanStatus::Ready

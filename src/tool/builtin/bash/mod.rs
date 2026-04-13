@@ -20,7 +20,7 @@ pub mod sed_validation;
 
 use command_helpers::{command_matches_rule, normalized_command_variants};
 use permissions::evaluate_bash_policy;
-use sandbox::{execute_with_sandbox, SandboxPolicy};
+use sandbox::{SandboxPolicy, execute_with_sandbox};
 
 pub struct BashTool;
 
@@ -163,8 +163,9 @@ impl Tool for BashTool {
 
         if policy.requires_escalation {
             return PermissionDecision::Ask {
-                message: "bash command requires explicit approval due to shell semantics or path risk"
-                    .into(),
+                message:
+                    "bash command requires explicit approval due to shell semantics or path risk"
+                        .into(),
                 reason: crate::tool::definition::PermissionDecisionReason::Safety,
             };
         }
@@ -197,7 +198,9 @@ impl Tool for BashTool {
         .await
         .map_err(|_| anyhow::anyhow!("bash command timed out after {timeout_ms}ms"))??;
 
-        Ok(ToolResult::Text(format_output(&input, output, &cwd, policy)))
+        Ok(ToolResult::Text(format_output(
+            &input, output, &cwd, policy,
+        )))
     }
 }
 
@@ -246,13 +249,16 @@ async fn launch_background_command(
         let result = run_background_process(&command, &cwd, policy, timeout_ms).await;
         match result {
             Ok(output) => {
-                manager.append_output(&task_id, format_output_background(
-                    description.as_deref(),
-                    &command,
-                    &cwd,
-                    policy,
-                    output,
-                ));
+                manager.append_output(
+                    &task_id,
+                    format_output_background(
+                        description.as_deref(),
+                        &command,
+                        &cwd,
+                        policy,
+                        output,
+                    ),
+                );
                 manager.complete(&task_id, &dispatcher);
             }
             Err(error) => {
@@ -316,11 +322,15 @@ async fn run_background_process(
         .await
         .map_err(|_| anyhow::anyhow!("bash command timed out after {timeout_ms}ms"))??;
     let stdout = match stdout_task {
-        Some(task) => task.await.map_err(|error| anyhow::anyhow!("stdout join failed: {error}"))?,
+        Some(task) => task
+            .await
+            .map_err(|error| anyhow::anyhow!("stdout join failed: {error}"))?,
         None => Vec::new(),
     };
     let stderr = match stderr_task {
-        Some(task) => task.await.map_err(|error| anyhow::anyhow!("stderr join failed: {error}"))?,
+        Some(task) => task
+            .await
+            .map_err(|error| anyhow::anyhow!("stderr join failed: {error}"))?,
         None => Vec::new(),
     };
 
@@ -382,7 +392,10 @@ fn format_output(
         parts.push(format!("description: {}", description.trim()));
     }
     parts.push(format!("command: {}", input.command.trim()));
-    parts.push(format!("normalized_variants: {:?}", normalized_command_variants(&input.command)));
+    parts.push(format!(
+        "normalized_variants: {:?}",
+        normalized_command_variants(&input.command)
+    ));
     parts.push(format!("cwd: {}", cwd.display()));
     parts.push(format!("sandbox_policy: {:?}", policy));
     parts.push(format!("exit_code: {status}"));

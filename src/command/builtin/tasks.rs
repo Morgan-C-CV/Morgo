@@ -34,7 +34,9 @@ impl Command for TasksCommand {
         if let Some(task_manager) = &app_state.permission_context.task_manager {
             let tasks = task_manager.list();
             if tasks.is_empty() {
-                return Ok(CommandResult::Message("No active or completed child tasks.".into()));
+                return Ok(CommandResult::Message(
+                    "No active or completed child tasks.".into(),
+                ));
             }
 
             let (groups, standalone_tasks) = task_manager.grouped_tasks();
@@ -55,9 +57,16 @@ impl Command for TasksCommand {
                 .filter(|group| group.hint.contains("still in progress"))
                 .count();
             for task in &tasks {
-                *status_counts.entry(format!("{:?}", task.status)).or_insert(0) += 1;
+                *status_counts
+                    .entry(format!("{:?}", task.status))
+                    .or_insert(0) += 1;
                 *role_counts
-                    .entry(task.worker_role.map(|role| role.as_str()).unwrap_or("none").to_string())
+                    .entry(
+                        task.worker_role
+                            .map(|role| role.as_str())
+                            .unwrap_or("none")
+                            .to_string(),
+                    )
                     .or_insert(0) += 1;
                 *validation_counts
                     .entry(
@@ -68,11 +77,20 @@ impl Command for TasksCommand {
                     )
                     .or_insert(0) += 1;
                 *phase_counts
-                    .entry(task.phase.map(|phase| phase.as_str()).unwrap_or("none").to_string())
+                    .entry(
+                        task.phase
+                            .map(|phase| phase.as_str())
+                            .unwrap_or("none")
+                            .to_string(),
+                    )
                     .or_insert(0) += 1;
             }
 
-            let mut lines = vec!["Agent Tasks:".to_string(), String::new(), "Summary:".to_string()];
+            let mut lines = vec![
+                "Agent Tasks:".to_string(),
+                String::new(),
+                "Summary:".to_string(),
+            ];
             lines.push(format!("- total: {}", tasks.len()));
             lines.push(format!("- orchestration_groups: {}", groups.len()));
             lines.push(format!(
@@ -120,7 +138,10 @@ impl Command for TasksCommand {
                 for group in groups {
                     lines.push(format!("- {} — {}", group.group_id, group.hint));
                     for task in group.tasks {
-                        lines.push(format!("  - [{}] {} (Status: {:?})", task.id, task.description, task.status));
+                        lines.push(format!(
+                            "  - [{}] {} (Status: {:?})",
+                            task.id, task.description, task.status
+                        ));
                         lines.push(format!(
                             "    worker_role: {}",
                             task.worker_role.map(|role| role.as_str()).unwrap_or("none")
@@ -131,7 +152,9 @@ impl Command for TasksCommand {
                         ));
                         lines.push(format!(
                             "    validation_state: {}",
-                            task.validation_state.map(|state| state.as_str()).unwrap_or("none")
+                            task.validation_state
+                                .map(|state| state.as_str())
+                                .unwrap_or("none")
                         ));
                         lines.push(format!("    hint: {}", task_manager.task_hint(&task)));
                         if let Some(parent_task_id) = task.parent_task_id.as_deref() {
@@ -145,7 +168,10 @@ impl Command for TasksCommand {
                 lines.push(String::new());
                 lines.push("Standalone tasks:".to_string());
                 for task in standalone_tasks {
-                    lines.push(format!("- [{}] {} (Status: {:?})", task.id, task.description, task.status));
+                    lines.push(format!(
+                        "- [{}] {} (Status: {:?})",
+                        task.id, task.description, task.status
+                    ));
                     lines.push(format!(
                         "  worker_role: {}",
                         task.worker_role.map(|role| role.as_str()).unwrap_or("none")
@@ -156,7 +182,9 @@ impl Command for TasksCommand {
                     ));
                     lines.push(format!(
                         "  validation_state: {}",
-                        task.validation_state.map(|state| state.as_str()).unwrap_or("none")
+                        task.validation_state
+                            .map(|state| state.as_str())
+                            .unwrap_or("none")
                     ));
                     lines.push(format!("  hint: {}", task_manager.task_hint(&task)));
                     if let Some(parent_task_id) = task.parent_task_id.as_deref() {

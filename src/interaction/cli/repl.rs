@@ -24,9 +24,15 @@ impl CliRuntimeEvent {
     pub fn to_legacy_line(&self) -> String {
         match self {
             Self::AssistantDelta { text } => format!("[delta] {text}"),
-            Self::ToolCallStarted { tool_name, input } => format!("[tool-start] {tool_name}: {input}"),
-            Self::ToolResult { tool_name, content } => format!("[tool-result] {tool_name}: {content}"),
-            Self::PendingApproval { tool_name, message } => format!("[approval] {tool_name}: {message}"),
+            Self::ToolCallStarted { tool_name, input } => {
+                format!("[tool-start] {tool_name}: {input}")
+            }
+            Self::ToolResult { tool_name, content } => {
+                format!("[tool-result] {tool_name}: {content}")
+            }
+            Self::PendingApproval { tool_name, message } => {
+                format!("[approval] {tool_name}: {message}")
+            }
             Self::Notice { kind, message } => format!("[notice:{kind}] {message}"),
             Self::Transition { text } => format!("[transition] {text}"),
             Self::Terminal { text } => format!("[terminal] {text}"),
@@ -89,7 +95,8 @@ pub async fn handle_normalized_input(
             (messages, events, true)
         }
         CommandResult::ContinueToQuery => {
-            let (messages, events) = collect_stream_messages(engine, Message::user(input.raw.clone())).await;
+            let (messages, events) =
+                collect_stream_messages(engine, Message::user(input.raw.clone())).await;
             (messages, events, true)
         }
         CommandResult::Denied(reason) => (

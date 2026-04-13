@@ -3,8 +3,8 @@ use std::sync::{Arc, RwLock};
 use crate::bootstrap::InteractionSurface;
 use crate::hook::registry::HookRegistry;
 use crate::interaction::dispatcher::NotificationDispatcher;
-use crate::plugins::runtime_state::RuntimePluginState;
 use crate::plan::manager::PlanManager;
+use crate::plugins::runtime_state::RuntimePluginState;
 use crate::service::mcp::runtime::McpRuntime;
 use crate::skills::registry::SkillRegistry;
 use crate::task::list_manager::TaskListManager;
@@ -158,7 +158,10 @@ impl ToolPermissionContext {
     }
 
     pub fn mode(&self) -> PermissionMode {
-        self.mode.read().map(|mode| *mode).unwrap_or(PermissionMode::Default)
+        self.mode
+            .read()
+            .map(|mode| *mode)
+            .unwrap_or(PermissionMode::Default)
     }
 
     pub fn set_mode(&self, mode: PermissionMode) {
@@ -174,7 +177,10 @@ impl ToolPermissionContext {
     }
 
     pub fn pending_approval(&self) -> Option<PendingApproval> {
-        self.pending_approval.read().ok().and_then(|slot| slot.clone())
+        self.pending_approval
+            .read()
+            .ok()
+            .and_then(|slot| slot.clone())
     }
 
     pub fn with_subagent_scripted_turns(

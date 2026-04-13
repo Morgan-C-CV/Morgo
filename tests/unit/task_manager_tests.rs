@@ -5,9 +5,9 @@ use rust_agent::bootstrap::InteractionSurface;
 use rust_agent::history::session::{InMemorySessionStore, SessionId, SessionStore};
 use rust_agent::interaction::dispatcher::NotificationDispatcher;
 use rust_agent::interaction::notification::NotificationTarget;
-use rust_agent::state::app_state::WorkerRole;
 use rust_agent::interaction::telegram::binding::{SessionBinding, TelegramDeliveryTarget};
 use rust_agent::interaction::telegram::gateway::TelegramGateway;
+use rust_agent::state::app_state::WorkerRole;
 use rust_agent::state::permission_context::{PermissionMode, ToolPermissionContext};
 use rust_agent::task::manager::TaskManager;
 use rust_agent::task::types::{TaskEvent, TaskOwner, TaskStatus};
@@ -83,7 +83,10 @@ fn terminal_task_states_mark_delivery_notified() {
     assert_eq!(notification.title, "Task completed");
     assert_eq!(notification.task_id.as_deref(), Some("task-0"));
     assert_eq!(notification.status.as_deref(), Some("completed"));
-    assert_eq!(notification.next_action.as_deref(), Some("inspect task output for task-0"));
+    assert_eq!(
+        notification.next_action.as_deref(),
+        Some("inspect task output for task-0")
+    );
     assert_eq!(notification.worker_role, None);
     assert_eq!(dispatcher.delivered().len(), 1);
 }
@@ -104,7 +107,11 @@ fn task_manager_tracks_failed_and_killed_states() {
 #[test]
 fn telegram_task_notifications_resolve_session_target_to_delivery_target() {
     let manager = TaskManager::default();
-    let task = manager.create("telegram task", "telegram-session", InteractionSurface::Telegram);
+    let task = manager.create(
+        "telegram task",
+        "telegram-session",
+        InteractionSurface::Telegram,
+    );
     manager.set_worker_role(&task.id, WorkerRole::Verify);
     let gateway = TelegramGateway::default().with_bindings(vec![SessionBinding {
         actor_id: "actor-1".into(),
@@ -434,9 +441,7 @@ async fn agent_tool_reuses_running_research_worker_and_respawns_terminal_worker(
         .expect("running worker reuse should succeed");
     assert_eq!(
         reused,
-        ToolResult::Text(
-            "agent task task-0 reused for research worker: inspect repository".into()
-        )
+        ToolResult::Text("agent task task-0 reused for research worker: inspect repository".into())
     );
 
     tokio::time::sleep(std::time::Duration::from_millis(2200)).await;
@@ -464,7 +469,9 @@ async fn agent_tool_reuses_running_research_worker_and_respawns_terminal_worker(
 
     tokio::time::timeout(std::time::Duration::from_secs(4), async {
         loop {
-            let replacement = manager.get("task-1").expect("replacement task should exist");
+            let replacement = manager
+                .get("task-1")
+                .expect("replacement task should exist");
             if replacement.status == TaskStatus::Completed {
                 break;
             }

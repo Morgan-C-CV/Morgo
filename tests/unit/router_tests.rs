@@ -20,12 +20,12 @@ use rust_agent::interaction::dispatcher::NotificationDispatcher;
 use rust_agent::interaction::envelope::NormalizedInput;
 use rust_agent::interaction::remote::{RemoteRequest, handle_remote_request};
 use rust_agent::interaction::router::{CommandRouter, RouteDecision};
+use rust_agent::interaction::telegram::gateway::TelegramGateway;
+use rust_agent::plan::manager::PlanManager;
 use rust_agent::plugins::runtime_state::{
     RuntimePluginState, build_runtime_plugin_snapshot, build_turn_engine, build_turn_router,
     hydrate_app_state_from_snapshot, rebuild_runtime_plugin_state,
 };
-use rust_agent::interaction::telegram::gateway::TelegramGateway;
-use rust_agent::plan::manager::PlanManager;
 use rust_agent::security::authorizer::{AuthDecision, DefaultSurfaceAuthorizer, SurfaceAuthorizer};
 use rust_agent::service::api::client::ModelProviderClient;
 use rust_agent::service::api::streaming::{StopReason, StreamEvent};
@@ -132,7 +132,10 @@ async fn router_executes_known_commands_before_query() {
 
 #[tokio::test]
 async fn router_falls_back_for_unknown_commands() {
-    let router = CommandRouter::new(Arc::new(CommandRegistry::new()), Box::new(DefaultSurfaceAuthorizer));
+    let router = CommandRouter::new(
+        Arc::new(CommandRegistry::new()),
+        Box::new(DefaultSurfaceAuthorizer),
+    );
     let input = NormalizedInput::from_raw(InteractionSurface::Cli, "/missing foo");
 
     assert_eq!(router.decide(&input).await, RouteDecision::ContinueToQuery);
@@ -140,14 +143,12 @@ async fn router_falls_back_for_unknown_commands() {
 
 #[tokio::test]
 async fn router_denies_unauthenticated_remote_actor() {
-    let router = CommandRouter::new(Arc::new(CommandRegistry::new()), Box::new(DefaultSurfaceAuthorizer));
-    let input = NormalizedInput::from_remote_raw(
-        "remote-session",
-        "remote-actor",
-        false,
-        true,
-        "/help",
+    let router = CommandRouter::new(
+        Arc::new(CommandRegistry::new()),
+        Box::new(DefaultSurfaceAuthorizer),
     );
+    let input =
+        NormalizedInput::from_remote_raw("remote-session", "remote-actor", false, true, "/help");
 
     assert_eq!(
         router.decide(&input).await,
@@ -610,24 +611,33 @@ async fn cli_repl_uses_next_turn_plugin_snapshot_after_reload_updates_manifest_s
     hydrate_app_state_from_snapshot(&mut app_state, &initial_snapshot);
 
     let router = build_turn_router(&initial_snapshot);
-    let base_engine = rust_agent::core::engine::QueryEngine::new(rust_agent::core::context::QueryContext {
-        app_state: app_state.clone(),
-        tool_registry: initial_snapshot.tool_registry.clone(),
-        api_client: ModelProviderClient::default(),
-        compactor: ReactiveCompactor,
-        hook_registry: initial_snapshot.hook_registry.clone(),
-        agent_id: None,
-        system_prompt: "test system".into(),
-        tools_prompt: "test tools".into(),
-        context_prompt: "test context".into(),
-    });
+    let base_engine =
+        rust_agent::core::engine::QueryEngine::new(rust_agent::core::context::QueryContext {
+            app_state: app_state.clone(),
+            tool_registry: initial_snapshot.tool_registry.clone(),
+            api_client: ModelProviderClient::default(),
+            compactor: ReactiveCompactor,
+            hook_registry: initial_snapshot.hook_registry.clone(),
+            agent_id: None,
+            system_prompt: "test system".into(),
+            tools_prompt: "test tools".into(),
+            context_prompt: "test context".into(),
+        });
     let engine = build_turn_engine(&app_state, &initial_snapshot, &base_engine);
 
     let first = handle_cli_inputs(&router, &engine, &app_state, vec!["/help"])
         .await
         .expect("first turn should succeed");
-    assert!(first[0].primary_text.contains("/demo-plugin-cmd — Demo plugin command"));
-    assert!(!first[0].primary_text.contains("/demo-plugin-cmd-v2 — Updated plugin command"));
+    assert!(
+        first[0]
+            .primary_text
+            .contains("/demo-plugin-cmd — Demo plugin command")
+    );
+    assert!(
+        !first[0]
+            .primary_text
+            .contains("/demo-plugin-cmd-v2 — Updated plugin command")
+    );
 
     fs::write(
         &manifest_path,
@@ -655,8 +665,16 @@ async fn cli_repl_uses_next_turn_plugin_snapshot_after_reload_updates_manifest_s
     let second = handle_cli_inputs(&router, &engine, &app_state, vec!["/help"])
         .await
         .expect("second turn should succeed");
-    assert!(!second[0].primary_text.contains("/demo-plugin-cmd — Demo plugin command"));
-    assert!(second[0].primary_text.contains("/demo-plugin-cmd-v2 — Updated plugin command"));
+    assert!(
+        !second[0]
+            .primary_text
+            .contains("/demo-plugin-cmd — Demo plugin command")
+    );
+    assert!(
+        second[0]
+            .primary_text
+            .contains("/demo-plugin-cmd-v2 — Updated plugin command")
+    );
 
     fs::remove_dir_all(root).expect("cleanup plugin reload update root");
 }
@@ -731,23 +749,28 @@ async fn cli_repl_uses_next_turn_plugin_snapshot_after_reload_removes_deleted_pl
     hydrate_app_state_from_snapshot(&mut app_state, &initial_snapshot);
 
     let router = build_turn_router(&initial_snapshot);
-    let base_engine = rust_agent::core::engine::QueryEngine::new(rust_agent::core::context::QueryContext {
-        app_state: app_state.clone(),
-        tool_registry: initial_snapshot.tool_registry.clone(),
-        api_client: ModelProviderClient::default(),
-        compactor: ReactiveCompactor,
-        hook_registry: initial_snapshot.hook_registry.clone(),
-        agent_id: None,
-        system_prompt: "test system".into(),
-        tools_prompt: "test tools".into(),
-        context_prompt: "test context".into(),
-    });
+    let base_engine =
+        rust_agent::core::engine::QueryEngine::new(rust_agent::core::context::QueryContext {
+            app_state: app_state.clone(),
+            tool_registry: initial_snapshot.tool_registry.clone(),
+            api_client: ModelProviderClient::default(),
+            compactor: ReactiveCompactor,
+            hook_registry: initial_snapshot.hook_registry.clone(),
+            agent_id: None,
+            system_prompt: "test system".into(),
+            tools_prompt: "test tools".into(),
+            context_prompt: "test context".into(),
+        });
     let engine = build_turn_engine(&app_state, &initial_snapshot, &base_engine);
 
     let first = handle_cli_inputs(&router, &engine, &app_state, vec!["/help"])
         .await
         .expect("first turn should succeed");
-    assert!(first[0].primary_text.contains("/demo-plugin-cmd — Demo plugin command"));
+    assert!(
+        first[0]
+            .primary_text
+            .contains("/demo-plugin-cmd — Demo plugin command")
+    );
 
     fs::remove_dir_all(&plugin_dir).expect("plugin dir should be removed");
     let report = rebuild_runtime_plugin_state(&app_state)
@@ -760,9 +783,11 @@ async fn cli_repl_uses_next_turn_plugin_snapshot_after_reload_removes_deleted_pl
         .await
         .expect("second turn should succeed");
     assert!(second[0].primary_text.contains("Available commands"));
-    assert!(!second[0]
-        .primary_text
-        .contains("/demo-plugin-cmd — Demo plugin command"));
+    assert!(
+        !second[0]
+            .primary_text
+            .contains("/demo-plugin-cmd — Demo plugin command")
+    );
 
     fs::remove_dir_all(root).expect("cleanup plugin reload root");
 }
@@ -837,21 +862,27 @@ async fn cli_repl_applies_disable_and_enable_only_on_next_turn_boundaries() {
     hydrate_app_state_from_snapshot(&mut app_state, &initial_snapshot);
 
     let router = build_turn_router(&initial_snapshot);
-    let base_engine = rust_agent::core::engine::QueryEngine::new(rust_agent::core::context::QueryContext {
-        app_state: app_state.clone(),
-        tool_registry: initial_snapshot.tool_registry.clone(),
-        api_client: ModelProviderClient::default(),
-        compactor: ReactiveCompactor,
-        hook_registry: initial_snapshot.hook_registry.clone(),
-        agent_id: None,
-        system_prompt: "test system".into(),
-        tools_prompt: "test tools".into(),
-        context_prompt: "test context".into(),
-    });
+    let base_engine =
+        rust_agent::core::engine::QueryEngine::new(rust_agent::core::context::QueryContext {
+            app_state: app_state.clone(),
+            tool_registry: initial_snapshot.tool_registry.clone(),
+            api_client: ModelProviderClient::default(),
+            compactor: ReactiveCompactor,
+            hook_registry: initial_snapshot.hook_registry.clone(),
+            agent_id: None,
+            system_prompt: "test system".into(),
+            tools_prompt: "test tools".into(),
+            context_prompt: "test context".into(),
+        });
     let engine = build_turn_engine(&app_state, &initial_snapshot, &base_engine);
 
     assert_eq!(
-        router.decide(&NormalizedInput::from_raw(InteractionSurface::Cli, "/demo-plugin-cmd")).await,
+        router
+            .decide(&NormalizedInput::from_raw(
+                InteractionSurface::Cli,
+                "/demo-plugin-cmd"
+            ))
+            .await,
         RouteDecision::ExecuteCommand("demo-plugin-cmd".into())
     );
 
@@ -868,21 +899,33 @@ async fn cli_repl_applies_disable_and_enable_only_on_next_turn_boundaries() {
     assert!(disable_text.contains("Disabled plugin demo-plugin."));
 
     assert_eq!(
-        router.decide(&NormalizedInput::from_raw(InteractionSurface::Cli, "/demo-plugin-cmd")).await,
+        router
+            .decide(&NormalizedInput::from_raw(
+                InteractionSurface::Cli,
+                "/demo-plugin-cmd"
+            ))
+            .await,
         RouteDecision::ExecuteCommand("demo-plugin-cmd".into())
     );
 
     let after_disable = handle_cli_inputs(&router, &engine, &app_state, vec!["/help"])
         .await
         .expect("help after disable should succeed");
-    assert!(!after_disable[0]
-        .primary_text
-        .contains("/demo-plugin-cmd — Demo plugin command"));
+    assert!(
+        !after_disable[0]
+            .primary_text
+            .contains("/demo-plugin-cmd — Demo plugin command")
+    );
 
     let disabled_snapshot = runtime_plugin_state.snapshot().await;
     let disabled_router = build_turn_router(&disabled_snapshot);
     assert_eq!(
-        disabled_router.decide(&NormalizedInput::from_raw(InteractionSurface::Cli, "/demo-plugin-cmd")).await,
+        disabled_router
+            .decide(&NormalizedInput::from_raw(
+                InteractionSurface::Cli,
+                "/demo-plugin-cmd"
+            ))
+            .await,
         RouteDecision::ContinueToQuery
     );
 
@@ -899,16 +942,23 @@ async fn cli_repl_applies_disable_and_enable_only_on_next_turn_boundaries() {
     assert!(enable_text.contains("Enabled plugin demo-plugin."));
 
     assert_eq!(
-        disabled_router.decide(&NormalizedInput::from_raw(InteractionSurface::Cli, "/demo-plugin-cmd")).await,
+        disabled_router
+            .decide(&NormalizedInput::from_raw(
+                InteractionSurface::Cli,
+                "/demo-plugin-cmd"
+            ))
+            .await,
         RouteDecision::ContinueToQuery
     );
 
     let after_enable = handle_cli_inputs(&router, &engine, &app_state, vec!["/help"])
         .await
         .expect("help after enable should succeed");
-    assert!(after_enable[0]
-        .primary_text
-        .contains("/demo-plugin-cmd — Demo plugin command"));
+    assert!(
+        after_enable[0]
+            .primary_text
+            .contains("/demo-plugin-cmd — Demo plugin command")
+    );
 
     fs::remove_dir_all(root).expect("cleanup visibility matrix root");
 }
@@ -995,17 +1045,18 @@ async fn remote_handler_uses_next_turn_plugin_snapshot_after_reload_removes_dele
     hydrate_app_state_from_snapshot(&mut app_state, &initial_snapshot);
 
     let router = build_turn_router(&initial_snapshot);
-    let base_engine = rust_agent::core::engine::QueryEngine::new(rust_agent::core::context::QueryContext {
-        app_state: app_state.clone(),
-        tool_registry: initial_snapshot.tool_registry.clone(),
-        api_client: ModelProviderClient::default(),
-        compactor: ReactiveCompactor,
-        hook_registry: initial_snapshot.hook_registry.clone(),
-        agent_id: None,
-        system_prompt: "test system".into(),
-        tools_prompt: "test tools".into(),
-        context_prompt: "test context".into(),
-    });
+    let base_engine =
+        rust_agent::core::engine::QueryEngine::new(rust_agent::core::context::QueryContext {
+            app_state: app_state.clone(),
+            tool_registry: initial_snapshot.tool_registry.clone(),
+            api_client: ModelProviderClient::default(),
+            compactor: ReactiveCompactor,
+            hook_registry: initial_snapshot.hook_registry.clone(),
+            agent_id: None,
+            system_prompt: "test system".into(),
+            tools_prompt: "test tools".into(),
+            context_prompt: "test context".into(),
+        });
     let engine = build_turn_engine(&app_state, &initial_snapshot, &base_engine);
 
     let first = handle_remote_request(
@@ -1022,7 +1073,11 @@ async fn remote_handler_uses_next_turn_plugin_snapshot_after_reload_removes_dele
     )
     .await
     .expect("first remote turn should succeed");
-    assert!(first.primary_text.contains("/demo-plugin-cmd — Demo plugin command"));
+    assert!(
+        first
+            .primary_text
+            .contains("/demo-plugin-cmd — Demo plugin command")
+    );
 
     fs::remove_dir_all(&plugin_dir).expect("plugin dir should be removed");
     let report = rebuild_runtime_plugin_state(&app_state)
@@ -1046,7 +1101,11 @@ async fn remote_handler_uses_next_turn_plugin_snapshot_after_reload_removes_dele
     .await
     .expect("second remote turn should succeed");
     assert!(second.primary_text.contains("Available commands"));
-    assert!(!second.primary_text.contains("/demo-plugin-cmd — Demo plugin command"));
+    assert!(
+        !second
+            .primary_text
+            .contains("/demo-plugin-cmd — Demo plugin command")
+    );
 
     fs::remove_dir_all(root).expect("cleanup remote plugin reload root");
 }
@@ -1129,7 +1188,10 @@ async fn cli_repl_persists_denied_turns() {
 
 #[tokio::test]
 async fn router_approves_pending_plan_mode_request() {
-    let router = CommandRouter::new(Arc::new(CommandRegistry::new()), Box::new(DefaultSurfaceAuthorizer));
+    let router = CommandRouter::new(
+        Arc::new(CommandRegistry::new()),
+        Box::new(DefaultSurfaceAuthorizer),
+    );
     let permission_context = ToolPermissionContext::new(PermissionMode::Default)
         .with_task_manager(Arc::new(TaskManager::default()))
         .with_plan_manager(Arc::new(PlanManager::default()))
@@ -1169,14 +1231,20 @@ async fn router_approves_pending_plan_mode_request() {
         .await
         .expect("approval should resolve");
 
-    assert_eq!(result, CommandResult::Message("entered plan mode: draft feature work".into()));
+    assert_eq!(
+        result,
+        CommandResult::Message("entered plan mode: draft feature work".into())
+    );
     assert_eq!(permission_context.mode(), PermissionMode::Plan);
     assert!(permission_context.pending_approval().is_none());
 }
 
 #[tokio::test]
 async fn router_denies_pending_request_without_session_approval() {
-    let router = CommandRouter::new(Arc::new(CommandRegistry::new()), Box::new(DefaultSurfaceAuthorizer));
+    let router = CommandRouter::new(
+        Arc::new(CommandRegistry::new()),
+        Box::new(DefaultSurfaceAuthorizer),
+    );
     let permission_context = ToolPermissionContext::new(PermissionMode::Default)
         .with_task_manager(Arc::new(TaskManager::default()))
         .with_plan_manager(Arc::new(PlanManager::default()))
@@ -1216,7 +1284,10 @@ async fn router_denies_pending_request_without_session_approval() {
         .await
         .expect("denial should resolve");
 
-    assert_eq!(result, CommandResult::Message("Denied approval for Bash".into()));
+    assert_eq!(
+        result,
+        CommandResult::Message("Denied approval for Bash".into())
+    );
     assert_eq!(permission_context.mode(), PermissionMode::Default);
     assert!(permission_context.pending_approval().is_none());
 }
@@ -1228,7 +1299,10 @@ async fn approval_replay_uses_runtime_tool_registry() {
         .get_or_init(|| std::sync::Mutex::new(()))
         .lock()
         .expect("cwd lock poisoned");
-    let router = CommandRouter::new(Arc::new(CommandRegistry::new()), Box::new(DefaultSurfaceAuthorizer));
+    let router = CommandRouter::new(
+        Arc::new(CommandRegistry::new()),
+        Box::new(DefaultSurfaceAuthorizer),
+    );
     let permission_context = ToolPermissionContext::new(PermissionMode::Default)
         .with_task_manager(Arc::new(TaskManager::default()))
         .with_plan_manager(Arc::new(PlanManager::default()))
@@ -1246,7 +1320,9 @@ async fn approval_replay_uses_runtime_tool_registry() {
         worker_role: None,
         permission_context: permission_context.clone(),
         command_registry: None,
-        runtime_tool_registry: Some(Arc::new(RwLock::new(ToolRegistry::new().register(Arc::new(rust_agent::tool::builtin::bash::BashTool))))),
+        runtime_tool_registry: Some(Arc::new(RwLock::new(
+            ToolRegistry::new().register(Arc::new(rust_agent::tool::builtin::bash::BashTool)),
+        ))),
         skill_registry: None,
         mcp_runtime: None,
         plugin_load_result: None,
@@ -1416,10 +1492,7 @@ async fn plan_command_enter_requests_approval_before_switching_mode() {
 
     let result = router
         .route(
-            &NormalizedInput::from_raw(
-                InteractionSurface::Cli,
-                "/plan enter draft feature work",
-            ),
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/plan enter draft feature work"),
             &app_state,
         )
         .await
@@ -1550,11 +1623,13 @@ async fn plan_command_handles_status_noop_and_denied_exit() {
         )
         .expect("mark linked task in progress with blocker");
     let runtime_task_manager = Arc::new(TaskManager::default());
-    let runtime_task = runtime_task_manager.create("runtime patch task", "cli-session", InteractionSurface::Cli);
+    let runtime_task =
+        runtime_task_manager.create("runtime patch task", "cli-session", InteractionSurface::Cli);
     runtime_task_manager.set_orchestration_group_id(&runtime_task.id, Some(step.id.clone()));
     runtime_task_manager.set_worker_role(&runtime_task.id, WorkerRole::Implement);
     runtime_task_manager.set_phase(&runtime_task.id, Some(WorkerPhase::Implement));
-    runtime_task_manager.set_validation_state(&runtime_task.id, Some(ValidationState::PendingVerification));
+    runtime_task_manager
+        .set_validation_state(&runtime_task.id, Some(ValidationState::PendingVerification));
     runtime_task_manager.start(&runtime_task.id);
     let active_context = ToolPermissionContext::new(PermissionMode::Plan)
         .with_task_manager(runtime_task_manager.clone())
@@ -1590,7 +1665,9 @@ async fn plan_command_handles_status_noop_and_denied_exit() {
         )
         .await
         .expect("plan status should render");
-    assert!(matches!(status, CommandResult::Message(ref message) if message.contains("Plan mode is on.")));
+    assert!(
+        matches!(status, CommandResult::Message(ref message) if message.contains("Plan mode is on."))
+    );
     assert!(matches!(status, CommandResult::Message(ref message) if message.contains("steps=1")));
 
     let show = router
@@ -1600,26 +1677,51 @@ async fn plan_command_handles_status_noop_and_denied_exit() {
         )
         .await
         .expect("plan show should render");
-    assert!(matches!(show, CommandResult::Message(ref message) if message.contains("Execution: 0/1 completed (0%)")));
-    assert!(matches!(show, CommandResult::Message(ref message) if message.contains("Step summary: total=1, completed=0, in_progress=0, pending=1, linked=1, unlinked=0")));
+    assert!(
+        matches!(show, CommandResult::Message(ref message) if message.contains("Execution: 0/1 completed (0%)"))
+    );
+    assert!(
+        matches!(show, CommandResult::Message(ref message) if message.contains("Step summary: total=1, completed=0, in_progress=0, pending=1, linked=1, unlinked=0"))
+    );
     assert!(matches!(show, CommandResult::Message(ref message) if message.contains(&step.id)));
-    assert!(matches!(show, CommandResult::Message(ref message) if message.contains("linked task:")));
-    assert!(matches!(show, CommandResult::Message(ref message) if message.contains("owner=planner")));
-    assert!(matches!(show, CommandResult::Message(ref message) if message.contains("blocked_by=task-1")));
-    assert!(matches!(show, CommandResult::Message(ref message) if message.contains("warning: plan/task status mismatch")));
-    assert!(matches!(show, CommandResult::Message(ref message) if message.contains("Runtime orchestration: groups=1, waiting_for_verification=0, ready_for_synthesis=0, still_in_progress=1")));
-    assert!(matches!(show, CommandResult::Message(ref message) if message.contains(&format!("runtime group: {} — group {} still in progress", step.id, step.id))));
-    assert!(matches!(show, CommandResult::Message(ref message) if message.contains("runtime task: task-0 [Running] role=implement phase=implement validation_state=pending_verification")));
-    assert!(matches!(show, CommandResult::Message(ref message) if message.contains("hint: verification next for task-0")));
+    assert!(
+        matches!(show, CommandResult::Message(ref message) if message.contains("linked task:"))
+    );
+    assert!(
+        matches!(show, CommandResult::Message(ref message) if message.contains("owner=planner"))
+    );
+    assert!(
+        matches!(show, CommandResult::Message(ref message) if message.contains("blocked_by=task-1"))
+    );
+    assert!(
+        matches!(show, CommandResult::Message(ref message) if message.contains("warning: plan/task status mismatch"))
+    );
+    assert!(
+        matches!(show, CommandResult::Message(ref message) if message.contains("Runtime orchestration: groups=1, waiting_for_verification=0, ready_for_synthesis=0, still_in_progress=1"))
+    );
+    assert!(
+        matches!(show, CommandResult::Message(ref message) if message.contains(&format!("runtime group: {} — group {} still in progress", step.id, step.id)))
+    );
+    assert!(
+        matches!(show, CommandResult::Message(ref message) if message.contains("runtime task: task-0 [Running] role=implement phase=implement validation_state=pending_verification"))
+    );
+    assert!(
+        matches!(show, CommandResult::Message(ref message) if message.contains("hint: verification next for task-0"))
+    );
 
     let add = router
         .route(
-            &NormalizedInput::from_raw(InteractionSurface::Cli, "/plan add Review outputs | confirm summaries"),
+            &NormalizedInput::from_raw(
+                InteractionSurface::Cli,
+                "/plan add Review outputs | confirm summaries",
+            ),
             &active_state,
         )
         .await
         .expect("plan add should succeed");
-    assert!(matches!(add, CommandResult::Message(message) if message.contains("Added plan step step-2")));
+    assert!(
+        matches!(add, CommandResult::Message(message) if message.contains("Added plan step step-2"))
+    );
 
     let done = router
         .route(
@@ -1628,7 +1730,10 @@ async fn plan_command_handles_status_noop_and_denied_exit() {
         )
         .await
         .expect("plan done should succeed");
-    assert_eq!(done, CommandResult::Message(format!("Completed plan step {}", step.id)));
+    assert_eq!(
+        done,
+        CommandResult::Message(format!("Completed plan step {}", step.id))
+    );
 
     let history = router
         .route(
@@ -1637,25 +1742,39 @@ async fn plan_command_handles_status_noop_and_denied_exit() {
         )
         .await
         .expect("plan history should render");
-    assert!(matches!(history, CommandResult::Message(ref message) if message.contains("Plan history:")));
-    assert!(matches!(history, CommandResult::Message(ref message) if message.contains("snapshot: steps=")));
-    assert!(matches!(history, CommandResult::Message(ref message) if message.contains("active_step=")));
-    assert!(matches!(history, CommandResult::Message(ref message) if message.contains("Current runtime overlay:")));
-    assert!(matches!(history, CommandResult::Message(ref message) if message.contains("active_runtime_groups=1")));
-    assert!(matches!(history, CommandResult::Message(ref message) if message.contains("still_in_progress_groups=1")));
+    assert!(
+        matches!(history, CommandResult::Message(ref message) if message.contains("Plan history:"))
+    );
+    assert!(
+        matches!(history, CommandResult::Message(ref message) if message.contains("snapshot: steps="))
+    );
+    assert!(
+        matches!(history, CommandResult::Message(ref message) if message.contains("active_step="))
+    );
+    assert!(
+        matches!(history, CommandResult::Message(ref message) if message.contains("Current runtime overlay:"))
+    );
+    assert!(
+        matches!(history, CommandResult::Message(ref message) if message.contains("active_runtime_groups=1"))
+    );
+    assert!(
+        matches!(history, CommandResult::Message(ref message) if message.contains("still_in_progress_groups=1"))
+    );
 
     let reorder = router
         .route(
-            &NormalizedInput::from_raw(
-                InteractionSurface::Cli,
-                "/plan reorder step-2 step-1",
-            ),
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/plan reorder step-2 step-1"),
             &active_state,
         )
         .await
         .expect("plan reorder should succeed");
-    assert_eq!(reorder, CommandResult::Message("Reordered 2 plan steps".into()));
-    let reordered_state = plan_manager.state().expect("reordered plan state should exist");
+    assert_eq!(
+        reorder,
+        CommandResult::Message("Reordered 2 plan steps".into())
+    );
+    let reordered_state = plan_manager
+        .state()
+        .expect("reordered plan state should exist");
     let reordered_steps = &reordered_state.draft.expect("draft should exist").steps;
     assert_eq!(reordered_steps[0].id, "step-2");
     assert_eq!(reordered_steps[1].id, step.id);
@@ -1667,7 +1786,10 @@ async fn plan_command_handles_status_noop_and_denied_exit() {
         )
         .await
         .expect("plan enter in plan mode should no-op");
-    assert_eq!(no_op, CommandResult::Message("Already in plan mode.".into()));
+    assert_eq!(
+        no_op,
+        CommandResult::Message("Already in plan mode.".into())
+    );
 
     let inactive_context = ToolPermissionContext::new(PermissionMode::Default)
         .with_task_manager(Arc::new(TaskManager::default()))
@@ -1702,7 +1824,10 @@ async fn plan_command_handles_status_noop_and_denied_exit() {
         )
         .await
         .expect("inactive plan exit should resolve");
-    assert_eq!(denied, CommandResult::Denied("Plan mode is not active.".into()));
+    assert_eq!(
+        denied,
+        CommandResult::Denied("Plan mode is not active.".into())
+    );
 }
 
 #[tokio::test]

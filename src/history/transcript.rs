@@ -22,7 +22,10 @@ impl Transcript {
     }
 
     pub fn messages(&self) -> Vec<Message> {
-        self.entries.iter().map(|entry| entry.message.clone()).collect()
+        self.entries
+            .iter()
+            .map(|entry| entry.message.clone())
+            .collect()
     }
 }
 

@@ -17,21 +17,29 @@ use crate::history::session::{
 use crate::history::transcript::Transcript;
 use crate::hook::executor::run_hook;
 use crate::hook::registry::{HookEvent, load_hook_registry};
-use crate::interaction::cli::renderer::{render_output, render_turn_output};
-use crate::interaction::cli::repl::handle_cli_input;
+use crate::interaction::cli::renderer::{
+    render_document_output, render_document_tui_output, render_output, render_turn_document,
+};
+use crate::interaction::cli::repl::{CliTurnOutput, handle_cli_input};
 use crate::interaction::dispatcher::NotificationDispatcher;
-use crate::interaction::remote::{RemoteRequest, handle_remote_request, render_remote_response_debug};
+use crate::interaction::remote::{
+    RemoteRequest, handle_remote_request, render_remote_response_debug,
+};
 use crate::interaction::telegram::gateway::TelegramGateway;
 use crate::plan::manager::PlanManager;
 use crate::plugins::loader::load_plugins;
-use crate::plugins::runtime::{augment_hook_registry_with_plugins, augment_tool_registry_with_plugins};
+use crate::plugins::runtime::{
+    augment_hook_registry_with_plugins, augment_tool_registry_with_plugins,
+};
 use crate::plugins::runtime_state::{
     RuntimePluginState, build_runtime_plugin_snapshot, build_turn_engine, build_turn_router,
     hydrate_app_state_from_snapshot,
 };
-use crate::plugins::types::{PluginDefinition, PluginDiagnostic, PluginDiagnosticSeverity, PluginLifecycleState};
+use crate::plugins::types::{
+    PluginDefinition, PluginDiagnostic, PluginDiagnosticSeverity, PluginLifecycleState,
+};
 use crate::service::api::client::{
-    ModelProviderClient, ModelProviderConfig, ModelPricing, ProviderTimeout,
+    ModelPricing, ModelProviderClient, ModelProviderConfig, ProviderTimeout,
 };
 use crate::service::api::retry::RetryPolicy;
 use crate::service::compact::reactive_compact::ReactiveCompactor;
@@ -46,13 +54,13 @@ use crate::task::list_manager::TaskListManager;
 use crate::task::manager::TaskManager;
 use crate::tool::builtin::{
     agent::AgentTool, ask_user::AskUserQuestionTool, bash::BashTool,
-    enter_plan_mode::EnterPlanModeTool, exit_plan_mode::ExitPlanModeTool,
-    file_edit::FileEditTool, file_read::FileReadTool, file_write::FileWriteTool,
-    glob::GlobTool, grep::GrepTool, mcp::McpTool, notebook_edit::NotebookEditTool,
-    send_message::SendMessageTool, skill::SkillTool, task_create::TaskCreateTool,
-    task_get::TaskGetTool, task_list::TaskListTool, task_output::TaskOutputTool,
-    task_stop::TaskStopTool, task_update::TaskUpdateTool, todo_write::TodoWriteTool,
-    tool_search::ToolSearchTool, web_fetch::WebFetchTool, web_search::WebSearchTool,
+    enter_plan_mode::EnterPlanModeTool, exit_plan_mode::ExitPlanModeTool, file_edit::FileEditTool,
+    file_read::FileReadTool, file_write::FileWriteTool, glob::GlobTool, grep::GrepTool,
+    mcp::McpTool, notebook_edit::NotebookEditTool, send_message::SendMessageTool, skill::SkillTool,
+    task_create::TaskCreateTool, task_get::TaskGetTool, task_list::TaskListTool,
+    task_output::TaskOutputTool, task_stop::TaskStopTool, task_update::TaskUpdateTool,
+    todo_write::TodoWriteTool, tool_search::ToolSearchTool, web_fetch::WebFetchTool,
+    web_search::WebSearchTool,
 };
 use crate::tool::registry::ToolRegistry;
 
@@ -73,6 +81,8 @@ pub struct BootstrapCli {
     pub trace_startup: bool,
     #[arg(long, default_value_t = false)]
     pub show_tools: bool,
+    #[arg(long, default_value_t = false)]
+    pub tui: bool,
     #[arg(long, default_value = "cli")]
     pub surface: String,
 }
@@ -122,7 +132,8 @@ impl RuntimeBootstrap {
         let setup = SetupContext::detect();
         let base_hook_registry = load_hook_registry(&setup.working_directory);
         let plugin_load_result = Arc::new(load_plugins(&setup.working_directory));
-        let hook_registry = augment_hook_registry_with_plugins(base_hook_registry, plugin_load_result.as_ref());
+        let hook_registry =
+            augment_hook_registry_with_plugins(base_hook_registry, plugin_load_result.as_ref());
         let _ = run_hook(&hook_registry, HookEvent::SessionStart);
         let _ = run_hook(&hook_registry, HookEvent::Setup);
         state.record_phase(BootstrapPhase::Setup);
@@ -315,7 +326,10 @@ impl RuntimeBootstrap {
         hydrate_app_state_from_snapshot(&mut app_state, &initial_snapshot);
 
         if self.cli.show_tools {
-            for tool in initial_snapshot.tool_registry.visible_tools(&app_state.permission_context) {
+            for tool in initial_snapshot
+                .tool_registry
+                .visible_tools(&app_state.permission_context)
+            {
                 println!("{} - {}", tool.name, tool.description);
             }
             return Ok(());
@@ -348,7 +362,11 @@ impl RuntimeBootstrap {
             ),
             context_prompt: crate::prompt::context::build_context_prompt(&app_state),
         };
-        let engine = build_turn_engine(&app_state, &initial_snapshot, &QueryEngine::new(base_query_context));
+        let engine = build_turn_engine(
+            &app_state,
+            &initial_snapshot,
+            &QueryEngine::new(base_query_context),
+        );
 
         if let Some(prompt) = &self.cli.print {
             if matches!(app_state.surface, InteractionSurface::Remote) {
@@ -365,10 +383,13 @@ impl RuntimeBootstrap {
                     },
                 )
                 .await?;
-                println!("{}", render_output(&render_remote_response_debug(&response)));
+                println!(
+                    "{}",
+                    render_output(&render_remote_response_debug(&response))
+                );
             } else {
                 let output = handle_cli_input(&router, &engine, &app_state, prompt.clone()).await?;
-                println!("{}", render_turn_output(&output));
+                self.print_cli_turn_output(&output);
             }
             return Ok(());
         }
@@ -396,14 +417,24 @@ impl RuntimeBootstrap {
             for line in io::stdin().lock().lines() {
                 let line = line?;
                 let output = handle_cli_input(&router, &engine, &app_state, line).await?;
-                println!("{}", render_turn_output(&output));
+                self.print_cli_turn_output(&output);
             }
             return Ok(());
         }
 
         let output = handle_cli_input(&router, &engine, &app_state, "/help").await?;
-        println!("{}", render_turn_output(&output));
+        self.print_cli_turn_output(&output);
         Ok(())
+    }
+
+    fn print_cli_turn_output(&self, output: &CliTurnOutput) {
+        let document = render_turn_document(output);
+        let rendered = if self.cli.tui {
+            render_document_tui_output(&document)
+        } else {
+            render_document_output(&document)
+        };
+        println!("{rendered}");
     }
 
     fn detect_surface(&self) -> InteractionSurface {
@@ -495,9 +526,7 @@ impl RuntimeBootstrap {
             base_url,
             api_key,
             model_id,
-            timeout: ProviderTimeout {
-                request_timeout_ms,
-            },
+            timeout: ProviderTimeout { request_timeout_ms },
             retry_policy: RetryPolicy {
                 max_attempts,
                 initial_backoff_ms,

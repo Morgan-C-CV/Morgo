@@ -6,7 +6,7 @@ use rust_agent::tool::builtin::bash::sandbox::{SandboxPolicy, select_sandbox_pol
 use rust_agent::tool::builtin::bash::security::{
     contains_destructive_pattern, contains_shell_operator, extract_shell_operators,
 };
-use rust_agent::tool::builtin::bash::sed_validation::{analyze_sed_safety, SedSafety};
+use rust_agent::tool::builtin::bash::sed_validation::{SedSafety, analyze_sed_safety};
 
 #[test]
 fn unsafe_paths_are_rejected() {

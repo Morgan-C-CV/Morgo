@@ -4,13 +4,13 @@ use std::path::{Path, PathBuf};
 use crate::command::types::CommandAvailability;
 use crate::hook::registry::HookEventMatcher;
 use crate::plugins::state::load_plugin_state_with_diagnostics;
+use crate::plugins::types::PluginCommandDefinition;
 use crate::plugins::types::{
     PluginActivationSummary, PluginApplyStatus, PluginCapability, PluginConfigSource,
     PluginDefinition, PluginDiagnostic, PluginDiagnosticSeverity, PluginDiagnosticsMetadata,
     PluginGovernanceState, PluginHookDefinition, PluginHookManifest, PluginLifecycleState,
     PluginLoadResult, PluginManifest, PluginToolDefinition,
 };
-use crate::plugins::types::PluginCommandDefinition;
 
 pub fn load_plugins(cwd: &Path) -> PluginLoadResult {
     let root = cwd.join(".claude").join("plugins");
@@ -40,7 +40,12 @@ pub fn load_plugins(cwd: &Path) -> PluginLoadResult {
         };
     }
 
-    visit_plugin_dirs(&root, &governance_state.states, &mut plugins, &mut diagnostics);
+    visit_plugin_dirs(
+        &root,
+        &governance_state.states,
+        &mut plugins,
+        &mut diagnostics,
+    );
     let discovered_names = plugins
         .iter()
         .map(|plugin| plugin.name.clone())
@@ -375,7 +380,9 @@ fn parse_hook_event_matcher(value: &str) -> Option<HookEventMatcher> {
         "userpromptsubmit" | "user_prompt_submit" => Some(HookEventMatcher::UserPromptSubmit),
         "pretooluse" | "pre_tool_use" => Some(HookEventMatcher::PreToolUse),
         "posttooluse" | "post_tool_use" => Some(HookEventMatcher::PostToolUse),
-        "posttoolusefailure" | "post_tool_use_failure" => Some(HookEventMatcher::PostToolUseFailure),
+        "posttoolusefailure" | "post_tool_use_failure" => {
+            Some(HookEventMatcher::PostToolUseFailure)
+        }
         "permissionrequest" | "permission_request" => Some(HookEventMatcher::PermissionRequest),
         "permissiondenied" | "permission_denied" => Some(HookEventMatcher::PermissionDenied),
         "stop" => Some(HookEventMatcher::Stop),

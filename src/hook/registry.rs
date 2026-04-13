@@ -149,7 +149,8 @@ pub fn load_hook_rules_with_diagnostics(cwd: &Path) -> HookConfigLoadResult {
                 diagnostics,
             },
             Ok(_) => {
-                diagnostics.push("Hook config file was empty; using no external hook rules.".to_string());
+                diagnostics
+                    .push("Hook config file was empty; using no external hook rules.".to_string());
                 HookConfigLoadResult {
                     path,
                     source: HookConfigSource::Defaults,
@@ -170,7 +171,8 @@ pub fn load_hook_rules_with_diagnostics(cwd: &Path) -> HookConfigLoadResult {
             }
         },
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            diagnostics.push("No .claude/hooks.json found; using no external hook rules.".to_string());
+            diagnostics
+                .push("No .claude/hooks.json found; using no external hook rules.".to_string());
             HookConfigLoadResult {
                 path,
                 source: HookConfigSource::Defaults,

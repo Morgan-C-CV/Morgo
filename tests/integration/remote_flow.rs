@@ -1,11 +1,15 @@
 use std::sync::Arc;
 
-use rust_agent::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
 use async_trait::async_trait;
+use rust_agent::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
 use rust_agent::command::registry::CommandRegistry;
-use rust_agent::command::types::{Command, CommandAvailability, CommandMetadata, CommandResult, CommandSource, CommandType};
+use rust_agent::command::types::{
+    Command, CommandAvailability, CommandMetadata, CommandResult, CommandSource, CommandType,
+};
 use rust_agent::cost::tracker::CostTracker;
-use rust_agent::history::session::{InMemorySessionStore, SessionHistory, SessionRestoreRequest, SessionSnapshot, SessionStore};
+use rust_agent::history::session::{
+    InMemorySessionStore, SessionHistory, SessionRestoreRequest, SessionSnapshot, SessionStore,
+};
 use rust_agent::interaction::dispatcher::NotificationDispatcher;
 use rust_agent::interaction::envelope::NormalizedInput;
 use rust_agent::interaction::notification::{Notification, NotificationTarget};
@@ -109,23 +113,24 @@ async fn remote_request_runs_minimal_query_chain() {
         history: None,
         restored_session: None,
     };
-    let engine = rust_agent::core::engine::QueryEngine::new(rust_agent::core::context::QueryContext {
-        app_state: app_state.clone(),
-        tool_registry: ToolRegistry::new(),
-        api_client: ModelProviderClient::with_scripted_turns(vec![vec![
-            StreamEvent::MessageStart,
-            StreamEvent::TextDelta("remote integration reply".into()),
-            StreamEvent::MessageStop {
-                stop_reason: StopReason::EndTurn,
-            },
-        ]]),
-        compactor: ReactiveCompactor,
-        hook_registry: rust_agent::hook::registry::HookRegistry::default(),
-        agent_id: None,
-        system_prompt: "test system".into(),
-        tools_prompt: "test tools".into(),
-        context_prompt: "test context".into(),
-    });
+    let engine =
+        rust_agent::core::engine::QueryEngine::new(rust_agent::core::context::QueryContext {
+            app_state: app_state.clone(),
+            tool_registry: ToolRegistry::new(),
+            api_client: ModelProviderClient::with_scripted_turns(vec![vec![
+                StreamEvent::MessageStart,
+                StreamEvent::TextDelta("remote integration reply".into()),
+                StreamEvent::MessageStop {
+                    stop_reason: StopReason::EndTurn,
+                },
+            ]]),
+            compactor: ReactiveCompactor,
+            hook_registry: rust_agent::hook::registry::HookRegistry::default(),
+            agent_id: None,
+            system_prompt: "test system".into(),
+            tools_prompt: "test tools".into(),
+            context_prompt: "test context".into(),
+        });
 
     let response = handle_remote_request(
         &router,
@@ -143,14 +148,18 @@ async fn remote_request_runs_minimal_query_chain() {
     .expect("remote request should succeed");
 
     assert!(response.primary_text.contains("remote integration reply"));
-    assert!(response
-        .events
-        .iter()
-        .any(|event| event.event_type == "assistant_delta"));
-    assert!(response
-        .events
-        .iter()
-        .any(|event| event.event_type == "session_milestone"));
+    assert!(
+        response
+            .events
+            .iter()
+            .any(|event| event.event_type == "assistant_delta")
+    );
+    assert!(
+        response
+            .events
+            .iter()
+            .any(|event| event.event_type == "session_milestone")
+    );
 
     let (_, default_history) = session_store
         .load(&SessionRestoreRequest {
@@ -233,7 +242,8 @@ async fn remote_request_drains_async_remote_notifications() {
         Notification::runtime_notice("remote-async-session", "tool", "background update"),
     );
 
-    let drained = drain_remote_notifications(&app_state, "remote-async-session", Some("remote-actor"));
+    let drained =
+        drain_remote_notifications(&app_state, "remote-async-session", Some("remote-actor"));
     assert_eq!(drained.len(), 2);
     assert!(drained.iter().any(|event| matches!(
         &event.payload,
@@ -245,12 +255,16 @@ async fn remote_request_drains_async_remote_notifications() {
         RemoteEventPayload::RuntimeNotice { kind, message }
             if kind == "tool" && message == "background update"
     )));
-    assert!(drain_remote_notifications(&app_state, "remote-async-session", Some("remote-actor")).is_empty());
+    assert!(
+        drain_remote_notifications(&app_state, "remote-async-session", Some("remote-actor"))
+            .is_empty()
+    );
 }
 
 #[tokio::test]
 async fn remote_request_drains_async_task_update_notifications() {
-    let command_registry = Arc::new(CommandRegistry::new().register(Arc::new(RemoteSpawnTaskCommand)));
+    let command_registry =
+        Arc::new(CommandRegistry::new().register(Arc::new(RemoteSpawnTaskCommand)));
     let router = rust_agent::interaction::router::CommandRouter::new(
         command_registry.clone(),
         Box::new(DefaultSurfaceAuthorizer),
@@ -281,17 +295,18 @@ async fn remote_request_drains_async_task_update_notifications() {
         history: None,
         restored_session: None,
     };
-    let engine = rust_agent::core::engine::QueryEngine::new(rust_agent::core::context::QueryContext {
-        app_state: app_state.clone(),
-        tool_registry: ToolRegistry::new(),
-        api_client: ModelProviderClient::with_scripted_turns(vec![]),
-        compactor: ReactiveCompactor,
-        hook_registry: rust_agent::hook::registry::HookRegistry::default(),
-        agent_id: None,
-        system_prompt: "test system".into(),
-        tools_prompt: "test tools".into(),
-        context_prompt: "test context".into(),
-    });
+    let engine =
+        rust_agent::core::engine::QueryEngine::new(rust_agent::core::context::QueryContext {
+            app_state: app_state.clone(),
+            tool_registry: ToolRegistry::new(),
+            api_client: ModelProviderClient::with_scripted_turns(vec![]),
+            compactor: ReactiveCompactor,
+            hook_registry: rust_agent::hook::registry::HookRegistry::default(),
+            agent_id: None,
+            system_prompt: "test system".into(),
+            tools_prompt: "test tools".into(),
+            context_prompt: "test context".into(),
+        });
 
     let response = handle_remote_request(
         &router,
@@ -317,7 +332,10 @@ async fn remote_request_drains_async_task_update_notifications() {
 
     let drained = drain_remote_notifications(&app_state, "remote-task-session", Some("task-actor"));
     assert_eq!(drained.len(), 1);
-    assert!(matches!(&drained[0].payload, RemoteEventPayload::TaskUpdate(_)));
+    assert!(matches!(
+        &drained[0].payload,
+        RemoteEventPayload::TaskUpdate(_)
+    ));
     assert!(matches!(
         &drained[0].payload,
         RemoteEventPayload::TaskUpdate(task)
@@ -369,23 +387,24 @@ async fn remote_request_preserves_response_boundary_and_async_inbox_semantics() 
         InteractionSurface::Remote,
         Notification::runtime_notice("remote-boundary-session", "tool", "background only"),
     );
-    let engine = rust_agent::core::engine::QueryEngine::new(rust_agent::core::context::QueryContext {
-        app_state: app_state.clone(),
-        tool_registry: ToolRegistry::new(),
-        api_client: ModelProviderClient::with_scripted_turns(vec![vec![
-            StreamEvent::MessageStart,
-            StreamEvent::TextDelta("boundary reply".into()),
-            StreamEvent::MessageStop {
-                stop_reason: StopReason::EndTurn,
-            },
-        ]]),
-        compactor: ReactiveCompactor,
-        hook_registry: rust_agent::hook::registry::HookRegistry::default(),
-        agent_id: None,
-        system_prompt: "test system".into(),
-        tools_prompt: "test tools".into(),
-        context_prompt: "test context".into(),
-    });
+    let engine =
+        rust_agent::core::engine::QueryEngine::new(rust_agent::core::context::QueryContext {
+            app_state: app_state.clone(),
+            tool_registry: ToolRegistry::new(),
+            api_client: ModelProviderClient::with_scripted_turns(vec![vec![
+                StreamEvent::MessageStart,
+                StreamEvent::TextDelta("boundary reply".into()),
+                StreamEvent::MessageStop {
+                    stop_reason: StopReason::EndTurn,
+                },
+            ]]),
+            compactor: ReactiveCompactor,
+            hook_registry: rust_agent::hook::registry::HookRegistry::default(),
+            agent_id: None,
+            system_prompt: "test system".into(),
+            tools_prompt: "test tools".into(),
+            context_prompt: "test context".into(),
+        });
 
     let response = handle_remote_request(
         &router,
@@ -402,24 +421,31 @@ async fn remote_request_preserves_response_boundary_and_async_inbox_semantics() 
     .await
     .expect("remote request should succeed");
 
-    assert!(response
-        .events
-        .iter()
-        .all(|event| !matches!(event.payload, RemoteEventPayload::RuntimeNotice { .. })));
+    assert!(
+        response
+            .events
+            .iter()
+            .all(|event| !matches!(event.payload, RemoteEventPayload::RuntimeNotice { .. }))
+    );
 
-    let drained = drain_remote_notifications(&app_state, "remote-boundary-session", Some("actor-a"));
+    let drained =
+        drain_remote_notifications(&app_state, "remote-boundary-session", Some("actor-a"));
     assert_eq!(drained.len(), 1);
     assert!(drained.iter().any(|event| matches!(
         &event.payload,
         RemoteEventPayload::RuntimeNotice { kind, message }
             if kind == "tool" && message == "background only"
     )));
-    assert!(drain_remote_notifications(&app_state, "remote-boundary-session", Some("other-actor")).is_empty());
+    assert!(
+        drain_remote_notifications(&app_state, "remote-boundary-session", Some("other-actor"))
+            .is_empty()
+    );
 }
 
 #[tokio::test]
 async fn remote_request_dual_channel_events_appear_in_response_and_async_inbox() {
-    let command_registry = Arc::new(CommandRegistry::new().register(Arc::new(RemoteSpawnTaskCommand)));
+    let command_registry =
+        Arc::new(CommandRegistry::new().register(Arc::new(RemoteSpawnTaskCommand)));
     let router = rust_agent::interaction::router::CommandRouter::new(
         command_registry.clone(),
         Box::new(DefaultSurfaceAuthorizer),
@@ -450,17 +476,18 @@ async fn remote_request_dual_channel_events_appear_in_response_and_async_inbox()
         history: None,
         restored_session: None,
     };
-    let engine = rust_agent::core::engine::QueryEngine::new(rust_agent::core::context::QueryContext {
-        app_state: app_state.clone(),
-        tool_registry: ToolRegistry::new(),
-        api_client: ModelProviderClient::with_scripted_turns(vec![]),
-        compactor: ReactiveCompactor,
-        hook_registry: rust_agent::hook::registry::HookRegistry::default(),
-        agent_id: None,
-        system_prompt: "test system".into(),
-        tools_prompt: "test tools".into(),
-        context_prompt: "test context".into(),
-    });
+    let engine =
+        rust_agent::core::engine::QueryEngine::new(rust_agent::core::context::QueryContext {
+            app_state: app_state.clone(),
+            tool_registry: ToolRegistry::new(),
+            api_client: ModelProviderClient::with_scripted_turns(vec![]),
+            compactor: ReactiveCompactor,
+            hook_registry: rust_agent::hook::registry::HookRegistry::default(),
+            agent_id: None,
+            system_prompt: "test system".into(),
+            tools_prompt: "test tools".into(),
+            context_prompt: "test context".into(),
+        });
 
     let response = handle_remote_request(
         &router,
@@ -536,23 +563,24 @@ async fn remote_request_returns_typed_remote_event_envelopes() {
         history: None,
         restored_session: None,
     };
-    let engine = rust_agent::core::engine::QueryEngine::new(rust_agent::core::context::QueryContext {
-        app_state: app_state.clone(),
-        tool_registry: ToolRegistry::new(),
-        api_client: ModelProviderClient::with_scripted_turns(vec![vec![
-            StreamEvent::MessageStart,
-            StreamEvent::TextDelta("typed remote reply".into()),
-            StreamEvent::MessageStop {
-                stop_reason: StopReason::EndTurn,
-            },
-        ]]),
-        compactor: ReactiveCompactor,
-        hook_registry: rust_agent::hook::registry::HookRegistry::default(),
-        agent_id: None,
-        system_prompt: "test system".into(),
-        tools_prompt: "test tools".into(),
-        context_prompt: "test context".into(),
-    });
+    let engine =
+        rust_agent::core::engine::QueryEngine::new(rust_agent::core::context::QueryContext {
+            app_state: app_state.clone(),
+            tool_registry: ToolRegistry::new(),
+            api_client: ModelProviderClient::with_scripted_turns(vec![vec![
+                StreamEvent::MessageStart,
+                StreamEvent::TextDelta("typed remote reply".into()),
+                StreamEvent::MessageStop {
+                    stop_reason: StopReason::EndTurn,
+                },
+            ]]),
+            compactor: ReactiveCompactor,
+            hook_registry: rust_agent::hook::registry::HookRegistry::default(),
+            agent_id: None,
+            system_prompt: "test system".into(),
+            tools_prompt: "test tools".into(),
+            context_prompt: "test context".into(),
+        });
 
     let response = handle_remote_request(
         &router,
@@ -569,10 +597,12 @@ async fn remote_request_returns_typed_remote_event_envelopes() {
     .await
     .expect("remote request should succeed");
 
-    assert!(response
-        .events
-        .iter()
-        .any(|event| event.event_type == "assistant_delta"));
+    assert!(
+        response
+            .events
+            .iter()
+            .any(|event| event.event_type == "assistant_delta")
+    );
     assert!(response
         .events
         .iter()
@@ -581,8 +611,11 @@ async fn remote_request_returns_typed_remote_event_envelopes() {
         .events
         .iter()
         .any(|event| matches!(&event.payload, RemoteEventPayload::SessionMilestone { kind } if kind == "assistant_message_committed")));
-    assert!(response
-        .events
-        .iter()
-        .all(|event| event.event_type != "task:task-0:remote task:inspect task output for task-0"));
+    assert!(
+        response
+            .events
+            .iter()
+            .all(|event| event.event_type
+                != "task:task-0:remote task:inspect task output for task-0")
+    );
 }

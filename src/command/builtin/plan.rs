@@ -135,7 +135,9 @@ impl Command for PlanCommand {
             ToolResult::PendingApproval { tool_name, message } => {
                 CommandResult::Message(format!("approval required for {tool_name}: {message}"))
             }
-            ToolResult::Interrupted(reason) => CommandResult::Message(format!("Interrupted: {reason}")),
+            ToolResult::Interrupted(reason) => {
+                CommandResult::Message(format!("Interrupted: {reason}"))
+            }
             ToolResult::Progress(progress) => CommandResult::Message(progress),
             ToolResult::ResultTooLarge(reason) => {
                 CommandResult::Message(format!("Result too large: {reason}"))

@@ -61,7 +61,14 @@ pub fn format_skill_prompt(skill: &SkillDefinition, args: &str) -> anyhow::Resul
 
     Ok(format!(
         "Loaded skill: {}\n{}{}{}{}{}{}\nSkill instructions:\n{}",
-        skill.name, when_to_use, argument_hint, workflow_hint, allowed_tools, source, args_line, skill.content
+        skill.name,
+        when_to_use,
+        argument_hint,
+        workflow_hint,
+        allowed_tools,
+        source,
+        args_line,
+        skill.content
     ))
 }
 
@@ -104,6 +111,11 @@ impl Tool for SkillTool {
             .ok_or_else(|| anyhow::anyhow!("skill registry is unavailable in this session"))?;
         let cwd = std::env::current_dir()
             .map_err(|error| anyhow::anyhow!("failed to resolve current directory: {error}"))?;
-        Ok(ToolResult::Text(load_skill_prompt(skill_registry, &cwd, skill_name, args)?))
+        Ok(ToolResult::Text(load_skill_prompt(
+            skill_registry,
+            &cwd,
+            skill_name,
+            args,
+        )?))
     }
 }

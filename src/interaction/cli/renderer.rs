@@ -2,26 +2,26 @@ use crate::interaction::cli::repl::{CliDisplayEvent, CliRuntimeEvent, CliTurnOut
 use crate::task::types::TaskEvent;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct RenderDocument {
-    blocks: Vec<RenderBlock>,
+pub struct RenderDocument {
+    pub blocks: Vec<RenderBlock>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum RenderBlock {
+pub enum RenderBlock {
     PrimaryText(String),
     Panel(RenderPanel),
     RawRuntime(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct RenderPanel {
-    kind: PanelKind,
-    title: String,
-    lines: Vec<String>,
+pub struct RenderPanel {
+    pub kind: PanelKind,
+    pub title: String,
+    pub lines: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PanelKind {
+pub enum PanelKind {
     Approval,
     Notice,
     TaskSummary,
@@ -34,6 +34,22 @@ pub fn render_output(output: &str) -> String {
 
 pub fn render_turn_output(turn: &CliTurnOutput) -> String {
     render_document_to_text(&build_render_document(turn))
+}
+
+pub fn render_turn_document(turn: &CliTurnOutput) -> RenderDocument {
+    build_render_document(turn)
+}
+
+pub fn render_document_output(document: &RenderDocument) -> String {
+    render_document_to_text(document)
+}
+
+pub fn render_turn_tui_output(turn: &CliTurnOutput) -> String {
+    render_document_to_tui_text(&build_render_document(turn))
+}
+
+pub fn render_document_tui_output(document: &RenderDocument) -> String {
+    render_document_to_tui_text(document)
 }
 
 fn build_render_document(turn: &CliTurnOutput) -> RenderDocument {
@@ -84,15 +100,24 @@ fn render_task_panel(task_event: &TaskEvent) -> RenderPanel {
             format!("[task] result: {}", task_event.result),
             format!(
                 "[task] worker_role: {}",
-                task_event.worker_role.map(|role| role.as_str()).unwrap_or("none")
+                task_event
+                    .worker_role
+                    .map(|role| role.as_str())
+                    .unwrap_or("none")
             ),
             format!(
                 "[task] orchestration_group: {}",
-                task_event.orchestration_group_id.as_deref().unwrap_or("none")
+                task_event
+                    .orchestration_group_id
+                    .as_deref()
+                    .unwrap_or("none")
             ),
             format!(
                 "[task] phase: {}",
-                task_event.phase.map(|phase| phase.as_str()).unwrap_or("none")
+                task_event
+                    .phase
+                    .map(|phase| phase.as_str())
+                    .unwrap_or("none")
             ),
             format!(
                 "[task] validation_state: {}",
@@ -115,6 +140,23 @@ fn render_panel(kind: PanelKind, title: impl Into<String>, lines: Vec<String>) -
     }
 }
 
+fn panel_marker(kind: PanelKind) -> &'static str {
+    match kind {
+        PanelKind::Approval => "approval",
+        PanelKind::Notice => "notice",
+        PanelKind::TaskSummary => "task",
+        PanelKind::ToolResult => "tool",
+    }
+}
+
+fn panel_header(title: &str) -> String {
+    format!("== {title} ==")
+}
+
+fn panel_body_lines(lines: &[String]) -> Vec<String> {
+    lines.iter().map(|line| format!("  {line}")).collect()
+}
+
 fn render_document_to_text(document: &RenderDocument) -> String {
     document
         .blocks
@@ -125,6 +167,29 @@ fn render_document_to_text(document: &RenderDocument) -> String {
         .join("\n\n")
 }
 
+fn render_document_to_tui_text(document: &RenderDocument) -> String {
+    let sections = document
+        .blocks
+        .iter()
+        .map(render_block_to_tui_text)
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>();
+
+    if sections.is_empty() {
+        return String::new();
+    }
+
+    let mut lines = vec!["╔════════════════ CLI TUI ════════════════".to_string()];
+    lines.extend(sections.into_iter().flat_map(|section| {
+        section
+            .lines()
+            .map(|line| format!("║ {line}"))
+            .collect::<Vec<_>>()
+    }));
+    lines.push("╚═════════════════════════════════════════".to_string());
+    lines.join("\n")
+}
+
 fn render_block_to_text(block: &RenderBlock) -> String {
     match block {
         RenderBlock::PrimaryText(text) => text.clone(),
@@ -133,15 +198,26 @@ fn render_block_to_text(block: &RenderBlock) -> String {
     }
 }
 
+fn render_block_to_tui_text(block: &RenderBlock) -> String {
+    match block {
+        RenderBlock::PrimaryText(text) => render_tui_section("Primary", text.lines().collect()),
+        RenderBlock::RawRuntime(text) => render_tui_section("Runtime", text.lines().collect()),
+        RenderBlock::Panel(panel) => render_tui_section(
+            &panel.title,
+            panel.lines.iter().map(|line| line.as_str()).collect(),
+        ),
+    }
+}
+
 fn render_panel_to_text(panel: &RenderPanel) -> String {
-    let marker = match panel.kind {
-        PanelKind::Approval => "approval",
-        PanelKind::Notice => "notice",
-        PanelKind::TaskSummary => "task",
-        PanelKind::ToolResult => "tool",
-    };
-    let mut lines = vec![format!("== {} ==", panel.title)];
-    lines.push(format!("  [panel:{marker}]"));
-    lines.extend(panel.lines.iter().map(|line| format!("  {line}")));
+    let mut lines = vec![panel_header(&panel.title)];
+    lines.push(format!("  [panel:{}]", panel_marker(panel.kind)));
+    lines.extend(panel_body_lines(&panel.lines));
     lines.join("\n")
+}
+
+fn render_tui_section(title: &str, lines: Vec<&str>) -> String {
+    let mut section_lines = vec![format!("[{}]", title)];
+    section_lines.extend(lines.into_iter().map(|line| format!("  {line}")));
+    section_lines.join("\n")
 }

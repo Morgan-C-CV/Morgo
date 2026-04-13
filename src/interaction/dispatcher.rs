@@ -87,7 +87,11 @@ impl NotificationDispatcher {
             .clone()
     }
 
-    pub fn drain_remote_notifications(&self, session_id: &str, actor_id: Option<&str>) -> Vec<Notification> {
+    pub fn drain_remote_notifications(
+        &self,
+        session_id: &str,
+        actor_id: Option<&str>,
+    ) -> Vec<Notification> {
         let mut inboxes = self
             .remote_inboxes
             .write()

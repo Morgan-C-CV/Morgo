@@ -402,9 +402,11 @@ async fn registry_rejects_non_json_input_for_schema_backed_tools() {
         .await
         .expect_err("schema-backed tool should reject non-json input");
 
-    assert!(error
-        .to_string()
-        .contains("tool Edit requires JSON-structured input"));
+    assert!(
+        error
+            .to_string()
+            .contains("tool Edit requires JSON-structured input")
+    );
 }
 
 #[tokio::test]
@@ -506,8 +508,8 @@ async fn tool_search_filters_catalog() {
 #[tokio::test]
 async fn tool_search_prefers_runtime_registry_when_available() {
     let registry = ToolRegistry::new().register(Arc::new(FileReadTool));
-    let permissions = ToolPermissionContext::new(PermissionMode::Default)
-        .with_inherited_tool_registry(registry);
+    let permissions =
+        ToolPermissionContext::new(PermissionMode::Default).with_inherited_tool_registry(registry);
 
     let result = ToolSearchTool
         .invoke(
@@ -530,8 +532,8 @@ async fn tool_search_prefers_runtime_registry_when_available() {
 #[tokio::test]
 async fn tool_search_matches_search_hint() {
     let registry = ToolRegistry::new().register(Arc::new(FileWriteTool));
-    let permissions = ToolPermissionContext::new(PermissionMode::Default)
-        .with_inherited_tool_registry(registry);
+    let permissions =
+        ToolPermissionContext::new(PermissionMode::Default).with_inherited_tool_registry(registry);
 
     let result = ToolSearchTool
         .invoke(

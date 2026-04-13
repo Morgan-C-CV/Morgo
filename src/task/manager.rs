@@ -181,9 +181,10 @@ impl TaskManager {
         self.list().into_iter().any(|task| {
             task.owner.session_id == session_id
                 && (task.validation_state == Some(ValidationState::PendingVerification)
-                    || task.orchestration_group_id.as_ref().is_some_and(|group_id| {
-                        !self.group_ready_for_fan_in(group_id)
-                    }))
+                    || task
+                        .orchestration_group_id
+                        .as_ref()
+                        .is_some_and(|group_id| !self.group_ready_for_fan_in(group_id)))
         })
     }
 
@@ -219,14 +220,21 @@ impl TaskManager {
             Some(ValidationState::PendingVerification) => {
                 format!("verification next for {}", task.id)
             }
-            Some(ValidationState::Verified) => format!("ready for validated synthesis for {}", task.id),
+            Some(ValidationState::Verified) => {
+                format!("ready for validated synthesis for {}", task.id)
+            }
             Some(ValidationState::VerificationFailed) => {
                 format!("verification failure needs inspection for {}", task.id)
             }
             Some(ValidationState::Unverified) => {
                 format!("synthesize with explicit unverified risk for {}", task.id)
             }
-            _ => next_action_for_task(&task.status, task.worker_role, task.validation_state, &task.id),
+            _ => next_action_for_task(
+                &task.status,
+                task.worker_role,
+                task.validation_state,
+                &task.id,
+            ),
         }
     }
 
@@ -387,7 +395,8 @@ impl TaskManager {
     }
 
     pub fn is_terminal(&self, id: &str) -> Option<bool> {
-        self.status(id).map(|status| !matches!(status, TaskStatus::Pending | TaskStatus::Running))
+        self.status(id)
+            .map(|status| !matches!(status, TaskStatus::Pending | TaskStatus::Running))
     }
 
     pub fn send_message(
@@ -587,7 +596,11 @@ impl TaskManager {
         }
     }
 
-    fn build_group_summary(&self, group_id: String, mut tasks: Vec<TaskRecord>) -> TaskGroupSummary {
+    fn build_group_summary(
+        &self,
+        group_id: String,
+        mut tasks: Vec<TaskRecord>,
+    ) -> TaskGroupSummary {
         tasks.sort_by(|left, right| {
             left.parent_task_id
                 .is_some()
@@ -648,10 +661,15 @@ impl TaskManager {
             event.validation_state.map(|state| state.as_str()),
             event.output_file.clone(),
         );
-        if matches!(event.owner.surface, InteractionSurface::Telegram | InteractionSurface::Remote) {
-            notification.target = Some(crate::interaction::notification::NotificationTarget::Session {
-                session_id: event.owner.session_id.clone(),
-            });
+        if matches!(
+            event.owner.surface,
+            InteractionSurface::Telegram | InteractionSurface::Remote
+        ) {
+            notification.target = Some(
+                crate::interaction::notification::NotificationTarget::Session {
+                    session_id: event.owner.session_id.clone(),
+                },
+            );
             if matches!(event.owner.surface, InteractionSurface::Remote) {
                 notification.dedupe_key = Some(format!(
                     "task_update:{}:{}:{}",
@@ -688,7 +706,10 @@ fn next_action_for_task(
                 format!("synthesize with explicit unverified risk for {}", task_id)
             }
             (Some(crate::state::app_state::WorkerRole::Research), _) => {
-                format!("synthesize findings or request follow-up research for {}", task_id)
+                format!(
+                    "synthesize findings or request follow-up research for {}",
+                    task_id
+                )
             }
             (Some(crate::state::app_state::WorkerRole::Implement), _) => {
                 format!("dispatch verify worker for {}", task_id)

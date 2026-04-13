@@ -5,7 +5,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::service::mcp::client::{McpClient, RoutingMcpClient};
-use crate::service::mcp::config::{default_server_configs, McpConfigLoadResult, McpConfigSource};
+use crate::service::mcp::config::{McpConfigLoadResult, McpConfigSource, default_server_configs};
 use crate::service::mcp::types::{
     McpAction, McpConnectInfo, McpConnectionStatus, McpRequest, McpResourceInfo, McpResponse,
     McpServerConfig, McpServerState, McpToolInfo,
@@ -174,7 +174,8 @@ impl McpRuntime {
                 }
             }
             McpAction::ListResources => {
-                if let Some(resources) = self.cached_resources.read().await.get(&config.id).cloned() {
+                if let Some(resources) = self.cached_resources.read().await.get(&config.id).cloned()
+                {
                     return Ok(McpResponse::ResourceList(resources));
                 }
                 match self.client.list_resources(&config).await {
@@ -386,7 +387,10 @@ fn preview_names_from_resources(resources: &[McpResourceInfo]) -> Vec<String> {
         .collect()
 }
 
-pub async fn replace_runtime_server_config(runtime: &McpRuntime, config: McpServerConfig) -> anyhow::Result<()> {
+pub async fn replace_runtime_server_config(
+    runtime: &McpRuntime,
+    config: McpServerConfig,
+) -> anyhow::Result<()> {
     {
         let mut servers = runtime.servers.write().await;
         let state = servers

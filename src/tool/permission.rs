@@ -41,7 +41,10 @@ pub fn evaluate_tool_permission(
         .any(|rule| rule == metadata.name || rule == call.name.as_str())
     {
         return PermissionDecision::Ask {
-            message: format!("tool {} requires explicit approval by ask rule", metadata.name),
+            message: format!(
+                "tool {} requires explicit approval by ask rule",
+                metadata.name
+            ),
             reason: crate::tool::definition::PermissionDecisionReason::Rule,
         };
     }

@@ -19,13 +19,15 @@ use rust_agent::interaction::dispatcher::NotificationDispatcher;
 use rust_agent::interaction::envelope::NormalizedInput;
 use rust_agent::interaction::telegram::gateway::TelegramGateway;
 use rust_agent::plugins::loader::load_plugins;
-use rust_agent::plugins::runtime::{augment_hook_registry_with_plugins, augment_tool_registry_with_plugins};
+use rust_agent::plugins::runtime::{
+    augment_hook_registry_with_plugins, augment_tool_registry_with_plugins,
+};
 use rust_agent::plugins::runtime_state::{RuntimePluginState, build_runtime_plugin_snapshot};
 use rust_agent::plugins::types::{
     PluginActivationSummary, PluginApplyStatus, PluginCapability, PluginCommandDefinition,
     PluginConfigSource, PluginDefinition, PluginDiagnostic, PluginDiagnosticSeverity,
-    PluginDiagnosticsMetadata, PluginGovernanceSource, PluginGovernanceState,
-    PluginHookDefinition, PluginLifecycleState, PluginLoadResult, PluginToolDefinition,
+    PluginDiagnosticsMetadata, PluginGovernanceSource, PluginGovernanceState, PluginHookDefinition,
+    PluginLifecycleState, PluginLoadResult, PluginToolDefinition,
 };
 use rust_agent::skills::registry::SkillRegistry;
 use rust_agent::skills::types::{SkillDefinition, SkillExecutionContext, SkillSource};
@@ -50,7 +52,9 @@ fn test_app_state(
     runtime_tool_registry: Option<Arc<RwLock<ToolRegistry>>>,
 ) -> AppState {
     let permission_context = match task_manager {
-        Some(manager) => ToolPermissionContext::new(PermissionMode::Default).with_task_manager(manager),
+        Some(manager) => {
+            ToolPermissionContext::new(PermissionMode::Default).with_task_manager(manager)
+        }
         None => ToolPermissionContext::new(PermissionMode::Default),
     };
     AppState {
@@ -100,7 +104,9 @@ fn sample_skill_definition(name: &str) -> SkillDefinition {
         when_to_use: Some("Use when triaging repo state".into()),
         argument_hint: Some("target path".into()),
         workflow_hint: Some("inspect then summarize".into()),
-        workflow_summary: Some("inspect then summarize | args: target path | use: Use when triaging repo state".into()),
+        workflow_summary: Some(
+            "inspect then summarize | args: target path | use: Use when triaging repo state".into(),
+        ),
         allowed_tools: vec!["Read".into()],
         aliases: vec![],
         user_invocable: true,
@@ -168,13 +174,20 @@ async fn help_command_renders_source_counts_and_execution_kinds() {
         CommandRegistry::new()
             .register(Arc::new(HelpCommand))
             .register(Arc::new(PermissionsCommand))
-            .register(Arc::new(SkillSlashCommand::from_skill(sample_skill_definition("summarize-skill"))))
-            .register(Arc::new(PluginSlashCommand::new(metadata_rich_plugin_command("plugin-cmd")))),
+            .register(Arc::new(SkillSlashCommand::from_skill(
+                sample_skill_definition("summarize-skill"),
+            )))
+            .register(Arc::new(PluginSlashCommand::new(
+                metadata_rich_plugin_command("plugin-cmd"),
+            ))),
     );
     let app_state = test_app_state(Some(registry), None, None, None);
 
     let result = HelpCommand
-        .execute(&NormalizedInput::from_raw(InteractionSurface::Cli, "/help"), &app_state)
+        .execute(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/help"),
+            &app_state,
+        )
         .await
         .expect("help command should render");
 
@@ -189,7 +202,9 @@ async fn help_command_renders_source_counts_and_execution_kinds() {
     assert!(text.contains("Built-in (2):"));
     assert!(text.contains("Skills (1):"));
     assert!(text.contains("Plugins (1):"));
-    assert!(text.contains("/help — Show the available commands [type=local] [builtin:core] aliases=h [immediate]"));
+    assert!(text.contains(
+        "/help — Show the available commands [type=local] [builtin:core] aliases=h [immediate]"
+    ));
     assert!(text.contains("/permissions — Inspect and update permission mode and explicit tool rules [type=local] [builtin:core] aliases=perms [sensitive] [immediate]"));
     assert!(text.contains("/summarize-skill — Summarize repository state — workflow: inspect then summarize | args: target path | use: Use when triaging repo state [type=prompt] [skill:skill] [model_invocation=disabled]"));
     assert!(text.contains("/plugin-cmd — Metadata-rich plugin command [type=prompt] [plugin:plugin] aliases=plugin-cmd-alias [availability=cli-only] [sensitive] [model_invocation=disabled] [immediate]"));
@@ -212,13 +227,18 @@ async fn skills_command_and_slash_command_share_augmented_workflow_metadata() {
     };
 
     let list_result = SkillsCommand
-        .execute(&NormalizedInput::from_raw(InteractionSurface::Cli, "/skills"), &app_state)
+        .execute(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/skills"),
+            &app_state,
+        )
         .await
         .expect("skills command should render");
     let CommandResult::Message(list_text) = list_result else {
         panic!("expected skills message");
     };
-    assert!(list_text.contains("workflow: inspect then summarize | args: target path | use: Use when triaging repo state"));
+    assert!(list_text.contains(
+        "workflow: inspect then summarize | args: target path | use: Use when triaging repo state"
+    ));
 
     let slash = SkillSlashCommand::from_skill(skill);
     let metadata = slash.metadata();
@@ -237,7 +257,9 @@ async fn help_command_surfaces_plugin_diagnostics_hint() {
         plugins: vec![],
         diagnostics: vec![PluginDiagnostic {
             plugin_name: Some("broken-plugin".into()),
-            manifest_path: Some(PathBuf::from("/tmp/project/.claude/plugins/broken/plugin.json")),
+            manifest_path: Some(PathBuf::from(
+                "/tmp/project/.claude/plugins/broken/plugin.json",
+            )),
             severity: PluginDiagnosticSeverity::Error,
             code: "plugin-manifest-load-failed".into(),
             message: "bad plugin manifest".into(),
@@ -247,7 +269,10 @@ async fn help_command_surfaces_plugin_diagnostics_hint() {
     let app_state = test_app_state(Some(registry), None, Some(plugin_load_result), None);
 
     let result = HelpCommand
-        .execute(&NormalizedInput::from_raw(InteractionSurface::Cli, "/help"), &app_state)
+        .execute(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/help"),
+            &app_state,
+        )
         .await
         .expect("help command should render");
 
@@ -262,7 +287,9 @@ async fn status_command_reports_plugin_discovery_summary() {
     let registry = Arc::new(
         CommandRegistry::new()
             .register(Arc::new(HelpCommand))
-            .register(Arc::new(PluginSlashCommand::new(metadata_rich_plugin_command("plugin-cmd")))),
+            .register(Arc::new(PluginSlashCommand::new(
+                metadata_rich_plugin_command("plugin-cmd"),
+            ))),
     );
     let tool_registry = ToolRegistry::new();
     let (tool_registry, _) = augment_tool_registry_with_plugins(
@@ -275,7 +302,11 @@ async fn status_command_reports_plugin_discovery_summary() {
                 version: Some("0.1.0".into()),
                 description: "demo".into(),
                 manifest_path: PathBuf::from("/tmp/project/.claude/plugins/demo/plugin.json"),
-                capabilities: vec![PluginCapability::Commands, PluginCapability::Hooks, PluginCapability::Tools],
+                capabilities: vec![
+                    PluginCapability::Commands,
+                    PluginCapability::Hooks,
+                    PluginCapability::Tools,
+                ],
                 diagnostics_metadata: Some(PluginDiagnosticsMetadata {
                     homepage: None,
                     docs: Some("https://example.com/docs".into()),
@@ -296,7 +327,9 @@ async fn status_command_reports_plugin_discovery_summary() {
             }],
             diagnostics: vec![PluginDiagnostic {
                 plugin_name: Some("broken-plugin".into()),
-                manifest_path: Some(PathBuf::from("/tmp/project/.claude/plugins/broken/plugin.json")),
+                manifest_path: Some(PathBuf::from(
+                    "/tmp/project/.claude/plugins/broken/plugin.json",
+                )),
                 severity: PluginDiagnosticSeverity::Error,
                 code: "plugin-manifest-load-failed".into(),
                 message: "bad plugin manifest".into(),
@@ -312,7 +345,11 @@ async fn status_command_reports_plugin_discovery_summary() {
             version: Some("0.1.0".into()),
             description: "demo".into(),
             manifest_path: PathBuf::from("/tmp/project/.claude/plugins/demo/plugin.json"),
-            capabilities: vec![PluginCapability::Commands, PluginCapability::Hooks, PluginCapability::Tools],
+            capabilities: vec![
+                PluginCapability::Commands,
+                PluginCapability::Hooks,
+                PluginCapability::Tools,
+            ],
             diagnostics_metadata: Some(PluginDiagnosticsMetadata {
                 homepage: None,
                 docs: Some("https://example.com/docs".into()),
@@ -333,7 +370,9 @@ async fn status_command_reports_plugin_discovery_summary() {
         }],
         diagnostics: vec![PluginDiagnostic {
             plugin_name: Some("broken-plugin".into()),
-            manifest_path: Some(PathBuf::from("/tmp/project/.claude/plugins/broken/plugin.json")),
+            manifest_path: Some(PathBuf::from(
+                "/tmp/project/.claude/plugins/broken/plugin.json",
+            )),
             severity: PluginDiagnosticSeverity::Error,
             code: "plugin-manifest-load-failed".into(),
             message: "bad plugin manifest".into(),
@@ -353,7 +392,10 @@ async fn status_command_reports_plugin_discovery_summary() {
         .with_runtime_plugin_state(runtime_plugin_state);
 
     let result = StatusCommand
-        .execute(&NormalizedInput::from_raw(InteractionSurface::Cli, "/status"), &app_state)
+        .execute(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/status"),
+            &app_state,
+        )
         .await
         .expect("status command should render");
 
@@ -368,7 +410,11 @@ async fn status_command_reports_plugin_discovery_summary() {
     assert!(text.contains("- source plugin: 1"));
     assert!(text.contains("- type local: 1"));
     assert!(text.contains("- type prompt: 1"));
-    assert!(text.contains("- contract: prompt=1, immediate=2, sensitive=1, model_invocation_disabled=1"));
+    assert!(
+        text.contains(
+            "- contract: prompt=1, immediate=2, sensitive=1, model_invocation_disabled=1"
+        )
+    );
     assert!(text.contains("- plugin_discovery: directory (root=/tmp/project/.claude/plugins)"));
     assert!(text.contains("- discovered_plugins: 1"));
     assert!(text.contains("- enabled_plugins: 1"));
@@ -403,17 +449,29 @@ async fn status_command_reports_plugin_discovery_summary() {
 #[tokio::test]
 async fn plugins_command_lists_show_details_and_persists_governance_state() {
     let root = unique_temp_path("rust-agent-plugins-command");
-    let plugin_manifest_path = root.join(".claude").join("plugins").join("demo").join("plugin.json");
-    fs::create_dir_all(plugin_manifest_path.parent().expect("plugin parent should exist"))
-        .expect("plugin dir should exist");
-    fs::write(&plugin_manifest_path, "{}") .expect("plugin manifest placeholder should be written");
+    let plugin_manifest_path = root
+        .join(".claude")
+        .join("plugins")
+        .join("demo")
+        .join("plugin.json");
+    fs::create_dir_all(
+        plugin_manifest_path
+            .parent()
+            .expect("plugin parent should exist"),
+    )
+    .expect("plugin dir should exist");
+    fs::write(&plugin_manifest_path, "{}").expect("plugin manifest placeholder should be written");
 
     let plugin = PluginDefinition {
         name: "demo-plugin".into(),
         version: Some("0.1.0".into()),
         description: "demo plugin".into(),
         manifest_path: plugin_manifest_path.clone(),
-        capabilities: vec![PluginCapability::Commands, PluginCapability::Tools, PluginCapability::Hooks],
+        capabilities: vec![
+            PluginCapability::Commands,
+            PluginCapability::Tools,
+            PluginCapability::Hooks,
+        ],
         diagnostics_metadata: Some(PluginDiagnosticsMetadata {
             homepage: Some("https://example.com/home".into()),
             docs: Some("https://example.com/docs".into()),
@@ -462,7 +520,10 @@ async fn plugins_command_lists_show_details_and_persists_governance_state() {
         .with_runtime_plugin_state(runtime_plugin_state);
 
     let list_result = PluginsCommand
-        .execute(&NormalizedInput::from_raw(InteractionSurface::Cli, "/plugins"), &app_state)
+        .execute(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/plugins"),
+            &app_state,
+        )
         .await
         .expect("plugins list should render");
     let CommandResult::Message(list_text) = list_result else {
@@ -549,7 +610,10 @@ async fn tasks_command_groups_orchestration_tasks_and_hints() {
     let parent = manager.create("implement feature", "test-session", InteractionSurface::Cli);
     manager.set_worker_role(&parent.id, WorkerRole::Implement);
     manager.set_orchestration_group_id(&parent.id, Some("group-1".into()));
-    manager.set_validation_state(&parent.id, Some(rust_agent::task::types::ValidationState::PendingVerification));
+    manager.set_validation_state(
+        &parent.id,
+        Some(rust_agent::task::types::ValidationState::PendingVerification),
+    );
     manager.complete(&parent.id, &dispatcher);
 
     let child = manager.create("verify feature", "test-session", InteractionSurface::Cli);
@@ -558,12 +622,19 @@ async fn tasks_command_groups_orchestration_tasks_and_hints() {
     manager.set_orchestration_group_id(&child.id, Some("group-1".into()));
     manager.start(&child.id);
 
-    let standalone = manager.create("standalone research", "test-session", InteractionSurface::Cli);
+    let standalone = manager.create(
+        "standalone research",
+        "test-session",
+        InteractionSurface::Cli,
+    );
     manager.set_worker_role(&standalone.id, WorkerRole::Research);
 
     let app_state = test_app_state(None, Some(manager), None, None);
     let result = TasksCommand
-        .execute(&NormalizedInput::from_raw(InteractionSurface::Cli, "/tasks"), &app_state)
+        .execute(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/tasks"),
+            &app_state,
+        )
         .await
         .expect("tasks command should render");
 
@@ -603,7 +674,8 @@ fn plugin_loader_loads_inline_and_file_prompts_and_collects_diagnostics() {
     let bad_dir = plugins_root.join("broken");
     fs::create_dir_all(&good_dir).expect("good plugin dir should exist");
     fs::create_dir_all(&bad_dir).expect("bad plugin dir should exist");
-    fs::write(good_dir.join("prompt.txt"), "Prompt loaded from file").expect("prompt file should be written");
+    fs::write(good_dir.join("prompt.txt"), "Prompt loaded from file")
+        .expect("prompt file should be written");
     fs::write(
         good_dir.join("plugin.json"),
         r#"{
@@ -648,7 +720,8 @@ fn plugin_loader_loads_inline_and_file_prompts_and_collects_diagnostics() {
 }"#,
     )
     .expect("good plugin manifest should be written");
-    fs::write(bad_dir.join("plugin.json"), "{ not-json }").expect("bad plugin manifest should be written");
+    fs::write(bad_dir.join("plugin.json"), "{ not-json }")
+        .expect("bad plugin manifest should be written");
 
     let result = load_plugins(&root);
 
@@ -658,10 +731,20 @@ fn plugin_loader_loads_inline_and_file_prompts_and_collects_diagnostics() {
     assert_eq!(result.plugins[0].version.as_deref(), Some("0.1.0"));
     assert_eq!(
         result.plugins[0].capabilities,
-        vec![PluginCapability::Commands, PluginCapability::Hooks, PluginCapability::Tools]
+        vec![
+            PluginCapability::Commands,
+            PluginCapability::Hooks,
+            PluginCapability::Tools
+        ]
     );
-    assert_eq!(result.plugins[0].lifecycle_state, PluginLifecycleState::Enabled);
-    assert_eq!(result.plugins[0].governance.source, PluginGovernanceSource::Default);
+    assert_eq!(
+        result.plugins[0].lifecycle_state,
+        PluginLifecycleState::Enabled
+    );
+    assert_eq!(
+        result.plugins[0].governance.source,
+        PluginGovernanceSource::Default
+    );
     assert!(result.plugins[0].governance.enabled);
     assert_eq!(result.plugins[0].activation.commands, 2);
     assert_eq!(result.plugins[0].activation.tools, 1);
@@ -669,22 +752,38 @@ fn plugin_loader_loads_inline_and_file_prompts_and_collects_diagnostics() {
     assert_eq!(result.plugins[0].commands.len(), 2);
     assert_eq!(result.plugins[0].tools.len(), 1);
     assert_eq!(result.plugins[0].hooks.len(), 1);
-    assert_eq!(result.plugins[0].diagnostics_metadata.as_ref().and_then(|meta| meta.docs.as_deref()), Some("https://example.com/docs"));
+    assert_eq!(
+        result.plugins[0]
+            .diagnostics_metadata
+            .as_ref()
+            .and_then(|meta| meta.docs.as_deref()),
+        Some("https://example.com/docs")
+    );
     assert_eq!(result.plugins[0].commands[0].prompt, "Inline prompt body");
     assert!(result.plugins[0].commands[0].disable_model_invocation);
     assert!(result.plugins[0].commands[0].immediate);
     assert!(result.plugins[0].commands[0].is_sensitive);
-    assert_eq!(result.plugins[0].commands[1].prompt, "Prompt loaded from file");
-    assert_eq!(result.plugins[0].commands[1].availability, CommandAvailability::CliOnly);
+    assert_eq!(
+        result.plugins[0].commands[1].prompt,
+        "Prompt loaded from file"
+    );
+    assert_eq!(
+        result.plugins[0].commands[1].availability,
+        CommandAvailability::CliOnly
+    );
     assert_eq!(result.diagnostics.len(), 2);
-    assert!(result
-        .diagnostics
-        .iter()
-        .any(|diagnostic| diagnostic.code == "plugin-manifest-load-failed"));
-    assert!(result
-        .diagnostics
-        .iter()
-        .any(|diagnostic| diagnostic.code == "plugin-state-defaults"));
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "plugin-manifest-load-failed")
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "plugin-state-defaults")
+    );
 
     fs::remove_dir_all(root).expect("plugin loader temp dir should be cleaned up");
 }
@@ -699,7 +798,11 @@ fn plugin_runtime_augments_hook_and_tool_registries() {
             version: Some("0.1.0".into()),
             description: "demo".into(),
             manifest_path: PathBuf::from("/tmp/project/.claude/plugins/demo/plugin.json"),
-            capabilities: vec![PluginCapability::Commands, PluginCapability::Hooks, PluginCapability::Tools],
+            capabilities: vec![
+                PluginCapability::Commands,
+                PluginCapability::Hooks,
+                PluginCapability::Tools,
+            ],
             diagnostics_metadata: None,
             commands: vec![sample_plugin_command("plugin-cmd")],
             tools: vec![sample_plugin_tool("demo_tool")],
@@ -717,8 +820,12 @@ fn plugin_runtime_augments_hook_and_tool_registries() {
         orphaned_governance_entries: vec![],
     };
 
-    let hook_registry = augment_hook_registry_with_plugins(rust_agent::hook::registry::HookRegistry::default(), &load_result);
-    let (tool_registry, diagnostics) = augment_tool_registry_with_plugins(ToolRegistry::new(), &load_result);
+    let hook_registry = augment_hook_registry_with_plugins(
+        rust_agent::hook::registry::HookRegistry::default(),
+        &load_result,
+    );
+    let (tool_registry, diagnostics) =
+        augment_tool_registry_with_plugins(ToolRegistry::new(), &load_result);
 
     assert_eq!(hook_registry.rules().len(), 1);
     assert_eq!(tool_registry.all_metadata().len(), 1);
@@ -754,8 +861,14 @@ fn plugin_slash_command_metadata_preserves_contract_flags() {
     let metadata = command.metadata();
 
     assert_eq!(metadata.name, "plugin-cmd");
-    assert_eq!(metadata.source, rust_agent::command::types::CommandSource::Plugin);
-    assert_eq!(metadata.command_type, rust_agent::command::types::CommandType::Prompt);
+    assert_eq!(
+        metadata.source,
+        rust_agent::command::types::CommandSource::Plugin
+    );
+    assert_eq!(
+        metadata.command_type,
+        rust_agent::command::types::CommandType::Prompt
+    );
     assert_eq!(metadata.availability, CommandAvailability::CliOnly);
     assert!(metadata.disable_model_invocation);
     assert!(metadata.immediate);

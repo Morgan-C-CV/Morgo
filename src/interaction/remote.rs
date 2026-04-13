@@ -322,7 +322,10 @@ fn dispatch_remote_runtime_notifications(
     events: &[CliDisplayEvent],
 ) {
     for event in events {
-        if !matches!(remote_delivery_mode_for_cli_event(event), RemoteDeliveryMode::DualChannel) {
+        if !matches!(
+            remote_delivery_mode_for_cli_event(event),
+            RemoteDeliveryMode::DualChannel
+        ) {
             continue;
         }
         let Some(notification) = notification_from_cli_event(input, event) else {
@@ -334,7 +337,10 @@ fn dispatch_remote_runtime_notifications(
     }
 }
 
-fn notification_from_cli_event(input: &NormalizedInput, event: &CliDisplayEvent) -> Option<Notification> {
+fn notification_from_cli_event(
+    input: &NormalizedInput,
+    event: &CliDisplayEvent,
+) -> Option<Notification> {
     match event {
         CliDisplayEvent::TaskEvent(_) => None,
         CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::PendingApproval { tool_name, message }) => {
@@ -368,7 +374,9 @@ pub fn remote_delivery_mode_for_cli_event(event: &CliDisplayEvent) -> RemoteDeli
     remote_delivery_mode_for_kind(remote_channel_kind_for_cli_event(event))
 }
 
-pub fn remote_delivery_mode_for_notification(notification_type: &NotificationType) -> RemoteDeliveryMode {
+pub fn remote_delivery_mode_for_notification(
+    notification_type: &NotificationType,
+) -> RemoteDeliveryMode {
     remote_delivery_mode_for_kind(remote_channel_kind_for_notification(notification_type))
 }
 
@@ -425,11 +433,8 @@ fn notification_from_pending_approval(
     actor_id: &str,
     pending: PendingApproval,
 ) -> Notification {
-    let mut notification = Notification::approval_required(
-        session_id.to_string(),
-        pending.tool_name,
-        pending.message,
-    );
+    let mut notification =
+        Notification::approval_required(session_id.to_string(), pending.tool_name, pending.message);
     notification.target = Some(NotificationTarget::RemoteActor {
         session_id: session_id.to_string(),
         actor_id: actor_id.to_string(),
@@ -516,7 +521,11 @@ pub fn render_remote_response_debug(response: &RemoteResponse) -> String {
     output
 }
 
-fn bind_remote_engine(engine: &QueryEngine, app_state: &AppState, input: &NormalizedInput) -> QueryEngine {
+fn bind_remote_engine(
+    engine: &QueryEngine,
+    app_state: &AppState,
+    input: &NormalizedInput,
+) -> QueryEngine {
     let mut remote_app_state = engine.context.app_state.clone();
     let (session_snapshot, session_history) = ensure_remote_session(app_state, input);
     remote_app_state.active_session_id = input.session_id.clone();
@@ -543,7 +552,10 @@ fn bind_remote_engine(engine: &QueryEngine, app_state: &AppState, input: &Normal
     })
 }
 
-fn ensure_remote_session(app_state: &AppState, input: &NormalizedInput) -> (SessionSnapshot, SessionHistory) {
+fn ensure_remote_session(
+    app_state: &AppState,
+    input: &NormalizedInput,
+) -> (SessionSnapshot, SessionHistory) {
     if let Some(session_store) = &app_state.session_store {
         if let Some((snapshot, history)) = session_store.load(&SessionRestoreRequest {
             resume: Some(input.session_id.clone()),

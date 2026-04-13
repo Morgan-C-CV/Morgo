@@ -34,7 +34,9 @@ impl Command for PermissionsCommand {
     ) -> anyhow::Result<CommandResult> {
         let args = input.command_args.trim();
         if args.is_empty() {
-            return Ok(CommandResult::Message(render_permissions_summary(app_state)));
+            return Ok(CommandResult::Message(render_permissions_summary(
+                app_state,
+            )));
         }
 
         let mut parts = args.split_whitespace();
@@ -54,7 +56,9 @@ impl Command for PermissionsCommand {
             "allow" => update_rule_list(app_state, RuleList::Allow, parts.collect()),
             "deny" => update_rule_list(app_state, RuleList::Deny, parts.collect()),
             "ask" => update_rule_list(app_state, RuleList::Ask, parts.collect()),
-            "show" => Ok(CommandResult::Message(render_permissions_summary(app_state))),
+            "show" => Ok(CommandResult::Message(render_permissions_summary(
+                app_state,
+            ))),
             _ => anyhow::bail!(
                 "unknown /permissions action '{}'. Supported: show, mode, allow, deny, ask",
                 action

@@ -37,11 +37,17 @@ Skill body
 
     let (frontmatter, content) = parse_frontmatter(markdown).expect("frontmatter should parse");
     assert_eq!(frontmatter.name.as_deref(), Some("test-skill"));
-    assert_eq!(frontmatter.workflow_hint.as_deref(), Some("inspect then update"));
+    assert_eq!(
+        frontmatter.workflow_hint.as_deref(),
+        Some("inspect then update")
+    );
     assert_eq!(frontmatter.allowed_tools, vec!["Read", "Edit"]);
     assert_eq!(frontmatter.aliases, vec!["tskill", "test-s"]);
     assert_eq!(frontmatter.exclude_paths, vec!["*/vendor/*"]);
-    assert_eq!(frontmatter.requires_files, vec!["Cargo.toml", "src/main.rs"]);
+    assert_eq!(
+        frontmatter.requires_files,
+        vec!["Cargo.toml", "src/main.rs"]
+    );
     assert_eq!(content.trim(), "Skill body");
 }
 
@@ -58,7 +64,10 @@ fn skill_loader_builds_normalized_workflow_summary() {
 
     let result = load_skills_with_diagnostics(&root).expect("skill load should succeed");
     let skill = &result.skills[0];
-    assert_eq!(skill.when_to_use.as_deref(), Some("Use when inspecting state"));
+    assert_eq!(
+        skill.when_to_use.as_deref(),
+        Some("Use when inspecting state")
+    );
     assert_eq!(skill.argument_hint.as_deref(), Some("path target"));
     assert_eq!(skill.workflow_hint.as_deref(), Some("inspect then patch"));
     assert_eq!(
@@ -91,10 +100,14 @@ fn skill_loader_merges_user_and_project_sources_with_project_override() {
     .expect("write project skill");
 
     let original_home = std::env::var("HOME").ok();
-    unsafe { std::env::set_var("HOME", &home_root); }
+    unsafe {
+        std::env::set_var("HOME", &home_root);
+    }
     let result = load_skills_with_diagnostics(&root).expect("skill load should succeed");
     if let Some(home) = original_home {
-        unsafe { std::env::set_var("HOME", home); }
+        unsafe {
+            std::env::set_var("HOME", home);
+        }
     }
 
     assert!(result.diagnostics.is_empty());
@@ -116,8 +129,11 @@ fn skill_loader_cache_reloads_only_after_fingerprint_changes() {
     let root = unique_temp_path("rust-agent-skill-cache");
     let skill_dir = root.join(".claude/skills/cacheable");
     fs::create_dir_all(&skill_dir).expect("create cache skill dir");
-    fs::write(skill_dir.join("SKILL.md"), "---\ndescription: cache skill\n---\nbody\n")
-        .expect("write skill file");
+    fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\ndescription: cache skill\n---\nbody\n",
+    )
+    .expect("write skill file");
 
     let mut cache = SkillLoaderCache::default();
     let (first, reloaded_first) = cache.load_or_reload(&root).expect("first cache load");
@@ -126,14 +142,19 @@ fn skill_loader_cache_reloads_only_after_fingerprint_changes() {
     assert!(!reloaded_second);
     assert_eq!(first.fingerprint, second.fingerprint);
 
-    fs::write(skill_dir.join("SKILL.md"), "---\ndescription: cache skill updated\n---\nbody\n")
-        .expect("rewrite skill file");
+    fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\ndescription: cache skill updated\n---\nbody\n",
+    )
+    .expect("rewrite skill file");
     let (third, reloaded_third) = cache.load_or_reload(&root).expect("third cache load");
     assert!(reloaded_third);
     assert_ne!(second.fingerprint, third.fingerprint);
 
     cache.invalidate();
-    let (_, reloaded_after_invalidate) = cache.load_or_reload(&root).expect("reload after invalidate");
+    let (_, reloaded_after_invalidate) = cache
+        .load_or_reload(&root)
+        .expect("reload after invalidate");
     assert!(reloaded_after_invalidate);
 
     fs::remove_dir_all(root).expect("cleanup cache root");

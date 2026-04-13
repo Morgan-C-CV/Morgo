@@ -72,7 +72,9 @@ impl Command for SkillSlashCommand {
         app_state: &AppState,
     ) -> anyhow::Result<CommandResult> {
         let Some(skill_registry) = app_state.skill_registry.as_ref() else {
-            return Ok(CommandResult::Message("No skills registry is available.".into()));
+            return Ok(CommandResult::Message(
+                "No skills registry is available.".into(),
+            ));
         };
         let cwd = app_state
             .session
@@ -112,7 +114,9 @@ impl Command for SkillsCommand {
         app_state: &AppState,
     ) -> anyhow::Result<CommandResult> {
         let Some(skill_registry) = app_state.skill_registry.as_ref() else {
-            return Ok(CommandResult::Message("No skills registry is available.".to_string()));
+            return Ok(CommandResult::Message(
+                "No skills registry is available.".to_string(),
+            ));
         };
         let cwd = app_state
             .session
@@ -139,7 +143,10 @@ impl Command for SkillsCommand {
                 .map(|value| format!(" — workflow: {}", value.trim()))
                 .unwrap_or_default();
             let source = format!(" [{}]", skill.source.as_str());
-            lines.push(format!("- {}{}: {}{}{}", skill.name, source, skill.description, when, workflow));
+            lines.push(format!(
+                "- {}{}: {}{}{}",
+                skill.name, source, skill.description, when, workflow
+            ));
         }
 
         Ok(CommandResult::Message(lines.join("\n")))

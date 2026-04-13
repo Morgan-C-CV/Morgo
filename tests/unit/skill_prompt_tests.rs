@@ -8,7 +8,9 @@ fn sample_skill() -> SkillDefinition {
         when_to_use: Some("Use when triaging repo state".into()),
         argument_hint: Some("target path".into()),
         workflow_hint: Some("raw workflow hint".into()),
-        workflow_summary: Some("inspect then summarize | args: target path | use: Use when triaging repo state".into()),
+        workflow_summary: Some(
+            "inspect then summarize | args: target path | use: Use when triaging repo state".into(),
+        ),
         allowed_tools: vec!["Read".into(), "Glob".into()],
         aliases: vec![],
         user_invocable: true,

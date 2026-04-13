@@ -2,14 +2,14 @@ pub mod clear;
 pub mod compact;
 pub mod config;
 pub mod cost;
-pub mod help;
-pub mod plan;
-pub mod resume;
-pub mod session;
 pub mod doctor;
+pub mod help;
 pub mod mcp;
 pub mod permissions;
+pub mod plan;
 pub mod plugins;
+pub mod resume;
+pub mod session;
 pub mod skills;
 pub mod status;
 pub mod tasks;
@@ -54,4 +54,3 @@ pub fn register_builtin_commands(registry: CommandRegistry) -> CommandRegistry {
 pub fn register_mcp_commands(registry: CommandRegistry) -> CommandRegistry {
     registry.register(Arc::new(McpCommand))
 }
-

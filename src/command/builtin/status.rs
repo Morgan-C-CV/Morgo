@@ -82,7 +82,10 @@ impl Command for StatusCommand {
                 registry.list_user_invocable(cwd).len()
             })
             .unwrap_or(0);
-        let mcp_config = app_state.mcp_runtime.as_ref().map(|runtime| runtime.config_load_result());
+        let mcp_config = app_state
+            .mcp_runtime
+            .as_ref()
+            .map(|runtime| runtime.config_load_result());
         let registry_total = app_state
             .command_registry
             .as_ref()
@@ -108,7 +111,10 @@ impl Command for StatusCommand {
             .filter(|command| command.command_type == CommandType::Prompt)
             .count();
         let immediate_command_count = metadata.iter().filter(|command| command.immediate).count();
-        let sensitive_command_count = metadata.iter().filter(|command| command.is_sensitive).count();
+        let sensitive_command_count = metadata
+            .iter()
+            .filter(|command| command.is_sensitive)
+            .count();
         let model_invocation_disabled_count = metadata
             .iter()
             .filter(|command| command.disable_model_invocation)
@@ -120,9 +126,15 @@ impl Command for StatusCommand {
         lines.push(format!("- runtime_role: {:?}", app_state.runtime_role));
         lines.push(format!(
             "- worker_role: {}",
-            app_state.worker_role.map(|role| role.as_str()).unwrap_or("none")
+            app_state
+                .worker_role
+                .map(|role| role.as_str())
+                .unwrap_or("none")
         ));
-        lines.push(format!("- cost: {}", app_state.cost_tracker.format_report()));
+        lines.push(format!(
+            "- cost: {}",
+            app_state.cost_tracker.format_report()
+        ));
 
         lines.push(String::new());
         lines.push("Commands:".to_string());
@@ -157,16 +169,27 @@ impl Command for StatusCommand {
         ));
         lines.push(format!(
             "- tasks: total={}, running={}, completed={}, failed={}, killed={}",
-            tasks.len(), running_count, completed_count, failed_count, killed_count
+            tasks.len(),
+            running_count,
+            completed_count,
+            failed_count,
+            killed_count
         ));
-        lines.push(format!("- pending_verification: {}", pending_verification_count));
+        lines.push(format!(
+            "- pending_verification: {}",
+            pending_verification_count
+        ));
         lines.push(format!("- orchestration_groups: {}", group_count));
 
         lines.push(String::new());
         lines.push("Integrations:".to_string());
         lines.push(format!(
             "- skills_registry: {} (user_invocable={})",
-            if app_state.skill_registry.is_some() { "available" } else { "unavailable" },
+            if app_state.skill_registry.is_some() {
+                "available"
+            } else {
+                "unavailable"
+            },
             skill_count
         ));
         if let Some(config) = mcp_config {
@@ -201,35 +224,42 @@ impl Command for StatusCommand {
                         .count()
                 })
                 .unwrap_or(0);
-            let registered_plugin_tools = if let Some(registry) = app_state.runtime_tool_registry.as_ref() {
-                registry
-                    .read()
-                    .await
-                    .all_metadata()
-                    .into_iter()
-                    .filter(|tool| tool.name.starts_with("plugin."))
-                    .count()
-            } else {
-                0
-            };
+            let registered_plugin_tools =
+                if let Some(registry) = app_state.runtime_tool_registry.as_ref() {
+                    registry
+                        .read()
+                        .await
+                        .all_metadata()
+                        .into_iter()
+                        .filter(|tool| tool.name.starts_with("plugin."))
+                        .count()
+                } else {
+                    0
+                };
             let discovered_plugin_commands = plugin_load_result.discovered_command_count();
             let discovered_plugin_tools = plugin_load_result.discovered_tool_count();
             let discovered_plugin_hooks = plugin_load_result.discovered_hook_count();
             let enabled_plugins = plugin_load_result.active_plugin_count();
             let disabled_plugins = plugin_load_result.disabled_plugin_count();
             let error_plugins = plugin_load_result.error_plugin_count();
-            let warning_count = plugin_load_result
-                .diagnostic_count_for_severity(crate::plugins::types::PluginDiagnosticSeverity::Warning);
-            let error_count = plugin_load_result
-                .diagnostic_count_for_severity(crate::plugins::types::PluginDiagnosticSeverity::Error);
-            let info_count = plugin_load_result
-                .diagnostic_count_for_severity(crate::plugins::types::PluginDiagnosticSeverity::Info);
+            let warning_count = plugin_load_result.diagnostic_count_for_severity(
+                crate::plugins::types::PluginDiagnosticSeverity::Warning,
+            );
+            let error_count = plugin_load_result.diagnostic_count_for_severity(
+                crate::plugins::types::PluginDiagnosticSeverity::Error,
+            );
+            let info_count = plugin_load_result.diagnostic_count_for_severity(
+                crate::plugins::types::PluginDiagnosticSeverity::Info,
+            );
             lines.push(format!(
                 "- plugin_discovery: {} (root={})",
                 plugin_load_result.source.as_str(),
                 plugin_load_result.root.display()
             ));
-            lines.push(format!("- discovered_plugins: {}", plugin_load_result.plugins.len()));
+            lines.push(format!(
+                "- discovered_plugins: {}",
+                plugin_load_result.plugins.len()
+            ));
             lines.push(format!(
                 "- orphaned_governance_entries: {}",
                 plugin_load_result.orphaned_governance_entries.len()
@@ -237,14 +267,38 @@ impl Command for StatusCommand {
             lines.push(format!("- enabled_plugins: {}", enabled_plugins));
             lines.push(format!("- disabled_plugins: {}", disabled_plugins));
             lines.push(format!("- error_plugins: {}", error_plugins));
-            lines.push(format!("- discovered_plugin_commands: {}", discovered_plugin_commands));
-            lines.push(format!("- discovered_plugin_tools: {}", discovered_plugin_tools));
-            lines.push(format!("- discovered_plugin_hooks: {}", discovered_plugin_hooks));
-            lines.push(format!("- active_plugin_commands: {}", plugin_load_result.active_command_count()));
-            lines.push(format!("- active_plugin_tools: {}", plugin_load_result.active_tool_count()));
-            lines.push(format!("- active_plugin_hooks: {}", plugin_load_result.active_hook_count()));
-            lines.push(format!("- registered_plugin_commands: {}", registered_plugin_commands));
-            lines.push(format!("- registered_plugin_tools: {}", registered_plugin_tools));
+            lines.push(format!(
+                "- discovered_plugin_commands: {}",
+                discovered_plugin_commands
+            ));
+            lines.push(format!(
+                "- discovered_plugin_tools: {}",
+                discovered_plugin_tools
+            ));
+            lines.push(format!(
+                "- discovered_plugin_hooks: {}",
+                discovered_plugin_hooks
+            ));
+            lines.push(format!(
+                "- active_plugin_commands: {}",
+                plugin_load_result.active_command_count()
+            ));
+            lines.push(format!(
+                "- active_plugin_tools: {}",
+                plugin_load_result.active_tool_count()
+            ));
+            lines.push(format!(
+                "- active_plugin_hooks: {}",
+                plugin_load_result.active_hook_count()
+            ));
+            lines.push(format!(
+                "- registered_plugin_commands: {}",
+                registered_plugin_commands
+            ));
+            lines.push(format!(
+                "- registered_plugin_tools: {}",
+                registered_plugin_tools
+            ));
             lines.push(format!(
                 "- diagnostics: total={}, info={}, warnings={}, errors={}",
                 plugin_load_result.diagnostics.len(),
@@ -307,7 +361,11 @@ impl Command for StatusCommand {
             }
             if !plugin_load_result.orphaned_governance_entries.is_empty() {
                 lines.push("- orphaned_governance_preview:".to_string());
-                for entry in plugin_load_result.orphaned_governance_entries.iter().take(3) {
+                for entry in plugin_load_result
+                    .orphaned_governance_entries
+                    .iter()
+                    .take(3)
+                {
                     lines.push(format!("  - {}", entry));
                 }
             }

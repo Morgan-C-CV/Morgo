@@ -1,13 +1,23 @@
 use rust_agent::state::permission_context::{PermissionMode, ToolPermissionContext};
-use rust_agent::tool::builtin::bash::command_helpers::{command_matches_rule, normalized_command_variants};
 use rust_agent::tool::builtin::bash::BashTool;
+use rust_agent::tool::builtin::bash::command_helpers::{
+    command_matches_rule, normalized_command_variants,
+};
 use rust_agent::tool::definition::{PermissionDecision, Tool, ToolCall};
 
 #[test]
 fn normalized_command_variants_strip_env_and_wrappers() {
     let variants = normalized_command_variants("env DEBUG=1 timeout 5 git diff");
-    assert!(variants.iter().any(|variant| variant == "env DEBUG=1 timeout 5 git diff"));
-    assert!(variants.iter().any(|variant| variant == "DEBUG=1 timeout 5 git diff"));
+    assert!(
+        variants
+            .iter()
+            .any(|variant| variant == "env DEBUG=1 timeout 5 git diff")
+    );
+    assert!(
+        variants
+            .iter()
+            .any(|variant| variant == "DEBUG=1 timeout 5 git diff")
+    );
     assert!(variants.iter().any(|variant| variant == "git diff"));
 }
 

@@ -119,11 +119,7 @@ impl Tool for PluginPromptTool {
         };
         Ok(ToolResult::Text(format!(
             "Loaded plugin tool: {}\nPlugin: {}\n{}\nManifest: {}\n\nPlugin tool instructions:\n{}",
-            self.metadata.name,
-            self.plugin_name,
-            args_line,
-            self.manifest_path,
-            self.prompt
+            self.metadata.name, self.plugin_name, args_line, self.manifest_path, self.prompt
         )))
     }
 }

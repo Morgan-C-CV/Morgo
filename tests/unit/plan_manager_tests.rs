@@ -2,7 +2,10 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rust_agent::bootstrap::{InteractionSurface, SessionMode};
-use rust_agent::history::session::{FileBackedSessionStore, InMemorySessionStore, SessionHistory, SessionId, SessionSnapshot, SessionStore};
+use rust_agent::history::session::{
+    FileBackedSessionStore, InMemorySessionStore, SessionHistory, SessionId, SessionSnapshot,
+    SessionStore,
+};
 use rust_agent::plan::manager::PlanManager;
 use rust_agent::plan::types::{PlanState, PlanStatus, PlanStepStatus};
 use rust_agent::task::list_manager::{TaskListManager, TaskListUpdate};
@@ -69,14 +72,22 @@ fn approve_preserves_execution_contract_and_progress() {
         .mark_step_status(&second.id, PlanStepStatus::InProgress)
         .expect("mark second in progress");
 
-    let approved = manager.approve(Some("ready to execute")).expect("approve plan");
+    let approved = manager
+        .approve(Some("ready to execute"))
+        .expect("approve plan");
     assert_eq!(approved.status, PlanStatus::Approved);
     let execution = approved.execution.expect("execution should be retained");
     assert_eq!(execution.completed_steps, 1);
     assert_eq!(execution.total_steps, 2);
     assert_eq!(execution.progress_percent, 50);
-    assert_eq!(execution.active_step_id.as_deref(), Some(second.id.as_str()));
-    assert_eq!(approved.approval_summary.as_deref(), Some("ready to execute"));
+    assert_eq!(
+        execution.active_step_id.as_deref(),
+        Some(second.id.as_str())
+    );
+    assert_eq!(
+        approved.approval_summary.as_deref(),
+        Some("ready to execute")
+    );
 }
 
 #[test]
@@ -102,12 +113,17 @@ fn persisted_plan_state_round_trips_with_history() {
     manager
         .mark_step_status(&step.id, PlanStepStatus::Completed)
         .expect("complete step");
-    manager.approve(Some("saved")).expect("approve persisted plan");
+    manager
+        .approve(Some("saved"))
+        .expect("approve persisted plan");
 
     let restored = store
         .load_plan_state(&session_id)
         .expect("plan state should persist");
-    assert_eq!(restored.draft.as_ref().expect("draft").summary, "Persistent plan");
+    assert_eq!(
+        restored.draft.as_ref().expect("draft").summary,
+        "Persistent plan"
+    );
     assert!(!restored.history.is_empty());
 }
 
@@ -121,7 +137,13 @@ fn task_list_reconciliation_updates_plan_execution_view() {
     let approved = manager.approve(Some("execute")).expect("approve plan");
 
     let task_list = TaskListManager::default();
-    let first_task = task_list.create("Inspect", "inspect repo", None, None, Some(first.id.clone()));
+    let first_task = task_list.create(
+        "Inspect",
+        "inspect repo",
+        None,
+        None,
+        Some(first.id.clone()),
+    );
     let second_task = task_list.create("Patch", "patch repo", None, None, Some(second.id.clone()));
     task_list
         .update(
@@ -152,7 +174,10 @@ fn task_list_reconciliation_updates_plan_execution_view() {
     assert_eq!(execution.completed_steps, 1);
     assert_eq!(execution.total_steps, 2);
     assert_eq!(execution.progress_percent, 50);
-    assert_eq!(execution.active_step_id.as_deref(), Some(second.id.as_str()));
+    assert_eq!(
+        execution.active_step_id.as_deref(),
+        Some(second.id.as_str())
+    );
 }
 
 #[test]
@@ -175,7 +200,9 @@ fn file_backed_plan_state_survives_new_store_instance() {
     let manager = PlanManager::default().with_persistence(store_a.clone(), session_id.clone());
     manager.ensure_draft(None);
     manager.set_summary("Durable plan");
-    let step = manager.add_step("Resume me", Some("persist across instances")).expect("add step");
+    let step = manager
+        .add_step("Resume me", Some("persist across instances"))
+        .expect("add step");
     manager
         .mark_step_status(&step.id, PlanStepStatus::Completed)
         .expect("complete durable step");
@@ -184,7 +211,10 @@ fn file_backed_plan_state_survives_new_store_instance() {
     let restored: PlanState = store_b
         .load_plan_state(&session_id)
         .expect("durable plan state should load");
-    assert_eq!(restored.draft.as_ref().expect("draft").summary, "Durable plan");
+    assert_eq!(
+        restored.draft.as_ref().expect("draft").summary,
+        "Durable plan"
+    );
     assert_eq!(restored.draft.as_ref().expect("draft").steps.len(), 1);
     assert!(!restored.history.is_empty());
 

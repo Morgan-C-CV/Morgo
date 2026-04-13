@@ -32,15 +32,15 @@ impl Command for DiffCommand {
         _input: &NormalizedInput,
         _app_state: &AppState,
     ) -> anyhow::Result<CommandResult> {
-        let output = ProcessCommand::new("git")
-            .args(["diff", "HEAD"])
-            .output();
+        let output = ProcessCommand::new("git").args(["diff", "HEAD"]).output();
 
         match output {
             Ok(output) if output.status.success() => {
                 let diff_text = String::from_utf8_lossy(&output.stdout);
                 if diff_text.trim().is_empty() {
-                    Ok(CommandResult::Message("No uncommitted changes found.".into()))
+                    Ok(CommandResult::Message(
+                        "No uncommitted changes found.".into(),
+                    ))
                 } else {
                     Ok(CommandResult::Message(format!(
                         "Git Diff (HEAD):\n```diff\n{}\n```",
@@ -55,12 +55,10 @@ impl Command for DiffCommand {
                     err_text
                 )))
             }
-            Err(e) => {
-                Ok(CommandResult::Message(format!(
-                    "Failed to execute git command: {}",
-                    e
-                )))
-            }
+            Err(e) => Ok(CommandResult::Message(format!(
+                "Failed to execute git command: {}",
+                e
+            ))),
         }
     }
 }

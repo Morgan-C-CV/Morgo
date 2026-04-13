@@ -1,7 +1,7 @@
 use crate::state::permission_context::ToolPermissionContext;
 use crate::tool::definition::{InterruptBehavior, ToolCall, ToolResult};
-use crate::tool::result::{ToolExecutionOutcomeKind, ToolExecutionRecord};
 use crate::tool::registry::ToolRegistry;
+use crate::tool::result::{ToolExecutionOutcomeKind, ToolExecutionRecord};
 use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,7 +79,8 @@ impl ToolOrchestrator {
         let mut outcomes = Vec::new();
 
         for batch in plan.batches {
-            let executed_in_batch = batch.concurrency_safe && batch.end_index - batch.start_index > 1;
+            let executed_in_batch =
+                batch.concurrency_safe && batch.end_index - batch.start_index > 1;
             if executed_in_batch {
                 let mut handles = Vec::new();
                 for request in &requests[batch.start_index..batch.end_index] {
@@ -92,7 +93,9 @@ impl ToolOrchestrator {
                     }));
                 }
                 for handle in handles {
-                    let (call, result) = handle.await.map_err(|error| anyhow::anyhow!("tool task join failed: {error}"))?;
+                    let (call, result) = handle
+                        .await
+                        .map_err(|error| anyhow::anyhow!("tool task join failed: {error}"))?;
                     let result = result?;
                     outcomes.push(ToolExecutionOutcome {
                         tool_name: call.name.clone(),
@@ -125,7 +128,13 @@ impl ToolOrchestrator {
                     executed_in_batch,
                 });
                 if matches!(interrupt_behavior, InterruptBehavior::Cancel)
-                    && matches!(outcomes.last(), Some(ToolExecutionOutcome { result: ToolResult::Denied(_), .. }))
+                    && matches!(
+                        outcomes.last(),
+                        Some(ToolExecutionOutcome {
+                            result: ToolResult::Denied(_),
+                            ..
+                        })
+                    )
                 {
                     break;
                 }

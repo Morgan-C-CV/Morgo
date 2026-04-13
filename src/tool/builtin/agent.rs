@@ -115,7 +115,9 @@ impl Tool for AgentTool {
                         task_id, role_label, task_label
                     )));
                 }
-                let owner_surface = permissions.active_surface.unwrap_or(InteractionSurface::Cli);
+                let owner_surface = permissions
+                    .active_surface
+                    .unwrap_or(InteractionSurface::Cli);
                 let task = tasks.create(
                     format!("Spawned {} worker for {}", role_label, task_label),
                     session_id.clone(),
@@ -142,9 +144,7 @@ impl Tool for AgentTool {
                 );
                 Ok(ToolResult::Text(format!(
                     "agent task {} respawned for {} worker: {}",
-                    task.id,
-                    role_label,
-                    task_label
+                    task.id, role_label, task_label
                 )))
             }
             AgentRequest::Continue { task_id, message } => {
@@ -187,7 +187,9 @@ fn launch_agent_task(
     tasks.launch(&launched_task_id.clone(), task_input.clone(), async move {
         let mut params = QueryParams::default();
         params.max_turns = request.max_turns;
-        let result = run_query_loop_with_params(&query_context, Message::user(task_input.clone()), params).await;
+        let result =
+            run_query_loop_with_params(&query_context, Message::user(task_input.clone()), params)
+                .await;
 
         if result.messages.is_empty() {
             tasks_for_run.append_output(&launched_task_id, "subagent produced no output");
@@ -273,10 +275,7 @@ fn parse_worker_phase(
     }
 }
 
-fn parse_reuse_strategy(
-    value: Option<&str>,
-    role: WorkerRole,
-) -> anyhow::Result<ReuseStrategy> {
+fn parse_reuse_strategy(value: Option<&str>, role: WorkerRole) -> anyhow::Result<ReuseStrategy> {
     match value {
         Some("running_only") => Ok(ReuseStrategy::RunningOnly),
         Some("fresh") => Ok(ReuseStrategy::Fresh),
@@ -298,7 +297,12 @@ fn maybe_reuse_running_task(
     tasks.list().into_iter().find_map(|task| {
         let matches_owner = task.owner.session_id == session_id;
         let matches_role = task.worker_role == Some(worker_role);
-        let matches_description = task.description == format!("Spawned {} worker for {}", worker_role.as_str(), task_description);
+        let matches_description = task.description
+            == format!(
+                "Spawned {} worker for {}",
+                worker_role.as_str(),
+                task_description
+            );
         let matches_group = task.orchestration_group_id.as_deref() == orchestration_group_id;
         if matches_owner
             && matches_role
@@ -315,8 +319,7 @@ fn maybe_reuse_running_task(
 
 fn build_parent_query_context(permissions: ToolPermissionContext) -> QueryContext {
     let mut runtime_permissions = permissions.clone();
-    runtime_permissions
-        .add_always_allow_rule(AgentTool.metadata().name);
+    runtime_permissions.add_always_allow_rule(AgentTool.metadata().name);
     runtime_permissions.include_interactive_tools = false;
     runtime_permissions.include_deferred_tools = false;
 
@@ -338,7 +341,9 @@ fn build_parent_query_context(permissions: ToolPermissionContext) -> QueryContex
         worker_role: None,
         permission_context: runtime_permissions,
         command_registry: None,
-        runtime_tool_registry: Some(std::sync::Arc::new(tokio::sync::RwLock::new(tool_registry.clone()))),
+        runtime_tool_registry: Some(std::sync::Arc::new(tokio::sync::RwLock::new(
+            tool_registry.clone(),
+        ))),
         skill_registry: None,
         mcp_runtime: permissions.mcp_runtime.clone(),
         plugin_load_result: None,
@@ -355,7 +360,8 @@ fn build_parent_query_context(permissions: ToolPermissionContext) -> QueryContex
         restored_session: None,
     };
     let system_prompt = crate::prompt::system::build_system_prompt(&app_state);
-    let tools_prompt = crate::prompt::tools::build_tools_prompt(&tool_registry, &app_state.permission_context);
+    let tools_prompt =
+        crate::prompt::tools::build_tools_prompt(&tool_registry, &app_state.permission_context);
     let context_prompt = crate::prompt::context::build_context_prompt(&app_state);
     QueryContext {
         app_state,

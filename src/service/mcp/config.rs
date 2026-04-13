@@ -64,7 +64,8 @@ pub fn load_server_configs_with_diagnostics(cwd: &Path) -> McpConfigLoadResult {
             }
         },
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            diagnostics.push("No .claude/mcp_servers.json found; using bundled defaults.".to_string());
+            diagnostics
+                .push("No .claude/mcp_servers.json found; using bundled defaults.".to_string());
             McpConfigLoadResult {
                 path,
                 source: McpConfigSource::Defaults,

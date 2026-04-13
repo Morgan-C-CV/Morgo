@@ -32,7 +32,9 @@ impl Command for HelpCommand {
         app_state: &AppState,
     ) -> anyhow::Result<CommandResult> {
         let Some(registry) = app_state.command_registry.as_ref() else {
-            return Ok(CommandResult::Message("Command registry is unavailable.".into()));
+            return Ok(CommandResult::Message(
+                "Command registry is unavailable.".into(),
+            ));
         };
 
         let mut metadata = registry.metadata();
@@ -52,9 +54,15 @@ impl Command for HelpCommand {
         for command in &metadata {
             if current_source != Some(command.source) {
                 current_source = Some(command.source);
-                let source_count = metadata.iter().filter(|item| item.source == command.source).count();
+                let source_count = metadata
+                    .iter()
+                    .filter(|item| item.source == command.source)
+                    .count();
                 lines.push(String::new());
-                lines.push(format!("{} ({source_count}):", command.source.display_name()));
+                lines.push(format!(
+                    "{} ({source_count}):",
+                    command.source.display_name()
+                ));
             }
             let aliases = if command.aliases.is_empty() {
                 String::new()
@@ -98,10 +106,12 @@ impl Command for HelpCommand {
 
         if let Some(plugin_load_result) = app_state.plugin_load_result.as_ref() {
             if !plugin_load_result.diagnostics.is_empty() {
-                let warning_count = plugin_load_result
-                    .diagnostic_count_for_severity(crate::plugins::types::PluginDiagnosticSeverity::Warning);
-                let error_count = plugin_load_result
-                    .diagnostic_count_for_severity(crate::plugins::types::PluginDiagnosticSeverity::Error);
+                let warning_count = plugin_load_result.diagnostic_count_for_severity(
+                    crate::plugins::types::PluginDiagnosticSeverity::Warning,
+                );
+                let error_count = plugin_load_result.diagnostic_count_for_severity(
+                    crate::plugins::types::PluginDiagnosticSeverity::Error,
+                );
                 lines.push(String::new());
                 lines.push(format!(
                     "Plugin diagnostics: {} issue(s) detected (warnings={}, errors={}); run /plugins or /status for details.",

@@ -1,5 +1,7 @@
 use rust_agent::bootstrap::InteractionSurface;
-use rust_agent::interaction::cli::renderer::render_turn_output;
+use rust_agent::interaction::cli::renderer::{
+    render_document_output, render_document_tui_output, render_turn_document, render_turn_output,
+};
 use rust_agent::interaction::cli::repl::{CliDisplayEvent, CliRuntimeEvent, CliTurnOutput};
 use rust_agent::interaction::dispatcher::NotificationDispatcher;
 use rust_agent::interaction::notification::{Notification, NotificationTarget, NotificationType};
@@ -111,7 +113,9 @@ fn cli_renderer_surfaces_implement_verify_and_risk_contract_lines() {
     assert!(rendered.contains("[task] next_action: dispatch verify worker for task-2"));
     assert!(rendered.contains("== Notice: validation =="));
     assert!(rendered.contains("[panel:notice]"));
-    assert!(rendered.contains("Validation pending; final answer must call out unverified risk until verify completes."));
+    assert!(rendered.contains(
+        "Validation pending; final answer must call out unverified risk until verify completes."
+    ));
 }
 
 #[test]
@@ -138,6 +142,146 @@ fn cli_renderer_renders_approval_and_tool_result_panels() {
     assert!(rendered.contains("== Tool result =="));
     assert!(rendered.contains("[panel:tool]"));
     assert!(rendered.contains("Tool: Read"));
+    assert!(rendered.contains("line one"));
+    assert!(rendered.contains("line two"));
+}
+
+#[test]
+fn cli_renderer_keeps_primary_text_before_mixed_panels_in_order() {
+    let rendered = render_turn_output(&CliTurnOutput {
+        primary_text: "Status\n\nPlugins:\n- discovered_plugins: 1".into(),
+        events: vec![
+            CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::Notice {
+                kind: "validation".into(),
+                message: "verify before shipping".into(),
+            }),
+            CliDisplayEvent::TaskEvent(TaskEvent {
+                owner: TaskOwner {
+                    session_id: "session-1".into(),
+                    surface: InteractionSurface::Cli,
+                },
+                target_task_id: Some("task-3".into()),
+                task_id: "task-3".into(),
+                status: TaskStatus::Running,
+                summary: "verify plugin snapshot".into(),
+                result: "Task running".into(),
+                next_action: "wait for verify worker".into(),
+                worker_role: Some(rust_agent::state::app_state::WorkerRole::Verify),
+                orchestration_group_id: Some("group-1".into()),
+                phase: Some(rust_agent::task::types::WorkerPhase::Verify),
+                validation_state: Some(
+                    rust_agent::task::types::ValidationState::PendingVerification,
+                ),
+                output_file: "/tmp/task-3.log".into(),
+            }),
+            CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::ToolResult {
+                tool_name: "Read".into(),
+                content: "plugin manifest updated".into(),
+            }),
+        ],
+    });
+
+    let primary_idx = rendered.find("Status").expect("primary text present");
+    let notice_idx = rendered
+        .find("== Notice: validation ==")
+        .expect("notice panel present");
+    let task_idx = rendered
+        .find("== Task update ==")
+        .expect("task panel present");
+    let tool_idx = rendered
+        .find("== Tool result ==")
+        .expect("tool panel present");
+
+    assert!(primary_idx < notice_idx);
+    assert!(notice_idx < task_idx);
+    assert!(task_idx < tool_idx);
+    assert!(rendered.contains("[panel:notice]"));
+    assert!(rendered.contains("[panel:task]"));
+    assert!(rendered.contains("[panel:tool]"));
+}
+
+#[test]
+fn cli_renderer_supports_help_style_primary_text_with_mixed_panels() {
+    let rendered = render_turn_output(&CliTurnOutput {
+        primary_text: "Available commands:\nBuilt-in (1):\n- /help — Show the available commands"
+            .into(),
+        events: vec![
+            CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::PendingApproval {
+                tool_name: "Bash".into(),
+                message: "approval needed for follow-up".into(),
+            }),
+            CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::Notice {
+                kind: "runtime".into(),
+                message: "background work still running".into(),
+            }),
+        ],
+    });
+
+    let help_idx = rendered
+        .find("Available commands:")
+        .expect("help text present");
+    let approval_idx = rendered
+        .find("== Approval required ==")
+        .expect("approval panel present");
+    let notice_idx = rendered
+        .find("== Notice: runtime ==")
+        .expect("notice panel present");
+
+    assert!(help_idx < approval_idx);
+    assert!(approval_idx < notice_idx);
+}
+
+#[test]
+fn cli_renderer_shared_document_path_preserves_text_output() {
+    let turn = CliTurnOutput {
+        primary_text: "Status\n\nPlugins:\n- discovered_plugins: 1".into(),
+        events: vec![CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::Notice {
+            kind: "validation".into(),
+            message: "verify before shipping".into(),
+        })],
+    };
+
+    let rendered = render_turn_output(&turn);
+    let document = render_turn_document(&turn);
+    let rendered_via_document = render_document_output(&document);
+
+    assert_eq!(rendered, rendered_via_document);
+    assert!(rendered_via_document.contains("Status"));
+    assert!(rendered_via_document.contains("== Notice: validation =="));
+}
+
+#[test]
+fn cli_renderer_tui_output_keeps_primary_text_before_panels() {
+    let turn = CliTurnOutput {
+        primary_text: "Available commands:\nBuilt-in (1):\n- /help — Show the available commands"
+            .into(),
+        events: vec![
+            CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::PendingApproval {
+                tool_name: "Bash".into(),
+                message: "approval needed for follow-up".into(),
+            }),
+            CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::ToolResult {
+                tool_name: "Read".into(),
+                content: "line one\nline two".into(),
+            }),
+        ],
+    };
+
+    let rendered = render_document_tui_output(&render_turn_document(&turn));
+
+    let primary_idx = rendered.find("[Primary]").expect("primary section present");
+    let approval_idx = rendered
+        .find("[Approval required]")
+        .expect("approval section present");
+    let tool_idx = rendered
+        .find("[Tool result]")
+        .expect("tool section present");
+
+    assert!(primary_idx < approval_idx);
+    assert!(approval_idx < tool_idx);
+    assert!(rendered.contains("╔════════════════ CLI TUI ════════════════"));
+    assert!(rendered.contains("Available commands:"));
+    assert!(rendered.contains("approval needed for follow-up"));
     assert!(rendered.contains("line one"));
     assert!(rendered.contains("line two"));
 }
@@ -341,11 +485,8 @@ fn dispatcher_drains_remote_session_and_actor_notifications() {
         InteractionSurface::Remote,
         Notification::runtime_notice("remote-session", "tool", "session scoped"),
     );
-    let mut actor_notification = Notification::approval_required(
-        "remote-session",
-        "Bash",
-        "requires explicit approval",
-    );
+    let mut actor_notification =
+        Notification::approval_required("remote-session", "Bash", "requires explicit approval");
     actor_notification.target = Some(NotificationTarget::RemoteActor {
         session_id: "remote-session".into(),
         actor_id: "actor-1".into(),
@@ -354,12 +495,16 @@ fn dispatcher_drains_remote_session_and_actor_notifications() {
 
     let actor_drained = dispatcher.drain_remote_notifications("remote-session", Some("actor-1"));
     assert_eq!(actor_drained.len(), 2);
-    assert!(actor_drained
-        .iter()
-        .any(|notification| notification.notification_type == NotificationType::RuntimeNotice));
-    assert!(actor_drained
-        .iter()
-        .any(|notification| notification.notification_type == NotificationType::ApprovalRequired));
+    assert!(
+        actor_drained
+            .iter()
+            .any(|notification| notification.notification_type == NotificationType::RuntimeNotice)
+    );
+    assert!(
+        actor_drained.iter().any(
+            |notification| notification.notification_type == NotificationType::ApprovalRequired
+        )
+    );
 
     dispatcher.dispatch(
         InteractionSurface::Remote,
@@ -367,21 +512,28 @@ fn dispatcher_drains_remote_session_and_actor_notifications() {
     );
     let session_only = dispatcher.drain_remote_notifications("remote-session", None);
     assert_eq!(session_only.len(), 1);
-    assert_eq!(session_only[0].notification_type, NotificationType::RuntimeNotice);
+    assert_eq!(
+        session_only[0].notification_type,
+        NotificationType::RuntimeNotice
+    );
 
-    assert!(dispatcher
-        .drain_remote_notifications("remote-session", Some("actor-1"))
-        .is_empty());
+    assert!(
+        dispatcher
+            .drain_remote_notifications("remote-session", Some("actor-1"))
+            .is_empty()
+    );
 }
 
 #[test]
 fn remote_drain_dedupes_session_and_actor_notifications() {
     let dispatcher = NotificationDispatcher::new(TelegramGateway::default());
-    let mut session_notification = Notification::runtime_notice("remote-session", "tool", "same message");
+    let mut session_notification =
+        Notification::runtime_notice("remote-session", "tool", "same message");
     session_notification.dedupe_key = Some("notice-1".into());
     dispatcher.dispatch(InteractionSurface::Remote, session_notification);
 
-    let mut actor_notification = Notification::runtime_notice("remote-session", "tool", "same message");
+    let mut actor_notification =
+        Notification::runtime_notice("remote-session", "tool", "same message");
     actor_notification.dedupe_key = Some("notice-1".into());
     actor_notification.target = Some(NotificationTarget::RemoteActor {
         session_id: "remote-session".into(),
@@ -463,11 +615,8 @@ fn drain_remote_notifications_maps_structured_payloads() {
         history: None,
         restored_session: None,
     };
-    let mut notification = Notification::approval_required(
-        "remote-session",
-        "Bash",
-        "requires explicit approval",
-    );
+    let mut notification =
+        Notification::approval_required("remote-session", "Bash", "requires explicit approval");
     notification.target = Some(NotificationTarget::RemoteActor {
         session_id: "remote-session".into(),
         actor_id: "actor-1".into(),

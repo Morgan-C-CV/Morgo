@@ -14,7 +14,6 @@ struct PreparedTurn {
     token_estimate: usize,
 }
 
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueryParams {
     pub messages: Vec<Message>,
@@ -154,7 +153,8 @@ pub async fn run_query_loop_with_params(
         if let Some(result) = check_turn_limits(context, &state, &params, &events) {
             return result;
         }
-        let prepared = match prepare_turn(context, &mut state, &params, &current_input, &mut events) {
+        let prepared = match prepare_turn(context, &mut state, &params, &current_input, &mut events)
+        {
             Ok(prepared) => prepared,
             Err(result) => return result,
         };
@@ -179,7 +179,15 @@ pub async fn run_query_loop_with_params(
         )
         .await;
 
-        match decide_next_turn(context, &mut state, turn_outcome, &mut current_input, &mut events).await {
+        match decide_next_turn(
+            context,
+            &mut state,
+            turn_outcome,
+            &mut current_input,
+            &mut events,
+        )
+        .await
+        {
             NextTurnDecision::Return(result) => return result,
             NextTurnDecision::Continue => continue,
         }
@@ -256,7 +264,9 @@ fn prepare_turn(
                     prepared.token_estimate
                 ),
             });
-            if !params.messages.is_empty() || state.transition == Some(Continue::TokenBudgetContinuation) {
+            if !params.messages.is_empty()
+                || state.transition == Some(Continue::TokenBudgetContinuation)
+            {
                 return Err(finalize_with_stop_hook(
                     context,
                     state.clone(),
@@ -283,7 +293,10 @@ fn prepare_turn(
         return Err(result);
     }
 
-    if context.compactor.should_compact(prepared.token_estimate, 4096) {
+    if context
+        .compactor
+        .should_compact(prepared.token_estimate, 4096)
+    {
         let compact_message = Message::assistant("compaction requested before continuing the turn");
         events.push(EngineEvent::Notice {
             kind: "compaction",
@@ -346,13 +359,15 @@ async fn decide_next_turn(
     events: &mut Vec<EngineEvent>,
 ) -> NextTurnDecision {
     match turn_outcome.decision {
-        TurnDecision::Return(loop_state, terminal) => NextTurnDecision::Return(finalize_with_stop_hook(
-            context,
-            loop_state,
-            terminal_state(&terminal),
-            terminal,
-            turn_outcome.events,
-        )),
+        TurnDecision::Return(loop_state, terminal) => {
+            NextTurnDecision::Return(finalize_with_stop_hook(
+                context,
+                loop_state,
+                terminal_state(&terminal),
+                terminal,
+                turn_outcome.events,
+            ))
+        }
         TurnDecision::ContinueWith(next_input, continue_reason) => {
             *state = turn_outcome.state;
             state.turn_count += 1;
@@ -456,7 +471,8 @@ async fn consume_model_stream(
                         state.messages.push(message);
                     }
                     let Some((tool_name, tool_input)) = pending_tool_use.take() else {
-                        let error_message = Message::assistant("stream error: tool stop without tool payload");
+                        let error_message =
+                            Message::assistant("stream error: tool stop without tool payload");
                         engine_events.push(EngineEvent::MessageCommitted(error_message.clone()));
                         state.messages.push(error_message);
                         return TurnOutcome {
@@ -468,7 +484,9 @@ async fn consume_model_stream(
                             ),
                         };
                     };
-                    let tool_outcome = execute_tool_phase(context, state, engine_events, tool_name, tool_input).await;
+                    let tool_outcome =
+                        execute_tool_phase(context, state, engine_events, tool_name, tool_input)
+                            .await;
                     return tool_outcome;
                 }
                 StopReason::MaxTokens => {
@@ -487,7 +505,9 @@ async fn consume_model_stream(
                             state: state.clone(),
                             events: engine_events,
                             decision: TurnDecision::ContinueWith(
-                                Message::user("Please continue and finish the response after max output token escalation."),
+                                Message::user(
+                                    "Please continue and finish the response after max output token escalation.",
+                                ),
                                 Continue::MaxOutputTokensEscalate,
                             ),
                         };
@@ -502,7 +522,9 @@ async fn consume_model_stream(
                             state: state.clone(),
                             events: engine_events,
                             decision: TurnDecision::ContinueWith(
-                                Message::user("Please continue from where you were interrupted due to max output tokens."),
+                                Message::user(
+                                    "Please continue from where you were interrupted due to max output tokens.",
+                                ),
                                 Continue::MaxOutputTokensRecovery,
                             ),
                         };
@@ -551,7 +573,10 @@ async fn consume_model_stream(
                     return TurnOutcome {
                         state: state.clone(),
                         events: engine_events,
-                        decision: TurnDecision::Return(state.clone(), Terminal::ModelError("stream stopped with error".into())),
+                        decision: TurnDecision::Return(
+                            state.clone(),
+                            Terminal::ModelError("stream stopped with error".into()),
+                        ),
                     };
                 }
             },
@@ -563,7 +588,9 @@ async fn consume_model_stream(
                     state.has_attempted_reactive_compact = true;
                     engine_events.push(EngineEvent::Notice {
                         kind: "recovery",
-                        message: format!("reactive compact retry triggered after stream error: {error}"),
+                        message: format!(
+                            "reactive compact retry triggered after stream error: {error}"
+                        ),
                     });
                     return TurnOutcome {
                         state: state.clone(),
@@ -577,7 +604,9 @@ async fn consume_model_stream(
                 if state.transition != Some(Continue::CollapseDrainRetry) {
                     engine_events.push(EngineEvent::Notice {
                         kind: "recovery",
-                        message: format!("collapse drain retry triggered after repeated stream error: {error}"),
+                        message: format!(
+                            "collapse drain retry triggered after repeated stream error: {error}"
+                        ),
                     });
                     return TurnOutcome {
                         state: state.clone(),
@@ -626,11 +655,15 @@ async fn execute_tool_phase(
         engine_events.push(EngineEvent::MessageCommitted(message.clone()));
         state.messages.push(message);
     }
-    let hook_permission_decision = crate::hook::permission_resolution::resolve_hook_permission_decision(
-        &pre_tool_hook.payload.permission_result,
-        crate::tool::definition::PermissionDecision::Allow,
-    );
-    if let crate::tool::definition::PermissionDecision::Deny { message: reason, .. } = hook_permission_decision {
+    let hook_permission_decision =
+        crate::hook::permission_resolution::resolve_hook_permission_decision(
+            &pre_tool_hook.payload.permission_result,
+            crate::tool::definition::PermissionDecision::Allow,
+        );
+    if let crate::tool::definition::PermissionDecision::Deny {
+        message: reason, ..
+    } = hook_permission_decision
+    {
         let denial = Message::assistant(format!("tool {tool_name} denied by hook: {reason}"));
         let permission_denied_hook = run_hook(
             &context.hook_registry,
@@ -703,12 +736,18 @@ async fn execute_tool_phase(
         engine_events.push(EngineEvent::MessageCommitted(message.clone()));
         state.messages.push(message);
     }
-    let requested_permission_decision = crate::hook::permission_resolution::resolve_hook_permission_decision(
-        &permission_request_hook.payload.permission_result,
-        crate::tool::definition::PermissionDecision::Allow,
-    );
-    if let crate::tool::definition::PermissionDecision::Deny { message: reason, .. } = requested_permission_decision {
-        let denial = Message::assistant(format!("tool {tool_name} denied before execution: {reason}"));
+    let requested_permission_decision =
+        crate::hook::permission_resolution::resolve_hook_permission_decision(
+            &permission_request_hook.payload.permission_result,
+            crate::tool::definition::PermissionDecision::Allow,
+        );
+    if let crate::tool::definition::PermissionDecision::Deny {
+        message: reason, ..
+    } = requested_permission_decision
+    {
+        let denial = Message::assistant(format!(
+            "tool {tool_name} denied before execution: {reason}"
+        ));
         let permission_denied_hook = run_hook(
             &context.hook_registry,
             HookEvent::PermissionDenied {
@@ -821,25 +860,23 @@ async fn execute_tool_phase(
                     decision: TurnDecision::Return(state.clone(), Terminal::AbortedTools),
                 }
             }
-            Some(crate::tool::definition::ToolResult::PendingApproval {
-                tool_name,
-                message,
-            }) => {
+            Some(crate::tool::definition::ToolResult::PendingApproval { tool_name, message }) => {
                 context
                     .app_state
                     .permission_context
-                    .set_pending_approval(Some(crate::state::permission_context::PendingApproval {
-                        tool_name: tool_name.clone(),
-                        tool_input: effective_tool_input.clone(),
-                        message: message.clone(),
-                    }));
+                    .set_pending_approval(Some(
+                        crate::state::permission_context::PendingApproval {
+                            tool_name: tool_name.clone(),
+                            tool_input: effective_tool_input.clone(),
+                            message: message.clone(),
+                        },
+                    ));
                 engine_events.push(EngineEvent::PendingApproval {
                     tool_name: tool_name.clone(),
                     message: message.clone(),
                 });
-                let approval_message = Message::assistant(format!(
-                    "approval required for {tool_name}: {message}"
-                ));
+                let approval_message =
+                    Message::assistant(format!("approval required for {tool_name}: {message}"));
                 engine_events.push(EngineEvent::MessageCommitted(approval_message.clone()));
                 state.messages.push(approval_message);
                 TurnOutcome {
@@ -853,7 +890,8 @@ async fn execute_tool_phase(
                     kind: "tool",
                     message: format!("tool {tool_name} interrupted: {reason}"),
                 });
-                let interrupted = Message::assistant(format!("tool {tool_name} interrupted: {reason}"));
+                let interrupted =
+                    Message::assistant(format!("tool {tool_name} interrupted: {reason}"));
                 engine_events.push(EngineEvent::MessageCommitted(interrupted.clone()));
                 state.messages.push(interrupted);
                 TurnOutcome {
@@ -881,7 +919,8 @@ async fn execute_tool_phase(
                     kind: "tool",
                     message: format!("tool {tool_name} result too large: {reason}"),
                 });
-                let oversized = Message::assistant(format!("tool {tool_name} result too large: {reason}"));
+                let oversized =
+                    Message::assistant(format!("tool {tool_name} result too large: {reason}"));
                 engine_events.push(EngineEvent::MessageCommitted(oversized.clone()));
                 state.messages.push(oversized);
                 TurnOutcome {
@@ -912,7 +951,9 @@ async fn execute_tool_phase(
             }
             engine_events.push(EngineEvent::Notice {
                 kind: "tool",
-                message: format!("injecting missing tool result after tool failure for {tool_name}"),
+                message: format!(
+                    "injecting missing tool result after tool failure for {tool_name}"
+                ),
             });
             let failure = Message::assistant(format!("tool {tool_name} failed: {error}"));
             let missing_tool_result = Message::assistant(format!(
@@ -942,7 +983,8 @@ fn inbox_messages(context: &QueryContext, target_task_id: Option<&str>) -> Vec<M
                 .drain_events_for_target(&context.app_state.active_session_id, target_task_id)
                 .into_iter()
                 .map(|event| {
-                    let notification = crate::coordinator::worker::TaskNotification::from_task_event(&event);
+                    let notification =
+                        crate::coordinator::worker::TaskNotification::from_task_event(&event);
                     Message::user(notification.format_as_user_message())
                 })
                 .collect()
@@ -973,14 +1015,18 @@ fn finalize_with_stop_hook(
     state
         .messages
         .extend(inbox_messages(context, context.agent_id.as_deref()));
-    if matches!(context.app_state.runtime_role, crate::state::app_state::RuntimeRole::Coordinator)
-        && matches!(default_terminal, Terminal::Completed)
+    if matches!(
+        context.app_state.runtime_role,
+        crate::state::app_state::RuntimeRole::Coordinator
+    ) && matches!(default_terminal, Terminal::Completed)
         && context
             .app_state
             .permission_context
             .task_manager
             .as_ref()
-            .is_some_and(|manager| manager.has_pending_orchestration(&context.app_state.active_session_id))
+            .is_some_and(|manager| {
+                manager.has_pending_orchestration(&context.app_state.active_session_id)
+            })
     {
         let gating_message = Message::assistant(
             "orchestration still pending: wait for grouped research fan-in or verification before final synthesis",
@@ -1049,4 +1095,3 @@ impl QueryLoopStateExt for QueryLoopState {
         self
     }
 }
-

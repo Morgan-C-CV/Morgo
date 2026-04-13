@@ -3,20 +3,20 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use rust_agent::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
-use rust_agent::skills::registry::SkillRegistry;
-use rust_agent::skills::types::{SkillDefinition, SkillExecutionContext, SkillSource};
 use rust_agent::core::message::Message;
 use rust_agent::history::session::{SessionHistory, SessionHistoryEntry, SessionSnapshot};
 use rust_agent::interaction::dispatcher::NotificationDispatcher;
+use rust_agent::interaction::telegram::gateway::TelegramGateway;
 use rust_agent::plan::manager::PlanManager;
+use rust_agent::skills::registry::SkillRegistry;
+use rust_agent::skills::types::{SkillDefinition, SkillExecutionContext, SkillSource};
+use rust_agent::state::app_state::{AppState, RuntimeRole, WorkerRole};
+use rust_agent::state::permission_context::{PermissionMode, ToolPermissionContext};
 use rust_agent::state::plan_mode;
 use rust_agent::task::list_manager::{TaskListManager, TaskListUpdate};
 use rust_agent::task::list_types::TaskListStatus;
 use rust_agent::task::manager::TaskManager;
 use rust_agent::task::types::{ValidationState, WorkerPhase};
-use rust_agent::interaction::telegram::gateway::TelegramGateway;
-use rust_agent::state::app_state::{AppState, RuntimeRole, WorkerRole};
-use rust_agent::state::permission_context::{PermissionMode, ToolPermissionContext};
 use rust_agent::tool::registry::ToolRegistry;
 
 fn sample_skill() -> SkillDefinition {
@@ -26,7 +26,9 @@ fn sample_skill() -> SkillDefinition {
         when_to_use: Some("Use when triaging repo state".into()),
         argument_hint: Some("target path".into()),
         workflow_hint: Some("inspect then summarize".into()),
-        workflow_summary: Some("inspect then summarize | args: target path | use: Use when triaging repo state".into()),
+        workflow_summary: Some(
+            "inspect then summarize | args: target path | use: Use when triaging repo state".into(),
+        ),
         allowed_tools: vec!["Read".into()],
         aliases: vec![],
         user_invocable: true,
@@ -88,7 +90,11 @@ fn build_plan_permissions() -> ToolPermissionContext {
         .expect("start patch task");
 
     let task_manager = Arc::new(TaskManager::default());
-    let runtime_task = task_manager.create("runtime patch execution", "context-session", InteractionSurface::Cli);
+    let runtime_task = task_manager.create(
+        "runtime patch execution",
+        "context-session",
+        InteractionSurface::Cli,
+    );
     task_manager.set_orchestration_group_id(&runtime_task.id, Some(patch.id.clone()));
     task_manager.set_worker_role(&runtime_task.id, WorkerRole::Implement);
     task_manager.set_phase(&runtime_task.id, Some(WorkerPhase::Implement));
@@ -184,7 +190,9 @@ fn context_prompt_includes_truthy_runtime_sections() {
     assert!(prompt.contains("- client_type: Cli"));
     assert!(prompt.contains("- worker_role: verify"));
     assert!(prompt.contains("Available skills:"));
-    assert!(prompt.contains("workflow: inspect then summarize | args: target path | use: Use when triaging repo state"));
+    assert!(prompt.contains(
+        "workflow: inspect then summarize | args: target path | use: Use when triaging repo state"
+    ));
     assert!(prompt.contains("Approved plan status: approved"));
     assert!(prompt.contains("Execution summary: 1/2 completed (50%)"));
     assert!(prompt.contains("Active step: step-2"));

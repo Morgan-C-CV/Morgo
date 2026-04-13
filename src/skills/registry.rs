@@ -38,10 +38,12 @@ impl SkillRegistry {
     }
 
     pub fn find(&self, name: &str) -> Option<SkillDefinition> {
-        self.skills
-            .get(name)
-            .cloned()
-            .or_else(|| self.skills.values().find(|skill| skill.aliases.iter().any(|alias| alias == name)).cloned())
+        self.skills.get(name).cloned().or_else(|| {
+            self.skills
+                .values()
+                .find(|skill| skill.aliases.iter().any(|alias| alias == name))
+                .cloned()
+        })
     }
 
     pub fn is_empty(&self) -> bool {
