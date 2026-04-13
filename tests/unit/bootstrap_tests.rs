@@ -2,7 +2,8 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rust_agent::bootstrap::{
-    BootstrapCli, BootstrapPhase, BootstrapState, InteractionSurface, RuntimeBootstrap, SessionMode,
+    BootstrapCli, BootstrapPhase, BootstrapState, InteractionSurface, RuntimeBootstrap,
+    SessionMode, is_tui_exit_input, tui_clear_screen_prefix,
 };
 use rust_agent::core::message::Message;
 use rust_agent::history::session::{
@@ -436,4 +437,19 @@ fn bootstrap_hook_loader_defaults_without_project_config() {
     );
 
     std::fs::remove_dir_all(root).expect("cleanup bootstrap hook root");
+}
+
+#[test]
+fn tui_exit_input_matches_expected_commands() {
+    assert!(is_tui_exit_input("/exit"));
+    assert!(is_tui_exit_input("exit"));
+    assert!(is_tui_exit_input("quit"));
+    assert!(is_tui_exit_input("  quit  "));
+    assert!(!is_tui_exit_input("/help"));
+    assert!(!is_tui_exit_input(""));
+}
+
+#[test]
+fn tui_clear_screen_prefix_uses_terminal_escape_sequence() {
+    assert_eq!(tui_clear_screen_prefix(), "\x1B[2J\x1B[H");
 }

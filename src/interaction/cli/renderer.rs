@@ -7,6 +7,20 @@ pub struct RenderDocument {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TuiScreen {
+    pub main: Vec<String>,
+    pub panels: Vec<TuiPanelSection>,
+    pub prompt: Vec<String>,
+    pub footer: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TuiPanelSection {
+    pub title: String,
+    pub lines: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RenderBlock {
     PrimaryText(String),
     Panel(RenderPanel),
@@ -50,6 +64,55 @@ pub fn render_turn_tui_output(turn: &CliTurnOutput) -> String {
 
 pub fn render_document_tui_output(document: &RenderDocument) -> String {
     render_document_to_tui_text(document)
+}
+
+pub fn render_tui_screen_output(screen: &TuiScreen) -> String {
+    render_tui_screen_to_text(screen)
+}
+
+pub fn build_tui_screen(document: &RenderDocument) -> TuiScreen {
+    let mut main = Vec::new();
+    let mut panels = Vec::new();
+
+    for block in &document.blocks {
+        match block {
+            RenderBlock::PrimaryText(text) => {
+                if !text.is_empty() {
+                    main.extend(text.lines().map(|line| line.to_string()));
+                }
+            }
+            RenderBlock::RawRuntime(text) => {
+                if !text.is_empty() {
+                    panels.push(TuiPanelSection {
+                        title: "Runtime".into(),
+                        lines: text.lines().map(|line| line.to_string()).collect(),
+                    });
+                }
+            }
+            RenderBlock::Panel(panel) => panels.push(TuiPanelSection {
+                title: panel.title.clone(),
+                lines: panel.lines.clone(),
+            }),
+        }
+    }
+
+    if main.is_empty() && panels.is_empty() {
+        main = vec![
+            "Welcome to RustAgent TUI.".into(),
+            "Run a command or ask for help to populate this screen.".into(),
+            "Try /help to inspect the current command surface.".into(),
+        ];
+    }
+
+    TuiScreen {
+        main,
+        panels,
+        prompt: vec![
+            "Prompt".into(),
+            "  > enter a request and press return".into(),
+        ],
+        footer: vec!["Controls: /exit, exit, or quit leaves the TUI.".into()],
+    }
 }
 
 fn build_render_document(turn: &CliTurnOutput) -> RenderDocument {
@@ -168,12 +231,11 @@ fn render_document_to_text(document: &RenderDocument) -> String {
 }
 
 fn render_document_to_tui_text(document: &RenderDocument) -> String {
-    let sections = document
-        .blocks
-        .iter()
-        .map(render_block_to_tui_text)
-        .filter(|text| !text.is_empty())
-        .collect::<Vec<_>>();
+    render_tui_screen_to_text(&build_tui_screen(document))
+}
+
+fn render_tui_screen_to_text(screen: &TuiScreen) -> String {
+    let sections = render_tui_screen_sections(screen);
 
     if sections.is_empty() {
         return String::new();
@@ -198,22 +260,40 @@ fn render_block_to_text(block: &RenderBlock) -> String {
     }
 }
 
-fn render_block_to_tui_text(block: &RenderBlock) -> String {
-    match block {
-        RenderBlock::PrimaryText(text) => render_tui_section("Primary", text.lines().collect()),
-        RenderBlock::RawRuntime(text) => render_tui_section("Runtime", text.lines().collect()),
-        RenderBlock::Panel(panel) => render_tui_section(
-            &panel.title,
-            panel.lines.iter().map(|line| line.as_str()).collect(),
-        ),
-    }
-}
-
 fn render_panel_to_text(panel: &RenderPanel) -> String {
     let mut lines = vec![panel_header(&panel.title)];
     lines.push(format!("  [panel:{}]", panel_marker(panel.kind)));
     lines.extend(panel_body_lines(&panel.lines));
     lines.join("\n")
+}
+
+fn render_tui_screen_sections(screen: &TuiScreen) -> Vec<String> {
+    let mut sections = Vec::new();
+    if !screen.main.is_empty() {
+        sections.push(render_tui_section(
+            "Main",
+            screen.main.iter().map(|line| line.as_str()).collect(),
+        ));
+    }
+    for panel in &screen.panels {
+        sections.push(render_tui_section(
+            &panel.title,
+            panel.lines.iter().map(|line| line.as_str()).collect(),
+        ));
+    }
+    if !screen.prompt.is_empty() {
+        sections.push(render_tui_section(
+            "Prompt",
+            screen.prompt.iter().map(|line| line.as_str()).collect(),
+        ));
+    }
+    if !screen.footer.is_empty() {
+        sections.push(render_tui_section(
+            "Footer",
+            screen.footer.iter().map(|line| line.as_str()).collect(),
+        ));
+    }
+    sections
 }
 
 fn render_tui_section(title: &str, lines: Vec<&str>) -> String {

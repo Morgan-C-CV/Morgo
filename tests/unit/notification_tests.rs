@@ -1,6 +1,7 @@
 use rust_agent::bootstrap::InteractionSurface;
 use rust_agent::interaction::cli::renderer::{
-    render_document_output, render_document_tui_output, render_turn_document, render_turn_output,
+    build_tui_screen, render_document_output, render_document_tui_output, render_turn_document,
+    render_turn_output,
 };
 use rust_agent::interaction::cli::repl::{CliDisplayEvent, CliRuntimeEvent, CliTurnOutput};
 use rust_agent::interaction::dispatcher::NotificationDispatcher;
@@ -251,7 +252,7 @@ fn cli_renderer_shared_document_path_preserves_text_output() {
 }
 
 #[test]
-fn cli_renderer_tui_output_keeps_primary_text_before_panels() {
+fn cli_renderer_tui_output_keeps_main_panels_and_footer_in_order() {
     let turn = CliTurnOutput {
         primary_text: "Available commands:\nBuilt-in (1):\n- /help — Show the available commands"
             .into(),
@@ -269,21 +270,73 @@ fn cli_renderer_tui_output_keeps_primary_text_before_panels() {
 
     let rendered = render_document_tui_output(&render_turn_document(&turn));
 
-    let primary_idx = rendered.find("[Primary]").expect("primary section present");
+    let main_idx = rendered.find("[Main]").expect("main section present");
     let approval_idx = rendered
         .find("[Approval required]")
         .expect("approval section present");
     let tool_idx = rendered
         .find("[Tool result]")
         .expect("tool section present");
+    let prompt_idx = rendered.find("[Prompt]").expect("prompt section present");
+    let footer_idx = rendered.find("[Footer]").expect("footer section present");
 
-    assert!(primary_idx < approval_idx);
+    assert!(main_idx < approval_idx);
     assert!(approval_idx < tool_idx);
+    assert!(tool_idx < prompt_idx);
+    assert!(prompt_idx < footer_idx);
     assert!(rendered.contains("╔════════════════ CLI TUI ════════════════"));
     assert!(rendered.contains("Available commands:"));
     assert!(rendered.contains("approval needed for follow-up"));
     assert!(rendered.contains("line one"));
     assert!(rendered.contains("line two"));
+    assert!(rendered.contains("  > enter a request and press return"));
+    assert!(rendered.contains("Controls: /exit, exit, or quit leaves the TUI."));
+}
+
+#[test]
+fn cli_renderer_builds_tui_screen_with_fixed_layout_sections() {
+    let turn = CliTurnOutput {
+        primary_text: "Status\n\nPlugins:\n- discovered_plugins: 1".into(),
+        events: vec![
+            CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::Notice {
+                kind: "validation".into(),
+                message: "verify before shipping".into(),
+            }),
+            CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::ToolResult {
+                tool_name: "Read".into(),
+                content: "plugin manifest updated".into(),
+            }),
+        ],
+    };
+
+    let screen = build_tui_screen(&render_turn_document(&turn));
+
+    assert_eq!(screen.main.first().map(String::as_str), Some("Status"));
+    assert_eq!(screen.panels.len(), 2);
+    assert_eq!(screen.panels[0].title, "Notice: validation");
+    assert_eq!(screen.panels[1].title, "Tool result");
+    assert_eq!(screen.prompt.first().map(String::as_str), Some("Prompt"));
+    assert!(
+        screen
+            .footer
+            .iter()
+            .any(|line| line.contains("Controls: /exit, exit, or quit leaves the TUI."))
+    );
+}
+
+#[test]
+fn cli_renderer_tui_screen_uses_welcome_empty_state_when_document_is_empty() {
+    let screen = build_tui_screen(&render_turn_document(&CliTurnOutput {
+        primary_text: String::new(),
+        events: vec![],
+    }));
+
+    assert_eq!(
+        screen.main.first().map(String::as_str),
+        Some("Welcome to RustAgent TUI.")
+    );
+    assert!(screen.main.iter().any(|line| line.contains("Try /help")));
+    assert_eq!(screen.prompt.first().map(String::as_str), Some("Prompt"));
 }
 
 #[test]

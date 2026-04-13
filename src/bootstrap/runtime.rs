@@ -18,7 +18,8 @@ use crate::history::transcript::Transcript;
 use crate::hook::executor::run_hook;
 use crate::hook::registry::{HookEvent, load_hook_registry};
 use crate::interaction::cli::renderer::{
-    render_document_output, render_document_tui_output, render_output, render_turn_document,
+    build_tui_screen, render_document_output, render_document_tui_output, render_output,
+    render_tui_screen_output, render_turn_document,
 };
 use crate::interaction::cli::repl::{CliTurnOutput, handle_cli_input};
 use crate::interaction::dispatcher::NotificationDispatcher;
@@ -63,6 +64,14 @@ use crate::tool::builtin::{
     web_search::WebSearchTool,
 };
 use crate::tool::registry::ToolRegistry;
+
+pub fn is_tui_exit_input(input: &str) -> bool {
+    matches!(input.trim(), "/exit" | "exit" | "quit")
+}
+
+pub fn tui_clear_screen_prefix() -> &'static str {
+    "\x1B[2J\x1B[H"
+}
 
 #[derive(Debug, Clone, Parser)]
 #[command(name = "rust-agent", about = "Rust agent runtime")]
@@ -414,8 +423,17 @@ impl RuntimeBootstrap {
         }
 
         if self.cli.interactive {
+            if self.cli.tui {
+                self.print_tui_welcome();
+            }
             for line in io::stdin().lock().lines() {
                 let line = line?;
+                if self.should_exit_tui_input(&line) {
+                    if self.cli.tui {
+                        self.print_tui_message("Exiting TUI session.");
+                    }
+                    break;
+                }
                 let output = handle_cli_input(&router, &engine, &app_state, line).await?;
                 self.print_cli_turn_output(&output);
             }
@@ -430,11 +448,46 @@ impl RuntimeBootstrap {
     fn print_cli_turn_output(&self, output: &CliTurnOutput) {
         let document = render_turn_document(output);
         let rendered = if self.cli.tui {
-            render_document_tui_output(&document)
+            format!(
+                "{}{}",
+                tui_clear_screen_prefix(),
+                render_document_tui_output(&document)
+            )
         } else {
             render_document_output(&document)
         };
         println!("{rendered}");
+    }
+
+    fn print_tui_welcome(&self) {
+        let document = render_turn_document(&CliTurnOutput {
+            primary_text: String::new(),
+            events: vec![],
+        });
+        let rendered = format!(
+            "{}{}",
+            tui_clear_screen_prefix(),
+            render_document_tui_output(&document)
+        );
+        println!("{rendered}");
+    }
+
+    fn print_tui_message(&self, message: &str) {
+        let mut screen = build_tui_screen(&render_turn_document(&CliTurnOutput {
+            primary_text: String::new(),
+            events: vec![],
+        }));
+        screen.footer = vec![message.to_string()];
+        let rendered = format!(
+            "{}{}",
+            tui_clear_screen_prefix(),
+            render_tui_screen_output(&screen)
+        );
+        println!("{rendered}");
+    }
+
+    fn should_exit_tui_input(&self, input: &str) -> bool {
+        self.cli.tui && is_tui_exit_input(input)
     }
 
     fn detect_surface(&self) -> InteractionSurface {
