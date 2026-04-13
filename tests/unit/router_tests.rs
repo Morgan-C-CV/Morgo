@@ -19,7 +19,9 @@ use rust_agent::interaction::cli::repl::handle_cli_inputs;
 use rust_agent::interaction::dispatcher::NotificationDispatcher;
 use rust_agent::interaction::envelope::NormalizedInput;
 use rust_agent::interaction::remote::{RemoteRequest, handle_remote_request};
-use rust_agent::interaction::router::{CommandRouter, RouteDecision};
+use rust_agent::interaction::router::{
+    CommandRoutePolicy, CommandRouter, QuerySource, RouteDecision, RouteExecution, RoutedCommand,
+};
 use rust_agent::interaction::telegram::gateway::TelegramGateway;
 use rust_agent::plan::manager::PlanManager;
 use rust_agent::plugins::runtime_state::{
@@ -126,7 +128,16 @@ async fn router_executes_known_commands_before_query() {
 
     assert_eq!(
         router.decide(&input).await,
-        RouteDecision::ExecuteCommand("help".into())
+        RouteDecision::ExecuteCommand(RoutedCommand {
+            name: "help".into(),
+            policy: CommandRoutePolicy {
+                availability: CommandAvailability::Everywhere,
+                command_type: CommandType::Local,
+                disable_model_invocation: false,
+                immediate: true,
+                is_sensitive: false,
+            },
+        })
     );
 }
 
@@ -138,7 +149,15 @@ async fn router_falls_back_for_unknown_commands() {
     );
     let input = NormalizedInput::from_raw(InteractionSurface::Cli, "/missing foo");
 
-    assert_eq!(router.decide(&input).await, RouteDecision::ContinueToQuery);
+    assert_eq!(
+        router.decide(&input).await,
+        RouteDecision::EnterQuery {
+            prompt: "/missing foo".into(),
+            source: QuerySource::UnknownSlashFallback {
+                command_name: "missing".into(),
+            },
+        }
+    );
 }
 
 #[tokio::test]
@@ -883,7 +902,16 @@ async fn cli_repl_applies_disable_and_enable_only_on_next_turn_boundaries() {
                 "/demo-plugin-cmd"
             ))
             .await,
-        RouteDecision::ExecuteCommand("demo-plugin-cmd".into())
+        RouteDecision::ExecuteCommand(RoutedCommand {
+            name: "demo-plugin-cmd".into(),
+            policy: CommandRoutePolicy {
+                availability: CommandAvailability::Everywhere,
+                command_type: CommandType::Prompt,
+                disable_model_invocation: false,
+                immediate: false,
+                is_sensitive: false,
+            },
+        })
     );
 
     let disable_result = PluginsCommand
@@ -905,7 +933,16 @@ async fn cli_repl_applies_disable_and_enable_only_on_next_turn_boundaries() {
                 "/demo-plugin-cmd"
             ))
             .await,
-        RouteDecision::ExecuteCommand("demo-plugin-cmd".into())
+        RouteDecision::ExecuteCommand(RoutedCommand {
+            name: "demo-plugin-cmd".into(),
+            policy: CommandRoutePolicy {
+                availability: CommandAvailability::Everywhere,
+                command_type: CommandType::Prompt,
+                disable_model_invocation: false,
+                immediate: false,
+                is_sensitive: false,
+            },
+        })
     );
 
     let after_disable = handle_cli_inputs(&router, &engine, &app_state, vec!["/help"])
@@ -926,7 +963,12 @@ async fn cli_repl_applies_disable_and_enable_only_on_next_turn_boundaries() {
                 "/demo-plugin-cmd"
             ))
             .await,
-        RouteDecision::ContinueToQuery
+        RouteDecision::EnterQuery {
+            prompt: "/demo-plugin-cmd".into(),
+            source: QuerySource::UnknownSlashFallback {
+                command_name: "demo-plugin-cmd".into(),
+            },
+        }
     );
 
     let enable_result = PluginsCommand
@@ -948,7 +990,12 @@ async fn cli_repl_applies_disable_and_enable_only_on_next_turn_boundaries() {
                 "/demo-plugin-cmd"
             ))
             .await,
-        RouteDecision::ContinueToQuery
+        RouteDecision::EnterQuery {
+            prompt: "/demo-plugin-cmd".into(),
+            source: QuerySource::UnknownSlashFallback {
+                command_name: "demo-plugin-cmd".into(),
+            },
+        }
     );
 
     let after_enable = handle_cli_inputs(&router, &engine, &app_state, vec!["/help"])
@@ -1233,7 +1280,9 @@ async fn router_approves_pending_plan_mode_request() {
 
     assert_eq!(
         result,
-        CommandResult::Message("entered plan mode: draft feature work".into())
+        RouteExecution::CommandResult(CommandResult::Message(
+            "entered plan mode: draft feature work".into()
+        ))
     );
     assert_eq!(permission_context.mode(), PermissionMode::Plan);
     assert!(permission_context.pending_approval().is_none());
@@ -1286,7 +1335,9 @@ async fn router_denies_pending_request_without_session_approval() {
 
     assert_eq!(
         result,
-        CommandResult::Message("Denied approval for Bash".into())
+        RouteExecution::CommandResult(CommandResult::Message(
+            "Denied approval for Bash".into()
+        ))
     );
     assert_eq!(permission_context.mode(), PermissionMode::Default);
     assert!(permission_context.pending_approval().is_none());
@@ -1344,7 +1395,7 @@ async fn approval_replay_uses_runtime_tool_registry() {
         .await
         .expect("approval replay should resolve");
 
-    let CommandResult::Message(text) = result else {
+    let RouteExecution::CommandResult(CommandResult::Message(text)) = result else {
         panic!("expected approval replay message");
     };
     assert!(text.contains("command: pwd"));
@@ -1400,7 +1451,7 @@ async fn permissions_command_reports_session_permission_state() {
         .await
         .expect("permissions summary should render");
 
-    let CommandResult::Message(text) = result else {
+    let RouteExecution::CommandResult(CommandResult::Message(text)) = result else {
         panic!("expected permissions summary message");
     };
     assert!(text.contains("Permission mode: plan"));
@@ -1452,9 +1503,9 @@ async fn plan_command_reports_inactive_status() {
 
     assert_eq!(
         result,
-        CommandResult::Message(
+        RouteExecution::CommandResult(CommandResult::Message(
             "Plan mode is off. Use /plan enter [reason] to start planning.\nNo plan object exists for this session yet.".into()
-        )
+        ))
     );
 }
 
@@ -1500,10 +1551,10 @@ async fn plan_command_enter_requests_approval_before_switching_mode() {
 
     assert_eq!(
         result,
-        CommandResult::Message(
+        RouteExecution::CommandResult(CommandResult::Message(
             "approval required for EnterPlanMode: approve entering plan mode: draft feature work"
                 .into(),
-        )
+        ))
     );
     assert_eq!(permission_context.mode(), PermissionMode::Default);
     let pending = permission_context
@@ -1565,10 +1616,10 @@ async fn plan_command_exit_requests_approval_and_approval_exits_mode() {
         .expect("plan exit should request approval");
     assert_eq!(
         request,
-        CommandResult::Message(
+        RouteExecution::CommandResult(CommandResult::Message(
             "approval required for ExitPlanMode: approve exiting plan mode: implementation looks good"
                 .into(),
-        )
+        ))
     );
     assert_eq!(permission_context.mode(), PermissionMode::Plan);
 
@@ -1581,7 +1632,9 @@ async fn plan_command_exit_requests_approval_and_approval_exits_mode() {
         .expect("plan exit approval should resolve");
     assert_eq!(
         approved,
-        CommandResult::Message("plan approved; exited plan mode: implementation looks good".into())
+        RouteExecution::CommandResult(CommandResult::Message(
+            "plan approved; exited plan mode: implementation looks good".into()
+        ))
     );
     assert_eq!(permission_context.mode(), PermissionMode::Default);
     assert!(permission_context.pending_approval().is_none());
@@ -1666,9 +1719,9 @@ async fn plan_command_handles_status_noop_and_denied_exit() {
         .await
         .expect("plan status should render");
     assert!(
-        matches!(status, CommandResult::Message(ref message) if message.contains("Plan mode is on."))
+        matches!(status, RouteExecution::CommandResult(CommandResult::Message(ref message)) if message.contains("Plan mode is on."))
     );
-    assert!(matches!(status, CommandResult::Message(ref message) if message.contains("steps=1")));
+    assert!(matches!(status, RouteExecution::CommandResult(CommandResult::Message(ref message)) if message.contains("steps=1")));
 
     let show = router
         .route(
@@ -1678,35 +1731,35 @@ async fn plan_command_handles_status_noop_and_denied_exit() {
         .await
         .expect("plan show should render");
     assert!(
-        matches!(show, CommandResult::Message(ref message) if message.contains("Execution: 0/1 completed (0%)"))
+        matches!(show, RouteExecution::CommandResult(CommandResult::Message(ref message)) if message.contains("Execution: 0/1 completed (0%)"))
     );
     assert!(
-        matches!(show, CommandResult::Message(ref message) if message.contains("Step summary: total=1, completed=0, in_progress=0, pending=1, linked=1, unlinked=0"))
+        matches!(show, RouteExecution::CommandResult(CommandResult::Message(ref message)) if message.contains("Step summary: total=1, completed=0, in_progress=0, pending=1, linked=1, unlinked=0"))
     );
-    assert!(matches!(show, CommandResult::Message(ref message) if message.contains(&step.id)));
+    assert!(matches!(show, RouteExecution::CommandResult(CommandResult::Message(ref message)) if message.contains(&step.id)));
     assert!(
-        matches!(show, CommandResult::Message(ref message) if message.contains("linked task:"))
-    );
-    assert!(
-        matches!(show, CommandResult::Message(ref message) if message.contains("owner=planner"))
+        matches!(show, RouteExecution::CommandResult(CommandResult::Message(ref message)) if message.contains("linked task:"))
     );
     assert!(
-        matches!(show, CommandResult::Message(ref message) if message.contains("blocked_by=task-1"))
+        matches!(show, RouteExecution::CommandResult(CommandResult::Message(ref message)) if message.contains("owner=planner"))
     );
     assert!(
-        matches!(show, CommandResult::Message(ref message) if message.contains("warning: plan/task status mismatch"))
+        matches!(show, RouteExecution::CommandResult(CommandResult::Message(ref message)) if message.contains("blocked_by=task-1"))
     );
     assert!(
-        matches!(show, CommandResult::Message(ref message) if message.contains("Runtime orchestration: groups=1, waiting_for_verification=0, ready_for_synthesis=0, still_in_progress=1"))
+        matches!(show, RouteExecution::CommandResult(CommandResult::Message(ref message)) if message.contains("warning: plan/task status mismatch"))
     );
     assert!(
-        matches!(show, CommandResult::Message(ref message) if message.contains(&format!("runtime group: {} — group {} still in progress", step.id, step.id)))
+        matches!(show, RouteExecution::CommandResult(CommandResult::Message(ref message)) if message.contains("Runtime orchestration: groups=1, waiting_for_verification=0, ready_for_synthesis=0, still_in_progress=1"))
     );
     assert!(
-        matches!(show, CommandResult::Message(ref message) if message.contains("runtime task: task-0 [Running] role=implement phase=implement validation_state=pending_verification"))
+        matches!(show, RouteExecution::CommandResult(CommandResult::Message(ref message)) if message.contains(&format!("runtime group: {} — group {} still in progress", step.id, step.id)))
     );
     assert!(
-        matches!(show, CommandResult::Message(ref message) if message.contains("hint: verification next for task-0"))
+        matches!(show, RouteExecution::CommandResult(CommandResult::Message(ref message)) if message.contains("runtime task: task-0 [Running] role=implement phase=implement validation_state=pending_verification"))
+    );
+    assert!(
+        matches!(show, RouteExecution::CommandResult(CommandResult::Message(ref message)) if message.contains("hint: verification next for task-0"))
     );
 
     let add = router
@@ -1720,7 +1773,7 @@ async fn plan_command_handles_status_noop_and_denied_exit() {
         .await
         .expect("plan add should succeed");
     assert!(
-        matches!(add, CommandResult::Message(message) if message.contains("Added plan step step-2"))
+        matches!(add, RouteExecution::CommandResult(CommandResult::Message(message)) if message.contains("Added plan step step-2"))
     );
 
     let done = router
@@ -1732,7 +1785,10 @@ async fn plan_command_handles_status_noop_and_denied_exit() {
         .expect("plan done should succeed");
     assert_eq!(
         done,
-        CommandResult::Message(format!("Completed plan step {}", step.id))
+        RouteExecution::CommandResult(CommandResult::Message(format!(
+            "Completed plan step {}",
+            step.id
+        )))
     );
 
     let history = router
@@ -1743,22 +1799,22 @@ async fn plan_command_handles_status_noop_and_denied_exit() {
         .await
         .expect("plan history should render");
     assert!(
-        matches!(history, CommandResult::Message(ref message) if message.contains("Plan history:"))
+        matches!(history, RouteExecution::CommandResult(CommandResult::Message(ref message)) if message.contains("Plan history:"))
     );
     assert!(
-        matches!(history, CommandResult::Message(ref message) if message.contains("snapshot: steps="))
+        matches!(history, RouteExecution::CommandResult(CommandResult::Message(ref message)) if message.contains("snapshot: steps="))
     );
     assert!(
-        matches!(history, CommandResult::Message(ref message) if message.contains("active_step="))
+        matches!(history, RouteExecution::CommandResult(CommandResult::Message(ref message)) if message.contains("active_step="))
     );
     assert!(
-        matches!(history, CommandResult::Message(ref message) if message.contains("Current runtime overlay:"))
+        matches!(history, RouteExecution::CommandResult(CommandResult::Message(ref message)) if message.contains("Current runtime overlay:"))
     );
     assert!(
-        matches!(history, CommandResult::Message(ref message) if message.contains("active_runtime_groups=1"))
+        matches!(history, RouteExecution::CommandResult(CommandResult::Message(ref message)) if message.contains("active_runtime_groups=1"))
     );
     assert!(
-        matches!(history, CommandResult::Message(ref message) if message.contains("still_in_progress_groups=1"))
+        matches!(history, RouteExecution::CommandResult(CommandResult::Message(ref message)) if message.contains("still_in_progress_groups=1"))
     );
 
     let reorder = router
@@ -1770,7 +1826,9 @@ async fn plan_command_handles_status_noop_and_denied_exit() {
         .expect("plan reorder should succeed");
     assert_eq!(
         reorder,
-        CommandResult::Message("Reordered 2 plan steps".into())
+        RouteExecution::CommandResult(CommandResult::Message(
+            "Reordered 2 plan steps".into()
+        ))
     );
     let reordered_state = plan_manager
         .state()
@@ -1788,7 +1846,9 @@ async fn plan_command_handles_status_noop_and_denied_exit() {
         .expect("plan enter in plan mode should no-op");
     assert_eq!(
         no_op,
-        CommandResult::Message("Already in plan mode.".into())
+        RouteExecution::CommandResult(CommandResult::Message(
+            "Already in plan mode.".into()
+        ))
     );
 
     let inactive_context = ToolPermissionContext::new(PermissionMode::Default)
@@ -1826,7 +1886,9 @@ async fn plan_command_handles_status_noop_and_denied_exit() {
         .expect("inactive plan exit should resolve");
     assert_eq!(
         denied,
-        CommandResult::Denied("Plan mode is not active.".into())
+        RouteExecution::CommandResult(CommandResult::Denied(
+            "Plan mode is not active.".into()
+        ))
     );
 }
 
@@ -1871,7 +1933,9 @@ async fn permissions_command_mutates_mode_and_rule_lists() {
         .expect("mode update should succeed");
     assert_eq!(
         mode_result,
-        CommandResult::Message("Permission mode set to accept-edits.".into())
+        RouteExecution::CommandResult(CommandResult::Message(
+            "Permission mode set to accept-edits.".into()
+        ))
     );
     assert_eq!(permission_context.mode(), PermissionMode::AcceptEdits);
 
@@ -1884,7 +1948,9 @@ async fn permissions_command_mutates_mode_and_rule_lists() {
         .expect("allow update should succeed");
     assert_eq!(
         allow_result,
-        CommandResult::Message("Added allow rule(s): Read, Bash".into())
+        RouteExecution::CommandResult(CommandResult::Message(
+            "Added allow rule(s): Read, Bash".into()
+        ))
     );
     assert_eq!(
         permission_context.always_allow_rules(),
@@ -1900,7 +1966,9 @@ async fn permissions_command_mutates_mode_and_rule_lists() {
         .expect("duplicate allow should be handled");
     assert_eq!(
         duplicate_result,
-        CommandResult::Message("No new allow rules added.".into())
+        RouteExecution::CommandResult(CommandResult::Message(
+            "No new allow rules added.".into()
+        ))
     );
 
     let ask_result = router
@@ -1912,7 +1980,9 @@ async fn permissions_command_mutates_mode_and_rule_lists() {
         .expect("ask update should succeed");
     assert_eq!(
         ask_result,
-        CommandResult::Message("Added ask rule(s): WebFetch".into())
+        RouteExecution::CommandResult(CommandResult::Message(
+            "Added ask rule(s): WebFetch".into()
+        ))
     );
     assert_eq!(
         permission_context.always_ask_rules(),
@@ -1928,7 +1998,9 @@ async fn permissions_command_mutates_mode_and_rule_lists() {
         .expect("deny update should succeed");
     assert_eq!(
         deny_result,
-        CommandResult::Message("Added deny rule(s): Edit".into())
+        RouteExecution::CommandResult(CommandResult::Message(
+            "Added deny rule(s): Edit".into()
+        ))
     );
     assert_eq!(
         permission_context.always_deny_rules(),

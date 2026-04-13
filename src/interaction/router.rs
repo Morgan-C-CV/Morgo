@@ -6,12 +6,45 @@ use crate::security::authorizer::{AuthDecision, SurfaceAuthorizer};
 use crate::state::app_state::AppState;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandRoutePolicy {
+    pub availability: CommandAvailability,
+    pub command_type: CommandType,
+    pub disable_model_invocation: bool,
+    pub immediate: bool,
+    pub is_sensitive: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoutedCommand {
+    pub name: String,
+    pub policy: CommandRoutePolicy,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QuerySource {
+    PlainPrompt,
+    UnknownSlashFallback { command_name: String },
+    PromptCommand { command: RoutedCommand },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RouteDecision {
-    ExecuteCommand(String),
-    ContinueToQuery,
-    ContinueToQueryWithPrompt(String),
+    ExecuteCommand(RoutedCommand),
+    EnterQuery {
+        prompt: String,
+        source: QuerySource,
+    },
     ApprovalResponse { approved: bool },
     Deny(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RouteExecution {
+    CommandResult(CommandResult),
+    EnterQuery {
+        prompt: String,
+        source: QuerySource,
+    },
 }
 
 use std::sync::Arc;
@@ -47,37 +80,11 @@ impl CommandRouter {
         }
 
         match input.command_name.as_deref() {
-            Some(name) => {
-                let Some(command) = self.registry.get(name) else {
-                    return RouteDecision::ContinueToQuery;
-                };
-                let metadata = command.metadata();
-                if !command.is_enabled() {
-                    return RouteDecision::Deny(format!("command {} is disabled", metadata.name));
-                }
-                if !Self::is_available(metadata.availability, input.surface) {
-                    return RouteDecision::Deny(format!(
-                        "command {} is not available on this surface",
-                        metadata.name
-                    ));
-                }
-                if matches!(input.surface, InteractionSurface::Remote)
-                    && (!input.metadata.from_trusted_surface || metadata.is_sensitive)
-                {
-                    return RouteDecision::Deny(format!(
-                        "command {} is not allowed on remote surface",
-                        metadata.name
-                    ));
-                }
-                if metadata.disable_model_invocation {
-                    return RouteDecision::Deny(format!(
-                        "command {} cannot invoke the model on this surface",
-                        metadata.name
-                    ));
-                }
-                RouteDecision::ExecuteCommand(metadata.name)
-            }
-            None => RouteDecision::ContinueToQueryWithPrompt(input.raw.clone()),
+            Some(name) => self.decide_command(input, name),
+            None => RouteDecision::EnterQuery {
+                prompt: input.raw.clone(),
+                source: QuerySource::PlainPrompt,
+            },
         }
     }
 
@@ -85,29 +92,80 @@ impl CommandRouter {
         &self,
         input: &NormalizedInput,
         app_state: &AppState,
-    ) -> anyhow::Result<CommandResult> {
+    ) -> anyhow::Result<RouteExecution> {
         match self.decide(input).await {
-            RouteDecision::ExecuteCommand(ref name) => {
+            RouteDecision::ExecuteCommand(routed) => {
                 let command = self
                     .registry
-                    .get(name)
+                    .get(&routed.name)
                     .ok_or_else(|| anyhow::anyhow!("command disappeared during routing"))?;
-                let metadata = command.metadata();
                 let result = command.execute(input, app_state).await?;
-                match (metadata.command_type, result) {
+                match (routed.policy.command_type, result) {
                     (CommandType::Prompt, CommandResult::Prompt(prompt)) => {
-                        Ok(CommandResult::Prompt(prompt))
+                        if routed.policy.disable_model_invocation {
+                            Ok(RouteExecution::CommandResult(CommandResult::Denied(format!(
+                                "command {} cannot invoke the model on this surface",
+                                routed.name
+                            ))))
+                        } else {
+                            Ok(RouteExecution::EnterQuery {
+                                prompt,
+                                source: QuerySource::PromptCommand { command: routed },
+                            })
+                        }
                     }
-                    (_, result) => Ok(result),
+                    (_, result) => Ok(RouteExecution::CommandResult(result)),
                 }
             }
-            RouteDecision::ApprovalResponse { approved } => {
-                app_state.resolve_pending_approval(approved).await
+            RouteDecision::ApprovalResponse { approved } => Ok(RouteExecution::CommandResult(
+                app_state.resolve_pending_approval(approved).await?,
+            )),
+            RouteDecision::EnterQuery { prompt, source } => {
+                Ok(RouteExecution::EnterQuery { prompt, source })
             }
-            RouteDecision::ContinueToQuery => Ok(CommandResult::ContinueToQuery),
-            RouteDecision::ContinueToQueryWithPrompt(prompt) => Ok(CommandResult::Prompt(prompt)),
-            RouteDecision::Deny(reason) => Ok(CommandResult::Denied(reason)),
+            RouteDecision::Deny(reason) => Ok(RouteExecution::CommandResult(CommandResult::Denied(
+                reason,
+            ))),
         }
+    }
+
+    fn decide_command(&self, input: &NormalizedInput, name: &str) -> RouteDecision {
+        let Some(command) = self.registry.get(name) else {
+            return RouteDecision::EnterQuery {
+                prompt: input.raw.clone(),
+                source: QuerySource::UnknownSlashFallback {
+                    command_name: name.to_string(),
+                },
+            };
+        };
+        let metadata = command.metadata();
+        if !command.is_enabled() {
+            return RouteDecision::Deny(format!("command {} is disabled", metadata.name));
+        }
+        if !Self::is_available(metadata.availability, input.surface) {
+            return RouteDecision::Deny(format!(
+                "command {} is not available on this surface",
+                metadata.name
+            ));
+        }
+        if matches!(input.surface, InteractionSurface::Remote)
+            && (!input.metadata.from_trusted_surface || metadata.is_sensitive)
+        {
+            return RouteDecision::Deny(format!(
+                "command {} is not allowed on remote surface",
+                metadata.name
+            ));
+        }
+        RouteDecision::ExecuteCommand(RoutedCommand {
+            name: metadata.name,
+            policy: CommandRoutePolicy {
+                availability: metadata.availability,
+                command_type: metadata.command_type,
+                disable_model_invocation: metadata.disable_model_invocation,
+                immediate: metadata.immediate,
+                is_sensitive: metadata.is_sensitive,
+            },
+        })
     }
 
     fn is_available(availability: CommandAvailability, surface: InteractionSurface) -> bool {

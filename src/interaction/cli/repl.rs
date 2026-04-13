@@ -3,7 +3,7 @@ use crate::core::engine::QueryEngine;
 use crate::core::events::EngineEvent;
 use crate::core::message::Message;
 use crate::interaction::envelope::NormalizedInput;
-use crate::interaction::router::CommandRouter;
+use crate::interaction::router::{CommandRouter, QuerySource, RouteExecution};
 use crate::plugins::runtime_state::{build_turn_engine, build_turn_router};
 use crate::state::app_state::AppState;
 use crate::task::types::TaskEvent;
@@ -89,31 +89,40 @@ pub async fn handle_normalized_input(
     };
     let route_result = router.route(&input, app_state).await?;
     let (persisted_messages, runtime_events, engine_persisted) = match route_result {
-        CommandResult::Message(message) => (vec![Message::assistant(message)], Vec::new(), false),
-        CommandResult::Prompt(prompt) => {
-            let (messages, events) = collect_stream_messages(engine, Message::user(prompt)).await;
+        RouteExecution::CommandResult(command_result) => match command_result {
+            CommandResult::Message(message) => (vec![Message::assistant(message)], Vec::new(), false),
+            CommandResult::Prompt(prompt) => (vec![Message::assistant(prompt)], Vec::new(), false),
+            CommandResult::ContinueToQuery => {
+                let (messages, events) =
+                    collect_stream_messages(engine, Message::user(input.raw.clone())).await;
+                (messages, events, true)
+            }
+            CommandResult::Denied(reason) => (
+                vec![Message::assistant(format!("Denied: {reason}"))],
+                Vec::new(),
+                false,
+            ),
+            CommandResult::UpdateConfig { key, value } => (
+                vec![Message::assistant(format!("Config updated: {key}={value}"))],
+                Vec::new(),
+                false,
+            ),
+            CommandResult::SystemTrap(action) => (
+                vec![Message::assistant(format!("System trap: {:?}", action))],
+                Vec::new(),
+                false,
+            ),
+        },
+        RouteExecution::EnterQuery { prompt, source } => {
+            let user_message = match source {
+                QuerySource::PlainPrompt | QuerySource::UnknownSlashFallback { .. } => {
+                    Message::user(input.raw.clone())
+                }
+                QuerySource::PromptCommand { .. } => Message::user(prompt.clone()),
+            };
+            let (messages, events) = collect_stream_messages(engine, user_message).await;
             (messages, events, true)
         }
-        CommandResult::ContinueToQuery => {
-            let (messages, events) =
-                collect_stream_messages(engine, Message::user(input.raw.clone())).await;
-            (messages, events, true)
-        }
-        CommandResult::Denied(reason) => (
-            vec![Message::assistant(format!("Denied: {reason}"))],
-            Vec::new(),
-            false,
-        ),
-        CommandResult::UpdateConfig { key, value } => (
-            vec![Message::assistant(format!("Config updated: {key}={value}"))],
-            Vec::new(),
-            false,
-        ),
-        CommandResult::SystemTrap(action) => (
-            vec![Message::assistant(format!("System trap: {:?}", action))],
-            Vec::new(),
-            false,
-        ),
     };
     if !engine_persisted {
         engine.persist_messages(

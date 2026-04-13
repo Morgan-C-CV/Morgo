@@ -12,7 +12,9 @@ use rust_agent::core::context::QueryContext;
 use rust_agent::core::engine::QueryEngine;
 use rust_agent::interaction::dispatcher::NotificationDispatcher;
 use rust_agent::interaction::envelope::NormalizedInput;
-use rust_agent::interaction::router::{CommandRouter, RouteDecision};
+use rust_agent::interaction::router::{
+    CommandRouter, QuerySource, RouteDecision, RouteExecution, RoutedCommand,
+};
 use rust_agent::interaction::telegram::gateway::TelegramGateway;
 use rust_agent::security::authorizer::DefaultSurfaceAuthorizer;
 use rust_agent::service::api::client::ModelProviderClient;
@@ -103,7 +105,15 @@ async fn unknown_slash_command_still_falls_back_to_query() {
         Box::new(DefaultSurfaceAuthorizer),
     );
     let input = NormalizedInput::from_raw(InteractionSurface::Cli, "/unknown foo");
-    assert_eq!(router.decide(&input).await, RouteDecision::ContinueToQuery);
+    assert_eq!(
+        router.decide(&input).await,
+        RouteDecision::EnterQuery {
+            prompt: "/unknown foo".into(),
+            source: QuerySource::UnknownSlashFallback {
+                command_name: "unknown".into(),
+            },
+        }
+    );
 }
 
 #[tokio::test]
@@ -115,7 +125,10 @@ async fn plain_user_input_routes_through_query_prompt_path() {
     let input = NormalizedInput::from_raw(InteractionSurface::Cli, "hello world");
     assert_eq!(
         router.decide(&input).await,
-        RouteDecision::ContinueToQueryWithPrompt("hello world".into())
+        RouteDecision::EnterQuery {
+            prompt: "hello world".into(),
+            source: QuerySource::PlainPrompt,
+        }
     );
 }
 
@@ -133,7 +146,24 @@ async fn prompt_command_is_interpreted_before_query_engine() {
         )
         .await
         .expect("route should succeed");
-    assert_eq!(result, CommandResult::Prompt("expanded prompt body".into()));
+    assert_eq!(
+        result,
+        RouteExecution::EnterQuery {
+            prompt: "expanded prompt body".into(),
+            source: QuerySource::PromptCommand {
+                command: RoutedCommand {
+                    name: "prompt-cmd".into(),
+                    policy: rust_agent::interaction::router::CommandRoutePolicy {
+                        availability: CommandAvailability::Everywhere,
+                        command_type: CommandType::Prompt,
+                        disable_model_invocation: false,
+                        immediate: true,
+                        is_sensitive: false,
+                    },
+                },
+            },
+        }
+    );
 }
 
 #[test]
