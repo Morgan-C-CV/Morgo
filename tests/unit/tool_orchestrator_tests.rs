@@ -6,9 +6,12 @@ use rust_agent::tool::builtin::agent::AgentTool;
 use rust_agent::tool::builtin::file_read::FileReadTool;
 use rust_agent::tool::builtin::glob::GlobTool;
 use rust_agent::tool::definition::{InterruptBehavior, ObservableInput, ObservableInputSource, PermissionDecision, Tool, ToolCall, ToolMetadata, ToolResult};
-use rust_agent::tool::orchestrator::{ToolExecutionRequest, ToolOrchestrator};
+use rust_agent::tool::orchestrator::{aggregate_execution_records, ToolExecutionRequest, ToolOrchestrator};
 use rust_agent::tool::registry::ToolRegistry;
-use rust_agent::tool::result::{ToolExecutionOutcomeKind, ToolReportModifier};
+use rust_agent::tool::result::{
+    ToolBatchContext, ToolExecutionOutcomeKind, ToolExecutionRecord, ToolReportContextModifier,
+    ToolReportModifier,
+};
 
 struct CancelOnDenyTool;
 struct BlockOnDenyTool;
@@ -615,5 +618,95 @@ async fn orchestrator_records_result_too_large_results_in_execution_record() {
     assert_eq!(
         outcomes[0].record.report_modifier,
         ToolReportModifier::NeedsAttention
+    );
+}
+
+#[test]
+fn aggregate_execution_records_prefers_continue_message_only_for_all_success_records() {
+    let records = vec![
+        ToolExecutionRecord {
+            tool_name: "Read".into(),
+            outcome: "Text(\"alpha\")".into(),
+            kind: ToolExecutionOutcomeKind::Success,
+            summary: "Read succeeded".into(),
+            detail: Some("alpha".into()),
+            report_modifier: ToolReportModifier::None,
+            observable_input: None,
+            batch_context: ToolBatchContext {
+                batch_index: 0,
+                batch_size: 2,
+                executed_in_batch: true,
+            },
+        },
+        ToolExecutionRecord {
+            tool_name: "Glob".into(),
+            outcome: "Text(\"beta\")".into(),
+            kind: ToolExecutionOutcomeKind::Success,
+            summary: "Glob succeeded".into(),
+            detail: Some("beta".into()),
+            report_modifier: ToolReportModifier::None,
+            observable_input: None,
+            batch_context: ToolBatchContext {
+                batch_index: 1,
+                batch_size: 2,
+                executed_in_batch: true,
+            },
+        },
+    ];
+
+    let report = aggregate_execution_records(&records).expect("aggregated report");
+
+    assert_eq!(report.records.len(), 2);
+    assert_eq!(report.report_modifier, ToolReportModifier::None);
+    assert_eq!(
+        report.context_modifier,
+        ToolReportContextModifier::ContinueWithUserMessage("alpha\nbeta".into())
+    );
+    assert_eq!(report.summary, "2 tool results");
+    assert_eq!(report.detail.as_deref(), Some("alpha\nbeta"));
+}
+
+#[test]
+fn aggregate_execution_records_escalates_attention_and_uses_pending_summary_for_mixed_batch() {
+    let records = vec![
+        ToolExecutionRecord {
+            tool_name: "Read".into(),
+            outcome: "Text(\"alpha\")".into(),
+            kind: ToolExecutionOutcomeKind::Success,
+            summary: "Read succeeded".into(),
+            detail: Some("alpha".into()),
+            report_modifier: ToolReportModifier::None,
+            observable_input: None,
+            batch_context: ToolBatchContext {
+                batch_index: 0,
+                batch_size: 2,
+                executed_in_batch: true,
+            },
+        },
+        ToolExecutionRecord {
+            tool_name: "Bash".into(),
+            outcome: "Denied(\"blocked\")".into(),
+            kind: ToolExecutionOutcomeKind::Denied,
+            summary: "Bash denied".into(),
+            detail: Some("blocked".into()),
+            report_modifier: ToolReportModifier::NeedsAttention,
+            observable_input: None,
+            batch_context: ToolBatchContext {
+                batch_index: 1,
+                batch_size: 2,
+                executed_in_batch: true,
+            },
+        },
+    ];
+
+    let report = aggregate_execution_records(&records).expect("aggregated report");
+
+    assert_eq!(report.records.len(), 2);
+    assert_eq!(report.report_modifier, ToolReportModifier::NeedsAttention);
+    assert_eq!(report.summary, "Read succeeded; Bash denied");
+    assert_eq!(report.detail.as_deref(), Some("alpha\nblocked"));
+    assert_eq!(
+        report.context_modifier,
+        ToolReportContextModifier::SetPendingToolUseSummary("Read succeeded; Bash denied".into())
     );
 }

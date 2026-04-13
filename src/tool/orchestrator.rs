@@ -185,26 +185,78 @@ fn should_stop_serial_execution(
 }
 
 pub fn aggregate_execution_records(records: &[ToolExecutionRecord]) -> Option<ToolExecutionReport> {
-    let first = records.first()?.clone();
-    let context_modifier = match first.kind {
-        ToolExecutionOutcomeKind::Success => ToolReportContextModifier::ContinueWithUserMessage(
-            first.detail.clone().unwrap_or_else(|| first.summary.clone()),
-        ),
-        ToolExecutionOutcomeKind::Progress
-        | ToolExecutionOutcomeKind::PendingApproval
-        | ToolExecutionOutcomeKind::Denied
-        | ToolExecutionOutcomeKind::Interrupted
-        | ToolExecutionOutcomeKind::ResultTooLarge => {
-            ToolReportContextModifier::SetPendingToolUseSummary(first.summary.clone())
-        }
+    let first = records.first()?;
+    if records.len() == 1 {
+        let context_modifier = match first.kind {
+            ToolExecutionOutcomeKind::Success => ToolReportContextModifier::ContinueWithUserMessage(
+                first.detail.clone().unwrap_or_else(|| first.summary.clone()),
+            ),
+            ToolExecutionOutcomeKind::Progress
+            | ToolExecutionOutcomeKind::PendingApproval
+            | ToolExecutionOutcomeKind::Denied
+            | ToolExecutionOutcomeKind::Interrupted
+            | ToolExecutionOutcomeKind::ResultTooLarge => {
+                ToolReportContextModifier::SetPendingToolUseSummary(first.summary.clone())
+            }
+        };
+        return Some(ToolExecutionReport {
+            records: records.to_vec(),
+            summary: first.summary.clone(),
+            detail: first.detail.clone(),
+            report_modifier: first.report_modifier.clone(),
+            context_modifier,
+        });
+    }
+
+    let has_non_success = records
+        .iter()
+        .any(|record| record.kind != ToolExecutionOutcomeKind::Success);
+    let report_modifier = records.iter().fold(ToolReportModifier::None, |current, record| {
+        aggregate_report_modifier(current, &record.report_modifier)
+    });
+    let summaries = records
+        .iter()
+        .map(|record| record.summary.clone())
+        .collect::<Vec<_>>();
+    let details = records
+        .iter()
+        .map(|record| record.detail.clone().unwrap_or_else(|| record.summary.clone()))
+        .collect::<Vec<_>>();
+    let summary = if summaries.iter().all(|summary| summary.ends_with("succeeded")) {
+        format!("{} tool results", records.len())
+    } else {
+        summaries.join("; ")
     };
+    let detail = Some(details.join("\n"));
+    let context_modifier = if !has_non_success && report_modifier == ToolReportModifier::None {
+        ToolReportContextModifier::ContinueWithUserMessage(
+            detail.clone().unwrap_or_else(|| summary.clone()),
+        )
+    } else {
+        ToolReportContextModifier::SetPendingToolUseSummary(summary.clone())
+    };
+
     Some(ToolExecutionReport {
         records: records.to_vec(),
-        summary: first.summary.clone(),
-        detail: first.detail.clone(),
-        report_modifier: first.report_modifier.clone(),
+        summary,
+        detail,
+        report_modifier,
         context_modifier,
     })
+}
+
+fn aggregate_report_modifier(
+    current: ToolReportModifier,
+    next: &ToolReportModifier,
+) -> ToolReportModifier {
+    use ToolReportModifier::{NeedsAttention, None, Pending, Progress};
+
+    match (current, next) {
+        (NeedsAttention, _) | (_, NeedsAttention) => NeedsAttention,
+        (Pending, _) | (_, Pending) => Pending,
+        (Progress, _) | (_, Progress) => Progress,
+        _ => None,
+    }
 }
 
 fn summarize_result(
