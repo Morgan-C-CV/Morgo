@@ -9,13 +9,17 @@ use rust_agent::interaction::notification::{Notification, NotificationTarget, No
 use rust_agent::interaction::remote::{
     REMOTE_CHANNEL_MATRIX, RemoteChannelEventKind, RemoteChannelRule, RemoteDeliveryMode,
     RemoteEventEnvelope, RemoteEventPayload, drain_remote_notifications,
-    remote_channel_kind_for_cli_event, remote_channel_kind_for_notification,
-    remote_delivery_mode_for_cli_event, remote_delivery_mode_for_kind,
-    remote_delivery_mode_for_notification,
+    remote_channel_kind_for_notification, remote_channel_kind_for_surface_item,
+    remote_delivery_mode_for_kind, remote_delivery_mode_for_notification,
+    remote_delivery_mode_for_surface_item,
 };
-use rust_agent::interaction::view::{build_surface_view, surface_item_from_cli_event};
-use rust_agent::interaction::telegram::binding::{SessionBinding, TelegramDeliveryTarget};
+use rust_agent::interaction::telegram::binding::{
+    SessionBinding, TelegramDeliveryTarget, TelegramOutgoingMessage,
+};
 use rust_agent::interaction::telegram::gateway::TelegramGateway;
+use rust_agent::interaction::view::{
+    SurfaceItem, build_surface_view, build_telegram_view, surface_item_from_cli_event,
+};
 use rust_agent::task::types::{TaskEvent, TaskOwner, TaskStatus};
 
 #[test]
@@ -434,15 +438,10 @@ fn remote_delivery_mode_lookup_uses_matrix() {
 }
 
 #[test]
-fn remote_delivery_mode_classifies_dual_channel_and_response_only_events() {
-    let task_event = CliDisplayEvent::TaskEvent(TaskEvent {
-        owner: TaskOwner {
-            session_id: "session-1".into(),
-            surface: InteractionSurface::Remote,
-        },
-        target_task_id: Some("task-1".into()),
+fn remote_delivery_mode_classifies_dual_channel_and_response_only_surface_items() {
+    let task_item = SurfaceItem::TaskUpdate(rust_agent::interaction::view::TaskView {
         task_id: "task-1".into(),
-        status: TaskStatus::Completed,
+        status: "completed",
         summary: "demo task".into(),
         result: "Task completed".into(),
         next_action: "inspect task output for task-1".into(),
@@ -453,49 +452,49 @@ fn remote_delivery_mode_classifies_dual_channel_and_response_only_events() {
         output_file: "/tmp/task-1.log".into(),
     });
     assert_eq!(
-        remote_channel_kind_for_cli_event(&task_event),
+        remote_channel_kind_for_surface_item(&task_item),
         RemoteChannelEventKind::TaskUpdate
     );
     assert_eq!(
-        remote_delivery_mode_for_cli_event(&task_event),
+        remote_delivery_mode_for_surface_item(&task_item),
         RemoteDeliveryMode::DualChannel
     );
 
-    let approval_event = CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::PendingApproval {
+    let approval_item = SurfaceItem::ApprovalRequired {
         tool_name: "Bash".into(),
         message: "requires explicit approval".into(),
-    });
+    };
     assert_eq!(
-        remote_channel_kind_for_cli_event(&approval_event),
+        remote_channel_kind_for_surface_item(&approval_item),
         RemoteChannelEventKind::ApprovalRequired
     );
     assert_eq!(
-        remote_delivery_mode_for_cli_event(&approval_event),
+        remote_delivery_mode_for_surface_item(&approval_item),
         RemoteDeliveryMode::DualChannel
     );
 
-    let notice_event = CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::Notice {
+    let notice_item = SurfaceItem::RuntimeNotice {
         kind: "validation".into(),
         message: "pending verify".into(),
-    });
+    };
     assert_eq!(
-        remote_channel_kind_for_cli_event(&notice_event),
+        remote_channel_kind_for_surface_item(&notice_item),
         RemoteChannelEventKind::RuntimeNotice
     );
     assert_eq!(
-        remote_delivery_mode_for_cli_event(&notice_event),
+        remote_delivery_mode_for_surface_item(&notice_item),
         RemoteDeliveryMode::DualChannel
     );
 
-    let delta_event = CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::AssistantDelta {
+    let delta_item = SurfaceItem::AssistantDelta {
         text: "partial reply".into(),
-    });
+    };
     assert_eq!(
-        remote_channel_kind_for_cli_event(&delta_event),
+        remote_channel_kind_for_surface_item(&delta_item),
         RemoteChannelEventKind::AssistantDelta
     );
     assert_eq!(
-        remote_delivery_mode_for_cli_event(&delta_event),
+        remote_delivery_mode_for_surface_item(&delta_item),
         RemoteDeliveryMode::ResponseOnly
     );
 }
@@ -563,6 +562,93 @@ fn remote_event_envelope_preserves_structured_task_payload() {
                 && task.phase == Some("verify")
                 && task.validation_state == Some("verified")
     ));
+}
+
+#[test]
+fn telegram_view_keeps_only_telegram_relevant_semantic_items() {
+    let turn = CliTurnOutput {
+        primary_text: "Status".into(),
+        events: vec![
+            CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::Notice {
+                kind: "validation".into(),
+                message: "pending verify".into(),
+            }),
+            CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::ToolResult {
+                tool_name: "Read".into(),
+                content: "line one".into(),
+            }),
+            CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::PendingApproval {
+                tool_name: "Bash".into(),
+                message: "requires explicit approval".into(),
+            }),
+        ],
+    };
+
+    let telegram_view = build_telegram_view(&build_surface_view(&turn));
+
+    assert_eq!(telegram_view.primary_text, "Status");
+    assert_eq!(telegram_view.items.len(), 2);
+    assert!(matches!(
+        &telegram_view.items[0],
+        rust_agent::interaction::view::TelegramItem::RuntimeNotice { kind, message }
+            if kind == "validation" && message == "pending verify"
+    ));
+    assert!(matches!(
+        &telegram_view.items[1],
+        rust_agent::interaction::view::TelegramItem::ApprovalRequired { tool_name, message }
+            if tool_name == "Bash" && message == "requires explicit approval"
+    ));
+}
+
+#[test]
+fn telegram_gateway_builds_semantic_outgoing_messages_without_cli_renderer_types() {
+    let gateway = TelegramGateway {
+        allowed_bindings: vec![SessionBinding {
+            actor_id: "actor-1".into(),
+            session_id: "telegram-session-1".into(),
+            telegram_user_id: Some("user-1".into()),
+            bot_id: Some("bot-1".into()),
+            delivery_target: Some(TelegramDeliveryTarget {
+                chat_id: "chat-1".into(),
+                thread_id: Some("thread-9".into()),
+            }),
+        }],
+    };
+    let view = build_surface_view(&CliTurnOutput {
+        primary_text: "Primary reply".into(),
+        events: vec![
+            CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::Notice {
+                kind: "runtime".into(),
+                message: "background work still running".into(),
+            }),
+            CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::ToolResult {
+                tool_name: "Read".into(),
+                content: "secret lines".into(),
+            }),
+        ],
+    });
+
+    let messages = gateway.build_outgoing_messages("telegram-session-1", &view);
+
+    assert_eq!(
+        messages,
+        vec![
+            TelegramOutgoingMessage {
+                target: TelegramDeliveryTarget {
+                    chat_id: "chat-1".into(),
+                    thread_id: Some("thread-9".into()),
+                },
+                text: "Primary reply".into(),
+            },
+            TelegramOutgoingMessage {
+                target: TelegramDeliveryTarget {
+                    chat_id: "chat-1".into(),
+                    thread_id: Some("thread-9".into()),
+                },
+                text: "Notice: runtime\nbackground work still running".into(),
+            }
+        ]
+    );
 }
 
 #[test]

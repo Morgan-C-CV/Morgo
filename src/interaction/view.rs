@@ -121,6 +121,73 @@ impl SurfaceItem {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TelegramView {
+    pub primary_text: String,
+    pub items: Vec<TelegramItem>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TelegramItem {
+    TaskUpdate(TelegramTaskItem),
+    ApprovalRequired { tool_name: String, message: String },
+    RuntimeNotice { kind: String, message: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TelegramTaskItem {
+    pub task_id: String,
+    pub status: &'static str,
+    pub summary: String,
+    pub result: String,
+    pub next_action: String,
+    pub worker_role: Option<&'static str>,
+    pub phase: Option<&'static str>,
+    pub validation_state: Option<&'static str>,
+    pub output_file: String,
+}
+
+pub fn build_telegram_view(view: &SurfaceView) -> TelegramView {
+    TelegramView {
+        primary_text: view.primary_text.clone(),
+        items: view
+            .items
+            .iter()
+            .filter_map(telegram_item_from_surface_item)
+            .collect(),
+    }
+}
+
+pub fn telegram_item_from_surface_item(item: &SurfaceItem) -> Option<TelegramItem> {
+    match item {
+        SurfaceItem::TaskUpdate(task) => Some(TelegramItem::TaskUpdate(TelegramTaskItem {
+            task_id: task.task_id.clone(),
+            status: task.status,
+            summary: task.summary.clone(),
+            result: task.result.clone(),
+            next_action: task.next_action.clone(),
+            worker_role: task.worker_role,
+            phase: task.phase,
+            validation_state: task.validation_state,
+            output_file: task.output_file.clone(),
+        })),
+        SurfaceItem::ApprovalRequired { tool_name, message } => Some(TelegramItem::ApprovalRequired {
+            tool_name: tool_name.clone(),
+            message: message.clone(),
+        }),
+        SurfaceItem::RuntimeNotice { kind, message } => Some(TelegramItem::RuntimeNotice {
+            kind: kind.clone(),
+            message: message.clone(),
+        }),
+        SurfaceItem::ToolCallStarted { .. }
+        | SurfaceItem::ToolResult { .. }
+        | SurfaceItem::AssistantDelta { .. }
+        | SurfaceItem::Transition { .. }
+        | SurfaceItem::Terminal { .. }
+        | SurfaceItem::SessionMilestone { .. } => None,
+    }
+}
+
 impl From<&TaskEvent> for TaskView {
     fn from(value: &TaskEvent) -> Self {
         Self {

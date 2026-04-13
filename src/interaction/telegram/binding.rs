@@ -12,3 +12,9 @@ pub struct SessionBinding {
     pub bot_id: Option<String>,
     pub delivery_target: Option<TelegramDeliveryTarget>,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TelegramOutgoingMessage {
+    pub target: TelegramDeliveryTarget,
+    pub text: String,
+}

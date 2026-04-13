@@ -2,10 +2,8 @@ use crate::bootstrap::SessionMode;
 use crate::core::context::QueryContext;
 use crate::core::engine::QueryEngine;
 use crate::history::session::{SessionHistory, SessionId, SessionRestoreRequest, SessionSnapshot};
-use crate::interaction::cli::repl::{CliDisplayEvent, CliRuntimeEvent, handle_normalized_input};
-use crate::interaction::view::{
-    SurfaceItem, TaskView, build_surface_view, surface_item_from_cli_event,
-};
+use crate::interaction::cli::repl::handle_normalized_input;
+use crate::interaction::view::{SurfaceItem, SurfaceView, TaskView, build_surface_view};
 use crate::interaction::envelope::NormalizedInput;
 use crate::interaction::notification::{Notification, NotificationTarget, NotificationType};
 use crate::interaction::router::CommandRouter;
@@ -162,9 +160,8 @@ pub async fn handle_remote_request(
     )
     .await?;
 
-    dispatch_remote_runtime_notifications(&remote_engine.context.app_state, &input, &output.events);
-
     let view = build_surface_view(&output);
+    dispatch_remote_runtime_notifications(&remote_engine.context.app_state, &input, &view);
 
     Ok(RemoteResponse {
         primary_text: view.primary_text,
@@ -183,18 +180,6 @@ pub fn drain_remote_notifications(
         .into_iter()
         .map(RemoteNotificationEnvelope::from)
         .collect()
-}
-
-impl From<CliDisplayEvent> for RemoteEventEnvelope {
-    fn from(event: CliDisplayEvent) -> Self {
-        Self::from(surface_item_from_cli_event(&event))
-    }
-}
-
-impl From<CliRuntimeEvent> for RemoteEventEnvelope {
-    fn from(event: CliRuntimeEvent) -> Self {
-        Self::from(surface_item_from_cli_event(&CliDisplayEvent::RuntimeEvent(event)))
-    }
 }
 
 impl From<SurfaceItem> for RemoteEventEnvelope {
@@ -317,16 +302,16 @@ impl From<Notification> for RemoteNotificationEnvelope {
 fn dispatch_remote_runtime_notifications(
     app_state: &AppState,
     input: &NormalizedInput,
-    events: &[CliDisplayEvent],
+    view: &SurfaceView,
 ) {
-    for event in events {
+    for item in &view.items {
         if !matches!(
-            remote_delivery_mode_for_cli_event(event),
+            remote_delivery_mode_for_surface_item(item),
             RemoteDeliveryMode::DualChannel
         ) {
             continue;
         }
-        let Some(notification) = notification_from_cli_event(input, event) else {
+        let Some(notification) = notification_from_surface_item(input, item) else {
             continue;
         };
         app_state
@@ -335,13 +320,13 @@ fn dispatch_remote_runtime_notifications(
     }
 }
 
-fn notification_from_cli_event(
+fn notification_from_surface_item(
     input: &NormalizedInput,
-    event: &CliDisplayEvent,
+    item: &SurfaceItem,
 ) -> Option<Notification> {
-    match event {
-        CliDisplayEvent::TaskEvent(_) => None,
-        CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::PendingApproval { tool_name, message }) => {
+    match item {
+        SurfaceItem::TaskUpdate(_) => None,
+        SurfaceItem::ApprovalRequired { tool_name, message } => {
             Some(notification_from_pending_approval(
                 &input.session_id,
                 &input.actor.actor_id,
@@ -352,7 +337,7 @@ fn notification_from_cli_event(
                 },
             ))
         }
-        CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::Notice { kind, message }) => {
+        SurfaceItem::RuntimeNotice { kind, message } => {
             let mut notification = Notification::runtime_notice(
                 input.session_id.clone(),
                 kind.clone(),
@@ -364,12 +349,17 @@ fn notification_from_cli_event(
             });
             Some(notification)
         }
-        _ => None,
+        SurfaceItem::ToolCallStarted { .. }
+        | SurfaceItem::ToolResult { .. }
+        | SurfaceItem::AssistantDelta { .. }
+        | SurfaceItem::Transition { .. }
+        | SurfaceItem::Terminal { .. }
+        | SurfaceItem::SessionMilestone { .. } => None,
     }
 }
 
-pub fn remote_delivery_mode_for_cli_event(event: &CliDisplayEvent) -> RemoteDeliveryMode {
-    remote_delivery_mode_for_kind(remote_channel_kind_for_cli_event(event))
+pub fn remote_delivery_mode_for_surface_item(item: &SurfaceItem) -> RemoteDeliveryMode {
+    remote_delivery_mode_for_kind(remote_channel_kind_for_surface_item(item))
 }
 
 pub fn remote_delivery_mode_for_notification(
@@ -386,33 +376,17 @@ pub fn remote_delivery_mode_for_kind(kind: RemoteChannelEventKind) -> RemoteDeli
         .expect("remote channel matrix must cover every event kind")
 }
 
-pub fn remote_channel_kind_for_cli_event(event: &CliDisplayEvent) -> RemoteChannelEventKind {
-    match event {
-        CliDisplayEvent::TaskEvent(_) => RemoteChannelEventKind::TaskUpdate,
-        CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::PendingApproval { .. }) => {
-            RemoteChannelEventKind::ApprovalRequired
-        }
-        CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::Notice { .. }) => {
-            RemoteChannelEventKind::RuntimeNotice
-        }
-        CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::ToolCallStarted { .. }) => {
-            RemoteChannelEventKind::ToolCallStarted
-        }
-        CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::ToolResult { .. }) => {
-            RemoteChannelEventKind::ToolResult
-        }
-        CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::AssistantDelta { .. }) => {
-            RemoteChannelEventKind::AssistantDelta
-        }
-        CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::Transition { .. }) => {
-            RemoteChannelEventKind::Transition
-        }
-        CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::Terminal { .. }) => {
-            RemoteChannelEventKind::Terminal
-        }
-        CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::SessionMilestone { .. }) => {
-            RemoteChannelEventKind::SessionMilestone
-        }
+pub fn remote_channel_kind_for_surface_item(item: &SurfaceItem) -> RemoteChannelEventKind {
+    match item {
+        SurfaceItem::TaskUpdate(_) => RemoteChannelEventKind::TaskUpdate,
+        SurfaceItem::ApprovalRequired { .. } => RemoteChannelEventKind::ApprovalRequired,
+        SurfaceItem::RuntimeNotice { .. } => RemoteChannelEventKind::RuntimeNotice,
+        SurfaceItem::ToolCallStarted { .. } => RemoteChannelEventKind::ToolCallStarted,
+        SurfaceItem::ToolResult { .. } => RemoteChannelEventKind::ToolResult,
+        SurfaceItem::AssistantDelta { .. } => RemoteChannelEventKind::AssistantDelta,
+        SurfaceItem::Transition { .. } => RemoteChannelEventKind::Transition,
+        SurfaceItem::Terminal { .. } => RemoteChannelEventKind::Terminal,
+        SurfaceItem::SessionMilestone { .. } => RemoteChannelEventKind::SessionMilestone,
     }
 }
 
