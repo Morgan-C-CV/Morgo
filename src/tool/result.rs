@@ -38,3 +38,19 @@ pub struct ToolExecutionRecord {
     pub observable_input: Option<ObservableInput>,
     pub batch_context: ToolBatchContext,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ToolReportContextModifier {
+    None,
+    SetPendingToolUseSummary(String),
+    ContinueWithUserMessage(String),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ToolExecutionReport {
+    pub records: Vec<ToolExecutionRecord>,
+    pub summary: String,
+    pub detail: Option<String>,
+    pub report_modifier: ToolReportModifier,
+    pub context_modifier: ToolReportContextModifier,
+}

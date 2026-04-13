@@ -28,9 +28,11 @@ use rust_agent::state::permission_context::{PermissionMode, ToolPermissionContex
 use rust_agent::task::manager::TaskManager;
 use rust_agent::tool::builtin::agent::AgentTool;
 use rust_agent::tool::definition::{Tool, ToolCall, ToolMetadata, ToolResult};
+use rust_agent::tool::definition::PermissionDecision;
 use rust_agent::tool::registry::ToolRegistry;
 
 struct ProgressFixtureTool;
+struct PendingApprovalFixtureTool;
 
 #[async_trait]
 impl Tool for ProgressFixtureTool {
@@ -58,6 +60,46 @@ impl Tool for ProgressFixtureTool {
         _permissions: &ToolPermissionContext,
     ) -> anyhow::Result<ToolResult> {
         Ok(ToolResult::Progress("42% complete".into()))
+    }
+}
+
+#[async_trait]
+impl Tool for PendingApprovalFixtureTool {
+    fn metadata(&self) -> ToolMetadata {
+        ToolMetadata {
+            name: "PendingApprovalFixture".into(),
+            description: "Requests approval for query loop tests".into(),
+            aliases: &[],
+            search_hint: None,
+            read_only: true,
+            destructive: false,
+            concurrency_safe: true,
+            always_load: true,
+            should_defer: false,
+            requires_auth: false,
+            requires_user_interaction: false,
+            is_open_world: false,
+            is_search_or_read_command: false,
+        }
+    }
+
+    async fn check_permissions(
+        &self,
+        _call: &ToolCall,
+        _permissions: &ToolPermissionContext,
+    ) -> PermissionDecision {
+        PermissionDecision::Ask {
+            message: "requires explicit approval".into(),
+            reason: rust_agent::tool::definition::PermissionDecisionReason::Tool,
+        }
+    }
+
+    async fn invoke(
+        &self,
+        _call: &ToolCall,
+        _permissions: &ToolPermissionContext,
+    ) -> anyhow::Result<ToolResult> {
+        Ok(ToolResult::Text("should not execute".into()))
     }
 }
 
@@ -215,6 +257,7 @@ async fn query_loop_invokes_tool_and_continues_follow_up_turn() {
     assert_eq!(result.messages[0], Message::assistant("planning..."));
     assert!(result.messages[1].content.contains("tool Agent result:"));
     assert_eq!(result.messages[2], Message::assistant("done after tool"));
+    assert!(result.messages[1].content.contains(": "));
     assert!(result.events.iter().any(|event| matches!(
         event,
         EngineEvent::ToolResultCommitted {
@@ -267,6 +310,10 @@ async fn query_loop_surfaces_progress_record_summary_and_detail() {
     assert_eq!(result.state, QueryLoopState::Completed);
     assert_eq!(result.terminal, Terminal::Completed);
     assert_eq!(result.transition, Some(Continue::ToolUseFollowUp));
+    assert_eq!(
+        result.messages.last(),
+        Some(&Message::assistant("done after progress"))
+    );
     assert!(result.events.iter().any(|event| matches!(
         event,
         EngineEvent::Notice { kind, message }
@@ -274,6 +321,104 @@ async fn query_loop_surfaces_progress_record_summary_and_detail() {
                 && message.contains("ProgressFixture in progress")
                 && message.contains("42% complete")
     )));
+    assert!(result.events.iter().any(|event| matches!(
+        event,
+        EngineEvent::Transition(Continue::ToolUseFollowUp)
+    )));
+}
+
+#[tokio::test]
+async fn query_loop_progress_follow_up_uses_aggregated_summary_not_detail() {
+    let registry = ToolRegistry::new().register(Arc::new(ProgressFixtureTool));
+    let context = test_context_with_turns(
+        vec![
+            vec![
+                StreamEvent::MessageStart,
+                StreamEvent::ToolUse {
+                    tool_name: "ProgressFixture".into(),
+                    input: "payload".into(),
+                },
+                StreamEvent::MessageStop {
+                    stop_reason: StopReason::ToolUse,
+                },
+            ],
+            vec![
+                StreamEvent::MessageStart,
+                StreamEvent::TextDelta("done after progress".into()),
+                StreamEvent::MessageStop {
+                    stop_reason: StopReason::EndTurn,
+                },
+            ],
+        ],
+        registry,
+    );
+
+    let result = run_query_loop_with_params(
+        &context,
+        Message::user("show progress"),
+        QueryParams::default(),
+    )
+    .await;
+
+    assert_eq!(result.transition, Some(Continue::ToolUseFollowUp));
+    assert!(result.messages.iter().all(|message| !message.content.contains("42% complete")));
+    assert!(result.events.iter().any(|event| matches!(
+        event,
+        EngineEvent::Notice { kind, message }
+            if kind == &"tool-progress"
+                && message.contains("42% complete")
+    )));
+}
+
+#[tokio::test]
+async fn query_loop_pending_approval_uses_aggregated_summary_for_pending_context() {
+    let registry = ToolRegistry::new().register(Arc::new(PendingApprovalFixtureTool));
+    let context = test_context_with_turns(
+        vec![vec![
+            StreamEvent::MessageStart,
+            StreamEvent::ToolUse {
+                tool_name: "PendingApprovalFixture".into(),
+                input: "payload".into(),
+            },
+            StreamEvent::MessageStop {
+                stop_reason: StopReason::ToolUse,
+            },
+        ]],
+        registry,
+    );
+
+    let result = run_query_loop_with_params(
+        &context,
+        Message::user("needs approval"),
+        QueryParams::default(),
+    )
+    .await;
+
+    assert_eq!(result.terminal, Terminal::AbortedTools);
+    assert!(matches!(
+        context
+            .app_state
+            .permission_context
+            .pending_approval(),
+        Some(pending)
+            if pending.tool_name == "PendingApprovalFixture"
+                && pending.message == "requires explicit approval"
+    ));
+    assert!(result.events.iter().any(|event| matches!(
+        event,
+        EngineEvent::PendingApproval {
+            tool_name,
+            summary,
+            detail,
+            ..
+        } if tool_name == "PendingApprovalFixture"
+            && summary == "PendingApprovalFixture pending approval"
+            && detail.as_deref() == Some("requires explicit approval")
+    )));
+    assert!(result.messages.iter().any(|message| {
+        message.content
+            == "approval required for PendingApprovalFixture: requires explicit approval"
+    }));
 }
 
 #[tokio::test]

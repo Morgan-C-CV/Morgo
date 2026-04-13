@@ -2,7 +2,8 @@ use crate::state::permission_context::ToolPermissionContext;
 use crate::tool::definition::{InterruptBehavior, ToolCall, ToolResult};
 use crate::tool::registry::ToolRegistry;
 use crate::tool::result::{
-    ToolExecutionOutcomeKind, ToolExecutionRecord, ToolReportModifier,
+    ToolExecutionOutcomeKind, ToolExecutionRecord, ToolExecutionReport,
+    ToolReportContextModifier, ToolReportModifier,
 };
 use std::sync::Arc;
 
@@ -181,6 +182,29 @@ fn should_stop_serial_execution(
         InterruptBehavior::Block => false,
         InterruptBehavior::Cancel => matches!(result, ToolResult::Denied(_)),
     }
+}
+
+pub fn aggregate_execution_records(records: &[ToolExecutionRecord]) -> Option<ToolExecutionReport> {
+    let first = records.first()?.clone();
+    let context_modifier = match first.kind {
+        ToolExecutionOutcomeKind::Success => ToolReportContextModifier::ContinueWithUserMessage(
+            first.detail.clone().unwrap_or_else(|| first.summary.clone()),
+        ),
+        ToolExecutionOutcomeKind::Progress
+        | ToolExecutionOutcomeKind::PendingApproval
+        | ToolExecutionOutcomeKind::Denied
+        | ToolExecutionOutcomeKind::Interrupted
+        | ToolExecutionOutcomeKind::ResultTooLarge => {
+            ToolReportContextModifier::SetPendingToolUseSummary(first.summary.clone())
+        }
+    };
+    Some(ToolExecutionReport {
+        records: records.to_vec(),
+        summary: first.summary.clone(),
+        detail: first.detail.clone(),
+        report_modifier: first.report_modifier.clone(),
+        context_modifier,
+    })
 }
 
 fn summarize_result(
