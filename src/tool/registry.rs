@@ -3,7 +3,7 @@ use std::sync::Arc;
 use crate::bootstrap::{InteractionSurface, SessionMode};
 use crate::state::app_state::RuntimeRole;
 use crate::state::permission_context::ToolPermissionContext;
-use crate::tool::definition::{InterruptBehavior, Tool, ToolCall, ToolMetadata, ToolResult};
+use crate::tool::definition::{InterruptBehavior, ObservableInput, Tool, ToolCall, ToolMetadata, ToolResult};
 use crate::tool::permission::{evaluate_tool_permission, is_tool_allowed};
 
 #[derive(Clone, Default)]
@@ -20,22 +20,40 @@ impl std::fmt::Debug for ToolRegistry {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolAssemblyEnvironment {
+    Standard,
+    Restricted,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ToolAssemblyContext {
     pub runtime_role: RuntimeRole,
     pub surface: InteractionSurface,
     pub session_mode: SessionMode,
+    pub environment: ToolAssemblyEnvironment,
     pub include_deferred_tools: bool,
     pub include_interactive_tools: bool,
+    pub include_open_world_tools: bool,
 }
 
 impl ToolAssemblyContext {
     pub fn coordinator(surface: InteractionSurface, session_mode: SessionMode) -> Self {
+        let include_open_world_tools = match (surface, session_mode) {
+            (InteractionSurface::Cli, SessionMode::Interactive) => true,
+            (InteractionSurface::Cli, SessionMode::Print)
+            | (InteractionSurface::Cli, SessionMode::InitOnly)
+            | (InteractionSurface::Cli, SessionMode::Headless)
+            | (InteractionSurface::Remote, _)
+            | (InteractionSurface::Telegram, _) => false,
+        };
         Self {
             runtime_role: RuntimeRole::Coordinator,
             surface,
             session_mode,
+            environment: ToolAssemblyEnvironment::Standard,
             include_deferred_tools: true,
             include_interactive_tools: true,
+            include_open_world_tools,
         }
     }
 
@@ -44,8 +62,10 @@ impl ToolAssemblyContext {
             runtime_role: RuntimeRole::Worker,
             surface,
             session_mode,
+            environment: ToolAssemblyEnvironment::Restricted,
             include_deferred_tools: false,
             include_interactive_tools: false,
+            include_open_world_tools: false,
         }
     }
 
@@ -114,6 +134,9 @@ impl ToolRegistry {
             .iter()
             .filter(|tool| {
                 let metadata = tool.metadata();
+                if metadata.is_open_world && !context.include_open_world_tools {
+                    return false;
+                }
                 match context.runtime_role {
                     RuntimeRole::Coordinator => is_tool_allowed(&metadata, &permissions),
                     RuntimeRole::Worker => {
@@ -175,6 +198,13 @@ impl ToolRegistry {
 
     pub fn interrupt_behavior(&self, call: &ToolCall) -> Option<InterruptBehavior> {
         self.find(call).map(|tool| tool.interrupt_behavior())
+    }
+
+    pub fn observable_input(&self, call: &ToolCall) -> Option<ObservableInput> {
+        self.find(call).and_then(|tool| {
+            tool.backfill_observable_input(call)
+                .or_else(|| tool.observable_input(call))
+        })
     }
 
     pub async fn invoke(

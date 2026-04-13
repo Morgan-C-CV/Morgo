@@ -88,60 +88,92 @@ impl ToolOrchestrator {
                     let permissions = permissions.clone();
                     let call = request.call.clone();
                     handles.push(tokio::spawn(async move {
+                        let observable_input = registry.observable_input(&call);
                         let result = registry.invoke(&call, &permissions).await;
-                        (call, result)
+                        (call, result, observable_input)
                     }));
                 }
-                for handle in handles {
-                    let (call, result) = handle
+                let batch_size = batch.end_index - batch.start_index;
+                for (batch_offset, handle) in handles.into_iter().enumerate() {
+                    let (call, result, observable_input) = handle
                         .await
                         .map_err(|error| anyhow::anyhow!("tool task join failed: {error}"))?;
                     let result = result?;
-                    outcomes.push(ToolExecutionOutcome {
-                        tool_name: call.name.clone(),
-                        record: ToolExecutionRecord {
-                            tool_name: call.name.clone(),
-                            outcome: format!("{:?}", result),
-                            kind: classify_result(&result),
-                        },
+                    outcomes.push(build_outcome(
+                        call.name.clone(),
                         result,
+                        observable_input,
+                        batch_offset,
+                        batch_size,
                         executed_in_batch,
-                    });
+                    ));
                 }
                 continue;
             }
 
-            for request in &requests[batch.start_index..batch.end_index] {
+            let batch_size = batch.end_index - batch.start_index;
+            for (batch_offset, request) in requests[batch.start_index..batch.end_index]
+                .iter()
+                .enumerate()
+            {
                 let interrupt_behavior = self
                     .registry
                     .interrupt_behavior(&request.call)
                     .unwrap_or(InterruptBehavior::Block);
+                let observable_input = self.registry.observable_input(&request.call);
                 let result = self.registry.invoke(&request.call, permissions).await?;
-                outcomes.push(ToolExecutionOutcome {
-                    tool_name: request.call.name.clone(),
-                    record: ToolExecutionRecord {
-                        tool_name: request.call.name.clone(),
-                        outcome: format!("{:?}", result),
-                        kind: classify_result(&result),
-                    },
+                let should_break = should_stop_serial_execution(&interrupt_behavior, &result);
+                outcomes.push(build_outcome(
+                    request.call.name.clone(),
                     result,
+                    observable_input,
+                    batch_offset,
+                    batch_size,
                     executed_in_batch,
-                });
-                if matches!(interrupt_behavior, InterruptBehavior::Cancel)
-                    && matches!(
-                        outcomes.last(),
-                        Some(ToolExecutionOutcome {
-                            result: ToolResult::Denied(_),
-                            ..
-                        })
-                    )
-                {
+                ));
+                if should_break {
                     break;
                 }
             }
         }
 
         Ok(outcomes)
+    }
+}
+
+fn build_outcome(
+    tool_name: String,
+    result: ToolResult,
+    observable_input: Option<crate::tool::definition::ObservableInput>,
+    batch_index: usize,
+    batch_size: usize,
+    executed_in_batch: bool,
+) -> ToolExecutionOutcome {
+    ToolExecutionOutcome {
+        record: ToolExecutionRecord {
+            tool_name: tool_name.clone(),
+            outcome: format!("{:?}", result),
+            kind: classify_result(&result),
+            observable_input,
+            batch_context: crate::tool::result::ToolBatchContext {
+                batch_index,
+                batch_size,
+                executed_in_batch,
+            },
+        },
+        tool_name,
+        result,
+        executed_in_batch,
+    }
+}
+
+fn should_stop_serial_execution(
+    interrupt_behavior: &InterruptBehavior,
+    result: &ToolResult,
+) -> bool {
+    match interrupt_behavior {
+        InterruptBehavior::Block => false,
+        InterruptBehavior::Cancel => matches!(result, ToolResult::Denied(_)),
     }
 }
 

@@ -18,7 +18,7 @@ use rust_agent::tool::builtin::web_fetch::{WebFetchTool, fetch_text_with};
 use rust_agent::tool::builtin::web_search::WebSearchTool;
 use rust_agent::tool::definition::{Tool, ToolCall, ToolResult};
 use rust_agent::tool::permission::is_tool_allowed;
-use rust_agent::tool::registry::{ToolAssemblyContext, ToolRegistry};
+use rust_agent::tool::registry::{ToolAssemblyContext, ToolAssemblyEnvironment, ToolRegistry};
 use tokio::fs;
 
 fn unique_name(prefix: &str) -> String {
@@ -646,4 +646,63 @@ fn coordinator_assembly_keeps_always_load_and_deferred_tools_visible() {
     assert!(names.contains(&"Bash"));
     assert!(names.contains(&"Read"));
     assert!(names.contains(&"WebSearch"));
+}
+
+#[test]
+fn open_world_tools_are_filtered_from_remote_and_headless_assembly() {
+    let registry = ToolRegistry::new()
+        .register(Arc::new(FileReadTool))
+        .register(Arc::new(WebSearchTool))
+        .register(Arc::new(WebFetchTool));
+
+    let remote = registry.assemble(ToolAssemblyContext::coordinator(
+        rust_agent::bootstrap::InteractionSurface::Remote,
+        rust_agent::bootstrap::SessionMode::Interactive,
+    ));
+    let remote_names = remote
+        .all_metadata()
+        .iter()
+        .map(|tool| tool.name)
+        .collect::<Vec<_>>();
+    assert!(remote_names.contains(&"Read"));
+    assert!(!remote_names.contains(&"WebSearch"));
+    assert!(!remote_names.contains(&"WebFetch"));
+
+    let cli_headless = registry.assemble(ToolAssemblyContext::coordinator(
+        rust_agent::bootstrap::InteractionSurface::Cli,
+        rust_agent::bootstrap::SessionMode::Headless,
+    ));
+    let cli_headless_names = cli_headless
+        .all_metadata()
+        .iter()
+        .map(|tool| tool.name)
+        .collect::<Vec<_>>();
+    assert!(cli_headless_names.contains(&"Read"));
+    assert!(!cli_headless_names.contains(&"WebSearch"));
+    assert!(!cli_headless_names.contains(&"WebFetch"));
+}
+
+#[test]
+fn assembly_environment_can_explicitly_disable_open_world_tools() {
+    let registry = ToolRegistry::new()
+        .register(Arc::new(FileReadTool))
+        .register(Arc::new(WebSearchTool));
+
+    let assembled = registry.assemble(ToolAssemblyContext {
+        runtime_role: rust_agent::state::app_state::RuntimeRole::Coordinator,
+        surface: rust_agent::bootstrap::InteractionSurface::Cli,
+        session_mode: rust_agent::bootstrap::SessionMode::Interactive,
+        environment: ToolAssemblyEnvironment::Restricted,
+        include_deferred_tools: true,
+        include_interactive_tools: true,
+        include_open_world_tools: false,
+    });
+    let names = assembled
+        .all_metadata()
+        .iter()
+        .map(|tool| tool.name)
+        .collect::<Vec<_>>();
+
+    assert!(names.contains(&"Read"));
+    assert!(!names.contains(&"WebSearch"));
 }

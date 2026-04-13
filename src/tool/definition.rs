@@ -9,6 +9,18 @@ pub enum InterruptBehavior {
     Cancel,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ObservableInputSource {
+    Raw,
+    Backfilled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ObservableInput {
+    pub value: String,
+    pub source: ObservableInputSource,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolMetadata {
     pub name: &'static str,
@@ -106,6 +118,22 @@ pub trait Tool: Send + Sync {
 
     fn max_result_size_chars(&self) -> usize {
         usize::MAX
+    }
+
+    fn observable_input(&self, call: &ToolCall) -> Option<ObservableInput> {
+        let raw = call.raw_input().trim();
+        if raw.is_empty() {
+            None
+        } else {
+            Some(ObservableInput {
+                value: raw.to_string(),
+                source: ObservableInputSource::Raw,
+            })
+        }
+    }
+
+    fn backfill_observable_input(&self, _call: &ToolCall) -> Option<ObservableInput> {
+        None
     }
 
     fn is_concurrency_safe(&self, _call: &ToolCall) -> bool {
