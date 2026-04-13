@@ -1341,3 +1341,61 @@ impl QueryLoopStateExt for QueryLoopState {
         self
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{apply_tool_report_context, report_detail_or_summary, LoopState, QueryParams};
+    use crate::tool::result::{ToolExecutionReport, ToolReportContextModifier, ToolReportModifier};
+
+    #[test]
+    fn report_detail_or_summary_prefers_detail() {
+        let report = ToolExecutionReport {
+            records: Vec::new(),
+            summary: "summary".into(),
+            detail: Some("detail".into()),
+            report_modifier: ToolReportModifier::None,
+            context_modifier: ToolReportContextModifier::None,
+        };
+
+        assert_eq!(report_detail_or_summary(&report), "detail");
+    }
+
+    #[test]
+    fn apply_tool_report_context_sets_pending_summary_from_continue_message() {
+        let mut state = LoopState::new(&QueryParams::default());
+        let report = ToolExecutionReport {
+            records: Vec::new(),
+            summary: "2 tool results".into(),
+            detail: Some("alpha\nbeta".into()),
+            report_modifier: ToolReportModifier::None,
+            context_modifier: ToolReportContextModifier::ContinueWithUserMessage(
+                "alpha\nbeta".into(),
+            ),
+        };
+
+        apply_tool_report_context(&mut state, &report);
+
+        assert_eq!(state.pending_tool_use_summary.as_deref(), Some("alpha\nbeta"));
+    }
+
+    #[test]
+    fn apply_tool_report_context_sets_pending_summary_from_pending_modifier() {
+        let mut state = LoopState::new(&QueryParams::default());
+        let report = ToolExecutionReport {
+            records: Vec::new(),
+            summary: "Read succeeded; ProgressTool in progress".into(),
+            detail: Some("alpha\nstill running".into()),
+            report_modifier: ToolReportModifier::Progress,
+            context_modifier: ToolReportContextModifier::SetPendingToolUseSummary(
+                "Read succeeded; ProgressTool in progress".into(),
+            ),
+        };
+
+        apply_tool_report_context(&mut state, &report);
+
+        assert_eq!(
+            state.pending_tool_use_summary.as_deref(),
+            Some("Read succeeded; ProgressTool in progress")
+        );
+    }
+}

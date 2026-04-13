@@ -710,3 +710,207 @@ fn aggregate_execution_records_escalates_attention_and_uses_pending_summary_for_
         ToolReportContextModifier::SetPendingToolUseSummary("Read succeeded; Bash denied".into())
     );
 }
+
+#[test]
+fn aggregate_execution_records_keeps_progress_batches_out_of_continue_message() {
+    let records = vec![
+        ToolExecutionRecord {
+            tool_name: "Read".into(),
+            outcome: "Text(\"alpha\")".into(),
+            kind: ToolExecutionOutcomeKind::Success,
+            summary: "Read succeeded".into(),
+            detail: Some("alpha".into()),
+            report_modifier: ToolReportModifier::None,
+            observable_input: None,
+            batch_context: ToolBatchContext {
+                batch_index: 0,
+                batch_size: 2,
+                executed_in_batch: true,
+            },
+        },
+        ToolExecutionRecord {
+            tool_name: "ProgressTool".into(),
+            outcome: "Progress(\"still running\")".into(),
+            kind: ToolExecutionOutcomeKind::Progress,
+            summary: "ProgressTool in progress".into(),
+            detail: Some("still running".into()),
+            report_modifier: ToolReportModifier::Progress,
+            observable_input: None,
+            batch_context: ToolBatchContext {
+                batch_index: 1,
+                batch_size: 2,
+                executed_in_batch: true,
+            },
+        },
+    ];
+
+    let report = aggregate_execution_records(&records).expect("aggregated report");
+
+    assert_eq!(report.report_modifier, ToolReportModifier::Progress);
+    assert_eq!(report.summary, "Read succeeded; ProgressTool in progress");
+    assert_eq!(report.detail.as_deref(), Some("alpha\nstill running"));
+    assert_eq!(
+        report.context_modifier,
+        ToolReportContextModifier::SetPendingToolUseSummary(
+            "Read succeeded; ProgressTool in progress".into()
+        )
+    );
+}
+
+#[test]
+fn aggregate_execution_records_keeps_pending_batches_out_of_continue_message() {
+    let records = vec![
+        ToolExecutionRecord {
+            tool_name: "Read".into(),
+            outcome: "Text(\"alpha\")".into(),
+            kind: ToolExecutionOutcomeKind::Success,
+            summary: "Read succeeded".into(),
+            detail: Some("alpha".into()),
+            report_modifier: ToolReportModifier::None,
+            observable_input: None,
+            batch_context: ToolBatchContext {
+                batch_index: 0,
+                batch_size: 2,
+                executed_in_batch: true,
+            },
+        },
+        ToolExecutionRecord {
+            tool_name: "PendingApprovalTool".into(),
+            outcome: "PendingApproval".into(),
+            kind: ToolExecutionOutcomeKind::PendingApproval,
+            summary: "PendingApprovalTool pending approval".into(),
+            detail: Some("approval required by test policy".into()),
+            report_modifier: ToolReportModifier::Pending,
+            observable_input: None,
+            batch_context: ToolBatchContext {
+                batch_index: 1,
+                batch_size: 2,
+                executed_in_batch: true,
+            },
+        },
+    ];
+
+    let report = aggregate_execution_records(&records).expect("aggregated report");
+
+    assert_eq!(report.report_modifier, ToolReportModifier::Pending);
+    assert_eq!(
+        report.summary,
+        "Read succeeded; PendingApprovalTool pending approval"
+    );
+    assert_eq!(report.detail.as_deref(), Some("alpha\napproval required by test policy"));
+    assert_eq!(
+        report.context_modifier,
+        ToolReportContextModifier::SetPendingToolUseSummary(
+            "Read succeeded; PendingApprovalTool pending approval".into()
+        )
+    );
+}
+
+#[test]
+fn aggregate_execution_records_escalates_multiple_attention_records() {
+    let records = vec![
+        ToolExecutionRecord {
+            tool_name: "Bash".into(),
+            outcome: "Denied(\"blocked\")".into(),
+            kind: ToolExecutionOutcomeKind::Denied,
+            summary: "Bash denied".into(),
+            detail: Some("blocked".into()),
+            report_modifier: ToolReportModifier::NeedsAttention,
+            observable_input: None,
+            batch_context: ToolBatchContext {
+                batch_index: 0,
+                batch_size: 2,
+                executed_in_batch: true,
+            },
+        },
+        ToolExecutionRecord {
+            tool_name: "ResultTooLargeTool".into(),
+            outcome: "ResultTooLarge(\"result exceeded test limit\")".into(),
+            kind: ToolExecutionOutcomeKind::ResultTooLarge,
+            summary: "ResultTooLargeTool result too large".into(),
+            detail: Some("result exceeded test limit".into()),
+            report_modifier: ToolReportModifier::NeedsAttention,
+            observable_input: None,
+            batch_context: ToolBatchContext {
+                batch_index: 1,
+                batch_size: 2,
+                executed_in_batch: true,
+            },
+        },
+    ];
+
+    let report = aggregate_execution_records(&records).expect("aggregated report");
+
+    assert_eq!(report.report_modifier, ToolReportModifier::NeedsAttention);
+    assert_eq!(
+        report.summary,
+        "Bash denied; ResultTooLargeTool result too large"
+    );
+    assert_eq!(report.detail.as_deref(), Some("blocked\nresult exceeded test limit"));
+    assert_eq!(
+        report.context_modifier,
+        ToolReportContextModifier::SetPendingToolUseSummary(
+            "Bash denied; ResultTooLargeTool result too large".into()
+        )
+    );
+}
+
+#[test]
+fn aggregate_execution_records_prioritizes_attention_over_pending_and_progress() {
+    let records = vec![
+        ToolExecutionRecord {
+            tool_name: "ProgressTool".into(),
+            outcome: "Progress(\"still running\")".into(),
+            kind: ToolExecutionOutcomeKind::Progress,
+            summary: "ProgressTool in progress".into(),
+            detail: Some("still running".into()),
+            report_modifier: ToolReportModifier::Progress,
+            observable_input: None,
+            batch_context: ToolBatchContext {
+                batch_index: 0,
+                batch_size: 3,
+                executed_in_batch: true,
+            },
+        },
+        ToolExecutionRecord {
+            tool_name: "PendingApprovalTool".into(),
+            outcome: "PendingApproval".into(),
+            kind: ToolExecutionOutcomeKind::PendingApproval,
+            summary: "PendingApprovalTool pending approval".into(),
+            detail: Some("approval required by test policy".into()),
+            report_modifier: ToolReportModifier::Pending,
+            observable_input: None,
+            batch_context: ToolBatchContext {
+                batch_index: 1,
+                batch_size: 3,
+                executed_in_batch: true,
+            },
+        },
+        ToolExecutionRecord {
+            tool_name: "Bash".into(),
+            outcome: "Denied(\"blocked\")".into(),
+            kind: ToolExecutionOutcomeKind::Denied,
+            summary: "Bash denied".into(),
+            detail: Some("blocked".into()),
+            report_modifier: ToolReportModifier::NeedsAttention,
+            observable_input: None,
+            batch_context: ToolBatchContext {
+                batch_index: 2,
+                batch_size: 3,
+                executed_in_batch: true,
+            },
+        },
+    ];
+
+    let report = aggregate_execution_records(&records).expect("aggregated report");
+
+    assert_eq!(report.report_modifier, ToolReportModifier::NeedsAttention);
+    assert_eq!(
+        report.summary,
+        "ProgressTool in progress; PendingApprovalTool pending approval; Bash denied"
+    );
+    assert_eq!(
+        report.detail.as_deref(),
+        Some("still running\napproval required by test policy\nblocked")
+    );
+}
