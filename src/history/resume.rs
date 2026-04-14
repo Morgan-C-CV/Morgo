@@ -31,6 +31,8 @@ pub struct ResolvedSessionState {
     pub restored_session: Option<RestoredSession>,
     pub client_type: ClientType,
     pub session_source: SessionSource,
+    pub external_memory_entries: Vec<String>,
+    pub nested_memory_lineage: Vec<String>,
 }
 
 impl ResolvedSessionState {
@@ -52,7 +54,14 @@ pub fn resolve_session_state(
             continue_session: matches!(request.source, RestoreSource::ContinueSession),
         };
         if let Some((snapshot, history)) = session_store.load(&store_request) {
-            return resolved_from_snapshot(snapshot, history, true);
+            let session_id = snapshot.session_id.clone();
+            return resolved_from_snapshot(
+                snapshot,
+                history,
+                true,
+                session_store.load_external_memory_entries(&session_id),
+                session_store.load_nested_memory_lineage(&session_id),
+            );
         }
 
         let fallback_session_id = request
@@ -70,6 +79,8 @@ pub fn resolve_session_state(
             },
             SessionHistory::default(),
             true,
+            Vec::new(),
+            Vec::new(),
         );
     }
 
@@ -84,6 +95,8 @@ pub fn resolve_session_state(
         },
         SessionHistory::default(),
         false,
+        Vec::new(),
+        Vec::new(),
     )
 }
 
@@ -91,6 +104,8 @@ pub fn resolved_from_snapshot(
     snapshot: SessionSnapshot,
     history: SessionHistory,
     restored: bool,
+    external_memory_entries: Vec<String>,
+    nested_memory_lineage: Vec<String>,
 ) -> ResolvedSessionState {
     let restored_session = restored.then(|| RestoredSession {
         snapshot: snapshot.clone(),
@@ -104,6 +119,8 @@ pub fn resolved_from_snapshot(
         restored_session,
         client_type,
         session_source,
+        external_memory_entries,
+        nested_memory_lineage,
     }
 }
 

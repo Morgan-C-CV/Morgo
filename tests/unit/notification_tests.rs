@@ -57,8 +57,8 @@ fn dispatcher_records_cli_notifications() {
 #[test]
 fn dispatcher_records_notification_hook_payloads_for_all_notification_types() {
     let registry = HookRegistry::default();
-    let dispatcher =
-        NotificationDispatcher::new(TelegramGateway::default()).with_hook_registry(registry.clone());
+    let dispatcher = NotificationDispatcher::new(TelegramGateway::default())
+        .with_hook_registry(registry.clone());
 
     dispatcher.dispatch(
         InteractionSurface::Cli,
@@ -135,8 +135,8 @@ fn dispatcher_can_deny_approval_notification_via_hook_rule() {
         updated_input: None,
         additional_context: None,
     });
-    let dispatcher =
-        NotificationDispatcher::new(TelegramGateway::default()).with_hook_registry(registry.clone());
+    let dispatcher = NotificationDispatcher::new(TelegramGateway::default())
+        .with_hook_registry(registry.clone());
 
     dispatcher.dispatch(
         InteractionSurface::Cli,

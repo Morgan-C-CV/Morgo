@@ -3,7 +3,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use rust_agent::hook::executor::{HookDecision, run_hook};
 use rust_agent::hook::registry::{
-    HookConfigSource, HookEvent, HookRuleLayer, HookRegistry, load_hook_registry,
+    HookConfigSource, HookEvent, HookRegistry, HookRuleLayer, load_hook_registry,
     load_hook_rules_with_diagnostics,
 };
 
@@ -41,10 +41,11 @@ fn hook_loader_reads_external_rules_from_project_config() {
         .config_load_result()
         .expect("config load result should be captured");
     assert_eq!(load_result.source, HookConfigSource::File);
-    assert!(load_result
-        .diagnostics
-        .iter()
-        .any(|line| line.contains("Loaded 1 hook rule(s) from .claude/hooks.json (layer=file).")));
+    assert!(
+        load_result.diagnostics.iter().any(
+            |line| line.contains("Loaded 1 hook rule(s) from .claude/hooks.json (layer=file).")
+        )
+    );
     assert_eq!(registry.rules().len(), 1);
     assert_eq!(registry.rules()[0].layer, HookRuleLayer::File);
 
@@ -138,14 +139,17 @@ fn hook_loader_ignores_unknown_events_and_keeps_valid_rules() {
     assert_eq!(load_result.source, HookConfigSource::File);
     assert_eq!(load_result.rules.len(), 1);
     assert_eq!(load_result.rules[0].layer, HookRuleLayer::File);
-    assert!(load_result
-        .diagnostics
-        .iter()
-        .any(|line| line.contains("Ignored hook rule with unknown event 'not_a_real_event'")));
-    assert!(load_result
-        .diagnostics
-        .iter()
-        .any(|line| line.contains("Loaded 1 hook rule(s) from .claude/hooks.json (layer=file).")));
+    assert!(
+        load_result
+            .diagnostics
+            .iter()
+            .any(|line| line.contains("Ignored hook rule with unknown event 'not_a_real_event'"))
+    );
+    assert!(
+        load_result.diagnostics.iter().any(
+            |line| line.contains("Loaded 1 hook rule(s) from .claude/hooks.json (layer=file).")
+        )
+    );
 
     let registry = load_hook_registry(&root);
     assert_eq!(
@@ -165,4 +169,3 @@ fn hook_registry_can_still_be_built_programmatically() {
     );
     assert!(registry.config_load_result().is_none());
 }
-

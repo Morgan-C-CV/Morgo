@@ -599,5 +599,7 @@ fn resolve_remote_session_state(
         },
         crate::history::session::SessionHistory::default(),
         false,
+        Vec::new(),
+        Vec::new(),
     )
 }

@@ -68,7 +68,8 @@ fn probe_git_context(cwd: &Path) -> GitProbe {
         .and_then(|path| resolve_git_path(cwd, &path))
         .and_then(|path| {
             if path.file_name().is_some_and(|name| name == ".git") {
-                path.parent().map(|parent| parent.to_string_lossy().to_string())
+                path.parent()
+                    .map(|parent| parent.to_string_lossy().to_string())
             } else {
                 Some(path.to_string_lossy().to_string())
             }
@@ -89,7 +90,11 @@ fn probe_git_context(cwd: &Path) -> GitProbe {
 
 fn resolve_git_path(cwd: &Path, value: &str) -> Option<PathBuf> {
     let raw = PathBuf::from(value);
-    let resolved = if raw.is_absolute() { raw } else { cwd.join(raw) };
+    let resolved = if raw.is_absolute() {
+        raw
+    } else {
+        cwd.join(raw)
+    };
     resolved.canonicalize().ok().or(Some(resolved))
 }
 

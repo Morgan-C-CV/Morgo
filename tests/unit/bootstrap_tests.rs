@@ -403,6 +403,49 @@ fn in_memory_session_store_round_trips_task_lists_by_session() {
 }
 
 #[test]
+fn in_memory_session_store_round_trips_external_and_nested_memory_by_session() {
+    let store = InMemorySessionStore::default();
+    let session_id = SessionId("session-memory".into());
+
+    store.save_external_memory_entries(
+        &session_id,
+        vec!["linear:ABC-1 context".into(), "slack:#triage".into()],
+    );
+    store.save_nested_memory_lineage(
+        &session_id,
+        vec![
+            "session:session-memory".into(),
+            "agent:child:inherit_context=true".into(),
+        ],
+    );
+
+    assert_eq!(
+        store.load_external_memory_entries(&session_id),
+        vec![
+            "linear:ABC-1 context".to_string(),
+            "slack:#triage".to_string()
+        ]
+    );
+    assert_eq!(
+        store.load_nested_memory_lineage(&session_id),
+        vec![
+            "session:session-memory".to_string(),
+            "agent:child:inherit_context=true".to_string(),
+        ]
+    );
+    assert!(
+        store
+            .load_external_memory_entries(&SessionId("other-session".into()))
+            .is_empty()
+    );
+    assert!(
+        store
+            .load_nested_memory_lineage(&SessionId("other-session".into()))
+            .is_empty()
+    );
+}
+
+#[test]
 fn resolve_session_state_reuses_store_for_continue_resume_and_fresh_start() {
     let store = InMemorySessionStore::default();
     store.save(
@@ -705,6 +748,11 @@ fn file_backed_session_store_round_trips_across_store_instances() {
 
     store_a.save(snapshot.clone(), history.clone());
     store_a.save_task_list(&session_id, task_list.clone());
+    store_a.save_external_memory_entries(
+        &session_id,
+        vec!["linear:INGEST-42 investigate context layering".into()],
+    );
+    store_a.save_nested_memory_lineage(&session_id, vec!["session:session-file-backed".into()]);
 
     let store_b = FileBackedSessionStore::new(root.clone());
     let loaded = store_b.load(&SessionRestoreRequest {
@@ -713,8 +761,51 @@ fn file_backed_session_store_round_trips_across_store_instances() {
     });
     assert_eq!(loaded, Some((snapshot, history)));
     assert_eq!(store_b.load_task_list(&session_id), Some(task_list));
+    assert_eq!(
+        store_b.load_external_memory_entries(&session_id),
+        vec!["linear:INGEST-42 investigate context layering".to_string()]
+    );
+    assert_eq!(
+        store_b.load_nested_memory_lineage(&session_id),
+        vec!["session:session-file-backed".to_string()]
+    );
 
     std::fs::remove_dir_all(root).expect("cleanup file-backed session store");
+}
+
+#[test]
+fn file_backed_session_store_loads_legacy_records_without_memory_fields() {
+    let root = unique_temp_path("rust-agent-session-store-legacy");
+    let store = FileBackedSessionStore::new(root.clone());
+    let session_id = SessionId("session-legacy".into());
+
+    let legacy_json = r#"{
+  "snapshot": {
+    "session_id": "session-legacy",
+    "surface": "Cli",
+    "session_mode": "Interactive",
+    "cwd": "/tmp/legacy",
+    "last_turn_at": null,
+    "prompt_seed": null
+  },
+  "history": {
+    "entries": []
+  },
+  "task_list": null,
+  "plan_state": null
+}"#;
+    let path = root.join("session-legacy.json");
+    std::fs::write(path, legacy_json).expect("write legacy session record");
+
+    let loaded = store.load(&SessionRestoreRequest {
+        resume: Some("session-legacy".into()),
+        continue_session: false,
+    });
+    assert!(loaded.is_some(), "legacy record should deserialize");
+    assert!(store.load_external_memory_entries(&session_id).is_empty());
+    assert!(store.load_nested_memory_lineage(&session_id).is_empty());
+
+    std::fs::remove_dir_all(root).expect("cleanup legacy file-backed session store");
 }
 
 #[test]

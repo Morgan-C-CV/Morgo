@@ -152,13 +152,26 @@ impl AppState {
         self.session = Some(resolved.snapshot.clone());
         self.history = Some(resolved.history.clone());
         self.restored_session = resolved.restored_session.clone();
+        self.permission_context
+            .set_external_memory_entries(resolved.external_memory_entries.clone());
+        self.permission_context
+            .set_nested_memory_lineage(resolved.nested_memory_lineage.clone());
     }
 
     pub fn persist_resolved_session_state(&self, resolved: &ResolvedSessionState) {
         let Some(session_store) = &self.session_store else {
             return;
         };
+        let session_id = resolved.snapshot.session_id.clone();
         session_store.save(resolved.snapshot.clone(), resolved.history.clone());
+        session_store.save_external_memory_entries(
+            &session_id,
+            self.permission_context.external_memory_entries(),
+        );
+        session_store.save_nested_memory_lineage(
+            &session_id,
+            self.permission_context.nested_memory_lineage(),
+        );
     }
 
     pub fn current_session_id(&self) -> SessionId {

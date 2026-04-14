@@ -4,11 +4,11 @@ use rust_agent::core::context::{QueryContext, SubagentConfig};
 use rust_agent::core::engine::QueryEngine;
 use rust_agent::core::events::EngineEvent;
 use rust_agent::core::message::Message;
-use rust_agent::history::session::{SessionHistory, SessionHistoryEntry};
 use rust_agent::core::query_loop::{
     Continue, QueryLoopState, QueryParams, Terminal, run_query_loop, run_query_loop_with_params,
 };
 use rust_agent::cost::tracker::CostTracker;
+use rust_agent::history::session::{SessionHistory, SessionHistoryEntry};
 use rust_agent::hook::registry::{
     HookEvent, HookEventMatcher, HookRegistry, HookRule, HookRuleLayer,
 };
@@ -697,11 +697,15 @@ async fn query_loop_respects_pre_tool_hook_denial() {
             reason: "tool Agent denied by hook policy".into(),
         }
     ));
-    assert!(engine.context.hook_registry.recorded_events().contains(
-        &HookEvent::PreToolUse {
-            tool_name: "Agent".into(),
-        }
-    ));
+    assert!(
+        engine
+            .context
+            .hook_registry
+            .recorded_events()
+            .contains(&HookEvent::PreToolUse {
+                tool_name: "Agent".into(),
+            })
+    );
     assert!(engine.context.hook_registry.recorded_events().contains(
         &HookEvent::PostToolUseFailure {
             tool_name: "Agent".into(),
@@ -1350,9 +1354,7 @@ async fn subagent_context_does_not_inherit_session_memory_when_disabled() {
         ]
     );
     assert!(
-        child
-            .context_prompt
-            .contains("- history: unavailable"),
+        child.context_prompt.contains("- history: unavailable"),
         "session memory should be unavailable when inherit_context=false"
     );
     assert!(

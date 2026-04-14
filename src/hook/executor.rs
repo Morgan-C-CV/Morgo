@@ -41,7 +41,6 @@ pub fn run_hook(registry: &HookRegistry, event: HookEvent) -> HookResult {
     matched_rules.sort_by_key(|rule| rule.layer.precedence());
 
     for rule in matched_rules {
-
         if let Some(message) = &rule.append_message {
             result.messages.push(Message::assistant(message.clone()));
         }

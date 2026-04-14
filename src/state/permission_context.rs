@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::{Arc, RwLock};
 
 use crate::bootstrap::InteractionSurface;
@@ -217,7 +218,7 @@ impl ToolPermissionContext {
 
     pub fn set_external_memory_entries(&self, entries: Vec<String>) {
         if let Ok(mut slot) = self.external_memory_entries.write() {
-            *slot = entries;
+            *slot = normalize_memory_entries(entries);
         }
     }
 
@@ -235,7 +236,7 @@ impl ToolPermissionContext {
 
     pub fn set_nested_memory_lineage(&self, lineage: Vec<String>) {
         if let Ok(mut slot) = self.nested_memory_lineage.write() {
-            *slot = lineage;
+            *slot = normalize_memory_entries(lineage);
         }
     }
 
@@ -267,4 +268,19 @@ fn add_rule(slot: &Arc<RwLock<Vec<String>>>, rule: impl Into<String>) -> bool {
         return true;
     }
     false
+}
+
+fn normalize_memory_entries(entries: Vec<String>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut normalized = Vec::new();
+    for entry in entries {
+        let trimmed = entry.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if seen.insert(trimmed.to_string()) {
+            normalized.push(trimmed.to_string());
+        }
+    }
+    normalized
 }

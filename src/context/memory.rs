@@ -25,7 +25,10 @@ pub fn describe_memory_context(app_state: &AppState) -> String {
             })
             .collect::<Vec<_>>();
         if !recent_messages.is_empty() {
-            lines.push(format!("- recent_messages: {}", recent_messages.join(" | ")));
+            lines.push(format!(
+                "- recent_messages: {}",
+                recent_messages.join(" | ")
+            ));
         }
 
         let tool_refs = history

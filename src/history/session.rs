@@ -55,6 +55,10 @@ pub trait SessionStore: Send + Sync {
     fn save_task_list(&self, session_id: &SessionId, snapshot: TaskListSnapshot);
     fn load_plan_state(&self, session_id: &SessionId) -> Option<PlanState>;
     fn save_plan_state(&self, session_id: &SessionId, state: PlanState);
+    fn load_external_memory_entries(&self, session_id: &SessionId) -> Vec<String>;
+    fn save_external_memory_entries(&self, session_id: &SessionId, entries: Vec<String>);
+    fn load_nested_memory_lineage(&self, session_id: &SessionId) -> Vec<String>;
+    fn save_nested_memory_lineage(&self, session_id: &SessionId, lineage: Vec<String>);
 }
 
 #[derive(Debug, Clone, Default)]
@@ -62,6 +66,8 @@ pub struct InMemorySessionStore {
     sessions: Arc<RwLock<HashMap<SessionId, (SessionSnapshot, SessionHistory)>>>,
     task_lists: Arc<RwLock<HashMap<SessionId, TaskListSnapshot>>>,
     plan_states: Arc<RwLock<HashMap<SessionId, PlanState>>>,
+    external_memory_entries: Arc<RwLock<HashMap<SessionId, Vec<String>>>>,
+    nested_memory_lineage: Arc<RwLock<HashMap<SessionId, Vec<String>>>>,
     latest_session: Arc<RwLock<Option<SessionId>>>,
 }
 
@@ -125,6 +131,34 @@ impl SessionStore for InMemorySessionStore {
             plan_states.insert(session_id.clone(), state);
         }
     }
+
+    fn load_external_memory_entries(&self, session_id: &SessionId) -> Vec<String> {
+        self.external_memory_entries
+            .read()
+            .ok()
+            .and_then(|entries| entries.get(session_id).cloned())
+            .unwrap_or_default()
+    }
+
+    fn save_external_memory_entries(&self, session_id: &SessionId, entries: Vec<String>) {
+        if let Ok(mut external_memory_entries) = self.external_memory_entries.write() {
+            external_memory_entries.insert(session_id.clone(), entries);
+        }
+    }
+
+    fn load_nested_memory_lineage(&self, session_id: &SessionId) -> Vec<String> {
+        self.nested_memory_lineage
+            .read()
+            .ok()
+            .and_then(|lineage| lineage.get(session_id).cloned())
+            .unwrap_or_default()
+    }
+
+    fn save_nested_memory_lineage(&self, session_id: &SessionId, lineage: Vec<String>) {
+        if let Ok(mut nested_memory_lineage) = self.nested_memory_lineage.write() {
+            nested_memory_lineage.insert(session_id.clone(), lineage);
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -138,6 +172,8 @@ struct PersistedSessionRecord {
     history: SessionHistory,
     task_list: Option<TaskListSnapshot>,
     plan_state: Option<PlanState>,
+    external_memory_entries: Option<Vec<String>>,
+    nested_memory_lineage: Option<Vec<String>>,
 }
 
 impl FileBackedSessionStore {
@@ -215,6 +251,8 @@ impl FileBackedSessionStore {
                 history: SessionHistory::default(),
                 task_list: None,
                 plan_state: None,
+                external_memory_entries: None,
+                nested_memory_lineage: None,
             });
         update(&mut record);
         self.write_record(session_id, &record);
@@ -245,7 +283,11 @@ impl SessionStore for FileBackedSessionStore {
         let session_id = snapshot.session_id.clone();
         let record = self.read_record(&session_id);
         let task_list = record.as_ref().and_then(|record| record.task_list.clone());
-        let plan_state = record.and_then(|record| record.plan_state);
+        let plan_state = record.as_ref().and_then(|record| record.plan_state.clone());
+        let external_memory_entries = record
+            .as_ref()
+            .and_then(|record| record.external_memory_entries.clone());
+        let nested_memory_lineage = record.and_then(|record| record.nested_memory_lineage);
         self.write_record(
             &session_id,
             &PersistedSessionRecord {
@@ -253,6 +295,8 @@ impl SessionStore for FileBackedSessionStore {
                 history,
                 task_list,
                 plan_state,
+                external_memory_entries,
+                nested_memory_lineage,
             },
         );
     }
@@ -282,6 +326,30 @@ impl SessionStore for FileBackedSessionStore {
     fn save_plan_state(&self, session_id: &SessionId, state: PlanState) {
         self.update_record(session_id, |record| {
             record.plan_state = Some(state);
+        });
+    }
+
+    fn load_external_memory_entries(&self, session_id: &SessionId) -> Vec<String> {
+        self.read_record(session_id)
+            .and_then(|record| record.external_memory_entries)
+            .unwrap_or_default()
+    }
+
+    fn save_external_memory_entries(&self, session_id: &SessionId, entries: Vec<String>) {
+        self.update_record(session_id, |record| {
+            record.external_memory_entries = Some(entries);
+        });
+    }
+
+    fn load_nested_memory_lineage(&self, session_id: &SessionId) -> Vec<String> {
+        self.read_record(session_id)
+            .and_then(|record| record.nested_memory_lineage)
+            .unwrap_or_default()
+    }
+
+    fn save_nested_memory_lineage(&self, session_id: &SessionId, lineage: Vec<String>) {
+        self.update_record(session_id, |record| {
+            record.nested_memory_lineage = Some(lineage);
         });
     }
 }

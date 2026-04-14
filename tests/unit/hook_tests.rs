@@ -273,4 +273,3 @@ fn higher_layer_permission_directive_overrides_lower_layer() {
         } if input == "runtime-input"
     ));
 }
-

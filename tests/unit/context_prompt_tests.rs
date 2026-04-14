@@ -150,7 +150,10 @@ fn run_git(cwd: &PathBuf, args: &[&str]) {
 fn init_test_repo(label: &str) -> PathBuf {
     let repo = unique_temp_dir(label);
     run_git(&repo, &["init"]);
-    run_git(&repo, &["config", "user.email", "context-tests@example.com"]);
+    run_git(
+        &repo,
+        &["config", "user.email", "context-tests@example.com"],
+    );
     run_git(&repo, &["config", "user.name", "Context Tests"]);
     fs::write(repo.join("README.md"), "seed\n").expect("write seed file");
     run_git(&repo, &["add", "README.md"]);

@@ -98,6 +98,8 @@ fn build_nested_memory_lineage(
     if lineage.is_empty() {
         lineage.push(parent_marker);
     }
-    lineage.push(format!("agent:{child_agent_id}:inherit_context={inherit_context}"));
+    lineage.push(format!(
+        "agent:{child_agent_id}:inherit_context={inherit_context}"
+    ));
     lineage
 }
