@@ -697,6 +697,16 @@ async fn query_loop_respects_pre_tool_hook_denial() {
             reason: "tool Agent denied by hook policy".into(),
         }
     ));
+    assert!(engine.context.hook_registry.recorded_events().contains(
+        &HookEvent::PreToolUse {
+            tool_name: "Agent".into(),
+        }
+    ));
+    assert!(engine.context.hook_registry.recorded_events().contains(
+        &HookEvent::PostToolUseFailure {
+            tool_name: "Agent".into(),
+        }
+    ));
 }
 
 #[tokio::test]
@@ -776,6 +786,12 @@ async fn query_loop_runs_permission_request_hook_before_tool_execution() {
     assert!(engine.context.hook_registry.recorded_events().contains(
         &HookEvent::PermissionRequest {
             tool_name: "Agent".into(),
+        }
+    ));
+    assert!(engine.context.hook_registry.recorded_events().contains(
+        &HookEvent::PermissionDenied {
+            tool_name: "Agent".into(),
+            reason: "hook rule set permission to deny".into(),
         }
     ));
 }

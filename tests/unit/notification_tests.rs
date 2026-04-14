@@ -1,4 +1,7 @@
 use rust_agent::bootstrap::InteractionSurface;
+use rust_agent::hook::registry::{
+    HookEvent, HookEventMatcher, HookRegistry, HookRule, HookRuleLayer,
+};
 use rust_agent::interaction::cli::renderer::{
     build_tui_screen, render_document_output, render_document_tui_output, render_turn_document,
     render_turn_output,
@@ -49,6 +52,111 @@ fn dispatcher_records_cli_notifications() {
     dispatcher.dispatch(InteractionSurface::Cli, notification.clone());
 
     assert_eq!(dispatcher.delivered(), vec![notification]);
+}
+
+#[test]
+fn dispatcher_records_notification_hook_payloads_for_all_notification_types() {
+    let registry = HookRegistry::default();
+    let dispatcher =
+        NotificationDispatcher::new(TelegramGateway::default()).with_hook_registry(registry.clone());
+
+    dispatcher.dispatch(
+        InteractionSurface::Cli,
+        Notification::task_update(
+            "session-1",
+            "Task completed",
+            "task body",
+            "task-7",
+            "Completed",
+            "inspect task output for task-7",
+            None,
+            None,
+            None,
+            None,
+            "/tmp/task-7.log",
+        ),
+    );
+    dispatcher.dispatch(
+        InteractionSurface::Cli,
+        Notification::approval_required("session-1", "Bash", "requires explicit approval"),
+    );
+    dispatcher.dispatch(
+        InteractionSurface::Cli,
+        Notification::runtime_notice("session-1", "tool", "runtime warning"),
+    );
+
+    let events = registry.recorded_events();
+    assert_eq!(events.len(), 3);
+    assert_eq!(
+        events[0],
+        HookEvent::Notification {
+            title: "Task completed".into(),
+            body: "task body".into(),
+            notification_type: "task_update".into(),
+            task_id: Some("task-7".into()),
+            status: Some("Completed".into()),
+            output_file: Some("/tmp/task-7.log".into()),
+        }
+    );
+    assert_eq!(
+        events[1],
+        HookEvent::Notification {
+            title: "Approval required: Bash".into(),
+            body: "requires explicit approval".into(),
+            notification_type: "approval_required".into(),
+            task_id: None,
+            status: None,
+            output_file: None,
+        }
+    );
+    assert_eq!(
+        events[2],
+        HookEvent::Notification {
+            title: "Runtime notice: tool".into(),
+            body: "runtime warning".into(),
+            notification_type: "runtime_notice".into(),
+            task_id: None,
+            status: None,
+            output_file: None,
+        }
+    );
+}
+
+#[test]
+fn dispatcher_can_deny_approval_notification_via_hook_rule() {
+    let registry = HookRegistry::default().register_rule(HookRule {
+        event: HookEventMatcher::Notification,
+        layer: HookRuleLayer::Defaults,
+        deny_match: Some("approval_required".into()),
+        append_message: None,
+        prevent_continuation: false,
+        block_continuation: false,
+        permission_decision: None,
+        updated_input: None,
+        additional_context: None,
+    });
+    let dispatcher =
+        NotificationDispatcher::new(TelegramGateway::default()).with_hook_registry(registry.clone());
+
+    dispatcher.dispatch(
+        InteractionSurface::Cli,
+        Notification::approval_required("session-1", "Bash", "requires explicit approval"),
+    );
+
+    let events = registry.recorded_events();
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        events[0],
+        HookEvent::Notification {
+            title: "Approval required: Bash".into(),
+            body: "requires explicit approval".into(),
+            notification_type: "approval_required".into(),
+            task_id: None,
+            status: None,
+            output_file: None,
+        }
+    );
+    assert!(dispatcher.delivered().is_empty());
 }
 
 #[test]
