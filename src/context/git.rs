@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::state::app_state::AppState;
@@ -45,18 +45,6 @@ pub fn describe_git_context(app_state: &AppState) -> String {
         lines.push(format!("- worktree: {worktree}"));
     }
 
-    if let Some(history) = app_state.history.as_ref() {
-        let touched = history
-            .entries
-            .iter()
-            .flat_map(|entry| entry.tool_refs.iter().cloned())
-            .filter(|value| !value.trim().is_empty())
-            .take(5)
-            .collect::<Vec<_>>();
-        if !touched.is_empty() {
-            lines.push(format!("- recent file/tool refs: {}", touched.join(", ")));
-        }
-    }
     lines.join("\n")
 }
 
@@ -75,13 +63,19 @@ fn probe_git_context(cwd: &Path) -> GitProbe {
         };
     }
 
-    let repo_root = git_output(cwd, ["rev-parse", "--show-toplevel"]);
-    let worktree = repo_root.clone();
-    let branch = git_output(cwd, ["symbolic-ref", "--quiet", "--short", "HEAD"])
-        .or_else(|| {
-            git_output(cwd, ["rev-parse", "--short", "HEAD"])
-                .map(|sha| format!("detached@{sha}"))
+    let worktree = git_output(cwd, ["rev-parse", "--show-toplevel"]);
+    let repo_root = git_output(cwd, ["rev-parse", "--git-common-dir"])
+        .and_then(|path| resolve_git_path(cwd, &path))
+        .and_then(|path| {
+            if path.file_name().is_some_and(|name| name == ".git") {
+                path.parent().map(|parent| parent.to_string_lossy().to_string())
+            } else {
+                Some(path.to_string_lossy().to_string())
+            }
         });
+    let branch = git_output(cwd, ["symbolic-ref", "--quiet", "--short", "HEAD"]).or_else(|| {
+        git_output(cwd, ["rev-parse", "--short", "HEAD"]).map(|sha| format!("detached@{sha}"))
+    });
     let dirty = git_has_porcelain_changes(cwd);
 
     GitProbe {
@@ -91,6 +85,12 @@ fn probe_git_context(cwd: &Path) -> GitProbe {
         branch,
         dirty,
     }
+}
+
+fn resolve_git_path(cwd: &Path, value: &str) -> Option<PathBuf> {
+    let raw = PathBuf::from(value);
+    let resolved = if raw.is_absolute() { raw } else { cwd.join(raw) };
+    resolved.canonicalize().ok().or(Some(resolved))
 }
 
 fn git_has_porcelain_changes(cwd: &Path) -> Option<bool> {
