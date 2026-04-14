@@ -64,16 +64,21 @@ pub fn filter_tools_for_worker(all_tools: &[ToolMetadata]) -> Vec<ToolMetadata> 
         .collect()
 }
 
+fn parse_notification_status(status: Option<&str>) -> TaskStatus {
+    match status {
+        Some(value) if value.eq_ignore_ascii_case("pending") => TaskStatus::Pending,
+        Some(value) if value.eq_ignore_ascii_case("running") => TaskStatus::Running,
+        Some(value) if value.eq_ignore_ascii_case("completed") => TaskStatus::Completed,
+        Some(value) if value.eq_ignore_ascii_case("failed") => TaskStatus::Failed,
+        Some(value) if value.eq_ignore_ascii_case("killed") => TaskStatus::Killed,
+        _ => TaskStatus::Pending,
+    }
+}
+
 pub fn notification_to_task_notification(notification: &Notification) -> Option<TaskNotification> {
     Some(TaskNotification {
         task_id: notification.task_id.clone()?,
-        status: match notification.status.as_deref() {
-            Some("Pending") => TaskStatus::Pending,
-            Some("Running") => TaskStatus::Running,
-            Some("Failed") => TaskStatus::Failed,
-            Some("Killed") => TaskStatus::Killed,
-            _ => TaskStatus::Completed,
-        },
+        status: parse_notification_status(notification.status.as_deref()),
         summary: notification.body.clone(),
         result: notification.title.clone(),
         next_action: notification

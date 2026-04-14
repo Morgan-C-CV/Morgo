@@ -113,8 +113,25 @@ pub struct TaskEvent {
 
 impl TaskEvent {
     pub fn format_notification(&self) -> String {
+        if self.output_file.is_empty() {
+            return format!(
+                "<task-notification>\n<task-id>{}</task-id>\n<status>{:?}</status>\n<summary>{}</summary>\n<result>{}</result>\n<next-action>{}</next-action>\n<worker-role>{}</worker-role>\n<orchestration-group>{}</orchestration-group>\n<phase>{}</phase>\n<validation-state>{}</validation-state>\n</task-notification>",
+                self.task_id,
+                self.status,
+                self.summary,
+                self.result,
+                self.next_action,
+                self.worker_role.map(|role| role.as_str()).unwrap_or("none"),
+                self.orchestration_group_id.as_deref().unwrap_or("none"),
+                self.phase.map(|phase| phase.as_str()).unwrap_or("none"),
+                self.validation_state
+                    .map(|state| state.as_str())
+                    .unwrap_or("none")
+            );
+        }
+
         format!(
-            "<task-notification>\n<task-id>{}</task-id>\n<status>{:?}</status>\n<summary>{}</summary>\n<result>{}</result>\n<next-action>{}</next-action>\n<worker-role>{}</worker-role>\n<orchestration-group>{}</orchestration-group>\n<phase>{}</phase>\n<validation-state>{}</validation-state>\n</task-notification>",
+            "<task-notification>\n<task-id>{}</task-id>\n<status>{:?}</status>\n<summary>{}</summary>\n<result>{}</result>\n<next-action>{}</next-action>\n<worker-role>{}</worker-role>\n<orchestration-group>{}</orchestration-group>\n<phase>{}</phase>\n<validation-state>{}</validation-state>\n<output-file>{}</output-file>\n</task-notification>",
             self.task_id,
             self.status,
             self.summary,
@@ -125,7 +142,8 @@ impl TaskEvent {
             self.phase.map(|phase| phase.as_str()).unwrap_or("none"),
             self.validation_state
                 .map(|state| state.as_str())
-                .unwrap_or("none")
+                .unwrap_or("none"),
+            self.output_file,
         )
     }
 }

@@ -288,6 +288,9 @@ fn worker_system_prompt_includes_role_specific_guidance() {
 
     assert!(prompt.contains("You are a verify worker."));
     assert!(prompt.contains("Respect coordinator intent"));
+    assert!(prompt.contains("outcome (completed/failed/killed)"));
+    assert!(prompt.contains("verification stance (verified/unverified plus risk if unverified)"));
+    assert!(prompt.contains("next_action for the coordinator"));
     assert!(prompt.contains("surface=Cli"));
     assert!(prompt.contains("worker_role=verify"));
 }

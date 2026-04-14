@@ -55,7 +55,7 @@ fn build_worker_system_prompt(app_state: &AppState) -> String {
         }
     };
     format!(
-        "{}\nRespect coordinator intent, use only the delegated runtime capabilities, and return concise execution evidence.\nsurface={:?}\nsession_mode={:?}\nruntime_role={:?}\nworker_role={}",
+        "{}\nRespect coordinator intent, use only the delegated runtime capabilities, and return concise execution evidence.\nWhen reporting task completion, always include: outcome (completed/failed/killed), verification stance (verified/unverified plus risk if unverified), and next_action for the coordinator.\nsurface={:?}\nsession_mode={:?}\nruntime_role={:?}\nworker_role={}",
         role_guidance,
         app_state.surface,
         app_state.session_mode,

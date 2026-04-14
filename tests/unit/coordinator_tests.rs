@@ -60,6 +60,7 @@ fn worker_notification_formats_as_task_notification_xml() {
     assert!(formatted.contains("<task-notification>"));
     assert!(formatted.contains("<task-id>task-7</task-id>"));
     assert!(formatted.contains("<summary>Worker finished research</summary>"));
+    assert!(formatted.contains("<output-file>/tmp/task-7.log</output-file>"));
 }
 
 #[test]
@@ -86,10 +87,59 @@ fn notification_conversion_preserves_worker_role_and_next_action() {
 
     let converted = notification_to_task_notification(&notification).expect("should convert");
     assert_eq!(converted.task_id, "task-8");
+    assert_eq!(converted.status, TaskStatus::Completed);
     assert_eq!(converted.next_action, "inspect task output for task-8");
     assert_eq!(converted.worker_role, Some(WorkerRole::Verify));
     assert_eq!(converted.phase, Some(WorkerPhase::Verify));
     assert_eq!(converted.validation_state, Some(ValidationState::Verified));
+}
+
+#[test]
+fn notification_conversion_parses_status_case_insensitively_and_handles_unknown_safely() {
+    let running_lowercase = Notification {
+        session_id: "session-1".into(),
+        title: "Task running".into(),
+        body: "Worker still running".into(),
+        notification_type: NotificationType::TaskUpdate,
+        task_id: Some("task-running".into()),
+        status: Some("running".into()),
+        next_action: None,
+        worker_role: None,
+        orchestration_group_id: None,
+        phase: None,
+        validation_state: None,
+        output_file: None,
+        tool_name: None,
+        notice_kind: None,
+        dedupe_key: None,
+        wake_up: true,
+        target: None,
+    };
+    let unknown_status = Notification {
+        session_id: "session-1".into(),
+        title: "Task state unknown".into(),
+        body: "Worker emitted unknown status".into(),
+        notification_type: NotificationType::TaskUpdate,
+        task_id: Some("task-unknown".into()),
+        status: Some("mystery".into()),
+        next_action: None,
+        worker_role: None,
+        orchestration_group_id: None,
+        phase: None,
+        validation_state: None,
+        output_file: None,
+        tool_name: None,
+        notice_kind: None,
+        dedupe_key: None,
+        wake_up: true,
+        target: None,
+    };
+
+    let running = notification_to_task_notification(&running_lowercase).expect("should convert");
+    let unknown = notification_to_task_notification(&unknown_status).expect("should convert");
+
+    assert_eq!(running.status, TaskStatus::Running);
+    assert_eq!(unknown.status, TaskStatus::Pending);
 }
 
 #[test]
