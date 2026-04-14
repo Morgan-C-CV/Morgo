@@ -33,11 +33,14 @@ pub fn run_hook(registry: &HookRegistry, event: HookEvent) -> HookResult {
     registry.record(event.clone());
 
     let mut result = HookResult::allow();
+    let mut matched_rules = registry
+        .rules()
+        .iter()
+        .filter(|rule| matches_event(&rule.event, &event))
+        .collect::<Vec<_>>();
+    matched_rules.sort_by_key(|rule| rule.layer.precedence());
 
-    for rule in registry.rules() {
-        if !matches_event(&rule.event, &event) {
-            continue;
-        }
+    for rule in matched_rules {
 
         if let Some(message) = &rule.append_message {
             result.messages.push(Message::assistant(message.clone()));
@@ -95,7 +98,6 @@ pub fn run_hook(registry: &HookRegistry, event: HookEvent) -> HookResult {
                     ),
                     _ => format!("hook event denied by policy: {deny_match}"),
                 });
-                return result;
             }
         }
     }

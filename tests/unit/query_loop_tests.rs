@@ -9,7 +9,9 @@ use rust_agent::core::query_loop::{
     Continue, QueryLoopState, QueryParams, Terminal, run_query_loop, run_query_loop_with_params,
 };
 use rust_agent::cost::tracker::CostTracker;
-use rust_agent::hook::registry::{HookEvent, HookEventMatcher, HookRegistry, HookRule};
+use rust_agent::hook::registry::{
+    HookEvent, HookEventMatcher, HookRegistry, HookRule, HookRuleLayer,
+};
 use rust_agent::interaction::dispatcher::NotificationDispatcher;
 use rust_agent::interaction::telegram::gateway::TelegramGateway;
 use rust_agent::service::api::client::{ModelProviderClient, parse_sse_response};
@@ -582,6 +584,7 @@ async fn query_loop_stop_hook_can_prevent_continuation() {
         compactor: ReactiveCompactor,
         hook_registry: HookRegistry::default().register_rule(HookRule {
             event: HookEventMatcher::Stop,
+            layer: HookRuleLayer::Defaults,
             deny_match: None,
             append_message: Some("stop hook appended message".into()),
             prevent_continuation: true,
@@ -660,6 +663,7 @@ async fn query_loop_respects_pre_tool_hook_denial() {
         compactor: ReactiveCompactor,
         hook_registry: HookRegistry::default().register_rule(HookRule {
             event: HookEventMatcher::PreToolUse,
+            layer: HookRuleLayer::Defaults,
             deny_match: Some("Agent".into()),
             append_message: None,
             prevent_continuation: false,
@@ -739,6 +743,7 @@ async fn query_loop_runs_permission_request_hook_before_tool_execution() {
         compactor: ReactiveCompactor,
         hook_registry: HookRegistry::default().register_rule(HookRule {
             event: HookEventMatcher::PermissionRequest,
+            layer: HookRuleLayer::Defaults,
             deny_match: None,
             append_message: Some("permission request observed".into()),
             prevent_continuation: false,
@@ -824,6 +829,7 @@ async fn query_loop_stop_hook_blocking_continues_with_follow_up_turn() {
         compactor: ReactiveCompactor,
         hook_registry: HookRegistry::default().register_rule(HookRule {
             event: HookEventMatcher::Stop,
+            layer: HookRuleLayer::Defaults,
             deny_match: None,
             append_message: Some("stop hook requires revision".into()),
             prevent_continuation: false,
@@ -908,6 +914,7 @@ async fn query_loop_uses_subagent_stop_hook_for_subagent_context() {
         compactor: ReactiveCompactor,
         hook_registry: HookRegistry::default().register_rule(HookRule {
             event: HookEventMatcher::SubagentStop,
+            layer: HookRuleLayer::Defaults,
             deny_match: None,
             append_message: Some("subagent stop appended message".into()),
             prevent_continuation: true,
@@ -1154,6 +1161,7 @@ async fn subagent_context_inherits_parent_tools_and_hooks() {
 
     let parent_hook_registry = HookRegistry::default().register_rule(HookRule {
         event: HookEventMatcher::SubagentStop,
+        layer: HookRuleLayer::Defaults,
         deny_match: None,
         append_message: Some("inherited stop hook".into()),
         prevent_continuation: false,
@@ -2088,6 +2096,7 @@ async fn submit_turn_distinguishes_stop_hook_prevented_and_blocking_runtime_even
         compactor: ReactiveCompactor,
         hook_registry: HookRegistry::default().register_rule(HookRule {
             event: HookEventMatcher::Stop,
+            layer: HookRuleLayer::Defaults,
             deny_match: None,
             append_message: Some("stop hook appended message".into()),
             prevent_continuation: true,
@@ -2145,6 +2154,7 @@ async fn submit_turn_distinguishes_stop_hook_prevented_and_blocking_runtime_even
         compactor: ReactiveCompactor,
         hook_registry: HookRegistry::default().register_rule(HookRule {
             event: HookEventMatcher::Stop,
+            layer: HookRuleLayer::Defaults,
             deny_match: None,
             append_message: Some("stop hook requires revision".into()),
             prevent_continuation: false,

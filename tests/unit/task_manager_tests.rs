@@ -151,6 +151,7 @@ async fn agent_tool_launches_subagent_and_completes_task() {
     let inherited_hooks = rust_agent::hook::registry::HookRegistry::default().register_rule(
         rust_agent::hook::registry::HookRule {
             event: rust_agent::hook::registry::HookEventMatcher::SubagentStop,
+            layer: rust_agent::hook::registry::HookRuleLayer::Defaults,
             deny_match: None,
             append_message: Some("shared hook message".into()),
             prevent_continuation: false,

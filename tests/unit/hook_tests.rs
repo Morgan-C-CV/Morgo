@@ -1,7 +1,9 @@
 use rust_agent::bootstrap::InteractionSurface;
 use rust_agent::core::message::Message;
 use rust_agent::hook::executor::{HookDecision, run_hook};
-use rust_agent::hook::registry::{HookEvent, HookEventMatcher, HookRegistry, HookRule};
+use rust_agent::hook::registry::{
+    HookEvent, HookEventMatcher, HookRegistry, HookRule, HookRuleLayer,
+};
 use rust_agent::interaction::dispatcher::NotificationDispatcher;
 use rust_agent::interaction::notification::{Notification, NotificationType};
 use rust_agent::interaction::telegram::gateway::TelegramGateway;
@@ -49,6 +51,7 @@ fn hook_registry_records_lifecycle_events() {
 fn pre_tool_hook_can_deny_specific_tool() {
     let registry = HookRegistry::default().register_rule(HookRule {
         event: HookEventMatcher::PreToolUse,
+        layer: HookRuleLayer::Defaults,
         deny_match: Some("Agent".into()),
         append_message: None,
         prevent_continuation: false,
@@ -75,6 +78,7 @@ fn pre_tool_hook_can_deny_specific_tool() {
 fn unrelated_tool_is_allowed() {
     let registry = HookRegistry::default().register_rule(HookRule {
         event: HookEventMatcher::PreToolUse,
+        layer: HookRuleLayer::Defaults,
         deny_match: Some("Agent".into()),
         append_message: None,
         prevent_continuation: false,
@@ -98,6 +102,7 @@ fn unrelated_tool_is_allowed() {
 fn hook_rule_can_append_message_and_prevent_continuation() {
     let registry = HookRegistry::default().register_rule(HookRule {
         event: HookEventMatcher::Stop,
+        layer: HookRuleLayer::Defaults,
         deny_match: None,
         append_message: Some("stop hook says wait".into()),
         prevent_continuation: true,
@@ -122,6 +127,7 @@ fn hook_rule_can_append_message_and_prevent_continuation() {
 fn hook_rule_can_block_continuation_without_preventing() {
     let registry = HookRegistry::default().register_rule(HookRule {
         event: HookEventMatcher::Stop,
+        layer: HookRuleLayer::Defaults,
         deny_match: None,
         append_message: Some("stop hook needs revision".into()),
         prevent_continuation: false,
@@ -146,6 +152,7 @@ fn hook_rule_can_block_continuation_without_preventing() {
 fn notification_hook_can_match_typed_payload() {
     let registry = HookRegistry::default().register_rule(HookRule {
         event: HookEventMatcher::Notification,
+        layer: HookRuleLayer::Defaults,
         deny_match: Some("task-9".into()),
         append_message: None,
         prevent_continuation: false,
@@ -198,6 +205,7 @@ fn notification_hook_can_match_typed_payload() {
 fn hook_rule_can_provide_typed_payload() {
     let registry = HookRegistry::default().register_rule(HookRule {
         event: HookEventMatcher::PreToolUse,
+        layer: HookRuleLayer::Defaults,
         deny_match: None,
         append_message: None,
         prevent_continuation: false,
@@ -223,3 +231,46 @@ fn hook_rule_can_provide_typed_payload() {
         Some("extra context")
     );
 }
+
+#[test]
+fn higher_layer_permission_directive_overrides_lower_layer() {
+    let registry = HookRegistry::default()
+        .register_rule(HookRule {
+            event: HookEventMatcher::PreToolUse,
+            layer: HookRuleLayer::Defaults,
+            deny_match: None,
+            append_message: None,
+            prevent_continuation: false,
+            block_continuation: false,
+            permission_decision: Some("ask".into()),
+            updated_input: Some("default-input".into()),
+            additional_context: None,
+        })
+        .register_rule(HookRule {
+            event: HookEventMatcher::PreToolUse,
+            layer: HookRuleLayer::Runtime,
+            deny_match: None,
+            append_message: None,
+            prevent_continuation: false,
+            block_continuation: false,
+            permission_decision: Some("deny".into()),
+            updated_input: Some("runtime-input".into()),
+            additional_context: None,
+        });
+
+    let result = run_hook(
+        &registry,
+        HookEvent::PreToolUse {
+            tool_name: "Read".into(),
+        },
+    );
+
+    assert!(matches!(
+        result.payload.permission_result,
+        rust_agent::hook::output::HookPermissionResult::Deny {
+            updated_input: Some(ref input),
+            ..
+        } if input == "runtime-input"
+    ));
+}
+
