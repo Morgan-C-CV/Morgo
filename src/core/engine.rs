@@ -1,7 +1,5 @@
 use crate::core::context::QueryContext;
-use crate::core::events::{
-    EngineEvent, RuntimeEventEnvelope, RuntimeEventKind, SessionMilestone,
-};
+use crate::core::events::{EngineEvent, RuntimeEventEnvelope, RuntimeEventKind, SessionMilestone};
 use crate::core::message::Message;
 use crate::core::query_loop::{QueryLoopResult, run_query_loop};
 use crate::history::session::{SessionHistoryEntry, SessionId};
@@ -198,14 +196,18 @@ impl QueryEngine {
     }
 }
 
-fn runtime_event_for_transition(transition: &crate::core::query_loop::Continue) -> RuntimeEventEnvelope {
+fn runtime_event_for_transition(
+    transition: &crate::core::query_loop::Continue,
+) -> RuntimeEventEnvelope {
     let kind = match transition {
         crate::core::query_loop::Continue::ReactiveCompactRetry
         | crate::core::query_loop::Continue::CollapseDrainRetry
         | crate::core::query_loop::Continue::MaxOutputTokensEscalate
         | crate::core::query_loop::Continue::MaxOutputTokensRecovery
         | crate::core::query_loop::Continue::ModelFallbackRetry
-        | crate::core::query_loop::Continue::TokenBudgetContinuation => RuntimeEventKind::RetryScheduled,
+        | crate::core::query_loop::Continue::TokenBudgetContinuation => {
+            RuntimeEventKind::RetryScheduled
+        }
         crate::core::query_loop::Continue::StopHookBlocking => RuntimeEventKind::StopHookBlocking,
         crate::core::query_loop::Continue::NextTurn
         | crate::core::query_loop::Continue::ToolUseFollowUp => RuntimeEventKind::NormalTerminal,
@@ -216,7 +218,9 @@ fn runtime_event_for_transition(transition: &crate::core::query_loop::Continue) 
     }
 }
 
-fn runtime_event_for_terminal(terminal: &crate::core::query_loop::Terminal) -> RuntimeEventEnvelope {
+fn runtime_event_for_terminal(
+    terminal: &crate::core::query_loop::Terminal,
+) -> RuntimeEventEnvelope {
     let kind = match terminal {
         crate::core::query_loop::Terminal::Completed => RuntimeEventKind::NormalTerminal,
         crate::core::query_loop::Terminal::StopHookPrevented => RuntimeEventKind::StopHookPrevented,

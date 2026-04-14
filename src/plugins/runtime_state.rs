@@ -142,10 +142,11 @@ pub fn build_runtime_plugin_snapshot(app_state: &AppState) -> RuntimePluginSnaps
         orphaned_governance_entries: plugin_load_result.orphaned_governance_entries.clone(),
     });
 
-    let coordinator_tools = tool_inventory.assemble(crate::tool::registry::ToolAssemblyContext::coordinator(
-        app_state.surface,
-        app_state.session_mode,
-    ));
+    let coordinator_tools =
+        tool_inventory.assemble(crate::tool::registry::ToolAssemblyContext::coordinator(
+            app_state.surface,
+            app_state.session_mode,
+        ));
     let command_registry = Arc::new(build_command_registry(
         app_state,
         plugin_load_result.as_ref(),

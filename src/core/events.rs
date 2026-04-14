@@ -42,7 +42,10 @@ pub struct RuntimeEventEnvelope {
 pub enum EngineEvent {
     AssistantDelta(String),
     MessageCommitted(Message),
-    ToolCallStarted { tool_name: String, input: String },
+    ToolCallStarted {
+        tool_name: String,
+        input: String,
+    },
     ToolResultCommitted {
         tool_name: String,
         content: String,
@@ -58,7 +61,10 @@ pub enum EngineEvent {
         detail: Option<String>,
         report_modifier: ToolReportModifier,
     },
-    Notice { kind: &'static str, message: String },
+    Notice {
+        kind: &'static str,
+        message: String,
+    },
     CompactPlanIssued {
         kind: CompactPlanKind,
         message: String,

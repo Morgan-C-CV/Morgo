@@ -64,20 +64,30 @@ pub struct TaskView {
 pub fn build_surface_view(turn: &CliTurnOutput) -> SurfaceView {
     SurfaceView {
         primary_text: turn.primary_text.clone(),
-        items: turn.events.iter().map(surface_item_from_cli_event).collect(),
+        items: turn
+            .events
+            .iter()
+            .map(surface_item_from_cli_event)
+            .collect(),
     }
 }
 
 pub fn surface_item_from_cli_event(event: &CliDisplayEvent) -> SurfaceItem {
     match event {
-        CliDisplayEvent::TaskEvent(task_event) => SurfaceItem::TaskUpdate(TaskView::from(task_event)),
-        CliDisplayEvent::RuntimeEvent(runtime_event) => surface_item_from_runtime_event(runtime_event),
+        CliDisplayEvent::TaskEvent(task_event) => {
+            SurfaceItem::TaskUpdate(TaskView::from(task_event))
+        }
+        CliDisplayEvent::RuntimeEvent(runtime_event) => {
+            surface_item_from_runtime_event(runtime_event)
+        }
     }
 }
 
 fn surface_item_from_runtime_event(event: &CliRuntimeEvent) -> SurfaceItem {
     match event {
-        CliRuntimeEvent::AssistantDelta { text } => SurfaceItem::AssistantDelta { text: text.clone() },
+        CliRuntimeEvent::AssistantDelta { text } => {
+            SurfaceItem::AssistantDelta { text: text.clone() }
+        }
         CliRuntimeEvent::ToolCallStarted { tool_name, input } => SurfaceItem::ToolCallStarted {
             tool_name: tool_name.clone(),
             input: input.clone(),
@@ -127,10 +137,16 @@ impl SurfaceItem {
     pub fn to_legacy_line(&self) -> String {
         match self {
             Self::TaskUpdate(task) => format!("[task] {} {}", task.task_id, task.summary),
-            Self::ApprovalRequired { tool_name, message, .. } => format!("[approval] {tool_name}: {message}"),
+            Self::ApprovalRequired {
+                tool_name, message, ..
+            } => format!("[approval] {tool_name}: {message}"),
             Self::RuntimeNotice { kind, message } => format!("[notice:{kind}] {message}"),
-            Self::ToolCallStarted { tool_name, input } => format!("[tool-start] {tool_name}: {input}"),
-            Self::ToolResult { tool_name, content, .. } => format!("[tool-result] {tool_name}: {content}"),
+            Self::ToolCallStarted { tool_name, input } => {
+                format!("[tool-start] {tool_name}: {input}")
+            }
+            Self::ToolResult {
+                tool_name, content, ..
+            } => format!("[tool-result] {tool_name}: {content}"),
             Self::AssistantDelta { text } => format!("[delta] {text}"),
             Self::Transition { text, .. } => format!("[transition] {text}"),
             Self::Terminal { text, .. } => format!("[terminal] {text}"),
@@ -249,7 +265,9 @@ pub fn telegram_item_from_surface_item(item: &SurfaceItem) -> Option<TelegramIte
             validation_state: task.validation_state,
             output_file: task.output_file.clone(),
         })),
-        SurfaceItem::ApprovalRequired { tool_name, message, .. } => Some(TelegramItem::ApprovalRequired {
+        SurfaceItem::ApprovalRequired {
+            tool_name, message, ..
+        } => Some(TelegramItem::ApprovalRequired {
             tool_name: tool_name.clone(),
             message: message.clone(),
         }),

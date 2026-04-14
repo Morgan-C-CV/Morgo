@@ -27,8 +27,8 @@ use rust_agent::state::app_state::{AppState, RuntimeRole};
 use rust_agent::state::permission_context::{PermissionMode, ToolPermissionContext};
 use rust_agent::task::manager::TaskManager;
 use rust_agent::tool::builtin::agent::AgentTool;
-use rust_agent::tool::definition::{Tool, ToolCall, ToolMetadata, ToolResult};
 use rust_agent::tool::definition::PermissionDecision;
+use rust_agent::tool::definition::{Tool, ToolCall, ToolMetadata, ToolResult};
 use rust_agent::tool::registry::ToolRegistry;
 
 struct ProgressFixtureTool;
@@ -321,10 +321,12 @@ async fn query_loop_surfaces_progress_record_summary_and_detail() {
                 && message.contains("ProgressFixture in progress")
                 && message.contains("42% complete")
     )));
-    assert!(result.events.iter().any(|event| matches!(
-        event,
-        EngineEvent::Transition(Continue::ToolUseFollowUp)
-    )));
+    assert!(
+        result
+            .events
+            .iter()
+            .any(|event| matches!(event, EngineEvent::Transition(Continue::ToolUseFollowUp)))
+    );
 }
 
 #[tokio::test]
@@ -361,7 +363,12 @@ async fn query_loop_progress_follow_up_uses_aggregated_summary_not_detail() {
     .await;
 
     assert_eq!(result.transition, Some(Continue::ToolUseFollowUp));
-    assert!(result.messages.iter().all(|message| !message.content.contains("42% complete")));
+    assert!(
+        result
+            .messages
+            .iter()
+            .all(|message| !message.content.contains("42% complete"))
+    );
     assert!(result.events.iter().any(|event| matches!(
         event,
         EngineEvent::Notice { kind, message }
@@ -845,10 +852,12 @@ async fn query_loop_stop_hook_blocking_continues_with_follow_up_turn() {
             Message::assistant("stop hook requires revision")
         ]
     );
-    assert!(result.events.iter().any(|event| matches!(
-        event,
-        EngineEvent::Transition(Continue::StopHookBlocking)
-    )));
+    assert!(
+        result
+            .events
+            .iter()
+            .any(|event| matches!(event, EngineEvent::Transition(Continue::StopHookBlocking)))
+    );
     assert!(result.events.iter().any(|event| matches!(
         event,
         EngineEvent::Notice {
@@ -1777,7 +1786,9 @@ async fn coordinator_surfaces_verification_failure_and_missing_verification_risk
 async fn query_loop_retries_with_model_fallback_before_other_stream_recovery() {
     let context = test_context_with_turns(
         vec![
-            vec![StreamEvent::Error("fallback:model_error: upstream overloaded".into())],
+            vec![StreamEvent::Error(
+                "fallback:model_error: upstream overloaded".into(),
+            )],
             vec![
                 StreamEvent::MessageStart,
                 StreamEvent::TextDelta("fallback recovered".into()),
@@ -1799,10 +1810,12 @@ async fn query_loop_retries_with_model_fallback_before_other_stream_recovery() {
     assert_eq!(result.state, QueryLoopState::Completed);
     assert_eq!(result.terminal, Terminal::Completed);
     assert_eq!(result.transition, Some(Continue::ModelFallbackRetry));
-    assert!(result.events.iter().any(|event| matches!(
-        event,
-        EngineEvent::Transition(Continue::ModelFallbackRetry)
-    )));
+    assert!(
+        result
+            .events
+            .iter()
+            .any(|event| matches!(event, EngineEvent::Transition(Continue::ModelFallbackRetry)))
+    );
     assert!(result.events.iter().any(|event| matches!(
         event,
         EngineEvent::Notice {
@@ -1816,8 +1829,12 @@ async fn query_loop_retries_with_model_fallback_before_other_stream_recovery() {
 async fn query_loop_escalates_fallback_failure_to_terminal_model_error() {
     let context = test_context_with_turns(
         vec![
-            vec![StreamEvent::Error("fallback:model_error: upstream overloaded".into())],
-            vec![StreamEvent::Error("fallback:model_error: still failing".into())],
+            vec![StreamEvent::Error(
+                "fallback:model_error: upstream overloaded".into(),
+            )],
+            vec![StreamEvent::Error(
+                "fallback:model_error: still failing".into(),
+            )],
             vec![StreamEvent::Error("residual collapse failure".into())],
             vec![StreamEvent::Error("fatal after retries".into())],
         ],
@@ -1832,7 +1849,10 @@ async fn query_loop_escalates_fallback_failure_to_terminal_model_error() {
     .await;
 
     assert_eq!(result.state, QueryLoopState::Failed);
-    assert_eq!(result.terminal, Terminal::ModelError("fatal after retries".into()));
+    assert_eq!(
+        result.terminal,
+        Terminal::ModelError("fatal after retries".into())
+    );
     assert_eq!(result.transition, Some(Continue::CollapseDrainRetry));
 }
 
@@ -1889,7 +1909,9 @@ async fn query_loop_second_max_tokens_hit_uses_recovery_branch() {
 async fn submit_turn_emits_runtime_events_for_compact_recovery_and_terminal_paths() {
     let engine = QueryEngine::new(test_context_with_turns(
         vec![
-            vec![StreamEvent::Error("fallback:model_error: upstream overloaded".into())],
+            vec![StreamEvent::Error(
+                "fallback:model_error: upstream overloaded".into(),
+            )],
             vec![StreamEvent::Error("still overloaded".into())],
             vec![
                 StreamEvent::MessageStart,
@@ -1902,7 +1924,9 @@ async fn submit_turn_emits_runtime_events_for_compact_recovery_and_terminal_path
         ToolRegistry::new(),
     ));
 
-    let result = engine.submit_turn(Message::user("needs layered recovery")).await;
+    let result = engine
+        .submit_turn(Message::user("needs layered recovery"))
+        .await;
 
     assert_eq!(result.terminal, Terminal::Completed);
     assert!(result.events.iter().any(|event| matches!(

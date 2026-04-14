@@ -1335,9 +1335,7 @@ async fn router_denies_pending_request_without_session_approval() {
 
     assert_eq!(
         result,
-        RouteExecution::CommandResult(CommandResult::Message(
-            "Denied approval for Bash".into()
-        ))
+        RouteExecution::CommandResult(CommandResult::Message("Denied approval for Bash".into()))
     );
     assert_eq!(permission_context.mode(), PermissionMode::Default);
     assert!(permission_context.pending_approval().is_none());
@@ -1721,7 +1719,9 @@ async fn plan_command_handles_status_noop_and_denied_exit() {
     assert!(
         matches!(status, RouteExecution::CommandResult(CommandResult::Message(ref message)) if message.contains("Plan mode is on."))
     );
-    assert!(matches!(status, RouteExecution::CommandResult(CommandResult::Message(ref message)) if message.contains("steps=1")));
+    assert!(
+        matches!(status, RouteExecution::CommandResult(CommandResult::Message(ref message)) if message.contains("steps=1"))
+    );
 
     let show = router
         .route(
@@ -1736,7 +1736,9 @@ async fn plan_command_handles_status_noop_and_denied_exit() {
     assert!(
         matches!(show, RouteExecution::CommandResult(CommandResult::Message(ref message)) if message.contains("Step summary: total=1, completed=0, in_progress=0, pending=1, linked=1, unlinked=0"))
     );
-    assert!(matches!(show, RouteExecution::CommandResult(CommandResult::Message(ref message)) if message.contains(&step.id)));
+    assert!(
+        matches!(show, RouteExecution::CommandResult(CommandResult::Message(ref message)) if message.contains(&step.id))
+    );
     assert!(
         matches!(show, RouteExecution::CommandResult(CommandResult::Message(ref message)) if message.contains("linked task:"))
     );
@@ -1826,9 +1828,7 @@ async fn plan_command_handles_status_noop_and_denied_exit() {
         .expect("plan reorder should succeed");
     assert_eq!(
         reorder,
-        RouteExecution::CommandResult(CommandResult::Message(
-            "Reordered 2 plan steps".into()
-        ))
+        RouteExecution::CommandResult(CommandResult::Message("Reordered 2 plan steps".into()))
     );
     let reordered_state = plan_manager
         .state()
@@ -1846,9 +1846,7 @@ async fn plan_command_handles_status_noop_and_denied_exit() {
         .expect("plan enter in plan mode should no-op");
     assert_eq!(
         no_op,
-        RouteExecution::CommandResult(CommandResult::Message(
-            "Already in plan mode.".into()
-        ))
+        RouteExecution::CommandResult(CommandResult::Message("Already in plan mode.".into()))
     );
 
     let inactive_context = ToolPermissionContext::new(PermissionMode::Default)
@@ -1886,9 +1884,7 @@ async fn plan_command_handles_status_noop_and_denied_exit() {
         .expect("inactive plan exit should resolve");
     assert_eq!(
         denied,
-        RouteExecution::CommandResult(CommandResult::Denied(
-            "Plan mode is not active.".into()
-        ))
+        RouteExecution::CommandResult(CommandResult::Denied("Plan mode is not active.".into()))
     );
 }
 
@@ -1966,9 +1962,7 @@ async fn permissions_command_mutates_mode_and_rule_lists() {
         .expect("duplicate allow should be handled");
     assert_eq!(
         duplicate_result,
-        RouteExecution::CommandResult(CommandResult::Message(
-            "No new allow rules added.".into()
-        ))
+        RouteExecution::CommandResult(CommandResult::Message("No new allow rules added.".into()))
     );
 
     let ask_result = router
@@ -1980,9 +1974,7 @@ async fn permissions_command_mutates_mode_and_rule_lists() {
         .expect("ask update should succeed");
     assert_eq!(
         ask_result,
-        RouteExecution::CommandResult(CommandResult::Message(
-            "Added ask rule(s): WebFetch".into()
-        ))
+        RouteExecution::CommandResult(CommandResult::Message("Added ask rule(s): WebFetch".into()))
     );
     assert_eq!(
         permission_context.always_ask_rules(),
@@ -1998,9 +1990,7 @@ async fn permissions_command_mutates_mode_and_rule_lists() {
         .expect("deny update should succeed");
     assert_eq!(
         deny_result,
-        RouteExecution::CommandResult(CommandResult::Message(
-            "Added deny rule(s): Edit".into()
-        ))
+        RouteExecution::CommandResult(CommandResult::Message("Added deny rule(s): Edit".into()))
     );
     assert_eq!(
         permission_context.always_deny_rules(),

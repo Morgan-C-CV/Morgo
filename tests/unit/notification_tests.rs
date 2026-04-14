@@ -203,7 +203,11 @@ fn surface_and_remote_views_preserve_structured_tool_fields() {
             && detail.as_deref() == Some("line one")
     ));
 
-    let remote_events = view.items.into_iter().map(RemoteEventEnvelope::from).collect::<Vec<_>>();
+    let remote_events = view
+        .items
+        .into_iter()
+        .map(RemoteEventEnvelope::from)
+        .collect::<Vec<_>>();
     assert!(matches!(
         &remote_events[0].payload,
         RemoteEventPayload::ApprovalRequired {
@@ -821,12 +825,18 @@ fn same_surface_view_feeds_remote_telegram_and_web_without_cli_renderer_types() 
     assert_eq!(remote_events.len(), 2);
     assert_eq!(telegram_view.items.len(), 2);
     assert_eq!(web_view.items.len(), 2);
-    assert!(matches!(remote_events[0].payload, RemoteEventPayload::ApprovalRequired { .. }));
+    assert!(matches!(
+        remote_events[0].payload,
+        RemoteEventPayload::ApprovalRequired { .. }
+    ));
     assert!(matches!(
         &telegram_view.items[0],
         rust_agent::interaction::view::TelegramItem::ApprovalRequired { .. }
     ));
-    assert!(matches!(&web_view.items[0], WebItem::ApprovalRequired { .. }));
+    assert!(matches!(
+        &web_view.items[0],
+        WebItem::ApprovalRequired { .. }
+    ));
 }
 
 #[test]

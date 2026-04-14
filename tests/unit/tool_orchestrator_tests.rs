@@ -1,12 +1,17 @@
 use std::sync::Arc;
 
-use rust_agent::state::permission_context::{PermissionMode, ToolPermissionContext};
 use async_trait::async_trait;
+use rust_agent::state::permission_context::{PermissionMode, ToolPermissionContext};
 use rust_agent::tool::builtin::agent::AgentTool;
 use rust_agent::tool::builtin::file_read::FileReadTool;
 use rust_agent::tool::builtin::glob::GlobTool;
-use rust_agent::tool::definition::{InterruptBehavior, ObservableInput, ObservableInputSource, PermissionDecision, Tool, ToolCall, ToolMetadata, ToolResult};
-use rust_agent::tool::orchestrator::{aggregate_execution_records, ToolExecutionRequest, ToolOrchestrator};
+use rust_agent::tool::definition::{
+    InterruptBehavior, ObservableInput, ObservableInputSource, PermissionDecision, Tool, ToolCall,
+    ToolMetadata, ToolResult,
+};
+use rust_agent::tool::orchestrator::{
+    ToolExecutionRequest, ToolOrchestrator, aggregate_execution_records,
+};
 use rust_agent::tool::registry::ToolRegistry;
 use rust_agent::tool::result::{
     ToolBatchContext, ToolExecutionOutcomeKind, ToolExecutionRecord, ToolReportContextModifier,
@@ -239,7 +244,9 @@ impl Tool for ResultTooLargeTool {
         _call: &ToolCall,
         _permissions: &ToolPermissionContext,
     ) -> anyhow::Result<ToolResult> {
-        Ok(ToolResult::ResultTooLarge("result exceeded test limit".into()))
+        Ok(ToolResult::ResultTooLarge(
+            "result exceeded test limit".into(),
+        ))
     }
 }
 
@@ -429,7 +436,10 @@ async fn orchestrator_continues_serial_requests_after_block_denial() {
         })
     );
     assert_eq!(outcomes[1].tool_name, "Passive");
-    assert_eq!(outcomes[1].result, ToolResult::Text("passive executed".into()));
+    assert_eq!(
+        outcomes[1].result,
+        ToolResult::Text("passive executed".into())
+    );
 }
 
 #[tokio::test]
@@ -527,7 +537,10 @@ async fn orchestrator_records_progress_results_in_execution_record() {
 
     assert_eq!(outcomes.len(), 1);
     assert_eq!(outcomes[0].tool_name, "ProgressTool");
-    assert_eq!(outcomes[0].result, ToolResult::Progress("still running".into()));
+    assert_eq!(
+        outcomes[0].result,
+        ToolResult::Progress("still running".into())
+    );
     assert_eq!(outcomes[0].record.kind, ToolExecutionOutcomeKind::Progress);
     assert_eq!(outcomes[0].record.summary, "ProgressTool in progress");
     assert_eq!(outcomes[0].record.detail, Some("still running".into()));
@@ -581,7 +594,10 @@ async fn orchestrator_records_pending_approval_results_in_execution_record() {
         outcomes[0].record.detail,
         Some("approval required by test policy".into())
     );
-    assert_eq!(outcomes[0].record.report_modifier, ToolReportModifier::Pending);
+    assert_eq!(
+        outcomes[0].record.report_modifier,
+        ToolReportModifier::Pending
+    );
 }
 
 #[tokio::test]
@@ -797,7 +813,10 @@ fn aggregate_execution_records_keeps_pending_batches_out_of_continue_message() {
         report.summary,
         "Read succeeded; PendingApprovalTool pending approval"
     );
-    assert_eq!(report.detail.as_deref(), Some("alpha\napproval required by test policy"));
+    assert_eq!(
+        report.detail.as_deref(),
+        Some("alpha\napproval required by test policy")
+    );
     assert_eq!(
         report.context_modifier,
         ToolReportContextModifier::SetPendingToolUseSummary(
@@ -846,7 +865,10 @@ fn aggregate_execution_records_escalates_multiple_attention_records() {
         report.summary,
         "Bash denied; ResultTooLargeTool result too large"
     );
-    assert_eq!(report.detail.as_deref(), Some("blocked\nresult exceeded test limit"));
+    assert_eq!(
+        report.detail.as_deref(),
+        Some("blocked\nresult exceeded test limit")
+    );
     assert_eq!(
         report.context_modifier,
         ToolReportContextModifier::SetPendingToolUseSummary(

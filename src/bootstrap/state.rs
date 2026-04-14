@@ -40,8 +40,11 @@ pub enum BootstrapPhase {
     AssembleTools,
     Setup,
     InitializeRuntime,
+    InitializeSettings,
     AugmentPrompt,
     GateUserAccess,
+    WarmupAndConvergence,
+    AssembleAppState,
     FinalizeState,
 }
 

@@ -135,7 +135,9 @@ impl AppState {
 
     pub fn apply_restored_session(&mut self, restored_session: Option<RestoredSession>) {
         self.restored_session = restored_session.clone();
-        self.session = restored_session.as_ref().map(|restored| restored.snapshot.clone());
+        self.session = restored_session
+            .as_ref()
+            .map(|restored| restored.snapshot.clone());
         self.history = restored_session.map(|restored| restored.history);
     }
 

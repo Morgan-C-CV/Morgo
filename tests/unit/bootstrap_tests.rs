@@ -6,18 +6,16 @@ use rust_agent::bootstrap::{
     RuntimeBootstrap, SessionMode, SessionSource, UserAccessDecision, is_tui_exit_input,
     tui_clear_screen_prefix,
 };
-use rust_agent::state::app_state::{AppState, AppStateRuntimeChange, RuntimeRole};
-use rust_agent::state::permission_context::{PermissionMode, ToolPermissionContext};
-use rust_agent::state::store::AppStateStore;
 use rust_agent::core::message::Message;
-use rust_agent::history::resume::{
-    RestoreRequest, RestoreSource, resolve_session_state,
-};
+use rust_agent::history::resume::{RestoreRequest, RestoreSource, resolve_session_state};
 use rust_agent::history::session::{
     FileBackedSessionStore, InMemorySessionStore, SessionHistory, SessionHistoryEntry, SessionId,
     SessionRestoreRequest, SessionSnapshot, SessionStore,
 };
 use rust_agent::hook::registry::{HookConfigSource, HookEvent, load_hook_registry};
+use rust_agent::state::app_state::{AppState, AppStateRuntimeChange, RuntimeRole};
+use rust_agent::state::permission_context::{PermissionMode, ToolPermissionContext};
+use rust_agent::state::store::AppStateStore;
 use rust_agent::task::list_types::{TaskListItem, TaskListSnapshot, TaskListStatus};
 use rust_agent::tool::registry::ToolAssemblyContext;
 
@@ -92,6 +90,138 @@ fn bootstrap_state_records_phase_order() {
         state.startup_trace(),
         "DetectSurface -> ResolvePermissions -> FinalizeState"
     );
+}
+
+#[test]
+fn bootstrap_phase_sequence_includes_all_phases() {
+    let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::Interactive, false);
+
+    // Simulate full bootstrap sequence
+    state.record_phase(BootstrapPhase::DetectSurface);
+    state.record_phase(BootstrapPhase::InjectSessionMetadata);
+    state.record_phase(BootstrapPhase::ResolvePermissions);
+    state.record_phase(BootstrapPhase::BuildToolContext);
+    state.record_phase(BootstrapPhase::AssembleTools);
+    state.record_phase(BootstrapPhase::Setup);
+    state.record_phase(BootstrapPhase::InitializeRuntime);
+    state.record_phase(BootstrapPhase::InitializeSettings);
+    state.record_phase(BootstrapPhase::AugmentPrompt);
+    state.record_phase(BootstrapPhase::GateUserAccess);
+    state.record_phase(BootstrapPhase::WarmupAndConvergence);
+    state.record_phase(BootstrapPhase::AssembleAppState);
+    state = state.finalize();
+
+    let trace = state.startup_trace();
+
+    // Verify all phases are present in order
+    assert!(trace.contains("DetectSurface"));
+    assert!(trace.contains("InjectSessionMetadata"));
+    assert!(trace.contains("ResolvePermissions"));
+    assert!(trace.contains("BuildToolContext"));
+    assert!(trace.contains("AssembleTools"));
+    assert!(trace.contains("Setup"));
+    assert!(trace.contains("InitializeRuntime"));
+    assert!(trace.contains("InitializeSettings"));
+    assert!(trace.contains("AugmentPrompt"));
+    assert!(trace.contains("GateUserAccess"));
+    assert!(trace.contains("WarmupAndConvergence"));
+    assert!(trace.contains("AssembleAppState"));
+    assert!(trace.contains("FinalizeState"));
+
+    // Verify phases appear in correct order
+    let detect_pos = trace.find("DetectSurface").unwrap();
+    let settings_pos = trace.find("InitializeSettings").unwrap();
+    let warmup_pos = trace.find("WarmupAndConvergence").unwrap();
+    let assemble_pos = trace.find("AssembleAppState").unwrap();
+    let finalize_pos = trace.find("FinalizeState").unwrap();
+
+    assert!(detect_pos < settings_pos);
+    assert!(settings_pos < warmup_pos);
+    assert!(warmup_pos < assemble_pos);
+    assert!(assemble_pos < finalize_pos);
+}
+
+#[test]
+fn cli_telegram_remote_share_core_runtime_initialization() {
+    // All surfaces should produce identical tool pools for core tools,
+    // but may differ on surface-specific filtering (interactive/deferred/open-world)
+
+    let cli_tools =
+        initialized_tool_names(InteractionSurface::Cli, SessionMode::Interactive, false);
+    let telegram_tools = initialized_tool_names(
+        InteractionSurface::Telegram,
+        SessionMode::Interactive,
+        false,
+    );
+    let remote_tools =
+        initialized_tool_names(InteractionSurface::Remote, SessionMode::Interactive, false);
+
+    // Core non-interactive tools should be present in all surfaces
+    let core_tools = [
+        "Agent",
+        "Read",
+        "Edit",
+        "Glob",
+        "Grep",
+        "TaskCreate",
+        "TaskList",
+    ];
+    for tool in core_tools {
+        assert!(cli_tools.contains(&tool), "CLI missing {}", tool);
+        assert!(telegram_tools.contains(&tool), "Telegram missing {}", tool);
+        assert!(remote_tools.contains(&tool), "Remote missing {}", tool);
+    }
+
+    // Bash is interactive/open-world, may be filtered on some surfaces
+    assert!(cli_tools.contains(&"Bash"), "CLI should have Bash");
+
+    // Mcp/WebFetch/WebSearch are deferred/open-world, may be filtered on bot surfaces
+    assert!(cli_tools.contains(&"Mcp"), "CLI should have Mcp");
+    assert!(cli_tools.contains(&"WebFetch"), "CLI should have WebFetch");
+    assert!(
+        cli_tools.contains(&"WebSearch"),
+        "CLI should have WebSearch"
+    );
+
+    // Telegram filters interactive/deferred/open-world tools - this is intentional
+    assert!(
+        !telegram_tools.contains(&"Bash"),
+        "Telegram should filter Bash (interactive)"
+    );
+    assert!(
+        !telegram_tools.contains(&"Mcp"),
+        "Telegram should filter Mcp (deferred/open-world)"
+    );
+    assert!(
+        !telegram_tools.contains(&"WebFetch"),
+        "Telegram should filter WebFetch (deferred/open-world)"
+    );
+    assert!(
+        !telegram_tools.contains(&"WebSearch"),
+        "Telegram should filter WebSearch (deferred/open-world)"
+    );
+}
+
+#[test]
+fn surface_init_respects_session_mode_consistently() {
+    // Headless mode should filter interactive tools consistently across all surfaces
+
+    let cli_headless =
+        initialized_tool_names(InteractionSurface::Cli, SessionMode::Headless, false);
+    let telegram_headless =
+        initialized_tool_names(InteractionSurface::Telegram, SessionMode::Headless, false);
+    let remote_headless =
+        initialized_tool_names(InteractionSurface::Remote, SessionMode::Headless, false);
+
+    // All surfaces should apply same headless filtering
+    assert_eq!(cli_headless, telegram_headless);
+    assert_eq!(cli_headless, remote_headless);
+
+    // Agent should be visible (always_load)
+    assert!(cli_headless.contains(&"Agent"));
+
+    // Interactive tools should be filtered in headless
+    // (This depends on actual metadata - adjust based on real behavior)
 }
 
 #[test]
@@ -200,8 +330,16 @@ fn app_state_classifies_runtime_visible_changes() {
 
     let change_set = AppState::classify_runtime_changes(&previous, &current);
 
-    assert!(change_set.changes.contains(&AppStateRuntimeChange::PermissionChanged));
-    assert!(change_set.changes.contains(&AppStateRuntimeChange::SurfaceBindingChanged));
+    assert!(
+        change_set
+            .changes
+            .contains(&AppStateRuntimeChange::PermissionChanged)
+    );
+    assert!(
+        change_set
+            .changes
+            .contains(&AppStateRuntimeChange::SurfaceBindingChanged)
+    );
 }
 
 #[test]
@@ -428,11 +566,8 @@ fn augment_prompt_depends_on_input_state_without_mutating_store() {
 
 #[test]
 fn initialize_runtime_matrix_locks_surface_mode_env_flag_visibility() {
-    let cli_interactive = initialized_tool_names(
-        InteractionSurface::Cli,
-        SessionMode::Interactive,
-        false,
-    );
+    let cli_interactive =
+        initialized_tool_names(InteractionSurface::Cli, SessionMode::Interactive, false);
     assert!(cli_interactive.contains(&"Read"));
     assert!(cli_interactive.contains(&"Agent"));
     assert!(cli_interactive.contains(&"Bash"));
@@ -440,11 +575,8 @@ fn initialize_runtime_matrix_locks_surface_mode_env_flag_visibility() {
     assert!(cli_interactive.contains(&"WebFetch"));
     assert!(cli_interactive.contains(&"Mcp"));
 
-    let cli_headless = initialized_tool_names(
-        InteractionSurface::Cli,
-        SessionMode::Headless,
-        false,
-    );
+    let cli_headless =
+        initialized_tool_names(InteractionSurface::Cli, SessionMode::Headless, false);
     assert!(cli_headless.contains(&"Read"));
     assert!(cli_headless.contains(&"Agent"));
     assert!(!cli_headless.contains(&"Bash"));
@@ -452,11 +584,8 @@ fn initialize_runtime_matrix_locks_surface_mode_env_flag_visibility() {
     assert!(!cli_headless.contains(&"WebFetch"));
     assert!(!cli_headless.contains(&"Mcp"));
 
-    let remote_interactive = initialized_tool_names(
-        InteractionSurface::Remote,
-        SessionMode::Interactive,
-        false,
-    );
+    let remote_interactive =
+        initialized_tool_names(InteractionSurface::Remote, SessionMode::Interactive, false);
     assert!(remote_interactive.contains(&"Read"));
     assert!(remote_interactive.contains(&"Agent"));
     assert!(remote_interactive.contains(&"AskUserQuestion"));
@@ -465,11 +594,8 @@ fn initialize_runtime_matrix_locks_surface_mode_env_flag_visibility() {
     assert!(!remote_interactive.contains(&"WebFetch"));
     assert!(!remote_interactive.contains(&"Mcp"));
 
-    let cli_init_only = initialized_tool_names(
-        InteractionSurface::Cli,
-        SessionMode::InitOnly,
-        true,
-    );
+    let cli_init_only =
+        initialized_tool_names(InteractionSurface::Cli, SessionMode::InitOnly, true);
     assert!(cli_init_only.contains(&"Read"));
     assert!(cli_init_only.contains(&"Agent"));
     assert!(!cli_init_only.contains(&"Bash"));
@@ -506,7 +632,8 @@ fn gate_user_access_matches_cli_remote_and_telegram_expectations() {
         }
     );
 
-    let remote_state = BootstrapState::new(InteractionSurface::Remote, SessionMode::Interactive, false);
+    let remote_state =
+        BootstrapState::new(InteractionSurface::Remote, SessionMode::Interactive, false);
     let remote_input = rust_agent::interaction::envelope::NormalizedInput::from_remote_raw(
         "session-remote",
         "actor-a",
@@ -514,9 +641,18 @@ fn gate_user_access_matches_cli_remote_and_telegram_expectations() {
         true,
         "/permissions",
     );
-    assert_eq!(runtime.gate_user_access(&remote_state, Some(&remote_input)).allowed, false);
+    assert_eq!(
+        runtime
+            .gate_user_access(&remote_state, Some(&remote_input))
+            .allowed,
+        false
+    );
 
-    let telegram_state = BootstrapState::new(InteractionSurface::Telegram, SessionMode::Interactive, false);
+    let telegram_state = BootstrapState::new(
+        InteractionSurface::Telegram,
+        SessionMode::Interactive,
+        false,
+    );
     let telegram_input = rust_agent::interaction::envelope::NormalizedInput::from_session_raw(
         InteractionSurface::Telegram,
         "session-telegram",
@@ -651,9 +787,15 @@ fn finalize_runtime_state_is_single_writeback_entrypoint() {
         resolved.active_session_id(),
     );
 
-    assert_eq!(finalized.app_state.active_session_id, resolved.active_session_id());
+    assert_eq!(
+        finalized.app_state.active_session_id,
+        resolved.active_session_id()
+    );
     assert_eq!(finalized.store.generation(), 0);
-    assert_eq!(finalized.engine.context.system_prompt, prompts.system_prompt);
+    assert_eq!(
+        finalized.engine.context.system_prompt,
+        prompts.system_prompt
+    );
     assert_eq!(
         finalized.engine.context.tools_prompt,
         rust_agent::prompt::tools::build_tools_prompt(
@@ -661,7 +803,10 @@ fn finalize_runtime_state_is_single_writeback_entrypoint() {
             &finalized.app_state.permission_context,
         )
     );
-    assert_eq!(finalized.engine.context.context_prompt, prompts.context_prompt);
+    assert_eq!(
+        finalized.engine.context.context_prompt,
+        prompts.context_prompt
+    );
 }
 
 #[tokio::test]
@@ -750,7 +895,8 @@ fn initialize_runtime_tracks_surface_mode_visibility_matrix() {
         surface: "cli".into(),
     });
 
-    let mut cli_state = BootstrapState::new(InteractionSurface::Cli, SessionMode::Interactive, false);
+    let mut cli_state =
+        BootstrapState::new(InteractionSurface::Cli, SessionMode::Interactive, false);
     cli_state.current_cwd = std::env::current_dir().expect("cwd available");
     let cli_bundle = runtime.initialize_runtime(
         &cli_state,
@@ -773,7 +919,8 @@ fn initialize_runtime_tracks_surface_mode_visibility_matrix() {
     assert!(cli_names.contains(&"Agent"));
     assert!(cli_names.contains(&"WebSearch"));
 
-    let mut remote_state = BootstrapState::new(InteractionSurface::Remote, SessionMode::Interactive, false);
+    let mut remote_state =
+        BootstrapState::new(InteractionSurface::Remote, SessionMode::Interactive, false);
     remote_state.current_cwd = std::env::current_dir().expect("cwd available");
     let remote_bundle = runtime.initialize_runtime(
         &remote_state,

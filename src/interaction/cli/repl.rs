@@ -10,8 +10,13 @@ use crate::task::types::TaskEvent;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CliRuntimeEvent {
-    AssistantDelta { text: String },
-    ToolCallStarted { tool_name: String, input: String },
+    AssistantDelta {
+        text: String,
+    },
+    ToolCallStarted {
+        tool_name: String,
+        input: String,
+    },
     ToolResult {
         tool_name: String,
         content: String,
@@ -24,10 +29,19 @@ pub enum CliRuntimeEvent {
         summary: Option<String>,
         detail: Option<String>,
     },
-    Notice { kind: String, message: String },
-    Transition { text: String },
-    Terminal { text: String },
-    SessionMilestone { text: String },
+    Notice {
+        kind: String,
+        message: String,
+    },
+    Transition {
+        text: String,
+    },
+    Terminal {
+        text: String,
+    },
+    SessionMilestone {
+        text: String,
+    },
 }
 
 impl CliRuntimeEvent {
@@ -37,10 +51,14 @@ impl CliRuntimeEvent {
             Self::ToolCallStarted { tool_name, input } => {
                 format!("[tool-start] {tool_name}: {input}")
             }
-            Self::ToolResult { tool_name, content, .. } => {
+            Self::ToolResult {
+                tool_name, content, ..
+            } => {
                 format!("[tool-result] {tool_name}: {content}")
             }
-            Self::PendingApproval { tool_name, message, .. } => {
+            Self::PendingApproval {
+                tool_name, message, ..
+            } => {
                 format!("[approval] {tool_name}: {message}")
             }
             Self::Notice { kind, message } => format!("[notice:{kind}] {message}"),
@@ -100,7 +118,9 @@ pub async fn handle_normalized_input(
     let route_result = router.route(&input, app_state).await?;
     let (persisted_messages, runtime_events, engine_persisted) = match route_result {
         RouteExecution::CommandResult(command_result) => match command_result {
-            CommandResult::Message(message) => (vec![Message::assistant(message)], Vec::new(), false),
+            CommandResult::Message(message) => {
+                (vec![Message::assistant(message)], Vec::new(), false)
+            }
             CommandResult::Prompt(prompt) => (vec![Message::assistant(prompt)], Vec::new(), false),
             CommandResult::ContinueToQuery => {
                 let (messages, events) =
@@ -229,12 +249,16 @@ async fn collect_stream_messages(
             }
             EngineEvent::CompactPlanIssued { kind, message } => {
                 runtime_events.push(CliRuntimeEvent::Notice {
-                    kind: format!("compact:{}", match kind {
-                        crate::service::compact::CompactPlanKind::AutoCompact => "auto",
-                        crate::service::compact::CompactPlanKind::ReactiveCompact => "reactive",
-                        crate::service::compact::CompactPlanKind::CollapseDrain => "collapse_drain",
-                        crate::service::compact::CompactPlanKind::Exhausted => "exhausted",
-                    }),
+                    kind: format!(
+                        "compact:{}",
+                        match kind {
+                            crate::service::compact::CompactPlanKind::AutoCompact => "auto",
+                            crate::service::compact::CompactPlanKind::ReactiveCompact => "reactive",
+                            crate::service::compact::CompactPlanKind::CollapseDrain =>
+                                "collapse_drain",
+                            crate::service::compact::CompactPlanKind::Exhausted => "exhausted",
+                        }
+                    ),
                     message,
                 });
             }

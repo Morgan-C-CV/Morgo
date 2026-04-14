@@ -785,24 +785,21 @@ fn always_load_overrides_defer_but_not_interactive_gating() {
 
 #[test]
 fn combined_always_load_defer_and_interactive_flags_follow_context() {
-    let registry = ToolRegistry::new().register(metadata_fixture(
-        "HybridFixture",
-        true,
-        true,
-        true,
-        false,
-    ));
+    let registry =
+        ToolRegistry::new().register(metadata_fixture("HybridFixture", true, true, true, false));
 
     let coordinator = registry.assemble(ToolAssemblyContext::coordinator(
         rust_agent::bootstrap::InteractionSurface::Cli,
         rust_agent::bootstrap::SessionMode::Interactive,
     ));
     let coordinator_names = coordinator
-        .visible_tools(&ToolAssemblyContext::coordinator(
-            rust_agent::bootstrap::InteractionSurface::Cli,
-            rust_agent::bootstrap::SessionMode::Interactive,
+        .visible_tools(
+            &ToolAssemblyContext::coordinator(
+                rust_agent::bootstrap::InteractionSurface::Cli,
+                rust_agent::bootstrap::SessionMode::Interactive,
+            )
+            .permission_context(PermissionMode::Default),
         )
-        .permission_context(PermissionMode::Default))
         .iter()
         .map(|tool| tool.name)
         .collect::<Vec<_>>();
@@ -813,11 +810,13 @@ fn combined_always_load_defer_and_interactive_flags_follow_context() {
         rust_agent::bootstrap::SessionMode::Headless,
     ));
     let worker_names = worker
-        .visible_tools(&ToolAssemblyContext::worker(
-            rust_agent::bootstrap::InteractionSurface::Cli,
-            rust_agent::bootstrap::SessionMode::Headless,
+        .visible_tools(
+            &ToolAssemblyContext::worker(
+                rust_agent::bootstrap::InteractionSurface::Cli,
+                rust_agent::bootstrap::SessionMode::Headless,
+            )
+            .permission_context(PermissionMode::Default),
         )
-        .permission_context(PermissionMode::Default))
         .iter()
         .map(|tool| tool.name)
         .collect::<Vec<_>>();
@@ -839,11 +838,10 @@ fn real_builtin_metadata_flags_follow_runtime_context() {
         SessionMode::Interactive,
     ));
     let cli_interactive_names = cli_interactive
-        .visible_tools(&ToolAssemblyContext::coordinator(
-            InteractionSurface::Cli,
-            SessionMode::Interactive,
+        .visible_tools(
+            &ToolAssemblyContext::coordinator(InteractionSurface::Cli, SessionMode::Interactive)
+                .permission_context(PermissionMode::Default),
         )
-        .permission_context(PermissionMode::Default))
         .iter()
         .map(|tool| tool.name)
         .collect::<Vec<_>>();
@@ -859,11 +857,10 @@ fn real_builtin_metadata_flags_follow_runtime_context() {
         SessionMode::Interactive,
     ));
     let remote_interactive_names = remote_interactive
-        .visible_tools(&ToolAssemblyContext::coordinator(
-            InteractionSurface::Remote,
-            SessionMode::Interactive,
+        .visible_tools(
+            &ToolAssemblyContext::coordinator(InteractionSurface::Remote, SessionMode::Interactive)
+                .permission_context(PermissionMode::Default),
         )
-        .permission_context(PermissionMode::Default))
         .iter()
         .map(|tool| tool.name)
         .collect::<Vec<_>>();
@@ -878,11 +875,10 @@ fn real_builtin_metadata_flags_follow_runtime_context() {
         SessionMode::Headless,
     ));
     let cli_headless_names = cli_headless
-        .visible_tools(&ToolAssemblyContext::coordinator(
-            InteractionSurface::Cli,
-            SessionMode::Headless,
+        .visible_tools(
+            &ToolAssemblyContext::coordinator(InteractionSurface::Cli, SessionMode::Headless)
+                .permission_context(PermissionMode::Default),
         )
-        .permission_context(PermissionMode::Default))
         .iter()
         .map(|tool| tool.name)
         .collect::<Vec<_>>();
@@ -909,11 +905,10 @@ fn real_builtin_worker_assembly_excludes_interactive_and_open_world_tools() {
         SessionMode::Headless,
     ));
     let names = worker
-        .visible_tools(&ToolAssemblyContext::worker(
-            InteractionSurface::Cli,
-            SessionMode::Headless,
+        .visible_tools(
+            &ToolAssemblyContext::worker(InteractionSurface::Cli, SessionMode::Headless)
+                .permission_context(PermissionMode::Default),
         )
-        .permission_context(PermissionMode::Default))
         .iter()
         .map(|tool| tool.name)
         .collect::<Vec<_>>();

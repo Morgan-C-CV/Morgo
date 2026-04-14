@@ -3,7 +3,9 @@ use std::sync::Arc;
 use crate::bootstrap::{InteractionSurface, SessionMode};
 use crate::state::app_state::RuntimeRole;
 use crate::state::permission_context::ToolPermissionContext;
-use crate::tool::definition::{InterruptBehavior, ObservableInput, Tool, ToolCall, ToolMetadata, ToolResult};
+use crate::tool::definition::{
+    InterruptBehavior, ObservableInput, Tool, ToolCall, ToolMetadata, ToolResult,
+};
 use crate::tool::permission::{evaluate_tool_permission, is_tool_allowed};
 
 #[derive(Clone, Default)]
@@ -69,7 +71,10 @@ impl ToolAssemblyContext {
         }
     }
 
-    pub fn permission_context(&self, mode: crate::state::permission_context::PermissionMode) -> ToolPermissionContext {
+    pub fn permission_context(
+        &self,
+        mode: crate::state::permission_context::PermissionMode,
+    ) -> ToolPermissionContext {
         ToolPermissionContext::new(mode)
             .with_active_surface(self.surface)
             .with_deferred_tools(self.include_deferred_tools)
@@ -128,7 +133,8 @@ impl ToolRegistry {
     }
 
     pub fn assemble(&self, context: ToolAssemblyContext) -> Self {
-        let permissions = context.permission_context(crate::state::permission_context::PermissionMode::Default);
+        let permissions =
+            context.permission_context(crate::state::permission_context::PermissionMode::Default);
         let tools = self
             .tools
             .iter()

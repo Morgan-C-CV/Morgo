@@ -1,5 +1,7 @@
 use crate::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
-use crate::history::session::{SessionHistory, SessionId, SessionRestoreRequest, SessionSnapshot, SessionStore};
+use crate::history::session::{
+    SessionHistory, SessionId, SessionRestoreRequest, SessionSnapshot, SessionStore,
+};
 use crate::history::transcript::Transcript;
 use std::path::Path;
 

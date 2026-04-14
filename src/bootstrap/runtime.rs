@@ -23,17 +23,17 @@ use crate::interaction::cli::renderer::{
 use crate::interaction::cli::repl::{CliTurnOutput, handle_cli_input};
 use crate::interaction::dispatcher::NotificationDispatcher;
 use crate::interaction::envelope::NormalizedInput;
-use crate::interaction::router::CommandRouter;
 use crate::interaction::remote::{
     RemoteRequest, handle_remote_request, render_remote_response_debug,
 };
+use crate::interaction::router::CommandRouter;
 use crate::interaction::telegram::gateway::TelegramGateway;
 use crate::plan::manager::PlanManager;
-use crate::plugins::runtime_state::RuntimePluginSnapshot;
 use crate::plugins::loader::load_plugins;
 use crate::plugins::runtime::{
     augment_hook_registry_with_plugins, augment_tool_registry_with_plugins,
 };
+use crate::plugins::runtime_state::RuntimePluginSnapshot;
 use crate::plugins::runtime_state::{
     RuntimePluginState, build_runtime_plugin_snapshot, build_turn_engine, build_turn_router,
     hydrate_app_state_from_snapshot,
@@ -41,20 +41,20 @@ use crate::plugins::runtime_state::{
 use crate::plugins::types::{
     PluginDefinition, PluginDiagnostic, PluginDiagnosticSeverity, PluginLifecycleState,
 };
+use crate::security::authorizer::{AuthDecision, DefaultSurfaceAuthorizer, SurfaceAuthorizer};
 use crate::service::api::client::{
     ModelPricing, ModelProviderClient, ModelProviderConfig, ProviderTimeout,
 };
 use crate::service::api::retry::RetryPolicy;
 use crate::service::compact::reactive_compact::ReactiveCompactor;
 use crate::service::mcp::config::load_server_configs_with_diagnostics;
-use crate::security::authorizer::{AuthDecision, DefaultSurfaceAuthorizer, SurfaceAuthorizer};
 use crate::service::mcp::runtime::McpRuntime;
 use crate::skills::bundled::bundled_skills;
 use crate::skills::loader::SkillLoaderCache;
 use crate::skills::registry::SkillRegistry;
 use crate::state::app_state::{AppState, RuntimeRole};
-use crate::state::store::AppStateStore;
 use crate::state::permission_context::{PermissionMode, ToolPermissionContext};
+use crate::state::store::AppStateStore;
 use crate::task::list_manager::TaskListManager;
 use crate::task::manager::TaskManager;
 use crate::tool::builtin::{
@@ -167,7 +167,10 @@ impl std::fmt::Debug for RuntimeInitializeBundle {
             .field("skill_registry", &self.skill_registry)
             .field("mcp_runtime", &self.mcp_runtime)
             .field("plugin_load_result", &self.plugin_load_result)
-            .field("coordinator_tool_count", &self.coordinator_tools.all_metadata().len())
+            .field(
+                "coordinator_tool_count",
+                &self.coordinator_tools.all_metadata().len(),
+            )
             .field("command_count", &self.command_registry.names().len())
             .field("provider_config", &self.provider_config)
             .finish_non_exhaustive()
@@ -206,7 +209,8 @@ impl RuntimeBootstrap {
         state.current_cwd = setup.working_directory.clone();
 
         let restore_request = self.restore_request();
-        let resolved_session = self.resolve_bootstrap_session_state(&state, restore_request.as_ref());
+        let resolved_session =
+            self.resolve_bootstrap_session_state(&state, restore_request.as_ref());
         self.session_store.save(
             resolved_session.snapshot.clone(),
             resolved_session.history.clone(),
@@ -241,6 +245,11 @@ impl RuntimeBootstrap {
             plan_manager.clone(),
         );
 
+        state.record_phase(BootstrapPhase::InitializeSettings);
+        // Phase 7: settings/model/agent initialization
+        // Currently model config is static from env/CLI, but this phase reserves
+        // the seam for dynamic model switching and agent definition loading
+
         state.record_phase(BootstrapPhase::AugmentPrompt);
         let prompt_seed_state = self.build_runtime_seed_state(
             &state,
@@ -261,6 +270,14 @@ impl RuntimeBootstrap {
             );
         }
 
+        state.record_phase(BootstrapPhase::WarmupAndConvergence);
+        // Phase 10: warmup & MCP convergence
+        // MCP runtime is already initialized in initialize_bundle
+        // Plugin sync happens via RuntimePluginState in finalize_runtime_state
+        // This phase marks the boundary before final state assembly
+
+        state.record_phase(BootstrapPhase::AssembleAppState);
+        // Phase 11: AppState/Store assembly
         let state = state.finalize();
         let finalized = self.finalize_runtime_state(
             &state,
@@ -495,22 +512,23 @@ impl RuntimeBootstrap {
         let runtime_tool_registry = Arc::new(RwLock::new(coordinator_tools.clone()));
         let notification_dispatcher = NotificationDispatcher::new(self.build_telegram_gateway())
             .with_hook_registry(hook_registry.clone());
-        let permission_context = ToolAssemblyContext::coordinator(state.surface, state.session_mode)
-            .permission_context(if self.cli.init_only {
-                PermissionMode::Plan
-            } else {
-                PermissionMode::Default
-            })
-            .with_task_manager(task_manager)
-            .with_task_list_manager(task_list_manager)
-            .with_plan_manager(plan_manager)
-            .with_skill_registry(skill_registry.clone())
-            .with_mcp_runtime(mcp_runtime.clone())
-            .with_active_session_id(active_session_id)
-            .with_active_surface(state.surface)
-            .with_notification_dispatcher(notification_dispatcher.clone())
-            .with_inherited_tool_registry(coordinator_tools.clone())
-            .with_inherited_hook_registry(hook_registry.clone());
+        let permission_context =
+            ToolAssemblyContext::coordinator(state.surface, state.session_mode)
+                .permission_context(if self.cli.init_only {
+                    PermissionMode::Plan
+                } else {
+                    PermissionMode::Default
+                })
+                .with_task_manager(task_manager)
+                .with_task_list_manager(task_list_manager)
+                .with_plan_manager(plan_manager)
+                .with_skill_registry(skill_registry.clone())
+                .with_mcp_runtime(mcp_runtime.clone())
+                .with_active_session_id(active_session_id)
+                .with_active_surface(state.surface)
+                .with_notification_dispatcher(notification_dispatcher.clone())
+                .with_inherited_tool_registry(coordinator_tools.clone())
+                .with_inherited_hook_registry(hook_registry.clone());
         let app_state = AppState {
             surface: state.surface,
             session_mode: state.session_mode,

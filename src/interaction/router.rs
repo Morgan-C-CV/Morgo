@@ -30,10 +30,7 @@ pub enum QuerySource {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RouteDecision {
     ExecuteCommand(RoutedCommand),
-    EnterQuery {
-        prompt: String,
-        source: QuerySource,
-    },
+    EnterQuery { prompt: String, source: QuerySource },
     ApprovalResponse { approved: bool },
     Deny(String),
 }
@@ -41,10 +38,7 @@ pub enum RouteDecision {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RouteExecution {
     CommandResult(CommandResult),
-    EnterQuery {
-        prompt: String,
-        source: QuerySource,
-    },
+    EnterQuery { prompt: String, source: QuerySource },
 }
 
 use std::sync::Arc;
@@ -103,10 +97,12 @@ impl CommandRouter {
                 match (routed.policy.command_type, result) {
                     (CommandType::Prompt, CommandResult::Prompt(prompt)) => {
                         if routed.policy.disable_model_invocation {
-                            Ok(RouteExecution::CommandResult(CommandResult::Denied(format!(
-                                "command {} cannot invoke the model on this surface",
-                                routed.name
-                            ))))
+                            Ok(RouteExecution::CommandResult(CommandResult::Denied(
+                                format!(
+                                    "command {} cannot invoke the model on this surface",
+                                    routed.name
+                                ),
+                            )))
                         } else {
                             Ok(RouteExecution::EnterQuery {
                                 prompt,
@@ -123,9 +119,9 @@ impl CommandRouter {
             RouteDecision::EnterQuery { prompt, source } => {
                 Ok(RouteExecution::EnterQuery { prompt, source })
             }
-            RouteDecision::Deny(reason) => Ok(RouteExecution::CommandResult(CommandResult::Denied(
-                reason,
-            ))),
+            RouteDecision::Deny(reason) => {
+                Ok(RouteExecution::CommandResult(CommandResult::Denied(reason)))
+            }
         }
     }
 

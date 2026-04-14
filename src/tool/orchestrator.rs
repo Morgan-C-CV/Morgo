@@ -2,8 +2,8 @@ use crate::state::permission_context::ToolPermissionContext;
 use crate::tool::definition::{InterruptBehavior, ToolCall, ToolResult};
 use crate::tool::registry::ToolRegistry;
 use crate::tool::result::{
-    ToolExecutionOutcomeKind, ToolExecutionRecord, ToolExecutionReport,
-    ToolReportContextModifier, ToolReportModifier,
+    ToolExecutionOutcomeKind, ToolExecutionRecord, ToolExecutionReport, ToolReportContextModifier,
+    ToolReportModifier,
 };
 use std::sync::Arc;
 
@@ -188,9 +188,14 @@ pub fn aggregate_execution_records(records: &[ToolExecutionRecord]) -> Option<To
     let first = records.first()?;
     if records.len() == 1 {
         let context_modifier = match first.kind {
-            ToolExecutionOutcomeKind::Success => ToolReportContextModifier::ContinueWithUserMessage(
-                first.detail.clone().unwrap_or_else(|| first.summary.clone()),
-            ),
+            ToolExecutionOutcomeKind::Success => {
+                ToolReportContextModifier::ContinueWithUserMessage(
+                    first
+                        .detail
+                        .clone()
+                        .unwrap_or_else(|| first.summary.clone()),
+                )
+            }
             ToolExecutionOutcomeKind::Progress
             | ToolExecutionOutcomeKind::PendingApproval
             | ToolExecutionOutcomeKind::Denied
@@ -211,18 +216,28 @@ pub fn aggregate_execution_records(records: &[ToolExecutionRecord]) -> Option<To
     let has_non_success = records
         .iter()
         .any(|record| record.kind != ToolExecutionOutcomeKind::Success);
-    let report_modifier = records.iter().fold(ToolReportModifier::None, |current, record| {
-        aggregate_report_modifier(current, &record.report_modifier)
-    });
+    let report_modifier = records
+        .iter()
+        .fold(ToolReportModifier::None, |current, record| {
+            aggregate_report_modifier(current, &record.report_modifier)
+        });
     let summaries = records
         .iter()
         .map(|record| record.summary.clone())
         .collect::<Vec<_>>();
     let details = records
         .iter()
-        .map(|record| record.detail.clone().unwrap_or_else(|| record.summary.clone()))
+        .map(|record| {
+            record
+                .detail
+                .clone()
+                .unwrap_or_else(|| record.summary.clone())
+        })
         .collect::<Vec<_>>();
-    let summary = if summaries.iter().all(|summary| summary.ends_with("succeeded")) {
+    let summary = if summaries
+        .iter()
+        .all(|summary| summary.ends_with("succeeded"))
+    {
         format!("{} tool results", records.len())
     } else {
         summaries.join("; ")

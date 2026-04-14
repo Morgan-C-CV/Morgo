@@ -37,7 +37,9 @@ impl ReactiveCompactor {
     ) -> CompactPlan {
         if !has_attempted_reactive_compact {
             let detail = error
-                .map(|value| format!("reactive compact retry triggered after stream error: {value}"))
+                .map(|value| {
+                    format!("reactive compact retry triggered after stream error: {value}")
+                })
                 .unwrap_or_else(|| "stream stop error triggered reactive compact retry".into());
             return CompactPlan {
                 kind: CompactPlanKind::ReactiveCompact,
@@ -50,7 +52,9 @@ impl ReactiveCompactor {
 
         if !has_attempted_collapse_drain {
             let detail = error
-                .map(|value| format!("collapse drain retry triggered after repeated stream error: {value}"))
+                .map(|value| {
+                    format!("collapse drain retry triggered after repeated stream error: {value}")
+                })
                 .unwrap_or_else(|| "draining collapsed context before final model error".into());
             return CompactPlan {
                 kind: CompactPlanKind::CollapseDrain,

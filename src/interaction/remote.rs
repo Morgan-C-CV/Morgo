@@ -6,10 +6,10 @@ use crate::history::resume::{
     resolved_from_snapshot,
 };
 use crate::interaction::cli::repl::handle_normalized_input;
-use crate::interaction::view::{SurfaceItem, SurfaceView, TaskView, build_surface_view};
 use crate::interaction::envelope::NormalizedInput;
 use crate::interaction::notification::{Notification, NotificationTarget, NotificationType};
 use crate::interaction::router::CommandRouter;
+use crate::interaction::view::{SurfaceItem, SurfaceView, TaskView, build_surface_view};
 use crate::state::app_state::AppState;
 use crate::state::permission_context::PendingApproval;
 use crate::task::types::TaskEvent;
@@ -45,18 +45,34 @@ pub enum RemoteEventPayload {
         summary: Option<String>,
         detail: Option<String>,
     },
-    RuntimeNotice { kind: String, message: String },
-    ToolCallStarted { tool_name: String, input: String },
+    RuntimeNotice {
+        kind: String,
+        message: String,
+    },
+    ToolCallStarted {
+        tool_name: String,
+        input: String,
+    },
     ToolResult {
         tool_name: String,
         content: String,
         summary: Option<String>,
         detail: Option<String>,
     },
-    AssistantDelta { text: String },
-    Transition { kind: String, text: String },
-    Terminal { kind: String, text: String },
-    SessionMilestone { kind: String },
+    AssistantDelta {
+        text: String,
+    },
+    Transition {
+        kind: String,
+        text: String,
+    },
+    Terminal {
+        kind: String,
+        text: String,
+    },
+    SessionMilestone {
+        kind: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -178,7 +194,11 @@ pub async fn handle_remote_request(
 
     Ok(RemoteResponse {
         primary_text: view.primary_text,
-        events: view.items.into_iter().map(RemoteEventEnvelope::from).collect(),
+        events: view
+            .items
+            .into_iter()
+            .map(RemoteEventEnvelope::from)
+            .collect(),
     })
 }
 
@@ -361,17 +381,17 @@ fn notification_from_surface_item(
 ) -> Option<Notification> {
     match item {
         SurfaceItem::TaskUpdate(_) => None,
-        SurfaceItem::ApprovalRequired { tool_name, message, .. } => {
-            Some(notification_from_pending_approval(
-                &input.session_id,
-                &input.actor.actor_id,
-                PendingApproval {
-                    tool_name: tool_name.clone(),
-                    tool_input: String::new(),
-                    message: message.clone(),
-                },
-            ))
-        }
+        SurfaceItem::ApprovalRequired {
+            tool_name, message, ..
+        } => Some(notification_from_pending_approval(
+            &input.session_id,
+            &input.actor.actor_id,
+            PendingApproval {
+                tool_name: tool_name.clone(),
+                tool_input: String::new(),
+                message: message.clone(),
+            },
+        )),
         SurfaceItem::RuntimeNotice { kind, message } => {
             let mut notification = Notification::runtime_notice(
                 input.session_id.clone(),
@@ -481,10 +501,7 @@ pub fn render_remote_response_debug(response: &RemoteResponse) -> String {
                 write!(
                     &mut output,
                     "tool_name={} message={} summary={:?} detail={:?}",
-                    tool_name,
-                    message,
-                    summary,
-                    detail
+                    tool_name, message, summary, detail
                 )
                 .expect("write approval event");
             }
@@ -505,10 +522,7 @@ pub fn render_remote_response_debug(response: &RemoteResponse) -> String {
                 write!(
                     &mut output,
                     "tool_name={} content={} summary={:?} detail={:?}",
-                    tool_name,
-                    content,
-                    summary,
-                    detail
+                    tool_name, content, summary, detail
                 )
                 .expect("write tool result event");
             }

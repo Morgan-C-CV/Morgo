@@ -308,7 +308,10 @@ fn prepare_turn(
         return Err(result);
     }
 
-    if let Some(plan) = context.compactor.plan_auto_compact(prepared.token_estimate, 4096) {
+    if let Some(plan) = context
+        .compactor
+        .plan_auto_compact(prepared.token_estimate, 4096)
+    {
         if let Some(compact_message) = plan.assistant_message.clone() {
             let compact_message = Message::assistant(compact_message);
             events.push(EngineEvent::CompactPlanIssued {
@@ -662,7 +665,9 @@ async fn consume_model_stream(
                                 state: state.clone(),
                                 events: engine_events,
                                 decision: TurnDecision::ContinueWith(
-                                    Message::user(plan.retry_prompt.expect("collapse drain prompt")),
+                                    Message::user(
+                                        plan.retry_prompt.expect("collapse drain prompt"),
+                                    ),
                                     Continue::CollapseDrainRetry,
                                 ),
                             };
@@ -678,7 +683,9 @@ async fn consume_model_stream(
                                 ),
                             };
                         }
-                        CompactPlanKind::AutoCompact => unreachable!("auto compact is pre-stream only"),
+                        CompactPlanKind::AutoCompact => {
+                            unreachable!("auto compact is pre-stream only")
+                        }
                     }
                 }
             },
@@ -746,7 +753,10 @@ async fn consume_model_stream(
                         return TurnOutcome {
                             state: state.clone(),
                             events: engine_events,
-                            decision: TurnDecision::Return(state.clone(), Terminal::ModelError(error)),
+                            decision: TurnDecision::Return(
+                                state.clone(),
+                                Terminal::ModelError(error),
+                            ),
                         };
                     }
                     CompactPlanKind::AutoCompact => unreachable!("auto compact is pre-stream only"),
@@ -913,7 +923,10 @@ async fn execute_tool_phase(
     match tool_result {
         Ok(outcomes) => {
             let report = aggregate_execution_records(
-                &outcomes.iter().map(|outcome| outcome.record.clone()).collect::<Vec<_>>(),
+                &outcomes
+                    .iter()
+                    .map(|outcome| outcome.record.clone())
+                    .collect::<Vec<_>>(),
             );
             match outcomes.into_iter().next() {
                 Some(ToolExecutionOutcome { result, record, .. }) => {
@@ -1001,18 +1014,23 @@ async fn execute_tool_phase(
                                 "tool {tool_name} result missing; synthesized denial result preserved"
                             ));
                             engine_events.push(EngineEvent::MessageCommitted(denial.clone()));
-                            engine_events.push(EngineEvent::MessageCommitted(
-                                missing_tool_result.clone(),
-                            ));
+                            engine_events
+                                .push(EngineEvent::MessageCommitted(missing_tool_result.clone()));
                             state.messages.push(denial);
                             state.messages.push(missing_tool_result);
                             TurnOutcome {
                                 state: state.clone(),
                                 events: engine_events,
-                                decision: TurnDecision::Return(state.clone(), Terminal::AbortedTools),
+                                decision: TurnDecision::Return(
+                                    state.clone(),
+                                    Terminal::AbortedTools,
+                                ),
                             }
                         }
-                        crate::tool::definition::ToolResult::PendingApproval { tool_name, message } => {
+                        crate::tool::definition::ToolResult::PendingApproval {
+                            tool_name,
+                            message,
+                        } => {
                             let pending_message = record.detail.clone().unwrap_or(message.clone());
                             context
                                 .app_state
@@ -1042,7 +1060,10 @@ async fn execute_tool_phase(
                             TurnOutcome {
                                 state: state.clone(),
                                 events: engine_events,
-                                decision: TurnDecision::Return(state.clone(), Terminal::AbortedTools),
+                                decision: TurnDecision::Return(
+                                    state.clone(),
+                                    Terminal::AbortedTools,
+                                ),
                             }
                         }
                         crate::tool::definition::ToolResult::Interrupted(_reason) => {
@@ -1057,7 +1078,10 @@ async fn execute_tool_phase(
                             TurnOutcome {
                                 state: state.clone(),
                                 events: engine_events,
-                                decision: TurnDecision::Return(state.clone(), Terminal::AbortedTools),
+                                decision: TurnDecision::Return(
+                                    state.clone(),
+                                    Terminal::AbortedTools,
+                                ),
                             }
                         }
                         crate::tool::definition::ToolResult::Progress(_progress) => {
@@ -1087,7 +1111,10 @@ async fn execute_tool_phase(
                             TurnOutcome {
                                 state: state.clone(),
                                 events: engine_events,
-                                decision: TurnDecision::Return(state.clone(), Terminal::AbortedTools),
+                                decision: TurnDecision::Return(
+                                    state.clone(),
+                                    Terminal::AbortedTools,
+                                ),
                             }
                         }
                     }
@@ -1137,11 +1164,17 @@ async fn execute_tool_phase(
 }
 
 fn record_detail_or_summary(record: &ToolExecutionRecord) -> String {
-    record.detail.clone().unwrap_or_else(|| record.summary.clone())
+    record
+        .detail
+        .clone()
+        .unwrap_or_else(|| record.summary.clone())
 }
 
 fn report_detail_or_summary(report: &ToolExecutionReport) -> String {
-    report.detail.clone().unwrap_or_else(|| report.summary.clone())
+    report
+        .detail
+        .clone()
+        .unwrap_or_else(|| report.summary.clone())
 }
 
 fn apply_tool_report_context(state: &mut LoopState, report: &ToolExecutionReport) {
@@ -1233,7 +1266,9 @@ fn finalize_normal_turn(
         .permission_context
         .task_manager
         .as_ref()
-        .is_some_and(|manager| manager.has_pending_orchestration(&context.app_state.active_session_id))
+        .is_some_and(|manager| {
+            manager.has_pending_orchestration(&context.app_state.active_session_id)
+        })
     {
         let gating_message = Message::assistant(
             "orchestration still pending: wait for grouped research fan-in or verification before final synthesis",
@@ -1344,7 +1379,7 @@ impl QueryLoopStateExt for QueryLoopState {
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_tool_report_context, report_detail_or_summary, LoopState, QueryParams};
+    use super::{LoopState, QueryParams, apply_tool_report_context, report_detail_or_summary};
     use crate::tool::result::{ToolExecutionReport, ToolReportContextModifier, ToolReportModifier};
 
     #[test]
@@ -1375,7 +1410,10 @@ mod tests {
 
         apply_tool_report_context(&mut state, &report);
 
-        assert_eq!(state.pending_tool_use_summary.as_deref(), Some("alpha\nbeta"));
+        assert_eq!(
+            state.pending_tool_use_summary.as_deref(),
+            Some("alpha\nbeta")
+        );
     }
 
     #[test]
