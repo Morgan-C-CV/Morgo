@@ -24,7 +24,7 @@ use rust_agent::interaction::view::{
     SurfaceItem, WebItem, build_surface_view, build_telegram_view, build_web_view,
     surface_item_from_cli_event,
 };
-use rust_agent::task::types::{TaskEvent, TaskOwner, TaskStatus};
+use rust_agent::task::types::{TaskEvent, TaskOwner, TaskStatus, TaskUsageSummary};
 
 #[test]
 fn dispatcher_records_cli_notifications() {
@@ -42,6 +42,7 @@ fn dispatcher_records_cli_notifications() {
         phase: Some("research".into()),
         validation_state: Some("not_needed".into()),
         output_file: Some("/tmp/task-1.log".into()),
+        usage: None,
         tool_name: None,
         notice_kind: None,
         dedupe_key: None,
@@ -74,6 +75,7 @@ fn dispatcher_records_notification_hook_payloads_for_all_notification_types() {
             None,
             None,
             "/tmp/task-7.log",
+            None,
         ),
     );
     dispatcher.dispatch(
@@ -179,6 +181,7 @@ fn cli_renderer_marks_task_event_lines() {
             phase: None,
             validation_state: None,
             output_file: "/tmp/task-1.log".into(),
+            usage: None,
         })],
     });
 
@@ -214,6 +217,7 @@ fn cli_renderer_surfaces_implement_verify_and_risk_contract_lines() {
                 phase: Some(rust_agent::task::types::WorkerPhase::Implement),
                 validation_state: Some(rust_agent::task::types::ValidationState::PendingVerification),
                 output_file: "/tmp/task-2.log".into(),
+                usage: None,
             }),
             CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::Notice {
                 kind: "validation".into(),
@@ -369,6 +373,7 @@ fn cli_renderer_keeps_primary_text_before_mixed_panels_in_order() {
                     rust_agent::task::types::ValidationState::PendingVerification,
                 ),
                 output_file: "/tmp/task-3.log".into(),
+                usage: None,
             }),
             CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::ToolResult {
                 tool_name: "Read".into(),
@@ -650,6 +655,14 @@ fn remote_delivery_mode_classifies_dual_channel_and_response_only_surface_items(
         phase: None,
         validation_state: None,
         output_file: "/tmp/task-1.log".into(),
+        usage: Some(TaskUsageSummary {
+            requests: 1,
+            input_tokens: 10,
+            output_tokens: 5,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+            estimated_cost_micros_usd: 42,
+        }),
     });
     assert_eq!(
         remote_channel_kind_for_surface_item(&task_item),
@@ -753,6 +766,14 @@ fn remote_event_envelope_preserves_structured_task_payload() {
         phase: Some(rust_agent::task::types::WorkerPhase::Verify),
         validation_state: Some(rust_agent::task::types::ValidationState::Verified),
         output_file: "/tmp/task-1.log".into(),
+        usage: Some(TaskUsageSummary {
+            requests: 2,
+            input_tokens: 20,
+            output_tokens: 8,
+            cache_creation_input_tokens: 3,
+            cache_read_input_tokens: 4,
+            estimated_cost_micros_usd: 88,
+        }),
     });
     let envelope = RemoteEventEnvelope::from(surface_item_from_cli_event(&event));
 
@@ -765,6 +786,14 @@ fn remote_event_envelope_preserves_structured_task_payload() {
                 && task.worker_role == Some("verify")
                 && task.phase == Some("verify")
                 && task.validation_state == Some("verified")
+                && task.usage == Some(TaskUsageSummary {
+                    requests: 2,
+                    input_tokens: 20,
+                    output_tokens: 8,
+                    cache_creation_input_tokens: 3,
+                    cache_read_input_tokens: 4,
+                    estimated_cost_micros_usd: 88,
+                })
     ));
 }
 
@@ -1029,6 +1058,7 @@ fn remote_task_update_notifications_use_dedupe_key() {
         None,
         None,
         "/tmp/task-1.log",
+        None,
     );
     session_notification.dedupe_key = Some("task_update:remote-session:task-1:completed".into());
     dispatcher.dispatch(InteractionSurface::Remote, session_notification);
@@ -1045,6 +1075,7 @@ fn remote_task_update_notifications_use_dedupe_key() {
         None,
         None,
         "/tmp/task-1.log",
+        None,
     );
     actor_notification.dedupe_key = Some("task_update:remote-session:task-1:completed".into());
     actor_notification.target = Some(NotificationTarget::RemoteActor {
@@ -1131,6 +1162,7 @@ fn dispatcher_requires_delivery_ready_binding_for_telegram() {
         phase: Some("verify".into()),
         validation_state: Some("verified".into()),
         output_file: Some("/tmp/task-1.log".into()),
+        usage: None,
         tool_name: None,
         notice_kind: None,
         dedupe_key: None,
@@ -1157,6 +1189,7 @@ fn dispatcher_requires_delivery_ready_binding_for_telegram() {
             phase: Some("verify".into()),
             validation_state: Some("verified".into()),
             output_file: Some("/tmp/task-1.log".into()),
+            usage: None,
             tool_name: None,
             notice_kind: None,
             dedupe_key: None,

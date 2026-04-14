@@ -10,6 +10,44 @@ pub struct CostTracker {
     default_model_id: Arc<RwLock<String>>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CostSnapshot {
+    pub requests: usize,
+    pub input_tokens: usize,
+    pub output_tokens: usize,
+    pub cache_creation_input_tokens: usize,
+    pub cache_read_input_tokens: usize,
+    pub estimated_cost_micros_usd: u64,
+}
+
+impl CostSnapshot {
+    pub fn delta_since(&self, before: &Self) -> Self {
+        Self {
+            requests: self.requests.saturating_sub(before.requests),
+            input_tokens: self.input_tokens.saturating_sub(before.input_tokens),
+            output_tokens: self.output_tokens.saturating_sub(before.output_tokens),
+            cache_creation_input_tokens: self
+                .cache_creation_input_tokens
+                .saturating_sub(before.cache_creation_input_tokens),
+            cache_read_input_tokens: self
+                .cache_read_input_tokens
+                .saturating_sub(before.cache_read_input_tokens),
+            estimated_cost_micros_usd: self
+                .estimated_cost_micros_usd
+                .saturating_sub(before.estimated_cost_micros_usd),
+        }
+    }
+
+    pub fn has_usage(&self) -> bool {
+        self.requests > 0
+            || self.input_tokens > 0
+            || self.output_tokens > 0
+            || self.cache_creation_input_tokens > 0
+            || self.cache_read_input_tokens > 0
+            || self.estimated_cost_micros_usd > 0
+    }
+}
+
 impl Default for CostTracker {
     fn default() -> Self {
         Self::with_default_pricing("default-model".into(), ModelPricing::default())
@@ -95,6 +133,18 @@ impl CostTracker {
         model_usage.cache_creation_input_tokens += cache_creation_input_tokens;
         model_usage.cache_read_input_tokens += cache_read_input_tokens;
         model_usage.estimated_cost_usd += estimated_cost_usd;
+    }
+
+    pub fn snapshot(&self) -> CostSnapshot {
+        let state = self.inner.read().expect("cost tracker poisoned");
+        CostSnapshot {
+            requests: state.requests,
+            input_tokens: state.input_tokens,
+            output_tokens: state.output_tokens,
+            cache_creation_input_tokens: state.cache_creation_input_tokens,
+            cache_read_input_tokens: state.cache_read_input_tokens,
+            estimated_cost_micros_usd: (state.estimated_cost_usd * 1_000_000.0).round() as u64,
+        }
     }
 
     pub fn format_report(&self) -> String {

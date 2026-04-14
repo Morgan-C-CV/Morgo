@@ -1,4 +1,5 @@
 use crate::interaction::telegram::binding::TelegramDeliveryTarget;
+use crate::task::types::TaskUsageSummary;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NotificationType {
@@ -33,6 +34,7 @@ pub struct Notification {
     pub phase: Option<String>,
     pub validation_state: Option<String>,
     pub output_file: Option<String>,
+    pub usage: Option<TaskUsageSummary>,
     pub tool_name: Option<String>,
     pub notice_kind: Option<String>,
     pub dedupe_key: Option<String>,
@@ -53,6 +55,7 @@ impl Notification {
         phase: Option<&str>,
         validation_state: Option<&str>,
         output_file: impl Into<String>,
+        usage: Option<TaskUsageSummary>,
     ) -> Self {
         Self {
             session_id: session_id.into(),
@@ -67,6 +70,7 @@ impl Notification {
             phase: phase.map(str::to_string),
             validation_state: validation_state.map(str::to_string),
             output_file: Some(output_file.into()),
+            usage,
             tool_name: None,
             notice_kind: None,
             dedupe_key: None,
@@ -96,6 +100,7 @@ impl Notification {
             phase: None,
             validation_state: None,
             output_file: None,
+            usage: None,
             tool_name: Some(tool_name),
             notice_kind: None,
             dedupe_key: Some(dedupe_key),
@@ -125,6 +130,7 @@ impl Notification {
             phase: None,
             validation_state: None,
             output_file: None,
+            usage: None,
             tool_name: None,
             notice_kind: Some(kind),
             dedupe_key: Some(dedupe_key),

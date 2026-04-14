@@ -12,7 +12,7 @@ use crate::interaction::router::CommandRouter;
 use crate::interaction::view::{SurfaceItem, SurfaceView, TaskView, build_surface_view};
 use crate::state::app_state::AppState;
 use crate::state::permission_context::PendingApproval;
-use crate::task::types::TaskEvent;
+use crate::task::types::{TaskEvent, TaskUsageSummary};
 use std::fmt::Write as _;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -158,6 +158,7 @@ pub struct RemoteTaskEvent {
     pub phase: Option<&'static str>,
     pub validation_state: Option<&'static str>,
     pub output_file: String,
+    pub usage: Option<TaskUsageSummary>,
 }
 
 // Current remote delivery contract:
@@ -291,6 +292,7 @@ impl From<TaskEvent> for RemoteTaskEvent {
             phase: value.phase.map(|phase| phase.as_str()),
             validation_state: value.validation_state.map(|state| state.as_str()),
             output_file: value.output_file,
+            usage: value.usage,
         }
     }
 }
@@ -308,6 +310,7 @@ impl From<TaskView> for RemoteTaskEvent {
             phase: value.phase,
             validation_state: value.validation_state,
             output_file: value.output_file,
+            usage: value.usage,
         }
     }
 }
@@ -332,6 +335,7 @@ impl From<Notification> for RemoteNotificationEnvelope {
                     phase: notification.phase.map(leak_string),
                     validation_state: notification.validation_state.map(leak_string),
                     output_file: notification.output_file.unwrap_or_default(),
+                    usage: notification.usage,
                 }),
             },
             NotificationType::ApprovalRequired => Self {

@@ -53,6 +53,7 @@ fn worker_notification_formats_as_task_notification_xml() {
         phase: None,
         validation_state: None,
         output_file: "/tmp/task-7.log".into(),
+        usage: None,
     };
 
     let notification = TaskNotification::from_task_event(&event);
@@ -78,6 +79,7 @@ fn notification_conversion_preserves_worker_role_and_next_action() {
         phase: Some("verify".into()),
         validation_state: Some("verified".into()),
         output_file: Some("/tmp/task-8.log".into()),
+        usage: None,
         tool_name: None,
         notice_kind: None,
         dedupe_key: None,
@@ -109,6 +111,7 @@ fn notification_conversion_parses_status_case_insensitively_and_handles_unknown_
         phase: None,
         validation_state: None,
         output_file: None,
+        usage: None,
         tool_name: None,
         notice_kind: None,
         dedupe_key: None,
@@ -128,6 +131,7 @@ fn notification_conversion_parses_status_case_insensitively_and_handles_unknown_
         phase: None,
         validation_state: None,
         output_file: None,
+        usage: None,
         tool_name: None,
         notice_kind: None,
         dedupe_key: None,
@@ -224,6 +228,7 @@ fn task_notification_contract_marks_implement_completion_for_verify_follow_up() 
         phase: Some(WorkerPhase::Implement),
         validation_state: Some(ValidationState::PendingVerification),
         output_file: "/tmp/task-9.log".into(),
+        usage: None,
     };
 
     let notification = TaskNotification::from_task_event(&event);
@@ -263,6 +268,7 @@ fn task_notification_contract_marks_verify_completion_for_validated_synthesis() 
         phase: Some(WorkerPhase::Verify),
         validation_state: Some(ValidationState::Verified),
         output_file: "/tmp/task-10.log".into(),
+        usage: None,
     };
 
     let notification = TaskNotification::from_task_event(&event);

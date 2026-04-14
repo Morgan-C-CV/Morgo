@@ -49,6 +49,7 @@ impl TaskNotification {
             phase: self.phase,
             validation_state: self.validation_state,
             output_file: self.output_file.clone(),
+            usage: None,
         }
         .format_notification()
     }

@@ -176,6 +176,7 @@ fn notification_hook_can_match_typed_payload() {
         phase: Some("research".into()),
         validation_state: Some("not_needed".into()),
         output_file: Some("/tmp/task-9.log".into()),
+        usage: None,
         tool_name: None,
         notice_kind: None,
         dedupe_key: None,

@@ -11,7 +11,7 @@ use crate::interaction::notification::Notification;
 use crate::task::output_store::TaskOutputStore;
 use crate::task::types::{
     TaskDeliveryState, TaskEvent, TaskOutputSlice, TaskOwner, TaskRecord, TaskStatus,
-    ValidationState, WorkerPhase,
+    TaskUsageSummary, ValidationState, WorkerPhase,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -285,11 +285,35 @@ impl TaskManager {
     }
 
     pub fn complete(&self, id: &str, dispatcher: &NotificationDispatcher) {
-        self.finish(id, TaskStatus::Completed, "Task completed", dispatcher);
+        self.complete_with_usage(id, dispatcher, None);
+    }
+
+    pub fn complete_with_usage(
+        &self,
+        id: &str,
+        dispatcher: &NotificationDispatcher,
+        usage: Option<TaskUsageSummary>,
+    ) {
+        self.finish(
+            id,
+            TaskStatus::Completed,
+            "Task completed",
+            dispatcher,
+            usage,
+        );
     }
 
     pub fn fail(&self, id: &str, dispatcher: &NotificationDispatcher) {
-        self.finish(id, TaskStatus::Failed, "Task failed", dispatcher);
+        self.fail_with_usage(id, dispatcher, None);
+    }
+
+    pub fn fail_with_usage(
+        &self,
+        id: &str,
+        dispatcher: &NotificationDispatcher,
+        usage: Option<TaskUsageSummary>,
+    ) {
+        self.finish(id, TaskStatus::Failed, "Task failed", dispatcher, usage);
     }
 
     pub fn kill(
@@ -315,7 +339,7 @@ impl TaskManager {
         {
             handle.abort();
         }
-        self.finish(id, TaskStatus::Killed, "Task killed", dispatcher);
+        self.finish(id, TaskStatus::Killed, "Task killed", dispatcher, None);
         true
     }
 
@@ -491,6 +515,7 @@ impl TaskManager {
         status: TaskStatus,
         title: &str,
         dispatcher: &NotificationDispatcher,
+        usage: Option<TaskUsageSummary>,
     ) {
         self.clear_running_handle(id);
         let mut barrier_candidate = None;
@@ -521,6 +546,7 @@ impl TaskManager {
                 phase: task.phase,
                 validation_state: task.validation_state,
                 output_file: task.output_file.clone(),
+                usage: usage.clone(),
             };
             self.enqueue_task_event(event.clone());
             let notification = self.dispatch_task_notification(title, &event, dispatcher);
@@ -550,6 +576,7 @@ impl TaskManager {
                     phase: None,
                     validation_state: None,
                     output_file,
+                    usage: None,
                 };
                 self.enqueue_task_event(event.clone());
                 let _ = self.dispatch_task_notification("Task group completed", &event, dispatcher);
@@ -660,6 +687,7 @@ impl TaskManager {
             event.phase.map(|phase| phase.as_str()),
             event.validation_state.map(|state| state.as_str()),
             event.output_file.clone(),
+            event.usage.clone(),
         );
         if matches!(
             event.owner.surface,

@@ -11,6 +11,7 @@ use crate::interaction::telegram::gateway::TelegramGateway;
 use crate::service::compact::reactive_compact::ReactiveCompactor;
 use crate::state::app_state::{AppState, RuntimeRole, WorkerRole};
 use crate::state::permission_context::ToolPermissionContext;
+use crate::task::types::TaskUsageSummary;
 use crate::tool::definition::{Tool, ToolCall, ToolMetadata, ToolResult};
 use crate::tool::registry::ToolRegistry;
 
@@ -187,9 +188,20 @@ fn launch_agent_task(
     tasks.launch(&launched_task_id.clone(), task_input.clone(), async move {
         let mut params = QueryParams::default();
         params.max_turns = request.max_turns;
+        let usage_before = query_context.app_state.cost_tracker.snapshot();
         let result =
             run_query_loop_with_params(&query_context, Message::user(task_input.clone()), params)
                 .await;
+        let usage_after = query_context.app_state.cost_tracker.snapshot();
+        let usage_delta = usage_after.delta_since(&usage_before);
+        let usage_summary = usage_delta.has_usage().then_some(TaskUsageSummary {
+            requests: usage_delta.requests,
+            input_tokens: usage_delta.input_tokens,
+            output_tokens: usage_delta.output_tokens,
+            cache_creation_input_tokens: usage_delta.cache_creation_input_tokens,
+            cache_read_input_tokens: usage_delta.cache_read_input_tokens,
+            estimated_cost_micros_usd: usage_delta.estimated_cost_micros_usd,
+        });
 
         if result.messages.is_empty() {
             tasks_for_run.append_output(&launched_task_id, "subagent produced no output");
@@ -203,9 +215,9 @@ fn launch_agent_task(
             result.state,
             crate::core::query_loop::QueryLoopState::Failed
         ) {
-            tasks_for_run.fail(&launched_task_id, &dispatcher);
+            tasks_for_run.fail_with_usage(&launched_task_id, &dispatcher, usage_summary);
         } else {
-            tasks_for_run.complete(&launched_task_id, &dispatcher);
+            tasks_for_run.complete_with_usage(&launched_task_id, &dispatcher, usage_summary);
         }
     });
 }

@@ -88,6 +88,7 @@ fn terminal_task_states_mark_delivery_notified() {
         Some("inspect task output for task-0")
     );
     assert_eq!(notification.worker_role, None);
+    assert_eq!(notification.usage, None);
     assert_eq!(dispatcher.delivered().len(), 1);
 }
 
@@ -141,6 +142,7 @@ fn telegram_task_notifications_resolve_session_target_to_delivery_target() {
         delivered[0].next_action.as_deref(),
         Some("synthesize validated result for task-0")
     );
+    assert_eq!(delivered[0].usage, None);
 }
 
 #[tokio::test]
@@ -226,6 +228,7 @@ async fn agent_tool_launches_subagent_and_completes_task() {
         notification.next_action.as_deref(),
         Some("synthesize findings or request follow-up research for task-0")
     );
+    assert!(notification.usage.is_some());
 }
 
 #[test]
@@ -255,6 +258,7 @@ fn task_manager_queues_internal_task_notifications() {
             phase: None,
             validation_state: None,
             output_file: task.output_file.clone(),
+            usage: None,
         }
     );
     assert!(manager.drain_events("session-1").is_empty());

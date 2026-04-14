@@ -1,5 +1,5 @@
 use crate::interaction::cli::repl::{CliDisplayEvent, CliRuntimeEvent, CliTurnOutput};
-use crate::task::types::TaskEvent;
+use crate::task::types::{TaskEvent, TaskUsageSummary};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SurfaceView {
@@ -59,6 +59,7 @@ pub struct TaskView {
     pub phase: Option<&'static str>,
     pub validation_state: Option<&'static str>,
     pub output_file: String,
+    pub usage: Option<TaskUsageSummary>,
 }
 
 pub fn build_surface_view(turn: &CliTurnOutput) -> SurfaceView {
@@ -179,6 +180,7 @@ pub struct TelegramTaskItem {
     pub phase: Option<&'static str>,
     pub validation_state: Option<&'static str>,
     pub output_file: String,
+    pub usage: Option<TaskUsageSummary>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -239,6 +241,7 @@ pub struct WebTaskItem {
     pub phase: Option<&'static str>,
     pub validation_state: Option<&'static str>,
     pub output_file: String,
+    pub usage: Option<TaskUsageSummary>,
 }
 
 pub fn build_telegram_view(view: &SurfaceView) -> TelegramView {
@@ -264,6 +267,7 @@ pub fn telegram_item_from_surface_item(item: &SurfaceItem) -> Option<TelegramIte
             phase: task.phase,
             validation_state: task.validation_state,
             output_file: task.output_file.clone(),
+            usage: task.usage.clone(),
         })),
         SurfaceItem::ApprovalRequired {
             tool_name, message, ..
@@ -304,6 +308,7 @@ pub fn web_item_from_surface_item(item: &SurfaceItem) -> WebItem {
             phase: task.phase,
             validation_state: task.validation_state,
             output_file: task.output_file.clone(),
+            usage: task.usage.clone(),
         }),
         SurfaceItem::ApprovalRequired {
             tool_name,
@@ -364,6 +369,7 @@ impl From<&TaskEvent> for TaskView {
             phase: value.phase.map(|phase| phase.as_str()),
             validation_state: value.validation_state.map(|state| state.as_str()),
             output_file: value.output_file.clone(),
+            usage: value.usage.clone(),
         }
     }
 }
