@@ -52,6 +52,7 @@ impl QueryContext {
         scripted_turns: Vec<Vec<StreamEvent>>,
         config: SubagentConfig,
     ) -> Self {
+        let child_agent_id = agent_id.into();
         let mut app_state = self.app_state.clone();
         app_state.runtime_role = RuntimeRole::Worker;
         app_state.worker_role = Some(config.worker_role);
@@ -61,6 +62,8 @@ impl QueryContext {
         }
         let mut permission_context = app_state.permission_context.clone();
         permission_context.set_pending_approval(None);
+        let lineage = build_nested_memory_lineage(self, &child_agent_id, config.inherit_context);
+        permission_context.set_nested_memory_lineage(lineage);
         let tool_registry = self
             .tool_registry
             .assemble_worker_registry(config.allowed_tools.as_deref());
@@ -80,7 +83,21 @@ impl QueryContext {
             api_client: ModelProviderClient::with_scripted_turns(scripted_turns),
             compactor: self.compactor.clone(),
             hook_registry: self.hook_registry.clone(),
-            agent_id: Some(agent_id.into()),
+            agent_id: Some(child_agent_id),
         }
     }
+}
+
+fn build_nested_memory_lineage(
+    parent: &QueryContext,
+    child_agent_id: &str,
+    inherit_context: bool,
+) -> Vec<String> {
+    let mut lineage = parent.app_state.permission_context.nested_memory_lineage();
+    let parent_marker = format!("session:{}", parent.app_state.active_session_id);
+    if lineage.is_empty() {
+        lineage.push(parent_marker);
+    }
+    lineage.push(format!("agent:{child_agent_id}:inherit_context={inherit_context}"));
+    lineage
 }

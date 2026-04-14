@@ -4,6 +4,7 @@ use rust_agent::core::context::{QueryContext, SubagentConfig};
 use rust_agent::core::engine::QueryEngine;
 use rust_agent::core::events::EngineEvent;
 use rust_agent::core::message::Message;
+use rust_agent::history::session::{SessionHistory, SessionHistoryEntry};
 use rust_agent::core::query_loop::{
     Continue, QueryLoopState, QueryParams, Terminal, run_query_loop, run_query_loop_with_params,
 };
@@ -1147,7 +1148,8 @@ async fn worker_query_loop_consumes_mailbox_messages() {
 #[tokio::test]
 async fn subagent_context_inherits_parent_tools_and_hooks() {
     let permission_context = ToolPermissionContext::new(PermissionMode::Default)
-        .with_task_manager(Arc::new(TaskManager::default()));
+        .with_task_manager(Arc::new(TaskManager::default()))
+        .with_external_memory_entries(vec!["external note for child".into()]);
     permission_context.add_always_allow_rule("Agent");
 
     let parent_hook_registry = HookRegistry::default().register_rule(HookRule {
@@ -1222,6 +1224,22 @@ async fn subagent_context_inherits_parent_tools_and_hooks() {
             .any(|tool| tool.name == "Agent")
     );
     assert_eq!(child.app_state.startup_trace, vec!["parent-runtime"]);
+    assert_eq!(
+        child.app_state.permission_context.external_memory_entries(),
+        vec!["external note for child"]
+    );
+    assert_eq!(
+        child.app_state.permission_context.nested_memory_lineage(),
+        vec![
+            "session:test-session".to_string(),
+            "agent:agent-task-2:inherit_context=true".to_string()
+        ]
+    );
+    assert!(
+        child
+            .context_prompt
+            .contains("- path: session:test-session -> agent:agent-task-2:inherit_context=true")
+    );
 
     let result = QueryEngine::new(child.clone())
         .submit_turn(Message::user("run child"))
@@ -1235,6 +1253,87 @@ async fn subagent_context_inherits_parent_tools_and_hooks() {
             .hook_registry
             .recorded_events()
             .contains(&HookEvent::SubagentStop)
+    );
+}
+
+#[tokio::test]
+async fn subagent_context_does_not_inherit_session_memory_when_disabled() {
+    let permission_context = ToolPermissionContext::new(PermissionMode::Default)
+        .with_task_manager(Arc::new(TaskManager::default()))
+        .with_external_memory_entries(vec!["external note only".into()]);
+
+    let parent = QueryContext {
+        app_state: AppState {
+            surface: InteractionSurface::Cli,
+            session_mode: SessionMode::Headless,
+            client_type: ClientType::Cli,
+            session_source: SessionSource::LocalCli,
+            runtime_role: RuntimeRole::Coordinator,
+            worker_role: None,
+            permission_context,
+            command_registry: None,
+            runtime_tool_registry: Some(Arc::new(RwLock::new(ToolRegistry::new()))),
+            skill_registry: None,
+            mcp_runtime: None,
+            plugin_load_result: None,
+            cost_tracker: CostTracker::default(),
+            notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
+            startup_trace: vec!["parent-runtime".into()],
+            active_session_id: "parent-session".into(),
+            session_store: None,
+            session: None,
+            history: Some(SessionHistory {
+                entries: vec![SessionHistoryEntry {
+                    message: Message::user("parent history present"),
+                    timestamp: None,
+                    tool_refs: vec!["src/parent.rs".into()],
+                    milestone: None,
+                }],
+            }),
+            restored_session: None,
+        },
+        tool_registry: ToolRegistry::new(),
+        api_client: ModelProviderClient::default(),
+        compactor: ReactiveCompactor,
+        hook_registry: HookRegistry::default(),
+        agent_id: None,
+        system_prompt: "test system".into(),
+        tools_prompt: "test tools".into(),
+        context_prompt: "test context".into(),
+    };
+
+    let child = parent.create_subagent_context(
+        "agent-task-noinherit",
+        vec![],
+        SubagentConfig {
+            worker_role: rust_agent::state::app_state::WorkerRole::Research,
+            inherit_context: false,
+            max_turns: None,
+            allowed_tools: None,
+        },
+    );
+
+    assert!(child.app_state.history.is_none());
+    assert_eq!(
+        child.app_state.permission_context.external_memory_entries(),
+        vec!["external note only"]
+    );
+    assert_eq!(
+        child.app_state.permission_context.nested_memory_lineage(),
+        vec![
+            "session:parent-session".to_string(),
+            "agent:agent-task-noinherit:inherit_context=false".to_string()
+        ]
+    );
+    assert!(
+        child
+            .context_prompt
+            .contains("- history: unavailable"),
+        "session memory should be unavailable when inherit_context=false"
+    );
+    assert!(
+        child.context_prompt.contains("External memory:")
+            && child.context_prompt.contains("external note only")
     );
 }
 

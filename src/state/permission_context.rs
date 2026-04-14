@@ -47,6 +47,8 @@ pub struct ToolPermissionContext {
     pub inherited_tool_registry: Option<ToolRegistry>,
     pub inherited_hook_registry: Option<HookRegistry>,
     pub runtime_plugin_state: Option<RuntimePluginState>,
+    pub external_memory_entries: Arc<RwLock<Vec<String>>>,
+    pub nested_memory_lineage: Arc<RwLock<Vec<String>>>,
 }
 
 impl ToolPermissionContext {
@@ -71,6 +73,8 @@ impl ToolPermissionContext {
             inherited_tool_registry: None,
             inherited_hook_registry: None,
             runtime_plugin_state: None,
+            external_memory_entries: Arc::new(RwLock::new(Vec::new())),
+            nested_memory_lineage: Arc::new(RwLock::new(Vec::new())),
         }
     }
 
@@ -204,6 +208,42 @@ impl ToolPermissionContext {
     pub fn with_runtime_plugin_state(mut self, runtime_plugin_state: RuntimePluginState) -> Self {
         self.runtime_plugin_state = Some(runtime_plugin_state);
         self
+    }
+
+    pub fn with_external_memory_entries(self, entries: Vec<String>) -> Self {
+        self.set_external_memory_entries(entries);
+        self
+    }
+
+    pub fn set_external_memory_entries(&self, entries: Vec<String>) {
+        if let Ok(mut slot) = self.external_memory_entries.write() {
+            *slot = entries;
+        }
+    }
+
+    pub fn external_memory_entries(&self) -> Vec<String> {
+        self.external_memory_entries
+            .read()
+            .map(|entries| entries.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn with_nested_memory_lineage(self, lineage: Vec<String>) -> Self {
+        self.set_nested_memory_lineage(lineage);
+        self
+    }
+
+    pub fn set_nested_memory_lineage(&self, lineage: Vec<String>) {
+        if let Ok(mut slot) = self.nested_memory_lineage.write() {
+            *slot = lineage;
+        }
+    }
+
+    pub fn nested_memory_lineage(&self) -> Vec<String> {
+        self.nested_memory_lineage
+            .read()
+            .map(|lineage| lineage.clone())
+            .unwrap_or_default()
     }
 
     pub fn with_deferred_tools(mut self, include_deferred_tools: bool) -> Self {

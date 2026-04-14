@@ -39,6 +39,7 @@ pub enum HookEvent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HookRule {
     pub event: HookEventMatcher,
+    pub layer: HookRuleLayer,
     pub deny_match: Option<String>,
     pub append_message: Option<String>,
     pub prevent_continuation: bool,
@@ -61,6 +62,34 @@ pub enum HookEventMatcher {
     Stop,
     SubagentStop,
     Notification,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookRuleLayer {
+    Defaults,
+    File,
+    Plugin,
+    Runtime,
+}
+
+impl HookRuleLayer {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Defaults => "defaults",
+            Self::File => "file",
+            Self::Plugin => "plugin",
+            Self::Runtime => "runtime",
+        }
+    }
+
+    pub fn precedence(&self) -> u8 {
+        match self {
+            Self::Defaults => 0,
+            Self::File => 1,
+            Self::Plugin => 2,
+            Self::Runtime => 3,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -143,12 +172,25 @@ pub fn load_hook_rules_with_diagnostics(cwd: &Path) -> HookConfigLoadResult {
 
     match std::fs::read_to_string(&path) {
         Ok(raw) => match serde_json::from_str::<Vec<HookRuleConfig>>(&raw) {
-            Ok(configs) if !configs.is_empty() => HookConfigLoadResult {
-                path,
-                source: HookConfigSource::File,
-                rules: configs.into_iter().map(HookRuleConfig::into_rule).collect(),
-                diagnostics,
-            },
+            Ok(configs) if !configs.is_empty() => {
+                let mut rules = Vec::new();
+                for config in configs {
+                    match config.into_rule_with_diagnostics() {
+                        Ok(rule) => rules.push(rule),
+                        Err(diagnostic) => diagnostics.push(diagnostic),
+                    }
+                }
+                diagnostics.push(format!(
+                    "Loaded {} hook rule(s) from .claude/hooks.json (layer=file).",
+                    rules.len()
+                ));
+                HookConfigLoadResult {
+                    path,
+                    source: HookConfigSource::File,
+                    rules,
+                    diagnostics,
+                }
+            }
             Ok(_) => {
                 diagnostics
                     .push("Hook config file was empty; using no external hook rules.".to_string());
@@ -215,9 +257,16 @@ struct HookRuleConfig {
 }
 
 impl HookRuleConfig {
-    fn into_rule(self) -> HookRule {
-        HookRule {
-            event: parse_event_matcher(&self.event),
+    fn into_rule_with_diagnostics(self) -> Result<HookRule, String> {
+        let event_value = self.event.clone();
+        let event = parse_event_matcher(&event_value).ok_or_else(|| {
+            format!(
+                "Ignored hook rule with unknown event '{event_value}' in .claude/hooks.json"
+            )
+        })?;
+        Ok(HookRule {
+            event,
+            layer: HookRuleLayer::File,
             deny_match: self.deny_match,
             append_message: self.append_message,
             prevent_continuation: self.prevent_continuation,
@@ -225,23 +274,23 @@ impl HookRuleConfig {
             permission_decision: self.permission_decision,
             updated_input: self.updated_input,
             additional_context: self.additional_context,
-        }
+        })
     }
 }
 
-fn parse_event_matcher(value: &str) -> HookEventMatcher {
+fn parse_event_matcher(value: &str) -> Option<HookEventMatcher> {
     match value.trim().to_ascii_lowercase().as_str() {
-        "sessionstart" | "session_start" => HookEventMatcher::SessionStart,
-        "setup" => HookEventMatcher::Setup,
-        "userpromptsubmit" | "user_prompt_submit" => HookEventMatcher::UserPromptSubmit,
-        "pretooluse" | "pre_tool_use" => HookEventMatcher::PreToolUse,
-        "posttooluse" | "post_tool_use" => HookEventMatcher::PostToolUse,
-        "posttoolusefailure" | "post_tool_use_failure" => HookEventMatcher::PostToolUseFailure,
-        "permissionrequest" | "permission_request" => HookEventMatcher::PermissionRequest,
-        "permissiondenied" | "permission_denied" => HookEventMatcher::PermissionDenied,
-        "stop" => HookEventMatcher::Stop,
-        "subagentstop" | "subagent_stop" => HookEventMatcher::SubagentStop,
-        "notification" => HookEventMatcher::Notification,
-        _ => HookEventMatcher::Setup,
+        "sessionstart" | "session_start" => Some(HookEventMatcher::SessionStart),
+        "setup" => Some(HookEventMatcher::Setup),
+        "userpromptsubmit" | "user_prompt_submit" => Some(HookEventMatcher::UserPromptSubmit),
+        "pretooluse" | "pre_tool_use" => Some(HookEventMatcher::PreToolUse),
+        "posttooluse" | "post_tool_use" => Some(HookEventMatcher::PostToolUse),
+        "posttoolusefailure" | "post_tool_use_failure" => Some(HookEventMatcher::PostToolUseFailure),
+        "permissionrequest" | "permission_request" => Some(HookEventMatcher::PermissionRequest),
+        "permissiondenied" | "permission_denied" => Some(HookEventMatcher::PermissionDenied),
+        "stop" => Some(HookEventMatcher::Stop),
+        "subagentstop" | "subagent_stop" => Some(HookEventMatcher::SubagentStop),
+        "notification" => Some(HookEventMatcher::Notification),
+        _ => None,
     }
 }

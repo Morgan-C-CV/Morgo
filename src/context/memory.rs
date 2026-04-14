@@ -2,50 +2,69 @@ use crate::state::app_state::AppState;
 
 pub fn describe_memory_context(app_state: &AppState) -> String {
     let session_id = app_state.active_session_id.as_str();
-    let Some(history) = app_state.history.as_ref() else {
-        return format!(
-            "Session memory:\n- session_id: {session_id}\n- history: unavailable\n- context_files: none"
-        );
-    };
-
-    let entry_count = history.entries.len();
-    let recent_messages = history
-        .entries
-        .iter()
-        .rev()
-        .take(3)
-        .map(|entry| {
-            format!(
-                "{}: {}",
-                format_role(&entry.message.role),
-                truncate(&entry.message.content, 60)
-            )
-        })
-        .collect::<Vec<_>>();
-    let tool_refs = history
-        .entries
-        .iter()
-        .flat_map(|entry| entry.tool_refs.iter().cloned())
-        .filter(|value| !value.trim().is_empty())
-        .take(5)
-        .collect::<Vec<_>>();
-
     let mut lines = vec![
         "Session memory:".to_string(),
         format!("- session_id: {session_id}"),
-        format!("- history_entries: {entry_count}"),
     ];
-    if !recent_messages.is_empty() {
-        lines.push(format!(
-            "- recent_messages: {}",
-            recent_messages.join(" | ")
-        ));
-    }
-    if !tool_refs.is_empty() {
-        lines.push(format!("- context_files: {}", tool_refs.join(", ")));
+
+    if let Some(history) = app_state.history.as_ref() {
+        let entry_count = history.entries.len();
+        lines.push(format!("- history_entries: {entry_count}"));
+
+        let recent_messages = history
+            .entries
+            .iter()
+            .rev()
+            .take(3)
+            .map(|entry| {
+                format!(
+                    "{}: {}",
+                    format_role(&entry.message.role),
+                    truncate(&entry.message.content, 60)
+                )
+            })
+            .collect::<Vec<_>>();
+        if !recent_messages.is_empty() {
+            lines.push(format!("- recent_messages: {}", recent_messages.join(" | ")));
+        }
+
+        let tool_refs = history
+            .entries
+            .iter()
+            .flat_map(|entry| entry.tool_refs.iter().cloned())
+            .filter(|value| !value.trim().is_empty())
+            .take(5)
+            .collect::<Vec<_>>();
+        if !tool_refs.is_empty() {
+            lines.push(format!("- context_files: {}", tool_refs.join(", ")));
+        } else {
+            lines.push("- context_files: none".to_string());
+        }
     } else {
+        lines.push("- history: unavailable".to_string());
         lines.push("- context_files: none".to_string());
     }
+
+    let external_memory = app_state.permission_context.external_memory_entries();
+    lines.push("External memory:".to_string());
+    if external_memory.is_empty() {
+        lines.push("- entries: none".to_string());
+    } else {
+        lines.push(format!("- entries: {}", external_memory.len()));
+        for (index, entry) in external_memory.iter().enumerate().take(5) {
+            lines.push(format!("- [{}] {}", index + 1, truncate(entry, 120)));
+        }
+    }
+
+    let nested_lineage = app_state.permission_context.nested_memory_lineage();
+    lines.push("Nested memory lineage:".to_string());
+    if nested_lineage.is_empty() {
+        lines.push("- lineage: root".to_string());
+    } else {
+        lines.push(format!("- depth: {}", nested_lineage.len()));
+        lines.push(format!("- path: {}", nested_lineage.join(" -> ")));
+    }
+
     lines.join("\n")
 }
 

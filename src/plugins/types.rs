@@ -309,6 +309,7 @@ impl PluginHookDefinition {
     pub fn to_rule(&self) -> crate::hook::registry::HookRule {
         crate::hook::registry::HookRule {
             event: self.event.clone(),
+            layer: crate::hook::registry::HookRuleLayer::Plugin,
             deny_match: self.deny_match.clone(),
             append_message: self.append_message.clone(),
             prevent_continuation: self.prevent_continuation,

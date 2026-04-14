@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::{fs, path::PathBuf, process::Command, time::SystemTime};
 
 use tokio::sync::RwLock;
 
@@ -127,7 +128,52 @@ fn build_plan_permissions() -> ToolPermissionContext {
     permissions
 }
 
+fn unique_temp_dir(label: &str) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock should be after epoch")
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!("rust-agent-{label}-{nanos}"));
+    fs::create_dir_all(&path).expect("create temp dir");
+    path
+}
+
+fn run_git(cwd: &PathBuf, args: &[&str]) {
+    let status = Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .status()
+        .expect("run git command");
+    assert!(status.success(), "git command failed: {:?}", args);
+}
+
+fn init_test_repo(label: &str) -> PathBuf {
+    let repo = unique_temp_dir(label);
+    run_git(&repo, &["init"]);
+    run_git(&repo, &["config", "user.email", "context-tests@example.com"]);
+    run_git(&repo, &["config", "user.name", "Context Tests"]);
+    fs::write(repo.join("README.md"), "seed\n").expect("write seed file");
+    run_git(&repo, &["add", "README.md"]);
+    run_git(&repo, &["commit", "-m", "seed"]);
+    repo
+}
+
+fn build_app_state_with_cwd(cwd: &str) -> AppState {
+    let mut state = build_app_state();
+    if let Some(session) = state.session.as_mut() {
+        session.cwd = cwd.to_string();
+    }
+    state
+}
+
 fn build_app_state() -> AppState {
+    let permissions = build_plan_permissions()
+        .with_external_memory_entries(vec![
+            "linear:INGEST-42 investigate context layering".into(),
+            "slack:#agents rollout note".into(),
+        ])
+        .with_nested_memory_lineage(vec!["session:context-session".into()]);
+
     AppState {
         surface: InteractionSurface::Cli,
         session_mode: SessionMode::Interactive,
@@ -135,7 +181,7 @@ fn build_app_state() -> AppState {
         session_source: SessionSource::LocalCli,
         runtime_role: RuntimeRole::Worker,
         worker_role: Some(WorkerRole::Verify),
-        permission_context: build_plan_permissions(),
+        permission_context: permissions,
         command_registry: None,
         runtime_tool_registry: Some(Arc::new(RwLock::new(ToolRegistry::new()))),
         skill_registry: Some(Arc::new(SkillRegistry::new(vec![sample_skill()]))),
@@ -176,16 +222,28 @@ fn build_app_state() -> AppState {
 
 #[test]
 fn context_prompt_includes_truthy_runtime_sections() {
-    let app_state = build_app_state();
+    let repo = init_test_repo("context-prompt-repo");
+    let app_state = build_app_state_with_cwd(repo.to_string_lossy().as_ref());
     let prompt = rust_agent::prompt::context::build_context_prompt(&app_state);
 
     assert!(prompt.contains("Runtime context summary:"));
     assert!(prompt.contains("Git context:"));
-    assert!(prompt.contains("- cwd: /tmp/context-demo"));
-    assert!(prompt.contains("- branch: feature/context"));
-    assert!(prompt.contains("- dirty: yes"));
+    assert!(prompt.contains(&format!("- cwd: {}", repo.to_string_lossy())));
+    assert!(prompt.contains("- repository: yes"));
+    assert!(prompt.contains("- branch: "));
+    assert!(!prompt.contains("- branch: <unknown>"));
+    assert!(prompt.contains("- dirty: "));
+    assert!(!prompt.contains("- dirty: <unknown>"));
+    assert!(prompt.contains("- repo_root: "));
+    assert!(prompt.contains("- worktree: "));
     assert!(prompt.contains("Session memory:"));
     assert!(prompt.contains("- session_id: context-session"));
+    assert!(prompt.contains("External memory:"));
+    assert!(prompt.contains("- entries: 2"));
+    assert!(prompt.contains("linear:INGEST-42 investigate context layering"));
+    assert!(prompt.contains("Nested memory lineage:"));
+    assert!(prompt.contains("- depth: 1"));
+    assert!(prompt.contains("- path: session:context-session"));
     assert!(prompt.contains("Runtime user context:"));
     assert!(prompt.contains("- client_type: Cli"));
     assert!(prompt.contains("- worker_role: verify"));
@@ -202,6 +260,22 @@ fn context_prompt_includes_truthy_runtime_sections() {
     assert!(prompt.contains("Active step runtime hint: group step-2 still in progress"));
     assert!(prompt.contains("Active runtime task hint: verification next for task-0"));
     assert!(prompt.contains("runtime_group=step-2 runtime_hint=group step-2 still in progress"));
+
+    fs::remove_dir_all(repo).expect("cleanup repo");
+}
+
+#[test]
+fn git_context_reports_non_repo_fallback() {
+    let dir = unique_temp_dir("context-prompt-non-repo");
+    let app_state = build_app_state_with_cwd(dir.to_string_lossy().as_ref());
+    let prompt = rust_agent::prompt::context::build_context_prompt(&app_state);
+
+    assert!(prompt.contains("Git context:"));
+    assert!(prompt.contains("- repository: no"));
+    assert!(prompt.contains("- branch: <unknown>"));
+    assert!(prompt.contains("- dirty: <unknown>"));
+
+    fs::remove_dir_all(dir).expect("cleanup non-repo dir");
 }
 
 #[test]
