@@ -2,6 +2,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
+use rust_agent::bootstrap::{InteractionSurface, SessionMode};
 use rust_agent::state::permission_context::{PermissionMode, ToolPermissionContext};
 use rust_agent::tool::builtin::agent::AgentTool;
 use rust_agent::tool::builtin::ask_user::AskUserQuestionTool;
@@ -821,6 +822,108 @@ fn combined_always_load_defer_and_interactive_flags_follow_context() {
         .map(|tool| tool.name)
         .collect::<Vec<_>>();
     assert!(!worker_names.contains(&"HybridFixture"));
+}
+
+#[test]
+fn real_builtin_metadata_flags_follow_runtime_context() {
+    let registry = ToolRegistry::new()
+        .register(Arc::new(AgentTool))
+        .register(Arc::new(AskUserQuestionTool))
+        .register(Arc::new(BashTool))
+        .register(Arc::new(FileReadTool))
+        .register(Arc::new(WebFetchTool))
+        .register(Arc::new(WebSearchTool));
+
+    let cli_interactive = registry.assemble(ToolAssemblyContext::coordinator(
+        InteractionSurface::Cli,
+        SessionMode::Interactive,
+    ));
+    let cli_interactive_names = cli_interactive
+        .visible_tools(&ToolAssemblyContext::coordinator(
+            InteractionSurface::Cli,
+            SessionMode::Interactive,
+        )
+        .permission_context(PermissionMode::Default))
+        .iter()
+        .map(|tool| tool.name)
+        .collect::<Vec<_>>();
+    assert!(cli_interactive_names.contains(&"Agent"));
+    assert!(cli_interactive_names.contains(&"AskUserQuestion"));
+    assert!(cli_interactive_names.contains(&"Bash"));
+    assert!(cli_interactive_names.contains(&"Read"));
+    assert!(cli_interactive_names.contains(&"WebFetch"));
+    assert!(cli_interactive_names.contains(&"WebSearch"));
+
+    let remote_interactive = registry.assemble(ToolAssemblyContext::coordinator(
+        InteractionSurface::Remote,
+        SessionMode::Interactive,
+    ));
+    let remote_interactive_names = remote_interactive
+        .visible_tools(&ToolAssemblyContext::coordinator(
+            InteractionSurface::Remote,
+            SessionMode::Interactive,
+        )
+        .permission_context(PermissionMode::Default))
+        .iter()
+        .map(|tool| tool.name)
+        .collect::<Vec<_>>();
+    assert!(remote_interactive_names.contains(&"Agent"));
+    assert!(remote_interactive_names.contains(&"AskUserQuestion"));
+    assert!(!remote_interactive_names.contains(&"Bash"));
+    assert!(!remote_interactive_names.contains(&"WebFetch"));
+    assert!(!remote_interactive_names.contains(&"WebSearch"));
+
+    let cli_headless = registry.assemble(ToolAssemblyContext::coordinator(
+        InteractionSurface::Cli,
+        SessionMode::Headless,
+    ));
+    let cli_headless_names = cli_headless
+        .visible_tools(&ToolAssemblyContext::coordinator(
+            InteractionSurface::Cli,
+            SessionMode::Headless,
+        )
+        .permission_context(PermissionMode::Default))
+        .iter()
+        .map(|tool| tool.name)
+        .collect::<Vec<_>>();
+    assert!(cli_headless_names.contains(&"Agent"));
+    assert!(cli_headless_names.contains(&"AskUserQuestion"));
+    assert!(!cli_headless_names.contains(&"Bash"));
+    assert!(cli_headless_names.contains(&"Read"));
+    assert!(!cli_headless_names.contains(&"WebFetch"));
+    assert!(!cli_headless_names.contains(&"WebSearch"));
+}
+
+#[test]
+fn real_builtin_worker_assembly_excludes_interactive_and_open_world_tools() {
+    let registry = ToolRegistry::new()
+        .register(Arc::new(AgentTool))
+        .register(Arc::new(AskUserQuestionTool))
+        .register(Arc::new(BashTool))
+        .register(Arc::new(FileReadTool))
+        .register(Arc::new(WebFetchTool))
+        .register(Arc::new(WebSearchTool));
+
+    let worker = registry.assemble(ToolAssemblyContext::worker(
+        InteractionSurface::Cli,
+        SessionMode::Headless,
+    ));
+    let names = worker
+        .visible_tools(&ToolAssemblyContext::worker(
+            InteractionSurface::Cli,
+            SessionMode::Headless,
+        )
+        .permission_context(PermissionMode::Default))
+        .iter()
+        .map(|tool| tool.name)
+        .collect::<Vec<_>>();
+
+    assert!(names.contains(&"Read"));
+    assert!(!names.contains(&"Agent"));
+    assert!(!names.contains(&"AskUserQuestion"));
+    assert!(!names.contains(&"Bash"));
+    assert!(!names.contains(&"WebFetch"));
+    assert!(!names.contains(&"WebSearch"));
 }
 
 #[test]

@@ -21,6 +21,58 @@ use rust_agent::hook::registry::{HookConfigSource, HookEvent, load_hook_registry
 use rust_agent::task::list_types::{TaskListItem, TaskListSnapshot, TaskListStatus};
 use rust_agent::tool::registry::ToolAssemblyContext;
 
+fn runtime_for_surface(surface: &str, interactive: bool, init_only: bool) -> RuntimeBootstrap {
+    RuntimeBootstrap::from_cli(BootstrapCli {
+        print: None,
+        interactive,
+        init_only,
+        continue_session: false,
+        resume: None,
+        trace_startup: false,
+        show_tools: false,
+        tui: false,
+        surface: surface.into(),
+    })
+}
+
+fn initialized_tool_names(
+    surface: InteractionSurface,
+    session_mode: SessionMode,
+    init_only: bool,
+) -> Vec<&'static str> {
+    let runtime = runtime_for_surface(
+        match surface {
+            InteractionSurface::Cli => "cli",
+            InteractionSurface::Remote => "remote",
+            InteractionSurface::Telegram => "telegram",
+        },
+        matches!(session_mode, SessionMode::Interactive),
+        init_only,
+    );
+    let mut state = BootstrapState::new(surface, session_mode, false);
+    state.current_cwd = std::env::current_dir().expect("cwd available");
+    let bundle = runtime.initialize_runtime(
+        &state,
+        format!("session-{surface:?}-{session_mode:?}"),
+        Arc::new(rust_agent::task::manager::TaskManager::default()),
+        Arc::new(rust_agent::task::list_manager::TaskListManager::default()),
+        Arc::new(rust_agent::plan::manager::PlanManager::default()),
+    );
+    let permission_context = ToolAssemblyContext::coordinator(surface, session_mode)
+        .permission_context(if init_only {
+            PermissionMode::Plan
+        } else {
+            PermissionMode::Default
+        })
+        .with_active_surface(surface);
+    bundle
+        .coordinator_tools
+        .visible_tools(&permission_context)
+        .iter()
+        .map(|tool| tool.name)
+        .collect()
+}
+
 fn unique_temp_path(prefix: &str) -> std::path::PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -279,17 +331,7 @@ fn resolve_session_state_reuses_store_for_continue_resume_and_fresh_start() {
 
 #[test]
 fn initialize_runtime_builds_consistent_runtime_bundle_shape() {
-    let runtime = RuntimeBootstrap::from_cli(BootstrapCli {
-        print: None,
-        interactive: false,
-        init_only: false,
-        continue_session: false,
-        resume: None,
-        trace_startup: false,
-        show_tools: false,
-        tui: false,
-        surface: "cli".into(),
-    });
+    let runtime = runtime_for_surface("cli", false, false);
     let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::Headless, false);
     state.current_cwd = std::env::current_dir().expect("cwd available");
 
@@ -382,6 +424,58 @@ fn augment_prompt_depends_on_input_state_without_mutating_store() {
     assert!(!prompts.system_prompt.is_empty());
     assert!(!prompts.tools_prompt.is_empty());
     assert!(!prompts.context_prompt.is_empty());
+}
+
+#[test]
+fn initialize_runtime_matrix_locks_surface_mode_env_flag_visibility() {
+    let cli_interactive = initialized_tool_names(
+        InteractionSurface::Cli,
+        SessionMode::Interactive,
+        false,
+    );
+    assert!(cli_interactive.contains(&"Read"));
+    assert!(cli_interactive.contains(&"Agent"));
+    assert!(cli_interactive.contains(&"Bash"));
+    assert!(cli_interactive.contains(&"WebSearch"));
+    assert!(cli_interactive.contains(&"WebFetch"));
+    assert!(cli_interactive.contains(&"Mcp"));
+
+    let cli_headless = initialized_tool_names(
+        InteractionSurface::Cli,
+        SessionMode::Headless,
+        false,
+    );
+    assert!(cli_headless.contains(&"Read"));
+    assert!(cli_headless.contains(&"Agent"));
+    assert!(!cli_headless.contains(&"Bash"));
+    assert!(!cli_headless.contains(&"WebSearch"));
+    assert!(!cli_headless.contains(&"WebFetch"));
+    assert!(!cli_headless.contains(&"Mcp"));
+
+    let remote_interactive = initialized_tool_names(
+        InteractionSurface::Remote,
+        SessionMode::Interactive,
+        false,
+    );
+    assert!(remote_interactive.contains(&"Read"));
+    assert!(remote_interactive.contains(&"Agent"));
+    assert!(remote_interactive.contains(&"AskUserQuestion"));
+    assert!(!remote_interactive.contains(&"Bash"));
+    assert!(!remote_interactive.contains(&"WebSearch"));
+    assert!(!remote_interactive.contains(&"WebFetch"));
+    assert!(!remote_interactive.contains(&"Mcp"));
+
+    let cli_init_only = initialized_tool_names(
+        InteractionSurface::Cli,
+        SessionMode::InitOnly,
+        true,
+    );
+    assert!(cli_init_only.contains(&"Read"));
+    assert!(cli_init_only.contains(&"Agent"));
+    assert!(!cli_init_only.contains(&"Bash"));
+    assert!(!cli_init_only.contains(&"WebSearch"));
+    assert!(!cli_init_only.contains(&"WebFetch"));
+    assert!(!cli_init_only.contains(&"Mcp"));
 }
 
 #[test]
