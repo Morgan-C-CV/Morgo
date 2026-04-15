@@ -11,7 +11,7 @@ use crate::interaction::notification::Notification;
 use crate::task::output_store::TaskOutputStore;
 use crate::task::types::{
     TaskDeliveryState, TaskEvent, TaskOutputSlice, TaskOwner, TaskRecord, TaskStatus,
-    TaskUsageSummary, ValidationState, WorkerPhase,
+    TaskUsageSummary, ValidationState, WorkerPhase, format_task_result, format_task_summary,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -294,13 +294,7 @@ impl TaskManager {
         dispatcher: &NotificationDispatcher,
         usage: Option<TaskUsageSummary>,
     ) {
-        self.finish(
-            id,
-            TaskStatus::Completed,
-            "Task completed",
-            dispatcher,
-            usage,
-        );
+        self.finish(id, TaskStatus::Completed, dispatcher, usage);
     }
 
     pub fn fail(&self, id: &str, dispatcher: &NotificationDispatcher) {
@@ -313,7 +307,7 @@ impl TaskManager {
         dispatcher: &NotificationDispatcher,
         usage: Option<TaskUsageSummary>,
     ) {
-        self.finish(id, TaskStatus::Failed, "Task failed", dispatcher, usage);
+        self.finish(id, TaskStatus::Failed, dispatcher, usage);
     }
 
     pub fn kill(
@@ -322,12 +316,7 @@ impl TaskManager {
         requester_session_id: &str,
         dispatcher: &NotificationDispatcher,
     ) -> bool {
-        let owner = self.running_owner(id);
-        if owner
-            .as_ref()
-            .map(|owner| owner.session_id.as_str() != requester_session_id)
-            .unwrap_or(false)
-        {
+        if !self.is_running_owned_by(id, requester_session_id) {
             return false;
         }
         if let Some(handle) = self
@@ -339,7 +328,7 @@ impl TaskManager {
         {
             handle.abort();
         }
-        self.finish(id, TaskStatus::Killed, "Task killed", dispatcher, None);
+        self.finish(id, TaskStatus::Killed, dispatcher, None);
         true
     }
 
@@ -419,8 +408,7 @@ impl TaskManager {
     }
 
     pub fn is_terminal(&self, id: &str) -> Option<bool> {
-        self.status(id)
-            .map(|status| !matches!(status, TaskStatus::Pending | TaskStatus::Running))
+        self.status(id).map(|status| status.is_terminal())
     }
 
     pub fn send_message(
@@ -513,7 +501,6 @@ impl TaskManager {
         &self,
         id: &str,
         status: TaskStatus,
-        title: &str,
         dispatcher: &NotificationDispatcher,
         usage: Option<TaskUsageSummary>,
     ) {
@@ -527,19 +514,24 @@ impl TaskManager {
             .iter_mut()
             .find(|task| task.id == id)
         {
+            if task.status.is_terminal() {
+                return;
+            }
             task.status = status.clone();
             task.delivery.notified = true;
             task.validation_state =
                 transition_validation_state(task.worker_role, &status, task.validation_state);
             let next_action =
                 next_action_for_task(&status, task.worker_role, task.validation_state, &task.id);
+            let summary = format_task_summary(&task.description, &task.id, &status, usage.as_ref());
+            let result = format_task_result(&status, task.validation_state, usage.as_ref());
             let event = TaskEvent {
                 owner: task.owner.clone(),
                 target_task_id: Some(task.id.clone()),
                 task_id: task.id.clone(),
                 status,
-                summary: format!("{} ({})", task.description, task.id),
-                result: title.to_string(),
+                summary,
+                result,
                 next_action,
                 worker_role: task.worker_role,
                 orchestration_group_id: task.orchestration_group_id.clone(),
@@ -549,7 +541,7 @@ impl TaskManager {
                 usage: usage.clone(),
             };
             self.enqueue_task_event(event.clone());
-            let notification = self.dispatch_task_notification(title, &event, dispatcher);
+            let notification = self.dispatch_task_notification(&event, dispatcher);
             task.delivery.notification = Some(notification);
 
             barrier_candidate = task.orchestration_group_id.clone().map(|group_id| {
@@ -563,13 +555,19 @@ impl TaskManager {
         }
         if let Some((group_id, owner, target_task_id, output_file)) = barrier_candidate {
             if self.group_ready_for_fan_in(&group_id) {
+                let group_task_id = format!("group-{}", group_id);
                 let event = TaskEvent {
                     owner,
                     target_task_id,
-                    task_id: format!("group-{}", group_id),
+                    task_id: group_task_id.clone(),
                     status: TaskStatus::Completed,
-                    summary: format!("grouped research tasks completed ({})", group_id),
-                    result: "Task group completed".into(),
+                    summary: format_task_summary(
+                        "grouped research tasks completed",
+                        &group_task_id,
+                        &TaskStatus::Completed,
+                        None,
+                    ),
+                    result: format_task_result(&TaskStatus::Completed, None, None),
                     next_action: format!("synthesize grouped findings for {}", group_id),
                     worker_role: None,
                     orchestration_group_id: Some(group_id.clone()),
@@ -579,7 +577,7 @@ impl TaskManager {
                     usage: None,
                 };
                 self.enqueue_task_event(event.clone());
-                let _ = self.dispatch_task_notification("Task group completed", &event, dispatcher);
+                let _ = self.dispatch_task_notification(&event, dispatcher);
             }
         }
         self.propagate_verification_to_parent(id);
@@ -671,13 +669,12 @@ impl TaskManager {
 
     fn dispatch_task_notification(
         &self,
-        title: &str,
         event: &TaskEvent,
         dispatcher: &NotificationDispatcher,
     ) -> Notification {
         let mut notification = Notification::task_update(
             &event.owner.session_id,
-            title,
+            event.result.clone(),
             event.summary.clone(),
             event.task_id.clone(),
             event.status.as_str(),

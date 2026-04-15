@@ -21,6 +21,10 @@ impl TaskStatus {
             Self::Killed => "killed",
         }
     }
+
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, Self::Completed | Self::Failed | Self::Killed)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,6 +96,45 @@ impl TaskUsageSummary {
             self.estimated_cost_micros_usd as f64 / 1_000_000.0
         )
     }
+}
+
+pub fn format_task_summary(
+    description: &str,
+    task_id: &str,
+    status: &TaskStatus,
+    usage: Option<&TaskUsageSummary>,
+) -> String {
+    let mut summary = format!("{} ({}) — {}", description, task_id, status.as_str());
+    if let Some(usage) = usage.filter(|usage| !usage.is_empty()) {
+        summary.push_str(" — ");
+        summary.push_str(&usage.format_compact());
+    }
+    summary
+}
+
+pub fn format_task_result(
+    status: &TaskStatus,
+    validation_state: Option<ValidationState>,
+    usage: Option<&TaskUsageSummary>,
+) -> String {
+    let mut result = match status {
+        TaskStatus::Pending => "Task pending".to_string(),
+        TaskStatus::Running => "Task running".to_string(),
+        TaskStatus::Completed => "Task completed".to_string(),
+        TaskStatus::Failed => "Task failed".to_string(),
+        TaskStatus::Killed => "Task killed".to_string(),
+    };
+    if let Some(validation_state) =
+        validation_state.filter(|state| *state != ValidationState::NotNeeded)
+    {
+        result.push_str(" — validation: ");
+        result.push_str(validation_state.as_str());
+    }
+    if let Some(usage) = usage.filter(|usage| !usage.is_empty()) {
+        result.push_str(" — usage: ");
+        result.push_str(&usage.format_compact());
+    }
+    result
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

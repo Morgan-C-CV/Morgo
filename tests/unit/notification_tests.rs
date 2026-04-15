@@ -783,6 +783,8 @@ fn remote_event_envelope_preserves_structured_task_payload() {
         RemoteEventPayload::TaskUpdate(task)
             if task.task_id == "task-1"
                 && task.status == "completed"
+                && task.summary == "demo task"
+                && task.result == "Task completed"
                 && task.worker_role == Some("verify")
                 && task.phase == Some("verify")
                 && task.validation_state == Some("verified")
@@ -794,6 +796,15 @@ fn remote_event_envelope_preserves_structured_task_payload() {
                     cache_read_input_tokens: 4,
                     estimated_cost_micros_usd: 88,
                 })
+    ));
+    let view = build_surface_view(&CliTurnOutput {
+        primary_text: String::new(),
+        events: vec![event],
+    });
+    assert!(matches!(
+        &view.items[0],
+        SurfaceItem::TaskUpdate(task)
+            if task.summary == "demo task" && task.result == "Task completed"
     ));
 }
 
@@ -1151,8 +1162,8 @@ fn dispatcher_requires_delivery_ready_binding_for_telegram() {
     });
     let notification = Notification {
         session_id: "telegram-session-1".into(),
-        title: "Task completed".into(),
-        body: "demo body".into(),
+        title: "Task completed — validation: verified".into(),
+        body: "demo body — completed".into(),
         notification_type: NotificationType::TaskUpdate,
         task_id: Some("task-1".into()),
         status: Some("Completed".into()),
@@ -1178,8 +1189,8 @@ fn dispatcher_requires_delivery_ready_binding_for_telegram() {
         dispatcher.delivered(),
         vec![Notification {
             session_id: "telegram-session-1".into(),
-            title: "Task completed".into(),
-            body: "demo body".into(),
+            title: "Task completed — validation: verified".into(),
+            body: "demo body — completed".into(),
             notification_type: NotificationType::TaskUpdate,
             task_id: Some("task-1".into()),
             status: Some("Completed".into()),

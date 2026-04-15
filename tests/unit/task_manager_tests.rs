@@ -81,6 +81,11 @@ fn terminal_task_states_mark_delivery_notified() {
         .expect("notification should exist");
     assert_eq!(notification.session_id, "session-1");
     assert_eq!(notification.title, "Task completed");
+    assert_eq!(notification.body, "demo task (task-0) — completed");
+    assert_eq!(
+        dispatcher.delivered()[0].body,
+        "demo task (task-0) — completed"
+    );
     assert_eq!(notification.task_id.as_deref(), Some("task-0"));
     assert_eq!(notification.status.as_deref(), Some("completed"));
     assert_eq!(
@@ -92,17 +97,33 @@ fn terminal_task_states_mark_delivery_notified() {
     assert_eq!(dispatcher.delivered().len(), 1);
 }
 
-#[test]
-fn task_manager_tracks_failed_and_killed_states() {
+#[tokio::test]
+async fn task_manager_tracks_failed_and_killed_states() {
     let manager = TaskManager::default();
     let dispatcher = NotificationDispatcher::new(TelegramGateway::default());
     let failed = manager.create("failing task", "session-2", InteractionSurface::Cli);
     manager.fail(&failed.id, &dispatcher);
     assert_eq!(manager.get(&failed.id).unwrap().status, TaskStatus::Failed);
+    assert_eq!(manager.is_terminal(&failed.id), Some(true));
+    let failed_notification = manager
+        .get(&failed.id)
+        .and_then(|task| task.delivery.notification)
+        .expect("failed notification should exist");
+    assert_eq!(failed_notification.title, "Task failed");
+    assert_eq!(failed_notification.body, "failing task (task-0) — failed");
 
     let killed = manager.create("killed task", "session-3", InteractionSurface::Cli);
+    manager.launch(&killed.id, "work", std::future::pending::<()>());
     assert!(manager.kill(&killed.id, "session-3", &dispatcher));
-    assert_eq!(manager.get(&killed.id).unwrap().status, TaskStatus::Killed);
+    let killed_task = manager.get(&killed.id).unwrap();
+    assert_eq!(killed_task.status, TaskStatus::Killed);
+    assert_eq!(manager.is_terminal(&killed.id), Some(true));
+    let killed_notification = killed_task
+        .delivery
+        .notification
+        .expect("killed notification should exist");
+    assert_eq!(killed_notification.title, "Task killed");
+    assert_eq!(killed_notification.body, "killed task (task-1) — killed");
 }
 
 #[test]
@@ -223,6 +244,14 @@ async fn agent_tool_launches_subagent_and_completes_task() {
         .as_ref()
         .expect("notification should exist");
     assert_eq!(notification.session_id, "session-7");
+    assert!(notification.body.starts_with(
+        "Spawned research worker for inspect repository (task-0) — completed — requests="
+    ));
+    assert!(
+        notification
+            .title
+            .starts_with("Task completed — usage: requests=")
+    );
     assert_eq!(notification.worker_role.as_deref(), Some("research"));
     assert_eq!(
         notification.next_action.as_deref(),
@@ -250,7 +279,7 @@ fn task_manager_queues_internal_task_notifications() {
             target_task_id: Some(task.id.clone()),
             task_id: task.id.clone(),
             status: TaskStatus::Completed,
-            summary: format!("demo task ({})", task.id),
+            summary: format!("demo task ({}) — completed", task.id),
             result: "Task completed".into(),
             next_action: format!("inspect task output for {}", task.id),
             worker_role: None,
@@ -270,9 +299,7 @@ async fn non_owner_cannot_kill_running_task() {
     let dispatcher = NotificationDispatcher::new(TelegramGateway::default());
     let task = manager.create("running task", "session-owner", InteractionSurface::Cli);
 
-    manager.launch(&task.id, "inspect", async move {
-        tokio::task::yield_now().await;
-    });
+    manager.launch(&task.id, "inspect", std::future::pending::<()>());
 
     assert_eq!(
         manager.running_owner(&task.id),
@@ -282,6 +309,16 @@ async fn non_owner_cannot_kill_running_task() {
         })
     );
     assert!(!manager.kill(&task.id, "session-other", &dispatcher));
+    assert_eq!(manager.get(&task.id).unwrap().status, TaskStatus::Running);
+    assert_eq!(manager.is_terminal(&task.id), Some(false));
+    assert!(
+        manager
+            .get(&task.id)
+            .unwrap()
+            .delivery
+            .notification
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -701,8 +738,30 @@ async fn task_stop_tool_allows_owner_and_rejects_non_owner() {
         result,
         ToolResult::Text(format!("task {} stopped", task.id))
     );
-    assert_eq!(manager.get(&task.id).unwrap().status, TaskStatus::Killed);
+    let stored = manager.get(&task.id).unwrap();
+    assert_eq!(stored.status, TaskStatus::Killed);
+    assert!(stored.delivery.notification.is_some());
+    assert_eq!(
+        stored.delivery.notification.as_ref().unwrap().title,
+        "Task killed"
+    );
     assert_eq!(dispatcher.delivered().len(), 0);
+
+    let second_stop_error = TaskStopTool
+        .invoke(
+            &ToolCall {
+                name: "TaskStop".into(),
+                input: task.id.clone(),
+            },
+            &owner_permissions,
+        )
+        .await
+        .expect_err("second stop should fail once task is terminal");
+    assert!(
+        second_stop_error
+            .to_string()
+            .contains("not running or not owned by this session")
+    );
 }
 
 #[tokio::test]
