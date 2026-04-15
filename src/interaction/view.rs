@@ -288,10 +288,7 @@ pub fn telegram_item_from_surface_item(item: &SurfaceItem) -> Option<TelegramIte
             tool_name: tool_name.clone(),
             message: message.clone(),
         }),
-        SurfaceItem::RuntimeNotice { kind, message } => Some(TelegramItem::RuntimeNotice {
-            kind: kind.clone(),
-            message: message.clone(),
-        }),
+        SurfaceItem::RuntimeNotice { kind, message } => telegram_runtime_notice_item(kind, message),
         SurfaceItem::ToolCallStarted { .. }
         | SurfaceItem::ToolResult { .. }
         | SurfaceItem::AssistantDelta { .. }
@@ -299,6 +296,16 @@ pub fn telegram_item_from_surface_item(item: &SurfaceItem) -> Option<TelegramIte
         | SurfaceItem::Terminal { .. }
         | SurfaceItem::SessionMilestone { .. } => None,
     }
+}
+
+fn telegram_runtime_notice_item(kind: &str, message: &str) -> Option<TelegramItem> {
+    if kind == "runtime" {
+        return None;
+    }
+    Some(TelegramItem::RuntimeNotice {
+        kind: kind.to_string(),
+        message: message.to_string(),
+    })
 }
 
 pub fn build_web_view(view: &SurfaceView) -> WebView {

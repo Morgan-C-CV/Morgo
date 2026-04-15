@@ -1034,6 +1034,31 @@ fn telegram_view_keeps_only_telegram_relevant_semantic_items() {
 }
 
 #[test]
+fn telegram_view_trims_shared_runtime_lifecycle_notices_but_keeps_surface_relevant_ones() {
+    let telegram_view = build_telegram_view(&build_surface_view(&CliTurnOutput {
+        primary_text: "Status".into(),
+        events: vec![
+            CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::Notice {
+                kind: "runtime".into(),
+                message: "NormalTerminal: completed".into(),
+            }),
+            CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::Notice {
+                kind: "validation".into(),
+                message: "pending verify".into(),
+            }),
+        ],
+    }));
+
+    assert_eq!(telegram_view.primary_text, "Status");
+    assert_eq!(telegram_view.items.len(), 1);
+    assert!(matches!(
+        &telegram_view.items[0],
+        rust_agent::interaction::view::TelegramItem::RuntimeNotice { kind, message }
+            if kind == "validation" && message == "pending verify"
+    ));
+}
+
+#[test]
 fn telegram_gateway_authorization_distinguishes_binding_and_delivery_readiness() {
     let gateway = TelegramGateway {
         allowed_bindings: vec![
@@ -1269,7 +1294,7 @@ fn telegram_gateway_builds_semantic_outgoing_messages_without_cli_renderer_types
                 usage: None,
             }),
             CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::Notice {
-                kind: "runtime".into(),
+                kind: "delivery".into(),
                 message: "background work still running".into(),
             }),
             CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::ToolResult {
@@ -1305,7 +1330,7 @@ fn telegram_gateway_builds_semantic_outgoing_messages_without_cli_renderer_types
                     chat_id: "chat-1".into(),
                     thread_id: Some("thread-9".into()),
                 },
-                text: "Notice: runtime\nbackground work still running".into(),
+                text: "Notice: delivery\nbackground work still running".into(),
             }
         ]
     );
@@ -1568,18 +1593,15 @@ async fn telegram_runtime_entry_routes_authorized_input_into_shared_runtime_and_
         panic!("expected authorized telegram runtime response");
     };
     assert_eq!(
-        messages[0],
-        TelegramOutgoingMessage {
+        messages,
+        vec![TelegramOutgoingMessage {
             target: TelegramDeliveryTarget {
                 chat_id: "chat-1".into(),
                 thread_id: Some("thread-1".into()),
             },
             text: "telegram runtime reply".into(),
-        }
+        }]
     );
-    assert!(messages.iter().any(|message| {
-        message.text == "Notice: runtime\nNormalTerminal: completed"
-    }));
 
     let (_, default_history) = session_store
         .load(&SessionRestoreRequest {
@@ -1789,7 +1811,7 @@ fn same_surface_view_feeds_remote_telegram_and_web_without_cli_renderer_types() 
                 detail: None,
             }),
             CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::Notice {
-                kind: "runtime".into(),
+                kind: "delivery".into(),
                 message: "background work still running".into(),
             }),
         ],
