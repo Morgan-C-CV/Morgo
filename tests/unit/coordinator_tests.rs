@@ -320,3 +320,40 @@ fn coordinator_prompt_requires_risk_callout_when_verification_is_missing() {
     assert!(prompt.contains("call out any unverified risk"));
     assert!(prompt.contains("describe validation status"));
 }
+
+#[test]
+fn coordinator_notification_conversion_is_independent_of_wake_up_flag() {
+    let notification = Notification {
+        session_id: "session-1".into(),
+        title: "Task completed".into(),
+        body: "Worker finished verify".into(),
+        notification_type: NotificationType::TaskUpdate,
+        task_id: Some("task-11".into()),
+        task_type: Some("local_agent".into()),
+        status: Some("Completed".into()),
+        next_action: Some("synthesize validated result for task-11".into()),
+        worker_role: Some("verify".into()),
+        orchestration_group_id: None,
+        phase: Some("verify".into()),
+        validation_state: Some("verified".into()),
+        output_file: Some("/tmp/task-11.log".into()),
+        usage: None,
+        tool_name: None,
+        notice_kind: None,
+        dedupe_key: None,
+        wake_up: false,
+        target: None,
+    };
+
+    let converted = notification_to_task_notification(&notification).expect("should convert");
+    assert_eq!(converted.task_id, "task-11");
+    assert_eq!(
+        converted.task_type,
+        rust_agent::task::types::TaskType::LocalAgent
+    );
+    assert_eq!(
+        converted.next_action,
+        "synthesize validated result for task-11"
+    );
+    assert_eq!(converted.validation_state, Some(ValidationState::Verified));
+}

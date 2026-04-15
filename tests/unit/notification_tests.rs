@@ -1400,7 +1400,7 @@ fn dispatcher_requires_delivery_ready_binding_for_telegram() {
             }),
         }],
     });
-    let notification = Notification {
+    let prepared = Notification {
         session_id: "telegram-session-1".into(),
         title: "Task completed — validation: verified".into(),
         body: "demo body — completed".into(),
@@ -1419,38 +1419,61 @@ fn dispatcher_requires_delivery_ready_binding_for_telegram() {
         notice_kind: None,
         dedupe_key: None,
         wake_up: true,
+        target: Some(NotificationTarget::Telegram(TelegramDeliveryTarget {
+            chat_id: "chat-1".into(),
+            thread_id: None,
+        })),
+    };
+    let notification = Notification {
         target: Some(NotificationTarget::Session {
             session_id: "telegram-session-1".into(),
         }),
+        ..prepared.clone()
     };
 
     dispatcher.dispatch(InteractionSurface::Telegram, notification);
 
+    assert_eq!(dispatcher.delivered(), vec![prepared.clone()]);
     assert_eq!(
-        dispatcher.delivered(),
-        vec![Notification {
+        dispatcher.drain_telegram_notifications("telegram-session-1"),
+        vec![prepared]
+    );
+}
+
+#[test]
+fn telegram_dispatch_only_enqueues_wake_up_notifications() {
+    let dispatcher = NotificationDispatcher::new(TelegramGateway {
+        allowed_bindings: vec![SessionBinding {
+            actor_id: "actor-1".into(),
             session_id: "telegram-session-1".into(),
-            title: "Task completed — validation: verified".into(),
-            body: "demo body — completed".into(),
-            notification_type: NotificationType::TaskUpdate,
-            task_id: Some("task-1".into()),
-            task_type: Some("local_agent".into()),
-            status: Some("Completed".into()),
-            next_action: Some("inspect task output for task-1".into()),
-            worker_role: Some("verify".into()),
-            orchestration_group_id: None,
-            phase: Some("verify".into()),
-            validation_state: Some("verified".into()),
-            output_file: Some("/tmp/task-1.log".into()),
-            usage: None,
-            tool_name: None,
-            notice_kind: None,
-            dedupe_key: None,
-            wake_up: true,
-            target: Some(NotificationTarget::Telegram(TelegramDeliveryTarget {
+            telegram_user_id: Some("user-1".into()),
+            bot_id: Some("bot-1".into()),
+            delivery_target: Some(TelegramDeliveryTarget {
                 chat_id: "chat-1".into(),
                 thread_id: None,
-            })),
-        }]
+            }),
+        }],
+    });
+
+    dispatcher.dispatch(
+        InteractionSurface::Telegram,
+        Notification::approval_required("telegram-session-1", "Bash", "needs approval"),
+    );
+    dispatcher.dispatch(
+        InteractionSurface::Telegram,
+        Notification::runtime_notice("telegram-session-1", "tool", "background only"),
+    );
+
+    let drained = dispatcher.drain_telegram_notifications("telegram-session-1");
+    assert_eq!(drained.len(), 1);
+    assert_eq!(
+        drained[0].notification_type,
+        NotificationType::ApprovalRequired
+    );
+    assert!(
+        dispatcher
+            .delivered()
+            .iter()
+            .any(|notification| notification.notification_type == NotificationType::RuntimeNotice)
     );
 }
