@@ -8,6 +8,7 @@ use crate::core::query_loop::{QueryParams, run_query_loop_with_params};
 use crate::cost::tracker::CostTracker;
 use crate::interaction::dispatcher::NotificationDispatcher;
 use crate::interaction::telegram::gateway::TelegramGateway;
+use crate::security::audit::AuditLog;
 use crate::service::compact::reactive_compact::ReactiveCompactor;
 use crate::state::app_state::{AppState, RuntimeRole, WorkerRole};
 use crate::state::permission_context::ToolPermissionContext;
@@ -366,6 +367,7 @@ fn build_parent_query_context(permissions: ToolPermissionContext) -> QueryContex
         cost_tracker: CostTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default())
             .with_hook_registry(hook_registry.clone()),
+        audit_log: std::sync::Arc::new(std::sync::Mutex::new(AuditLog::default())),
         startup_trace: Vec::new(),
         active_session_id: permissions
             .active_session_id

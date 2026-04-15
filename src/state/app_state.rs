@@ -13,8 +13,10 @@ use tokio::sync::RwLock;
 use crate::history::resume::{ResolvedSessionState, RestoredSession};
 use crate::history::session::{SessionHistory, SessionId, SessionSnapshot, SessionStore};
 use crate::interaction::dispatcher::NotificationDispatcher;
+use crate::security::audit::AuditLog;
 use crate::state::permission_context::ToolPermissionContext;
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppStateRuntimeChange {
@@ -69,6 +71,7 @@ pub struct AppState {
     pub plugin_load_result: Option<Arc<PluginLoadResult>>,
     pub cost_tracker: CostTracker,
     pub notification_dispatcher: NotificationDispatcher,
+    pub audit_log: Arc<Mutex<AuditLog>>,
     pub startup_trace: Vec<String>,
     pub active_session_id: String,
     pub session_store: Option<Arc<dyn SessionStore>>,

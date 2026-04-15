@@ -1,5 +1,5 @@
 use std::io::{self, BufRead};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio::sync::RwLock;
 
 use clap::Parser;
@@ -41,6 +41,7 @@ use crate::plugins::runtime_state::{
 use crate::plugins::types::{
     PluginDefinition, PluginDiagnostic, PluginDiagnosticSeverity, PluginLifecycleState,
 };
+use crate::security::audit::AuditLog;
 use crate::security::authorizer::{AuthDecision, DefaultSurfaceAuthorizer, SurfaceAuthorizer};
 use crate::service::api::client::{
     ModelPricing, ModelProviderClient, ModelProviderConfig, ProviderTimeout,
@@ -544,6 +545,7 @@ impl RuntimeBootstrap {
             plugin_load_result: Some(plugin_load_result.clone()),
             cost_tracker: CostTracker::default(),
             notification_dispatcher: notification_dispatcher.clone(),
+            audit_log: Arc::new(Mutex::new(AuditLog::default())),
             startup_trace: state
                 .phases
                 .iter()
@@ -615,6 +617,7 @@ impl RuntimeBootstrap {
                 initialize_bundle.provider_config.pricing.clone(),
             ),
             notification_dispatcher: initialize_bundle.notification_dispatcher.clone(),
+            audit_log: Arc::new(Mutex::new(AuditLog::default())),
             startup_trace: state
                 .phases
                 .iter()

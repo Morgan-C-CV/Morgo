@@ -66,6 +66,7 @@ async fn query_engine_submit_turn_works_through_production_provider_path() {
             plugin_load_result: None,
             cost_tracker: cost_tracker.clone(),
             notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
+            audit_log: Arc::new(std::sync::Mutex::new(rust_agent::security::audit::AuditLog::default())),
             startup_trace: Vec::new(),
             active_session_id: "provider-it-session".into(),
             session_store: None,

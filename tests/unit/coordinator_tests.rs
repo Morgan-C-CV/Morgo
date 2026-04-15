@@ -190,6 +190,7 @@ fn coordinator_test_app_state() -> AppState {
         plugin_load_result: None,
         cost_tracker: CostTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
+        audit_log: Arc::new(std::sync::Mutex::new(rust_agent::security::audit::AuditLog::default())),
         startup_trace: Vec::new(),
         active_session_id: "test-session".into(),
         session_store: None,

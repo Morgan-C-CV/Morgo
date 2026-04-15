@@ -5,6 +5,21 @@ pub enum AuditEvent {
     TaskStarted { task_id: String },
     TaskFinished { task_id: String, status: String },
     SurfaceDenied { actor_id: String, reason: String },
+    RemoteRequestAccepted {
+        session_id: String,
+        actor_id: String,
+        from_trusted_surface: bool,
+    },
+    RemoteRequestDenied {
+        session_id: String,
+        actor_id: String,
+        reason: String,
+    },
+    RemoteNotificationQueued {
+        session_id: String,
+        actor_id: Option<String>,
+        notification_type: String,
+    },
 }
 
 #[derive(Debug, Clone, Default)]

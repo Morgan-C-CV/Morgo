@@ -1,7 +1,10 @@
+use std::sync::Arc;
+
 use rust_agent::bootstrap::InteractionSurface;
 use rust_agent::hook::registry::{
     HookEvent, HookEventMatcher, HookRegistry, HookRule, HookRuleLayer,
 };
+use rust_agent::security::audit::AuditLog;
 use rust_agent::interaction::cli::renderer::{
     build_tui_screen, render_document_output, render_document_tui_output, render_turn_document,
     render_turn_output,
@@ -17,9 +20,14 @@ use rust_agent::interaction::remote::{
     remote_delivery_mode_for_surface_item,
 };
 use rust_agent::interaction::telegram::binding::{
-    SessionBinding, TelegramDeliveryTarget, TelegramOutgoingMessage,
+    SessionBinding, TelegramBindingAuthorization, TelegramDeliveryTarget,
+    TelegramOutgoingMessage,
 };
 use rust_agent::interaction::telegram::gateway::TelegramGateway;
+use rust_agent::state::app_state::{AppState, RuntimeRole};
+use rust_agent::state::permission_context::{PermissionMode, ToolPermissionContext};
+use rust_agent::tool::registry::ToolRegistry;
+use tokio::sync::RwLock;
 use rust_agent::interaction::view::{
     SurfaceItem, WebItem, build_surface_view, build_telegram_view, build_web_view,
     surface_item_from_cli_event,
@@ -943,6 +951,90 @@ fn telegram_view_keeps_only_telegram_relevant_semantic_items() {
 }
 
 #[test]
+fn telegram_gateway_authorization_distinguishes_binding_and_delivery_readiness() {
+    let gateway = TelegramGateway {
+        allowed_bindings: vec![
+            SessionBinding {
+                actor_id: "actor-1".into(),
+                session_id: "telegram-session-1".into(),
+                telegram_user_id: Some("user-1".into()),
+                bot_id: Some("bot-1".into()),
+                delivery_target: Some(TelegramDeliveryTarget {
+                    chat_id: "chat-1".into(),
+                    thread_id: Some("thread-9".into()),
+                }),
+            },
+            SessionBinding {
+                actor_id: "actor-2".into(),
+                session_id: "telegram-session-2".into(),
+                telegram_user_id: Some("user-2".into()),
+                bot_id: Some("bot-1".into()),
+                delivery_target: None,
+            },
+        ],
+    };
+
+    assert_eq!(
+        gateway.authorize_binding("actor-1", "telegram-session-1"),
+        TelegramBindingAuthorization::DeliveryReady(TelegramDeliveryTarget {
+            chat_id: "chat-1".into(),
+            thread_id: Some("thread-9".into()),
+        })
+    );
+    assert_eq!(
+        gateway.authorize_binding("actor-2", "telegram-session-2"),
+        TelegramBindingAuthorization::AuthorizedNoDeliveryTarget
+    );
+    assert_eq!(
+        gateway.authorize_binding("actor-3", "telegram-session-3"),
+        TelegramBindingAuthorization::Unauthorized
+    );
+}
+
+#[test]
+fn telegram_gateway_rejects_explicit_target_without_matching_binding() {
+    let gateway = TelegramGateway {
+        allowed_bindings: vec![SessionBinding {
+            actor_id: "actor-1".into(),
+            session_id: "telegram-session-1".into(),
+            telegram_user_id: Some("user-1".into()),
+            bot_id: Some("bot-1".into()),
+            delivery_target: Some(TelegramDeliveryTarget {
+                chat_id: "chat-1".into(),
+                thread_id: Some("thread-9".into()),
+            }),
+        }],
+    };
+    let notification = Notification {
+        session_id: "telegram-session-1".into(),
+        title: "Approval required: Bash".into(),
+        body: "requires explicit approval".into(),
+        notification_type: NotificationType::ApprovalRequired,
+        task_id: None,
+        task_type: None,
+        status: None,
+        next_action: None,
+        worker_role: None,
+        orchestration_group_id: None,
+        phase: None,
+        validation_state: None,
+        output_file: None,
+        usage: None,
+        tool_name: Some("Bash".into()),
+        notice_kind: None,
+        dedupe_key: Some("approval_required:Bash:requires explicit approval".into()),
+        wake_up: true,
+        target: Some(NotificationTarget::Telegram(TelegramDeliveryTarget {
+            chat_id: "chat-other".into(),
+            thread_id: None,
+        })),
+    };
+
+    assert!(!gateway.can_deliver(&notification));
+    assert_eq!(gateway.prepare_delivery(&notification), None);
+}
+
+#[test]
 fn telegram_gateway_builds_semantic_outgoing_messages_without_cli_renderer_types() {
     let gateway = TelegramGateway {
         allowed_bindings: vec![SessionBinding {
@@ -1299,6 +1391,7 @@ fn drain_remote_notifications_maps_structured_payloads() {
         plugin_load_result: None,
         cost_tracker: rust_agent::cost::tracker::CostTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
+        audit_log: std::sync::Arc::new(std::sync::Mutex::new(AuditLog::default())),
         startup_trace: Vec::new(),
         active_session_id: "remote-session".into(),
         session_store: None,
@@ -1345,6 +1438,7 @@ fn drain_remote_task_update_notifications_preserve_task_type() {
         plugin_load_result: None,
         cost_tracker: rust_agent::cost::tracker::CostTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
+        audit_log: std::sync::Arc::new(std::sync::Mutex::new(AuditLog::default())),
         startup_trace: Vec::new(),
         active_session_id: "remote-session".into(),
         session_store: None,

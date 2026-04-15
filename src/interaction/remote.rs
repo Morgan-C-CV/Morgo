@@ -10,6 +10,7 @@ use crate::interaction::envelope::NormalizedInput;
 use crate::interaction::notification::{Notification, NotificationTarget, NotificationType};
 use crate::interaction::router::CommandRouter;
 use crate::interaction::view::{SurfaceItem, SurfaceView, TaskView, build_surface_view};
+use crate::security::audit::AuditEvent;
 use crate::state::app_state::AppState;
 use crate::state::permission_context::PendingApproval;
 use crate::task::types::{TaskEvent, TaskUsageSummary};
@@ -183,13 +184,37 @@ pub async fn handle_remote_request(
         request.raw,
     );
     let remote_engine = bind_remote_engine(engine, app_state, &input);
-    let output = handle_normalized_input(
+    let output = match handle_normalized_input(
         router,
         &remote_engine,
         &remote_engine.context.app_state,
         input.clone(),
     )
-    .await?;
+    .await
+    {
+        Ok(output) => {
+            record_remote_audit(
+                &remote_engine.context.app_state,
+                AuditEvent::RemoteRequestAccepted {
+                    session_id: input.session_id.clone(),
+                    actor_id: input.actor.actor_id.clone(),
+                    from_trusted_surface: input.metadata.from_trusted_surface,
+                },
+            );
+            output
+        }
+        Err(error) => {
+            record_remote_audit(
+                &remote_engine.context.app_state,
+                AuditEvent::RemoteRequestDenied {
+                    session_id: input.session_id.clone(),
+                    actor_id: input.actor.actor_id.clone(),
+                    reason: error.to_string(),
+                },
+            );
+            return Err(error);
+        }
+    };
 
     let view = build_surface_view(&output);
     dispatch_remote_runtime_notifications(&remote_engine.context.app_state, &input, &view);
@@ -379,6 +404,7 @@ fn dispatch_remote_runtime_notifications(
         let Some(notification) = notification_from_surface_item(input, item) else {
             continue;
         };
+        record_remote_notification_audit(app_state, &notification);
         app_state
             .notification_dispatcher
             .dispatch(input.surface, notification);
@@ -477,6 +503,34 @@ fn notification_from_pending_approval(
         actor_id: actor_id.to_string(),
     });
     notification
+}
+
+fn record_remote_audit(app_state: &AppState, event: AuditEvent) {
+    app_state
+        .audit_log
+        .lock()
+        .expect("audit log poisoned")
+        .record(event);
+}
+
+fn record_remote_notification_audit(app_state: &AppState, notification: &Notification) {
+    let actor_id = match &notification.target {
+        Some(NotificationTarget::RemoteActor { actor_id, .. }) => Some(actor_id.clone()),
+        _ => None,
+    };
+    let notification_type = match notification.notification_type {
+        NotificationType::TaskUpdate => "task_update",
+        NotificationType::ApprovalRequired => "approval_required",
+        NotificationType::RuntimeNotice => "runtime_notice",
+    };
+    record_remote_audit(
+        app_state,
+        AuditEvent::RemoteNotificationQueued {
+            session_id: notification.session_id.clone(),
+            actor_id,
+            notification_type: notification_type.into(),
+        },
+    );
 }
 
 fn leak_string(value: String) -> &'static str {
