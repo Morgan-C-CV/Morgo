@@ -10,6 +10,7 @@ use rust_agent::command::types::{
 };
 use rust_agent::core::context::QueryContext;
 use rust_agent::core::engine::QueryEngine;
+use rust_agent::core::message::Message;
 use rust_agent::interaction::dispatcher::NotificationDispatcher;
 use rust_agent::interaction::envelope::NormalizedInput;
 use rust_agent::interaction::router::{
@@ -159,6 +160,7 @@ async fn prompt_command_is_interpreted_before_query_engine() {
                         disable_model_invocation: false,
                         immediate: true,
                         is_sensitive: false,
+                        enters_query_engine: true,
                     },
                 },
             },
@@ -177,4 +179,35 @@ fn query_context_builds_non_empty_prompt_layers() {
             .contains("Runtime context summary:")
     );
     assert!(engine.context.context_prompt.contains("- client_type: Cli"));
+}
+
+#[test]
+fn query_source_to_user_message_is_shared_for_unknown_and_prompt_commands() {
+    let unknown_input = NormalizedInput::from_raw(InteractionSurface::Cli, "/unknown foo");
+    let unknown_source = QuerySource::UnknownSlashFallback {
+        command_name: "unknown".into(),
+    };
+    assert_eq!(
+        unknown_source.to_user_message(&unknown_input, "/ignored"),
+        Message::user("/unknown foo")
+    );
+
+    let prompt_input = NormalizedInput::from_raw(InteractionSurface::Cli, "/prompt-cmd");
+    let prompt_source = QuerySource::PromptCommand {
+        command: RoutedCommand {
+            name: "prompt-cmd".into(),
+            policy: rust_agent::interaction::router::CommandRoutePolicy {
+                availability: CommandAvailability::Everywhere,
+                command_type: CommandType::Prompt,
+                disable_model_invocation: false,
+                immediate: true,
+                is_sensitive: false,
+                enters_query_engine: true,
+            },
+        },
+    };
+    assert_eq!(
+        prompt_source.to_user_message(&prompt_input, "expanded prompt body"),
+        Message::user("expanded prompt body")
+    );
 }

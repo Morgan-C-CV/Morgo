@@ -1,6 +1,7 @@
 use crate::bootstrap::InteractionSurface;
 use crate::command::registry::CommandRegistry;
-use crate::command::types::{CommandAvailability, CommandResult, CommandType};
+use crate::command::types::{CommandAvailability, CommandMetadata, CommandResult, CommandType};
+use crate::core::message::Message;
 use crate::interaction::envelope::NormalizedInput;
 use crate::security::authorizer::{AuthDecision, SurfaceAuthorizer};
 use crate::state::app_state::AppState;
@@ -12,6 +13,7 @@ pub struct CommandRoutePolicy {
     pub disable_model_invocation: bool,
     pub immediate: bool,
     pub is_sensitive: bool,
+    pub enters_query_engine: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,6 +27,17 @@ pub enum QuerySource {
     PlainPrompt,
     UnknownSlashFallback { command_name: String },
     PromptCommand { command: RoutedCommand },
+}
+
+impl QuerySource {
+    pub fn to_user_message(&self, input: &NormalizedInput, prompt: &str) -> Message {
+        match self {
+            Self::PlainPrompt | Self::UnknownSlashFallback { .. } => {
+                Message::user(input.raw.clone())
+            }
+            Self::PromptCommand { .. } => Message::user(prompt.to_string()),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -96,7 +109,7 @@ impl CommandRouter {
                 let result = command.execute(input, app_state).await?;
                 match (routed.policy.command_type, result) {
                     (CommandType::Prompt, CommandResult::Prompt(prompt)) => {
-                        if routed.policy.disable_model_invocation {
+                        if !routed.policy.enters_query_engine {
                             Ok(RouteExecution::CommandResult(CommandResult::Denied(
                                 format!(
                                     "command {} cannot invoke the model on this surface",
@@ -138,8 +151,31 @@ impl CommandRouter {
         if !command.is_enabled() {
             return RouteDecision::Deny(format!("command {} is disabled", metadata.name));
         }
+        if let Some(reason) = Self::policy_denial_reason(&metadata, input) {
+            return RouteDecision::Deny(reason);
+        }
+        let policy = Self::policy_from_metadata(&metadata);
+        RouteDecision::ExecuteCommand(RoutedCommand {
+            name: metadata.name,
+            policy,
+        })
+    }
+
+    fn policy_from_metadata(metadata: &CommandMetadata) -> CommandRoutePolicy {
+        CommandRoutePolicy {
+            availability: metadata.availability,
+            command_type: metadata.command_type,
+            disable_model_invocation: metadata.disable_model_invocation,
+            immediate: metadata.immediate,
+            is_sensitive: metadata.is_sensitive,
+            enters_query_engine: matches!(metadata.command_type, CommandType::Prompt)
+                && !metadata.disable_model_invocation,
+        }
+    }
+
+    fn policy_denial_reason(metadata: &CommandMetadata, input: &NormalizedInput) -> Option<String> {
         if !Self::is_available(metadata.availability, input.surface) {
-            return RouteDecision::Deny(format!(
+            return Some(format!(
                 "command {} is not available on this surface",
                 metadata.name
             ));
@@ -147,21 +183,12 @@ impl CommandRouter {
         if matches!(input.surface, InteractionSurface::Remote)
             && (!input.metadata.from_trusted_surface || metadata.is_sensitive)
         {
-            return RouteDecision::Deny(format!(
+            return Some(format!(
                 "command {} is not allowed on remote surface",
                 metadata.name
             ));
         }
-        RouteDecision::ExecuteCommand(RoutedCommand {
-            name: metadata.name,
-            policy: CommandRoutePolicy {
-                availability: metadata.availability,
-                command_type: metadata.command_type,
-                disable_model_invocation: metadata.disable_model_invocation,
-                immediate: metadata.immediate,
-                is_sensitive: metadata.is_sensitive,
-            },
-        })
+        None
     }
 
     fn is_available(availability: CommandAvailability, surface: InteractionSurface) -> bool {

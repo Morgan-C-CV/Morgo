@@ -93,6 +93,8 @@ impl Command for RemoteSafeTestCommand {
     }
 }
 
+struct PromptNoModelCommand;
+
 #[async_trait]
 impl Command for SensitiveRemoteCommand {
     fn metadata(&self) -> CommandMetadata {
@@ -120,6 +122,33 @@ impl Command for SensitiveRemoteCommand {
     }
 }
 
+#[async_trait]
+impl Command for PromptNoModelCommand {
+    fn metadata(&self) -> CommandMetadata {
+        CommandMetadata {
+            name: "prompt-no-model".into(),
+            description: "Prompt command with model invocation disabled".into(),
+            source: CommandSource::Builtin,
+            category: "test".into(),
+            command_type: CommandType::Prompt,
+            availability: CommandAvailability::Everywhere,
+            aliases: Vec::new(),
+            is_hidden: false,
+            disable_model_invocation: true,
+            immediate: false,
+            is_sensitive: false,
+        }
+    }
+
+    async fn execute(
+        &self,
+        _input: &NormalizedInput,
+        _app_state: &AppState,
+    ) -> anyhow::Result<CommandResult> {
+        Ok(CommandResult::Prompt("expanded prompt body".into()))
+    }
+}
+
 #[tokio::test]
 async fn router_executes_known_commands_before_query() {
     let registry = Arc::new(CommandRegistry::new().register(Arc::new(HelpCommand)));
@@ -136,6 +165,7 @@ async fn router_executes_known_commands_before_query() {
                 disable_model_invocation: false,
                 immediate: true,
                 is_sensitive: false,
+                enters_query_engine: false,
             },
         })
     );
@@ -158,6 +188,24 @@ async fn router_falls_back_for_unknown_commands() {
             },
         }
     );
+}
+
+#[tokio::test]
+async fn router_unknown_slash_fallback_is_shared_by_cli_and_remote() {
+    let router = CommandRouter::new(
+        Arc::new(CommandRegistry::new()),
+        Box::new(DefaultSurfaceAuthorizer),
+    );
+    let cli = NormalizedInput::from_raw(InteractionSurface::Cli, "/missing foo");
+    let remote = NormalizedInput::from_remote_raw(
+        "remote-session",
+        "remote-actor",
+        true,
+        true,
+        "/missing foo",
+    );
+
+    assert_eq!(router.decide(&cli).await, router.decide(&remote).await);
 }
 
 #[tokio::test]
@@ -212,6 +260,51 @@ async fn router_denies_sensitive_remote_command() {
     assert_eq!(
         router.decide(&input).await,
         RouteDecision::Deny("command remote-sensitive is not allowed on remote surface".into())
+    );
+}
+
+#[tokio::test]
+async fn prompt_command_with_model_invocation_disabled_never_enters_query_engine() {
+    let router = CommandRouter::new(
+        Arc::new(CommandRegistry::new().register(Arc::new(PromptNoModelCommand))),
+        Box::new(DefaultSurfaceAuthorizer),
+    );
+    let app_state = AppState {
+        surface: InteractionSurface::Cli,
+        session_mode: SessionMode::Interactive,
+        client_type: ClientType::Cli,
+        session_source: SessionSource::LocalCli,
+        runtime_role: RuntimeRole::Coordinator,
+        worker_role: None,
+        permission_context: ToolPermissionContext::new(PermissionMode::Default),
+        command_registry: None,
+        runtime_tool_registry: Some(Arc::new(RwLock::new(ToolRegistry::new()))),
+        skill_registry: None,
+        mcp_runtime: None,
+        plugin_load_result: None,
+        cost_tracker: CostTracker::default(),
+        notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
+        startup_trace: Vec::new(),
+        active_session_id: "test-session".into(),
+        session_store: None,
+        session: None,
+        history: None,
+        restored_session: None,
+    };
+
+    let result = router
+        .route(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/prompt-no-model"),
+            &app_state,
+        )
+        .await
+        .expect("route should succeed");
+
+    assert_eq!(
+        result,
+        RouteExecution::CommandResult(CommandResult::Denied(
+            "command prompt-no-model cannot invoke the model on this surface".into()
+        ))
     );
 }
 
@@ -910,6 +1003,7 @@ async fn cli_repl_applies_disable_and_enable_only_on_next_turn_boundaries() {
                 disable_model_invocation: false,
                 immediate: false,
                 is_sensitive: false,
+                enters_query_engine: true,
             },
         })
     );
@@ -941,6 +1035,7 @@ async fn cli_repl_applies_disable_and_enable_only_on_next_turn_boundaries() {
                 disable_model_invocation: false,
                 immediate: false,
                 is_sensitive: false,
+                enters_query_engine: true,
             },
         })
     );

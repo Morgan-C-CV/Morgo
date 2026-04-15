@@ -3,7 +3,7 @@ use crate::core::engine::QueryEngine;
 use crate::core::events::EngineEvent;
 use crate::core::message::Message;
 use crate::interaction::envelope::NormalizedInput;
-use crate::interaction::router::{CommandRouter, QuerySource, RouteExecution};
+use crate::interaction::router::{CommandRouter, RouteExecution};
 use crate::plugins::runtime_state::{build_turn_engine, build_turn_router};
 use crate::state::app_state::AppState;
 use crate::task::types::TaskEvent;
@@ -144,12 +144,7 @@ pub async fn handle_normalized_input(
             ),
         },
         RouteExecution::EnterQuery { prompt, source } => {
-            let user_message = match source {
-                QuerySource::PlainPrompt | QuerySource::UnknownSlashFallback { .. } => {
-                    Message::user(input.raw.clone())
-                }
-                QuerySource::PromptCommand { .. } => Message::user(prompt.clone()),
-            };
+            let user_message = source.to_user_message(&input, &prompt);
             let (messages, events) = collect_stream_messages(engine, user_message).await;
             (messages, events, true)
         }
