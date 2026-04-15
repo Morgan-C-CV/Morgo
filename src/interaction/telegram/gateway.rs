@@ -1,9 +1,28 @@
+use crate::interaction::envelope::NormalizedInput;
 use crate::interaction::notification::{Notification, NotificationTarget};
 use crate::interaction::telegram::binding::{
     SessionBinding, TelegramBindingAuthorization, TelegramDeliveryTarget,
-    TelegramOutgoingMessage,
+    TelegramInboundBindingAuthorization, TelegramOutgoingMessage,
 };
 use crate::interaction::view::{TelegramItem, TelegramView, build_telegram_view};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TelegramInboundRequest {
+    pub telegram_user_id: String,
+    pub bot_id: String,
+    pub actor_id: String,
+    pub session_id: String,
+    pub raw: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TelegramInboundIntake {
+    Authorized {
+        binding: SessionBinding,
+        input: NormalizedInput,
+    },
+    Rejected(TelegramInboundBindingAuthorization),
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct TelegramGateway {
@@ -34,6 +53,76 @@ impl TelegramGateway {
         }
     }
 
+    pub fn authorize_principal(
+        &self,
+        telegram_user_id: &str,
+        bot_id: &str,
+        session_id: &str,
+    ) -> TelegramBindingAuthorization {
+        let Some(binding) = self.allowed_bindings.iter().find(|binding| {
+            binding.matches_session(session_id)
+                && binding.matches_telegram_principal(telegram_user_id, bot_id)
+        }) else {
+            return TelegramBindingAuthorization::Unauthorized;
+        };
+        match binding.delivery_target.clone() {
+            Some(target) => TelegramBindingAuthorization::DeliveryReady(target),
+            None => TelegramBindingAuthorization::AuthorizedNoDeliveryTarget,
+        }
+    }
+
+    pub fn authorize_inbound_binding(
+        &self,
+        telegram_user_id: &str,
+        bot_id: &str,
+        actor_id: &str,
+        session_id: &str,
+    ) -> TelegramInboundBindingAuthorization {
+        let Some(session_binding) = self
+            .allowed_bindings
+            .iter()
+            .find(|binding| binding.matches_session(session_id))
+        else {
+            return TelegramInboundBindingAuthorization::SessionNotBound;
+        };
+
+        if session_binding.bot_id.as_deref() != Some(bot_id) {
+            return TelegramInboundBindingAuthorization::BotMismatch;
+        }
+
+        if session_binding.telegram_user_id.as_deref() != Some(telegram_user_id) {
+            return TelegramInboundBindingAuthorization::PrincipalMismatch;
+        }
+
+        if session_binding.actor_id != actor_id {
+            return TelegramInboundBindingAuthorization::ActorMismatch;
+        }
+
+        TelegramInboundBindingAuthorization::Authorized(session_binding.clone())
+    }
+
+    pub fn intake_inbound(&self, request: TelegramInboundRequest) -> TelegramInboundIntake {
+        match self.authorize_inbound_binding(
+            &request.telegram_user_id,
+            &request.bot_id,
+            &request.actor_id,
+            &request.session_id,
+        ) {
+            TelegramInboundBindingAuthorization::Authorized(binding) => {
+                TelegramInboundIntake::Authorized {
+                    input: NormalizedInput::from_telegram_raw(
+                        request.session_id,
+                        request.actor_id,
+                        true,
+                        request.raw,
+                    ),
+                    binding,
+                }
+            }
+            rejection => TelegramInboundIntake::Rejected(rejection),
+        }
+    }
+
     pub fn is_authorized(&self, actor_id: &str, session_id: &str) -> bool {
         !matches!(
             self.authorize_binding(actor_id, session_id),
@@ -46,6 +135,18 @@ impl TelegramGateway {
             .iter()
             .find(|binding| binding.matches_session(session_id) && binding.is_delivery_ready())
             .and_then(|binding| binding.delivery_target.clone())
+    }
+
+    pub fn resolve_actor_delivery_target(
+        &self,
+        actor_id: &str,
+        session_id: &str,
+    ) -> Option<TelegramDeliveryTarget> {
+        match self.authorize_binding(actor_id, session_id) {
+            TelegramBindingAuthorization::DeliveryReady(target) => Some(target),
+            TelegramBindingAuthorization::AuthorizedNoDeliveryTarget
+            | TelegramBindingAuthorization::Unauthorized => None,
+        }
     }
 
     pub fn can_deliver(&self, notification: &Notification) -> bool {
@@ -63,9 +164,10 @@ impl TelegramGateway {
             Some(NotificationTarget::Session { session_id }) => {
                 self.resolve_delivery_target(session_id)
             }
-            Some(NotificationTarget::RemoteActor { session_id, .. }) => {
-                self.resolve_delivery_target(session_id)
-            }
+            Some(NotificationTarget::RemoteActor {
+                session_id,
+                actor_id,
+            }) => self.resolve_actor_delivery_target(actor_id, session_id),
             None => self.resolve_delivery_target(&notification.session_id),
         }?;
 

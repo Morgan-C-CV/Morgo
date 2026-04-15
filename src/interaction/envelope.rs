@@ -53,6 +53,22 @@ impl NormalizedInput {
         )
     }
 
+    pub fn from_telegram_raw(
+        session_id: impl Into<String>,
+        actor_id: impl Into<String>,
+        is_authenticated: bool,
+        raw: impl Into<String>,
+    ) -> Self {
+        Self::from_actor_session_raw(
+            InteractionSurface::Telegram,
+            session_id,
+            actor_id,
+            is_authenticated,
+            true,
+            raw,
+        )
+    }
+
     fn from_actor_session_raw(
         surface: InteractionSurface,
         session_id: impl Into<String>,

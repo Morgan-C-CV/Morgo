@@ -22,6 +22,11 @@ impl SessionBinding {
         self.session_id == session_id
     }
 
+    pub fn matches_telegram_principal(&self, telegram_user_id: &str, bot_id: &str) -> bool {
+        self.telegram_user_id.as_deref() == Some(telegram_user_id)
+            && self.bot_id.as_deref() == Some(bot_id)
+    }
+
     pub fn is_delivery_ready(&self) -> bool {
         self.delivery_target.is_some()
     }
@@ -36,6 +41,15 @@ pub enum TelegramBindingAuthorization {
     Unauthorized,
     AuthorizedNoDeliveryTarget,
     DeliveryReady(TelegramDeliveryTarget),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TelegramInboundBindingAuthorization {
+    Authorized(SessionBinding),
+    SessionNotBound,
+    BotMismatch,
+    PrincipalMismatch,
+    ActorMismatch,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

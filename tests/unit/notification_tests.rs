@@ -19,9 +19,11 @@ use rust_agent::interaction::remote::{
 };
 use rust_agent::interaction::telegram::binding::{
     SessionBinding, TelegramBindingAuthorization, TelegramDeliveryTarget,
-    TelegramOutgoingMessage,
+    TelegramInboundBindingAuthorization, TelegramOutgoingMessage,
 };
-use rust_agent::interaction::telegram::gateway::TelegramGateway;
+use rust_agent::interaction::telegram::gateway::{
+    TelegramGateway, TelegramInboundIntake, TelegramInboundRequest,
+};
 use rust_agent::interaction::view::{
     SurfaceItem, WebItem, build_surface_view, build_telegram_view, build_web_view,
     surface_item_from_cli_event,
@@ -1029,6 +1031,121 @@ fn telegram_gateway_rejects_explicit_target_without_matching_binding() {
 }
 
 #[test]
+fn telegram_gateway_authorizes_telegram_principal_separately_from_delivery_readiness() {
+    let gateway = TelegramGateway {
+        allowed_bindings: vec![SessionBinding {
+            actor_id: "actor-1".into(),
+            session_id: "telegram-session-1".into(),
+            telegram_user_id: Some("user-1".into()),
+            bot_id: Some("bot-1".into()),
+            delivery_target: Some(TelegramDeliveryTarget {
+                chat_id: "chat-1".into(),
+                thread_id: None,
+            }),
+        }, SessionBinding {
+            actor_id: "actor-2".into(),
+            session_id: "telegram-session-2".into(),
+            telegram_user_id: Some("user-2".into()),
+            bot_id: Some("bot-1".into()),
+            delivery_target: None,
+        }],
+    };
+
+    assert_eq!(
+        gateway.authorize_principal("user-1", "bot-1", "telegram-session-1"),
+        TelegramBindingAuthorization::DeliveryReady(TelegramDeliveryTarget {
+            chat_id: "chat-1".into(),
+            thread_id: None,
+        })
+    );
+    assert_eq!(
+        gateway.authorize_principal("user-2", "bot-1", "telegram-session-2"),
+        TelegramBindingAuthorization::AuthorizedNoDeliveryTarget
+    );
+    assert_eq!(
+        gateway.authorize_principal("user-9", "bot-1", "telegram-session-1"),
+        TelegramBindingAuthorization::Unauthorized
+    );
+}
+
+#[test]
+fn telegram_gateway_resolves_remote_actor_delivery_target_only_for_bound_actor() {
+    let gateway = TelegramGateway {
+        allowed_bindings: vec![SessionBinding {
+            actor_id: "actor-1".into(),
+            session_id: "telegram-session-1".into(),
+            telegram_user_id: Some("user-1".into()),
+            bot_id: Some("bot-1".into()),
+            delivery_target: Some(TelegramDeliveryTarget {
+                chat_id: "chat-1".into(),
+                thread_id: Some("thread-9".into()),
+            }),
+        }],
+    };
+    let mut actor_notification =
+        Notification::approval_required("telegram-session-1", "Bash", "needs approval");
+    actor_notification.target = Some(NotificationTarget::RemoteActor {
+        session_id: "telegram-session-1".into(),
+        actor_id: "actor-1".into(),
+    });
+
+    let prepared = gateway
+        .prepare_delivery(&actor_notification)
+        .expect("bound actor should resolve to telegram target");
+    assert_eq!(
+        prepared.target,
+        Some(NotificationTarget::Telegram(TelegramDeliveryTarget {
+            chat_id: "chat-1".into(),
+            thread_id: Some("thread-9".into()),
+        }))
+    );
+
+    actor_notification.target = Some(NotificationTarget::RemoteActor {
+        session_id: "telegram-session-1".into(),
+        actor_id: "other-actor".into(),
+    });
+    assert_eq!(gateway.prepare_delivery(&actor_notification), None);
+}
+
+#[test]
+fn telegram_gateway_inbound_binding_requires_matching_principal_actor_session_and_bot() {
+    let gateway = TelegramGateway {
+        allowed_bindings: vec![SessionBinding {
+            actor_id: "actor-1".into(),
+            session_id: "telegram-session-1".into(),
+            telegram_user_id: Some("user-1".into()),
+            bot_id: Some("bot-1".into()),
+            delivery_target: Some(TelegramDeliveryTarget {
+                chat_id: "chat-1".into(),
+                thread_id: None,
+            }),
+        }],
+    };
+
+    assert!(matches!(
+        gateway.authorize_inbound_binding("user-1", "bot-1", "actor-1", "telegram-session-1"),
+        TelegramInboundBindingAuthorization::Authorized(binding)
+            if binding.actor_id == "actor-1" && binding.session_id == "telegram-session-1"
+    ));
+    assert_eq!(
+        gateway.authorize_inbound_binding("user-9", "bot-1", "actor-1", "telegram-session-1"),
+        TelegramInboundBindingAuthorization::PrincipalMismatch
+    );
+    assert_eq!(
+        gateway.authorize_inbound_binding("user-1", "bot-9", "actor-1", "telegram-session-1"),
+        TelegramInboundBindingAuthorization::BotMismatch
+    );
+    assert_eq!(
+        gateway.authorize_inbound_binding("user-1", "bot-1", "actor-9", "telegram-session-1"),
+        TelegramInboundBindingAuthorization::ActorMismatch
+    );
+    assert_eq!(
+        gateway.authorize_inbound_binding("user-1", "bot-1", "actor-1", "missing-session"),
+        TelegramInboundBindingAuthorization::SessionNotBound
+    );
+}
+
+#[test]
 fn telegram_gateway_builds_semantic_outgoing_messages_without_cli_renderer_types() {
     let gateway = TelegramGateway {
         allowed_bindings: vec![SessionBinding {
@@ -1104,6 +1221,116 @@ fn telegram_gateway_builds_semantic_outgoing_messages_without_cli_renderer_types
                 text: "Notice: runtime\nbackground work still running".into(),
             }
         ]
+    );
+}
+
+#[test]
+fn normalized_input_from_telegram_raw_marks_telegram_surface_and_actor() {
+    let input = rust_agent::interaction::envelope::NormalizedInput::from_telegram_raw(
+        "telegram-session-1",
+        "actor-1",
+        true,
+        "/help please",
+    );
+
+    assert_eq!(input.surface, InteractionSurface::Telegram);
+    assert_eq!(input.session_id, "telegram-session-1");
+    assert_eq!(input.actor.actor_id, "actor-1");
+    assert!(input.actor.is_authenticated);
+    assert!(input.metadata.from_trusted_surface);
+    assert_eq!(input.command_name.as_deref(), Some("help"));
+    assert_eq!(input.command_args, "please");
+}
+
+#[test]
+fn telegram_inbound_intake_authorizes_before_normalizing_input() {
+    let gateway = TelegramGateway {
+        allowed_bindings: vec![SessionBinding {
+            actor_id: "actor-1".into(),
+            session_id: "telegram-session-1".into(),
+            telegram_user_id: Some("user-1".into()),
+            bot_id: Some("bot-1".into()),
+            delivery_target: Some(TelegramDeliveryTarget {
+                chat_id: "chat-1".into(),
+                thread_id: None,
+            }),
+        }],
+    };
+
+    let intake = gateway.intake_inbound(TelegramInboundRequest {
+        telegram_user_id: "user-1".into(),
+        bot_id: "bot-1".into(),
+        actor_id: "actor-1".into(),
+        session_id: "telegram-session-1".into(),
+        raw: "/help please".into(),
+    });
+
+    assert!(matches!(
+        intake,
+        TelegramInboundIntake::Authorized { binding, input }
+            if binding.actor_id == "actor-1"
+                && input.surface == InteractionSurface::Telegram
+                && input.session_id == "telegram-session-1"
+                && input.actor.actor_id == "actor-1"
+                && input.command_name.as_deref() == Some("help")
+                && input.command_args == "please"
+    ));
+}
+
+#[test]
+fn telegram_inbound_intake_preserves_explicit_rejection_paths_without_normalizing() {
+    let gateway = TelegramGateway {
+        allowed_bindings: vec![SessionBinding {
+            actor_id: "actor-1".into(),
+            session_id: "telegram-session-1".into(),
+            telegram_user_id: Some("user-1".into()),
+            bot_id: Some("bot-1".into()),
+            delivery_target: Some(TelegramDeliveryTarget {
+                chat_id: "chat-1".into(),
+                thread_id: None,
+            }),
+        }],
+    };
+
+    assert_eq!(
+        gateway.intake_inbound(TelegramInboundRequest {
+            telegram_user_id: "user-9".into(),
+            bot_id: "bot-1".into(),
+            actor_id: "actor-1".into(),
+            session_id: "telegram-session-1".into(),
+            raw: "/help please".into(),
+        }),
+        TelegramInboundIntake::Rejected(TelegramInboundBindingAuthorization::PrincipalMismatch)
+    );
+    assert_eq!(
+        gateway.intake_inbound(TelegramInboundRequest {
+            telegram_user_id: "user-1".into(),
+            bot_id: "bot-9".into(),
+            actor_id: "actor-1".into(),
+            session_id: "telegram-session-1".into(),
+            raw: "/help please".into(),
+        }),
+        TelegramInboundIntake::Rejected(TelegramInboundBindingAuthorization::BotMismatch)
+    );
+    assert_eq!(
+        gateway.intake_inbound(TelegramInboundRequest {
+            telegram_user_id: "user-1".into(),
+            bot_id: "bot-1".into(),
+            actor_id: "actor-9".into(),
+            session_id: "telegram-session-1".into(),
+            raw: "/help please".into(),
+        }),
+        TelegramInboundIntake::Rejected(TelegramInboundBindingAuthorization::ActorMismatch)
+    );
+    assert_eq!(
+        gateway.intake_inbound(TelegramInboundRequest {
+            telegram_user_id: "user-1".into(),
+            bot_id: "bot-1".into(),
+            actor_id: "actor-1".into(),
+            session_id: "missing-session".into(),
+            raw: "/help please".into(),
+        }),
+        TelegramInboundIntake::Rejected(TelegramInboundBindingAuthorization::SessionNotBound)
     );
 }
 
