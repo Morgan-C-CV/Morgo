@@ -26,6 +26,7 @@ use rust_agent::service::compact::reactive_compact::ReactiveCompactor;
 use rust_agent::state::app_state::{AppState, RuntimeRole};
 use rust_agent::state::permission_context::{PermissionMode, ToolPermissionContext};
 use rust_agent::task::manager::TaskManager;
+use rust_agent::tool::builtin::bash::BashTool;
 use rust_agent::tool::registry::ToolRegistry;
 use tokio::sync::RwLock;
 
@@ -323,12 +324,7 @@ async fn remote_request_records_accept_and_notification_audit_events() {
     );
     let permission_context = ToolPermissionContext::new(PermissionMode::Default)
         .with_task_manager(Arc::new(TaskManager::default()))
-        .with_plan_manager(Arc::new(PlanManager::default()))
-        .with_pending_approval(rust_agent::state::permission_context::PendingApproval {
-            tool_name: "Bash".into(),
-            tool_input: serde_json::json!({"command": "ls"}).to_string(),
-            message: "requires explicit approval".into(),
-        });
+        .with_plan_manager(Arc::new(PlanManager::default()));
     let session_store = Arc::new(InMemorySessionStore::default());
     let audit_log = Arc::new(std::sync::Mutex::new(rust_agent::security::audit::AuditLog::default()));
     let app_state = AppState {
@@ -357,12 +353,19 @@ async fn remote_request_records_accept_and_notification_audit_events() {
     let engine =
         rust_agent::core::engine::QueryEngine::new(rust_agent::core::context::QueryContext {
             app_state: app_state.clone(),
-            tool_registry: ToolRegistry::new(),
+            tool_registry: ToolRegistry::new().register(Arc::new(BashTool)),
             api_client: ModelProviderClient::with_scripted_turns(vec![vec![
                 StreamEvent::MessageStart,
-                StreamEvent::TextDelta("audit reply".into()),
+                StreamEvent::ToolUse {
+                    tool_name: "Bash".into(),
+                    input: serde_json::json!({
+                        "command": "ls",
+                        "dangerously_disable_sandbox": true
+                    })
+                    .to_string(),
+                },
                 StreamEvent::MessageStop {
-                    stop_reason: StopReason::EndTurn,
+                    stop_reason: StopReason::ToolUse,
                 },
             ]]),
             compactor: ReactiveCompactor,
@@ -388,7 +391,14 @@ async fn remote_request_records_accept_and_notification_audit_events() {
     .await
     .expect("remote request should succeed");
 
-    assert!(response.primary_text.contains("audit reply"));
+    assert!(response.primary_text.contains("approval required for Bash:"));
+    assert!(response.events.iter().any(|event| matches!(
+        &event.payload,
+        RemoteEventPayload::ApprovalRequired {
+            tool_name,
+            ..
+        } if tool_name == "Bash"
+    )));
 
     let events = audit_log.lock().expect("audit log poisoned").events().to_vec();
     assert!(events.iter().any(|event| matches!(

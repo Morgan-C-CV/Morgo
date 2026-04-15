@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use rust_agent::bootstrap::InteractionSurface;
 use rust_agent::hook::registry::{
     HookEvent, HookEventMatcher, HookRegistry, HookRule, HookRuleLayer,
@@ -24,10 +22,6 @@ use rust_agent::interaction::telegram::binding::{
     TelegramOutgoingMessage,
 };
 use rust_agent::interaction::telegram::gateway::TelegramGateway;
-use rust_agent::state::app_state::{AppState, RuntimeRole};
-use rust_agent::state::permission_context::{PermissionMode, ToolPermissionContext};
-use rust_agent::tool::registry::ToolRegistry;
-use tokio::sync::RwLock;
 use rust_agent::interaction::view::{
     SurfaceItem, WebItem, build_surface_view, build_telegram_view, build_web_view,
     surface_item_from_cli_event,
