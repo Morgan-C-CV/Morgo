@@ -65,6 +65,9 @@ impl SurfaceAuthorizer for DenyingAuthorizer {
 
 struct RemoteSafeTestCommand;
 struct SensitiveRemoteCommand;
+struct SensitiveEverywhereCommand;
+struct CliOnlyTestCommand;
+struct PromptImmediateMetadataCommand;
 
 #[async_trait]
 impl Command for RemoteSafeTestCommand {
@@ -149,6 +152,89 @@ impl Command for PromptNoModelCommand {
     }
 }
 
+#[async_trait]
+impl Command for SensitiveEverywhereCommand {
+    fn metadata(&self) -> CommandMetadata {
+        CommandMetadata {
+            name: "sensitive-everywhere".into(),
+            description: "Sensitive command available on all surfaces".into(),
+            source: CommandSource::Builtin,
+            category: "test".into(),
+            command_type: CommandType::Local,
+            availability: CommandAvailability::Everywhere,
+            aliases: Vec::new(),
+            is_hidden: false,
+            disable_model_invocation: false,
+            immediate: true,
+            is_sensitive: true,
+        }
+    }
+
+    async fn execute(
+        &self,
+        _input: &NormalizedInput,
+        _app_state: &AppState,
+    ) -> anyhow::Result<CommandResult> {
+        Ok(CommandResult::Message(
+            "sensitive everywhere response".into(),
+        ))
+    }
+}
+
+#[async_trait]
+impl Command for CliOnlyTestCommand {
+    fn metadata(&self) -> CommandMetadata {
+        CommandMetadata {
+            name: "cli-only".into(),
+            description: "CLI-only test command".into(),
+            source: CommandSource::Builtin,
+            category: "test".into(),
+            command_type: CommandType::Local,
+            availability: CommandAvailability::CliOnly,
+            aliases: Vec::new(),
+            is_hidden: false,
+            disable_model_invocation: false,
+            immediate: true,
+            is_sensitive: false,
+        }
+    }
+
+    async fn execute(
+        &self,
+        _input: &NormalizedInput,
+        _app_state: &AppState,
+    ) -> anyhow::Result<CommandResult> {
+        Ok(CommandResult::Message("cli only response".into()))
+    }
+}
+
+#[async_trait]
+impl Command for PromptImmediateMetadataCommand {
+    fn metadata(&self) -> CommandMetadata {
+        CommandMetadata {
+            name: "prompt-immediate".into(),
+            description: "Prompt command with immediate metadata enabled".into(),
+            source: CommandSource::Builtin,
+            category: "test".into(),
+            command_type: CommandType::Prompt,
+            availability: CommandAvailability::Everywhere,
+            aliases: Vec::new(),
+            is_hidden: false,
+            disable_model_invocation: false,
+            immediate: true,
+            is_sensitive: false,
+        }
+    }
+
+    async fn execute(
+        &self,
+        _input: &NormalizedInput,
+        _app_state: &AppState,
+    ) -> anyhow::Result<CommandResult> {
+        Ok(CommandResult::Prompt("prompt immediate body".into()))
+    }
+}
+
 #[tokio::test]
 async fn router_executes_known_commands_before_query() {
     let registry = Arc::new(CommandRegistry::new().register(Arc::new(HelpCommand)));
@@ -191,12 +277,13 @@ async fn router_falls_back_for_unknown_commands() {
 }
 
 #[tokio::test]
-async fn router_unknown_slash_fallback_is_shared_by_cli_and_remote() {
+async fn router_unknown_slash_fallback_is_shared_by_cli_remote_and_telegram() {
     let router = CommandRouter::new(
         Arc::new(CommandRegistry::new()),
         Box::new(DefaultSurfaceAuthorizer),
     );
     let cli = NormalizedInput::from_raw(InteractionSurface::Cli, "/missing foo");
+    let telegram = NormalizedInput::from_raw(InteractionSurface::Telegram, "/missing foo");
     let remote = NormalizedInput::from_remote_raw(
         "remote-session",
         "remote-actor",
@@ -205,7 +292,9 @@ async fn router_unknown_slash_fallback_is_shared_by_cli_and_remote() {
         "/missing foo",
     );
 
-    assert_eq!(router.decide(&cli).await, router.decide(&remote).await);
+    let cli_decision = router.decide(&cli).await;
+    assert_eq!(cli_decision, router.decide(&telegram).await);
+    assert_eq!(cli_decision, router.decide(&remote).await);
 }
 
 #[tokio::test]
@@ -260,6 +349,126 @@ async fn router_denies_sensitive_remote_command() {
     assert_eq!(
         router.decide(&input).await,
         RouteDecision::Deny("command remote-sensitive is not allowed on remote surface".into())
+    );
+}
+
+#[tokio::test]
+async fn router_execute_command_decision_is_shared_by_cli_remote_and_telegram() {
+    let router = CommandRouter::new(
+        Arc::new(CommandRegistry::new().register(Arc::new(HelpCommand))),
+        Box::new(DefaultSurfaceAuthorizer),
+    );
+    let cli = NormalizedInput::from_raw(InteractionSurface::Cli, "/help");
+    let telegram = NormalizedInput::from_raw(InteractionSurface::Telegram, "/help");
+    let remote =
+        NormalizedInput::from_remote_raw("remote-session", "remote-actor", true, true, "/help");
+
+    let cli_decision = router.decide(&cli).await;
+    assert_eq!(cli_decision, router.decide(&telegram).await);
+    assert_eq!(cli_decision, router.decide(&remote).await);
+}
+
+#[tokio::test]
+async fn router_plain_prompt_decision_is_shared_by_cli_remote_and_telegram() {
+    let router = CommandRouter::new(
+        Arc::new(CommandRegistry::new()),
+        Box::new(DefaultSurfaceAuthorizer),
+    );
+    let cli = NormalizedInput::from_raw(InteractionSurface::Cli, "hello world");
+    let telegram = NormalizedInput::from_raw(InteractionSurface::Telegram, "hello world");
+    let remote = NormalizedInput::from_remote_raw(
+        "remote-session",
+        "remote-actor",
+        true,
+        true,
+        "hello world",
+    );
+
+    let cli_decision = router.decide(&cli).await;
+    assert_eq!(cli_decision, router.decide(&telegram).await);
+    assert_eq!(cli_decision, router.decide(&remote).await);
+}
+
+#[tokio::test]
+async fn router_availability_policy_is_shared_by_cli_and_telegram_but_denies_remote() {
+    let router = CommandRouter::new(
+        Arc::new(CommandRegistry::new().register(Arc::new(CliOnlyTestCommand))),
+        Box::new(DefaultSurfaceAuthorizer),
+    );
+    let cli = NormalizedInput::from_raw(InteractionSurface::Cli, "/cli-only");
+    let telegram = NormalizedInput::from_raw(InteractionSurface::Telegram, "/cli-only");
+    let remote =
+        NormalizedInput::from_remote_raw("remote-session", "remote-actor", true, true, "/cli-only");
+
+    assert_eq!(
+        router.decide(&cli).await,
+        RouteDecision::ExecuteCommand(RoutedCommand {
+            name: "cli-only".into(),
+            policy: CommandRoutePolicy {
+                availability: CommandAvailability::CliOnly,
+                command_type: CommandType::Local,
+                disable_model_invocation: false,
+                immediate: true,
+                is_sensitive: false,
+                enters_query_engine: false,
+            },
+        })
+    );
+    assert_eq!(
+        router.decide(&telegram).await,
+        RouteDecision::Deny("command cli-only is not available on this surface".into())
+    );
+    assert_eq!(
+        router.decide(&remote).await,
+        RouteDecision::Deny("command cli-only is not available on this surface".into())
+    );
+}
+
+#[tokio::test]
+async fn router_sensitive_command_policy_is_carried_in_allowed_surface_decision() {
+    let router = CommandRouter::new(
+        Arc::new(CommandRegistry::new().register(Arc::new(SensitiveEverywhereCommand))),
+        Box::new(DefaultSurfaceAuthorizer),
+    );
+    let cli = NormalizedInput::from_raw(InteractionSurface::Cli, "/sensitive-everywhere");
+    let telegram = NormalizedInput::from_raw(InteractionSurface::Telegram, "/sensitive-everywhere");
+
+    let allowed = RouteDecision::ExecuteCommand(RoutedCommand {
+        name: "sensitive-everywhere".into(),
+        policy: CommandRoutePolicy {
+            availability: CommandAvailability::Everywhere,
+            command_type: CommandType::Local,
+            disable_model_invocation: false,
+            immediate: true,
+            is_sensitive: true,
+            enters_query_engine: false,
+        },
+    });
+    assert_eq!(router.decide(&cli).await, allowed);
+    assert_eq!(router.decide(&telegram).await, allowed);
+}
+
+#[tokio::test]
+async fn router_normalizes_prompt_commands_away_from_immediate_execution() {
+    let router = CommandRouter::new(
+        Arc::new(CommandRegistry::new().register(Arc::new(PromptImmediateMetadataCommand))),
+        Box::new(DefaultSurfaceAuthorizer),
+    );
+    let input = NormalizedInput::from_raw(InteractionSurface::Cli, "/prompt-immediate");
+
+    assert_eq!(
+        router.decide(&input).await,
+        RouteDecision::ExecuteCommand(RoutedCommand {
+            name: "prompt-immediate".into(),
+            policy: CommandRoutePolicy {
+                availability: CommandAvailability::Everywhere,
+                command_type: CommandType::Prompt,
+                disable_model_invocation: false,
+                immediate: false,
+                is_sensitive: false,
+                enters_query_engine: true,
+            },
+        })
     );
 }
 

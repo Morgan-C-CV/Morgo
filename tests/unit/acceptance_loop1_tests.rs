@@ -40,7 +40,7 @@ impl Command for PromptCommand {
             aliases: Vec::new(),
             is_hidden: false,
             disable_model_invocation: false,
-            immediate: true,
+            immediate: false,
             is_sensitive: false,
         }
     }
@@ -158,7 +158,7 @@ async fn prompt_command_is_interpreted_before_query_engine() {
                         availability: CommandAvailability::Everywhere,
                         command_type: CommandType::Prompt,
                         disable_model_invocation: false,
-                        immediate: true,
+                        immediate: false,
                         is_sensitive: false,
                         enters_query_engine: true,
                     },
@@ -200,7 +200,7 @@ fn query_source_to_user_message_is_shared_for_unknown_and_prompt_commands() {
                 availability: CommandAvailability::Everywhere,
                 command_type: CommandType::Prompt,
                 disable_model_invocation: false,
-                immediate: true,
+                immediate: false,
                 is_sensitive: false,
                 enters_query_engine: true,
             },

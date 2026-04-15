@@ -162,14 +162,15 @@ impl CommandRouter {
     }
 
     fn policy_from_metadata(metadata: &CommandMetadata) -> CommandRoutePolicy {
+        let enters_query_engine = matches!(metadata.command_type, CommandType::Prompt)
+            && !metadata.disable_model_invocation;
         CommandRoutePolicy {
             availability: metadata.availability,
             command_type: metadata.command_type,
             disable_model_invocation: metadata.disable_model_invocation,
-            immediate: metadata.immediate,
+            immediate: metadata.immediate && !enters_query_engine,
             is_sensitive: metadata.is_sensitive,
-            enters_query_engine: matches!(metadata.command_type, CommandType::Prompt)
-                && !metadata.disable_model_invocation,
+            enters_query_engine,
         }
     }
 
