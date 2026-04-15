@@ -17,6 +17,9 @@ use rust_agent::interaction::remote::{
     remote_delivery_mode_for_kind, remote_delivery_mode_for_notification,
     remote_delivery_mode_for_surface_item,
 };
+use rust_agent::interaction::telegram::adapter::{
+    TelegramInboundEnvelope, intake_transport_envelope,
+};
 use rust_agent::interaction::telegram::binding::{
     SessionBinding, TelegramBindingAuthorization, TelegramDeliveryTarget,
     TelegramInboundBindingAuthorization, TelegramOutgoingMessage,
@@ -1331,6 +1334,73 @@ fn telegram_inbound_intake_preserves_explicit_rejection_paths_without_normalizin
             raw: "/help please".into(),
         }),
         TelegramInboundIntake::Rejected(TelegramInboundBindingAuthorization::SessionNotBound)
+    );
+}
+
+#[test]
+fn telegram_transport_adapter_maps_webhook_fields_without_adding_policy_logic() {
+    let gateway = TelegramGateway {
+        allowed_bindings: vec![SessionBinding {
+            actor_id: "actor-1".into(),
+            session_id: "telegram-session-1".into(),
+            telegram_user_id: Some("user-1".into()),
+            bot_id: Some("bot-1".into()),
+            delivery_target: Some(TelegramDeliveryTarget {
+                chat_id: "chat-1".into(),
+                thread_id: None,
+            }),
+        }],
+    };
+
+    let intake = intake_transport_envelope(
+        &gateway,
+        TelegramInboundEnvelope {
+            telegram_user_id: "user-1".into(),
+            bot_id: "bot-1".into(),
+            actor_id: "actor-1".into(),
+            session_id: "telegram-session-1".into(),
+            raw_text: "/help please".into(),
+        },
+    );
+
+    assert!(matches!(
+        intake,
+        TelegramInboundIntake::Authorized { input, .. }
+            if input.surface == InteractionSurface::Telegram
+                && input.session_id == "telegram-session-1"
+                && input.actor.actor_id == "actor-1"
+                && input.command_name.as_deref() == Some("help")
+                && input.command_args == "please"
+    ));
+}
+
+#[test]
+fn telegram_transport_adapter_preserves_rejection_reason() {
+    let gateway = TelegramGateway {
+        allowed_bindings: vec![SessionBinding {
+            actor_id: "actor-1".into(),
+            session_id: "telegram-session-1".into(),
+            telegram_user_id: Some("user-1".into()),
+            bot_id: Some("bot-1".into()),
+            delivery_target: Some(TelegramDeliveryTarget {
+                chat_id: "chat-1".into(),
+                thread_id: None,
+            }),
+        }],
+    };
+
+    assert_eq!(
+        intake_transport_envelope(
+            &gateway,
+            TelegramInboundEnvelope {
+                telegram_user_id: "user-1".into(),
+                bot_id: "bot-9".into(),
+                actor_id: "actor-1".into(),
+                session_id: "telegram-session-1".into(),
+                raw_text: "/help please".into(),
+            }
+        ),
+        TelegramInboundIntake::Rejected(TelegramInboundBindingAuthorization::BotMismatch)
     );
 }
 
