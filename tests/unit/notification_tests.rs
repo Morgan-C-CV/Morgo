@@ -12,6 +12,7 @@ use rust_agent::hook::registry::{
     HookEvent, HookEventMatcher, HookRegistry, HookRule, HookRuleLayer,
 };
 use rust_agent::security::audit::AuditLog;
+use rust_agent::security::authorizer::{DefaultSurfaceAuthorizer, SurfaceAdmissionPolicy};
 use rust_agent::interaction::cli::renderer::{
     build_tui_screen, render_document_output, render_document_tui_output, render_turn_document,
     render_turn_output,
@@ -44,7 +45,6 @@ use rust_agent::interaction::view::{
     surface_item_from_cli_event,
 };
 use rust_agent::plan::manager::PlanManager;
-use rust_agent::security::authorizer::DefaultSurfaceAuthorizer;
 use rust_agent::service::api::client::ModelProviderClient;
 use rust_agent::service::api::streaming::{StopReason, StreamEvent};
 use rust_agent::service::compact::reactive_compact::ReactiveCompactor;
@@ -1080,6 +1080,7 @@ fn telegram_gateway_authorization_distinguishes_binding_and_delivery_readiness()
                 delivery_target: None,
             },
         ],
+        surface_authorizer: DefaultSurfaceAuthorizer::default(),
     };
 
     assert_eq!(
@@ -1112,6 +1113,7 @@ fn telegram_gateway_rejects_explicit_target_without_matching_binding() {
                 thread_id: Some("thread-9".into()),
             }),
         }],
+        surface_authorizer: DefaultSurfaceAuthorizer::default(),
     };
     let notification = Notification {
         session_id: "telegram-session-1".into(),
@@ -1161,6 +1163,7 @@ fn telegram_gateway_authorizes_telegram_principal_separately_from_delivery_readi
             bot_id: Some("bot-1".into()),
             delivery_target: None,
         }],
+        surface_authorizer: DefaultSurfaceAuthorizer::default(),
     };
 
     assert_eq!(
@@ -1193,6 +1196,7 @@ fn telegram_gateway_resolves_remote_actor_delivery_target_only_for_bound_actor()
                 thread_id: Some("thread-9".into()),
             }),
         }],
+        surface_authorizer: DefaultSurfaceAuthorizer::default(),
     };
     let mut actor_notification =
         Notification::approval_required("telegram-session-1", "Bash", "needs approval");
@@ -1232,6 +1236,7 @@ fn telegram_gateway_inbound_binding_requires_matching_principal_actor_session_an
                 thread_id: None,
             }),
         }],
+        surface_authorizer: DefaultSurfaceAuthorizer::default(),
     };
 
     assert!(matches!(
@@ -1270,6 +1275,7 @@ fn telegram_gateway_builds_semantic_outgoing_messages_without_cli_renderer_types
                 thread_id: Some("thread-9".into()),
             }),
         }],
+        surface_authorizer: DefaultSurfaceAuthorizer::default(),
     };
     let view = build_surface_view(&CliTurnOutput {
         primary_text: "Primary reply".into(),
@@ -1367,6 +1373,7 @@ fn telegram_inbound_intake_authorizes_before_normalizing_input() {
                 thread_id: None,
             }),
         }],
+        surface_authorizer: DefaultSurfaceAuthorizer::default(),
     };
 
     let intake = gateway.intake_inbound(TelegramInboundRequest {
@@ -1402,6 +1409,7 @@ fn telegram_inbound_intake_preserves_explicit_rejection_paths_without_normalizin
                 thread_id: None,
             }),
         }],
+        surface_authorizer: DefaultSurfaceAuthorizer::default(),
     };
 
     assert_eq!(
@@ -1447,6 +1455,113 @@ fn telegram_inbound_intake_preserves_explicit_rejection_paths_without_normalizin
 }
 
 #[test]
+fn telegram_inbound_intake_rejects_not_allowlisted_rate_limited_and_abuse_blocked() {
+    let allowlisted_gateway = TelegramGateway::default()
+        .with_bindings(vec![SessionBinding {
+            actor_id: "actor-1".into(),
+            session_id: "telegram-session-1".into(),
+            telegram_user_id: Some("user-1".into()),
+            bot_id: Some("bot-1".into()),
+            delivery_target: Some(TelegramDeliveryTarget {
+                chat_id: "chat-1".into(),
+                thread_id: None,
+            }),
+        }])
+        .with_admission_policy(SurfaceAdmissionPolicy {
+            allowlisted_actors: ["actor-9".to_string()].into_iter().collect(),
+            max_requests_per_window: None,
+            window_seconds: 60,
+            abuse_denial_threshold: None,
+        });
+    assert_eq!(
+        allowlisted_gateway.intake_inbound(TelegramInboundRequest {
+            telegram_user_id: "user-1".into(),
+            bot_id: "bot-1".into(),
+            actor_id: "actor-1".into(),
+            session_id: "telegram-session-1".into(),
+            raw: "/help please".into(),
+        }),
+        TelegramInboundIntake::Rejected(TelegramInboundBindingAuthorization::NotAllowlisted)
+    );
+
+    let rate_limited_gateway = TelegramGateway::default()
+        .with_bindings(vec![SessionBinding {
+            actor_id: "actor-1".into(),
+            session_id: "telegram-session-1".into(),
+            telegram_user_id: Some("user-1".into()),
+            bot_id: Some("bot-1".into()),
+            delivery_target: Some(TelegramDeliveryTarget {
+                chat_id: "chat-1".into(),
+                thread_id: None,
+            }),
+        }])
+        .with_admission_policy(SurfaceAdmissionPolicy {
+            allowlisted_actors: std::collections::HashSet::new(),
+            max_requests_per_window: Some(1),
+            window_seconds: 60,
+            abuse_denial_threshold: None,
+        });
+    assert!(matches!(
+        rate_limited_gateway.intake_inbound(TelegramInboundRequest {
+            telegram_user_id: "user-1".into(),
+            bot_id: "bot-1".into(),
+            actor_id: "actor-1".into(),
+            session_id: "telegram-session-1".into(),
+            raw: "/help first".into(),
+        }),
+        TelegramInboundIntake::Authorized { .. }
+    ));
+    assert_eq!(
+        rate_limited_gateway.intake_inbound(TelegramInboundRequest {
+            telegram_user_id: "user-1".into(),
+            bot_id: "bot-1".into(),
+            actor_id: "actor-1".into(),
+            session_id: "telegram-session-1".into(),
+            raw: "/help second".into(),
+        }),
+        TelegramInboundIntake::Rejected(TelegramInboundBindingAuthorization::RateLimited)
+    );
+
+    let abuse_blocked_gateway = TelegramGateway::default()
+        .with_bindings(vec![SessionBinding {
+            actor_id: "actor-1".into(),
+            session_id: "telegram-session-1".into(),
+            telegram_user_id: Some("user-1".into()),
+            bot_id: Some("bot-1".into()),
+            delivery_target: Some(TelegramDeliveryTarget {
+                chat_id: "chat-1".into(),
+                thread_id: None,
+            }),
+        }])
+        .with_admission_policy(SurfaceAdmissionPolicy {
+            allowlisted_actors: ["actor-9".to_string()].into_iter().collect(),
+            max_requests_per_window: None,
+            window_seconds: 60,
+            abuse_denial_threshold: Some(1),
+        });
+    assert_eq!(
+        abuse_blocked_gateway.intake_inbound(TelegramInboundRequest {
+            telegram_user_id: "user-1".into(),
+            bot_id: "bot-1".into(),
+            actor_id: "actor-1".into(),
+            session_id: "telegram-session-1".into(),
+            raw: "/help first".into(),
+        }),
+        TelegramInboundIntake::Rejected(TelegramInboundBindingAuthorization::NotAllowlisted)
+    );
+    assert_eq!(
+        abuse_blocked_gateway.intake_inbound(TelegramInboundRequest {
+            telegram_user_id: "user-1".into(),
+            bot_id: "bot-1".into(),
+            actor_id: "actor-1".into(),
+            session_id: "telegram-session-1".into(),
+            raw: "/help second".into(),
+        }),
+        TelegramInboundIntake::Rejected(TelegramInboundBindingAuthorization::AbuseBlocked)
+    );
+}
+
+#[test]
 fn telegram_transport_adapter_maps_webhook_fields_without_adding_policy_logic() {
     let gateway = TelegramGateway {
         allowed_bindings: vec![SessionBinding {
@@ -1459,6 +1574,7 @@ fn telegram_transport_adapter_maps_webhook_fields_without_adding_policy_logic() 
                 thread_id: None,
             }),
         }],
+        surface_authorizer: DefaultSurfaceAuthorizer::default(),
     };
 
     let intake = intake_transport_envelope(
@@ -1496,6 +1612,7 @@ fn telegram_transport_adapter_preserves_rejection_reason() {
                 thread_id: None,
             }),
         }],
+        surface_authorizer: DefaultSurfaceAuthorizer::default(),
     };
 
     assert_eq!(
@@ -1518,7 +1635,7 @@ async fn telegram_runtime_entry_routes_authorized_input_into_shared_runtime_and_
     let command_registry = Arc::new(CommandRegistry::new().register(Arc::new(TelegramPromptCommand)));
     let router = rust_agent::interaction::router::CommandRouter::new(
         command_registry.clone(),
-        Box::new(DefaultSurfaceAuthorizer),
+        Box::new(DefaultSurfaceAuthorizer::default()),
     );
     let session_store = Arc::new(InMemorySessionStore::default());
     session_store.save(
@@ -1543,6 +1660,7 @@ async fn telegram_runtime_entry_routes_authorized_input_into_shared_runtime_and_
                 thread_id: Some("thread-1".into()),
             }),
         }],
+        surface_authorizer: DefaultSurfaceAuthorizer::default(),
     };
     let app_state = telegram_test_app_state(
         command_registry.clone(),
@@ -1643,7 +1761,7 @@ async fn telegram_runtime_entry_preserves_rejection_without_running_shared_runti
     let command_registry = Arc::new(CommandRegistry::new().register(Arc::new(TelegramPromptCommand)));
     let router = rust_agent::interaction::router::CommandRouter::new(
         command_registry.clone(),
-        Box::new(DefaultSurfaceAuthorizer),
+        Box::new(DefaultSurfaceAuthorizer::default()),
     );
     let session_store = Arc::new(InMemorySessionStore::default());
     let gateway = TelegramGateway {
@@ -1657,6 +1775,7 @@ async fn telegram_runtime_entry_preserves_rejection_without_running_shared_runti
                 thread_id: Some("thread-1".into()),
             }),
         }],
+        surface_authorizer: DefaultSurfaceAuthorizer::default(),
     };
     let app_state = telegram_test_app_state(
         command_registry.clone(),
@@ -2092,6 +2211,7 @@ fn dispatcher_requires_delivery_ready_binding_for_telegram() {
                 thread_id: None,
             }),
         }],
+        surface_authorizer: DefaultSurfaceAuthorizer::default(),
     });
     let prepared = Notification {
         session_id: "telegram-session-1".into(),
@@ -2146,6 +2266,7 @@ fn telegram_dispatch_only_enqueues_wake_up_notifications() {
                 thread_id: None,
             }),
         }],
+        surface_authorizer: DefaultSurfaceAuthorizer::default(),
     });
 
     dispatcher.dispatch(

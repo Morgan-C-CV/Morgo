@@ -229,7 +229,7 @@ pub fn build_turn_engine(
 pub fn build_turn_router(snapshot: &RuntimePluginSnapshot) -> CommandRouter {
     CommandRouter::new(
         snapshot.command_registry.clone(),
-        Box::new(DefaultSurfaceAuthorizer),
+        Box::new(DefaultSurfaceAuthorizer::default()),
     )
 }
 

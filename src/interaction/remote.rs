@@ -11,6 +11,9 @@ use crate::interaction::notification::{Notification, NotificationTarget, Notific
 use crate::interaction::router::CommandRouter;
 use crate::interaction::view::{SurfaceItem, SurfaceView, TaskView, build_surface_view};
 use crate::security::audit::AuditEvent;
+use crate::security::authorizer::{
+    AuthDecision, AuthDenyCategory, DefaultSurfaceAuthorizer, SurfaceAuthorizer,
+};
 use crate::state::app_state::AppState;
 use crate::state::permission_context::PendingApproval;
 use crate::task::types::{TaskEvent, TaskUsageSummary};
@@ -183,6 +186,22 @@ pub async fn handle_remote_request(
         request.from_trusted_surface,
         request.raw,
     );
+    let authorizer = remote_surface_authorizer(app_state);
+    if let AuthDecision::Deny { category, reason } = authorizer.authorize(&input) {
+        let denied_app_state = bind_remote_engine(engine, app_state, &input).context.app_state;
+        record_remote_audit(
+            &denied_app_state,
+            AuditEvent::RemoteRequestDenied {
+                session_id: input.session_id.clone(),
+                actor_id: input.actor.actor_id.clone(),
+                reason,
+            },
+        );
+        return Ok(RemoteResponse {
+            primary_text: denial_message_for_category(category),
+            events: Vec::new(),
+        });
+    }
     let remote_engine = bind_remote_engine(engine, app_state, &input);
     let output = match handle_normalized_input(
         router,
@@ -531,6 +550,21 @@ fn record_remote_notification_audit(app_state: &AppState, notification: &Notific
             notification_type: notification_type.into(),
         },
     );
+}
+
+fn remote_surface_authorizer(app_state: &AppState) -> DefaultSurfaceAuthorizer {
+    DefaultSurfaceAuthorizer::default()
+        .with_remote_policy(app_state.permission_context.remote_surface_admission_policy())
+}
+
+fn denial_message_for_category(category: AuthDenyCategory) -> String {
+    match category {
+        AuthDenyCategory::Unauthenticated => "Denied: unauthenticated actor for remote surface".into(),
+        AuthDenyCategory::NotAllowlisted => "Denied: actor is not allowlisted for remote surface".into(),
+        AuthDenyCategory::RateLimited => "Denied: remote request rate limit exceeded".into(),
+        AuthDenyCategory::AbuseBlocked => "Denied: actor is temporarily blocked on remote surface".into(),
+        AuthDenyCategory::SurfaceCommandBlocked => "Denied: command is blocked on remote surface".into(),
+    }
 }
 
 fn leak_string(value: String) -> &'static str {

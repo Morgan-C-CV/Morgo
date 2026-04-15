@@ -104,7 +104,7 @@ fn test_engine() -> QueryEngine {
 async fn unknown_slash_command_still_falls_back_to_query() {
     let router = CommandRouter::new(
         Arc::new(CommandRegistry::new()),
-        Box::new(DefaultSurfaceAuthorizer),
+        Box::new(DefaultSurfaceAuthorizer::default()),
     );
     let input = NormalizedInput::from_raw(InteractionSurface::Cli, "/unknown foo");
     assert_eq!(
@@ -122,7 +122,7 @@ async fn unknown_slash_command_still_falls_back_to_query() {
 async fn plain_user_input_routes_through_query_prompt_path() {
     let router = CommandRouter::new(
         Arc::new(CommandRegistry::new()),
-        Box::new(DefaultSurfaceAuthorizer),
+        Box::new(DefaultSurfaceAuthorizer::default()),
     );
     let input = NormalizedInput::from_raw(InteractionSurface::Cli, "hello world");
     assert_eq!(
@@ -138,7 +138,7 @@ async fn plain_user_input_routes_through_query_prompt_path() {
 async fn prompt_command_is_interpreted_before_query_engine() {
     let router = CommandRouter::new(
         Arc::new(CommandRegistry::new().register(Arc::new(PromptCommand))),
-        Box::new(DefaultSurfaceAuthorizer),
+        Box::new(DefaultSurfaceAuthorizer::default()),
     );
     let app_state = test_app_state();
     let result = router

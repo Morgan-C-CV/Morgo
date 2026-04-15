@@ -6,6 +6,7 @@ use crate::hook::registry::HookRegistry;
 use crate::interaction::dispatcher::NotificationDispatcher;
 use crate::plan::manager::PlanManager;
 use crate::plugins::runtime_state::RuntimePluginState;
+use crate::security::authorizer::SurfaceAdmissionPolicy;
 use crate::service::mcp::runtime::McpRuntime;
 use crate::skills::registry::SkillRegistry;
 use crate::task::list_manager::TaskListManager;
@@ -48,6 +49,8 @@ pub struct ToolPermissionContext {
     pub inherited_tool_registry: Option<ToolRegistry>,
     pub inherited_hook_registry: Option<HookRegistry>,
     pub runtime_plugin_state: Option<RuntimePluginState>,
+    remote_surface_admission_policy: Arc<RwLock<SurfaceAdmissionPolicy>>,
+    telegram_surface_admission_policy: Arc<RwLock<SurfaceAdmissionPolicy>>,
     pub external_memory_entries: Arc<RwLock<Vec<String>>>,
     pub nested_memory_lineage: Arc<RwLock<Vec<String>>>,
 }
@@ -74,6 +77,8 @@ impl ToolPermissionContext {
             inherited_tool_registry: None,
             inherited_hook_registry: None,
             runtime_plugin_state: None,
+            remote_surface_admission_policy: Arc::new(RwLock::new(SurfaceAdmissionPolicy::default())),
+            telegram_surface_admission_policy: Arc::new(RwLock::new(SurfaceAdmissionPolicy::default())),
             external_memory_entries: Arc::new(RwLock::new(Vec::new())),
             nested_memory_lineage: Arc::new(RwLock::new(Vec::new())),
         }
@@ -209,6 +214,42 @@ impl ToolPermissionContext {
     pub fn with_runtime_plugin_state(mut self, runtime_plugin_state: RuntimePluginState) -> Self {
         self.runtime_plugin_state = Some(runtime_plugin_state);
         self
+    }
+
+    pub fn with_remote_surface_admission_policy(self, policy: SurfaceAdmissionPolicy) -> Self {
+        self.set_remote_surface_admission_policy(policy);
+        self
+    }
+
+    pub fn set_remote_surface_admission_policy(&self, policy: SurfaceAdmissionPolicy) {
+        if let Ok(mut slot) = self.remote_surface_admission_policy.write() {
+            *slot = policy;
+        }
+    }
+
+    pub fn remote_surface_admission_policy(&self) -> SurfaceAdmissionPolicy {
+        self.remote_surface_admission_policy
+            .read()
+            .map(|policy| policy.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn with_telegram_surface_admission_policy(self, policy: SurfaceAdmissionPolicy) -> Self {
+        self.set_telegram_surface_admission_policy(policy);
+        self
+    }
+
+    pub fn set_telegram_surface_admission_policy(&self, policy: SurfaceAdmissionPolicy) {
+        if let Ok(mut slot) = self.telegram_surface_admission_policy.write() {
+            *slot = policy;
+        }
+    }
+
+    pub fn telegram_surface_admission_policy(&self) -> SurfaceAdmissionPolicy {
+        self.telegram_surface_admission_policy
+            .read()
+            .map(|policy| policy.clone())
+            .unwrap_or_default()
     }
 
     pub fn with_external_memory_entries(self, entries: Vec<String>) -> Self {

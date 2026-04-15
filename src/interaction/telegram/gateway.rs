@@ -5,6 +5,10 @@ use crate::interaction::telegram::binding::{
     TelegramInboundBindingAuthorization, TelegramOutgoingMessage,
 };
 use crate::interaction::view::{TelegramItem, TelegramView, build_telegram_view};
+use crate::security::authorizer::{
+    AuthDecision, AuthDenyCategory, DefaultSurfaceAuthorizer, SurfaceAdmissionPolicy,
+    SurfaceAuthorizer,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TelegramInboundRequest {
@@ -24,14 +28,29 @@ pub enum TelegramInboundIntake {
     Rejected(TelegramInboundBindingAuthorization),
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct TelegramGateway {
     pub allowed_bindings: Vec<SessionBinding>,
+    pub surface_authorizer: DefaultSurfaceAuthorizer,
+}
+
+impl Default for TelegramGateway {
+    fn default() -> Self {
+        Self {
+            allowed_bindings: Vec::new(),
+            surface_authorizer: DefaultSurfaceAuthorizer::default(),
+        }
+    }
 }
 
 impl TelegramGateway {
     pub fn with_bindings(mut self, bindings: Vec<SessionBinding>) -> Self {
         self.allowed_bindings = bindings;
+        self
+    }
+
+    pub fn with_admission_policy(mut self, policy: SurfaceAdmissionPolicy) -> Self {
+        self.surface_authorizer = self.surface_authorizer.clone().with_telegram_policy(policy);
         self
     }
 
@@ -109,14 +128,17 @@ impl TelegramGateway {
             &request.session_id,
         ) {
             TelegramInboundBindingAuthorization::Authorized(binding) => {
-                TelegramInboundIntake::Authorized {
-                    input: NormalizedInput::from_telegram_raw(
-                        request.session_id,
-                        request.actor_id,
-                        true,
-                        request.raw,
-                    ),
-                    binding,
+                let input = NormalizedInput::from_telegram_raw(
+                    request.session_id,
+                    request.actor_id,
+                    true,
+                    request.raw,
+                );
+                match self.surface_authorizer.authorize(&input) {
+                    AuthDecision::Allow => TelegramInboundIntake::Authorized { input, binding },
+                    AuthDecision::Deny { category, .. } => {
+                        TelegramInboundIntake::Rejected(rejection_from_auth_category(category))
+                    }
                 }
             }
             rejection => TelegramInboundIntake::Rejected(rejection),
@@ -207,6 +229,16 @@ fn telegram_outgoing_messages(
         });
     }
     messages
+}
+
+fn rejection_from_auth_category(category: AuthDenyCategory) -> TelegramInboundBindingAuthorization {
+    match category {
+        AuthDenyCategory::NotAllowlisted => TelegramInboundBindingAuthorization::NotAllowlisted,
+        AuthDenyCategory::RateLimited => TelegramInboundBindingAuthorization::RateLimited,
+        AuthDenyCategory::AbuseBlocked => TelegramInboundBindingAuthorization::AbuseBlocked,
+        AuthDenyCategory::Unauthenticated
+        | AuthDenyCategory::SurfaceCommandBlocked => TelegramInboundBindingAuthorization::ActorMismatch,
+    }
 }
 
 fn render_telegram_item(item: &TelegramItem) -> String {

@@ -19,7 +19,7 @@ use rust_agent::interaction::remote::{
 use rust_agent::interaction::telegram::gateway::TelegramGateway;
 use rust_agent::plan::manager::PlanManager;
 use rust_agent::security::audit::AuditEvent;
-use rust_agent::security::authorizer::DefaultSurfaceAuthorizer;
+use rust_agent::security::authorizer::{DefaultSurfaceAuthorizer, SurfaceAdmissionPolicy};
 use rust_agent::service::api::client::ModelProviderClient;
 use rust_agent::service::api::streaming::{StopReason, StreamEvent};
 use rust_agent::service::compact::reactive_compact::ReactiveCompactor;
@@ -76,7 +76,7 @@ async fn remote_request_runs_minimal_query_chain() {
     let command_registry = Arc::new(CommandRegistry::new());
     let router = rust_agent::interaction::router::CommandRouter::new(
         command_registry.clone(),
-        Box::new(DefaultSurfaceAuthorizer),
+        Box::new(DefaultSurfaceAuthorizer::default()),
     );
     let permission_context = ToolPermissionContext::new(PermissionMode::Default)
         .with_task_manager(Arc::new(TaskManager::default()))
@@ -200,7 +200,7 @@ async fn remote_request_uses_shared_session_apply_contract() {
     let command_registry = Arc::new(CommandRegistry::new());
     let router = rust_agent::interaction::router::CommandRouter::new(
         command_registry.clone(),
-        Box::new(DefaultSurfaceAuthorizer),
+        Box::new(DefaultSurfaceAuthorizer::default()),
     );
     let permission_context = ToolPermissionContext::new(PermissionMode::Default)
         .with_task_manager(Arc::new(TaskManager::default()))
@@ -320,7 +320,7 @@ async fn remote_request_records_accept_and_notification_audit_events() {
     let command_registry = Arc::new(CommandRegistry::new());
     let router = rust_agent::interaction::router::CommandRouter::new(
         command_registry.clone(),
-        Box::new(DefaultSurfaceAuthorizer),
+        Box::new(DefaultSurfaceAuthorizer::default()),
     );
     let permission_context = ToolPermissionContext::new(PermissionMode::Default)
         .with_task_manager(Arc::new(TaskManager::default()))
@@ -424,11 +424,100 @@ async fn remote_request_records_accept_and_notification_audit_events() {
 }
 
 #[tokio::test]
+async fn remote_request_denies_not_allowlisted_and_records_audit_event() {
+    let command_registry = Arc::new(CommandRegistry::new());
+    let router = rust_agent::interaction::router::CommandRouter::new(
+        command_registry.clone(),
+        Box::new(DefaultSurfaceAuthorizer::default()),
+    );
+    let permission_context = ToolPermissionContext::new(PermissionMode::Default)
+        .with_task_manager(Arc::new(TaskManager::default()))
+        .with_plan_manager(Arc::new(PlanManager::default()))
+        .with_remote_surface_admission_policy(SurfaceAdmissionPolicy {
+            allowlisted_actors: ["approved-actor".to_string()].into_iter().collect(),
+            max_requests_per_window: None,
+            window_seconds: 60,
+            abuse_denial_threshold: None,
+        });
+    let session_store = Arc::new(InMemorySessionStore::default());
+    let audit_log = Arc::new(std::sync::Mutex::new(rust_agent::security::audit::AuditLog::default()));
+    let app_state = AppState {
+        surface: InteractionSurface::Remote,
+        session_mode: SessionMode::Interactive,
+        client_type: ClientType::RemoteControl,
+        session_source: SessionSource::RemoteControl,
+        runtime_role: RuntimeRole::Coordinator,
+        worker_role: None,
+        permission_context,
+        command_registry: Some(command_registry),
+        runtime_tool_registry: Some(Arc::new(RwLock::new(ToolRegistry::new()))),
+        skill_registry: None,
+        mcp_runtime: None,
+        plugin_load_result: None,
+        cost_tracker: CostTracker::default(),
+        notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
+        audit_log: audit_log.clone(),
+        startup_trace: Vec::new(),
+        active_session_id: "remote-audit-session".into(),
+        session_store: Some(session_store),
+        session: None,
+        history: None,
+        restored_session: None,
+    };
+    let engine =
+        rust_agent::core::engine::QueryEngine::new(rust_agent::core::context::QueryContext {
+            app_state: app_state.clone(),
+            tool_registry: ToolRegistry::new(),
+            api_client: ModelProviderClient::with_scripted_turns(Vec::new()),
+            compactor: ReactiveCompactor,
+            hook_registry: rust_agent::hook::registry::HookRegistry::default(),
+            agent_id: None,
+            system_prompt: "test system".into(),
+            tools_prompt: "test tools".into(),
+            context_prompt: "test context".into(),
+        });
+
+    let response = handle_remote_request(
+        &router,
+        &engine,
+        &app_state,
+        RemoteRequest {
+            session_id: "remote-audit-session".into(),
+            actor_id: "audit-actor".into(),
+            is_authenticated: true,
+            from_trusted_surface: true,
+            raw: "hello audit".into(),
+        },
+    )
+    .await
+    .expect("remote denial should return response");
+
+    assert_eq!(
+        response.primary_text,
+        "Denied: actor is not allowlisted for remote surface"
+    );
+    assert!(response.events.is_empty());
+
+    let events = audit_log.lock().expect("audit log poisoned").events().to_vec();
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AuditEvent::RemoteRequestDenied {
+            session_id,
+            actor_id,
+            reason,
+        } if session_id == "remote-audit-session"
+            && actor_id == "audit-actor"
+            && reason.contains("not allowlisted")
+    )));
+    assert!(!events.iter().any(|event| matches!(event, AuditEvent::RemoteRequestAccepted { .. })));
+}
+
+#[tokio::test]
 async fn remote_request_drains_async_remote_notifications() {
     let command_registry = Arc::new(CommandRegistry::new());
     let _router = rust_agent::interaction::router::CommandRouter::new(
         command_registry.clone(),
-        Box::new(DefaultSurfaceAuthorizer),
+        Box::new(DefaultSurfaceAuthorizer::default()),
     );
     let permission_context = ToolPermissionContext::new(PermissionMode::Default)
         .with_task_manager(Arc::new(TaskManager::default()))
@@ -500,7 +589,7 @@ async fn remote_request_drains_async_task_update_notifications() {
         Arc::new(CommandRegistry::new().register(Arc::new(RemoteSpawnTaskCommand)));
     let router = rust_agent::interaction::router::CommandRouter::new(
         command_registry.clone(),
-        Box::new(DefaultSurfaceAuthorizer),
+        Box::new(DefaultSurfaceAuthorizer::default()),
     );
     let permission_context = ToolPermissionContext::new(PermissionMode::Default)
         .with_task_manager(Arc::new(TaskManager::default()))
@@ -587,7 +676,7 @@ async fn remote_request_preserves_response_boundary_and_async_inbox_semantics() 
     let command_registry = Arc::new(CommandRegistry::new());
     let router = rust_agent::interaction::router::CommandRouter::new(
         command_registry.clone(),
-        Box::new(DefaultSurfaceAuthorizer),
+        Box::new(DefaultSurfaceAuthorizer::default()),
     );
     let permission_context = ToolPermissionContext::new(PermissionMode::Default)
         .with_task_manager(Arc::new(TaskManager::default()))
@@ -687,7 +776,7 @@ async fn remote_request_dual_channel_events_appear_in_response_and_async_inbox()
         Arc::new(CommandRegistry::new().register(Arc::new(RemoteSpawnTaskCommand)));
     let router = rust_agent::interaction::router::CommandRouter::new(
         command_registry.clone(),
-        Box::new(DefaultSurfaceAuthorizer),
+        Box::new(DefaultSurfaceAuthorizer::default()),
     );
     let permission_context = ToolPermissionContext::new(PermissionMode::Default)
         .with_task_manager(Arc::new(TaskManager::default()))
@@ -764,7 +853,7 @@ async fn remote_request_returns_typed_remote_event_envelopes() {
     let command_registry = Arc::new(CommandRegistry::new());
     let router = rust_agent::interaction::router::CommandRouter::new(
         command_registry.clone(),
-        Box::new(DefaultSurfaceAuthorizer),
+        Box::new(DefaultSurfaceAuthorizer::default()),
     );
     let permission_context = ToolPermissionContext::new(PermissionMode::Default)
         .with_task_manager(Arc::new(TaskManager::default()))

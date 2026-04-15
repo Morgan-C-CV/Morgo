@@ -51,13 +51,9 @@ fn unique_temp_path(prefix: &str) -> PathBuf {
 struct DenyingAuthorizer;
 
 impl SurfaceAuthorizer for DenyingAuthorizer {
-    fn authorize(
-        &self,
-        _surface: InteractionSurface,
-        _actor: &rust_agent::interaction::envelope::ActorIdentity,
-        _raw_input: &str,
-    ) -> AuthDecision {
+    fn authorize(&self, _input: &NormalizedInput) -> AuthDecision {
         AuthDecision::Deny {
+            category: rust_agent::security::authorizer::AuthDenyCategory::SurfaceCommandBlocked,
             reason: "blocked by authorizer".into(),
         }
     }
@@ -238,7 +234,7 @@ impl Command for PromptImmediateMetadataCommand {
 #[tokio::test]
 async fn router_executes_known_commands_before_query() {
     let registry = Arc::new(CommandRegistry::new().register(Arc::new(HelpCommand)));
-    let router = CommandRouter::new(registry, Box::new(DefaultSurfaceAuthorizer));
+    let router = CommandRouter::new(registry, Box::new(DefaultSurfaceAuthorizer::default()));
     let input = NormalizedInput::from_raw(InteractionSurface::Cli, "/help");
 
     assert_eq!(
@@ -261,7 +257,7 @@ async fn router_executes_known_commands_before_query() {
 async fn router_falls_back_for_unknown_commands() {
     let router = CommandRouter::new(
         Arc::new(CommandRegistry::new()),
-        Box::new(DefaultSurfaceAuthorizer),
+        Box::new(DefaultSurfaceAuthorizer::default()),
     );
     let input = NormalizedInput::from_raw(InteractionSurface::Cli, "/missing foo");
 
@@ -280,7 +276,7 @@ async fn router_falls_back_for_unknown_commands() {
 async fn router_unknown_slash_fallback_is_shared_by_cli_remote_and_telegram() {
     let router = CommandRouter::new(
         Arc::new(CommandRegistry::new()),
-        Box::new(DefaultSurfaceAuthorizer),
+        Box::new(DefaultSurfaceAuthorizer::default()),
     );
     let cli = NormalizedInput::from_raw(InteractionSurface::Cli, "/missing foo");
     let telegram = NormalizedInput::from_raw(InteractionSurface::Telegram, "/missing foo");
@@ -301,7 +297,7 @@ async fn router_unknown_slash_fallback_is_shared_by_cli_remote_and_telegram() {
 async fn router_denies_unauthenticated_remote_actor() {
     let router = CommandRouter::new(
         Arc::new(CommandRegistry::new()),
-        Box::new(DefaultSurfaceAuthorizer),
+        Box::new(DefaultSurfaceAuthorizer::default()),
     );
     let input =
         NormalizedInput::from_remote_raw("remote-session", "remote-actor", false, true, "/help");
@@ -316,7 +312,7 @@ async fn router_denies_unauthenticated_remote_actor() {
 async fn router_denies_untrusted_remote_command() {
     let router = CommandRouter::new(
         Arc::new(CommandRegistry::new().register(Arc::new(RemoteSafeTestCommand))),
-        Box::new(DefaultSurfaceAuthorizer),
+        Box::new(DefaultSurfaceAuthorizer::default()),
     );
     let input = NormalizedInput::from_remote_raw(
         "remote-session",
@@ -336,7 +332,7 @@ async fn router_denies_untrusted_remote_command() {
 async fn router_denies_sensitive_remote_command() {
     let router = CommandRouter::new(
         Arc::new(CommandRegistry::new().register(Arc::new(SensitiveRemoteCommand))),
-        Box::new(DefaultSurfaceAuthorizer),
+        Box::new(DefaultSurfaceAuthorizer::default()),
     );
     let input = NormalizedInput::from_remote_raw(
         "remote-session",
@@ -356,7 +352,7 @@ async fn router_denies_sensitive_remote_command() {
 async fn router_execute_command_decision_is_shared_by_cli_remote_and_telegram() {
     let router = CommandRouter::new(
         Arc::new(CommandRegistry::new().register(Arc::new(HelpCommand))),
-        Box::new(DefaultSurfaceAuthorizer),
+        Box::new(DefaultSurfaceAuthorizer::default()),
     );
     let cli = NormalizedInput::from_raw(InteractionSurface::Cli, "/help");
     let telegram = NormalizedInput::from_raw(InteractionSurface::Telegram, "/help");
@@ -372,7 +368,7 @@ async fn router_execute_command_decision_is_shared_by_cli_remote_and_telegram() 
 async fn router_plain_prompt_decision_is_shared_by_cli_remote_and_telegram() {
     let router = CommandRouter::new(
         Arc::new(CommandRegistry::new()),
-        Box::new(DefaultSurfaceAuthorizer),
+        Box::new(DefaultSurfaceAuthorizer::default()),
     );
     let cli = NormalizedInput::from_raw(InteractionSurface::Cli, "hello world");
     let telegram = NormalizedInput::from_raw(InteractionSurface::Telegram, "hello world");
@@ -393,7 +389,7 @@ async fn router_plain_prompt_decision_is_shared_by_cli_remote_and_telegram() {
 async fn router_availability_policy_is_shared_by_cli_and_telegram_but_denies_remote() {
     let router = CommandRouter::new(
         Arc::new(CommandRegistry::new().register(Arc::new(CliOnlyTestCommand))),
-        Box::new(DefaultSurfaceAuthorizer),
+        Box::new(DefaultSurfaceAuthorizer::default()),
     );
     let cli = NormalizedInput::from_raw(InteractionSurface::Cli, "/cli-only");
     let telegram = NormalizedInput::from_raw(InteractionSurface::Telegram, "/cli-only");
@@ -428,7 +424,7 @@ async fn router_availability_policy_is_shared_by_cli_and_telegram_but_denies_rem
 async fn router_sensitive_command_policy_is_carried_in_allowed_surface_decision() {
     let router = CommandRouter::new(
         Arc::new(CommandRegistry::new().register(Arc::new(SensitiveEverywhereCommand))),
-        Box::new(DefaultSurfaceAuthorizer),
+        Box::new(DefaultSurfaceAuthorizer::default()),
     );
     let cli = NormalizedInput::from_raw(InteractionSurface::Cli, "/sensitive-everywhere");
     let telegram = NormalizedInput::from_raw(InteractionSurface::Telegram, "/sensitive-everywhere");
@@ -452,7 +448,7 @@ async fn router_sensitive_command_policy_is_carried_in_allowed_surface_decision(
 async fn router_normalizes_prompt_commands_away_from_immediate_execution() {
     let router = CommandRouter::new(
         Arc::new(CommandRegistry::new().register(Arc::new(PromptImmediateMetadataCommand))),
-        Box::new(DefaultSurfaceAuthorizer),
+        Box::new(DefaultSurfaceAuthorizer::default()),
     );
     let input = NormalizedInput::from_raw(InteractionSurface::Cli, "/prompt-immediate");
 
@@ -476,7 +472,7 @@ async fn router_normalizes_prompt_commands_away_from_immediate_execution() {
 async fn prompt_command_with_model_invocation_disabled_never_enters_query_engine() {
     let router = CommandRouter::new(
         Arc::new(CommandRegistry::new().register(Arc::new(PromptNoModelCommand))),
-        Box::new(DefaultSurfaceAuthorizer),
+        Box::new(DefaultSurfaceAuthorizer::default()),
     );
     let app_state = AppState {
         surface: InteractionSurface::Cli,
@@ -521,7 +517,7 @@ async fn prompt_command_with_model_invocation_disabled_never_enters_query_engine
 #[tokio::test]
 async fn cli_repl_handles_multiple_inputs_in_sequence() {
     let command_registry = Arc::new(CommandRegistry::new().register(Arc::new(HelpCommand)));
-    let router = CommandRouter::new(command_registry.clone(), Box::new(DefaultSurfaceAuthorizer));
+    let router = CommandRouter::new(command_registry.clone(), Box::new(DefaultSurfaceAuthorizer::default()));
     let permission_context = ToolPermissionContext::new(PermissionMode::Default)
         .with_task_manager(Arc::new(TaskManager::default()))
         .with_plan_manager(Arc::new(PlanManager::default()));
@@ -581,7 +577,7 @@ async fn cli_repl_handles_multiple_inputs_in_sequence() {
 #[tokio::test]
 async fn cli_repl_surfaces_task_events_for_active_session() {
     let command_registry = Arc::new(CommandRegistry::new().register(Arc::new(HelpCommand)));
-    let router = CommandRouter::new(command_registry.clone(), Box::new(DefaultSurfaceAuthorizer));
+    let router = CommandRouter::new(command_registry.clone(), Box::new(DefaultSurfaceAuthorizer::default()));
     let manager = Arc::new(TaskManager::default());
     let permission_context =
         ToolPermissionContext::new(PermissionMode::Default).with_task_manager(manager.clone());
@@ -652,7 +648,7 @@ async fn cli_repl_surfaces_task_events_for_active_session() {
 #[tokio::test]
 async fn cli_repl_persists_history_for_local_and_query_turns() {
     let command_registry = Arc::new(CommandRegistry::new().register(Arc::new(HelpCommand)));
-    let router = CommandRouter::new(command_registry.clone(), Box::new(DefaultSurfaceAuthorizer));
+    let router = CommandRouter::new(command_registry.clone(), Box::new(DefaultSurfaceAuthorizer::default()));
     let permission_context = ToolPermissionContext::new(PermissionMode::Default)
         .with_task_manager(Arc::new(TaskManager::default()))
         .with_plan_manager(Arc::new(PlanManager::default()));
@@ -749,7 +745,7 @@ async fn remote_handler_preserves_remote_actor_and_session_for_query_flow() {
             .register(Arc::new(RemoteSafeTestCommand))
             .register(Arc::new(PluginsCommand)),
     );
-    let router = CommandRouter::new(command_registry.clone(), Box::new(DefaultSurfaceAuthorizer));
+    let router = CommandRouter::new(command_registry.clone(), Box::new(DefaultSurfaceAuthorizer::default()));
     let permission_context = ToolPermissionContext::new(PermissionMode::Default)
         .with_task_manager(Arc::new(TaskManager::default()))
         .with_plan_manager(Arc::new(PlanManager::default()));
@@ -1551,7 +1547,7 @@ async fn cli_repl_persists_denied_turns() {
 async fn router_approves_pending_plan_mode_request() {
     let router = CommandRouter::new(
         Arc::new(CommandRegistry::new()),
-        Box::new(DefaultSurfaceAuthorizer),
+        Box::new(DefaultSurfaceAuthorizer::default()),
     );
     let permission_context = ToolPermissionContext::new(PermissionMode::Default)
         .with_task_manager(Arc::new(TaskManager::default()))
@@ -1607,7 +1603,7 @@ async fn router_approves_pending_plan_mode_request() {
 async fn router_denies_pending_request_without_session_approval() {
     let router = CommandRouter::new(
         Arc::new(CommandRegistry::new()),
-        Box::new(DefaultSurfaceAuthorizer),
+        Box::new(DefaultSurfaceAuthorizer::default()),
     );
     let permission_context = ToolPermissionContext::new(PermissionMode::Default)
         .with_task_manager(Arc::new(TaskManager::default()))
@@ -1666,7 +1662,7 @@ async fn approval_replay_uses_runtime_tool_registry() {
         .expect("cwd lock poisoned");
     let router = CommandRouter::new(
         Arc::new(CommandRegistry::new()),
-        Box::new(DefaultSurfaceAuthorizer),
+        Box::new(DefaultSurfaceAuthorizer::default()),
     );
     let permission_context = ToolPermissionContext::new(PermissionMode::Default)
         .with_task_manager(Arc::new(TaskManager::default()))
@@ -1722,7 +1718,7 @@ async fn approval_replay_uses_runtime_tool_registry() {
 async fn permissions_command_reports_session_permission_state() {
     let router = CommandRouter::new(
         Arc::new(CommandRegistry::new().register(Arc::new(PermissionsCommand))),
-        Box::new(DefaultSurfaceAuthorizer),
+        Box::new(DefaultSurfaceAuthorizer::default()),
     );
     let permission_context = ToolPermissionContext::new(PermissionMode::Plan)
         .with_task_manager(Arc::new(TaskManager::default()))
@@ -1781,7 +1777,7 @@ async fn permissions_command_reports_session_permission_state() {
 async fn plan_command_reports_inactive_status() {
     let router = CommandRouter::new(
         Arc::new(CommandRegistry::new().register(Arc::new(PlanCommand))),
-        Box::new(DefaultSurfaceAuthorizer),
+        Box::new(DefaultSurfaceAuthorizer::default()),
     );
     let permission_context = ToolPermissionContext::new(PermissionMode::Default)
         .with_task_manager(Arc::new(TaskManager::default()))
@@ -1830,7 +1826,7 @@ async fn plan_command_reports_inactive_status() {
 async fn plan_command_enter_requests_approval_before_switching_mode() {
     let router = CommandRouter::new(
         Arc::new(CommandRegistry::new().register(Arc::new(PlanCommand))),
-        Box::new(DefaultSurfaceAuthorizer),
+        Box::new(DefaultSurfaceAuthorizer::default()),
     );
     let permission_context = ToolPermissionContext::new(PermissionMode::Default)
         .with_task_manager(Arc::new(TaskManager::default()))
@@ -1886,7 +1882,7 @@ async fn plan_command_enter_requests_approval_before_switching_mode() {
 async fn plan_command_exit_requests_approval_and_approval_exits_mode() {
     let router = CommandRouter::new(
         Arc::new(CommandRegistry::new().register(Arc::new(PlanCommand))),
-        Box::new(DefaultSurfaceAuthorizer),
+        Box::new(DefaultSurfaceAuthorizer::default()),
     );
     let plan_manager = Arc::new(PlanManager::default());
     plan_manager.ensure_draft(None);
@@ -1967,7 +1963,7 @@ async fn plan_command_exit_requests_approval_and_approval_exits_mode() {
 async fn plan_command_handles_status_noop_and_denied_exit() {
     let router = CommandRouter::new(
         Arc::new(CommandRegistry::new().register(Arc::new(PlanCommand))),
-        Box::new(DefaultSurfaceAuthorizer),
+        Box::new(DefaultSurfaceAuthorizer::default()),
     );
     let plan_manager = Arc::new(PlanManager::default());
     plan_manager.ensure_draft(None);
@@ -2215,7 +2211,7 @@ async fn plan_command_handles_status_noop_and_denied_exit() {
 async fn permissions_command_mutates_mode_and_rule_lists() {
     let router = CommandRouter::new(
         Arc::new(CommandRegistry::new().register(Arc::new(PermissionsCommand))),
-        Box::new(DefaultSurfaceAuthorizer),
+        Box::new(DefaultSurfaceAuthorizer::default()),
     );
     let permission_context = ToolPermissionContext::new(PermissionMode::Default)
         .with_task_manager(Arc::new(TaskManager::default()))

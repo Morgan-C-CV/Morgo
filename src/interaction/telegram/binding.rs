@@ -50,6 +50,9 @@ pub enum TelegramInboundBindingAuthorization {
     BotMismatch,
     PrincipalMismatch,
     ActorMismatch,
+    NotAllowlisted,
+    RateLimited,
+    AbuseBlocked,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

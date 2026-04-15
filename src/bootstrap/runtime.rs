@@ -659,22 +659,22 @@ impl RuntimeBootstrap {
 
     pub fn gate_user_access(
         &self,
-        state: &BootstrapState,
+        _state: &BootstrapState,
         input: Option<&NormalizedInput>,
     ) -> UserAccessDecision {
-        let authorizer = DefaultSurfaceAuthorizer;
+        let authorizer = DefaultSurfaceAuthorizer::default();
         let Some(input) = input else {
             return UserAccessDecision {
                 allowed: true,
                 reason: None,
             };
         };
-        match authorizer.authorize(state.surface, &input.actor, &input.raw) {
+        match authorizer.authorize(input) {
             AuthDecision::Allow => UserAccessDecision {
                 allowed: true,
                 reason: None,
             },
-            AuthDecision::Deny { reason } => UserAccessDecision {
+            AuthDecision::Deny { reason, .. } => UserAccessDecision {
                 allowed: false,
                 reason: Some(reason),
             },

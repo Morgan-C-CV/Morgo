@@ -70,11 +70,8 @@ impl CommandRouter {
     }
 
     pub async fn decide(&self, input: &NormalizedInput) -> RouteDecision {
-        match self
-            .authorizer
-            .authorize(input.surface, &input.actor, &input.raw)
-        {
-            AuthDecision::Deny { reason } => return RouteDecision::Deny(reason),
+        match self.authorizer.authorize(input) {
+            AuthDecision::Deny { reason, .. } => return RouteDecision::Deny(reason),
             AuthDecision::Allow => {}
         }
 
