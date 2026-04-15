@@ -447,7 +447,9 @@ async fn remote_request_drains_async_task_update_notifications() {
     assert!(response.events.iter().any(|event| matches!(
         &event.payload,
         RemoteEventPayload::TaskUpdate(task)
-            if task.task_id == "task-0" && task.status == "completed"
+            if task.task_id == "task-0"
+                && task.task_type == "generic"
+                && task.status == "completed"
     )));
 
     let drained = drain_remote_notifications(&app_state, "remote-task-session", Some("task-actor"));
@@ -460,6 +462,7 @@ async fn remote_request_drains_async_task_update_notifications() {
         &drained[0].payload,
         RemoteEventPayload::TaskUpdate(task)
             if task.task_id == "task-0"
+                && task.task_type == "generic"
                 && task.status == "completed"
                 && task.summary.contains("remote async task")
     ));

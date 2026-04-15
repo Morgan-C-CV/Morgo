@@ -31,6 +31,7 @@ pub enum HookEvent {
         body: String,
         notification_type: String,
         task_id: Option<String>,
+        task_type: Option<String>,
         status: Option<String>,
         output_file: Option<String>,
     },

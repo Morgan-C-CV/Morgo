@@ -61,6 +61,7 @@ fn worker_notification_formats_as_task_notification_xml() {
     let formatted = notification.format_as_user_message();
     assert!(formatted.contains("<task-notification>"));
     assert!(formatted.contains("<task-id>task-7</task-id>"));
+    assert!(formatted.contains("<task-type>local_agent</task-type>"));
     assert!(formatted.contains("<summary>Worker finished research</summary>"));
     assert!(formatted.contains("<output-file>/tmp/task-7.log</output-file>"));
 }
@@ -91,6 +92,10 @@ fn notification_conversion_preserves_worker_role_and_next_action() {
 
     let converted = notification_to_task_notification(&notification).expect("should convert");
     assert_eq!(converted.task_id, "task-8");
+    assert_eq!(
+        converted.task_type,
+        rust_agent::task::types::TaskType::LocalAgent
+    );
     assert_eq!(converted.status, TaskStatus::Completed);
     assert_eq!(converted.next_action, "inspect task output for task-8");
     assert_eq!(converted.worker_role, Some(WorkerRole::Verify));
@@ -239,6 +244,10 @@ fn task_notification_contract_marks_implement_completion_for_verify_follow_up() 
     let notification = TaskNotification::from_task_event(&event);
     let formatted = notification.format_as_user_message();
 
+    assert_eq!(
+        notification.task_type,
+        rust_agent::task::types::TaskType::LocalAgent
+    );
     assert_eq!(notification.worker_role, Some(WorkerRole::Implement));
     assert_eq!(notification.phase, Some(WorkerPhase::Implement));
     assert_eq!(
@@ -249,6 +258,7 @@ fn task_notification_contract_marks_implement_completion_for_verify_follow_up() 
         notification.next_action,
         "dispatch verify worker for task-9"
     );
+    assert!(formatted.contains("<task-type>local_agent</task-type>"));
     assert!(formatted.contains("<worker-role>implement</worker-role>"));
     assert!(formatted.contains("<phase>implement</phase>"));
     assert!(formatted.contains("<validation-state>pending_verification</validation-state>"));
@@ -280,6 +290,10 @@ fn task_notification_contract_marks_verify_completion_for_validated_synthesis() 
     let notification = TaskNotification::from_task_event(&event);
     let formatted = notification.format_as_user_message();
 
+    assert_eq!(
+        notification.task_type,
+        rust_agent::task::types::TaskType::LocalAgent
+    );
     assert_eq!(notification.worker_role, Some(WorkerRole::Verify));
     assert_eq!(notification.phase, Some(WorkerPhase::Verify));
     assert_eq!(
@@ -290,6 +304,7 @@ fn task_notification_contract_marks_verify_completion_for_validated_synthesis() 
         notification.next_action,
         "synthesize validated result for task-10"
     );
+    assert!(formatted.contains("<task-type>local_agent</task-type>"));
     assert!(formatted.contains("<worker-role>verify</worker-role>"));
     assert!(formatted.contains("<phase>verify</phase>"));
     assert!(formatted.contains("<validation-state>verified</validation-state>"));

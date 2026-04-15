@@ -98,6 +98,7 @@ fn dispatcher_records_notification_hook_payloads_for_all_notification_types() {
             body: "task body".into(),
             notification_type: "task_update".into(),
             task_id: Some("task-7".into()),
+            task_type: Some("local_agent".into()),
             status: Some("Completed".into()),
             output_file: Some("/tmp/task-7.log".into()),
         }
@@ -109,6 +110,7 @@ fn dispatcher_records_notification_hook_payloads_for_all_notification_types() {
             body: "requires explicit approval".into(),
             notification_type: "approval_required".into(),
             task_id: None,
+            task_type: None,
             status: None,
             output_file: None,
         }
@@ -120,6 +122,7 @@ fn dispatcher_records_notification_hook_payloads_for_all_notification_types() {
             body: "runtime warning".into(),
             notification_type: "runtime_notice".into(),
             task_id: None,
+            task_type: None,
             status: None,
             output_file: None,
         }
@@ -156,6 +159,7 @@ fn dispatcher_can_deny_approval_notification_via_hook_rule() {
             body: "requires explicit approval".into(),
             notification_type: "approval_required".into(),
             task_id: None,
+            task_type: None,
             status: None,
             output_file: None,
         }
@@ -819,10 +823,85 @@ fn remote_event_envelope_preserves_structured_task_payload() {
 }
 
 #[test]
+fn remote_notification_envelope_preserves_task_type_and_uses_generic_fallback() {
+    let typed = rust_agent::interaction::remote::RemoteNotificationEnvelope::from(
+        Notification::task_update(
+            "remote-session",
+            "Command completed",
+            "bash: ls (task-2) — command completed",
+            "task-2",
+            Some("local_bash"),
+            "completed",
+            "inspect command output for task-2",
+            None,
+            None,
+            None,
+            None,
+            "/tmp/task-2.log",
+            None,
+        ),
+    );
+    assert!(matches!(
+        typed.payload,
+        RemoteEventPayload::TaskUpdate(task)
+            if task.task_id == "task-2"
+                && task.task_type == "local_bash"
+                && task.next_action == "inspect command output for task-2"
+    ));
+
+    let fallback =
+        rust_agent::interaction::remote::RemoteNotificationEnvelope::from(Notification {
+            session_id: "remote-session".into(),
+            title: "Task completed".into(),
+            body: "fallback body".into(),
+            notification_type: NotificationType::TaskUpdate,
+            task_id: Some("task-fallback".into()),
+            task_type: None,
+            status: Some("completed".into()),
+            next_action: Some("inspect task notification".into()),
+            worker_role: None,
+            orchestration_group_id: None,
+            phase: None,
+            validation_state: None,
+            output_file: Some("/tmp/task-fallback.log".into()),
+            usage: None,
+            tool_name: None,
+            notice_kind: None,
+            dedupe_key: None,
+            wake_up: true,
+            target: None,
+        });
+    assert!(matches!(
+        fallback.payload,
+        RemoteEventPayload::TaskUpdate(task)
+            if task.task_id == "task-fallback" && task.task_type == "generic"
+    ));
+}
+
+#[test]
 fn telegram_view_keeps_only_telegram_relevant_semantic_items() {
     let turn = CliTurnOutput {
         primary_text: "Status".into(),
         events: vec![
+            CliDisplayEvent::TaskEvent(TaskEvent {
+                owner: TaskOwner {
+                    session_id: "session-1".into(),
+                    surface: InteractionSurface::Telegram,
+                },
+                target_task_id: Some("task-tele-1".into()),
+                task_id: "task-tele-1".into(),
+                task_type: rust_agent::task::types::TaskType::LocalAgent,
+                status: TaskStatus::Completed,
+                summary: "telegram task".into(),
+                result: "Task completed".into(),
+                next_action: "inspect task output for task-tele-1".into(),
+                worker_role: None,
+                orchestration_group_id: None,
+                phase: None,
+                validation_state: None,
+                output_file: "/tmp/task-tele-1.log".into(),
+                usage: None,
+            }),
             CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::Notice {
                 kind: "validation".into(),
                 message: "pending verify".into(),
@@ -845,14 +924,19 @@ fn telegram_view_keeps_only_telegram_relevant_semantic_items() {
     let telegram_view = build_telegram_view(&build_surface_view(&turn));
 
     assert_eq!(telegram_view.primary_text, "Status");
-    assert_eq!(telegram_view.items.len(), 2);
+    assert_eq!(telegram_view.items.len(), 3);
     assert!(matches!(
         &telegram_view.items[0],
+        rust_agent::interaction::view::TelegramItem::TaskUpdate(task)
+            if task.task_type == "local_agent" && task.task_id == "task-tele-1"
+    ));
+    assert!(matches!(
+        &telegram_view.items[1],
         rust_agent::interaction::view::TelegramItem::RuntimeNotice { kind, message }
             if kind == "validation" && message == "pending verify"
     ));
     assert!(matches!(
-        &telegram_view.items[1],
+        &telegram_view.items[2],
         rust_agent::interaction::view::TelegramItem::ApprovalRequired { tool_name, message }
             if tool_name == "Bash" && message == "requires explicit approval"
     ));
@@ -875,6 +959,25 @@ fn telegram_gateway_builds_semantic_outgoing_messages_without_cli_renderer_types
     let view = build_surface_view(&CliTurnOutput {
         primary_text: "Primary reply".into(),
         events: vec![
+            CliDisplayEvent::TaskEvent(TaskEvent {
+                owner: TaskOwner {
+                    session_id: "telegram-session-1".into(),
+                    surface: InteractionSurface::Telegram,
+                },
+                target_task_id: Some("task-tele-2".into()),
+                task_id: "task-tele-2".into(),
+                task_type: rust_agent::task::types::TaskType::LocalBash,
+                status: TaskStatus::Completed,
+                summary: "bash: pwd".into(),
+                result: "Command completed".into(),
+                next_action: "inspect command output for task-tele-2".into(),
+                worker_role: None,
+                orchestration_group_id: None,
+                phase: None,
+                validation_state: None,
+                output_file: "/tmp/task-tele-2.log".into(),
+                usage: None,
+            }),
             CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::Notice {
                 kind: "runtime".into(),
                 message: "background work still running".into(),
@@ -905,6 +1008,13 @@ fn telegram_gateway_builds_semantic_outgoing_messages_without_cli_renderer_types
                     chat_id: "chat-1".into(),
                     thread_id: Some("thread-9".into()),
                 },
+                text: "Task: bash: pwd\nType: local_bash\nStatus: completed\nResult: Command completed\nNext: inspect command output for task-tele-2\nOutput: /tmp/task-tele-2.log".into(),
+            },
+            TelegramOutgoingMessage {
+                target: TelegramDeliveryTarget {
+                    chat_id: "chat-1".into(),
+                    thread_id: Some("thread-9".into()),
+                },
                 text: "Notice: runtime\nbackground work still running".into(),
             }
         ]
@@ -916,6 +1026,25 @@ fn web_view_is_derived_from_surface_view_with_frontend_friendly_kinds() {
     let turn = CliTurnOutput {
         primary_text: "Primary reply".into(),
         events: vec![
+            CliDisplayEvent::TaskEvent(TaskEvent {
+                owner: TaskOwner {
+                    session_id: "session-web".into(),
+                    surface: InteractionSurface::Cli,
+                },
+                target_task_id: Some("task-web-1".into()),
+                task_id: "task-web-1".into(),
+                task_type: rust_agent::task::types::TaskType::LocalBash,
+                status: TaskStatus::Completed,
+                summary: "bash: ls".into(),
+                result: "Command completed".into(),
+                next_action: "inspect command output for task-web-1".into(),
+                worker_role: None,
+                orchestration_group_id: None,
+                phase: None,
+                validation_state: None,
+                output_file: "/tmp/task-web-1.log".into(),
+                usage: None,
+            }),
             CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::Notice {
                 kind: "runtime".into(),
                 message: "background work still running".into(),
@@ -935,19 +1064,26 @@ fn web_view_is_derived_from_surface_view_with_frontend_friendly_kinds() {
     let web_view = build_web_view(&build_surface_view(&turn));
 
     assert_eq!(web_view.primary_text, "Primary reply");
-    assert_eq!(web_view.items.len(), 3);
+    assert_eq!(web_view.items.len(), 4);
     assert!(matches!(
         &web_view.items[0],
+        WebItem::TaskUpdate(task)
+            if task.task_type == "local_bash"
+                && task.task_id == "task-web-1"
+                && task.next_action == "inspect command output for task-web-1"
+    ));
+    assert!(matches!(
+        &web_view.items[1],
         WebItem::RuntimeNotice { notice_kind, message }
             if notice_kind == "runtime" && message == "background work still running"
     ));
     assert!(matches!(
-        &web_view.items[1],
+        &web_view.items[2],
         WebItem::Transition { transition_kind, text }
             if transition_kind == "next_turn" && text == "next_turn"
     ));
     assert!(matches!(
-        &web_view.items[2],
+        &web_view.items[3],
         WebItem::ToolResult { tool_name, content, .. }
             if tool_name == "Read" && content == "line one"
     ));
@@ -958,6 +1094,25 @@ fn same_surface_view_feeds_remote_telegram_and_web_without_cli_renderer_types() 
     let view = build_surface_view(&CliTurnOutput {
         primary_text: "Shared reply".into(),
         events: vec![
+            CliDisplayEvent::TaskEvent(TaskEvent {
+                owner: TaskOwner {
+                    session_id: "shared-session".into(),
+                    surface: InteractionSurface::Cli,
+                },
+                target_task_id: Some("task-shared-1".into()),
+                task_id: "task-shared-1".into(),
+                task_type: rust_agent::task::types::TaskType::LocalAgent,
+                status: TaskStatus::Completed,
+                summary: "shared task".into(),
+                result: "Task completed".into(),
+                next_action: "inspect task output for task-shared-1".into(),
+                worker_role: None,
+                orchestration_group_id: None,
+                phase: None,
+                validation_state: None,
+                output_file: "/tmp/task-shared-1.log".into(),
+                usage: None,
+            }),
             CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::PendingApproval {
                 tool_name: "Bash".into(),
                 message: "requires explicit approval".into(),
@@ -980,19 +1135,32 @@ fn same_surface_view_feeds_remote_telegram_and_web_without_cli_renderer_types() 
     let telegram_view = build_telegram_view(&view);
     let web_view = build_web_view(&view);
 
-    assert_eq!(remote_events.len(), 2);
-    assert_eq!(telegram_view.items.len(), 2);
-    assert_eq!(web_view.items.len(), 2);
+    assert_eq!(remote_events.len(), 3);
+    assert_eq!(telegram_view.items.len(), 3);
+    assert_eq!(web_view.items.len(), 3);
     assert!(matches!(
-        remote_events[0].payload,
+        &remote_events[0].payload,
+        RemoteEventPayload::TaskUpdate(task) if task.task_type == "local_agent"
+    ));
+    assert!(matches!(
+        remote_events[1].payload,
         RemoteEventPayload::ApprovalRequired { .. }
     ));
     assert!(matches!(
         &telegram_view.items[0],
+        rust_agent::interaction::view::TelegramItem::TaskUpdate(task)
+            if task.task_type == "local_agent"
+    ));
+    assert!(matches!(
+        &telegram_view.items[1],
         rust_agent::interaction::view::TelegramItem::ApprovalRequired { .. }
     ));
     assert!(matches!(
         &web_view.items[0],
+        WebItem::TaskUpdate(task) if task.task_type == "local_agent"
+    ));
+    assert!(matches!(
+        &web_view.items[1],
         WebItem::ApprovalRequired { .. }
     ));
 }
@@ -1155,6 +1323,66 @@ fn drain_remote_notifications_maps_structured_payloads() {
         &drained[0].payload,
         RemoteEventPayload::ApprovalRequired { tool_name, message, .. }
             if tool_name == "Bash" && message == "requires explicit approval"
+    ));
+}
+
+#[test]
+fn drain_remote_task_update_notifications_preserve_task_type() {
+    let app_state = rust_agent::state::app_state::AppState {
+        surface: InteractionSurface::Remote,
+        session_mode: rust_agent::bootstrap::SessionMode::Interactive,
+        client_type: rust_agent::bootstrap::ClientType::RemoteControl,
+        session_source: rust_agent::bootstrap::SessionSource::RemoteControl,
+        runtime_role: rust_agent::state::app_state::RuntimeRole::Coordinator,
+        worker_role: None,
+        permission_context: rust_agent::state::permission_context::ToolPermissionContext::new(
+            rust_agent::state::permission_context::PermissionMode::Default,
+        ),
+        command_registry: None,
+        runtime_tool_registry: None,
+        skill_registry: None,
+        mcp_runtime: None,
+        plugin_load_result: None,
+        cost_tracker: rust_agent::cost::tracker::CostTracker::default(),
+        notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
+        startup_trace: Vec::new(),
+        active_session_id: "remote-session".into(),
+        session_store: None,
+        session: None,
+        history: None,
+        restored_session: None,
+    };
+    let mut notification = Notification::task_update(
+        "remote-session",
+        "Command completed",
+        "bash: ls (task-9) — command completed",
+        "task-9",
+        Some("local_bash"),
+        "completed",
+        "inspect command output for task-9",
+        None,
+        None,
+        None,
+        None,
+        "/tmp/task-9.log",
+        None,
+    );
+    notification.target = Some(NotificationTarget::RemoteActor {
+        session_id: "remote-session".into(),
+        actor_id: "actor-1".into(),
+    });
+    app_state
+        .notification_dispatcher
+        .dispatch(InteractionSurface::Remote, notification);
+
+    let drained = drain_remote_notifications(&app_state, "remote-session", Some("actor-1"));
+    assert_eq!(drained.len(), 1);
+    assert!(matches!(
+        &drained[0].payload,
+        RemoteEventPayload::TaskUpdate(task)
+            if task.task_id == "task-9"
+                && task.task_type == "local_bash"
+                && task.next_action == "inspect command output for task-9"
     ));
 }
 

@@ -129,8 +129,9 @@ async fn task_manager_tracks_failed_and_killed_states() {
 #[test]
 fn telegram_task_notifications_resolve_session_target_to_delivery_target() {
     let manager = TaskManager::default();
-    let task = manager.create(
+    let task = manager.create_with_type(
         "telegram task",
+        rust_agent::task::types::TaskType::LocalAgent,
         "telegram-session",
         InteractionSurface::Telegram,
     );
@@ -245,12 +246,12 @@ async fn agent_tool_launches_subagent_and_completes_task() {
         .expect("notification should exist");
     assert_eq!(notification.session_id, "session-7");
     assert!(notification.body.starts_with(
-        "Spawned research worker for inspect repository (task-0) — completed — requests="
+        "Spawned research worker for inspect repository (task-0) — worker completed — requests="
     ));
     assert!(
         notification
             .title
-            .starts_with("Task completed — usage: requests=")
+            .starts_with("Agent task completed — usage: requests=")
     );
     assert_eq!(notification.worker_role.as_deref(), Some("research"));
     assert_eq!(
@@ -292,6 +293,179 @@ fn task_manager_queues_internal_task_notifications() {
         }
     );
     assert!(manager.drain_events("session-1").is_empty());
+}
+
+#[test]
+fn task_type_changes_terminal_summary_result_and_next_action_semantics() {
+    let manager = TaskManager::default();
+    let usage = Some(rust_agent::task::types::TaskUsageSummary {
+        requests: 1,
+        input_tokens: 10,
+        output_tokens: 5,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: 0,
+        estimated_cost_micros_usd: 42,
+    });
+
+    let generic_summary = rust_agent::task::types::format_task_summary(
+        "demo task",
+        "task-1",
+        rust_agent::task::types::TaskType::Generic,
+        &TaskStatus::Completed,
+        usage.as_ref(),
+    );
+    let bash_summary = rust_agent::task::types::format_task_summary(
+        "bash: ls",
+        "task-2",
+        rust_agent::task::types::TaskType::LocalBash,
+        &TaskStatus::Completed,
+        usage.as_ref(),
+    );
+    let agent_summary = rust_agent::task::types::format_task_summary(
+        "Spawned research worker",
+        "task-3",
+        rust_agent::task::types::TaskType::LocalAgent,
+        &TaskStatus::Completed,
+        usage.as_ref(),
+    );
+
+    assert!(generic_summary.contains("demo task (task-1) — completed"));
+    assert!(bash_summary.contains("bash: ls (task-2) — command completed"));
+    assert!(agent_summary.contains("Spawned research worker (task-3) — worker completed"));
+
+    let generic_result = rust_agent::task::types::format_task_result(
+        rust_agent::task::types::TaskType::Generic,
+        &TaskStatus::Completed,
+        None,
+        usage.as_ref(),
+    );
+    let bash_result = rust_agent::task::types::format_task_result(
+        rust_agent::task::types::TaskType::LocalBash,
+        &TaskStatus::Completed,
+        None,
+        usage.as_ref(),
+    );
+    let agent_result = rust_agent::task::types::format_task_result(
+        rust_agent::task::types::TaskType::LocalAgent,
+        &TaskStatus::Completed,
+        None,
+        usage.as_ref(),
+    );
+
+    assert!(generic_result.starts_with("Task completed — usage:"));
+    assert!(bash_result.starts_with("Command completed — usage:"));
+    assert!(agent_result.starts_with("Agent task completed — usage:"));
+
+    let generic_task = manager.create("generic task", "session-1", InteractionSurface::Cli);
+    let bash_task = manager.create_with_type(
+        "bash: ls",
+        rust_agent::task::types::TaskType::LocalBash,
+        "session-1",
+        InteractionSurface::Cli,
+    );
+    let agent_task = manager.create_with_type(
+        "research worker",
+        rust_agent::task::types::TaskType::LocalAgent,
+        "session-1",
+        InteractionSurface::Cli,
+    );
+    manager.set_worker_role(&agent_task.id, WorkerRole::Research);
+    manager.complete(
+        &agent_task.id,
+        &NotificationDispatcher::new(TelegramGateway::default()),
+    );
+    let completed_agent_task = manager
+        .get(&agent_task.id)
+        .expect("agent task should exist");
+
+    let generic_hint = manager.task_hint(&generic_task);
+    let bash_hint = manager.task_hint(&bash_task);
+    let agent_hint = manager.task_hint(&completed_agent_task);
+
+    assert_eq!(
+        generic_hint,
+        format!("inspect task output for {}", generic_task.id)
+    );
+    assert_eq!(
+        bash_hint,
+        format!("inspect command output for {}", bash_task.id)
+    );
+    assert_eq!(
+        agent_hint,
+        format!(
+            "synthesize findings or request follow-up research for {}",
+            agent_task.id
+        )
+    );
+}
+
+#[test]
+fn grouped_task_type_semantics_drive_group_hint_and_fan_in() {
+    let manager = TaskManager::default();
+
+    let bash_a = manager.create_with_type(
+        "bash: one",
+        rust_agent::task::types::TaskType::LocalBash,
+        "session-1",
+        InteractionSurface::Cli,
+    );
+    let bash_b = manager.create_with_type(
+        "bash: two",
+        rust_agent::task::types::TaskType::LocalBash,
+        "session-1",
+        InteractionSurface::Cli,
+    );
+    manager.set_orchestration_group_id(&bash_a.id, Some("group-bash".into()));
+    manager.set_orchestration_group_id(&bash_b.id, Some("group-bash".into()));
+    manager.start(&bash_a.id);
+    manager.start(&bash_b.id);
+    manager.set_phase(
+        &bash_a.id,
+        Some(rust_agent::task::types::WorkerPhase::Research),
+    );
+    manager.fail(
+        &bash_a.id,
+        &NotificationDispatcher::new(TelegramGateway::default()),
+    );
+    manager.complete(
+        &bash_b.id,
+        &NotificationDispatcher::new(TelegramGateway::default()),
+    );
+
+    let bash_group = manager
+        .group_summary("group-bash")
+        .expect("bash group exists");
+    assert_eq!(
+        bash_group.hint,
+        "group group-bash is ready for command-result review"
+    );
+    assert!(manager.group_ready_for_fan_in("group-bash"));
+
+    let agent = manager.create_with_type(
+        "implement patch",
+        rust_agent::task::types::TaskType::LocalAgent,
+        "session-1",
+        InteractionSurface::Cli,
+    );
+    manager.set_orchestration_group_id(&agent.id, Some("group-agent".into()));
+    manager.set_worker_role(&agent.id, WorkerRole::Implement);
+    manager.set_validation_state(
+        &agent.id,
+        Some(rust_agent::task::types::ValidationState::PendingVerification),
+    );
+    manager.complete(
+        &agent.id,
+        &NotificationDispatcher::new(TelegramGateway::default()),
+    );
+
+    let agent_group = manager
+        .group_summary("group-agent")
+        .expect("agent group exists");
+    assert_eq!(
+        agent_group.hint,
+        "group group-agent is waiting for verification"
+    );
+    assert!(!manager.group_ready_for_fan_in("group-agent"));
 }
 
 #[tokio::test]

@@ -5,6 +5,7 @@ use crate::tool::definition::ToolMetadata;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskNotification {
     pub task_id: String,
+    pub task_type: TaskType,
     pub status: TaskStatus,
     pub summary: String,
     pub result: String,
@@ -20,6 +21,7 @@ impl TaskNotification {
     pub fn from_task_event(event: &TaskEvent) -> Self {
         Self {
             task_id: event.task_id.clone(),
+            task_type: event.task_type,
             status: event.status.clone(),
             summary: event.summary.clone(),
             result: event.result.clone(),
@@ -40,7 +42,7 @@ impl TaskNotification {
             },
             target_task_id: None,
             task_id: self.task_id.clone(),
-            task_type: TaskType::LocalAgent,
+            task_type: self.task_type,
             status: self.status.clone(),
             summary: self.summary.clone(),
             result: self.result.clone(),
@@ -77,9 +79,18 @@ fn parse_notification_status(status: Option<&str>) -> TaskStatus {
     }
 }
 
+fn parse_notification_task_type(task_type: Option<&str>) -> TaskType {
+    match task_type {
+        Some("local_bash") => TaskType::LocalBash,
+        Some("local_agent") => TaskType::LocalAgent,
+        _ => TaskType::Generic,
+    }
+}
+
 pub fn notification_to_task_notification(notification: &Notification) -> Option<TaskNotification> {
     Some(TaskNotification {
         task_id: notification.task_id.clone()?,
+        task_type: parse_notification_task_type(notification.task_type.as_deref()),
         status: parse_notification_status(notification.status.as_deref()),
         summary: notification.body.clone(),
         result: notification.title.clone(),

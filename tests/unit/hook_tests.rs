@@ -196,6 +196,7 @@ fn notification_hook_can_match_typed_payload() {
             body: "demo body".into(),
             notification_type: "task_update".into(),
             task_id: Some("task-9".into()),
+            task_type: Some("local_agent".into()),
             status: Some("Completed".into()),
             output_file: Some("/tmp/task-9.log".into()),
         }

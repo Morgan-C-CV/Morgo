@@ -17,6 +17,73 @@ impl TaskType {
             Self::LocalAgent => "local_agent",
         }
     }
+
+    pub fn summary_status_label(&self, status: &TaskStatus) -> &'static str {
+        match (self, status) {
+            (Self::Generic, _) => status.as_str(),
+            (Self::LocalBash, TaskStatus::Pending) => "command pending",
+            (Self::LocalBash, TaskStatus::Running) => "command running",
+            (Self::LocalBash, TaskStatus::Completed) => "command completed",
+            (Self::LocalBash, TaskStatus::Failed) => "command failed",
+            (Self::LocalBash, TaskStatus::Killed) => "command killed",
+            (Self::LocalAgent, TaskStatus::Pending) => "worker pending",
+            (Self::LocalAgent, TaskStatus::Running) => "worker running",
+            (Self::LocalAgent, TaskStatus::Completed) => "worker completed",
+            (Self::LocalAgent, TaskStatus::Failed) => "worker failed",
+            (Self::LocalAgent, TaskStatus::Killed) => "worker killed",
+        }
+    }
+
+    pub fn result_title(&self, status: &TaskStatus) -> &'static str {
+        match (self, status) {
+            (Self::Generic, TaskStatus::Pending) => "Task pending",
+            (Self::Generic, TaskStatus::Running) => "Task running",
+            (Self::Generic, TaskStatus::Completed) => "Task completed",
+            (Self::Generic, TaskStatus::Failed) => "Task failed",
+            (Self::Generic, TaskStatus::Killed) => "Task killed",
+            (Self::LocalBash, TaskStatus::Pending) => "Command pending",
+            (Self::LocalBash, TaskStatus::Running) => "Command running",
+            (Self::LocalBash, TaskStatus::Completed) => "Command completed",
+            (Self::LocalBash, TaskStatus::Failed) => "Command failed",
+            (Self::LocalBash, TaskStatus::Killed) => "Command killed",
+            (Self::LocalAgent, TaskStatus::Pending) => "Agent task pending",
+            (Self::LocalAgent, TaskStatus::Running) => "Agent task running",
+            (Self::LocalAgent, TaskStatus::Completed) => "Agent task completed",
+            (Self::LocalAgent, TaskStatus::Failed) => "Agent task failed",
+            (Self::LocalAgent, TaskStatus::Killed) => "Agent task killed",
+        }
+    }
+
+    pub fn default_next_action(&self, task_id: &str) -> String {
+        match self {
+            Self::Generic | Self::LocalAgent => format!("inspect task output for {}", task_id),
+            Self::LocalBash => format!("inspect command output for {}", task_id),
+        }
+    }
+
+    pub fn running_next_action(&self, task_id: &str) -> String {
+        match self {
+            Self::Generic => format!("continue running task {}", task_id),
+            Self::LocalBash => format!("continue running command task {}", task_id),
+            Self::LocalAgent => format!("continue running worker task {}", task_id),
+        }
+    }
+
+    pub fn group_summary_description(&self) -> &'static str {
+        match self {
+            Self::Generic => "grouped tasks completed",
+            Self::LocalBash => "grouped bash tasks completed",
+            Self::LocalAgent => "grouped research tasks completed",
+        }
+    }
+
+    pub fn group_next_action(&self, group_id: &str) -> String {
+        match self {
+            Self::Generic => format!("inspect grouped task results for {}", group_id),
+            Self::LocalBash => format!("inspect grouped command output for {}", group_id),
+            Self::LocalAgent => format!("synthesize grouped findings for {}", group_id),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -118,10 +185,16 @@ impl TaskUsageSummary {
 pub fn format_task_summary(
     description: &str,
     task_id: &str,
+    task_type: TaskType,
     status: &TaskStatus,
     usage: Option<&TaskUsageSummary>,
 ) -> String {
-    let mut summary = format!("{} ({}) — {}", description, task_id, status.as_str());
+    let mut summary = format!(
+        "{} ({}) — {}",
+        description,
+        task_id,
+        task_type.summary_status_label(status)
+    );
     if let Some(usage) = usage.filter(|usage| !usage.is_empty()) {
         summary.push_str(" — ");
         summary.push_str(&usage.format_compact());
@@ -130,17 +203,12 @@ pub fn format_task_summary(
 }
 
 pub fn format_task_result(
+    task_type: TaskType,
     status: &TaskStatus,
     validation_state: Option<ValidationState>,
     usage: Option<&TaskUsageSummary>,
 ) -> String {
-    let mut result = match status {
-        TaskStatus::Pending => "Task pending".to_string(),
-        TaskStatus::Running => "Task running".to_string(),
-        TaskStatus::Completed => "Task completed".to_string(),
-        TaskStatus::Failed => "Task failed".to_string(),
-        TaskStatus::Killed => "Task killed".to_string(),
-    };
+    let mut result = task_type.result_title(status).to_string();
     if let Some(validation_state) =
         validation_state.filter(|state| *state != ValidationState::NotNeeded)
     {
@@ -218,8 +286,9 @@ impl TaskEvent {
 
         if self.output_file.is_empty() {
             return format!(
-                "<task-notification>\n<task-id>{}</task-id>\n<status>{:?}</status>\n<summary>{}</summary>\n<result>{}</result>\n<next-action>{}</next-action>\n<worker-role>{}</worker-role>\n<orchestration-group>{}</orchestration-group>\n<phase>{}</phase>\n<validation-state>{}</validation-state>{}\n</task-notification>",
+                "<task-notification>\n<task-id>{}</task-id>\n<task-type>{}</task-type>\n<status>{:?}</status>\n<summary>{}</summary>\n<result>{}</result>\n<next-action>{}</next-action>\n<worker-role>{}</worker-role>\n<orchestration-group>{}</orchestration-group>\n<phase>{}</phase>\n<validation-state>{}</validation-state>{}\n</task-notification>",
                 self.task_id,
+                self.task_type.as_str(),
                 self.status,
                 self.summary,
                 self.result,
@@ -235,8 +304,9 @@ impl TaskEvent {
         }
 
         format!(
-            "<task-notification>\n<task-id>{}</task-id>\n<status>{:?}</status>\n<summary>{}</summary>\n<result>{}</result>\n<next-action>{}</next-action>\n<worker-role>{}</worker-role>\n<orchestration-group>{}</orchestration-group>\n<phase>{}</phase>\n<validation-state>{}</validation-state>{}\n<output-file>{}</output-file>\n</task-notification>",
+            "<task-notification>\n<task-id>{}</task-id>\n<task-type>{}</task-type>\n<status>{:?}</status>\n<summary>{}</summary>\n<result>{}</result>\n<next-action>{}</next-action>\n<worker-role>{}</worker-role>\n<orchestration-group>{}</orchestration-group>\n<phase>{}</phase>\n<validation-state>{}</validation-state>{}\n<output-file>{}</output-file>\n</task-notification>",
             self.task_id,
+            self.task_type.as_str(),
             self.status,
             self.summary,
             self.result,

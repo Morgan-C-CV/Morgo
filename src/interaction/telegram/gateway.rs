@@ -87,6 +87,7 @@ fn render_telegram_item(item: &TelegramItem) -> String {
         TelegramItem::TaskUpdate(task) => {
             let mut lines = vec![
                 format!("Task: {}", task.summary),
+                format!("Type: {}", task.task_type),
                 format!("Status: {}", task.status),
                 format!("Result: {}", task.result),
                 format!("Next: {}", task.next_action),

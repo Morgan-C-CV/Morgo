@@ -44,6 +44,7 @@ impl NotificationDispatcher {
                 NotificationType::RuntimeNotice => "runtime_notice".into(),
             },
             task_id: notification.task_id.clone(),
+            task_type: notification.task_type.clone(),
             status: notification.status.clone(),
             output_file: notification.output_file.clone(),
         };

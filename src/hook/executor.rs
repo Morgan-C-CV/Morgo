@@ -150,6 +150,7 @@ fn matches_denial(event: &HookEvent, deny_match: &str) -> bool {
             body,
             notification_type,
             task_id,
+            task_type,
             status,
             output_file,
         } => {
@@ -157,6 +158,7 @@ fn matches_denial(event: &HookEvent, deny_match: &str) -> bool {
                 || title.contains(deny_match)
                 || body.contains(deny_match)
                 || task_id.as_deref() == Some(deny_match)
+                || task_type.as_deref() == Some(deny_match)
                 || status.as_deref() == Some(deny_match)
                 || output_file
                     .as_deref()

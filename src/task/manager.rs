@@ -191,6 +191,10 @@ impl TaskManager {
             && tasks
                 .iter()
                 .all(|task| !matches!(task.status, TaskStatus::Pending | TaskStatus::Running))
+            && (derive_group_task_type(&tasks) != TaskType::LocalAgent
+                || tasks.iter().all(|task| {
+                    task.validation_state != Some(ValidationState::PendingVerification)
+                }))
     }
 
     pub fn has_pending_orchestration(&self, session_id: &str) -> bool {
@@ -246,6 +250,7 @@ impl TaskManager {
                 format!("synthesize with explicit unverified risk for {}", task.id)
             }
             _ => next_action_for_task(
+                task.task_type,
                 &task.status,
                 task.worker_role,
                 task.validation_state,
@@ -535,12 +540,32 @@ impl TaskManager {
             }
             task.status = status.clone();
             task.delivery.notified = true;
-            task.validation_state =
-                transition_validation_state(task.worker_role, &status, task.validation_state);
-            let next_action =
-                next_action_for_task(&status, task.worker_role, task.validation_state, &task.id);
-            let summary = format_task_summary(&task.description, &task.id, &status, usage.as_ref());
-            let result = format_task_result(&status, task.validation_state, usage.as_ref());
+            task.validation_state = transition_validation_state(
+                task.task_type,
+                task.worker_role,
+                &status,
+                task.validation_state,
+            );
+            let next_action = next_action_for_task(
+                task.task_type,
+                &status,
+                task.worker_role,
+                task.validation_state,
+                &task.id,
+            );
+            let summary = format_task_summary(
+                &task.description,
+                &task.id,
+                task.task_type,
+                &status,
+                usage.as_ref(),
+            );
+            let result = format_task_result(
+                task.task_type,
+                &status,
+                task.validation_state,
+                usage.as_ref(),
+            );
             let event = TaskEvent {
                 owner: task.owner.clone(),
                 target_task_id: Some(task.id.clone()),
@@ -573,20 +598,22 @@ impl TaskManager {
         if let Some((group_id, owner, target_task_id, output_file)) = barrier_candidate {
             if self.group_ready_for_fan_in(&group_id) {
                 let group_task_id = format!("group-{}", group_id);
+                let group_task_type = self.derive_group_task_type(&group_id);
                 let event = TaskEvent {
                     owner,
                     target_task_id,
                     task_id: group_task_id.clone(),
-                    task_type: TaskType::LocalAgent,
+                    task_type: group_task_type,
                     status: TaskStatus::Completed,
                     summary: format_task_summary(
-                        "grouped research tasks completed",
+                        group_task_type.group_summary_description(),
                         &group_task_id,
+                        group_task_type,
                         &TaskStatus::Completed,
                         None,
                     ),
-                    result: format_task_result(&TaskStatus::Completed, None, None),
-                    next_action: format!("synthesize grouped findings for {}", group_id),
+                    result: format_task_result(group_task_type, &TaskStatus::Completed, None, None),
+                    next_action: group_task_type.group_next_action(&group_id),
                     worker_role: None,
                     orchestration_group_id: Some(group_id.clone()),
                     phase: None,
@@ -639,6 +666,11 @@ impl TaskManager {
         }
     }
 
+    fn derive_group_task_type(&self, orchestration_group_id: &str) -> TaskType {
+        let tasks = self.group_tasks(orchestration_group_id);
+        derive_group_task_type(&tasks)
+    }
+
     fn build_group_summary(
         &self,
         group_id: String,
@@ -659,20 +691,34 @@ impl TaskManager {
     }
 
     fn group_hint(&self, group_id: &str, tasks: &[TaskRecord]) -> String {
+        let group_type = derive_group_task_type(tasks);
         if tasks
             .iter()
             .any(|task| matches!(task.status, TaskStatus::Pending | TaskStatus::Running))
         {
-            return format!("group {} still in progress", group_id);
+            return match group_type {
+                TaskType::Generic => format!("group {} still in progress", group_id),
+                TaskType::LocalBash => {
+                    format!("group {} still has running command tasks", group_id)
+                }
+                TaskType::LocalAgent => format!("group {} still has running workers", group_id),
+            };
         }
-        if tasks
-            .iter()
-            .any(|task| task.validation_state == Some(ValidationState::PendingVerification))
+        if group_type == TaskType::LocalAgent
+            && tasks
+                .iter()
+                .any(|task| task.validation_state == Some(ValidationState::PendingVerification))
         {
             return format!("group {} is waiting for verification", group_id);
         }
         if self.group_ready_for_fan_in(group_id) {
-            return format!("group {} is ready for synthesis", group_id);
+            return match group_type {
+                TaskType::Generic => format!("group {} is ready for inspection", group_id),
+                TaskType::LocalBash => {
+                    format!("group {} is ready for command-result review", group_id)
+                }
+                TaskType::LocalAgent => format!("group {} is ready for synthesis", group_id),
+            };
         }
         format!("group {} needs follow-up inspection", group_id)
     }
@@ -729,63 +775,78 @@ impl TaskManager {
 }
 
 fn next_action_for_task(
+    task_type: TaskType,
     status: &TaskStatus,
     worker_role: Option<crate::state::app_state::WorkerRole>,
     validation_state: Option<ValidationState>,
     task_id: &str,
 ) -> String {
     match status {
-        TaskStatus::Running => format!("continue running task {}", task_id),
-        TaskStatus::Completed => match (worker_role, validation_state) {
-            (_, Some(ValidationState::PendingVerification)) => {
-                format!("dispatch verify worker for {}", task_id)
-            }
-            (_, Some(ValidationState::Verified)) => {
-                format!("synthesize validated result for {}", task_id)
-            }
-            (_, Some(ValidationState::VerificationFailed)) => {
-                format!("inspect verification failure for {}", task_id)
-            }
-            (_, Some(ValidationState::Unverified)) => {
-                format!("synthesize with explicit unverified risk for {}", task_id)
-            }
-            (Some(crate::state::app_state::WorkerRole::Research), _) => {
-                format!(
-                    "synthesize findings or request follow-up research for {}",
-                    task_id
-                )
-            }
-            (Some(crate::state::app_state::WorkerRole::Implement), _) => {
-                format!("dispatch verify worker for {}", task_id)
-            }
-            (Some(crate::state::app_state::WorkerRole::Verify), _) => {
-                format!("synthesize validated result for {}", task_id)
-            }
-            (None, _) => format!("inspect task output for {}", task_id),
+        TaskStatus::Running => task_type.running_next_action(task_id),
+        TaskStatus::Completed => match task_type {
+            TaskType::LocalAgent => match (worker_role, validation_state) {
+                (_, Some(ValidationState::PendingVerification)) => {
+                    format!("dispatch verify worker for {}", task_id)
+                }
+                (_, Some(ValidationState::Verified)) => {
+                    format!("synthesize validated result for {}", task_id)
+                }
+                (_, Some(ValidationState::VerificationFailed)) => {
+                    format!("inspect verification failure for {}", task_id)
+                }
+                (_, Some(ValidationState::Unverified)) => {
+                    format!("synthesize with explicit unverified risk for {}", task_id)
+                }
+                (Some(crate::state::app_state::WorkerRole::Research), _) => {
+                    format!(
+                        "synthesize findings or request follow-up research for {}",
+                        task_id
+                    )
+                }
+                (Some(crate::state::app_state::WorkerRole::Implement), _) => {
+                    format!("dispatch verify worker for {}", task_id)
+                }
+                (Some(crate::state::app_state::WorkerRole::Verify), _) => {
+                    format!("synthesize validated result for {}", task_id)
+                }
+                (None, _) => task_type.default_next_action(task_id),
+            },
+            TaskType::LocalBash => format!("inspect command output for {}", task_id),
+            TaskType::Generic => task_type.default_next_action(task_id),
         },
-        TaskStatus::Failed => match (worker_role, validation_state) {
-            (_, Some(ValidationState::VerificationFailed))
-            | (Some(crate::state::app_state::WorkerRole::Verify), _) => {
-                format!("inspect verification failure for {}", task_id)
-            }
-            _ => format!("inspect task output for {}", task_id),
+        TaskStatus::Failed => match task_type {
+            TaskType::LocalAgent => match (worker_role, validation_state) {
+                (_, Some(ValidationState::VerificationFailed))
+                | (Some(crate::state::app_state::WorkerRole::Verify), _) => {
+                    format!("inspect verification failure for {}", task_id)
+                }
+                _ => task_type.default_next_action(task_id),
+            },
+            _ => task_type.default_next_action(task_id),
         },
-        TaskStatus::Killed => match (worker_role, validation_state) {
-            (_, Some(ValidationState::Unverified))
-            | (Some(crate::state::app_state::WorkerRole::Verify), _) => {
-                format!("synthesize with explicit unverified risk for {}", task_id)
-            }
-            _ => format!("inspect task output for {}", task_id),
+        TaskStatus::Killed => match task_type {
+            TaskType::LocalAgent => match (worker_role, validation_state) {
+                (_, Some(ValidationState::Unverified))
+                | (Some(crate::state::app_state::WorkerRole::Verify), _) => {
+                    format!("synthesize with explicit unverified risk for {}", task_id)
+                }
+                _ => task_type.default_next_action(task_id),
+            },
+            _ => task_type.default_next_action(task_id),
         },
-        TaskStatus::Pending => format!("inspect task output for {}", task_id),
+        TaskStatus::Pending => task_type.default_next_action(task_id),
     }
 }
 
 fn transition_validation_state(
+    task_type: TaskType,
     worker_role: Option<crate::state::app_state::WorkerRole>,
     status: &TaskStatus,
     current: Option<ValidationState>,
 ) -> Option<ValidationState> {
+    if task_type != TaskType::LocalAgent {
+        return current.filter(|state| *state != ValidationState::PendingVerification);
+    }
     match (worker_role, status, current) {
         (
             Some(crate::state::app_state::WorkerRole::Implement),
@@ -803,5 +864,18 @@ fn transition_validation_state(
         }
         (_, TaskStatus::Completed, Some(state)) => Some(state),
         (_, _, current) => current,
+    }
+}
+
+fn derive_group_task_type(tasks: &[TaskRecord]) -> TaskType {
+    let mut iter = tasks.iter();
+    let Some(first) = iter.next() else {
+        return TaskType::Generic;
+    };
+    let first_type = first.task_type;
+    if iter.all(|task| task.task_type == first_type) {
+        first_type
+    } else {
+        TaskType::Generic
     }
 }
