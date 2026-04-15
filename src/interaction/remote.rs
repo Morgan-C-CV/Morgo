@@ -149,6 +149,7 @@ pub const REMOTE_CHANNEL_MATRIX: &[RemoteChannelRule] = &[
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteTaskEvent {
     pub task_id: String,
+    pub task_type: &'static str,
     pub status: &'static str,
     pub summary: String,
     pub result: String,
@@ -283,6 +284,7 @@ impl From<TaskEvent> for RemoteTaskEvent {
     fn from(value: TaskEvent) -> Self {
         Self {
             task_id: value.task_id,
+            task_type: value.task_type.as_str(),
             status: value.status.as_str(),
             summary: value.summary,
             result: value.result,
@@ -301,6 +303,7 @@ impl From<TaskView> for RemoteTaskEvent {
     fn from(value: TaskView) -> Self {
         Self {
             task_id: value.task_id,
+            task_type: value.task_type,
             status: value.status,
             summary: value.summary,
             result: value.result,
@@ -326,6 +329,9 @@ impl From<Notification> for RemoteNotificationEnvelope {
                 event_type: "task_update",
                 payload: RemoteEventPayload::TaskUpdate(RemoteTaskEvent {
                     task_id: notification.task_id.unwrap_or_default(),
+                    task_type: leak_string(
+                        notification.task_type.unwrap_or_else(|| "generic".into()),
+                    ),
                     status: leak_string(notification.status.unwrap_or_else(|| "unknown".into())),
                     summary: notification.body,
                     result: notification.title,

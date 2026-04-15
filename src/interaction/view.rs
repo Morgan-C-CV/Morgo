@@ -1,6 +1,10 @@
 use crate::interaction::cli::repl::{CliDisplayEvent, CliRuntimeEvent, CliTurnOutput};
 use crate::task::types::{TaskEvent, TaskUsageSummary};
 
+fn leak_task_type(task_type: &'static str) -> &'static str {
+    task_type
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SurfaceView {
     pub primary_text: String,
@@ -50,6 +54,7 @@ pub enum SurfaceItem {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskView {
     pub task_id: String,
+    pub task_type: &'static str,
     pub status: &'static str,
     pub summary: String,
     pub result: String,
@@ -137,7 +142,12 @@ fn surface_item_from_runtime_event(event: &CliRuntimeEvent) -> SurfaceItem {
 impl SurfaceItem {
     pub fn to_legacy_line(&self) -> String {
         match self {
-            Self::TaskUpdate(task) => format!("[task] {} {}", task.task_id, task.summary),
+            Self::TaskUpdate(task) => {
+                format!(
+                    "[task:{}] {} {}",
+                    task.task_type, task.task_id, task.summary
+                )
+            }
             Self::ApprovalRequired {
                 tool_name, message, ..
             } => format!("[approval] {tool_name}: {message}"),
@@ -172,6 +182,7 @@ pub enum TelegramItem {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TelegramTaskItem {
     pub task_id: String,
+    pub task_type: &'static str,
     pub status: &'static str,
     pub summary: String,
     pub result: String,
@@ -232,6 +243,7 @@ pub enum WebItem {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WebTaskItem {
     pub task_id: String,
+    pub task_type: &'static str,
     pub status: &'static str,
     pub summary: String,
     pub result: String,
@@ -259,6 +271,7 @@ pub fn telegram_item_from_surface_item(item: &SurfaceItem) -> Option<TelegramIte
     match item {
         SurfaceItem::TaskUpdate(task) => Some(TelegramItem::TaskUpdate(TelegramTaskItem {
             task_id: task.task_id.clone(),
+            task_type: task.task_type,
             status: task.status,
             summary: task.summary.clone(),
             result: task.result.clone(),
@@ -299,6 +312,7 @@ pub fn web_item_from_surface_item(item: &SurfaceItem) -> WebItem {
     match item {
         SurfaceItem::TaskUpdate(task) => WebItem::TaskUpdate(WebTaskItem {
             task_id: task.task_id.clone(),
+            task_type: task.task_type,
             status: task.status,
             summary: task.summary.clone(),
             result: task.result.clone(),
@@ -360,6 +374,7 @@ impl From<&TaskEvent> for TaskView {
     fn from(value: &TaskEvent) -> Self {
         Self {
             task_id: value.task_id.clone(),
+            task_type: leak_task_type(value.task_type.as_str()),
             status: value.status.as_str(),
             summary: value.summary.clone(),
             result: value.result.clone(),

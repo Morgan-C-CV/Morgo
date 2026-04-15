@@ -278,6 +278,7 @@ fn task_manager_queues_internal_task_notifications() {
             },
             target_task_id: Some(task.id.clone()),
             task_id: task.id.clone(),
+            task_type: rust_agent::task::types::TaskType::Generic,
             status: TaskStatus::Completed,
             summary: format!("demo task ({}) — completed", task.id),
             result: "Task completed".into(),

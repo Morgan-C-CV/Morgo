@@ -226,11 +226,12 @@ async fn launch_background_command(
     let owner_surface = permissions
         .active_surface
         .unwrap_or(crate::bootstrap::InteractionSurface::Cli);
-    let task = task_manager.create(
+    let task = task_manager.create_with_type(
         input
             .description
             .clone()
             .unwrap_or_else(|| format!("bash: {}", input.command.trim())),
+        crate::task::types::TaskType::LocalBash,
         session_id,
         owner_surface,
     );

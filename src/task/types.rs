@@ -2,6 +2,23 @@ use crate::bootstrap::InteractionSurface;
 use crate::interaction::notification::Notification;
 use crate::state::app_state::WorkerRole;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskType {
+    Generic,
+    LocalBash,
+    LocalAgent,
+}
+
+impl TaskType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Generic => "generic",
+            Self::LocalBash => "local_bash",
+            Self::LocalAgent => "local_agent",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TaskStatus {
     Pending,
@@ -153,6 +170,7 @@ pub struct TaskOwner {
 pub struct TaskRecord {
     pub id: String,
     pub description: String,
+    pub task_type: TaskType,
     pub status: TaskStatus,
     pub owner: TaskOwner,
     pub worker_role: Option<WorkerRole>,
@@ -176,6 +194,7 @@ pub struct TaskEvent {
     pub owner: TaskOwner,
     pub target_task_id: Option<String>,
     pub task_id: String,
+    pub task_type: TaskType,
     pub status: TaskStatus,
     pub summary: String,
     pub result: String,

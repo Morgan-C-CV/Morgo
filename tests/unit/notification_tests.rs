@@ -35,6 +35,7 @@ fn dispatcher_records_cli_notifications() {
         body: "demo body".into(),
         notification_type: NotificationType::TaskUpdate,
         task_id: Some("task-1".into()),
+        task_type: Some("local_agent".into()),
         status: Some("Completed".into()),
         next_action: Some("inspect task output for task-1".into()),
         worker_role: Some("research".into()),
@@ -68,6 +69,7 @@ fn dispatcher_records_notification_hook_payloads_for_all_notification_types() {
             "Task completed",
             "task body",
             "task-7",
+            Some("local_agent"),
             "Completed",
             "inspect task output for task-7",
             None,
@@ -172,6 +174,7 @@ fn cli_renderer_marks_task_event_lines() {
             },
             target_task_id: Some("task-1".into()),
             task_id: "task-1".into(),
+            task_type: rust_agent::task::types::TaskType::LocalAgent,
             status: TaskStatus::Completed,
             summary: "demo task".into(),
             result: "Task completed".into(),
@@ -208,6 +211,7 @@ fn cli_renderer_surfaces_implement_verify_and_risk_contract_lines() {
                 },
                 target_task_id: Some("task-2".into()),
                 task_id: "task-2".into(),
+                task_type: rust_agent::task::types::TaskType::LocalAgent,
                 status: TaskStatus::Completed,
                 summary: "implement worker finished patch".into(),
                 result: "Task completed".into(),
@@ -362,6 +366,7 @@ fn cli_renderer_keeps_primary_text_before_mixed_panels_in_order() {
                 },
                 target_task_id: Some("task-3".into()),
                 task_id: "task-3".into(),
+                task_type: rust_agent::task::types::TaskType::LocalAgent,
                 status: TaskStatus::Running,
                 summary: "verify plugin snapshot".into(),
                 result: "Task running".into(),
@@ -646,6 +651,7 @@ fn remote_delivery_mode_lookup_uses_matrix() {
 fn remote_delivery_mode_classifies_dual_channel_and_response_only_surface_items() {
     let task_item = SurfaceItem::TaskUpdate(rust_agent::interaction::view::TaskView {
         task_id: "task-1".into(),
+        task_type: "local_agent",
         status: "completed",
         summary: "demo task".into(),
         result: "Task completed".into(),
@@ -757,6 +763,7 @@ fn remote_event_envelope_preserves_structured_task_payload() {
         },
         target_task_id: Some("task-1".into()),
         task_id: "task-1".into(),
+        task_type: rust_agent::task::types::TaskType::LocalAgent,
         status: TaskStatus::Completed,
         summary: "demo task".into(),
         result: "Task completed".into(),
@@ -782,6 +789,7 @@ fn remote_event_envelope_preserves_structured_task_payload() {
         envelope.payload,
         RemoteEventPayload::TaskUpdate(task)
             if task.task_id == "task-1"
+                && task.task_type == "local_agent"
                 && task.status == "completed"
                 && task.summary == "demo task"
                 && task.result == "Task completed"
@@ -804,7 +812,9 @@ fn remote_event_envelope_preserves_structured_task_payload() {
     assert!(matches!(
         &view.items[0],
         SurfaceItem::TaskUpdate(task)
-            if task.summary == "demo task" && task.result == "Task completed"
+            if task.task_type == "local_agent"
+                && task.summary == "demo task"
+                && task.result == "Task completed"
     ));
 }
 
@@ -1062,6 +1072,7 @@ fn remote_task_update_notifications_use_dedupe_key() {
         "Task completed",
         "remote task (task-1)",
         "task-1",
+        Some("local_agent"),
         "completed",
         "inspect task output for task-1",
         None,
@@ -1079,6 +1090,7 @@ fn remote_task_update_notifications_use_dedupe_key() {
         "Task completed",
         "remote task (task-1)",
         "task-1",
+        Some("local_agent"),
         "completed",
         "inspect task output for task-1",
         None,
@@ -1166,6 +1178,7 @@ fn dispatcher_requires_delivery_ready_binding_for_telegram() {
         body: "demo body — completed".into(),
         notification_type: NotificationType::TaskUpdate,
         task_id: Some("task-1".into()),
+        task_type: Some("local_agent".into()),
         status: Some("Completed".into()),
         next_action: Some("inspect task output for task-1".into()),
         worker_role: Some("verify".into()),
@@ -1193,6 +1206,7 @@ fn dispatcher_requires_delivery_ready_binding_for_telegram() {
             body: "demo body — completed".into(),
             notification_type: NotificationType::TaskUpdate,
             task_id: Some("task-1".into()),
+            task_type: Some("local_agent".into()),
             status: Some("Completed".into()),
             next_action: Some("inspect task output for task-1".into()),
             worker_role: Some("verify".into()),

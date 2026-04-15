@@ -10,7 +10,7 @@ use crate::interaction::dispatcher::NotificationDispatcher;
 use crate::interaction::notification::Notification;
 use crate::task::output_store::TaskOutputStore;
 use crate::task::types::{
-    TaskDeliveryState, TaskEvent, TaskOutputSlice, TaskOwner, TaskRecord, TaskStatus,
+    TaskDeliveryState, TaskEvent, TaskOutputSlice, TaskOwner, TaskRecord, TaskStatus, TaskType,
     TaskUsageSummary, ValidationState, WorkerPhase, format_task_result, format_task_summary,
 };
 
@@ -50,6 +50,21 @@ impl TaskManager {
         owner_session_id: impl Into<String>,
         owner_surface: InteractionSurface,
     ) -> TaskRecord {
+        self.create_with_type(
+            description,
+            TaskType::Generic,
+            owner_session_id,
+            owner_surface,
+        )
+    }
+
+    pub fn create_with_type(
+        &self,
+        description: impl Into<String>,
+        task_type: TaskType,
+        owner_session_id: impl Into<String>,
+        owner_surface: InteractionSurface,
+    ) -> TaskRecord {
         let mut store = self.store.write().expect("task store poisoned");
         let id = format!("task-{}", store.next_id);
         store.next_id += 1;
@@ -60,6 +75,7 @@ impl TaskManager {
         let task = TaskRecord {
             id: id.clone(),
             description: description.into(),
+            task_type,
             status: TaskStatus::Pending,
             owner: TaskOwner {
                 session_id: owner_session_id.into(),
@@ -529,6 +545,7 @@ impl TaskManager {
                 owner: task.owner.clone(),
                 target_task_id: Some(task.id.clone()),
                 task_id: task.id.clone(),
+                task_type: task.task_type,
                 status,
                 summary,
                 result,
@@ -560,6 +577,7 @@ impl TaskManager {
                     owner,
                     target_task_id,
                     task_id: group_task_id.clone(),
+                    task_type: TaskType::LocalAgent,
                     status: TaskStatus::Completed,
                     summary: format_task_summary(
                         "grouped research tasks completed",
@@ -677,6 +695,7 @@ impl TaskManager {
             event.result.clone(),
             event.summary.clone(),
             event.task_id.clone(),
+            Some(event.task_type.as_str()),
             event.status.as_str(),
             event.next_action.clone(),
             event.worker_role.map(|role| role.as_str()),

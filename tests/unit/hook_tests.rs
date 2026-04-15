@@ -169,6 +169,7 @@ fn notification_hook_can_match_typed_payload() {
         body: "demo body".into(),
         notification_type: NotificationType::TaskUpdate,
         task_id: Some("task-9".into()),
+        task_type: Some("local_agent".into()),
         status: Some("Completed".into()),
         next_action: Some("inspect task output for task-9".into()),
         worker_role: Some("research".into()),

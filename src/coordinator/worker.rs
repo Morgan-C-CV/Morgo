@@ -1,5 +1,5 @@
 use crate::interaction::notification::Notification;
-use crate::task::types::{TaskEvent, TaskStatus};
+use crate::task::types::{TaskEvent, TaskStatus, TaskType};
 use crate::tool::definition::ToolMetadata;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,6 +40,7 @@ impl TaskNotification {
             },
             target_task_id: None,
             task_id: self.task_id.clone(),
+            task_type: TaskType::LocalAgent,
             status: self.status.clone(),
             summary: self.summary.clone(),
             result: self.result.clone(),

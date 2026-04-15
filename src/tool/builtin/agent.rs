@@ -119,8 +119,9 @@ impl Tool for AgentTool {
                 let owner_surface = permissions
                     .active_surface
                     .unwrap_or(InteractionSurface::Cli);
-                let task = tasks.create(
+                let task = tasks.create_with_type(
                     format!("Spawned {} worker for {}", role_label, task_label),
+                    crate::task::types::TaskType::LocalAgent,
                     session_id.clone(),
                     owner_surface,
                 );
