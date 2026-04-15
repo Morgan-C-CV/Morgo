@@ -1,4 +1,13 @@
-use rust_agent::bootstrap::InteractionSurface;
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use rust_agent::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
+use rust_agent::command::registry::CommandRegistry;
+use rust_agent::command::types::{
+    Command, CommandAvailability, CommandMetadata, CommandResult, CommandSource, CommandType,
+};
+use rust_agent::cost::tracker::CostTracker;
+use rust_agent::history::session::{InMemorySessionStore, SessionHistory, SessionRestoreRequest, SessionSnapshot, SessionStore};
 use rust_agent::hook::registry::{
     HookEvent, HookEventMatcher, HookRegistry, HookRule, HookRuleLayer,
 };
@@ -27,11 +36,86 @@ use rust_agent::interaction::telegram::binding::{
 use rust_agent::interaction::telegram::gateway::{
     TelegramGateway, TelegramInboundIntake, TelegramInboundRequest,
 };
+use rust_agent::interaction::telegram::runtime::{
+    TelegramRuntimeResponse, handle_telegram_envelope,
+};
 use rust_agent::interaction::view::{
     SurfaceItem, WebItem, build_surface_view, build_telegram_view, build_web_view,
     surface_item_from_cli_event,
 };
+use rust_agent::plan::manager::PlanManager;
+use rust_agent::security::authorizer::DefaultSurfaceAuthorizer;
+use rust_agent::service::api::client::ModelProviderClient;
+use rust_agent::service::api::streaming::{StopReason, StreamEvent};
+use rust_agent::service::compact::reactive_compact::ReactiveCompactor;
+use rust_agent::state::app_state::{AppState, RuntimeRole};
+use rust_agent::state::permission_context::{PermissionMode, ToolPermissionContext};
+use rust_agent::task::manager::TaskManager;
 use rust_agent::task::types::{TaskEvent, TaskOwner, TaskStatus, TaskUsageSummary};
+use rust_agent::tool::registry::ToolRegistry;
+use tokio::sync::RwLock;
+
+struct TelegramPromptCommand;
+
+#[async_trait]
+impl Command for TelegramPromptCommand {
+    fn metadata(&self) -> CommandMetadata {
+        CommandMetadata {
+            name: "telegram-prompt".into(),
+            description: "Enter query engine from telegram tests".into(),
+            source: CommandSource::Builtin,
+            category: "test".into(),
+            command_type: CommandType::Prompt,
+            availability: CommandAvailability::RemoteSafe,
+            aliases: Vec::new(),
+            is_hidden: false,
+            disable_model_invocation: false,
+            immediate: false,
+            is_sensitive: false,
+        }
+    }
+
+    async fn execute(
+        &self,
+        _input: &rust_agent::interaction::envelope::NormalizedInput,
+        _app_state: &AppState,
+    ) -> anyhow::Result<CommandResult> {
+        Ok(CommandResult::Prompt("telegram runtime prompt".into()))
+    }
+}
+
+fn telegram_test_app_state(
+    command_registry: Arc<CommandRegistry>,
+    gateway: TelegramGateway,
+    session_store: Arc<InMemorySessionStore>,
+    active_session_id: &str,
+) -> AppState {
+    AppState {
+        surface: InteractionSurface::Telegram,
+        session_mode: SessionMode::Interactive,
+        client_type: ClientType::Bot,
+        session_source: SessionSource::Telegram,
+        runtime_role: RuntimeRole::Coordinator,
+        worker_role: None,
+        permission_context: ToolPermissionContext::new(PermissionMode::Default)
+            .with_task_manager(Arc::new(TaskManager::default()))
+            .with_plan_manager(Arc::new(PlanManager::default())),
+        command_registry: Some(command_registry),
+        runtime_tool_registry: Some(Arc::new(RwLock::new(ToolRegistry::new()))),
+        skill_registry: None,
+        mcp_runtime: None,
+        plugin_load_result: None,
+        cost_tracker: CostTracker::default(),
+        notification_dispatcher: NotificationDispatcher::new(gateway),
+        audit_log: Arc::new(std::sync::Mutex::new(AuditLog::default())),
+        startup_trace: Vec::new(),
+        active_session_id: active_session_id.into(),
+        session_store: Some(session_store),
+        session: None,
+        history: None,
+        restored_session: None,
+    }
+}
 
 #[test]
 fn dispatcher_records_cli_notifications() {
@@ -1401,6 +1485,208 @@ fn telegram_transport_adapter_preserves_rejection_reason() {
             }
         ),
         TelegramInboundIntake::Rejected(TelegramInboundBindingAuthorization::BotMismatch)
+    );
+}
+
+#[tokio::test]
+async fn telegram_runtime_entry_routes_authorized_input_into_shared_runtime_and_messages() {
+    let command_registry = Arc::new(CommandRegistry::new().register(Arc::new(TelegramPromptCommand)));
+    let router = rust_agent::interaction::router::CommandRouter::new(
+        command_registry.clone(),
+        Box::new(DefaultSurfaceAuthorizer),
+    );
+    let session_store = Arc::new(InMemorySessionStore::default());
+    session_store.save(
+        SessionSnapshot {
+            session_id: rust_agent::history::session::SessionId("telegram-runtime-session".into()),
+            surface: InteractionSurface::Telegram,
+            session_mode: SessionMode::Interactive,
+            cwd: "/tmp/telegram-runtime".into(),
+            last_turn_at: None,
+            prompt_seed: None,
+        },
+        SessionHistory::default(),
+    );
+    let gateway = TelegramGateway {
+        allowed_bindings: vec![SessionBinding {
+            actor_id: "actor-1".into(),
+            session_id: "telegram-runtime-session".into(),
+            telegram_user_id: Some("user-1".into()),
+            bot_id: Some("bot-1".into()),
+            delivery_target: Some(TelegramDeliveryTarget {
+                chat_id: "chat-1".into(),
+                thread_id: Some("thread-1".into()),
+            }),
+        }],
+    };
+    let app_state = telegram_test_app_state(
+        command_registry.clone(),
+        gateway.clone(),
+        session_store.clone(),
+        "bootstrap-telegram-session",
+    );
+    let engine = rust_agent::core::engine::QueryEngine::new(rust_agent::core::context::QueryContext {
+        app_state: app_state.clone(),
+        tool_registry: ToolRegistry::new(),
+        api_client: ModelProviderClient::with_scripted_turns(vec![vec![
+            StreamEvent::MessageStart,
+            StreamEvent::TextDelta("telegram runtime reply".into()),
+            StreamEvent::MessageStop {
+                stop_reason: StopReason::EndTurn,
+            },
+        ]]),
+        compactor: ReactiveCompactor,
+        hook_registry: rust_agent::hook::registry::HookRegistry::default(),
+        agent_id: None,
+        system_prompt: "test system".into(),
+        tools_prompt: "test tools".into(),
+        context_prompt: "test context".into(),
+    });
+
+    let response = handle_telegram_envelope(
+        &router,
+        &engine,
+        &app_state,
+        &gateway,
+        TelegramInboundEnvelope {
+            telegram_user_id: "user-1".into(),
+            bot_id: "bot-1".into(),
+            actor_id: "actor-1".into(),
+            session_id: "telegram-runtime-session".into(),
+            raw_text: "/telegram-prompt run".into(),
+        },
+    )
+    .await
+    .expect("telegram runtime should succeed");
+
+    assert!(matches!(
+        &response,
+        TelegramRuntimeResponse::Authorized { primary_text, .. }
+            if primary_text.contains("telegram runtime reply")
+    ));
+    let TelegramRuntimeResponse::Authorized { messages, .. } = response else {
+        panic!("expected authorized telegram runtime response");
+    };
+    assert_eq!(
+        messages[0],
+        TelegramOutgoingMessage {
+            target: TelegramDeliveryTarget {
+                chat_id: "chat-1".into(),
+                thread_id: Some("thread-1".into()),
+            },
+            text: "telegram runtime reply".into(),
+        }
+    );
+    assert!(messages.iter().any(|message| {
+        message.text == "Notice: runtime\nNormalTerminal: completed"
+    }));
+
+    let (_, default_history) = session_store
+        .load(&SessionRestoreRequest {
+            resume: Some("bootstrap-telegram-session".into()),
+            continue_session: false,
+        })
+        .unwrap_or((
+            SessionSnapshot {
+                session_id: rust_agent::history::session::SessionId("bootstrap-telegram-session".into()),
+                surface: InteractionSurface::Telegram,
+                session_mode: SessionMode::Interactive,
+                cwd: String::new(),
+                last_turn_at: None,
+                prompt_seed: None,
+            },
+            SessionHistory::default(),
+        ));
+    assert!(default_history.entries.is_empty());
+
+    let (_, history) = session_store
+        .load(&SessionRestoreRequest {
+            resume: Some("telegram-runtime-session".into()),
+            continue_session: false,
+        })
+        .expect("expected telegram runtime history");
+    assert_eq!(history.entries.len(), 2);
+    assert_eq!(
+        history.entries[0].message,
+        rust_agent::core::message::Message::user("telegram runtime prompt")
+    );
+    assert_eq!(
+        history.entries[1].message,
+        rust_agent::core::message::Message::assistant("telegram runtime reply")
+    );
+}
+
+#[tokio::test]
+async fn telegram_runtime_entry_preserves_rejection_without_running_shared_runtime() {
+    let command_registry = Arc::new(CommandRegistry::new().register(Arc::new(TelegramPromptCommand)));
+    let router = rust_agent::interaction::router::CommandRouter::new(
+        command_registry.clone(),
+        Box::new(DefaultSurfaceAuthorizer),
+    );
+    let session_store = Arc::new(InMemorySessionStore::default());
+    let gateway = TelegramGateway {
+        allowed_bindings: vec![SessionBinding {
+            actor_id: "actor-1".into(),
+            session_id: "telegram-runtime-session".into(),
+            telegram_user_id: Some("user-1".into()),
+            bot_id: Some("bot-1".into()),
+            delivery_target: Some(TelegramDeliveryTarget {
+                chat_id: "chat-1".into(),
+                thread_id: Some("thread-1".into()),
+            }),
+        }],
+    };
+    let app_state = telegram_test_app_state(
+        command_registry.clone(),
+        gateway.clone(),
+        session_store.clone(),
+        "bootstrap-telegram-session",
+    );
+    let engine = rust_agent::core::engine::QueryEngine::new(rust_agent::core::context::QueryContext {
+        app_state: app_state.clone(),
+        tool_registry: ToolRegistry::new(),
+        api_client: ModelProviderClient::with_scripted_turns(vec![vec![
+            StreamEvent::MessageStart,
+            StreamEvent::TextDelta("should not run".into()),
+            StreamEvent::MessageStop {
+                stop_reason: StopReason::EndTurn,
+            },
+        ]]),
+        compactor: ReactiveCompactor,
+        hook_registry: rust_agent::hook::registry::HookRegistry::default(),
+        agent_id: None,
+        system_prompt: "test system".into(),
+        tools_prompt: "test tools".into(),
+        context_prompt: "test context".into(),
+    });
+
+    let response = handle_telegram_envelope(
+        &router,
+        &engine,
+        &app_state,
+        &gateway,
+        TelegramInboundEnvelope {
+            telegram_user_id: "user-9".into(),
+            bot_id: "bot-1".into(),
+            actor_id: "actor-1".into(),
+            session_id: "telegram-runtime-session".into(),
+            raw_text: "/telegram-prompt run".into(),
+        },
+    )
+    .await
+    .expect("telegram runtime should return rejection");
+
+    assert_eq!(
+        response,
+        TelegramRuntimeResponse::Rejected(TelegramInboundBindingAuthorization::PrincipalMismatch)
+    );
+    assert!(
+        session_store
+            .load(&SessionRestoreRequest {
+                resume: Some("telegram-runtime-session".into()),
+                continue_session: false,
+            })
+            .is_none()
     );
 }
 
