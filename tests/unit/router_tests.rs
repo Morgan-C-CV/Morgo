@@ -488,6 +488,8 @@ async fn prompt_command_with_model_invocation_disabled_never_enters_query_engine
         mcp_runtime: None,
         plugin_load_result: None,
         cost_tracker: CostTracker::default(),
+        service_observability_tracker:
+            rust_agent::service::observability::ServiceObservabilityTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
         audit_log: Arc::new(std::sync::Mutex::new(
             rust_agent::security::audit::AuditLog::default(),
@@ -540,6 +542,8 @@ async fn cli_repl_handles_multiple_inputs_in_sequence() {
         mcp_runtime: None,
         plugin_load_result: None,
         cost_tracker: CostTracker::default(),
+        service_observability_tracker:
+            rust_agent::service::observability::ServiceObservabilityTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
         audit_log: Arc::new(std::sync::Mutex::new(
             rust_agent::security::audit::AuditLog::default(),
@@ -605,6 +609,8 @@ async fn cli_repl_surfaces_task_events_for_active_session() {
         mcp_runtime: None,
         plugin_load_result: None,
         cost_tracker: CostTracker::default(),
+        service_observability_tracker:
+            rust_agent::service::observability::ServiceObservabilityTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
         audit_log: Arc::new(std::sync::Mutex::new(
             rust_agent::security::audit::AuditLog::default(),
@@ -693,6 +699,8 @@ async fn cli_repl_persists_history_for_local_and_query_turns() {
         mcp_runtime: None,
         plugin_load_result: None,
         cost_tracker: CostTracker::default(),
+        service_observability_tracker:
+            rust_agent::service::observability::ServiceObservabilityTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
         audit_log: Arc::new(std::sync::Mutex::new(
             rust_agent::security::audit::AuditLog::default(),
@@ -795,6 +803,8 @@ async fn remote_handler_preserves_remote_actor_and_session_for_query_flow() {
         mcp_runtime: None,
         plugin_load_result: None,
         cost_tracker: CostTracker::default(),
+        service_observability_tracker:
+            rust_agent::service::observability::ServiceObservabilityTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
         audit_log: Arc::new(std::sync::Mutex::new(
             rust_agent::security::audit::AuditLog::default(),
@@ -930,6 +940,8 @@ async fn cli_repl_uses_next_turn_plugin_snapshot_after_reload_updates_manifest_s
         mcp_runtime: None,
         plugin_load_result: None,
         cost_tracker: CostTracker::default(),
+        service_observability_tracker:
+            rust_agent::service::observability::ServiceObservabilityTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
         audit_log: Arc::new(std::sync::Mutex::new(
             rust_agent::security::audit::AuditLog::default(),
@@ -1071,6 +1083,8 @@ async fn cli_repl_uses_next_turn_plugin_snapshot_after_reload_removes_deleted_pl
         mcp_runtime: None,
         plugin_load_result: None,
         cost_tracker: CostTracker::default(),
+        service_observability_tracker:
+            rust_agent::service::observability::ServiceObservabilityTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
         audit_log: Arc::new(std::sync::Mutex::new(
             rust_agent::security::audit::AuditLog::default(),
@@ -1187,6 +1201,8 @@ async fn cli_repl_applies_disable_and_enable_only_on_next_turn_boundaries() {
         mcp_runtime: None,
         plugin_load_result: None,
         cost_tracker: CostTracker::default(),
+        service_observability_tracker:
+            rust_agent::service::observability::ServiceObservabilityTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
         audit_log: Arc::new(std::sync::Mutex::new(
             rust_agent::security::audit::AuditLog::default(),
@@ -1403,6 +1419,8 @@ async fn remote_handler_uses_next_turn_plugin_snapshot_after_reload_removes_dele
         mcp_runtime: None,
         plugin_load_result: None,
         cost_tracker: CostTracker::default(),
+        service_observability_tracker:
+            rust_agent::service::observability::ServiceObservabilityTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
         audit_log: Arc::new(std::sync::Mutex::new(
             rust_agent::security::audit::AuditLog::default(),
@@ -1531,6 +1549,8 @@ async fn cli_repl_persists_denied_turns() {
         mcp_runtime: None,
         plugin_load_result: None,
         cost_tracker: CostTracker::default(),
+        service_observability_tracker:
+            rust_agent::service::observability::ServiceObservabilityTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
         audit_log: Arc::new(std::sync::Mutex::new(
             rust_agent::security::audit::AuditLog::default(),
@@ -1608,6 +1628,8 @@ async fn router_approves_pending_plan_mode_request() {
         mcp_runtime: None,
         plugin_load_result: None,
         cost_tracker: CostTracker::default(),
+        service_observability_tracker:
+            rust_agent::service::observability::ServiceObservabilityTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
         audit_log: Arc::new(std::sync::Mutex::new(
             rust_agent::security::audit::AuditLog::default(),
@@ -1671,6 +1693,8 @@ async fn router_denies_pending_request_without_session_approval() {
         mcp_runtime: None,
         plugin_load_result: None,
         cost_tracker: CostTracker::default(),
+        service_observability_tracker:
+            rust_agent::service::observability::ServiceObservabilityTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
         audit_log: Arc::new(std::sync::Mutex::new(
             rust_agent::security::audit::AuditLog::default(),
@@ -1739,6 +1763,8 @@ async fn approval_replay_uses_runtime_tool_registry() {
         mcp_runtime: None,
         plugin_load_result: None,
         cost_tracker: CostTracker::default(),
+        service_observability_tracker:
+            rust_agent::service::observability::ServiceObservabilityTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
         audit_log: Arc::new(std::sync::Mutex::new(
             rust_agent::security::audit::AuditLog::default(),
@@ -1803,6 +1829,8 @@ async fn permissions_command_reports_session_permission_state() {
         mcp_runtime: None,
         plugin_load_result: None,
         cost_tracker: CostTracker::default(),
+        service_observability_tracker:
+            rust_agent::service::observability::ServiceObservabilityTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
         audit_log: Arc::new(std::sync::Mutex::new(
             rust_agent::security::audit::AuditLog::default(),
@@ -1856,6 +1884,8 @@ async fn plan_command_reports_inactive_status() {
         mcp_runtime: None,
         plugin_load_result: None,
         cost_tracker: CostTracker::default(),
+        service_observability_tracker:
+            rust_agent::service::observability::ServiceObservabilityTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
         audit_log: Arc::new(std::sync::Mutex::new(
             rust_agent::security::audit::AuditLog::default(),
@@ -1907,6 +1937,8 @@ async fn plan_command_enter_requests_approval_before_switching_mode() {
         mcp_runtime: None,
         plugin_load_result: None,
         cost_tracker: CostTracker::default(),
+        service_observability_tracker:
+            rust_agent::service::observability::ServiceObservabilityTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
         audit_log: Arc::new(std::sync::Mutex::new(
             rust_agent::security::audit::AuditLog::default(),
@@ -1973,6 +2005,8 @@ async fn plan_command_exit_requests_approval_and_approval_exits_mode() {
         mcp_runtime: None,
         plugin_load_result: None,
         cost_tracker: CostTracker::default(),
+        service_observability_tracker:
+            rust_agent::service::observability::ServiceObservabilityTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
         audit_log: Arc::new(std::sync::Mutex::new(
             rust_agent::security::audit::AuditLog::default(),
@@ -2083,6 +2117,8 @@ async fn plan_command_handles_status_noop_and_denied_exit() {
         mcp_runtime: None,
         plugin_load_result: None,
         cost_tracker: CostTracker::default(),
+        service_observability_tracker:
+            rust_agent::service::observability::ServiceObservabilityTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
         audit_log: Arc::new(std::sync::Mutex::new(
             rust_agent::security::audit::AuditLog::default(),
@@ -2253,6 +2289,8 @@ async fn plan_command_handles_status_noop_and_denied_exit() {
         mcp_runtime: None,
         plugin_load_result: None,
         cost_tracker: CostTracker::default(),
+        service_observability_tracker:
+            rust_agent::service::observability::ServiceObservabilityTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
         audit_log: Arc::new(std::sync::Mutex::new(
             rust_agent::security::audit::AuditLog::default(),
@@ -2300,6 +2338,8 @@ async fn permissions_command_mutates_mode_and_rule_lists() {
         mcp_runtime: None,
         plugin_load_result: None,
         cost_tracker: CostTracker::default(),
+        service_observability_tracker:
+            rust_agent::service::observability::ServiceObservabilityTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
         audit_log: Arc::new(std::sync::Mutex::new(
             rust_agent::security::audit::AuditLog::default(),

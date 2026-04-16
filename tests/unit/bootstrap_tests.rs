@@ -240,6 +240,8 @@ fn app_state_store_notifies_subscribers_after_committed_update() {
         mcp_runtime: None,
         plugin_load_result: None,
         cost_tracker: rust_agent::cost::tracker::CostTracker::default(),
+        service_observability_tracker:
+            rust_agent::service::observability::ServiceObservabilityTracker::default(),
         notification_dispatcher: rust_agent::interaction::dispatcher::NotificationDispatcher::new(
             rust_agent::interaction::telegram::gateway::TelegramGateway::default(),
         ),
@@ -292,6 +294,8 @@ fn app_state_classifies_runtime_visible_changes() {
         mcp_runtime: None,
         plugin_load_result: None,
         cost_tracker: rust_agent::cost::tracker::CostTracker::default(),
+        service_observability_tracker:
+            rust_agent::service::observability::ServiceObservabilityTracker::default(),
         notification_dispatcher: rust_agent::interaction::dispatcher::NotificationDispatcher::new(
             rust_agent::interaction::telegram::gateway::TelegramGateway::default(),
         ),
@@ -319,6 +323,7 @@ fn app_state_classifies_runtime_visible_changes() {
         mcp_runtime: previous.mcp_runtime.clone(),
         plugin_load_result: previous.plugin_load_result.clone(),
         cost_tracker: previous.cost_tracker.clone(),
+        service_observability_tracker: previous.service_observability_tracker.clone(),
         notification_dispatcher: previous.notification_dispatcher.clone(),
         audit_log: previous.audit_log.clone(),
         startup_trace: previous.startup_trace.clone(),
@@ -641,6 +646,8 @@ fn augment_prompt_depends_on_input_state_without_mutating_store() {
         mcp_runtime: Some(bundle.mcp_runtime.clone()),
         plugin_load_result: Some(bundle.plugin_load_result.clone()),
         cost_tracker: rust_agent::cost::tracker::CostTracker::default(),
+        service_observability_tracker:
+            rust_agent::service::observability::ServiceObservabilityTracker::default(),
         notification_dispatcher: bundle.notification_dispatcher.clone(),
         audit_log: Arc::new(std::sync::Mutex::new(
             rust_agent::security::audit::AuditLog::default(),
@@ -925,6 +932,8 @@ fn finalize_runtime_state_is_single_writeback_entrypoint() {
         mcp_runtime: Some(bundle.mcp_runtime.clone()),
         plugin_load_result: Some(bundle.plugin_load_result.clone()),
         cost_tracker: rust_agent::cost::tracker::CostTracker::default(),
+        service_observability_tracker:
+            rust_agent::service::observability::ServiceObservabilityTracker::default(),
         notification_dispatcher: bundle.notification_dispatcher.clone(),
         audit_log: Arc::new(std::sync::Mutex::new(
             rust_agent::security::audit::AuditLog::default(),

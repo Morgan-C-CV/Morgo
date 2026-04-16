@@ -1403,6 +1403,15 @@ fn continue_after_stream_error(
             surface_visible: true,
         }),
     });
+    if matches!(
+        plan.kind,
+        CompactPlanKind::ReactiveCompact | CompactPlanKind::CollapseDrain
+    ) {
+        context
+            .app_state
+            .service_observability_tracker
+            .record_compact_recovery_hit(&plan.kind);
+    }
     match plan.kind {
         CompactPlanKind::ReactiveCompact => {
             state.has_attempted_reactive_compact = true;

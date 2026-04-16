@@ -112,6 +112,8 @@ fn telegram_test_app_state(
         mcp_runtime: None,
         plugin_load_result: None,
         cost_tracker: CostTracker::default(),
+        service_observability_tracker:
+            rust_agent::service::observability::ServiceObservabilityTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(gateway),
         audit_log: Arc::new(std::sync::Mutex::new(AuditLog::default())),
         startup_trace: Vec::new(),
@@ -2483,6 +2485,8 @@ fn drain_remote_notifications_maps_structured_payloads() {
         mcp_runtime: None,
         plugin_load_result: None,
         cost_tracker: rust_agent::cost::tracker::CostTracker::default(),
+        service_observability_tracker:
+            rust_agent::service::observability::ServiceObservabilityTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
         audit_log: std::sync::Arc::new(std::sync::Mutex::new(AuditLog::default())),
         startup_trace: Vec::new(),
@@ -2594,6 +2598,8 @@ fn drain_remote_task_update_notifications_preserve_task_type() {
         mcp_runtime: None,
         plugin_load_result: None,
         cost_tracker: rust_agent::cost::tracker::CostTracker::default(),
+        service_observability_tracker:
+            rust_agent::service::observability::ServiceObservabilityTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
         audit_log: std::sync::Arc::new(std::sync::Mutex::new(AuditLog::default())),
         startup_trace: Vec::new(),

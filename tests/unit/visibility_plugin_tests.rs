@@ -71,6 +71,8 @@ fn test_app_state(
         mcp_runtime: None,
         plugin_load_result,
         cost_tracker: rust_agent::cost::tracker::CostTracker::default(),
+        service_observability_tracker:
+            rust_agent::service::observability::ServiceObservabilityTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
         audit_log: Arc::new(std::sync::Mutex::new(
             rust_agent::security::audit::AuditLog::default(),

@@ -4,6 +4,7 @@ use crate::command::types::CommandResult;
 use crate::cost::tracker::CostTracker;
 use crate::plugins::types::PluginLoadResult;
 use crate::service::mcp::runtime::McpRuntime;
+use crate::service::observability::ServiceObservabilityTracker;
 use crate::skills::registry::SkillRegistry;
 use crate::tool::definition::{ToolCall, ToolResult};
 use crate::tool::registry::ToolRegistry;
@@ -70,6 +71,7 @@ pub struct AppState {
     pub mcp_runtime: Option<Arc<McpRuntime>>,
     pub plugin_load_result: Option<Arc<PluginLoadResult>>,
     pub cost_tracker: CostTracker,
+    pub service_observability_tracker: ServiceObservabilityTracker,
     pub notification_dispatcher: NotificationDispatcher,
     pub audit_log: Arc<Mutex<AuditLog>>,
     pub startup_trace: Vec<String>,
@@ -270,6 +272,10 @@ impl std::fmt::Debug for AppState {
             .field("has_mcp_runtime", &self.mcp_runtime.is_some())
             .field("has_plugin_load_result", &self.plugin_load_result.is_some())
             .field("cost_tracker", &self.cost_tracker)
+            .field(
+                "service_observability_tracker",
+                &self.service_observability_tracker,
+            )
             .field("notification_dispatcher", &self.notification_dispatcher)
             .field("startup_trace", &self.startup_trace)
             .field("active_session_id", &self.active_session_id)

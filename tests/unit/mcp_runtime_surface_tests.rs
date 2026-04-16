@@ -142,6 +142,7 @@ fn test_app_state(runtime: Arc<McpRuntime>) -> AppState {
         mcp_runtime: Some(runtime),
         plugin_load_result: None,
         cost_tracker: CostTracker::default(),
+        service_observability_tracker: rust_agent::service::observability::ServiceObservabilityTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
         audit_log: Arc::new(std::sync::Mutex::new(rust_agent::security::audit::AuditLog::default())),
         startup_trace: Vec::new(),

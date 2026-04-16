@@ -63,6 +63,8 @@ async fn query_engine_submit_turn_works_through_production_provider_path() {
             mcp_runtime: None,
             plugin_load_result: None,
             cost_tracker: cost_tracker.clone(),
+            service_observability_tracker:
+                rust_agent::service::observability::ServiceObservabilityTracker::default(),
             notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
             audit_log: Arc::new(std::sync::Mutex::new(
                 rust_agent::security::audit::AuditLog::default(),

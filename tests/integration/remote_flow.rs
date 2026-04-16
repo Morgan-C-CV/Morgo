@@ -118,6 +118,8 @@ async fn remote_request_runs_minimal_query_chain() {
         mcp_runtime: None,
         plugin_load_result: None,
         cost_tracker: CostTracker::default(),
+        service_observability_tracker:
+            rust_agent::service::observability::ServiceObservabilityTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
         audit_log: Arc::new(std::sync::Mutex::new(
             rust_agent::security::audit::AuditLog::default(),
@@ -255,6 +257,8 @@ async fn remote_request_uses_shared_session_apply_contract() {
         mcp_runtime: None,
         plugin_load_result: None,
         cost_tracker: CostTracker::default(),
+        service_observability_tracker:
+            rust_agent::service::observability::ServiceObservabilityTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
         audit_log: Arc::new(std::sync::Mutex::new(
             rust_agent::security::audit::AuditLog::default(),
@@ -359,6 +363,8 @@ async fn remote_request_records_accept_and_notification_audit_events() {
         mcp_runtime: None,
         plugin_load_result: None,
         cost_tracker: CostTracker::default(),
+        service_observability_tracker:
+            rust_agent::service::observability::ServiceObservabilityTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
         audit_log: audit_log.clone(),
         startup_trace: Vec::new(),
@@ -500,6 +506,8 @@ async fn remote_request_denies_not_allowlisted_and_records_audit_event() {
         mcp_runtime: None,
         plugin_load_result: None,
         cost_tracker: CostTracker::default(),
+        service_observability_tracker:
+            rust_agent::service::observability::ServiceObservabilityTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
         audit_log: audit_log.clone(),
         startup_trace: Vec::new(),
@@ -601,6 +609,8 @@ async fn remote_request_drains_async_remote_notifications() {
         mcp_runtime: None,
         plugin_load_result: None,
         cost_tracker: CostTracker::default(),
+        service_observability_tracker:
+            rust_agent::service::observability::ServiceObservabilityTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
         audit_log: Arc::new(std::sync::Mutex::new(
             rust_agent::security::audit::AuditLog::default(),
@@ -723,6 +733,8 @@ async fn remote_request_drains_async_task_update_notifications() {
         mcp_runtime: None,
         plugin_load_result: None,
         cost_tracker: CostTracker::default(),
+        service_observability_tracker:
+            rust_agent::service::observability::ServiceObservabilityTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
         audit_log: Arc::new(std::sync::Mutex::new(
             rust_agent::security::audit::AuditLog::default(),
@@ -822,6 +834,8 @@ async fn remote_request_preserves_response_boundary_and_async_inbox_semantics() 
         mcp_runtime: None,
         plugin_load_result: None,
         cost_tracker: CostTracker::default(),
+        service_observability_tracker:
+            rust_agent::service::observability::ServiceObservabilityTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
         audit_log: Arc::new(std::sync::Mutex::new(
             rust_agent::security::audit::AuditLog::default(),
@@ -966,6 +980,8 @@ async fn remote_request_dual_channel_events_appear_in_response_and_async_inbox()
         mcp_runtime: None,
         plugin_load_result: None,
         cost_tracker: CostTracker::default(),
+        service_observability_tracker:
+            rust_agent::service::observability::ServiceObservabilityTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
         audit_log: Arc::new(std::sync::Mutex::new(
             rust_agent::security::audit::AuditLog::default(),
@@ -1056,6 +1072,8 @@ async fn remote_request_returns_typed_remote_event_envelopes() {
         mcp_runtime: None,
         plugin_load_result: None,
         cost_tracker: CostTracker::default(),
+        service_observability_tracker:
+            rust_agent::service::observability::ServiceObservabilityTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
         audit_log: Arc::new(std::sync::Mutex::new(
             rust_agent::security::audit::AuditLog::default(),

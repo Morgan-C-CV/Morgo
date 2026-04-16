@@ -9,6 +9,15 @@ use crate::history::session::{SessionHistoryEntry, SessionId};
 use crate::task::types::TaskEvent;
 use tokio::sync::mpsc;
 
+fn record_runtime_observability(context: &QueryContext, runtime: &RuntimeEventEnvelope) {
+    if let Some(service_failure) = runtime.service_failure.as_ref() {
+        context
+            .app_state
+            .service_observability_tracker
+            .record_service_failure(service_failure);
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct QueryEngine {
     pub context: QueryContext,
@@ -166,15 +175,16 @@ impl QueryEngine {
                     }
                 }
                 EngineEvent::CompactPlanIssued { kind, message } => {
-                    persisted_events.push(EngineEvent::RuntimeEvent(
-                        runtime_event_for_compact_plan(kind, message, compact_plan_code.clone()),
-                    ));
+                    let runtime =
+                        runtime_event_for_compact_plan(kind, message, compact_plan_code.clone());
+                    record_runtime_observability(&self.context, &runtime);
+                    persisted_events.push(EngineEvent::RuntimeEvent(runtime));
                     persisted_events.push(event.clone());
                 }
                 EngineEvent::Terminal(terminal) => {
-                    persisted_events.push(EngineEvent::RuntimeEvent(runtime_event_for_terminal(
-                        terminal,
-                    )));
+                    let runtime = runtime_event_for_terminal(terminal);
+                    record_runtime_observability(&self.context, &runtime);
+                    persisted_events.push(EngineEvent::RuntimeEvent(runtime));
                     persisted_events.push(event.clone());
                     if session_store.is_some() {
                         persisted_events.push(EngineEvent::SessionMilestoneWritten(
@@ -183,9 +193,9 @@ impl QueryEngine {
                     }
                 }
                 EngineEvent::Transition(transition) => {
-                    persisted_events.push(EngineEvent::RuntimeEvent(runtime_event_for_transition(
-                        transition,
-                    )));
+                    let runtime = runtime_event_for_transition(transition);
+                    record_runtime_observability(&self.context, &runtime);
+                    persisted_events.push(EngineEvent::RuntimeEvent(runtime));
                     persisted_events.push(event.clone());
                 }
                 _ => persisted_events.push(event.clone()),

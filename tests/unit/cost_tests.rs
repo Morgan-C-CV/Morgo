@@ -10,6 +10,7 @@ use rust_agent::interaction::telegram::gateway::TelegramGateway;
 use rust_agent::service::api::client::{
     ModelPricing, ModelProviderClient, parse_anthropic_sse_response,
 };
+use rust_agent::service::observability::ServiceObservabilityTracker;
 use rust_agent::state::app_state::{AppState, RuntimeRole};
 use rust_agent::state::permission_context::{PermissionMode, ToolPermissionContext};
 use rust_agent::task::manager::TaskManager;
@@ -42,6 +43,7 @@ async fn cost_command_reports_tracked_usage() {
         mcp_runtime: None,
         plugin_load_result: None,
         cost_tracker,
+        service_observability_tracker: ServiceObservabilityTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
         audit_log: Arc::new(std::sync::Mutex::new(
             rust_agent::security::audit::AuditLog::default(),
@@ -73,6 +75,47 @@ async fn cost_command_reports_tracked_usage() {
     assert!(text.contains("cache_read_input_tokens: 5"));
     assert!(text.contains("estimated_cost_usd:"));
     assert!(text.contains("model default-model -> requests: 1"));
+}
+
+#[test]
+fn service_observability_tracker_counts_failures_and_compact_hits() {
+    let tracker = ServiceObservabilityTracker::default();
+    tracker.record_service_failure(&rust_agent::core::events::ServiceFailureNotice {
+        service_failure_code: rust_agent::core::events::ServiceFailureCode::ApiProviderHttp5xx,
+        provider_kind: Some("anthropic".into()),
+        status_code: Some(503),
+        retryable: true,
+        surface_visible: true,
+    });
+    tracker.record_service_failure(&rust_agent::core::events::ServiceFailureNotice {
+        service_failure_code: rust_agent::core::events::ServiceFailureCode::ApiStreamTerminal,
+        provider_kind: None,
+        status_code: None,
+        retryable: false,
+        surface_visible: true,
+    });
+    tracker.record_compact_recovery_hit(
+        &rust_agent::service::compact::CompactPlanKind::ReactiveCompact,
+    );
+    tracker.record_compact_recovery_hit(&rust_agent::service::compact::CompactPlanKind::Exhausted);
+
+    let snapshot = tracker.snapshot();
+    assert_eq!(
+        snapshot.by_failure_code.get("api_provider_http_5xx"),
+        Some(&1)
+    );
+    assert_eq!(
+        snapshot.by_failure_code.get("api_stream_terminal"),
+        Some(&1)
+    );
+    assert_eq!(snapshot.retryable_count, 1);
+    assert_eq!(snapshot.terminal_count, 1);
+    assert_eq!(snapshot.by_provider_kind.get("anthropic"), Some(&1));
+    assert_eq!(
+        snapshot.compact_recovery_hits.get("reactive_compact"),
+        Some(&1)
+    );
+    assert!(!snapshot.compact_recovery_hits.contains_key("exhausted"));
 }
 
 #[test]

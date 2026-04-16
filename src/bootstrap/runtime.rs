@@ -50,6 +50,7 @@ use crate::service::api::retry::RetryPolicy;
 use crate::service::compact::reactive_compact::ReactiveCompactor;
 use crate::service::mcp::config::load_server_configs_with_diagnostics;
 use crate::service::mcp::runtime::McpRuntime;
+use crate::service::observability::ServiceObservabilityTracker;
 use crate::skills::bundled::bundled_skills;
 use crate::skills::loader::SkillLoaderCache;
 use crate::skills::registry::SkillRegistry;
@@ -544,6 +545,7 @@ impl RuntimeBootstrap {
             mcp_runtime: Some(mcp_runtime.clone()),
             plugin_load_result: Some(plugin_load_result.clone()),
             cost_tracker: CostTracker::default(),
+            service_observability_tracker: ServiceObservabilityTracker::default(),
             notification_dispatcher: notification_dispatcher.clone(),
             audit_log: Arc::new(Mutex::new(AuditLog::file_backed(
                 AuditLog::default_root_from(&state.current_cwd),
@@ -618,6 +620,7 @@ impl RuntimeBootstrap {
                 initialize_bundle.provider_config.model_id.clone(),
                 initialize_bundle.provider_config.pricing.clone(),
             ),
+            service_observability_tracker: ServiceObservabilityTracker::default(),
             notification_dispatcher: initialize_bundle.notification_dispatcher.clone(),
             audit_log: Arc::new(Mutex::new(AuditLog::file_backed(
                 AuditLog::default_root_from(&std::path::PathBuf::from(

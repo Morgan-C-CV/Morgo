@@ -21,6 +21,7 @@ use rust_agent::service::api::streaming::{
     ProviderFailureDisposition, StopReason, StreamError, StreamEvent, UsageEvent,
 };
 use rust_agent::service::compact::reactive_compact::ReactiveCompactor;
+use rust_agent::service::observability::ServiceObservabilityTracker;
 use rust_agent::state::app_state::WorkerRole;
 use rust_agent::task::types::{TaskOwner, ValidationState, WorkerPhase};
 use std::sync::Arc;
@@ -134,6 +135,7 @@ fn test_context_with_turns(
             mcp_runtime: None,
             plugin_load_result: None,
             cost_tracker: CostTracker::default(),
+            service_observability_tracker: ServiceObservabilityTracker::default(),
             notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
             audit_log: Arc::new(std::sync::Mutex::new(
                 rust_agent::security::audit::AuditLog::default(),
@@ -599,6 +601,7 @@ async fn query_loop_stop_hook_can_prevent_continuation() {
             mcp_runtime: None,
             plugin_load_result: None,
             cost_tracker: CostTracker::default(),
+            service_observability_tracker: ServiceObservabilityTracker::default(),
             notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
             audit_log: Arc::new(std::sync::Mutex::new(
                 rust_agent::security::audit::AuditLog::default(),
@@ -678,6 +681,7 @@ async fn query_loop_respects_pre_tool_hook_denial() {
             mcp_runtime: None,
             plugin_load_result: None,
             cost_tracker: CostTracker::default(),
+            service_observability_tracker: ServiceObservabilityTracker::default(),
             notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
             audit_log: Arc::new(std::sync::Mutex::new(
                 rust_agent::security::audit::AuditLog::default(),
@@ -775,6 +779,7 @@ async fn query_loop_runs_permission_request_hook_before_tool_execution() {
             mcp_runtime: None,
             plugin_load_result: None,
             cost_tracker: CostTracker::default(),
+            service_observability_tracker: ServiceObservabilityTracker::default(),
             notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
             audit_log: Arc::new(std::sync::Mutex::new(
                 rust_agent::security::audit::AuditLog::default(),
@@ -864,6 +869,7 @@ async fn query_loop_stop_hook_blocking_continues_with_follow_up_turn() {
             mcp_runtime: None,
             plugin_load_result: None,
             cost_tracker: CostTracker::default(),
+            service_observability_tracker: ServiceObservabilityTracker::default(),
             notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
             audit_log: Arc::new(std::sync::Mutex::new(
                 rust_agent::security::audit::AuditLog::default(),
@@ -962,6 +968,7 @@ async fn query_loop_uses_subagent_stop_hook_for_subagent_context() {
             mcp_runtime: None,
             plugin_load_result: None,
             cost_tracker: CostTracker::default(),
+            service_observability_tracker: ServiceObservabilityTracker::default(),
             notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
             audit_log: Arc::new(std::sync::Mutex::new(
                 rust_agent::security::audit::AuditLog::default(),
@@ -1097,6 +1104,7 @@ async fn engine_drains_internal_task_events() {
             mcp_runtime: None,
             plugin_load_result: None,
             cost_tracker: CostTracker::default(),
+            service_observability_tracker: ServiceObservabilityTracker::default(),
             notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
             audit_log: Arc::new(std::sync::Mutex::new(
                 rust_agent::security::audit::AuditLog::default(),
@@ -1173,6 +1181,7 @@ async fn worker_query_loop_consumes_mailbox_messages() {
             mcp_runtime: None,
             plugin_load_result: None,
             cost_tracker: CostTracker::default(),
+            service_observability_tracker: ServiceObservabilityTracker::default(),
             notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
             audit_log: Arc::new(std::sync::Mutex::new(
                 rust_agent::security::audit::AuditLog::default(),
@@ -1268,6 +1277,7 @@ async fn subagent_context_inherits_parent_tools_and_hooks() {
             mcp_runtime: None,
             plugin_load_result: None,
             cost_tracker: CostTracker::default(),
+            service_observability_tracker: ServiceObservabilityTracker::default(),
             notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
             audit_log: Arc::new(std::sync::Mutex::new(
                 rust_agent::security::audit::AuditLog::default(),
@@ -1369,6 +1379,7 @@ async fn subagent_context_does_not_inherit_session_memory_when_disabled() {
             mcp_runtime: None,
             plugin_load_result: None,
             cost_tracker: CostTracker::default(),
+            service_observability_tracker: ServiceObservabilityTracker::default(),
             notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
             audit_log: Arc::new(std::sync::Mutex::new(
                 rust_agent::security::audit::AuditLog::default(),
@@ -1462,6 +1473,7 @@ async fn subagent_context_reanchors_and_bounds_nested_memory_lineage() {
             mcp_runtime: None,
             plugin_load_result: None,
             cost_tracker: CostTracker::default(),
+            service_observability_tracker: ServiceObservabilityTracker::default(),
             notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
             audit_log: Arc::new(std::sync::Mutex::new(
                 rust_agent::security::audit::AuditLog::default(),
@@ -1628,6 +1640,7 @@ async fn coordinator_waits_for_group_barrier_before_synthesis_follow_up() {
             mcp_runtime: None,
             plugin_load_result: None,
             cost_tracker: CostTracker::default(),
+            service_observability_tracker: ServiceObservabilityTracker::default(),
             notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
             audit_log: Arc::new(std::sync::Mutex::new(
                 rust_agent::security::audit::AuditLog::default(),
@@ -1751,6 +1764,7 @@ async fn coordinator_gates_finalization_until_verification_finishes() {
             mcp_runtime: None,
             plugin_load_result: None,
             cost_tracker: CostTracker::default(),
+            service_observability_tracker: ServiceObservabilityTracker::default(),
             notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
             audit_log: Arc::new(std::sync::Mutex::new(
                 rust_agent::security::audit::AuditLog::default(),
@@ -1887,6 +1901,7 @@ async fn coordinator_surfaces_verification_failure_and_missing_verification_risk
             mcp_runtime: None,
             plugin_load_result: None,
             cost_tracker: CostTracker::default(),
+            service_observability_tracker: ServiceObservabilityTracker::default(),
             notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
             audit_log: Arc::new(std::sync::Mutex::new(rust_agent::security::audit::AuditLog::default())),
             startup_trace: Vec::new(),
@@ -2324,6 +2339,27 @@ async fn submit_turn_emits_runtime_events_for_compact_recovery_and_terminal_path
             if runtime.kind == rust_agent::core::events::RuntimeEventKind::NormalTerminal
                 && runtime.detail == Terminal::Completed.as_str()
     )));
+
+    let snapshot = engine
+        .context
+        .app_state
+        .service_observability_tracker
+        .snapshot();
+    assert_eq!(
+        snapshot.by_failure_code.get("api_stream_model_fallback"),
+        Some(&1)
+    );
+    assert_eq!(
+        snapshot.by_failure_code.get("compact_recovery_error"),
+        Some(&2)
+    );
+    assert_eq!(snapshot.retryable_count, 3);
+    assert_eq!(snapshot.terminal_count, 0);
+    assert!(snapshot.by_provider_kind.is_empty());
+    assert_eq!(
+        snapshot.compact_recovery_hits.get("reactive_compact"),
+        Some(&1)
+    );
 }
 
 #[tokio::test]
@@ -2347,6 +2383,7 @@ async fn submit_turn_distinguishes_stop_hook_prevented_and_blocking_runtime_even
             mcp_runtime: None,
             plugin_load_result: None,
             cost_tracker: CostTracker::default(),
+            service_observability_tracker: ServiceObservabilityTracker::default(),
             notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
             audit_log: Arc::new(std::sync::Mutex::new(
                 rust_agent::security::audit::AuditLog::default(),
@@ -2399,6 +2436,7 @@ async fn submit_turn_distinguishes_stop_hook_prevented_and_blocking_runtime_even
             mcp_runtime: None,
             plugin_load_result: None,
             cost_tracker: CostTracker::default(),
+            service_observability_tracker: ServiceObservabilityTracker::default(),
             notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
             audit_log: Arc::new(std::sync::Mutex::new(
                 rust_agent::security::audit::AuditLog::default(),
