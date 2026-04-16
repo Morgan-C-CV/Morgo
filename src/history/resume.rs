@@ -2,6 +2,9 @@ use crate::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSourc
 use crate::history::session::{
     SessionHistory, SessionId, SessionRestoreRequest, SessionSnapshot, SessionStore,
 };
+use crate::state::permission_context::{
+    sanitize_external_memory_entries, sanitize_nested_memory_lineage,
+};
 use crate::history::transcript::Transcript;
 use std::path::Path;
 
@@ -119,8 +122,8 @@ pub fn resolved_from_snapshot(
         restored_session,
         client_type,
         session_source,
-        external_memory_entries,
-        nested_memory_lineage,
+        external_memory_entries: sanitize_external_memory_entries(external_memory_entries),
+        nested_memory_lineage: sanitize_nested_memory_lineage(nested_memory_lineage),
     }
 }
 

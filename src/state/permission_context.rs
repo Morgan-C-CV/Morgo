@@ -259,7 +259,7 @@ impl ToolPermissionContext {
 
     pub fn set_external_memory_entries(&self, entries: Vec<String>) {
         if let Ok(mut slot) = self.external_memory_entries.write() {
-            *slot = normalize_memory_entries(entries);
+            *slot = sanitize_external_memory_entries(entries);
         }
     }
 
@@ -277,7 +277,7 @@ impl ToolPermissionContext {
 
     pub fn set_nested_memory_lineage(&self, lineage: Vec<String>) {
         if let Ok(mut slot) = self.nested_memory_lineage.write() {
-            *slot = normalize_memory_entries(lineage);
+            *slot = sanitize_nested_memory_lineage(lineage);
         }
     }
 
@@ -311,7 +311,51 @@ fn add_rule(slot: &Arc<RwLock<Vec<String>>>, rule: impl Into<String>) -> bool {
     false
 }
 
-fn normalize_memory_entries(entries: Vec<String>) -> Vec<String> {
+const MAX_EXTERNAL_MEMORY_ENTRIES: usize = 32;
+const MAX_EXTERNAL_MEMORY_ENTRY_CHARS: usize = 240;
+pub const MAX_NESTED_MEMORY_DEPTH: usize = 8;
+const MAX_NESTED_MEMORY_MARKER_CHARS: usize = 120;
+
+pub fn sanitize_external_memory_entries(entries: Vec<String>) -> Vec<String> {
+    normalize_memory_entries(entries, MAX_EXTERNAL_MEMORY_ENTRIES, |entry| {
+        truncate_chars(entry, MAX_EXTERNAL_MEMORY_ENTRY_CHARS)
+    })
+}
+
+pub fn sanitize_nested_memory_lineage(lineage: Vec<String>) -> Vec<String> {
+    let mut normalized = Vec::new();
+    for entry in lineage {
+        let trimmed = entry.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Some(candidate) = truncate_chars(trimmed, MAX_NESTED_MEMORY_MARKER_CHARS) else {
+            continue;
+        };
+        if normalized.is_empty() {
+            if candidate.starts_with("session:") && is_valid_nested_memory_marker(&candidate) {
+                normalized.push(candidate);
+            }
+            continue;
+        }
+        if candidate.starts_with("agent:")
+            && is_valid_nested_memory_marker(&candidate)
+            && !normalized.iter().any(|existing| existing == &candidate)
+        {
+            normalized.push(candidate);
+        }
+        if normalized.len() >= MAX_NESTED_MEMORY_DEPTH {
+            break;
+        }
+    }
+    normalized
+}
+
+fn normalize_memory_entries(
+    entries: Vec<String>,
+    max_entries: usize,
+    transform: impl Fn(&str) -> Option<String>,
+) -> Vec<String> {
     let mut seen = HashSet::new();
     let mut normalized = Vec::new();
     for entry in entries {
@@ -319,9 +363,44 @@ fn normalize_memory_entries(entries: Vec<String>) -> Vec<String> {
         if trimmed.is_empty() {
             continue;
         }
-        if seen.insert(trimmed.to_string()) {
-            normalized.push(trimmed.to_string());
+        let Some(candidate) = transform(trimmed) else {
+            continue;
+        };
+        if seen.insert(candidate.clone()) {
+            normalized.push(candidate);
+        }
+        if normalized.len() >= max_entries {
+            break;
         }
     }
     normalized
+}
+
+fn truncate_chars(value: &str, max_chars: usize) -> Option<String> {
+    let truncated = value.chars().take(max_chars).collect::<String>();
+    if truncated.trim().is_empty() {
+        None
+    } else {
+        Some(truncated)
+    }
+}
+
+fn is_valid_nested_memory_marker(value: &str) -> bool {
+    if let Some(session_id) = value.strip_prefix("session:") {
+        return is_valid_memory_token(session_id);
+    }
+    let Some(rest) = value.strip_prefix("agent:") else {
+        return false;
+    };
+    let Some((agent_id, inherit_context)) = rest.split_once(":inherit_context=") else {
+        return false;
+    };
+    is_valid_memory_token(agent_id) && matches!(inherit_context, "true" | "false")
+}
+
+fn is_valid_memory_token(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
 }

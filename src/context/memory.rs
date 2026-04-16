@@ -1,4 +1,7 @@
 use crate::state::app_state::AppState;
+use crate::state::permission_context::{
+    sanitize_external_memory_entries, sanitize_nested_memory_lineage,
+};
 
 pub fn describe_memory_context(app_state: &AppState) -> String {
     let session_id = app_state.active_session_id.as_str();
@@ -48,7 +51,9 @@ pub fn describe_memory_context(app_state: &AppState) -> String {
         lines.push("- context_files: none".to_string());
     }
 
-    let external_memory = app_state.permission_context.external_memory_entries();
+    let external_memory = sanitize_external_memory_entries(
+        app_state.permission_context.external_memory_entries(),
+    );
     lines.push("External memory:".to_string());
     if external_memory.is_empty() {
         lines.push("- entries: none".to_string());
@@ -59,7 +64,9 @@ pub fn describe_memory_context(app_state: &AppState) -> String {
         }
     }
 
-    let nested_lineage = app_state.permission_context.nested_memory_lineage();
+    let nested_lineage = sanitize_nested_memory_lineage(
+        app_state.permission_context.nested_memory_lineage(),
+    );
     lines.push("Nested memory lineage:".to_string());
     if nested_lineage.is_empty() {
         lines.push("- lineage: root".to_string());

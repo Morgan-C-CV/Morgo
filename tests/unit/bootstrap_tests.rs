@@ -514,6 +514,60 @@ fn resolve_session_state_reuses_store_for_continue_resume_and_fresh_start() {
 }
 
 #[test]
+fn resolve_session_state_sanitizes_restored_memory_metadata() {
+    let store = InMemorySessionStore::default();
+    let session_id = SessionId("session-sanitized".into());
+    store.save(
+        SessionSnapshot {
+            session_id: session_id.clone(),
+            surface: InteractionSurface::Remote,
+            session_mode: SessionMode::Interactive,
+            cwd: "/tmp/restore".into(),
+            last_turn_at: None,
+            prompt_seed: None,
+        },
+        SessionHistory::default(),
+    );
+    store.save_external_memory_entries(
+        &session_id,
+        vec!["  linear:ABC-1 context  ".into(), " ".into(), "x".repeat(300)],
+    );
+    store.save_nested_memory_lineage(
+        &session_id,
+        vec![
+            "agent:orphan:inherit_context=true".into(),
+            "session:session-sanitized".into(),
+            "agent:child:inherit_context=true".into(),
+            "agent:child:inherit_context=true".into(),
+            "bad marker".into(),
+        ],
+    );
+
+    let resolved = resolve_session_state(
+        &store,
+        Some(&RestoreRequest {
+            source: RestoreSource::ResumeSession,
+            session_id: Some("session-sanitized".into()),
+        }),
+        InteractionSurface::Cli,
+        SessionMode::Headless,
+        std::path::Path::new("/tmp/fresh"),
+    );
+
+    assert_eq!(
+        resolved.external_memory_entries,
+        vec!["linear:ABC-1 context".to_string(), "x".repeat(240)]
+    );
+    assert_eq!(
+        resolved.nested_memory_lineage,
+        vec![
+            "session:session-sanitized".to_string(),
+            "agent:child:inherit_context=true".to_string(),
+        ]
+    );
+}
+
+#[test]
 fn initialize_runtime_builds_consistent_runtime_bundle_shape() {
     let runtime = runtime_for_surface("cli", false, false);
     let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::Headless, false);

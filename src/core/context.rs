@@ -6,6 +6,9 @@ use crate::service::api::client::ModelProviderClient;
 use crate::service::api::streaming::StreamEvent;
 use crate::service::compact::ReactiveCompactor;
 use crate::state::app_state::{AppState, RuntimeRole, WorkerRole};
+use crate::state::permission_context::{
+    MAX_NESTED_MEMORY_DEPTH, sanitize_nested_memory_lineage,
+};
 use crate::tool::registry::ToolRegistry;
 
 #[derive(Debug, Clone)]
@@ -93,13 +96,22 @@ fn build_nested_memory_lineage(
     child_agent_id: &str,
     inherit_context: bool,
 ) -> Vec<String> {
-    let mut lineage = parent.app_state.permission_context.nested_memory_lineage();
     let parent_marker = format!("session:{}", parent.app_state.active_session_id);
-    if lineage.is_empty() {
-        lineage.push(parent_marker);
+    let child_marker = format!("agent:{child_agent_id}:inherit_context={inherit_context}");
+    let lineage = sanitize_nested_memory_lineage(
+        parent.app_state.permission_context.nested_memory_lineage(),
+    );
+    let mut agent_markers = lineage
+        .into_iter()
+        .skip_while(|entry| entry.starts_with("session:"))
+        .collect::<Vec<_>>();
+    if agent_markers.len() >= MAX_NESTED_MEMORY_DEPTH.saturating_sub(1) {
+        let keep = MAX_NESTED_MEMORY_DEPTH.saturating_sub(2);
+        let skip = agent_markers.len().saturating_sub(keep);
+        agent_markers = agent_markers.into_iter().skip(skip).collect();
     }
-    lineage.push(format!(
-        "agent:{child_agent_id}:inherit_context={inherit_context}"
-    ));
-    lineage
+    let mut bounded = vec![parent_marker];
+    bounded.extend(agent_markers);
+    bounded.push(child_marker);
+    sanitize_nested_memory_lineage(bounded)
 }

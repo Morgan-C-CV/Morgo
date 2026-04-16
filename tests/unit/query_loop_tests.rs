@@ -1374,6 +1374,85 @@ async fn subagent_context_does_not_inherit_session_memory_when_disabled() {
 }
 
 #[tokio::test]
+async fn subagent_context_reanchors_and_bounds_nested_memory_lineage() {
+    let permission_context = ToolPermissionContext::new(PermissionMode::Default)
+        .with_task_manager(Arc::new(TaskManager::default()))
+        .with_nested_memory_lineage(vec![
+            "agent:orphan:inherit_context=true".into(),
+            "session:test-session".into(),
+            "agent:first:inherit_context=true".into(),
+            "agent:second:inherit_context=false".into(),
+            "agent:third:inherit_context=true".into(),
+            "agent:fourth:inherit_context=false".into(),
+            "agent:fifth:inherit_context=true".into(),
+            "agent:sixth:inherit_context=false".into(),
+            "agent:seventh:inherit_context=true".into(),
+            "agent:eighth:inherit_context=false".into(),
+            "bad marker".into(),
+        ]);
+    let parent = QueryContext {
+        app_state: AppState {
+            surface: InteractionSurface::Cli,
+            session_mode: SessionMode::Headless,
+            client_type: ClientType::Cli,
+            session_source: SessionSource::LocalCli,
+            runtime_role: RuntimeRole::Coordinator,
+            worker_role: None,
+            permission_context,
+            command_registry: None,
+            runtime_tool_registry: Some(Arc::new(RwLock::new(ToolRegistry::new()))),
+            skill_registry: None,
+            mcp_runtime: None,
+            plugin_load_result: None,
+            cost_tracker: CostTracker::default(),
+            notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
+            audit_log: Arc::new(std::sync::Mutex::new(rust_agent::security::audit::AuditLog::default())),
+            startup_trace: vec!["parent-runtime".into()],
+            active_session_id: "test-session".into(),
+            session_store: None,
+            session: None,
+            history: None,
+            restored_session: None,
+        },
+        tool_registry: ToolRegistry::new(),
+        api_client: ModelProviderClient::default(),
+        compactor: ReactiveCompactor,
+        hook_registry: HookRegistry::default(),
+        agent_id: None,
+        system_prompt: "test system".into(),
+        tools_prompt: "test tools".into(),
+        context_prompt: "test context".into(),
+    };
+
+    let child = parent.create_subagent_context(
+        "agent-task-bounded",
+        vec![],
+        SubagentConfig {
+            worker_role: rust_agent::state::app_state::WorkerRole::Research,
+            inherit_context: true,
+            max_turns: None,
+            allowed_tools: None,
+        },
+    );
+
+    assert_eq!(
+        child.app_state.permission_context.nested_memory_lineage(),
+        vec![
+            "session:test-session".to_string(),
+            "agent:second:inherit_context=false".to_string(),
+            "agent:third:inherit_context=true".to_string(),
+            "agent:fourth:inherit_context=false".to_string(),
+            "agent:fifth:inherit_context=true".to_string(),
+            "agent:sixth:inherit_context=false".to_string(),
+            "agent:seventh:inherit_context=true".to_string(),
+            "agent:agent-task-bounded:inherit_context=true".to_string(),
+        ]
+    );
+    assert!(!child.context_prompt.contains("agent:orphan:inherit_context=true"));
+    assert!(!child.context_prompt.contains("bad marker"));
+}
+
+#[tokio::test]
 async fn query_loop_respects_max_turns_terminal() {
     let context = test_context_with_turns(
         vec![vec![

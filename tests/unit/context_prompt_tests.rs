@@ -177,6 +177,11 @@ fn build_app_state() -> AppState {
         ])
         .with_nested_memory_lineage(vec!["session:context-session".into()]);
 
+    build_app_state_with_permissions(permissions)
+}
+
+fn build_app_state_with_permissions(permissions: ToolPermissionContext) -> AppState {
+
     AppState {
         surface: InteractionSurface::Cli,
         session_mode: SessionMode::Interactive,
@@ -266,6 +271,38 @@ fn context_prompt_includes_truthy_runtime_sections() {
     assert!(prompt.contains("runtime_group=step-2 runtime_hint=group step-2 still in progress"));
 
     fs::remove_dir_all(repo).expect("cleanup repo");
+}
+
+#[test]
+fn context_prompt_renders_only_sanitized_memory_metadata() {
+    let permissions = build_plan_permissions()
+        .with_external_memory_entries(vec![
+            "  linear:INGEST-42 investigate context layering  ".into(),
+            "slack:#agents rollout note".into(),
+            " ".into(),
+            "x".repeat(300),
+        ])
+        .with_nested_memory_lineage(vec![
+            "agent:discarded-parent:inherit_context=true".into(),
+            "session:context-session".into(),
+            "agent:valid-child:inherit_context=true".into(),
+            "agent:valid-child:inherit_context=true".into(),
+            "bad marker".into(),
+        ]);
+    let app_state = build_app_state_with_permissions(permissions);
+    let prompt = rust_agent::prompt::context::build_context_prompt(&app_state);
+
+    assert!(prompt.contains("External memory:"));
+    assert!(prompt.contains("- entries: 3"));
+    assert!(prompt.contains("linear:INGEST-42 investigate context layering"));
+    assert!(prompt.contains("slack:#agents rollout note"));
+    assert!(!prompt.contains("bad marker"));
+    assert!(!prompt.contains("agent:discarded-parent:inherit_context=true"));
+    assert!(prompt.contains("Nested memory lineage:"));
+    assert!(prompt.contains("- depth: 2"));
+    assert!(prompt.contains(
+        "- path: session:context-session -> agent:valid-child:inherit_context=true"
+    ));
 }
 
 #[test]
