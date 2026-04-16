@@ -1,5 +1,5 @@
 use crate::core::context::QueryContext;
-use crate::core::events::{EngineEvent, ServiceFailureCode};
+use crate::core::events::{EngineEvent, ServiceFailureCode, ServiceFailureNotice};
 use crate::core::message::Message;
 use crate::hook::executor::{HookDecision, run_hook};
 use crate::hook::registry::HookEvent;
@@ -288,6 +288,7 @@ fn prepare_turn(
                     prepared.token_estimate
                 ),
                 code: None,
+                service_failure: None,
             });
             if !params.messages.is_empty()
                 || state.transition == Some(Continue::TokenBudgetContinuation)
@@ -332,6 +333,13 @@ fn prepare_turn(
                 kind: plan.notice_kind,
                 message: plan.notice_message,
                 code: Some(ServiceFailureCode::CompactRecoveryError),
+                service_failure: Some(ServiceFailureNotice {
+                    service_failure_code: ServiceFailureCode::CompactRecoveryError,
+                    provider_kind: None,
+                    status_code: None,
+                    retryable: true,
+                    surface_visible: true,
+                }),
             });
             events.push(EngineEvent::Transition(Continue::ReactiveCompactRetry));
             events.push(EngineEvent::MessageCommitted(compact_message.clone()));
@@ -545,6 +553,7 @@ async fn consume_model_stream(
                         usage.model, usage.input_tokens, usage.output_tokens
                     ),
                     code: None,
+                    service_failure: None,
                 });
             }
             StreamEvent::MessageStop { stop_reason } => match stop_reason {
@@ -607,6 +616,7 @@ async fn consume_model_stream(
                             kind: "recovery",
                             message: "escalating max output tokens after model stop".into(),
                             code: None,
+                            service_failure: None,
                         });
                         return TurnOutcome {
                             state: state.clone(),
@@ -625,6 +635,7 @@ async fn consume_model_stream(
                             kind: "recovery",
                             message: "continuing after max output token interruption".into(),
                             code: None,
+                            service_failure: None,
                         });
                         return TurnOutcome {
                             state: state.clone(),
@@ -1109,6 +1120,7 @@ async fn execute_tool_phase(
                     "injecting missing tool result after tool failure for {tool_name}"
                 ),
                 code: None,
+                service_failure: None,
             });
             let failure = Message::assistant(format!("tool {tool_name} failed: {error}"));
             let missing_tool_result = Message::assistant(format!(
@@ -1165,6 +1177,7 @@ fn tool_notice_event(record: &ToolExecutionRecord) -> EngineEvent {
         kind,
         message: format!("{}: {}", record.summary, record_detail_or_summary(record)),
         code,
+        service_failure: None,
     }
 }
 
@@ -1266,6 +1279,7 @@ fn finalize_normal_turn(
             kind: "hook",
             message: "stop hook prevented continuation".into(),
             code: None,
+            service_failure: None,
         });
         let terminal = Terminal::StopHookPrevented;
         events.push(EngineEvent::Terminal(terminal.clone()));
@@ -1285,6 +1299,7 @@ fn finalize_normal_turn(
             kind: "hook",
             message: "stop hook requested blocking continuation retry".into(),
             code: None,
+            service_failure: None,
         });
         return NormalTurnFinalization::Continue {
             loop_state: state,
@@ -1344,13 +1359,16 @@ fn continue_after_stream_error(
     if state.transition != Some(Continue::ModelFallbackRetry)
         && should_trigger_model_fallback(&error)
     {
+        let code = classify_service_failure_code(&error);
+        let service_failure = service_failure_notice_from_error(&error, code.clone(), true);
         engine_events.push(EngineEvent::Notice {
             kind: "recovery",
             message: format!(
                 "model fallback retry triggered after stream error [{}]: {}",
                 error.kind, error.message
             ),
-            code: Some(classify_service_failure_code(&error)),
+            code: Some(code),
+            service_failure: Some(service_failure),
         });
         return TurnOutcome {
             state: state.clone(),
@@ -1377,6 +1395,13 @@ fn continue_after_stream_error(
         kind: plan.notice_kind,
         message: plan.notice_message.clone(),
         code: Some(ServiceFailureCode::CompactRecoveryError),
+        service_failure: Some(ServiceFailureNotice {
+            service_failure_code: ServiceFailureCode::CompactRecoveryError,
+            provider_kind: Some(error.provider_id.clone()),
+            status_code: error.status_code,
+            retryable: true,
+            surface_visible: true,
+        }),
     });
     match plan.kind {
         CompactPlanKind::ReactiveCompact => {
@@ -1423,6 +1448,20 @@ fn continue_after_stream_error(
 
 fn should_trigger_model_fallback(error: &StreamError) -> bool {
     error.kind == "model_fallback" || (error.disposition.is_stream_interrupted() && error.retryable)
+}
+
+fn service_failure_notice_from_error(
+    error: &StreamError,
+    service_failure_code: ServiceFailureCode,
+    surface_visible: bool,
+) -> ServiceFailureNotice {
+    ServiceFailureNotice {
+        service_failure_code,
+        provider_kind: Some(error.provider_id.clone()),
+        status_code: error.status_code,
+        retryable: error.retryable,
+        surface_visible,
+    }
 }
 
 fn synthetic_stop_reason_error(transition: Option<&Continue>) -> StreamError {

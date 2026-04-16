@@ -2091,8 +2091,19 @@ async fn query_loop_retries_with_model_fallback_before_other_stream_recovery() {
             kind: "recovery",
             message,
             code,
+            service_failure,
         } if message.contains("model fallback retry")
             && code == &Some(rust_agent::core::events::ServiceFailureCode::ApiStreamModelFallback)
+            && matches!(
+                service_failure,
+                Some(rust_agent::core::events::ServiceFailureNotice {
+                    service_failure_code: rust_agent::core::events::ServiceFailureCode::ApiStreamModelFallback,
+                    provider_kind: Some(provider_kind),
+                    status_code: Some(503),
+                    retryable: true,
+                    surface_visible: true,
+                }) if provider_kind == "anthropic"
+            )
     )));
 }
 
@@ -2278,6 +2289,16 @@ async fn submit_turn_emits_runtime_events_for_compact_recovery_and_terminal_path
                 && runtime.detail.contains("ReactiveCompact")
                 && runtime.code
                     == Some(rust_agent::core::events::ServiceFailureCode::CompactRecoveryError)
+                && matches!(
+                    runtime.service_failure.as_ref(),
+                    Some(rust_agent::core::events::ServiceFailureNotice {
+                        service_failure_code: rust_agent::core::events::ServiceFailureCode::CompactRecoveryError,
+                        provider_kind: None,
+                        status_code: None,
+                        retryable: true,
+                        surface_visible: true,
+                    })
+                )
     )));
     assert!(result.events.iter().any(|event| matches!(
         event,
@@ -2286,6 +2307,16 @@ async fn submit_turn_emits_runtime_events_for_compact_recovery_and_terminal_path
                 && runtime.detail == Continue::ModelFallbackRetry.as_str()
                 && runtime.code
                     == Some(rust_agent::core::events::ServiceFailureCode::ApiStreamModelFallback)
+                && matches!(
+                    runtime.service_failure.as_ref(),
+                    Some(rust_agent::core::events::ServiceFailureNotice {
+                        service_failure_code: rust_agent::core::events::ServiceFailureCode::ApiStreamModelFallback,
+                        provider_kind: None,
+                        status_code: None,
+                        retryable: true,
+                        surface_visible: true,
+                    })
+                )
     )));
     assert!(result.events.iter().any(|event| matches!(
         event,

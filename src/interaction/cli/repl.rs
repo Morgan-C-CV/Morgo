@@ -1,6 +1,6 @@
 use crate::command::types::CommandResult;
 use crate::core::engine::QueryEngine;
-use crate::core::events::{EngineEvent, ServiceFailureCode};
+use crate::core::events::{EngineEvent, ServiceFailureCode, ServiceFailureNotice};
 use crate::core::message::Message;
 use crate::interaction::envelope::NormalizedInput;
 use crate::interaction::router::{CommandRouter, RouteExecution};
@@ -37,6 +37,11 @@ pub enum CliRuntimeEvent {
         message: String,
         code: Option<String>,
         runtime_kind: Option<String>,
+        service_failure_code: Option<String>,
+        provider_kind: Option<String>,
+        status_code: Option<u16>,
+        retryable: Option<bool>,
+        surface_visible: Option<bool>,
     },
     Transition {
         text: String,
@@ -251,12 +256,21 @@ async fn collect_stream_messages(
                 kind,
                 message,
                 code,
+                service_failure,
             } => {
+                let service_failure_code = service_failure_code_string(service_failure.as_ref());
                 runtime_events.push(CliRuntimeEvent::Notice {
                     kind: kind.to_string(),
                     message,
                     code: code.map(|value| value.as_str().to_string()),
                     runtime_kind: None,
+                    service_failure_code,
+                    provider_kind: service_failure
+                        .as_ref()
+                        .and_then(|value| value.provider_kind.clone()),
+                    status_code: service_failure.as_ref().and_then(|value| value.status_code),
+                    retryable: service_failure.as_ref().map(|value| value.retryable),
+                    surface_visible: service_failure.as_ref().map(|value| value.surface_visible),
                 });
             }
             EngineEvent::CompactPlanIssued { kind, message } => {
@@ -274,6 +288,13 @@ async fn collect_stream_messages(
                     message,
                     code: Some(ServiceFailureCode::CompactRecoveryError.as_str().into()),
                     runtime_kind: Some("CompactPlan".into()),
+                    service_failure_code: Some(
+                        ServiceFailureCode::CompactRecoveryError.as_str().into(),
+                    ),
+                    provider_kind: None,
+                    status_code: None,
+                    retryable: Some(true),
+                    surface_visible: Some(true),
                 });
             }
             EngineEvent::Transition(transition) => {
@@ -282,11 +303,30 @@ async fn collect_stream_messages(
                 });
             }
             EngineEvent::RuntimeEvent(runtime) => {
+                let service_failure_code =
+                    service_failure_code_string(runtime.service_failure.as_ref());
                 runtime_events.push(CliRuntimeEvent::Notice {
                     kind: "runtime".into(),
                     message: format!("{:?}: {}", runtime.kind, runtime.detail),
                     code: runtime.code.map(|value| value.as_str().to_string()),
                     runtime_kind: Some(format!("{:?}", runtime.kind)),
+                    service_failure_code,
+                    provider_kind: runtime
+                        .service_failure
+                        .as_ref()
+                        .and_then(|value| value.provider_kind.clone()),
+                    status_code: runtime
+                        .service_failure
+                        .as_ref()
+                        .and_then(|value| value.status_code),
+                    retryable: runtime
+                        .service_failure
+                        .as_ref()
+                        .map(|value| value.retryable),
+                    surface_visible: runtime
+                        .service_failure
+                        .as_ref()
+                        .map(|value| value.surface_visible),
                 });
             }
             EngineEvent::Terminal(terminal) => {
@@ -302,6 +342,10 @@ async fn collect_stream_messages(
         }
     }
     (messages, runtime_events)
+}
+
+fn service_failure_code_string(service_failure: Option<&ServiceFailureNotice>) -> Option<String> {
+    service_failure.map(|value| value.service_failure_code.as_str().to_string())
 }
 
 fn collect_message_content(messages: Vec<Message>) -> String {

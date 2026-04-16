@@ -72,10 +72,20 @@ pub enum RuntimeEventKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceFailureNotice {
+    pub service_failure_code: ServiceFailureCode,
+    pub provider_kind: Option<String>,
+    pub status_code: Option<u16>,
+    pub retryable: bool,
+    pub surface_visible: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeEventEnvelope {
     pub kind: RuntimeEventKind,
     pub detail: String,
     pub code: Option<ServiceFailureCode>,
+    pub service_failure: Option<ServiceFailureNotice>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -108,6 +118,7 @@ pub enum EngineEvent {
         kind: &'static str,
         message: String,
         code: Option<ServiceFailureCode>,
+        service_failure: Option<ServiceFailureNotice>,
     },
     CompactPlanIssued {
         kind: CompactPlanKind,

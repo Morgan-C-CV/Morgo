@@ -57,6 +57,11 @@ pub enum RemoteEventPayload {
         message: String,
         code: Option<String>,
         runtime_kind: Option<String>,
+        service_failure_code: Option<String>,
+        provider_kind: Option<String>,
+        status_code: Option<u16>,
+        retryable: Option<bool>,
+        surface_visible: Option<bool>,
     },
     ToolCallStarted {
         tool_name: String,
@@ -302,6 +307,11 @@ impl From<SurfaceItem> for RemoteEventEnvelope {
                 message,
                 code,
                 runtime_kind,
+                service_failure_code,
+                provider_kind,
+                status_code,
+                retryable,
+                surface_visible,
             } => Self {
                 event_type: "runtime_notice",
                 payload: RemoteEventPayload::RuntimeNotice {
@@ -309,6 +319,11 @@ impl From<SurfaceItem> for RemoteEventEnvelope {
                     message,
                     code,
                     runtime_kind,
+                    service_failure_code,
+                    provider_kind,
+                    status_code,
+                    retryable,
+                    surface_visible,
                 },
             },
             SurfaceItem::ToolCallStarted { tool_name, input } => Self {
@@ -432,6 +447,11 @@ impl From<Notification> for RemoteNotificationEnvelope {
                     message: notification.body,
                     code: notification.notice_code,
                     runtime_kind: notification.runtime_kind,
+                    service_failure_code: notification.service_failure_code,
+                    provider_kind: notification.provider_kind,
+                    status_code: notification.status_code,
+                    retryable: notification.retryable,
+                    surface_visible: notification.surface_visible,
                 },
             },
         }
@@ -493,13 +513,26 @@ fn notification_from_surface_item(
             message,
             code,
             runtime_kind,
+            service_failure_code,
+            provider_kind,
+            status_code,
+            retryable,
+            surface_visible,
         } => {
+            if matches!(surface_visible, Some(false)) {
+                return None;
+            }
             let mut notification = Notification::runtime_notice(
                 input.session_id.clone(),
                 kind.clone(),
                 message.clone(),
                 code.clone(),
                 runtime_kind.clone(),
+                service_failure_code.clone(),
+                provider_kind.clone(),
+                *status_code,
+                *retryable,
+                *surface_visible,
             );
             notification.target = Some(NotificationTarget::RemoteActor {
                 session_id: input.session_id.clone(),
@@ -664,11 +697,24 @@ pub fn render_remote_response_debug(response: &RemoteResponse) -> String {
                 message,
                 code,
                 runtime_kind,
+                service_failure_code,
+                provider_kind,
+                status_code,
+                retryable,
+                surface_visible,
             } => {
                 write!(
                     &mut output,
-                    "kind={} message={} code={:?} runtime_kind={:?}",
-                    kind, message, code, runtime_kind
+                    "kind={} message={} code={:?} runtime_kind={:?} service_failure_code={:?} provider_kind={:?} status_code={:?} retryable={:?} surface_visible={:?}",
+                    kind,
+                    message,
+                    code,
+                    runtime_kind,
+                    service_failure_code,
+                    provider_kind,
+                    status_code,
+                    retryable,
+                    surface_visible
                 )
                 .expect("write notice event");
             }

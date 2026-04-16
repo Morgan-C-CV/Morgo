@@ -1,6 +1,7 @@
 use crate::core::context::QueryContext;
 use crate::core::events::{
-    EngineEvent, RuntimeEventEnvelope, RuntimeEventKind, ServiceFailureCode, SessionMilestone,
+    EngineEvent, RuntimeEventEnvelope, RuntimeEventKind, ServiceFailureCode, ServiceFailureNotice,
+    SessionMilestone,
 };
 use crate::core::message::Message;
 use crate::core::query_loop::{QueryLoopResult, run_query_loop};
@@ -225,10 +226,25 @@ fn runtime_event_for_transition(
             (RuntimeEventKind::NormalTerminal, None)
         }
     };
+    let service_failure = code
+        .clone()
+        .map(|service_failure_code| ServiceFailureNotice {
+            service_failure_code,
+            provider_kind: None,
+            status_code: None,
+            retryable: matches!(
+                transition,
+                crate::core::query_loop::Continue::ReactiveCompactRetry
+                    | crate::core::query_loop::Continue::CollapseDrainRetry
+                    | crate::core::query_loop::Continue::ModelFallbackRetry
+            ),
+            surface_visible: true,
+        });
     RuntimeEventEnvelope {
         kind,
         detail: transition.as_str().into(),
         code,
+        service_failure,
     }
 }
 
@@ -250,10 +266,24 @@ fn runtime_event_for_terminal(
             (RuntimeEventKind::RetryScheduled, None)
         }
     };
+    let service_failure = match terminal {
+        crate::core::query_loop::Terminal::ModelError {
+            code: Some(service_failure_code),
+            ..
+        } => Some(ServiceFailureNotice {
+            service_failure_code: service_failure_code.clone(),
+            provider_kind: None,
+            status_code: None,
+            retryable: false,
+            surface_visible: true,
+        }),
+        _ => None,
+    };
     RuntimeEventEnvelope {
         kind,
         detail: terminal.as_str().into(),
         code,
+        service_failure,
     }
 }
 
@@ -262,10 +292,20 @@ fn runtime_event_for_compact_plan(
     message: &str,
     code: Option<ServiceFailureCode>,
 ) -> RuntimeEventEnvelope {
+    let service_failure = code
+        .clone()
+        .map(|service_failure_code| ServiceFailureNotice {
+            service_failure_code,
+            provider_kind: None,
+            status_code: None,
+            retryable: true,
+            surface_visible: true,
+        });
     RuntimeEventEnvelope {
         kind: RuntimeEventKind::CompactPlan,
         detail: format!("{:?}: {}", kind, message),
         code,
+        service_failure,
     }
 }
 

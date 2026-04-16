@@ -636,8 +636,13 @@ async fn remote_request_drains_async_remote_notifications() {
             "remote-async-session",
             "tool",
             "background update",
-            None,
-            None,
+            Some("api_stream_interrupted".into()),
+            Some("RetryScheduled".into()),
+            Some("api_stream_interrupted".into()),
+            Some("anthropic".into()),
+            Some(503),
+            Some(true),
+            Some(true),
         ),
     );
 
@@ -670,11 +675,21 @@ async fn remote_request_drains_async_remote_notifications() {
             message,
             code,
             runtime_kind,
+            service_failure_code,
+            provider_kind,
+            status_code,
+            retryable,
+            surface_visible,
         }
             if kind == "tool"
                 && message == "background update"
-                && code.is_none()
-                && runtime_kind.is_none()
+                && code.as_deref() == Some("api_stream_interrupted")
+                && runtime_kind.as_deref() == Some("RetryScheduled")
+                && service_failure_code.as_deref() == Some("api_stream_interrupted")
+                && provider_kind.as_deref() == Some("anthropic")
+                && status_code == &Some(503)
+                && retryable == &Some(true)
+                && surface_visible == &Some(true)
     )));
     assert!(
         drain_remote_notifications(&app_state, "remote-async-session", Some("remote-actor"))
@@ -824,8 +839,13 @@ async fn remote_request_preserves_response_boundary_and_async_inbox_semantics() 
             "remote-boundary-session",
             "tool",
             "background only",
-            None,
-            None,
+            Some("api_stream_terminal".into()),
+            Some("ModelError".into()),
+            Some("api_stream_terminal".into()),
+            Some("anthropic".into()),
+            Some(400),
+            Some(false),
+            Some(true),
         ),
     );
     let engine =
@@ -870,11 +890,21 @@ async fn remote_request_preserves_response_boundary_and_async_inbox_semantics() 
                 message,
                 code,
                 runtime_kind,
+                service_failure_code,
+                provider_kind,
+                status_code,
+                retryable,
+                surface_visible,
             }
                 if kind == "tool"
                     && message == "background only"
-                    && code.is_none()
-                    && runtime_kind.is_none()
+                    && code.as_deref() == Some("api_stream_terminal")
+                    && runtime_kind.as_deref() == Some("ModelError")
+                    && service_failure_code.as_deref() == Some("api_stream_terminal")
+                    && provider_kind.as_deref() == Some("anthropic")
+                    && status_code == &Some(400)
+                    && retryable == &Some(false)
+                    && surface_visible == &Some(true)
         )
     }));
 
@@ -888,11 +918,21 @@ async fn remote_request_preserves_response_boundary_and_async_inbox_semantics() 
             message,
             code,
             runtime_kind,
+            service_failure_code,
+            provider_kind,
+            status_code,
+            retryable,
+            surface_visible,
         }
             if kind == "tool"
                 && message == "background only"
-                && code.is_none()
-                && runtime_kind.is_none()
+                && code.as_deref() == Some("api_stream_terminal")
+                && runtime_kind.as_deref() == Some("ModelError")
+                && service_failure_code.as_deref() == Some("api_stream_terminal")
+                && provider_kind.as_deref() == Some("anthropic")
+                && status_code == &Some(400)
+                && retryable == &Some(false)
+                && surface_visible == &Some(true)
     )));
     assert!(
         drain_remote_notifications(&app_state, "remote-boundary-session", Some("other-actor"))
