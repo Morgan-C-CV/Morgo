@@ -190,6 +190,13 @@ async fn plugin_runtime_exposes_command_hook_tool_and_diagnostics() {
     };
 
     assert!(help_text.contains("/demo-plugin-cmd — Demo plugin command"));
+    assert!(status_text.contains("Observability:"));
+    assert!(status_text.contains("- retryable_count: 0"));
+    assert!(status_text.contains("- terminal_count: 0"));
+    assert!(status_text.contains("- by_failure_code: none"));
+    assert!(status_text.contains("- by_provider_kind: none"));
+    assert!(status_text.contains("- compact_recovery_hits: none"));
+    assert!(status_text.contains("normalized runtime failure signals"));
     assert!(
         help_text
             .contains("/plugins — Inspect plugin inventory, diagnostics, and governance state")

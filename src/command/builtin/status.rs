@@ -136,6 +136,46 @@ impl Command for StatusCommand {
             app_state.cost_tracker.format_report()
         ));
 
+        let observability = app_state.service_observability_tracker.snapshot();
+        lines.push(String::new());
+        lines.push("Observability:".to_string());
+        lines.push(format!(
+            "- retryable_count: {}",
+            observability.retryable_count
+        ));
+        lines.push(format!(
+            "- terminal_count: {}",
+            observability.terminal_count
+        ));
+        if observability.by_failure_code.is_empty() {
+            lines.push("- by_failure_code: none".to_string());
+        } else {
+            lines.push("- by_failure_code:".to_string());
+            for (code, count) in observability.by_failure_code {
+                lines.push(format!("  - {}: {}", code, count));
+            }
+        }
+        if observability.by_provider_kind.is_empty() {
+            lines.push("- by_provider_kind: none".to_string());
+        } else {
+            lines.push("- by_provider_kind:".to_string());
+            for (provider_kind, count) in observability.by_provider_kind {
+                lines.push(format!("  - {}: {}", provider_kind, count));
+            }
+        }
+        if observability.compact_recovery_hits.is_empty() {
+            lines.push("- compact_recovery_hits: none".to_string());
+        } else {
+            lines.push("- compact_recovery_hits:".to_string());
+            for (kind, count) in observability.compact_recovery_hits {
+                lines.push(format!("  - {}: {}", kind, count));
+            }
+        }
+        lines.push(
+            "- note: buckets count normalized runtime failure signals, not unique error instances"
+                .to_string(),
+        );
+
         lines.push(String::new());
         lines.push("Commands:".to_string());
         lines.push(format!("- total: {}", registry_total));
