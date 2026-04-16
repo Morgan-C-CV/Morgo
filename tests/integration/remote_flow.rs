@@ -632,7 +632,13 @@ async fn remote_request_drains_async_remote_notifications() {
         .dispatch(InteractionSurface::Remote, actor_notification);
     app_state.notification_dispatcher.dispatch(
         InteractionSurface::Remote,
-        Notification::runtime_notice("remote-async-session", "tool", "background update"),
+        Notification::runtime_notice(
+            "remote-async-session",
+            "tool",
+            "background update",
+            None,
+            None,
+        ),
     );
 
     let drained =
@@ -659,8 +665,16 @@ async fn remote_request_drains_async_remote_notifications() {
     )));
     assert!(drained.iter().any(|event| matches!(
         &event.payload,
-        RemoteEventPayload::RuntimeNotice { kind, message }
-            if kind == "tool" && message == "background update"
+        RemoteEventPayload::RuntimeNotice {
+            kind,
+            message,
+            code,
+            runtime_kind,
+        }
+            if kind == "tool"
+                && message == "background update"
+                && code.is_none()
+                && runtime_kind.is_none()
     )));
     assert!(
         drain_remote_notifications(&app_state, "remote-async-session", Some("remote-actor"))
@@ -806,7 +820,13 @@ async fn remote_request_preserves_response_boundary_and_async_inbox_semantics() 
     };
     app_state.notification_dispatcher.dispatch(
         InteractionSurface::Remote,
-        Notification::runtime_notice("remote-boundary-session", "tool", "background only"),
+        Notification::runtime_notice(
+            "remote-boundary-session",
+            "tool",
+            "background only",
+            None,
+            None,
+        ),
     );
     let engine =
         rust_agent::core::engine::QueryEngine::new(rust_agent::core::context::QueryContext {
@@ -845,8 +865,16 @@ async fn remote_request_preserves_response_boundary_and_async_inbox_semantics() 
     assert!(response.events.iter().all(|event| {
         !matches!(
             &event.payload,
-            RemoteEventPayload::RuntimeNotice { kind, message }
-                if kind == "tool" && message == "background only"
+            RemoteEventPayload::RuntimeNotice {
+                kind,
+                message,
+                code,
+                runtime_kind,
+            }
+                if kind == "tool"
+                    && message == "background only"
+                    && code.is_none()
+                    && runtime_kind.is_none()
         )
     }));
 
@@ -855,8 +883,16 @@ async fn remote_request_preserves_response_boundary_and_async_inbox_semantics() 
     assert!(!drained.is_empty());
     assert!(drained.iter().any(|event| matches!(
         &event.payload,
-        RemoteEventPayload::RuntimeNotice { kind, message }
-            if kind == "tool" && message == "background only"
+        RemoteEventPayload::RuntimeNotice {
+            kind,
+            message,
+            code,
+            runtime_kind,
+        }
+            if kind == "tool"
+                && message == "background only"
+                && code.is_none()
+                && runtime_kind.is_none()
     )));
     assert!(
         drain_remote_notifications(&app_state, "remote-boundary-session", Some("other-actor"))

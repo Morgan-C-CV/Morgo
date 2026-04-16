@@ -55,6 +55,8 @@ pub enum RemoteEventPayload {
     RuntimeNotice {
         kind: String,
         message: String,
+        code: Option<String>,
+        runtime_kind: Option<String>,
     },
     ToolCallStarted {
         tool_name: String,
@@ -295,9 +297,19 @@ impl From<SurfaceItem> for RemoteEventEnvelope {
                     escalation_reasons,
                 },
             },
-            SurfaceItem::RuntimeNotice { kind, message } => Self {
+            SurfaceItem::RuntimeNotice {
+                kind,
+                message,
+                code,
+                runtime_kind,
+            } => Self {
                 event_type: "runtime_notice",
-                payload: RemoteEventPayload::RuntimeNotice { kind, message },
+                payload: RemoteEventPayload::RuntimeNotice {
+                    kind,
+                    message,
+                    code,
+                    runtime_kind,
+                },
             },
             SurfaceItem::ToolCallStarted { tool_name, input } => Self {
                 event_type: "tool_call_started",
@@ -418,6 +430,8 @@ impl From<Notification> for RemoteNotificationEnvelope {
                 payload: RemoteEventPayload::RuntimeNotice {
                     kind: notification.notice_kind.unwrap_or_else(|| "runtime".into()),
                     message: notification.body,
+                    code: notification.notice_code,
+                    runtime_kind: notification.runtime_kind,
                 },
             },
         }
@@ -474,11 +488,18 @@ fn notification_from_surface_item(
                 escalation_reasons: escalation_reasons.clone(),
             },
         )),
-        SurfaceItem::RuntimeNotice { kind, message } => {
+        SurfaceItem::RuntimeNotice {
+            kind,
+            message,
+            code,
+            runtime_kind,
+        } => {
             let mut notification = Notification::runtime_notice(
                 input.session_id.clone(),
                 kind.clone(),
                 message.clone(),
+                code.clone(),
+                runtime_kind.clone(),
             );
             notification.target = Some(NotificationTarget::RemoteActor {
                 session_id: input.session_id.clone(),
@@ -638,9 +659,18 @@ pub fn render_remote_response_debug(response: &RemoteResponse) -> String {
                 )
                 .expect("write approval event");
             }
-            RemoteEventPayload::RuntimeNotice { kind, message } => {
-                write!(&mut output, "kind={} message={}", kind, message)
-                    .expect("write notice event");
+            RemoteEventPayload::RuntimeNotice {
+                kind,
+                message,
+                code,
+                runtime_kind,
+            } => {
+                write!(
+                    &mut output,
+                    "kind={} message={} code={:?} runtime_kind={:?}",
+                    kind, message, code, runtime_kind
+                )
+                .expect("write notice event");
             }
             RemoteEventPayload::ToolCallStarted { tool_name, input } => {
                 write!(&mut output, "tool_name={} input={}", tool_name, input)

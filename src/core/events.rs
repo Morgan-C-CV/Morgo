@@ -22,6 +22,25 @@ impl SessionMilestone {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ServiceFailureCode {
+    ApiStreamError,
+    ApiProviderError,
+    McpRuntimeError,
+    CompactRecoveryError,
+}
+
+impl ServiceFailureCode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::ApiStreamError => "api_stream_error",
+            Self::ApiProviderError => "api_provider_error",
+            Self::McpRuntimeError => "mcp_runtime_error",
+            Self::CompactRecoveryError => "compact_recovery_error",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeEventKind {
     NormalTerminal,
@@ -36,6 +55,7 @@ pub enum RuntimeEventKind {
 pub struct RuntimeEventEnvelope {
     pub kind: RuntimeEventKind,
     pub detail: String,
+    pub code: Option<ServiceFailureCode>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,6 +87,7 @@ pub enum EngineEvent {
     Notice {
         kind: &'static str,
         message: String,
+        code: Option<ServiceFailureCode>,
     },
     CompactPlanIssued {
         kind: CompactPlanKind,

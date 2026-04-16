@@ -26,6 +26,8 @@ pub enum SurfaceItem {
     RuntimeNotice {
         kind: String,
         message: String,
+        code: Option<String>,
+        runtime_kind: Option<String>,
     },
     ToolCallStarted {
         tool_name: String,
@@ -129,9 +131,16 @@ fn surface_item_from_runtime_event(event: &CliRuntimeEvent) -> SurfaceItem {
             approval_kind: approval_kind.clone(),
             escalation_reasons: escalation_reasons.clone(),
         },
-        CliRuntimeEvent::Notice { kind, message } => SurfaceItem::RuntimeNotice {
+        CliRuntimeEvent::Notice {
+            kind,
+            message,
+            code,
+            runtime_kind,
+        } => SurfaceItem::RuntimeNotice {
             kind: kind.clone(),
             message: message.clone(),
+            code: code.clone(),
+            runtime_kind: runtime_kind.clone(),
         },
         CliRuntimeEvent::Transition { text } => SurfaceItem::Transition {
             kind: stable_transition_kind(text).to_string(),
@@ -160,7 +169,7 @@ impl SurfaceItem {
             Self::ApprovalRequired {
                 tool_name, message, ..
             } => format!("[approval] {tool_name}: {message}"),
-            Self::RuntimeNotice { kind, message } => format!("[notice:{kind}] {message}"),
+            Self::RuntimeNotice { kind, message, .. } => format!("[notice:{kind}] {message}"),
             Self::ToolCallStarted { tool_name, input } => {
                 format!("[tool-start] {tool_name}: {input}")
             }
@@ -224,6 +233,8 @@ pub enum WebItem {
     RuntimeNotice {
         notice_kind: String,
         message: String,
+        code: Option<String>,
+        runtime_kind: Option<String>,
     },
     ToolCallStarted {
         tool_name: String,
@@ -300,7 +311,9 @@ pub fn telegram_item_from_surface_item(item: &SurfaceItem) -> Option<TelegramIte
             tool_name: tool_name.clone(),
             message: message.clone(),
         }),
-        SurfaceItem::RuntimeNotice { kind, message } => telegram_runtime_notice_item(kind, message),
+        SurfaceItem::RuntimeNotice { kind, message, .. } => {
+            telegram_runtime_notice_item(kind, message)
+        }
         SurfaceItem::ToolCallStarted { .. }
         | SurfaceItem::ToolResult { .. }
         | SurfaceItem::AssistantDelta { .. }
@@ -360,9 +373,16 @@ pub fn web_item_from_surface_item(item: &SurfaceItem) -> WebItem {
             approval_kind: approval_kind.clone(),
             escalation_reasons: escalation_reasons.clone(),
         },
-        SurfaceItem::RuntimeNotice { kind, message } => WebItem::RuntimeNotice {
+        SurfaceItem::RuntimeNotice {
+            kind,
+            message,
+            code,
+            runtime_kind,
+        } => WebItem::RuntimeNotice {
             notice_kind: kind.clone(),
             message: message.clone(),
+            code: code.clone(),
+            runtime_kind: runtime_kind.clone(),
         },
         SurfaceItem::ToolCallStarted { tool_name, input } => WebItem::ToolCallStarted {
             tool_name: tool_name.clone(),

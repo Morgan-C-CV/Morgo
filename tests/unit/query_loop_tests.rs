@@ -322,7 +322,7 @@ async fn query_loop_surfaces_progress_record_summary_and_detail() {
     );
     assert!(result.events.iter().any(|event| matches!(
         event,
-        EngineEvent::Notice { kind, message }
+        EngineEvent::Notice { kind, message, .. }
             if kind == &"tool-progress"
                 && message.contains("ProgressFixture in progress")
                 && message.contains("42% complete")
@@ -377,7 +377,7 @@ async fn query_loop_progress_follow_up_uses_aggregated_summary_not_detail() {
     );
     assert!(result.events.iter().any(|event| matches!(
         event,
-        EngineEvent::Notice { kind, message }
+        EngineEvent::Notice { kind, message, .. }
             if kind == &"tool-progress"
                 && message.contains("42% complete")
     )));
@@ -534,7 +534,11 @@ async fn query_loop_surfaces_stream_errors_after_recovery_attempt() {
     );
     assert!(result.events.iter().any(|event| matches!(
         event,
-        EngineEvent::Notice { kind: "recovery", message }
+        EngineEvent::Notice {
+            kind: "recovery",
+            message,
+            ..
+        }
         if message.contains("collapse drain retry")
     )));
 }
@@ -928,6 +932,7 @@ async fn query_loop_stop_hook_blocking_continues_with_follow_up_turn() {
         EngineEvent::Notice {
             kind: "hook",
             message,
+            ..
         } if message.contains("blocking continuation retry")
     )));
 }
@@ -2076,7 +2081,9 @@ async fn query_loop_retries_with_model_fallback_before_other_stream_recovery() {
         EngineEvent::Notice {
             kind: "recovery",
             message,
+            code,
         } if message.contains("model fallback retry")
+            && code == &Some(rust_agent::core::events::ServiceFailureCode::ApiProviderError)
     )));
 }
 
@@ -2126,7 +2133,10 @@ async fn query_loop_escalates_fallback_failure_to_terminal_model_error() {
     assert_eq!(result.state, QueryLoopState::Failed);
     assert_eq!(
         result.terminal,
-        Terminal::ModelError("fatal after retries".into())
+        Terminal::ModelError {
+            message: "fatal after retries".into(),
+            code: Some(rust_agent::core::events::ServiceFailureCode::ApiStreamError),
+        }
     );
     assert_eq!(result.transition, Some(Continue::CollapseDrainRetry));
 }
@@ -2219,12 +2229,16 @@ async fn submit_turn_emits_runtime_events_for_compact_recovery_and_terminal_path
         EngineEvent::RuntimeEvent(runtime)
             if runtime.kind == rust_agent::core::events::RuntimeEventKind::CompactPlan
                 && runtime.detail.contains("ReactiveCompact")
+                && runtime.code
+                    == Some(rust_agent::core::events::ServiceFailureCode::CompactRecoveryError)
     )));
     assert!(result.events.iter().any(|event| matches!(
         event,
         EngineEvent::RuntimeEvent(runtime)
             if runtime.kind == rust_agent::core::events::RuntimeEventKind::RetryScheduled
                 && runtime.detail == Continue::ModelFallbackRetry.as_str()
+                && runtime.code
+                    == Some(rust_agent::core::events::ServiceFailureCode::ApiStreamError)
     )));
     assert!(result.events.iter().any(|event| matches!(
         event,

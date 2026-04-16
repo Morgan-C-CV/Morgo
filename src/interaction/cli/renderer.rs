@@ -136,7 +136,7 @@ fn render_block_for_surface_item(item: &SurfaceItem) -> RenderBlock {
             "Approval required",
             vec![format!("Tool: {tool_name}"), message.clone()],
         )),
-        SurfaceItem::RuntimeNotice { kind, message } => RenderBlock::Panel(render_panel(
+        SurfaceItem::RuntimeNotice { kind, message, .. } => RenderBlock::Panel(render_panel(
             PanelKind::Notice,
             format!("Notice: {kind}"),
             vec![message.clone()],

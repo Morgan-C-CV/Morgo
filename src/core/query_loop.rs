@@ -1,5 +1,5 @@
 use crate::core::context::QueryContext;
-use crate::core::events::EngineEvent;
+use crate::core::events::{EngineEvent, ServiceFailureCode};
 use crate::core::message::Message;
 use crate::hook::executor::{HookDecision, run_hook};
 use crate::hook::registry::HookEvent;
@@ -70,12 +70,19 @@ impl LoopState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Terminal {
     Completed,
-    MaxTurns { count: usize },
-    MaxBudget { budget_usd_cents: u64 },
+    MaxTurns {
+        count: usize,
+    },
+    MaxBudget {
+        budget_usd_cents: u64,
+    },
     StopHookPrevented,
     AbortedStreaming,
     AbortedTools,
-    ModelError(String),
+    ModelError {
+        message: String,
+        code: Option<ServiceFailureCode>,
+    },
 }
 
 impl Terminal {
@@ -87,7 +94,7 @@ impl Terminal {
             Self::StopHookPrevented => "stop_hook_prevented",
             Self::AbortedStreaming => "aborted_streaming",
             Self::AbortedTools => "aborted_tools",
-            Self::ModelError(_) => "model_error",
+            Self::ModelError { .. } => "model_error",
         }
     }
 }
@@ -278,6 +285,7 @@ fn prepare_turn(
                     "token budget continuation requested at input size {}",
                     prepared.token_estimate
                 ),
+                code: None,
             });
             if !params.messages.is_empty()
                 || state.transition == Some(Continue::TokenBudgetContinuation)
@@ -321,6 +329,7 @@ fn prepare_turn(
             events.push(EngineEvent::Notice {
                 kind: plan.notice_kind,
                 message: plan.notice_message,
+                code: Some(ServiceFailureCode::CompactRecoveryError),
             });
             events.push(EngineEvent::Transition(Continue::ReactiveCompactRetry));
             events.push(EngineEvent::MessageCommitted(compact_message.clone()));
@@ -358,11 +367,17 @@ fn process_user_input(
     }
     if let HookDecision::Deny(reason) = prompt_hook.decision {
         let denial = Message::assistant(format!("hook denied prompt: {reason}"));
-        events.push(EngineEvent::Terminal(Terminal::ModelError(reason)));
+        events.push(EngineEvent::Terminal(Terminal::ModelError {
+            message: reason,
+            code: None,
+        }));
         state.messages.push(denial);
         return Some(QueryLoopResult {
             state: QueryLoopState::Failed,
-            terminal: Terminal::ModelError("prompt denied by hook".into()),
+            terminal: Terminal::ModelError {
+                message: "prompt denied by hook".into(),
+                code: None,
+            },
             messages: state.messages.clone(),
             transition: state.transition.clone(),
             events: events.clone(),
@@ -526,6 +541,7 @@ async fn consume_model_stream(
                         "recorded usage for model {} (input={}, output={})",
                         usage.model, usage.input_tokens, usage.output_tokens
                     ),
+                    code: None,
                 });
             }
             StreamEvent::MessageStop { stop_reason } => match stop_reason {
@@ -564,7 +580,10 @@ async fn consume_model_stream(
                             events: engine_events,
                             decision: TurnDecision::Return(
                                 state.clone(),
-                                Terminal::ModelError("tool stop without tool payload".into()),
+                                Terminal::ModelError {
+                                    message: "tool stop without tool payload".into(),
+                                    code: None,
+                                },
                             ),
                         };
                     };
@@ -584,6 +603,7 @@ async fn consume_model_stream(
                         engine_events.push(EngineEvent::Notice {
                             kind: "recovery",
                             message: "escalating max output tokens after model stop".into(),
+                            code: None,
                         });
                         return TurnOutcome {
                             state: state.clone(),
@@ -601,6 +621,7 @@ async fn consume_model_stream(
                         engine_events.push(EngineEvent::Notice {
                             kind: "recovery",
                             message: "continuing after max output token interruption".into(),
+                            code: None,
                         });
                         return TurnOutcome {
                             state: state.clone(),
@@ -629,6 +650,7 @@ async fn consume_model_stream(
                         engine_events.push(EngineEvent::Notice {
                             kind: "recovery",
                             message: "stream stop error triggered model fallback retry".into(),
+                            code: Some(ServiceFailureCode::ApiStreamError),
                         });
                         return TurnOutcome {
                             state: state.clone(),
@@ -651,6 +673,7 @@ async fn consume_model_stream(
                     engine_events.push(EngineEvent::Notice {
                         kind: plan.notice_kind,
                         message: plan.notice_message.clone(),
+                        code: Some(ServiceFailureCode::CompactRecoveryError),
                     });
                     match plan.kind {
                         CompactPlanKind::ReactiveCompact => {
@@ -687,7 +710,10 @@ async fn consume_model_stream(
                                 events: engine_events,
                                 decision: TurnDecision::Return(
                                     state.clone(),
-                                    Terminal::ModelError("stream stopped with error".into()),
+                                    Terminal::ModelError {
+                                        message: "stream stopped with error".into(),
+                                        code: Some(ServiceFailureCode::ApiStreamError),
+                                    },
                                 ),
                             };
                         }
@@ -710,6 +736,7 @@ async fn consume_model_stream(
                             "model fallback retry triggered after stream error [{}]: {}",
                             error.kind, error.message
                         ),
+                        code: Some(classify_service_failure_code(&error.kind)),
                     });
                     return TurnOutcome {
                         state: state.clone(),
@@ -735,6 +762,7 @@ async fn consume_model_stream(
                 engine_events.push(EngineEvent::Notice {
                     kind: plan.notice_kind,
                     message: plan.notice_message.clone(),
+                    code: Some(ServiceFailureCode::CompactRecoveryError),
                 });
                 match plan.kind {
                     CompactPlanKind::ReactiveCompact => {
@@ -767,7 +795,10 @@ async fn consume_model_stream(
                             events: engine_events,
                             decision: TurnDecision::Return(
                                 state.clone(),
-                                Terminal::ModelError(error.message),
+                                Terminal::ModelError {
+                                    message: error.message,
+                                    code: Some(classify_service_failure_code(&error.kind)),
+                                },
                             ),
                         };
                     }
@@ -1171,7 +1202,10 @@ async fn execute_tool_phase(
                     events: engine_events,
                     decision: TurnDecision::Return(
                         state.clone(),
-                        Terminal::ModelError("tool orchestrator returned no outcome".into()),
+                        Terminal::ModelError {
+                            message: "tool orchestrator returned no outcome".into(),
+                            code: None,
+                        },
                     ),
                 },
             }
@@ -1192,6 +1226,7 @@ async fn execute_tool_phase(
                 message: format!(
                     "injecting missing tool result after tool failure for {tool_name}"
                 ),
+                code: None,
             });
             let failure = Message::assistant(format!("tool {tool_name} failed: {error}"));
             let missing_tool_result = Message::assistant(format!(
@@ -1243,9 +1278,11 @@ fn tool_notice_event(record: &ToolExecutionRecord) -> EngineEvent {
         ToolReportModifier::NeedsAttention => "tool-attention",
         ToolReportModifier::None => "tool",
     };
+    let code = mcp_runtime_failure_code(record.detail.as_deref());
     EngineEvent::Notice {
         kind,
         message: format!("{}: {}", record.summary, record_detail_or_summary(record)),
+        code,
     }
 }
 
@@ -1346,6 +1383,7 @@ fn finalize_normal_turn(
         events.push(EngineEvent::Notice {
             kind: "hook",
             message: "stop hook prevented continuation".into(),
+            code: None,
         });
         let terminal = Terminal::StopHookPrevented;
         events.push(EngineEvent::Terminal(terminal.clone()));
@@ -1364,6 +1402,7 @@ fn finalize_normal_turn(
         events.push(EngineEvent::Notice {
             kind: "hook",
             message: "stop hook requested blocking continuation retry".into(),
+            code: None,
         });
         return NormalTurnFinalization::Continue {
             loop_state: state,
@@ -1407,11 +1446,24 @@ fn finalize_turn(
 fn terminal_state(terminal: &Terminal) -> QueryLoopState {
     match terminal {
         Terminal::Completed | Terminal::StopHookPrevented => QueryLoopState::Completed,
-        Terminal::MaxTurns { .. } | Terminal::MaxBudget { .. } | Terminal::ModelError(_) => {
+        Terminal::MaxTurns { .. } | Terminal::MaxBudget { .. } | Terminal::ModelError { .. } => {
             QueryLoopState::Failed
         }
         Terminal::AbortedStreaming | Terminal::AbortedTools => QueryLoopState::Interrupted,
     }
+}
+
+fn classify_service_failure_code(error_kind: &str) -> ServiceFailureCode {
+    match error_kind {
+        "provider_stream" | "sse_protocol" => ServiceFailureCode::ApiStreamError,
+        _ => ServiceFailureCode::ApiProviderError,
+    }
+}
+
+fn mcp_runtime_failure_code(detail: Option<&str>) -> Option<ServiceFailureCode> {
+    detail
+        .filter(|value| value.contains("mcp") || value.contains("MCP"))
+        .map(|_| ServiceFailureCode::McpRuntimeError)
 }
 
 trait QueryLoopStateExt {

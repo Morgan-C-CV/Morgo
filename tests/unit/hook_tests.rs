@@ -185,6 +185,8 @@ fn notification_hook_can_match_typed_payload() {
         approval_kind: None,
         approval_escalation_reasons: Vec::new(),
         notice_kind: None,
+        notice_code: None,
+        runtime_kind: None,
         dedupe_key: None,
         wake_up: true,
         target: None,

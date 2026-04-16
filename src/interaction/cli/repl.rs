@@ -35,6 +35,8 @@ pub enum CliRuntimeEvent {
     Notice {
         kind: String,
         message: String,
+        code: Option<String>,
+        runtime_kind: Option<String>,
     },
     Transition {
         text: String,
@@ -64,7 +66,7 @@ impl CliRuntimeEvent {
             } => {
                 format!("[approval] {tool_name}: {message}")
             }
-            Self::Notice { kind, message } => format!("[notice:{kind}] {message}"),
+            Self::Notice { kind, message, .. } => format!("[notice:{kind}] {message}"),
             Self::Transition { text } => format!("[transition] {text}"),
             Self::Terminal { text } => format!("[terminal] {text}"),
             Self::SessionMilestone { text } => format!("[milestone] {text}"),
@@ -245,10 +247,16 @@ async fn collect_stream_messages(
                     escalation_reasons,
                 });
             }
-            EngineEvent::Notice { kind, message } => {
+            EngineEvent::Notice {
+                kind,
+                message,
+                code,
+            } => {
                 runtime_events.push(CliRuntimeEvent::Notice {
                     kind: kind.to_string(),
                     message,
+                    code: code.map(|value| value.as_str().to_string()),
+                    runtime_kind: None,
                 });
             }
             EngineEvent::CompactPlanIssued { kind, message } => {
@@ -264,6 +272,8 @@ async fn collect_stream_messages(
                         }
                     ),
                     message,
+                    code: Some("compact_recovery_error".into()),
+                    runtime_kind: Some("CompactPlan".into()),
                 });
             }
             EngineEvent::Transition(transition) => {
@@ -275,6 +285,8 @@ async fn collect_stream_messages(
                 runtime_events.push(CliRuntimeEvent::Notice {
                     kind: "runtime".into(),
                     message: format!("{:?}: {}", runtime.kind, runtime.detail),
+                    code: runtime.code.map(|value| value.as_str().to_string()),
+                    runtime_kind: Some(format!("{:?}", runtime.kind)),
                 });
             }
             EngineEvent::Terminal(terminal) => {

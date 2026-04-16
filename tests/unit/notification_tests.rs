@@ -148,6 +148,8 @@ fn dispatcher_records_cli_notifications() {
         approval_kind: None,
         approval_escalation_reasons: Vec::new(),
         notice_kind: None,
+        notice_code: None,
+        runtime_kind: None,
         dedupe_key: None,
         wake_up: true,
         target: None,
@@ -197,7 +199,7 @@ fn dispatcher_records_notification_hook_payloads_for_all_notification_types() {
     );
     dispatcher.dispatch(
         InteractionSurface::Cli,
-        Notification::runtime_notice("session-1", "tool", "runtime warning"),
+        Notification::runtime_notice("session-1", "tool", "runtime warning", None, None),
     );
 
     let events = registry.recorded_events();
@@ -350,6 +352,8 @@ fn cli_renderer_surfaces_implement_verify_and_risk_contract_lines() {
             CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::Notice {
                 kind: "validation".into(),
                 message: "Validation pending; final answer must call out unverified risk until verify completes.".into(),
+                code: None,
+                runtime_kind: None,
             }),
         ],
     });
@@ -500,6 +504,8 @@ fn cli_renderer_keeps_primary_text_before_mixed_panels_in_order() {
             CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::Notice {
                 kind: "validation".into(),
                 message: "verify before shipping".into(),
+                code: None,
+                runtime_kind: None,
             }),
             CliDisplayEvent::TaskEvent(TaskEvent {
                 owner: TaskOwner {
@@ -568,6 +574,8 @@ fn cli_renderer_supports_help_style_primary_text_with_mixed_panels() {
             CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::Notice {
                 kind: "runtime".into(),
                 message: "background work still running".into(),
+                code: None,
+                runtime_kind: None,
             }),
         ],
     });
@@ -593,6 +601,8 @@ fn cli_renderer_shared_document_path_preserves_text_output() {
         events: vec![CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::Notice {
             kind: "validation".into(),
             message: "verify before shipping".into(),
+            code: None,
+            runtime_kind: None,
         })],
     };
 
@@ -662,6 +672,8 @@ fn cli_renderer_builds_tui_screen_with_fixed_layout_sections() {
             CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::Notice {
                 kind: "validation".into(),
                 message: "verify before shipping".into(),
+                code: None,
+                runtime_kind: None,
             }),
             CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::ToolResult {
                 tool_name: "Read".into(),
@@ -848,6 +860,8 @@ fn remote_delivery_mode_classifies_dual_channel_and_response_only_surface_items(
     let notice_item = SurfaceItem::RuntimeNotice {
         kind: "validation".into(),
         message: "pending verify".into(),
+        code: Some("api_provider_error".into()),
+        runtime_kind: Some("ModelError".into()),
     };
     assert_eq!(
         remote_channel_kind_for_surface_item(&notice_item),
@@ -879,6 +893,8 @@ fn surface_view_classifies_cli_events_for_cli_and_remote_reuse() {
             CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::Notice {
                 kind: "validation".into(),
                 message: "pending verify".into(),
+                code: Some("api_provider_error".into()),
+                runtime_kind: Some("ModelError".into()),
             }),
             CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::ToolResult {
                 tool_name: "Read".into(),
@@ -895,8 +911,16 @@ fn surface_view_classifies_cli_events_for_cli_and_remote_reuse() {
     assert_eq!(view.items.len(), 2);
     assert!(matches!(
         &view.items[0],
-        rust_agent::interaction::view::SurfaceItem::RuntimeNotice { kind, message }
-            if kind == "validation" && message == "pending verify"
+        rust_agent::interaction::view::SurfaceItem::RuntimeNotice {
+            kind,
+            message,
+            code,
+            runtime_kind,
+        }
+            if kind == "validation"
+                && message == "pending verify"
+                && code.as_deref() == Some("api_provider_error")
+                && runtime_kind.as_deref() == Some("ModelError")
     ));
     assert!(matches!(
         &view.items[1],
@@ -1019,6 +1043,8 @@ fn remote_notification_envelope_preserves_task_type_and_uses_generic_fallback() 
             approval_kind: None,
             approval_escalation_reasons: Vec::new(),
             notice_kind: None,
+            notice_code: None,
+            runtime_kind: None,
             dedupe_key: None,
             wake_up: true,
             target: None,
@@ -1057,6 +1083,8 @@ fn telegram_view_keeps_only_telegram_relevant_semantic_items() {
             CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::Notice {
                 kind: "validation".into(),
                 message: "pending verify".into(),
+                code: None,
+                runtime_kind: None,
             }),
             CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::ToolResult {
                 tool_name: "Read".into(),
@@ -1105,10 +1133,14 @@ fn telegram_view_trims_shared_runtime_lifecycle_notices_but_keeps_surface_releva
             CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::Notice {
                 kind: "runtime".into(),
                 message: "NormalTerminal: completed".into(),
+                code: None,
+                runtime_kind: Some("NormalTerminal".into()),
             }),
             CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::Notice {
                 kind: "validation".into(),
                 message: "pending verify".into(),
+                code: None,
+                runtime_kind: None,
             }),
         ],
     }));
@@ -1201,6 +1233,8 @@ fn telegram_gateway_rejects_explicit_target_without_matching_binding() {
         approval_kind: Some("tool_permission".into()),
         approval_escalation_reasons: vec!["privileged_system".into()],
         notice_kind: None,
+        notice_code: None,
+        runtime_kind: None,
         dedupe_key: Some("approval_required:Bash:requires explicit approval".into()),
         wake_up: true,
         target: Some(NotificationTarget::Telegram(TelegramDeliveryTarget {
@@ -1382,6 +1416,8 @@ fn telegram_gateway_builds_semantic_outgoing_messages_without_cli_renderer_types
             CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::Notice {
                 kind: "delivery".into(),
                 message: "background work still running".into(),
+                code: None,
+                runtime_kind: None,
             }),
             CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::ToolResult {
                 tool_name: "Read".into(),
@@ -2014,6 +2050,8 @@ fn web_view_is_derived_from_surface_view_with_frontend_friendly_kinds() {
             CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::Notice {
                 kind: "runtime".into(),
                 message: "background work still running".into(),
+                code: Some("api_stream_error".into()),
+                runtime_kind: Some("RetryScheduled".into()),
             }),
             CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::Transition {
                 text: "next_turn".into(),
@@ -2040,8 +2078,16 @@ fn web_view_is_derived_from_surface_view_with_frontend_friendly_kinds() {
     ));
     assert!(matches!(
         &web_view.items[1],
-        WebItem::RuntimeNotice { notice_kind, message }
-            if notice_kind == "runtime" && message == "background work still running"
+        WebItem::RuntimeNotice {
+            notice_kind,
+            message,
+            code,
+            runtime_kind,
+        }
+            if notice_kind == "runtime"
+                && message == "background work still running"
+                && code.as_deref() == Some("api_stream_error")
+                && runtime_kind.as_deref() == Some("RetryScheduled")
     ));
     assert!(matches!(
         &web_view.items[2],
@@ -2091,6 +2137,8 @@ fn same_surface_view_feeds_remote_telegram_and_web_without_cli_renderer_types() 
             CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::Notice {
                 kind: "delivery".into(),
                 message: "background work still running".into(),
+                code: None,
+                runtime_kind: None,
             }),
         ],
     });
@@ -2146,7 +2194,7 @@ fn dispatcher_drains_remote_session_and_actor_notifications() {
     let dispatcher = NotificationDispatcher::new(TelegramGateway::default());
     dispatcher.dispatch(
         InteractionSurface::Remote,
-        Notification::runtime_notice("remote-session", "tool", "session scoped"),
+        Notification::runtime_notice("remote-session", "tool", "session scoped", None, None),
     );
     let mut actor_notification = Notification::approval_required(
         "remote-session",
@@ -2179,7 +2227,7 @@ fn dispatcher_drains_remote_session_and_actor_notifications() {
 
     dispatcher.dispatch(
         InteractionSurface::Remote,
-        Notification::runtime_notice("remote-session", "tool", "session only"),
+        Notification::runtime_notice("remote-session", "tool", "session only", None, None),
     );
     let session_only = dispatcher.drain_remote_notifications("remote-session", None);
     assert_eq!(session_only.len(), 1);
@@ -2199,12 +2247,12 @@ fn dispatcher_drains_remote_session_and_actor_notifications() {
 fn remote_drain_dedupes_session_and_actor_notifications() {
     let dispatcher = NotificationDispatcher::new(TelegramGateway::default());
     let mut session_notification =
-        Notification::runtime_notice("remote-session", "tool", "same message");
+        Notification::runtime_notice("remote-session", "tool", "same message", None, None);
     session_notification.dedupe_key = Some("notice-1".into());
     dispatcher.dispatch(InteractionSurface::Remote, session_notification);
 
     let mut actor_notification =
-        Notification::runtime_notice("remote-session", "tool", "same message");
+        Notification::runtime_notice("remote-session", "tool", "same message", None, None);
     actor_notification.dedupe_key = Some("notice-1".into());
     actor_notification.target = Some(NotificationTarget::RemoteActor {
         session_id: "remote-session".into(),
@@ -2431,6 +2479,8 @@ fn dispatcher_requires_delivery_ready_binding_for_telegram() {
         approval_kind: None,
         approval_escalation_reasons: Vec::new(),
         notice_kind: None,
+        notice_code: None,
+        runtime_kind: None,
         dedupe_key: None,
         wake_up: true,
         target: Some(NotificationTarget::Telegram(TelegramDeliveryTarget {
@@ -2485,7 +2535,7 @@ fn telegram_dispatch_only_enqueues_wake_up_notifications() {
     );
     dispatcher.dispatch(
         InteractionSurface::Telegram,
-        Notification::runtime_notice("telegram-session-1", "tool", "background only"),
+        Notification::runtime_notice("telegram-session-1", "tool", "background only", None, None),
     );
 
     let drained = dispatcher.drain_telegram_notifications("telegram-session-1");

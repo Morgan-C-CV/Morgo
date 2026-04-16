@@ -1,5 +1,7 @@
 use crate::core::context::QueryContext;
-use crate::core::events::{EngineEvent, RuntimeEventEnvelope, RuntimeEventKind, SessionMilestone};
+use crate::core::events::{
+    EngineEvent, RuntimeEventEnvelope, RuntimeEventKind, ServiceFailureCode, SessionMilestone,
+};
 use crate::core::message::Message;
 use crate::core::query_loop::{QueryLoopResult, run_query_loop};
 use crate::history::session::{SessionHistoryEntry, SessionId};
@@ -88,6 +90,7 @@ impl QueryEngine {
         let session_store = self.context.app_state.session_store.as_ref();
         let session_id = SessionId(self.context.app_state.active_session_id.clone());
         let mut persisted_events = Vec::new();
+        let compact_plan_code = compact_plan_code_from_events(&events);
 
         if let Some(session_store) = session_store {
             session_store.append_entry(
@@ -163,7 +166,7 @@ impl QueryEngine {
                 }
                 EngineEvent::CompactPlanIssued { kind, message } => {
                     persisted_events.push(EngineEvent::RuntimeEvent(
-                        runtime_event_for_compact_plan(kind, message),
+                        runtime_event_for_compact_plan(kind, message, compact_plan_code.clone()),
                     ));
                     persisted_events.push(event.clone());
                 }
@@ -199,49 +202,76 @@ impl QueryEngine {
 fn runtime_event_for_transition(
     transition: &crate::core::query_loop::Continue,
 ) -> RuntimeEventEnvelope {
-    let kind = match transition {
+    let (kind, code) = match transition {
         crate::core::query_loop::Continue::ReactiveCompactRetry
-        | crate::core::query_loop::Continue::CollapseDrainRetry
-        | crate::core::query_loop::Continue::MaxOutputTokensEscalate
+        | crate::core::query_loop::Continue::CollapseDrainRetry => (
+            RuntimeEventKind::RetryScheduled,
+            Some(ServiceFailureCode::CompactRecoveryError),
+        ),
+        crate::core::query_loop::Continue::ModelFallbackRetry => (
+            RuntimeEventKind::RetryScheduled,
+            Some(ServiceFailureCode::ApiStreamError),
+        ),
+        crate::core::query_loop::Continue::MaxOutputTokensEscalate
         | crate::core::query_loop::Continue::MaxOutputTokensRecovery
-        | crate::core::query_loop::Continue::ModelFallbackRetry
         | crate::core::query_loop::Continue::TokenBudgetContinuation => {
-            RuntimeEventKind::RetryScheduled
+            (RuntimeEventKind::RetryScheduled, None)
         }
-        crate::core::query_loop::Continue::StopHookBlocking => RuntimeEventKind::StopHookBlocking,
+        crate::core::query_loop::Continue::StopHookBlocking => {
+            (RuntimeEventKind::StopHookBlocking, None)
+        }
         crate::core::query_loop::Continue::NextTurn
-        | crate::core::query_loop::Continue::ToolUseFollowUp => RuntimeEventKind::NormalTerminal,
+        | crate::core::query_loop::Continue::ToolUseFollowUp => {
+            (RuntimeEventKind::NormalTerminal, None)
+        }
     };
     RuntimeEventEnvelope {
         kind,
         detail: transition.as_str().into(),
+        code,
     }
 }
 
 fn runtime_event_for_terminal(
     terminal: &crate::core::query_loop::Terminal,
 ) -> RuntimeEventEnvelope {
-    let kind = match terminal {
-        crate::core::query_loop::Terminal::Completed => RuntimeEventKind::NormalTerminal,
-        crate::core::query_loop::Terminal::StopHookPrevented => RuntimeEventKind::StopHookPrevented,
-        crate::core::query_loop::Terminal::ModelError(_) => RuntimeEventKind::ModelError,
+    let (kind, code) = match terminal {
+        crate::core::query_loop::Terminal::Completed => (RuntimeEventKind::NormalTerminal, None),
+        crate::core::query_loop::Terminal::StopHookPrevented => {
+            (RuntimeEventKind::StopHookPrevented, None)
+        }
+        crate::core::query_loop::Terminal::ModelError { code, .. } => {
+            (RuntimeEventKind::ModelError, code.clone())
+        }
         crate::core::query_loop::Terminal::MaxTurns { .. }
         | crate::core::query_loop::Terminal::MaxBudget { .. }
         | crate::core::query_loop::Terminal::AbortedStreaming
-        | crate::core::query_loop::Terminal::AbortedTools => RuntimeEventKind::RetryScheduled,
+        | crate::core::query_loop::Terminal::AbortedTools => {
+            (RuntimeEventKind::RetryScheduled, None)
+        }
     };
     RuntimeEventEnvelope {
         kind,
         detail: terminal.as_str().into(),
+        code,
     }
 }
 
 fn runtime_event_for_compact_plan(
     kind: &crate::service::compact::CompactPlanKind,
     message: &str,
+    code: Option<ServiceFailureCode>,
 ) -> RuntimeEventEnvelope {
     RuntimeEventEnvelope {
         kind: RuntimeEventKind::CompactPlan,
         detail: format!("{:?}: {}", kind, message),
+        code,
     }
+}
+
+fn compact_plan_code_from_events(events: &[EngineEvent]) -> Option<ServiceFailureCode> {
+    events.iter().find_map(|event| match event {
+        EngineEvent::CompactPlanIssued { .. } => Some(ServiceFailureCode::CompactRecoveryError),
+        _ => None,
+    })
 }
