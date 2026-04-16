@@ -545,7 +545,9 @@ impl RuntimeBootstrap {
             plugin_load_result: Some(plugin_load_result.clone()),
             cost_tracker: CostTracker::default(),
             notification_dispatcher: notification_dispatcher.clone(),
-            audit_log: Arc::new(Mutex::new(AuditLog::default())),
+            audit_log: Arc::new(Mutex::new(AuditLog::file_backed(
+                AuditLog::default_root_from(&state.current_cwd),
+            ))),
             startup_trace: state
                 .phases
                 .iter()
@@ -617,7 +619,11 @@ impl RuntimeBootstrap {
                 initialize_bundle.provider_config.pricing.clone(),
             ),
             notification_dispatcher: initialize_bundle.notification_dispatcher.clone(),
-            audit_log: Arc::new(Mutex::new(AuditLog::default())),
+            audit_log: Arc::new(Mutex::new(AuditLog::file_backed(
+                AuditLog::default_root_from(&std::path::PathBuf::from(
+                    resolved_session.snapshot.cwd.clone(),
+                )),
+            ))),
             startup_trace: state
                 .phases
                 .iter()

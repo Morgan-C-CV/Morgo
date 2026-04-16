@@ -1,4 +1,7 @@
+use std::fs;
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use rust_agent::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
@@ -18,7 +21,7 @@ use rust_agent::interaction::remote::{
 };
 use rust_agent::interaction::telegram::gateway::TelegramGateway;
 use rust_agent::plan::manager::PlanManager;
-use rust_agent::security::audit::AuditEvent;
+use rust_agent::security::audit::{AuditEvent, AuditLog};
 use rust_agent::security::authorizer::{DefaultSurfaceAuthorizer, SurfaceAdmissionPolicy};
 use rust_agent::service::api::client::ModelProviderClient;
 use rust_agent::service::api::streaming::{StopReason, StreamEvent};
@@ -29,6 +32,14 @@ use rust_agent::task::manager::TaskManager;
 use rust_agent::tool::builtin::bash::BashTool;
 use rust_agent::tool::registry::ToolRegistry;
 use tokio::sync::RwLock;
+
+fn unique_temp_path(prefix: &str) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock should be after unix epoch")
+        .as_nanos();
+    std::env::temp_dir().join(format!("{prefix}-{nanos}"))
+}
 
 struct RemoteSpawnTaskCommand;
 
@@ -326,7 +337,8 @@ async fn remote_request_records_accept_and_notification_audit_events() {
         .with_task_manager(Arc::new(TaskManager::default()))
         .with_plan_manager(Arc::new(PlanManager::default()));
     let session_store = Arc::new(InMemorySessionStore::default());
-    let audit_log = Arc::new(std::sync::Mutex::new(rust_agent::security::audit::AuditLog::default()));
+    let audit_root = unique_temp_path("remote-audit");
+    let audit_log = Arc::new(std::sync::Mutex::new(AuditLog::file_backed(audit_root.clone())));
     let app_state = AppState {
         surface: InteractionSurface::Remote,
         session_mode: SessionMode::Interactive,
@@ -421,6 +433,22 @@ async fn remote_request_records_accept_and_notification_audit_events() {
             && actor_id.as_deref() == Some("audit-actor")
             && notification_type == "approval_required"
     )));
+    let records = audit_log.lock().expect("audit log poisoned").load_records();
+    assert!(records.iter().any(|record| {
+        record.event_kind == "remote_request_accepted"
+            && record.session_id.as_deref() == Some("remote-audit-session")
+            && record.actor_id.as_deref() == Some("audit-actor")
+            && record.surface.as_deref() == Some("remote")
+            && record.outcome == "accepted"
+    }));
+    assert!(records.iter().any(|record| {
+        record.event_kind == "remote_notification_queued"
+            && record.session_id.as_deref() == Some("remote-audit-session")
+            && record.actor_id.as_deref() == Some("audit-actor")
+            && record.surface.as_deref() == Some("remote")
+            && record.outcome == "queued"
+    }));
+    let _ = fs::remove_dir_all(audit_root);
 }
 
 #[tokio::test]
@@ -440,7 +468,8 @@ async fn remote_request_denies_not_allowlisted_and_records_audit_event() {
             abuse_denial_threshold: None,
         });
     let session_store = Arc::new(InMemorySessionStore::default());
-    let audit_log = Arc::new(std::sync::Mutex::new(rust_agent::security::audit::AuditLog::default()));
+    let audit_root = unique_temp_path("remote-audit-denied");
+    let audit_log = Arc::new(std::sync::Mutex::new(AuditLog::file_backed(audit_root.clone())));
     let app_state = AppState {
         surface: InteractionSurface::Remote,
         session_mode: SessionMode::Interactive,
@@ -510,6 +539,15 @@ async fn remote_request_denies_not_allowlisted_and_records_audit_event() {
             && reason.contains("not allowlisted")
     )));
     assert!(!events.iter().any(|event| matches!(event, AuditEvent::RemoteRequestAccepted { .. })));
+    let records = audit_log.lock().expect("audit log poisoned").load_records();
+    assert!(records.iter().any(|record| {
+        record.event_kind == "remote_request_denied"
+            && record.session_id.as_deref() == Some("remote-audit-session")
+            && record.actor_id.as_deref() == Some("audit-actor")
+            && record.surface.as_deref() == Some("remote")
+            && record.outcome == "denied"
+    }));
+    let _ = fs::remove_dir_all(audit_root);
 }
 
 #[tokio::test]
