@@ -2,10 +2,10 @@ use crate::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSourc
 use crate::history::session::{
     SessionHistory, SessionId, SessionRestoreRequest, SessionSnapshot, SessionStore,
 };
+use crate::history::transcript::Transcript;
 use crate::state::permission_context::{
     sanitize_external_memory_entries, sanitize_nested_memory_lineage,
 };
-use crate::history::transcript::Transcript;
 use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

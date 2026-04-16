@@ -18,6 +18,7 @@ pub mod sandbox;
 pub mod security;
 pub mod sed_validation;
 
+use crate::tool::classifier::auto_classifier::{ClassifierDecision, classify_bash_command};
 use command_helpers::{command_matches_rule, normalized_command_variants};
 use permissions::evaluate_bash_policy;
 use sandbox::{SandboxPolicy, execute_with_sandbox};
@@ -140,32 +141,33 @@ impl Tool for BashTool {
 
         if input.dangerously_disable_sandbox {
             return PermissionDecision::Ask {
-                message: "bash command requests disabling sandbox protections".into(),
+                message: format_bash_warning(
+                    "sandbox_disable",
+                    "command requests disabling sandbox protections",
+                ),
                 reason: crate::tool::definition::PermissionDecisionReason::Safety,
             };
         }
 
-        match crate::tool::classifier::auto_classifier::classify_bash_command(&input.command) {
-            crate::tool::classifier::auto_classifier::ClassifierDecision::Deny(message) => {
+        match classify_bash_command(&input.command) {
+            ClassifierDecision::Deny { code, warning } => {
                 return PermissionDecision::Deny {
-                    message,
+                    message: format_bash_denial(code, &warning),
                     reason: crate::tool::definition::PermissionDecisionReason::Safety,
                 };
             }
-            crate::tool::classifier::auto_classifier::ClassifierDecision::Ask(message) => {
+            ClassifierDecision::Ask { code, warning } => {
                 return PermissionDecision::Ask {
-                    message,
+                    message: format_bash_warning(code, &warning),
                     reason: crate::tool::definition::PermissionDecisionReason::Safety,
                 };
             }
-            crate::tool::classifier::auto_classifier::ClassifierDecision::Allow => {}
+            ClassifierDecision::Allow => {}
         }
 
         if policy.requires_escalation {
             return PermissionDecision::Ask {
-                message:
-                    "bash command requires explicit approval due to shell semantics or path risk"
-                        .into(),
+                message: format_policy_warning(&policy),
                 reason: crate::tool::definition::PermissionDecisionReason::Safety,
             };
         }
@@ -206,6 +208,26 @@ impl Tool for BashTool {
 
 fn parse_input(raw: &str) -> anyhow::Result<BashInput> {
     serde_json::from_str(raw).map_err(|error| anyhow::anyhow!("invalid bash input: {error}"))
+}
+
+fn format_bash_warning(code: &str, warning: &str) -> String {
+    format!("bash command warning [{code}]: {warning}")
+}
+
+fn format_bash_denial(code: &str, warning: &str) -> String {
+    format!("bash command denied [{code}]: {warning}")
+}
+
+fn format_policy_warning(policy: &permissions::BashPolicyDecision) -> String {
+    let reasons = if policy.escalation_reasons.is_empty() {
+        "none".to_string()
+    } else {
+        policy.escalation_reasons.join(", ")
+    };
+    format!(
+        "bash command warning [policy_escalation]: explicit approval required; sandbox={:?}; reasons={reasons}",
+        policy.sandbox_policy
+    )
 }
 
 async fn launch_background_command(

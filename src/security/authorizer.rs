@@ -26,9 +26,7 @@ impl AuthDenyCategory {
 
     pub fn remote_denial_message(self) -> &'static str {
         match self {
-            AuthDenyCategory::Unauthenticated => {
-                "Denied: unauthenticated actor for remote surface"
-            }
+            AuthDenyCategory::Unauthenticated => "Denied: unauthenticated actor for remote surface",
             AuthDenyCategory::NotAllowlisted => {
                 "Denied: actor is not allowlisted for remote surface"
             }
@@ -215,9 +213,10 @@ impl SurfaceAuthorizer for DefaultSurfaceAuthorizer {
                 };
             }
 
-            if policy.max_requests_per_window.is_some_and(|limit| {
-                tracker.recent_requests.len() >= limit
-            }) {
+            if policy
+                .max_requests_per_window
+                .is_some_and(|limit| tracker.recent_requests.len() >= limit)
+            {
                 tracker.consecutive_denials += 1;
                 return AuthDecision::Deny {
                     category: AuthDenyCategory::RateLimited,

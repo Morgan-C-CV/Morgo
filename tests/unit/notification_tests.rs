@@ -7,14 +7,11 @@ use rust_agent::command::types::{
     Command, CommandAvailability, CommandMetadata, CommandResult, CommandSource, CommandType,
 };
 use rust_agent::cost::tracker::CostTracker;
-use rust_agent::history::session::{InMemorySessionStore, SessionHistory, SessionRestoreRequest, SessionSnapshot, SessionStore};
+use rust_agent::history::session::{
+    InMemorySessionStore, SessionHistory, SessionRestoreRequest, SessionSnapshot, SessionStore,
+};
 use rust_agent::hook::registry::{
     HookEvent, HookEventMatcher, HookRegistry, HookRule, HookRuleLayer,
-};
-use rust_agent::security::audit::AuditLog;
-use rust_agent::security::authorizer::{
-    AuthDecision, AuthDenyCategory, DefaultSurfaceAuthorizer, SurfaceAdmissionPolicy,
-    SurfaceAuthorizer,
 };
 use rust_agent::interaction::cli::renderer::{
     build_tui_screen, render_document_output, render_document_tui_output, render_turn_document,
@@ -49,6 +46,11 @@ use rust_agent::interaction::view::{
     surface_item_from_cli_event,
 };
 use rust_agent::plan::manager::PlanManager;
+use rust_agent::security::audit::AuditLog;
+use rust_agent::security::authorizer::{
+    AuthDecision, AuthDenyCategory, DefaultSurfaceAuthorizer, SurfaceAdmissionPolicy,
+    SurfaceAuthorizer,
+};
 use rust_agent::service::api::client::ModelProviderClient;
 use rust_agent::service::api::streaming::{StopReason, StreamEvent};
 use rust_agent::service::compact::reactive_compact::ReactiveCompactor;
@@ -1151,22 +1153,25 @@ fn telegram_gateway_rejects_explicit_target_without_matching_binding() {
 #[test]
 fn telegram_gateway_authorizes_telegram_principal_separately_from_delivery_readiness() {
     let gateway = TelegramGateway {
-        allowed_bindings: vec![SessionBinding {
-            actor_id: "actor-1".into(),
-            session_id: "telegram-session-1".into(),
-            telegram_user_id: Some("user-1".into()),
-            bot_id: Some("bot-1".into()),
-            delivery_target: Some(TelegramDeliveryTarget {
-                chat_id: "chat-1".into(),
-                thread_id: None,
-            }),
-        }, SessionBinding {
-            actor_id: "actor-2".into(),
-            session_id: "telegram-session-2".into(),
-            telegram_user_id: Some("user-2".into()),
-            bot_id: Some("bot-1".into()),
-            delivery_target: None,
-        }],
+        allowed_bindings: vec![
+            SessionBinding {
+                actor_id: "actor-1".into(),
+                session_id: "telegram-session-1".into(),
+                telegram_user_id: Some("user-1".into()),
+                bot_id: Some("bot-1".into()),
+                delivery_target: Some(TelegramDeliveryTarget {
+                    chat_id: "chat-1".into(),
+                    thread_id: None,
+                }),
+            },
+            SessionBinding {
+                actor_id: "actor-2".into(),
+                session_id: "telegram-session-2".into(),
+                telegram_user_id: Some("user-2".into()),
+                bot_id: Some("bot-1".into()),
+                delivery_target: None,
+            },
+        ],
         surface_authorizer: DefaultSurfaceAuthorizer::default(),
     };
 
@@ -1567,20 +1572,16 @@ fn telegram_inbound_intake_rejects_not_allowlisted_rate_limited_and_abuse_blocke
 
 #[test]
 fn authorizer_uses_audit_aligned_deny_reason_codes() {
-    let authorizer = DefaultSurfaceAuthorizer::default().with_remote_policy(SurfaceAdmissionPolicy {
-        allowlisted_actors: ["approved-actor".to_string()].into_iter().collect(),
-        max_requests_per_window: Some(1),
-        window_seconds: 60,
-        abuse_denial_threshold: Some(2),
-    });
+    let authorizer =
+        DefaultSurfaceAuthorizer::default().with_remote_policy(SurfaceAdmissionPolicy {
+            allowlisted_actors: ["approved-actor".to_string()].into_iter().collect(),
+            max_requests_per_window: Some(1),
+            window_seconds: 60,
+            abuse_denial_threshold: Some(2),
+        });
 
-    let unauthenticated = NormalizedInput::from_remote_raw(
-        "session-1",
-        "actor-1",
-        false,
-        true,
-        "hello",
-    );
+    let unauthenticated =
+        NormalizedInput::from_remote_raw("session-1", "actor-1", false, true, "hello");
     assert_eq!(
         authorizer.authorize(&unauthenticated),
         AuthDecision::Deny {
@@ -1589,13 +1590,8 @@ fn authorizer_uses_audit_aligned_deny_reason_codes() {
         }
     );
 
-    let not_allowlisted = NormalizedInput::from_remote_raw(
-        "session-1",
-        "actor-1",
-        true,
-        true,
-        "hello",
-    );
+    let not_allowlisted =
+        NormalizedInput::from_remote_raw("session-1", "actor-1", true, true, "hello");
     assert_eq!(
         authorizer.authorize(&not_allowlisted),
         AuthDecision::Deny {
@@ -1611,22 +1607,19 @@ fn authorizer_uses_audit_aligned_deny_reason_codes() {
         }
     );
 
-    let rate_limited_authorizer = DefaultSurfaceAuthorizer::default().with_remote_policy(
-        SurfaceAdmissionPolicy {
+    let rate_limited_authorizer =
+        DefaultSurfaceAuthorizer::default().with_remote_policy(SurfaceAdmissionPolicy {
             allowlisted_actors: std::collections::HashSet::new(),
             max_requests_per_window: Some(1),
             window_seconds: 60,
             abuse_denial_threshold: None,
-        },
+        });
+    let rate_limited =
+        NormalizedInput::from_remote_raw("session-2", "actor-2", true, true, "hello");
+    assert_eq!(
+        rate_limited_authorizer.authorize(&rate_limited),
+        AuthDecision::Allow
     );
-    let rate_limited = NormalizedInput::from_remote_raw(
-        "session-2",
-        "actor-2",
-        true,
-        true,
-        "hello",
-    );
-    assert_eq!(rate_limited_authorizer.authorize(&rate_limited), AuthDecision::Allow);
     assert_eq!(
         rate_limited_authorizer.authorize(&rate_limited),
         AuthDecision::Deny {
@@ -1635,13 +1628,8 @@ fn authorizer_uses_audit_aligned_deny_reason_codes() {
         }
     );
 
-    let command_blocked = NormalizedInput::from_remote_raw(
-        "session-3",
-        "actor-3",
-        true,
-        true,
-        "/permissions",
-    );
+    let command_blocked =
+        NormalizedInput::from_remote_raw("session-3", "actor-3", true, true, "/permissions");
     let command_authorizer = DefaultSurfaceAuthorizer::default();
     assert_eq!(
         command_authorizer.authorize(&command_blocked),
@@ -1723,7 +1711,8 @@ fn telegram_transport_adapter_preserves_rejection_reason() {
 
 #[tokio::test]
 async fn telegram_runtime_entry_routes_authorized_input_into_shared_runtime_and_messages() {
-    let command_registry = Arc::new(CommandRegistry::new().register(Arc::new(TelegramPromptCommand)));
+    let command_registry =
+        Arc::new(CommandRegistry::new().register(Arc::new(TelegramPromptCommand)));
     let router = rust_agent::interaction::router::CommandRouter::new(
         command_registry.clone(),
         Box::new(DefaultSurfaceAuthorizer::default()),
@@ -1759,23 +1748,24 @@ async fn telegram_runtime_entry_routes_authorized_input_into_shared_runtime_and_
         session_store.clone(),
         "bootstrap-telegram-session",
     );
-    let engine = rust_agent::core::engine::QueryEngine::new(rust_agent::core::context::QueryContext {
-        app_state: app_state.clone(),
-        tool_registry: ToolRegistry::new(),
-        api_client: ModelProviderClient::with_scripted_turns(vec![vec![
-            StreamEvent::MessageStart,
-            StreamEvent::TextDelta("telegram runtime reply".into()),
-            StreamEvent::MessageStop {
-                stop_reason: StopReason::EndTurn,
-            },
-        ]]),
-        compactor: ReactiveCompactor,
-        hook_registry: rust_agent::hook::registry::HookRegistry::default(),
-        agent_id: None,
-        system_prompt: "test system".into(),
-        tools_prompt: "test tools".into(),
-        context_prompt: "test context".into(),
-    });
+    let engine =
+        rust_agent::core::engine::QueryEngine::new(rust_agent::core::context::QueryContext {
+            app_state: app_state.clone(),
+            tool_registry: ToolRegistry::new(),
+            api_client: ModelProviderClient::with_scripted_turns(vec![vec![
+                StreamEvent::MessageStart,
+                StreamEvent::TextDelta("telegram runtime reply".into()),
+                StreamEvent::MessageStop {
+                    stop_reason: StopReason::EndTurn,
+                },
+            ]]),
+            compactor: ReactiveCompactor,
+            hook_registry: rust_agent::hook::registry::HookRegistry::default(),
+            agent_id: None,
+            system_prompt: "test system".into(),
+            tools_prompt: "test tools".into(),
+            context_prompt: "test context".into(),
+        });
 
     let response = handle_telegram_envelope(
         &router,
@@ -1819,7 +1809,9 @@ async fn telegram_runtime_entry_routes_authorized_input_into_shared_runtime_and_
         })
         .unwrap_or((
             SessionSnapshot {
-                session_id: rust_agent::history::session::SessionId("bootstrap-telegram-session".into()),
+                session_id: rust_agent::history::session::SessionId(
+                    "bootstrap-telegram-session".into(),
+                ),
                 surface: InteractionSurface::Telegram,
                 session_mode: SessionMode::Interactive,
                 cwd: String::new(),
@@ -1849,7 +1841,8 @@ async fn telegram_runtime_entry_routes_authorized_input_into_shared_runtime_and_
 
 #[tokio::test]
 async fn telegram_runtime_entry_preserves_rejection_without_running_shared_runtime() {
-    let command_registry = Arc::new(CommandRegistry::new().register(Arc::new(TelegramPromptCommand)));
+    let command_registry =
+        Arc::new(CommandRegistry::new().register(Arc::new(TelegramPromptCommand)));
     let router = rust_agent::interaction::router::CommandRouter::new(
         command_registry.clone(),
         Box::new(DefaultSurfaceAuthorizer::default()),
@@ -1874,23 +1867,24 @@ async fn telegram_runtime_entry_preserves_rejection_without_running_shared_runti
         session_store.clone(),
         "bootstrap-telegram-session",
     );
-    let engine = rust_agent::core::engine::QueryEngine::new(rust_agent::core::context::QueryContext {
-        app_state: app_state.clone(),
-        tool_registry: ToolRegistry::new(),
-        api_client: ModelProviderClient::with_scripted_turns(vec![vec![
-            StreamEvent::MessageStart,
-            StreamEvent::TextDelta("should not run".into()),
-            StreamEvent::MessageStop {
-                stop_reason: StopReason::EndTurn,
-            },
-        ]]),
-        compactor: ReactiveCompactor,
-        hook_registry: rust_agent::hook::registry::HookRegistry::default(),
-        agent_id: None,
-        system_prompt: "test system".into(),
-        tools_prompt: "test tools".into(),
-        context_prompt: "test context".into(),
-    });
+    let engine =
+        rust_agent::core::engine::QueryEngine::new(rust_agent::core::context::QueryContext {
+            app_state: app_state.clone(),
+            tool_registry: ToolRegistry::new(),
+            api_client: ModelProviderClient::with_scripted_turns(vec![vec![
+                StreamEvent::MessageStart,
+                StreamEvent::TextDelta("should not run".into()),
+                StreamEvent::MessageStop {
+                    stop_reason: StopReason::EndTurn,
+                },
+            ]]),
+            compactor: ReactiveCompactor,
+            hook_registry: rust_agent::hook::registry::HookRegistry::default(),
+            agent_id: None,
+            system_prompt: "test system".into(),
+            tools_prompt: "test tools".into(),
+            context_prompt: "test context".into(),
+        });
 
     let response = handle_telegram_envelope(
         &router,

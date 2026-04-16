@@ -119,7 +119,9 @@ async fn remote_request_runs_minimal_query_chain() {
         plugin_load_result: None,
         cost_tracker: CostTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
-        audit_log: Arc::new(std::sync::Mutex::new(rust_agent::security::audit::AuditLog::default())),
+        audit_log: Arc::new(std::sync::Mutex::new(
+            rust_agent::security::audit::AuditLog::default(),
+        )),
         startup_trace: Vec::new(),
         active_session_id: "remote-e2e-session".into(),
         session_store: Some(session_store.clone()),
@@ -254,7 +256,9 @@ async fn remote_request_uses_shared_session_apply_contract() {
         plugin_load_result: None,
         cost_tracker: CostTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
-        audit_log: Arc::new(std::sync::Mutex::new(rust_agent::security::audit::AuditLog::default())),
+        audit_log: Arc::new(std::sync::Mutex::new(
+            rust_agent::security::audit::AuditLog::default(),
+        )),
         startup_trace: Vec::new(),
         active_session_id: "bootstrap-session".into(),
         session_store: Some(session_store.clone()),
@@ -338,7 +342,9 @@ async fn remote_request_records_accept_and_notification_audit_events() {
         .with_plan_manager(Arc::new(PlanManager::default()));
     let session_store = Arc::new(InMemorySessionStore::default());
     let audit_root = unique_temp_path("remote-audit");
-    let audit_log = Arc::new(std::sync::Mutex::new(AuditLog::file_backed(audit_root.clone())));
+    let audit_log = Arc::new(std::sync::Mutex::new(AuditLog::file_backed(
+        audit_root.clone(),
+    )));
     let app_state = AppState {
         surface: InteractionSurface::Remote,
         session_mode: SessionMode::Interactive,
@@ -403,7 +409,11 @@ async fn remote_request_records_accept_and_notification_audit_events() {
     .await
     .expect("remote request should succeed");
 
-    assert!(response.primary_text.contains("approval required for Bash:"));
+    assert!(
+        response
+            .primary_text
+            .contains("approval required for Bash:")
+    );
     assert!(response.events.iter().any(|event| matches!(
         &event.payload,
         RemoteEventPayload::ApprovalRequired {
@@ -412,7 +422,11 @@ async fn remote_request_records_accept_and_notification_audit_events() {
         } if tool_name == "Bash"
     )));
 
-    let events = audit_log.lock().expect("audit log poisoned").events().to_vec();
+    let events = audit_log
+        .lock()
+        .expect("audit log poisoned")
+        .events()
+        .to_vec();
     assert!(events.iter().any(|event| matches!(
         event,
         AuditEvent::RemoteRequestAccepted {
@@ -469,7 +483,9 @@ async fn remote_request_denies_not_allowlisted_and_records_audit_event() {
         });
     let session_store = Arc::new(InMemorySessionStore::default());
     let audit_root = unique_temp_path("remote-audit-denied");
-    let audit_log = Arc::new(std::sync::Mutex::new(AuditLog::file_backed(audit_root.clone())));
+    let audit_log = Arc::new(std::sync::Mutex::new(AuditLog::file_backed(
+        audit_root.clone(),
+    )));
     let app_state = AppState {
         surface: InteractionSurface::Remote,
         session_mode: SessionMode::Interactive,
@@ -527,7 +543,11 @@ async fn remote_request_denies_not_allowlisted_and_records_audit_event() {
     );
     assert!(response.events.is_empty());
 
-    let events = audit_log.lock().expect("audit log poisoned").events().to_vec();
+    let events = audit_log
+        .lock()
+        .expect("audit log poisoned")
+        .events()
+        .to_vec();
     assert!(events.iter().any(|event| matches!(
         event,
         AuditEvent::RemoteRequestDenied {
@@ -540,7 +560,11 @@ async fn remote_request_denies_not_allowlisted_and_records_audit_event() {
             && outcome == "not_allowlisted"
             && reason.starts_with("not_allowlisted:")
     )));
-    assert!(!events.iter().any(|event| matches!(event, AuditEvent::RemoteRequestAccepted { .. })));
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AuditEvent::RemoteRequestAccepted { .. }))
+    );
     let records = audit_log.lock().expect("audit log poisoned").load_records();
     assert!(records.iter().any(|record| {
         record.event_kind == "remote_request_denied_not_allowlisted"
@@ -578,7 +602,9 @@ async fn remote_request_drains_async_remote_notifications() {
         plugin_load_result: None,
         cost_tracker: CostTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
-        audit_log: Arc::new(std::sync::Mutex::new(rust_agent::security::audit::AuditLog::default())),
+        audit_log: Arc::new(std::sync::Mutex::new(
+            rust_agent::security::audit::AuditLog::default(),
+        )),
         startup_trace: Vec::new(),
         active_session_id: "remote-async-session".into(),
         session_store: Some(session_store),
@@ -650,7 +676,9 @@ async fn remote_request_drains_async_task_update_notifications() {
         plugin_load_result: None,
         cost_tracker: CostTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
-        audit_log: Arc::new(std::sync::Mutex::new(rust_agent::security::audit::AuditLog::default())),
+        audit_log: Arc::new(std::sync::Mutex::new(
+            rust_agent::security::audit::AuditLog::default(),
+        )),
         startup_trace: Vec::new(),
         active_session_id: "remote-task-session".into(),
         session_store: Some(session_store),
@@ -742,7 +770,9 @@ async fn remote_request_preserves_response_boundary_and_async_inbox_semantics() 
         plugin_load_result: None,
         cost_tracker: CostTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
-        audit_log: Arc::new(std::sync::Mutex::new(rust_agent::security::audit::AuditLog::default())),
+        audit_log: Arc::new(std::sync::Mutex::new(
+            rust_agent::security::audit::AuditLog::default(),
+        )),
         startup_trace: Vec::new(),
         active_session_id: "remote-boundary-session".into(),
         session_store: Some(session_store),
@@ -837,7 +867,9 @@ async fn remote_request_dual_channel_events_appear_in_response_and_async_inbox()
         plugin_load_result: None,
         cost_tracker: CostTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
-        audit_log: Arc::new(std::sync::Mutex::new(rust_agent::security::audit::AuditLog::default())),
+        audit_log: Arc::new(std::sync::Mutex::new(
+            rust_agent::security::audit::AuditLog::default(),
+        )),
         startup_trace: Vec::new(),
         active_session_id: "remote-dual-session".into(),
         session_store: Some(session_store),
@@ -925,7 +957,9 @@ async fn remote_request_returns_typed_remote_event_envelopes() {
         plugin_load_result: None,
         cost_tracker: CostTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
-        audit_log: Arc::new(std::sync::Mutex::new(rust_agent::security::audit::AuditLog::default())),
+        audit_log: Arc::new(std::sync::Mutex::new(
+            rust_agent::security::audit::AuditLog::default(),
+        )),
         startup_trace: Vec::new(),
         active_session_id: "remote-event-session".into(),
         session_store: Some(session_store),

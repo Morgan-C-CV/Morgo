@@ -41,7 +41,9 @@ async fn cost_command_reports_tracked_usage() {
         plugin_load_result: None,
         cost_tracker,
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
-        audit_log: Arc::new(std::sync::Mutex::new(rust_agent::security::audit::AuditLog::default())),
+        audit_log: Arc::new(std::sync::Mutex::new(
+            rust_agent::security::audit::AuditLog::default(),
+        )),
         startup_trace: Vec::new(),
         active_session_id: "cost-session".into(),
         session_store: None,

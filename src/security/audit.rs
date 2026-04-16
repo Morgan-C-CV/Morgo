@@ -6,11 +6,24 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AuditEvent {
-    ToolChecked { tool_name: String },
-    ToolDenied { tool_name: String, reason: String },
-    TaskStarted { task_id: String },
-    TaskFinished { task_id: String, status: String },
-    SurfaceDenied { actor_id: String, reason: String },
+    ToolChecked {
+        tool_name: String,
+    },
+    ToolDenied {
+        tool_name: String,
+        reason: String,
+    },
+    TaskStarted {
+        task_id: String,
+    },
+    TaskFinished {
+        task_id: String,
+        status: String,
+    },
+    SurfaceDenied {
+        actor_id: String,
+        reason: String,
+    },
     RemoteRequestAccepted {
         session_id: String,
         actor_id: String,
@@ -295,7 +308,10 @@ mod tests {
         let reloaded = AuditLog::file_backed(temp_root.clone());
         let records = reloaded.load_records();
         assert_eq!(records.len(), 2);
-        assert_eq!(records[0].event_kind, "remote_request_denied_not_allowlisted");
+        assert_eq!(
+            records[0].event_kind,
+            "remote_request_denied_not_allowlisted"
+        );
         assert_eq!(records[1].event_kind, "remote_notification_queued");
 
         let _ = std::fs::remove_dir_all(temp_root);

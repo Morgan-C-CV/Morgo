@@ -1,6 +1,6 @@
 use crate::bootstrap::SessionMode;
-use crate::core::engine::QueryEngine;
 use crate::core::context::QueryContext;
+use crate::core::engine::QueryEngine;
 use crate::history::resume::{
     ResolvedSessionState, RestoreRequest, RestoreSource, resolve_session_state,
     resolved_from_snapshot,
@@ -8,9 +8,7 @@ use crate::history::resume::{
 use crate::interaction::cli::repl::handle_normalized_input;
 use crate::interaction::envelope::NormalizedInput;
 use crate::interaction::router::CommandRouter;
-use crate::interaction::telegram::adapter::{
-    TelegramInboundEnvelope, intake_transport_envelope,
-};
+use crate::interaction::telegram::adapter::{TelegramInboundEnvelope, intake_transport_envelope};
 use crate::interaction::telegram::binding::{
     TelegramInboundBindingAuthorization, TelegramOutgoingMessage,
 };

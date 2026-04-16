@@ -58,7 +58,11 @@ async fn bash_classifier_flags_download_and_exec() {
         )
         .await;
 
-    assert!(matches!(decision, PermissionDecision::Deny { .. }));
+    assert!(matches!(
+        decision,
+        PermissionDecision::Deny { message, .. }
+            if message == "bash command denied [download_and_exec]: download-and-exec pattern detected"
+    ));
 }
 
 #[tokio::test]
@@ -73,5 +77,30 @@ async fn bash_classifier_asks_on_secret_access_patterns() {
         )
         .await;
 
-    assert!(matches!(decision, PermissionDecision::Ask { .. }));
+    assert!(matches!(
+        decision,
+        PermissionDecision::Ask { message, .. }
+            if message == "bash command warning [secret_access]: command may access credentials or secrets"
+    ));
+}
+
+#[tokio::test]
+async fn bash_policy_escalation_uses_structured_warning_contract() {
+    let decision = BashTool
+        .check_permissions(
+            &ToolCall {
+                name: "Bash".into(),
+                input: serde_json::json!({ "command": "cat file.txt | grep needle" }).to_string(),
+            },
+            &ToolPermissionContext::new(PermissionMode::Default),
+        )
+        .await;
+
+    assert!(matches!(
+        decision,
+        PermissionDecision::Ask { message, .. }
+            if message.contains("bash command warning [policy_escalation]: explicit approval required")
+                && message.contains("sandbox=WorkspaceWrite")
+                && message.contains("shell_operators=|")
+    ));
 }

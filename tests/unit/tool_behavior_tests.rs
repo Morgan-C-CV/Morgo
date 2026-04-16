@@ -383,7 +383,9 @@ async fn registry_returns_pending_approval_for_ask_only_bash() {
         result,
         ToolResult::PendingApproval {
             tool_name: "Bash".into(),
-            message: "command touches privileged system state".into(),
+            message:
+                "bash command warning [privileged_system]: command touches privileged system state"
+                    .into(),
         }
     );
 }

@@ -243,7 +243,9 @@ fn app_state_store_notifies_subscribers_after_committed_update() {
         notification_dispatcher: rust_agent::interaction::dispatcher::NotificationDispatcher::new(
             rust_agent::interaction::telegram::gateway::TelegramGateway::default(),
         ),
-        audit_log: Arc::new(std::sync::Mutex::new(rust_agent::security::audit::AuditLog::default())),
+        audit_log: Arc::new(std::sync::Mutex::new(
+            rust_agent::security::audit::AuditLog::default(),
+        )),
         startup_trace: Vec::new(),
         active_session_id: "session-1".into(),
         session_store: None,
@@ -293,7 +295,9 @@ fn app_state_classifies_runtime_visible_changes() {
         notification_dispatcher: rust_agent::interaction::dispatcher::NotificationDispatcher::new(
             rust_agent::interaction::telegram::gateway::TelegramGateway::default(),
         ),
-        audit_log: Arc::new(std::sync::Mutex::new(rust_agent::security::audit::AuditLog::default())),
+        audit_log: Arc::new(std::sync::Mutex::new(
+            rust_agent::security::audit::AuditLog::default(),
+        )),
         startup_trace: Vec::new(),
         active_session_id: "session-1".into(),
         session_store: None,
@@ -530,7 +534,11 @@ fn resolve_session_state_sanitizes_restored_memory_metadata() {
     );
     store.save_external_memory_entries(
         &session_id,
-        vec!["  linear:ABC-1 context  ".into(), " ".into(), "x".repeat(300)],
+        vec![
+            "  linear:ABC-1 context  ".into(),
+            " ".into(),
+            "x".repeat(300),
+        ],
     );
     store.save_nested_memory_lineage(
         &session_id,
@@ -634,7 +642,9 @@ fn augment_prompt_depends_on_input_state_without_mutating_store() {
         plugin_load_result: Some(bundle.plugin_load_result.clone()),
         cost_tracker: rust_agent::cost::tracker::CostTracker::default(),
         notification_dispatcher: bundle.notification_dispatcher.clone(),
-        audit_log: Arc::new(std::sync::Mutex::new(rust_agent::security::audit::AuditLog::default())),
+        audit_log: Arc::new(std::sync::Mutex::new(
+            rust_agent::security::audit::AuditLog::default(),
+        )),
         startup_trace: Vec::new(),
         active_session_id: "session-prompts".into(),
         session_store: Some(Arc::new(InMemorySessionStore::default())),
@@ -916,7 +926,9 @@ fn finalize_runtime_state_is_single_writeback_entrypoint() {
         plugin_load_result: Some(bundle.plugin_load_result.clone()),
         cost_tracker: rust_agent::cost::tracker::CostTracker::default(),
         notification_dispatcher: bundle.notification_dispatcher.clone(),
-        audit_log: Arc::new(std::sync::Mutex::new(rust_agent::security::audit::AuditLog::default())),
+        audit_log: Arc::new(std::sync::Mutex::new(
+            rust_agent::security::audit::AuditLog::default(),
+        )),
         startup_trace: state
             .phases
             .iter()

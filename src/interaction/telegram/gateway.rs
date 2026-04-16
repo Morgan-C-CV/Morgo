@@ -236,8 +236,9 @@ fn rejection_from_auth_category(category: AuthDenyCategory) -> TelegramInboundBi
         AuthDenyCategory::NotAllowlisted => TelegramInboundBindingAuthorization::NotAllowlisted,
         AuthDenyCategory::RateLimited => TelegramInboundBindingAuthorization::RateLimited,
         AuthDenyCategory::AbuseBlocked => TelegramInboundBindingAuthorization::AbuseBlocked,
-        AuthDenyCategory::Unauthenticated
-        | AuthDenyCategory::SurfaceCommandBlocked => TelegramInboundBindingAuthorization::ActorMismatch,
+        AuthDenyCategory::Unauthenticated | AuthDenyCategory::SurfaceCommandBlocked => {
+            TelegramInboundBindingAuthorization::ActorMismatch
+        }
     }
 }
 

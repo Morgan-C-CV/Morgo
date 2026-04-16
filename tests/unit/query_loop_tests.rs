@@ -133,7 +133,9 @@ fn test_context_with_turns(
             plugin_load_result: None,
             cost_tracker: CostTracker::default(),
             notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
-            audit_log: Arc::new(std::sync::Mutex::new(rust_agent::security::audit::AuditLog::default())),
+            audit_log: Arc::new(std::sync::Mutex::new(
+                rust_agent::security::audit::AuditLog::default(),
+            )),
             startup_trace: Vec::new(),
             active_session_id: "test-session".into(),
             session_store: None,
@@ -567,7 +569,9 @@ async fn query_loop_stop_hook_can_prevent_continuation() {
             plugin_load_result: None,
             cost_tracker: CostTracker::default(),
             notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
-            audit_log: Arc::new(std::sync::Mutex::new(rust_agent::security::audit::AuditLog::default())),
+            audit_log: Arc::new(std::sync::Mutex::new(
+                rust_agent::security::audit::AuditLog::default(),
+            )),
             startup_trace: Vec::new(),
             active_session_id: "test-session".into(),
             session_store: None,
@@ -644,7 +648,9 @@ async fn query_loop_respects_pre_tool_hook_denial() {
             plugin_load_result: None,
             cost_tracker: CostTracker::default(),
             notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
-            audit_log: Arc::new(std::sync::Mutex::new(rust_agent::security::audit::AuditLog::default())),
+            audit_log: Arc::new(std::sync::Mutex::new(
+                rust_agent::security::audit::AuditLog::default(),
+            )),
             startup_trace: Vec::new(),
             active_session_id: "test-session".into(),
             session_store: None,
@@ -739,7 +745,9 @@ async fn query_loop_runs_permission_request_hook_before_tool_execution() {
             plugin_load_result: None,
             cost_tracker: CostTracker::default(),
             notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
-            audit_log: Arc::new(std::sync::Mutex::new(rust_agent::security::audit::AuditLog::default())),
+            audit_log: Arc::new(std::sync::Mutex::new(
+                rust_agent::security::audit::AuditLog::default(),
+            )),
             startup_trace: Vec::new(),
             active_session_id: "test-session".into(),
             session_store: None,
@@ -826,7 +834,9 @@ async fn query_loop_stop_hook_blocking_continues_with_follow_up_turn() {
             plugin_load_result: None,
             cost_tracker: CostTracker::default(),
             notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
-            audit_log: Arc::new(std::sync::Mutex::new(rust_agent::security::audit::AuditLog::default())),
+            audit_log: Arc::new(std::sync::Mutex::new(
+                rust_agent::security::audit::AuditLog::default(),
+            )),
             startup_trace: Vec::new(),
             active_session_id: "test-session".into(),
             session_store: None,
@@ -921,7 +931,9 @@ async fn query_loop_uses_subagent_stop_hook_for_subagent_context() {
             plugin_load_result: None,
             cost_tracker: CostTracker::default(),
             notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
-            audit_log: Arc::new(std::sync::Mutex::new(rust_agent::security::audit::AuditLog::default())),
+            audit_log: Arc::new(std::sync::Mutex::new(
+                rust_agent::security::audit::AuditLog::default(),
+            )),
             startup_trace: Vec::new(),
             active_session_id: "test-session".into(),
             session_store: None,
@@ -1049,7 +1061,9 @@ async fn engine_drains_internal_task_events() {
             plugin_load_result: None,
             cost_tracker: CostTracker::default(),
             notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
-            audit_log: Arc::new(std::sync::Mutex::new(rust_agent::security::audit::AuditLog::default())),
+            audit_log: Arc::new(std::sync::Mutex::new(
+                rust_agent::security::audit::AuditLog::default(),
+            )),
             startup_trace: Vec::new(),
             active_session_id: "test-session".into(),
             session_store: None,
@@ -1123,7 +1137,9 @@ async fn worker_query_loop_consumes_mailbox_messages() {
             plugin_load_result: None,
             cost_tracker: CostTracker::default(),
             notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
-            audit_log: Arc::new(std::sync::Mutex::new(rust_agent::security::audit::AuditLog::default())),
+            audit_log: Arc::new(std::sync::Mutex::new(
+                rust_agent::security::audit::AuditLog::default(),
+            )),
             startup_trace: Vec::new(),
             active_session_id: "test-session".into(),
             session_store: None,
@@ -1216,7 +1232,9 @@ async fn subagent_context_inherits_parent_tools_and_hooks() {
             plugin_load_result: None,
             cost_tracker: CostTracker::default(),
             notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
-            audit_log: Arc::new(std::sync::Mutex::new(rust_agent::security::audit::AuditLog::default())),
+            audit_log: Arc::new(std::sync::Mutex::new(
+                rust_agent::security::audit::AuditLog::default(),
+            )),
             startup_trace: vec!["parent-runtime".into()],
             active_session_id: "test-session".into(),
             session_store: None,
@@ -1315,7 +1333,9 @@ async fn subagent_context_does_not_inherit_session_memory_when_disabled() {
             plugin_load_result: None,
             cost_tracker: CostTracker::default(),
             notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
-            audit_log: Arc::new(std::sync::Mutex::new(rust_agent::security::audit::AuditLog::default())),
+            audit_log: Arc::new(std::sync::Mutex::new(
+                rust_agent::security::audit::AuditLog::default(),
+            )),
             startup_trace: vec!["parent-runtime".into()],
             active_session_id: "parent-session".into(),
             session_store: None,
@@ -1406,7 +1426,9 @@ async fn subagent_context_reanchors_and_bounds_nested_memory_lineage() {
             plugin_load_result: None,
             cost_tracker: CostTracker::default(),
             notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
-            audit_log: Arc::new(std::sync::Mutex::new(rust_agent::security::audit::AuditLog::default())),
+            audit_log: Arc::new(std::sync::Mutex::new(
+                rust_agent::security::audit::AuditLog::default(),
+            )),
             startup_trace: vec!["parent-runtime".into()],
             active_session_id: "test-session".into(),
             session_store: None,
@@ -1448,7 +1470,11 @@ async fn subagent_context_reanchors_and_bounds_nested_memory_lineage() {
             "agent:agent-task-bounded:inherit_context=true".to_string(),
         ]
     );
-    assert!(!child.context_prompt.contains("agent:orphan:inherit_context=true"));
+    assert!(
+        !child
+            .context_prompt
+            .contains("agent:orphan:inherit_context=true")
+    );
     assert!(!child.context_prompt.contains("bad marker"));
 }
 
@@ -1566,7 +1592,9 @@ async fn coordinator_waits_for_group_barrier_before_synthesis_follow_up() {
             plugin_load_result: None,
             cost_tracker: CostTracker::default(),
             notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
-            audit_log: Arc::new(std::sync::Mutex::new(rust_agent::security::audit::AuditLog::default())),
+            audit_log: Arc::new(std::sync::Mutex::new(
+                rust_agent::security::audit::AuditLog::default(),
+            )),
             startup_trace: Vec::new(),
             active_session_id: "test-session".into(),
             session_store: None,
@@ -1687,7 +1715,9 @@ async fn coordinator_gates_finalization_until_verification_finishes() {
             plugin_load_result: None,
             cost_tracker: CostTracker::default(),
             notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
-            audit_log: Arc::new(std::sync::Mutex::new(rust_agent::security::audit::AuditLog::default())),
+            audit_log: Arc::new(std::sync::Mutex::new(
+                rust_agent::security::audit::AuditLog::default(),
+            )),
             startup_trace: Vec::new(),
             active_session_id: "test-session".into(),
             session_store: None,
@@ -2188,7 +2218,9 @@ async fn submit_turn_distinguishes_stop_hook_prevented_and_blocking_runtime_even
             plugin_load_result: None,
             cost_tracker: CostTracker::default(),
             notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
-            audit_log: Arc::new(std::sync::Mutex::new(rust_agent::security::audit::AuditLog::default())),
+            audit_log: Arc::new(std::sync::Mutex::new(
+                rust_agent::security::audit::AuditLog::default(),
+            )),
             startup_trace: Vec::new(),
             active_session_id: "test-session".into(),
             session_store: None,
@@ -2238,7 +2270,9 @@ async fn submit_turn_distinguishes_stop_hook_prevented_and_blocking_runtime_even
             plugin_load_result: None,
             cost_tracker: CostTracker::default(),
             notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
-            audit_log: Arc::new(std::sync::Mutex::new(rust_agent::security::audit::AuditLog::default())),
+            audit_log: Arc::new(std::sync::Mutex::new(
+                rust_agent::security::audit::AuditLog::default(),
+            )),
             startup_trace: Vec::new(),
             active_session_id: "test-session".into(),
             session_store: None,

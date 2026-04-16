@@ -181,7 +181,6 @@ fn build_app_state() -> AppState {
 }
 
 fn build_app_state_with_permissions(permissions: ToolPermissionContext) -> AppState {
-
     AppState {
         surface: InteractionSurface::Cli,
         session_mode: SessionMode::Interactive,
@@ -197,7 +196,9 @@ fn build_app_state_with_permissions(permissions: ToolPermissionContext) -> AppSt
         plugin_load_result: None,
         cost_tracker: rust_agent::cost::tracker::CostTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
-        audit_log: Arc::new(std::sync::Mutex::new(rust_agent::security::audit::AuditLog::default())),
+        audit_log: Arc::new(std::sync::Mutex::new(
+            rust_agent::security::audit::AuditLog::default(),
+        )),
         startup_trace: vec!["DetectSurface".into(), "Setup".into()],
         active_session_id: "context-session".into(),
         session_store: None,
@@ -300,9 +301,10 @@ fn context_prompt_renders_only_sanitized_memory_metadata() {
     assert!(!prompt.contains("agent:discarded-parent:inherit_context=true"));
     assert!(prompt.contains("Nested memory lineage:"));
     assert!(prompt.contains("- depth: 2"));
-    assert!(prompt.contains(
-        "- path: session:context-session -> agent:valid-child:inherit_context=true"
-    ));
+    assert!(
+        prompt
+            .contains("- path: session:context-session -> agent:valid-child:inherit_context=true")
+    );
 }
 
 #[test]

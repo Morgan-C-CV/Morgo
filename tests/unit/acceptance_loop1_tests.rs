@@ -71,7 +71,9 @@ fn test_app_state() -> AppState {
         plugin_load_result: None,
         cost_tracker: rust_agent::cost::tracker::CostTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
-        audit_log: Arc::new(std::sync::Mutex::new(rust_agent::security::audit::AuditLog::default())),
+        audit_log: Arc::new(std::sync::Mutex::new(
+            rust_agent::security::audit::AuditLog::default(),
+        )),
         startup_trace: Vec::new(),
         active_session_id: "acceptance-session".into(),
         session_store: None,

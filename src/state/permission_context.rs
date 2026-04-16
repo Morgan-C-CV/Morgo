@@ -77,8 +77,12 @@ impl ToolPermissionContext {
             inherited_tool_registry: None,
             inherited_hook_registry: None,
             runtime_plugin_state: None,
-            remote_surface_admission_policy: Arc::new(RwLock::new(SurfaceAdmissionPolicy::default())),
-            telegram_surface_admission_policy: Arc::new(RwLock::new(SurfaceAdmissionPolicy::default())),
+            remote_surface_admission_policy: Arc::new(RwLock::new(
+                SurfaceAdmissionPolicy::default(),
+            )),
+            telegram_surface_admission_policy: Arc::new(RwLock::new(
+                SurfaceAdmissionPolicy::default(),
+            )),
             external_memory_entries: Arc::new(RwLock::new(Vec::new())),
             nested_memory_lineage: Arc::new(RwLock::new(Vec::new())),
         }

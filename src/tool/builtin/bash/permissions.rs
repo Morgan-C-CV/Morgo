@@ -18,6 +18,7 @@ pub struct BashPolicyDecision {
     pub shell_operators: Vec<String>,
     pub path_findings: Vec<String>,
     pub sed_safe: bool,
+    pub escalation_reasons: Vec<String>,
 }
 
 pub fn evaluate_bash_policy(command: &str) -> BashPolicyDecision {
@@ -33,16 +34,34 @@ pub fn evaluate_bash_policy(command: &str) -> BashPolicyDecision {
     let sed_analysis = analyze_sed_safety(command);
     let sed_safe = !matches!(sed_analysis, SedSafety::Unsafe(_));
     let sandbox_policy = select_sandbox_policy(command);
+    let mut escalation_reasons = Vec::new();
+    if destructive {
+        escalation_reasons.push("destructive_pattern".into());
+    }
+    if has_shell_operator {
+        escalation_reasons.push(format!("shell_operators={}", shell_operators.join(",")));
+    }
+    if !path_safe {
+        escalation_reasons.extend(
+            path_findings
+                .iter()
+                .map(|finding| format!("path:{finding}")),
+        );
+    }
+    if let SedSafety::Unsafe(reason) = sed_analysis {
+        escalation_reasons.push(format!("sed:{reason}"));
+    }
 
     BashPolicyDecision {
         read_only,
         safe_in_plan_mode: read_only && path_safe && !has_shell_operator && sed_safe,
         path_safe,
-        requires_escalation: destructive || has_shell_operator || !path_safe || !sed_safe,
+        requires_escalation: !escalation_reasons.is_empty(),
         sandbox_policy,
         shell_operators,
         path_findings,
         sed_safe,
+        escalation_reasons,
     }
 }
 

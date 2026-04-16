@@ -75,4 +75,10 @@ fn bash_policy_tracks_structured_findings() {
     assert!(!decision.path_safe);
     assert!(!decision.path_findings.is_empty());
     assert!(decision.requires_escalation);
+    assert!(
+        decision
+            .escalation_reasons
+            .iter()
+            .any(|reason| reason.starts_with("path:"))
+    );
 }

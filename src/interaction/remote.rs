@@ -188,7 +188,9 @@ pub async fn handle_remote_request(
     );
     let authorizer = remote_surface_authorizer(app_state);
     if let AuthDecision::Deny { category, reason } = authorizer.authorize(&input) {
-        let denied_app_state = bind_remote_engine(engine, app_state, &input).context.app_state;
+        let denied_app_state = bind_remote_engine(engine, app_state, &input)
+            .context
+            .app_state;
         record_remote_audit(
             &denied_app_state,
             AuditEvent::RemoteRequestDenied {
@@ -555,8 +557,11 @@ fn record_remote_notification_audit(app_state: &AppState, notification: &Notific
 }
 
 fn remote_surface_authorizer(app_state: &AppState) -> DefaultSurfaceAuthorizer {
-    DefaultSurfaceAuthorizer::default()
-        .with_remote_policy(app_state.permission_context.remote_surface_admission_policy())
+    DefaultSurfaceAuthorizer::default().with_remote_policy(
+        app_state
+            .permission_context
+            .remote_surface_admission_policy(),
+    )
 }
 
 fn denial_message_for_category(category: AuthDenyCategory) -> String {

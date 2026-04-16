@@ -489,7 +489,9 @@ async fn prompt_command_with_model_invocation_disabled_never_enters_query_engine
         plugin_load_result: None,
         cost_tracker: CostTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
-        audit_log: Arc::new(std::sync::Mutex::new(rust_agent::security::audit::AuditLog::default())),
+        audit_log: Arc::new(std::sync::Mutex::new(
+            rust_agent::security::audit::AuditLog::default(),
+        )),
         startup_trace: Vec::new(),
         active_session_id: "test-session".into(),
         session_store: None,
@@ -517,7 +519,10 @@ async fn prompt_command_with_model_invocation_disabled_never_enters_query_engine
 #[tokio::test]
 async fn cli_repl_handles_multiple_inputs_in_sequence() {
     let command_registry = Arc::new(CommandRegistry::new().register(Arc::new(HelpCommand)));
-    let router = CommandRouter::new(command_registry.clone(), Box::new(DefaultSurfaceAuthorizer::default()));
+    let router = CommandRouter::new(
+        command_registry.clone(),
+        Box::new(DefaultSurfaceAuthorizer::default()),
+    );
     let permission_context = ToolPermissionContext::new(PermissionMode::Default)
         .with_task_manager(Arc::new(TaskManager::default()))
         .with_plan_manager(Arc::new(PlanManager::default()));
@@ -536,7 +541,9 @@ async fn cli_repl_handles_multiple_inputs_in_sequence() {
         plugin_load_result: None,
         cost_tracker: CostTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
-        audit_log: Arc::new(std::sync::Mutex::new(rust_agent::security::audit::AuditLog::default())),
+        audit_log: Arc::new(std::sync::Mutex::new(
+            rust_agent::security::audit::AuditLog::default(),
+        )),
         startup_trace: Vec::new(),
         active_session_id: "cli-session".into(),
         session_store: None,
@@ -577,7 +584,10 @@ async fn cli_repl_handles_multiple_inputs_in_sequence() {
 #[tokio::test]
 async fn cli_repl_surfaces_task_events_for_active_session() {
     let command_registry = Arc::new(CommandRegistry::new().register(Arc::new(HelpCommand)));
-    let router = CommandRouter::new(command_registry.clone(), Box::new(DefaultSurfaceAuthorizer::default()));
+    let router = CommandRouter::new(
+        command_registry.clone(),
+        Box::new(DefaultSurfaceAuthorizer::default()),
+    );
     let manager = Arc::new(TaskManager::default());
     let permission_context =
         ToolPermissionContext::new(PermissionMode::Default).with_task_manager(manager.clone());
@@ -596,7 +606,9 @@ async fn cli_repl_surfaces_task_events_for_active_session() {
         plugin_load_result: None,
         cost_tracker: CostTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
-        audit_log: Arc::new(std::sync::Mutex::new(rust_agent::security::audit::AuditLog::default())),
+        audit_log: Arc::new(std::sync::Mutex::new(
+            rust_agent::security::audit::AuditLog::default(),
+        )),
         startup_trace: Vec::new(),
         active_session_id: "cli-session".into(),
         session_store: None,
@@ -648,7 +660,10 @@ async fn cli_repl_surfaces_task_events_for_active_session() {
 #[tokio::test]
 async fn cli_repl_persists_history_for_local_and_query_turns() {
     let command_registry = Arc::new(CommandRegistry::new().register(Arc::new(HelpCommand)));
-    let router = CommandRouter::new(command_registry.clone(), Box::new(DefaultSurfaceAuthorizer::default()));
+    let router = CommandRouter::new(
+        command_registry.clone(),
+        Box::new(DefaultSurfaceAuthorizer::default()),
+    );
     let permission_context = ToolPermissionContext::new(PermissionMode::Default)
         .with_task_manager(Arc::new(TaskManager::default()))
         .with_plan_manager(Arc::new(PlanManager::default()));
@@ -679,7 +694,9 @@ async fn cli_repl_persists_history_for_local_and_query_turns() {
         plugin_load_result: None,
         cost_tracker: CostTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
-        audit_log: Arc::new(std::sync::Mutex::new(rust_agent::security::audit::AuditLog::default())),
+        audit_log: Arc::new(std::sync::Mutex::new(
+            rust_agent::security::audit::AuditLog::default(),
+        )),
         startup_trace: Vec::new(),
         active_session_id: "cli-session".into(),
         session_store: Some(session_store.clone()),
@@ -745,7 +762,10 @@ async fn remote_handler_preserves_remote_actor_and_session_for_query_flow() {
             .register(Arc::new(RemoteSafeTestCommand))
             .register(Arc::new(PluginsCommand)),
     );
-    let router = CommandRouter::new(command_registry.clone(), Box::new(DefaultSurfaceAuthorizer::default()));
+    let router = CommandRouter::new(
+        command_registry.clone(),
+        Box::new(DefaultSurfaceAuthorizer::default()),
+    );
     let permission_context = ToolPermissionContext::new(PermissionMode::Default)
         .with_task_manager(Arc::new(TaskManager::default()))
         .with_plan_manager(Arc::new(PlanManager::default()));
@@ -776,7 +796,9 @@ async fn remote_handler_preserves_remote_actor_and_session_for_query_flow() {
         plugin_load_result: None,
         cost_tracker: CostTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
-        audit_log: Arc::new(std::sync::Mutex::new(rust_agent::security::audit::AuditLog::default())),
+        audit_log: Arc::new(std::sync::Mutex::new(
+            rust_agent::security::audit::AuditLog::default(),
+        )),
         startup_trace: Vec::new(),
         active_session_id: "remote-session".into(),
         session_store: Some(session_store.clone()),
@@ -909,7 +931,9 @@ async fn cli_repl_uses_next_turn_plugin_snapshot_after_reload_updates_manifest_s
         plugin_load_result: None,
         cost_tracker: CostTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
-        audit_log: Arc::new(std::sync::Mutex::new(rust_agent::security::audit::AuditLog::default())),
+        audit_log: Arc::new(std::sync::Mutex::new(
+            rust_agent::security::audit::AuditLog::default(),
+        )),
         startup_trace: Vec::new(),
         active_session_id: "cli-session".into(),
         session_store: None,
@@ -1048,7 +1072,9 @@ async fn cli_repl_uses_next_turn_plugin_snapshot_after_reload_removes_deleted_pl
         plugin_load_result: None,
         cost_tracker: CostTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
-        audit_log: Arc::new(std::sync::Mutex::new(rust_agent::security::audit::AuditLog::default())),
+        audit_log: Arc::new(std::sync::Mutex::new(
+            rust_agent::security::audit::AuditLog::default(),
+        )),
         startup_trace: Vec::new(),
         active_session_id: "cli-session".into(),
         session_store: None,
@@ -1162,7 +1188,9 @@ async fn cli_repl_applies_disable_and_enable_only_on_next_turn_boundaries() {
         plugin_load_result: None,
         cost_tracker: CostTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
-        audit_log: Arc::new(std::sync::Mutex::new(rust_agent::security::audit::AuditLog::default())),
+        audit_log: Arc::new(std::sync::Mutex::new(
+            rust_agent::security::audit::AuditLog::default(),
+        )),
         startup_trace: Vec::new(),
         active_session_id: "cli-session".into(),
         session_store: None,
@@ -1376,7 +1404,9 @@ async fn remote_handler_uses_next_turn_plugin_snapshot_after_reload_removes_dele
         plugin_load_result: None,
         cost_tracker: CostTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
-        audit_log: Arc::new(std::sync::Mutex::new(rust_agent::security::audit::AuditLog::default())),
+        audit_log: Arc::new(std::sync::Mutex::new(
+            rust_agent::security::audit::AuditLog::default(),
+        )),
         startup_trace: Vec::new(),
         active_session_id: "remote-session".into(),
         session_store: Some(session_store),
@@ -1502,7 +1532,9 @@ async fn cli_repl_persists_denied_turns() {
         plugin_load_result: None,
         cost_tracker: CostTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
-        audit_log: Arc::new(std::sync::Mutex::new(rust_agent::security::audit::AuditLog::default())),
+        audit_log: Arc::new(std::sync::Mutex::new(
+            rust_agent::security::audit::AuditLog::default(),
+        )),
         startup_trace: Vec::new(),
         active_session_id: "remote-session".into(),
         session_store: Some(session_store.clone()),
@@ -1572,7 +1604,9 @@ async fn router_approves_pending_plan_mode_request() {
         plugin_load_result: None,
         cost_tracker: CostTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
-        audit_log: Arc::new(std::sync::Mutex::new(rust_agent::security::audit::AuditLog::default())),
+        audit_log: Arc::new(std::sync::Mutex::new(
+            rust_agent::security::audit::AuditLog::default(),
+        )),
         startup_trace: Vec::new(),
         active_session_id: "cli-session".into(),
         session_store: None,
@@ -1628,7 +1662,9 @@ async fn router_denies_pending_request_without_session_approval() {
         plugin_load_result: None,
         cost_tracker: CostTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
-        audit_log: Arc::new(std::sync::Mutex::new(rust_agent::security::audit::AuditLog::default())),
+        audit_log: Arc::new(std::sync::Mutex::new(
+            rust_agent::security::audit::AuditLog::default(),
+        )),
         startup_trace: Vec::new(),
         active_session_id: "cli-session".into(),
         session_store: None,
@@ -1689,7 +1725,9 @@ async fn approval_replay_uses_runtime_tool_registry() {
         plugin_load_result: None,
         cost_tracker: CostTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
-        audit_log: Arc::new(std::sync::Mutex::new(rust_agent::security::audit::AuditLog::default())),
+        audit_log: Arc::new(std::sync::Mutex::new(
+            rust_agent::security::audit::AuditLog::default(),
+        )),
         startup_trace: Vec::new(),
         active_session_id: "cli-session".into(),
         session_store: None,
@@ -1746,7 +1784,9 @@ async fn permissions_command_reports_session_permission_state() {
         plugin_load_result: None,
         cost_tracker: CostTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
-        audit_log: Arc::new(std::sync::Mutex::new(rust_agent::security::audit::AuditLog::default())),
+        audit_log: Arc::new(std::sync::Mutex::new(
+            rust_agent::security::audit::AuditLog::default(),
+        )),
         startup_trace: Vec::new(),
         active_session_id: "cli-session".into(),
         session_store: None,
@@ -1797,7 +1837,9 @@ async fn plan_command_reports_inactive_status() {
         plugin_load_result: None,
         cost_tracker: CostTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
-        audit_log: Arc::new(std::sync::Mutex::new(rust_agent::security::audit::AuditLog::default())),
+        audit_log: Arc::new(std::sync::Mutex::new(
+            rust_agent::security::audit::AuditLog::default(),
+        )),
         startup_trace: Vec::new(),
         active_session_id: "cli-session".into(),
         session_store: None,
@@ -1846,7 +1888,9 @@ async fn plan_command_enter_requests_approval_before_switching_mode() {
         plugin_load_result: None,
         cost_tracker: CostTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
-        audit_log: Arc::new(std::sync::Mutex::new(rust_agent::security::audit::AuditLog::default())),
+        audit_log: Arc::new(std::sync::Mutex::new(
+            rust_agent::security::audit::AuditLog::default(),
+        )),
         startup_trace: Vec::new(),
         active_session_id: "cli-session".into(),
         session_store: None,
@@ -1910,7 +1954,9 @@ async fn plan_command_exit_requests_approval_and_approval_exits_mode() {
         plugin_load_result: None,
         cost_tracker: CostTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
-        audit_log: Arc::new(std::sync::Mutex::new(rust_agent::security::audit::AuditLog::default())),
+        audit_log: Arc::new(std::sync::Mutex::new(
+            rust_agent::security::audit::AuditLog::default(),
+        )),
         startup_trace: Vec::new(),
         active_session_id: "cli-session".into(),
         session_store: None,
@@ -2018,7 +2064,9 @@ async fn plan_command_handles_status_noop_and_denied_exit() {
         plugin_load_result: None,
         cost_tracker: CostTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
-        audit_log: Arc::new(std::sync::Mutex::new(rust_agent::security::audit::AuditLog::default())),
+        audit_log: Arc::new(std::sync::Mutex::new(
+            rust_agent::security::audit::AuditLog::default(),
+        )),
         startup_trace: Vec::new(),
         active_session_id: "cli-session".into(),
         session_store: None,
@@ -2186,7 +2234,9 @@ async fn plan_command_handles_status_noop_and_denied_exit() {
         plugin_load_result: None,
         cost_tracker: CostTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
-        audit_log: Arc::new(std::sync::Mutex::new(rust_agent::security::audit::AuditLog::default())),
+        audit_log: Arc::new(std::sync::Mutex::new(
+            rust_agent::security::audit::AuditLog::default(),
+        )),
         startup_trace: Vec::new(),
         active_session_id: "cli-session".into(),
         session_store: None,
@@ -2231,7 +2281,9 @@ async fn permissions_command_mutates_mode_and_rule_lists() {
         plugin_load_result: None,
         cost_tracker: CostTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
-        audit_log: Arc::new(std::sync::Mutex::new(rust_agent::security::audit::AuditLog::default())),
+        audit_log: Arc::new(std::sync::Mutex::new(
+            rust_agent::security::audit::AuditLog::default(),
+        )),
         startup_trace: Vec::new(),
         active_session_id: "cli-session".into(),
         session_store: None,
