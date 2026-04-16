@@ -72,6 +72,8 @@ impl McpRuntime {
                 tool_names_preview: Vec::new(),
                 resource_names_preview: Vec::new(),
                 last_error: None,
+                last_error_kind: None,
+                last_error_detail: None,
                 protocol_initialized: false,
                 pid: None,
                 server_name: None,
@@ -104,7 +106,7 @@ impl McpRuntime {
     }
 
     pub async fn reconnect(&self, server: &str) -> anyhow::Result<McpServerState> {
-        self.set_status(server, McpConnectionStatus::Reconnecting, None)
+        self.set_status(server, McpConnectionStatus::Reconnecting, None, None, None)
             .await?;
         self.invalidate_server_cache(server).await;
         let _ = self.disconnect(server).await;
@@ -114,19 +116,46 @@ impl McpRuntime {
     pub async fn connect(&self, server: &str) -> anyhow::Result<McpServerState> {
         self.refresh_stale_server_config(server).await?;
         let config = self.server_config(server).await?;
-        self.set_status(server, McpConnectionStatus::Connecting, None)
+        self.set_status(server, McpConnectionStatus::Connecting, None, None, None)
             .await?;
         let connect_info = match self.client.connect(&config).await {
             Ok(value) => value,
-            Err(error) => return self.fail_server(server, error.to_string()).await,
+            Err(error) => {
+                return self
+                    .fail_server(
+                        server,
+                        "connect",
+                        error.to_string(),
+                        Some(error.to_string()),
+                    )
+                    .await;
+            }
         };
         let tools = match self.client.list_tools(&config).await {
             Ok(value) => value,
-            Err(error) => return self.fail_server(server, error.to_string()).await,
+            Err(error) => {
+                return self
+                    .fail_server(
+                        server,
+                        "connect",
+                        error.to_string(),
+                        Some(error.to_string()),
+                    )
+                    .await;
+            }
         };
         let resources = match self.client.list_resources(&config).await {
             Ok(value) => value,
-            Err(error) => return self.fail_server(server, error.to_string()).await,
+            Err(error) => {
+                return self
+                    .fail_server(
+                        server,
+                        "connect",
+                        error.to_string(),
+                        Some(error.to_string()),
+                    )
+                    .await;
+            }
         };
         self.cached_tools
             .write()
@@ -144,7 +173,14 @@ impl McpRuntime {
         self.refresh_stale_server_config(server).await?;
         let config = self.server_config(server).await?;
         if let Err(error) = self.client.disconnect(&config).await {
-            return self.fail_server(server, error.to_string()).await;
+            return self
+                .fail_server(
+                    server,
+                    "disconnect",
+                    error.to_string(),
+                    Some(error.to_string()),
+                )
+                .await;
         }
         self.invalidate_server_cache(server).await;
         self.update_disconnected(server).await
@@ -170,7 +206,15 @@ impl McpRuntime {
                         self.clear_last_error(&request.server).await?;
                         Ok(McpResponse::ToolList(tools))
                     }
-                    Err(error) => self.fail_server(&request.server, error.to_string()).await,
+                    Err(error) => {
+                        self.fail_server(
+                            &request.server,
+                            "list_tools",
+                            error.to_string(),
+                            Some(error.to_string()),
+                        )
+                        .await
+                    }
                 }
             }
             McpAction::ListResources => {
@@ -189,7 +233,15 @@ impl McpRuntime {
                         self.clear_last_error(&request.server).await?;
                         Ok(McpResponse::ResourceList(resources))
                     }
-                    Err(error) => self.fail_server(&request.server, error.to_string()).await,
+                    Err(error) => {
+                        self.fail_server(
+                            &request.server,
+                            "list_resources",
+                            error.to_string(),
+                            Some(error.to_string()),
+                        )
+                        .await
+                    }
                 }
             }
             McpAction::CallTool => {
@@ -202,7 +254,15 @@ impl McpRuntime {
                         self.clear_last_error(&request.server).await?;
                         Ok(McpResponse::ToolResult(value))
                     }
-                    Err(error) => self.fail_server(&request.server, error.to_string()).await,
+                    Err(error) => {
+                        self.fail_server(
+                            &request.server,
+                            "call_tool",
+                            error.to_string(),
+                            Some(error.to_string()),
+                        )
+                        .await
+                    }
                 }
             }
             McpAction::ReadResource => {
@@ -215,7 +275,15 @@ impl McpRuntime {
                         self.clear_last_error(&request.server).await?;
                         Ok(McpResponse::ResourceContent(content))
                     }
-                    Err(error) => self.fail_server(&request.server, error.to_string()).await,
+                    Err(error) => {
+                        self.fail_server(
+                            &request.server,
+                            "read_resource",
+                            error.to_string(),
+                            Some(error.to_string()),
+                        )
+                        .await
+                    }
                 }
             }
         }
@@ -252,6 +320,8 @@ impl McpRuntime {
         server: &str,
         status: McpConnectionStatus,
         last_error: Option<String>,
+        last_error_kind: Option<String>,
+        last_error_detail: Option<String>,
     ) -> anyhow::Result<McpServerState> {
         let mut servers = self.servers.write().await;
         let state = servers
@@ -260,18 +330,33 @@ impl McpRuntime {
             .ok_or_else(|| anyhow::anyhow!("unknown MCP server: {server}"))?;
         state.status = status;
         state.last_error = last_error;
+        state.last_error_kind = last_error_kind;
+        state.last_error_detail = last_error_detail;
         Ok(state.clone())
     }
 
     async fn clear_last_error(&self, server: &str) -> anyhow::Result<McpServerState> {
         let state = self.find_server(server).await?;
-        self.set_status(server, state.status, None).await
+        self.set_status(server, state.status, None, None, None)
+            .await
     }
 
-    async fn fail_server<T>(&self, server: &str, message: String) -> anyhow::Result<T> {
+    async fn fail_server<T>(
+        &self,
+        server: &str,
+        kind: &str,
+        message: String,
+        detail: Option<String>,
+    ) -> anyhow::Result<T> {
         self.invalidate_server_cache(server).await;
         let _ = self
-            .set_status(server, McpConnectionStatus::Failed, Some(message.clone()))
+            .set_status(
+                server,
+                McpConnectionStatus::Failed,
+                Some(message.clone()),
+                Some(kind.to_string()),
+                detail,
+            )
             .await;
         anyhow::bail!(message)
     }
@@ -294,6 +379,8 @@ impl McpRuntime {
         state.tool_names_preview = preview_names_from_tools(tools);
         state.resource_names_preview = preview_names_from_resources(resources);
         state.last_error = None;
+        state.last_error_kind = None;
+        state.last_error_detail = None;
         state.protocol_initialized = connect_info.protocol_initialized;
         state.pid = connect_info.pid;
         state.server_name = connect_info.peer.server_name;
@@ -337,6 +424,8 @@ impl McpRuntime {
         state.tool_names_preview.clear();
         state.resource_names_preview.clear();
         state.last_error = None;
+        state.last_error_kind = None;
+        state.last_error_detail = None;
         state.protocol_initialized = false;
         state.pid = None;
         state.server_name = None;
@@ -399,11 +488,13 @@ pub async fn replace_runtime_server_config(
             .ok_or_else(|| anyhow::anyhow!("unknown MCP server: {}", config.id))?;
         state.config = config.clone();
     }
+    runtime.invalidate_server_cache(&config.id).await;
+    let _ = runtime.update_disconnected(&config.id).await;
     runtime
         .config_fingerprints
         .write()
         .await
-        .insert(config.id.clone(), 0);
+        .insert(config.id.clone(), fingerprint_config(&config));
     Ok(())
 }
 
@@ -419,4 +510,121 @@ pub fn fingerprint_config(config: &McpServerConfig) -> u64 {
         value.hash(&mut hasher);
     }
     hasher.finish()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{McpRuntime, fingerprint_config, replace_runtime_server_config};
+    use crate::service::mcp::client::{McpClient, MockMcpClient};
+    use crate::service::mcp::types::{
+        McpAction, McpConnectInfo, McpRequest, McpResourceInfo, McpServerConfig, McpToolInfo,
+        McpTransportKind,
+    };
+    use async_trait::async_trait;
+    use serde_json::Value;
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    #[derive(Debug, Default)]
+    struct FailingListToolsClient;
+
+    #[async_trait]
+    impl McpClient for FailingListToolsClient {
+        async fn connect(&self, _config: &McpServerConfig) -> anyhow::Result<McpConnectInfo> {
+            Ok(McpConnectInfo::default())
+        }
+
+        async fn disconnect(&self, _config: &McpServerConfig) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn list_tools(&self, _config: &McpServerConfig) -> anyhow::Result<Vec<McpToolInfo>> {
+            anyhow::bail!("list_tools exploded")
+        }
+
+        async fn list_resources(
+            &self,
+            _config: &McpServerConfig,
+        ) -> anyhow::Result<Vec<McpResourceInfo>> {
+            Ok(Vec::new())
+        }
+
+        async fn call_tool(
+            &self,
+            _config: &McpServerConfig,
+            _tool: &str,
+            _input: Option<Value>,
+        ) -> anyhow::Result<Value> {
+            Ok(Value::Null)
+        }
+
+        async fn read_resource(
+            &self,
+            _config: &McpServerConfig,
+            _resource: &str,
+        ) -> anyhow::Result<String> {
+            Ok(String::new())
+        }
+    }
+
+    fn test_config(id: &str, name: &str) -> McpServerConfig {
+        McpServerConfig {
+            id: id.into(),
+            name: name.into(),
+            command: "mock-mcp".into(),
+            args: Vec::new(),
+            env: BTreeMap::new(),
+            transport: McpTransportKind::Mock,
+        }
+    }
+
+    #[tokio::test]
+    async fn replace_runtime_server_config_updates_fingerprint_and_disconnects() {
+        let config = test_config("local-test", "Local Test");
+        let runtime = McpRuntime::new(Arc::new(MockMcpClient), vec![config.clone()]);
+        runtime
+            .connect("local-test")
+            .await
+            .expect("connect should succeed");
+
+        let mut updated = config.clone();
+        updated.command = "mock-mcp-updated".into();
+        replace_runtime_server_config(&runtime, updated.clone())
+            .await
+            .expect("replace should succeed");
+
+        let servers = runtime.list_servers().await;
+        assert_eq!(servers[0].status.as_str(), "disconnected");
+        assert!(servers[0].last_error.is_none());
+        let fingerprints = runtime.config_fingerprints.read().await;
+        assert_eq!(
+            fingerprints.get("local-test").copied(),
+            Some(fingerprint_config(&updated))
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_failure_records_error_kind_and_detail() {
+        let config = test_config("local-test", "Local Test");
+        let runtime = McpRuntime::new(Arc::new(FailingListToolsClient), vec![config]);
+
+        let error = runtime
+            .dispatch(McpRequest {
+                action: McpAction::ListTools,
+                server: "local-test".into(),
+                tool: None,
+                resource: None,
+                input: None,
+            })
+            .await
+            .expect_err("list tools should fail");
+        assert!(error.to_string().contains("list_tools exploded"));
+
+        let servers = runtime.list_servers().await;
+        assert_eq!(servers[0].last_error_kind.as_deref(), Some("connect"));
+        assert_eq!(
+            servers[0].last_error_detail.as_deref(),
+            Some("list_tools exploded")
+        );
+    }
 }

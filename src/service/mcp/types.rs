@@ -95,6 +95,8 @@ pub struct McpServerState {
     pub tool_names_preview: Vec<String>,
     pub resource_names_preview: Vec<String>,
     pub last_error: Option<String>,
+    pub last_error_kind: Option<String>,
+    pub last_error_detail: Option<String>,
     pub protocol_initialized: bool,
     pub pid: Option<u32>,
     pub server_name: Option<String>,

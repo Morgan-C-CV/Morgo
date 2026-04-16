@@ -15,6 +15,12 @@ pub struct CompactPlan {
     pub retry_prompt: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompactRecoveryErrorContext<'a> {
+    pub kind: &'a str,
+    pub message: &'a str,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ReactiveCompactor;
 
@@ -33,12 +39,15 @@ impl ReactiveCompactor {
         &self,
         has_attempted_reactive_compact: bool,
         has_attempted_collapse_drain: bool,
-        error: Option<&str>,
+        error: Option<CompactRecoveryErrorContext<'_>>,
     ) -> CompactPlan {
         if !has_attempted_reactive_compact {
             let detail = error
                 .map(|value| {
-                    format!("reactive compact retry triggered after stream error: {value}")
+                    format!(
+                        "reactive compact retry triggered after stream error [{}]: {}",
+                        value.kind, value.message
+                    )
                 })
                 .unwrap_or_else(|| "stream stop error triggered reactive compact retry".into());
             return CompactPlan {
@@ -53,7 +62,10 @@ impl ReactiveCompactor {
         if !has_attempted_collapse_drain {
             let detail = error
                 .map(|value| {
-                    format!("collapse drain retry triggered after repeated stream error: {value}")
+                    format!(
+                        "collapse drain retry triggered after repeated stream error [{}]: {}",
+                        value.kind, value.message
+                    )
                 })
                 .unwrap_or_else(|| "draining collapsed context before final model error".into());
             return CompactPlan {
@@ -69,7 +81,12 @@ impl ReactiveCompactor {
             kind: CompactPlanKind::Exhausted,
             notice_kind: "recovery",
             notice_message: error
-                .map(|value| format!("stream recovery exhausted after error: {value}"))
+                .map(|value| {
+                    format!(
+                        "stream recovery exhausted after error [{}]: {}",
+                        value.kind, value.message
+                    )
+                })
                 .unwrap_or_else(|| "stream recovery exhausted after stop error".into()),
             assistant_message: None,
             retry_prompt: None,

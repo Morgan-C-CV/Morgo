@@ -14,10 +14,10 @@ use rust_agent::hook::registry::{
 };
 use rust_agent::interaction::dispatcher::NotificationDispatcher;
 use rust_agent::interaction::telegram::gateway::TelegramGateway;
-use rust_agent::service::api::client::{ModelProviderClient, parse_sse_response};
+use rust_agent::service::api::client::{ModelProviderClient, parse_anthropic_sse_response};
 use rust_agent::service::api::errors::ApiError;
 use rust_agent::service::api::retry::RetryPolicy;
-use rust_agent::service::api::streaming::{StopReason, StreamEvent, UsageEvent};
+use rust_agent::service::api::streaming::{StopReason, StreamError, StreamEvent, UsageEvent};
 use rust_agent::service::compact::reactive_compact::ReactiveCompactor;
 use rust_agent::state::app_state::WorkerRole;
 use rust_agent::task::types::{TaskOwner, ValidationState, WorkerPhase};
@@ -503,8 +503,20 @@ async fn query_loop_requests_compaction_for_large_input() {
 async fn query_loop_surfaces_stream_errors_after_recovery_attempt() {
     let engine = QueryEngine::new(test_context_with_turns(
         vec![
-            vec![StreamEvent::Error("boom".into())],
-            vec![StreamEvent::Error("boom again".into())],
+            vec![StreamEvent::Error(StreamError {
+                provider_id: "anthropic".into(),
+                kind: "provider_stream".into(),
+                message: "boom".into(),
+                retryable: false,
+                status_code: None,
+            })],
+            vec![StreamEvent::Error(StreamError {
+                provider_id: "anthropic".into(),
+                kind: "provider_stream".into(),
+                message: "boom again".into(),
+                retryable: false,
+                status_code: None,
+            })],
         ],
         ToolRegistry::new(),
     ));
@@ -1017,7 +1029,8 @@ fn provider_sse_parsing_maps_standard_events() {
         "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":4}}\n\n"
     );
 
-    let events = parse_sse_response(body, "default-model").expect("provider SSE should parse");
+    let events =
+        parse_anthropic_sse_response(body, "default-model").expect("provider SSE should parse");
     assert!(matches!(events[0], StreamEvent::MessageStart));
     assert!(matches!(events[1], StreamEvent::Usage(_)));
     assert!(matches!(events[2], StreamEvent::TextDelta(_)));
@@ -2024,9 +2037,13 @@ async fn coordinator_surfaces_verification_failure_and_missing_verification_risk
 async fn query_loop_retries_with_model_fallback_before_other_stream_recovery() {
     let context = test_context_with_turns(
         vec![
-            vec![StreamEvent::Error(
-                "fallback:model_error: upstream overloaded".into(),
-            )],
+            vec![StreamEvent::Error(StreamError {
+                provider_id: "anthropic".into(),
+                kind: "model_fallback".into(),
+                message: "fallback:model_error: upstream overloaded".into(),
+                retryable: true,
+                status_code: Some(503),
+            })],
             vec![
                 StreamEvent::MessageStart,
                 StreamEvent::TextDelta("fallback recovered".into()),
@@ -2067,14 +2084,34 @@ async fn query_loop_retries_with_model_fallback_before_other_stream_recovery() {
 async fn query_loop_escalates_fallback_failure_to_terminal_model_error() {
     let context = test_context_with_turns(
         vec![
-            vec![StreamEvent::Error(
-                "fallback:model_error: upstream overloaded".into(),
-            )],
-            vec![StreamEvent::Error(
-                "fallback:model_error: still failing".into(),
-            )],
-            vec![StreamEvent::Error("residual collapse failure".into())],
-            vec![StreamEvent::Error("fatal after retries".into())],
+            vec![StreamEvent::Error(StreamError {
+                provider_id: "anthropic".into(),
+                kind: "model_fallback".into(),
+                message: "fallback:model_error: upstream overloaded".into(),
+                retryable: true,
+                status_code: Some(503),
+            })],
+            vec![StreamEvent::Error(StreamError {
+                provider_id: "anthropic".into(),
+                kind: "model_fallback".into(),
+                message: "fallback:model_error: still failing".into(),
+                retryable: true,
+                status_code: Some(503),
+            })],
+            vec![StreamEvent::Error(StreamError {
+                provider_id: "anthropic".into(),
+                kind: "provider_stream".into(),
+                message: "residual collapse failure".into(),
+                retryable: false,
+                status_code: None,
+            })],
+            vec![StreamEvent::Error(StreamError {
+                provider_id: "anthropic".into(),
+                kind: "provider_stream".into(),
+                message: "fatal after retries".into(),
+                retryable: false,
+                status_code: None,
+            })],
         ],
         ToolRegistry::new(),
     );
@@ -2147,10 +2184,20 @@ async fn query_loop_second_max_tokens_hit_uses_recovery_branch() {
 async fn submit_turn_emits_runtime_events_for_compact_recovery_and_terminal_paths() {
     let engine = QueryEngine::new(test_context_with_turns(
         vec![
-            vec![StreamEvent::Error(
-                "fallback:model_error: upstream overloaded".into(),
-            )],
-            vec![StreamEvent::Error("still overloaded".into())],
+            vec![StreamEvent::Error(StreamError {
+                provider_id: "anthropic".into(),
+                kind: "model_fallback".into(),
+                message: "fallback:model_error: upstream overloaded".into(),
+                retryable: true,
+                status_code: Some(503),
+            })],
+            vec![StreamEvent::Error(StreamError {
+                provider_id: "anthropic".into(),
+                kind: "provider_stream".into(),
+                message: "still overloaded".into(),
+                retryable: false,
+                status_code: None,
+            })],
             vec![
                 StreamEvent::MessageStart,
                 StreamEvent::TextDelta("final answer".into()),

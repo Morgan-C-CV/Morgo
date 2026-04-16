@@ -4,7 +4,7 @@ use crate::core::message::Message;
 use crate::hook::executor::{HookDecision, run_hook};
 use crate::hook::registry::HookEvent;
 use crate::service::api::streaming::{StopReason, StreamEvent};
-use crate::service::compact::CompactPlanKind;
+use crate::service::compact::{CompactPlanKind, CompactRecoveryErrorContext};
 use crate::tool::orchestrator::{ToolExecutionOutcome, aggregate_execution_records};
 use crate::tool::result::{
     ToolExecutionRecord, ToolExecutionReport, ToolReportContextModifier, ToolReportModifier,
@@ -382,15 +382,23 @@ async fn stream_model_turn(
         .await;
     if matches!(transition, Some(Continue::ModelFallbackRetry)) {
         if let Some(index) = streamed.iter().position(|event| {
-            matches!(event, StreamEvent::Error(error) if error.contains("fallback:model_error:"))
-                || matches!(
-                    event,
-                    StreamEvent::MessageStop {
-                        stop_reason: StopReason::Error
-                    }
-                )
+            matches!(
+                event,
+                StreamEvent::Error(error) if error.kind == "model_fallback"
+            ) || matches!(
+                event,
+                StreamEvent::MessageStop {
+                    stop_reason: StopReason::Error
+                }
+            )
         }) {
-            streamed[index] = StreamEvent::Error("model fallback retry failed".into());
+            streamed[index] = StreamEvent::Error(crate::service::api::streaming::StreamError {
+                provider_id: context.api_client.provider_config().provider_id,
+                kind: "model_fallback_failed".into(),
+                message: "model fallback retry failed".into(),
+                retryable: false,
+                status_code: None,
+            });
         }
     }
     streamed
@@ -690,16 +698,17 @@ async fn consume_model_stream(
                 }
             },
             StreamEvent::Error(error) => {
-                let error_message = Message::assistant(format!("stream error: {error}"));
+                let error_message = Message::assistant(format!("stream error: {}", error.message));
                 engine_events.push(EngineEvent::MessageCommitted(error_message.clone()));
                 state.messages.push(error_message);
                 if state.transition != Some(Continue::ModelFallbackRetry)
-                    && error.contains("fallback:model_error:")
+                    && error.kind == "model_fallback"
                 {
                     engine_events.push(EngineEvent::Notice {
                         kind: "recovery",
                         message: format!(
-                            "model fallback retry triggered after stream error: {error}"
+                            "model fallback retry triggered after stream error [{}]: {}",
+                            error.kind, error.message
                         ),
                     });
                     return TurnOutcome {
@@ -714,7 +723,10 @@ async fn consume_model_stream(
                 let plan = context.compactor.plan_stream_error_recovery(
                     state.has_attempted_reactive_compact,
                     state.transition == Some(Continue::CollapseDrainRetry),
-                    Some(&error),
+                    Some(CompactRecoveryErrorContext {
+                        kind: &error.kind,
+                        message: &error.message,
+                    }),
                 );
                 engine_events.push(EngineEvent::CompactPlanIssued {
                     kind: plan.kind.clone(),
@@ -755,7 +767,7 @@ async fn consume_model_stream(
                             events: engine_events,
                             decision: TurnDecision::Return(
                                 state.clone(),
-                                Terminal::ModelError(error),
+                                Terminal::ModelError(error.message),
                             ),
                         };
                     }

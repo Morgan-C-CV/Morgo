@@ -8,7 +8,7 @@ use tokio::time::{sleep, timeout};
 use crate::core::message::Message;
 use crate::service::api::errors::ApiError;
 use crate::service::api::retry::RetryPolicy;
-use crate::service::api::streaming::{StopReason, StreamEvent, UsageEvent};
+use crate::service::api::streaming::{StopReason, StreamError, StreamEvent, UsageEvent};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ModelPricing {
@@ -139,7 +139,9 @@ impl ModelProviderClient {
                 }
                 match self.stream_message_with_retry(config, client, input).await {
                     Ok(events) => events,
-                    Err(error) => vec![StreamEvent::Error(error.to_string())],
+                    Err(error) => vec![StreamEvent::Error(
+                        error.to_stream_error(&config.provider_id),
+                    )],
                 }
             }
         }
@@ -173,12 +175,13 @@ impl ModelProviderClient {
         client: &reqwest::Client,
         input: &Message,
     ) -> Result<Vec<StreamEvent>, ApiError> {
-        let url = build_messages_url(&config.base_url);
+        let url = build_messages_url_for_provider(&config.provider_id, &config.base_url)?;
+        let payload = build_request_payload_for_provider(config, input)?;
         let mut request = client
             .post(url)
             .header(ACCEPT, "text/event-stream")
             .header(CONTENT_TYPE, "application/json")
-            .json(&build_request_payload(config, input));
+            .json(&payload);
         if let Some(api_key) = config
             .api_key
             .as_ref()
@@ -218,28 +221,69 @@ impl ModelProviderClient {
         .map_err(|_| ApiError::timeout("provider stream timed out while reading response"))?
         .map_err(|error| ApiError::transport(format!("failed reading provider stream: {error}")))?;
 
-        parse_sse_response(&body, &config.model_id)
+        parse_stream_response_for_provider(&config.provider_id, &body, &config.model_id)
     }
 }
 
-fn build_messages_url(base_url: &str) -> String {
-    format!("{}/v1/messages", base_url.trim_end_matches('/'))
+fn build_messages_url_for_provider(provider_id: &str, base_url: &str) -> Result<String, ApiError> {
+    match normalized_provider_id(provider_id) {
+        "anthropic" | "default-provider" => {
+            Ok(format!("{}/v1/messages", base_url.trim_end_matches('/')))
+        }
+        _ => Err(ApiError::invalid_response(format!(
+            "unsupported provider id: {provider_id}"
+        ))),
+    }
 }
 
-fn build_request_payload(config: &ModelProviderConfig, input: &Message) -> Value {
-    json!({
-        "model": config.model_id,
-        "messages": [
-            {
-                "role": "user",
-                "content": input.content,
-            }
-        ],
-        "stream": true,
-    })
+fn build_request_payload_for_provider(
+    config: &ModelProviderConfig,
+    input: &Message,
+) -> Result<Value, ApiError> {
+    match normalized_provider_id(&config.provider_id) {
+        "anthropic" | "default-provider" => Ok(json!({
+            "model": config.model_id,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": input.content,
+                }
+            ],
+            "stream": true,
+        })),
+        _ => Err(ApiError::invalid_response(format!(
+            "unsupported provider id: {}",
+            config.provider_id
+        ))),
+    }
 }
 
-pub fn parse_sse_response(body: &str, default_model: &str) -> Result<Vec<StreamEvent>, ApiError> {
+fn parse_stream_response_for_provider(
+    provider_id: &str,
+    body: &str,
+    default_model: &str,
+) -> Result<Vec<StreamEvent>, ApiError> {
+    match normalized_provider_id(provider_id) {
+        "anthropic" | "default-provider" => parse_anthropic_sse_response(body, default_model),
+        _ => Err(ApiError::invalid_response(format!(
+            "unsupported provider id: {provider_id}"
+        ))),
+    }
+}
+
+fn normalized_provider_id(provider_id: &str) -> &str {
+    let trimmed = provider_id.trim();
+    if trimmed.is_empty() {
+        "anthropic"
+    } else {
+        trimmed
+    }
+}
+
+pub fn parse_anthropic_sse_response(
+    body: &str,
+    default_model: &str,
+) -> Result<Vec<StreamEvent>, ApiError> {
     let mut events = Vec::new();
     let mut saw_message_start = false;
     let normalized = body.replace("\r\n", "\n");
@@ -367,7 +411,13 @@ fn map_provider_event(
                 .and_then(Value::as_str)
                 .unwrap_or("provider stream error")
                 .to_string();
-            output.push(StreamEvent::Error(message));
+            output.push(StreamEvent::Error(StreamError {
+                provider_id: "anthropic".into(),
+                kind: "provider_stream".into(),
+                message,
+                retryable: false,
+                status_code: None,
+            }));
         }
         _ => {}
     }
@@ -416,8 +466,8 @@ fn map_stop_reason(reason: &str) -> StopReason {
 #[cfg(test)]
 mod tests {
     use super::{
-        ModelProviderConfig, ProviderTimeout, build_messages_url, map_stop_reason,
-        parse_sse_response,
+        ModelProviderConfig, ProviderTimeout, build_messages_url_for_provider, map_stop_reason,
+        parse_anthropic_sse_response, parse_stream_response_for_provider,
     };
     use crate::service::api::retry::RetryPolicy;
     use crate::service::api::streaming::{StopReason, StreamEvent};
@@ -445,7 +495,7 @@ mod tests {
             "data: {\"type\":\"message_stop\"}\n\n"
         );
 
-        let events = parse_sse_response(body, "default-model").expect("sse should parse");
+        let events = parse_anthropic_sse_response(body, "default-model").expect("sse should parse");
         assert!(matches!(events[0], StreamEvent::MessageStart));
         assert!(matches!(events[1], StreamEvent::Usage(_)));
         assert!(matches!(events[2], StreamEvent::TextDelta(_)));
@@ -464,8 +514,46 @@ mod tests {
         assert_eq!(config.timeout, ProviderTimeout::default());
         assert_eq!(config.retry_policy, RetryPolicy::default());
         assert_eq!(
-            build_messages_url(&config.base_url),
+            build_messages_url_for_provider(&config.provider_id, &config.base_url)
+                .expect("default provider should resolve URL"),
             "http://localhost/v1/messages"
         );
+    }
+
+    #[test]
+    fn rejects_unknown_provider_ids_for_request_and_parse_paths() {
+        let config = ModelProviderConfig {
+            provider_id: "custom-provider".into(),
+            ..ModelProviderConfig::default()
+        };
+
+        let request_error = build_messages_url_for_provider(&config.provider_id, &config.base_url)
+            .expect_err("unknown provider should be rejected");
+        assert_eq!(request_error.kind_label(), "invalid_response");
+        assert!(request_error.message.contains("custom-provider"));
+
+        let parse_error = parse_stream_response_for_provider("custom-provider", "", "model")
+            .expect_err("unknown provider parser should be rejected");
+        assert_eq!(parse_error.kind_label(), "invalid_response");
+        assert!(parse_error.message.contains("custom-provider"));
+    }
+
+    #[test]
+    fn parses_error_events_into_structured_stream_errors() {
+        let body = concat!(
+            "event: message\n",
+            "data: {\"type\":\"error\",\"error\":{\"message\":\"provider exploded\"}}\n\n"
+        );
+
+        let events = parse_anthropic_sse_response(body, "default-model").expect("sse should parse");
+        assert!(matches!(
+            &events[0],
+            StreamEvent::Error(error)
+                if error.provider_id == "anthropic"
+                    && error.kind == "provider_stream"
+                    && error.message == "provider exploded"
+                    && !error.retryable
+                    && error.status_code.is_none()
+        ));
     }
 }

@@ -1,5 +1,7 @@
 use std::fmt;
 
+use crate::service::api::streaming::StreamError;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApiErrorKind {
     HttpStatus(u16),
@@ -62,6 +64,30 @@ impl ApiError {
     pub fn is_retryable(&self) -> bool {
         matches!(self.kind, ApiErrorKind::Transport | ApiErrorKind::Timeout)
             || matches!(self.kind, ApiErrorKind::HttpStatus(status) if status == 429 || (500..=599).contains(&status))
+    }
+
+    pub fn kind_label(&self) -> &'static str {
+        match self.kind {
+            ApiErrorKind::HttpStatus(_) => "http_status",
+            ApiErrorKind::RequestBuild => "request_build",
+            ApiErrorKind::Transport => "transport",
+            ApiErrorKind::Timeout => "timeout",
+            ApiErrorKind::InvalidResponse => "invalid_response",
+            ApiErrorKind::SseProtocol => "sse_protocol",
+        }
+    }
+
+    pub fn to_stream_error(&self, provider_id: &str) -> StreamError {
+        StreamError {
+            provider_id: provider_id.to_string(),
+            kind: self.kind_label().to_string(),
+            message: self.message.clone(),
+            retryable: self.is_retryable(),
+            status_code: match self.kind {
+                ApiErrorKind::HttpStatus(status) => Some(status),
+                _ => None,
+            },
+        }
     }
 }
 
