@@ -1444,10 +1444,44 @@ fn synthetic_stop_reason_error(transition: Option<&Continue>) -> StreamError {
 
 fn classify_service_failure_code(error: &StreamError) -> ServiceFailureCode {
     match error.disposition {
-        ProviderFailureDisposition::StreamInterrupted
-        | ProviderFailureDisposition::StreamTerminal => ServiceFailureCode::ApiStreamError,
         ProviderFailureDisposition::PreStreamRetryable
-        | ProviderFailureDisposition::PreStreamTerminal => ServiceFailureCode::ApiProviderError,
+        | ProviderFailureDisposition::PreStreamTerminal => {
+            classify_pre_stream_failure_code(&error.kind, error.status_code)
+        }
+        ProviderFailureDisposition::StreamInterrupted
+        | ProviderFailureDisposition::StreamTerminal => {
+            classify_stream_failure_code(&error.kind, error.disposition.clone())
+        }
+    }
+}
+
+fn classify_pre_stream_failure_code(kind: &str, status_code: Option<u16>) -> ServiceFailureCode {
+    match kind {
+        "timeout" => ServiceFailureCode::ApiProviderTimeout,
+        "transport" => ServiceFailureCode::ApiProviderTransport,
+        "request_build" => ServiceFailureCode::ApiProviderRequestBuild,
+        "invalid_response" => ServiceFailureCode::ApiProviderInvalidResponse,
+        "sse_protocol" => ServiceFailureCode::ApiStreamProtocol,
+        "http_status" => match status_code {
+            Some(429) => ServiceFailureCode::ApiProviderHttp429,
+            Some(500..=599) => ServiceFailureCode::ApiProviderHttp5xx,
+            Some(400..=499) => ServiceFailureCode::ApiProviderHttp4xx,
+            _ => ServiceFailureCode::ApiProviderInvalidResponse,
+        },
+        _ => ServiceFailureCode::ApiProviderInvalidResponse,
+    }
+}
+
+fn classify_stream_failure_code(
+    kind: &str,
+    disposition: ProviderFailureDisposition,
+) -> ServiceFailureCode {
+    match kind {
+        "model_fallback" | "model_fallback_failed" => ServiceFailureCode::ApiStreamModelFallback,
+        "overloaded_error" => ServiceFailureCode::ApiStreamOverloaded,
+        "sse_protocol" => ServiceFailureCode::ApiStreamProtocol,
+        _ if disposition.is_stream_interrupted() => ServiceFailureCode::ApiStreamInterrupted,
+        _ => ServiceFailureCode::ApiStreamTerminal,
     }
 }
 
@@ -1469,7 +1503,12 @@ impl QueryLoopStateExt for QueryLoopState {
 
 #[cfg(test)]
 mod tests {
-    use super::{LoopState, QueryParams, apply_tool_report_context, report_detail_or_summary};
+    use super::{
+        LoopState, QueryParams, apply_tool_report_context, classify_pre_stream_failure_code,
+        classify_stream_failure_code, report_detail_or_summary,
+    };
+    use crate::core::events::ServiceFailureCode;
+    use crate::service::api::streaming::ProviderFailureDisposition;
     use crate::tool::result::{ToolExecutionReport, ToolReportContextModifier, ToolReportModifier};
 
     #[test]
@@ -1524,6 +1563,70 @@ mod tests {
         assert_eq!(
             state.pending_tool_use_summary.as_deref(),
             Some("Read succeeded; ProgressTool in progress")
+        );
+    }
+
+    #[test]
+    fn classify_pre_stream_failure_code_uses_status_and_kind_metadata() {
+        assert_eq!(
+            classify_pre_stream_failure_code("http_status", Some(429)),
+            ServiceFailureCode::ApiProviderHttp429
+        );
+        assert_eq!(
+            classify_pre_stream_failure_code("http_status", Some(503)),
+            ServiceFailureCode::ApiProviderHttp5xx
+        );
+        assert_eq!(
+            classify_pre_stream_failure_code("http_status", Some(400)),
+            ServiceFailureCode::ApiProviderHttp4xx
+        );
+        assert_eq!(
+            classify_pre_stream_failure_code("transport", None),
+            ServiceFailureCode::ApiProviderTransport
+        );
+        assert_eq!(
+            classify_pre_stream_failure_code("timeout", None),
+            ServiceFailureCode::ApiProviderTimeout
+        );
+        assert_eq!(
+            classify_pre_stream_failure_code("request_build", None),
+            ServiceFailureCode::ApiProviderRequestBuild
+        );
+        assert_eq!(
+            classify_pre_stream_failure_code("invalid_response", None),
+            ServiceFailureCode::ApiProviderInvalidResponse
+        );
+    }
+
+    #[test]
+    fn classify_stream_failure_code_uses_stream_kind_and_disposition() {
+        assert_eq!(
+            classify_stream_failure_code(
+                "model_fallback",
+                ProviderFailureDisposition::StreamInterrupted,
+            ),
+            ServiceFailureCode::ApiStreamModelFallback
+        );
+        assert_eq!(
+            classify_stream_failure_code(
+                "overloaded_error",
+                ProviderFailureDisposition::StreamInterrupted,
+            ),
+            ServiceFailureCode::ApiStreamOverloaded
+        );
+        assert_eq!(
+            classify_stream_failure_code(
+                "provider_stream",
+                ProviderFailureDisposition::StreamInterrupted
+            ),
+            ServiceFailureCode::ApiStreamInterrupted
+        );
+        assert_eq!(
+            classify_stream_failure_code(
+                "provider_terminal",
+                ProviderFailureDisposition::StreamTerminal
+            ),
+            ServiceFailureCode::ApiStreamTerminal
         );
     }
 }

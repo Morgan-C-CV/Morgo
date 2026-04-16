@@ -210,7 +210,7 @@ fn runtime_event_for_transition(
         ),
         crate::core::query_loop::Continue::ModelFallbackRetry => (
             RuntimeEventKind::RetryScheduled,
-            Some(ServiceFailureCode::ApiStreamError),
+            Some(ServiceFailureCode::ApiStreamModelFallback),
         ),
         crate::core::query_loop::Continue::MaxOutputTokensEscalate
         | crate::core::query_loop::Continue::MaxOutputTokensRecovery

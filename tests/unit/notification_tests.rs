@@ -860,7 +860,7 @@ fn remote_delivery_mode_classifies_dual_channel_and_response_only_surface_items(
     let notice_item = SurfaceItem::RuntimeNotice {
         kind: "validation".into(),
         message: "pending verify".into(),
-        code: Some("api_provider_error".into()),
+        code: Some("api_provider_http_5xx".into()),
         runtime_kind: Some("ModelError".into()),
     };
     assert_eq!(
@@ -893,7 +893,7 @@ fn surface_view_classifies_cli_events_for_cli_and_remote_reuse() {
             CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::Notice {
                 kind: "validation".into(),
                 message: "pending verify".into(),
-                code: Some("api_provider_error".into()),
+                code: Some("api_provider_http_5xx".into()),
                 runtime_kind: Some("ModelError".into()),
             }),
             CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::ToolResult {
@@ -919,7 +919,7 @@ fn surface_view_classifies_cli_events_for_cli_and_remote_reuse() {
         }
             if kind == "validation"
                 && message == "pending verify"
-                && code.as_deref() == Some("api_provider_error")
+                && code.as_deref() == Some("api_provider_http_5xx")
                 && runtime_kind.as_deref() == Some("ModelError")
     ));
     assert!(matches!(
@@ -2050,7 +2050,7 @@ fn web_view_is_derived_from_surface_view_with_frontend_friendly_kinds() {
             CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::Notice {
                 kind: "runtime".into(),
                 message: "background work still running".into(),
-                code: Some("api_stream_error".into()),
+                code: Some("api_stream_interrupted".into()),
                 runtime_kind: Some("RetryScheduled".into()),
             }),
             CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::Transition {
@@ -2086,7 +2086,7 @@ fn web_view_is_derived_from_surface_view_with_frontend_friendly_kinds() {
         }
             if notice_kind == "runtime"
                 && message == "background work still running"
-                && code.as_deref() == Some("api_stream_error")
+                && code.as_deref() == Some("api_stream_interrupted")
                 && runtime_kind.as_deref() == Some("RetryScheduled")
     ));
     assert!(matches!(

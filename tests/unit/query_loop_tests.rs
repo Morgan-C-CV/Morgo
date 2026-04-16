@@ -2092,7 +2092,7 @@ async fn query_loop_retries_with_model_fallback_before_other_stream_recovery() {
             message,
             code,
         } if message.contains("model fallback retry")
-            && code == &Some(rust_agent::core::events::ServiceFailureCode::ApiStreamError)
+            && code == &Some(rust_agent::core::events::ServiceFailureCode::ApiStreamModelFallback)
     )));
 }
 
@@ -2148,7 +2148,7 @@ async fn query_loop_escalates_fallback_failure_to_terminal_model_error() {
         result.terminal,
         Terminal::ModelError {
             message: "fatal after retries".into(),
-            code: Some(rust_agent::core::events::ServiceFailureCode::ApiStreamError),
+            code: Some(rust_agent::core::events::ServiceFailureCode::ApiStreamInterrupted),
         }
     );
     assert_eq!(result.transition, Some(Continue::CollapseDrainRetry));
@@ -2180,7 +2180,7 @@ async fn query_loop_terminal_stream_failures_do_not_enter_recovery() {
         result.terminal,
         Terminal::ModelError {
             message: "fatal terminal failure".into(),
-            code: Some(rust_agent::core::events::ServiceFailureCode::ApiStreamError),
+            code: Some(rust_agent::core::events::ServiceFailureCode::ApiStreamTerminal),
         }
     );
     assert_eq!(result.transition, None);
@@ -2285,7 +2285,7 @@ async fn submit_turn_emits_runtime_events_for_compact_recovery_and_terminal_path
             if runtime.kind == rust_agent::core::events::RuntimeEventKind::RetryScheduled
                 && runtime.detail == Continue::ModelFallbackRetry.as_str()
                 && runtime.code
-                    == Some(rust_agent::core::events::ServiceFailureCode::ApiStreamError)
+                    == Some(rust_agent::core::events::ServiceFailureCode::ApiStreamModelFallback)
     )));
     assert!(result.events.iter().any(|event| matches!(
         event,

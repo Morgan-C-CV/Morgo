@@ -1,6 +1,6 @@
 use crate::command::types::CommandResult;
 use crate::core::engine::QueryEngine;
-use crate::core::events::EngineEvent;
+use crate::core::events::{EngineEvent, ServiceFailureCode};
 use crate::core::message::Message;
 use crate::interaction::envelope::NormalizedInput;
 use crate::interaction::router::{CommandRouter, RouteExecution};
@@ -272,7 +272,7 @@ async fn collect_stream_messages(
                         }
                     ),
                     message,
-                    code: Some("compact_recovery_error".into()),
+                    code: Some(ServiceFailureCode::CompactRecoveryError.as_str().into()),
                     runtime_kind: Some("CompactPlan".into()),
                 });
             }

@@ -24,8 +24,18 @@ impl SessionMilestone {
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ServiceFailureCode {
-    ApiStreamError,
-    ApiProviderError,
+    ApiProviderHttp4xx,
+    ApiProviderHttp429,
+    ApiProviderHttp5xx,
+    ApiProviderTransport,
+    ApiProviderTimeout,
+    ApiProviderRequestBuild,
+    ApiProviderInvalidResponse,
+    ApiStreamModelFallback,
+    ApiStreamOverloaded,
+    ApiStreamInterrupted,
+    ApiStreamProtocol,
+    ApiStreamTerminal,
     McpRuntimeError,
     CompactRecoveryError,
 }
@@ -33,8 +43,18 @@ pub enum ServiceFailureCode {
 impl ServiceFailureCode {
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::ApiStreamError => "api_stream_error",
-            Self::ApiProviderError => "api_provider_error",
+            Self::ApiProviderHttp4xx => "api_provider_http_4xx",
+            Self::ApiProviderHttp429 => "api_provider_http_429",
+            Self::ApiProviderHttp5xx => "api_provider_http_5xx",
+            Self::ApiProviderTransport => "api_provider_transport",
+            Self::ApiProviderTimeout => "api_provider_timeout",
+            Self::ApiProviderRequestBuild => "api_provider_request_build",
+            Self::ApiProviderInvalidResponse => "api_provider_invalid_response",
+            Self::ApiStreamModelFallback => "api_stream_model_fallback",
+            Self::ApiStreamOverloaded => "api_stream_overloaded",
+            Self::ApiStreamInterrupted => "api_stream_interrupted",
+            Self::ApiStreamProtocol => "api_stream_protocol",
+            Self::ApiStreamTerminal => "api_stream_terminal",
             Self::McpRuntimeError => "mcp_runtime_error",
             Self::CompactRecoveryError => "compact_recovery_error",
         }
