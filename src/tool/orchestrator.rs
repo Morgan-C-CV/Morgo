@@ -2,8 +2,8 @@ use crate::state::permission_context::ToolPermissionContext;
 use crate::tool::definition::{InterruptBehavior, ToolCall, ToolResult};
 use crate::tool::registry::ToolRegistry;
 use crate::tool::result::{
-    ToolExecutionOutcomeKind, ToolExecutionRecord, ToolExecutionReport, ToolReportContextModifier,
-    ToolReportModifier,
+    PendingApprovalPayload, ToolExecutionOutcomeKind, ToolExecutionRecord, ToolExecutionReport,
+    ToolReportContextModifier, ToolReportModifier,
 };
 use std::sync::Arc;
 
@@ -152,7 +152,8 @@ fn build_outcome(
     batch_size: usize,
     executed_in_batch: bool,
 ) -> ToolExecutionOutcome {
-    let (kind, summary, detail, report_modifier) = summarize_result(&tool_name, &result);
+    let (kind, summary, detail, pending_approval, report_modifier) =
+        summarize_result(&tool_name, &result);
     ToolExecutionOutcome {
         record: ToolExecutionRecord {
             tool_name: tool_name.clone(),
@@ -160,6 +161,7 @@ fn build_outcome(
             kind,
             summary,
             detail,
+            pending_approval,
             report_modifier,
             observable_input,
             batch_context: crate::tool::result::ToolBatchContext {
@@ -281,6 +283,7 @@ fn summarize_result(
     ToolExecutionOutcomeKind,
     String,
     Option<String>,
+    Option<PendingApprovalPayload>,
     ToolReportModifier,
 ) {
     match result {
@@ -288,36 +291,44 @@ fn summarize_result(
             ToolExecutionOutcomeKind::Success,
             format!("{tool_name} succeeded"),
             Some(text.clone()),
+            None,
             ToolReportModifier::None,
         ),
         ToolResult::Denied(message) => (
             ToolExecutionOutcomeKind::Denied,
             format!("{tool_name} denied"),
             Some(message.clone()),
+            None,
             ToolReportModifier::NeedsAttention,
         ),
-        ToolResult::PendingApproval { message, .. } => (
+        ToolResult::PendingApproval {
+            message, approval, ..
+        } => (
             ToolExecutionOutcomeKind::PendingApproval,
-            format!("{tool_name} pending approval"),
-            Some(message.clone()),
+            approval.summary.clone(),
+            approval.detail.clone().or_else(|| Some(message.clone())),
+            Some(approval.clone()),
             ToolReportModifier::Pending,
         ),
         ToolResult::Interrupted(message) => (
             ToolExecutionOutcomeKind::Interrupted,
             format!("{tool_name} interrupted"),
             Some(message.clone()),
+            None,
             ToolReportModifier::NeedsAttention,
         ),
         ToolResult::Progress(message) => (
             ToolExecutionOutcomeKind::Progress,
             format!("{tool_name} in progress"),
             Some(message.clone()),
+            None,
             ToolReportModifier::Progress,
         ),
         ToolResult::ResultTooLarge(message) => (
             ToolExecutionOutcomeKind::ResultTooLarge,
             format!("{tool_name} result too large"),
             Some(message.clone()),
+            None,
             ToolReportModifier::NeedsAttention,
         ),
     }

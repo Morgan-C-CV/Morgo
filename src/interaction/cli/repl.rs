@@ -26,8 +26,11 @@ pub enum CliRuntimeEvent {
     PendingApproval {
         tool_name: String,
         message: String,
+        code: Option<String>,
         summary: Option<String>,
         detail: Option<String>,
+        approval_kind: Option<String>,
+        escalation_reasons: Vec<String>,
     },
     Notice {
         kind: String,
@@ -225,15 +228,21 @@ async fn collect_stream_messages(
             EngineEvent::PendingApproval {
                 tool_name,
                 message,
+                code,
                 summary,
                 detail,
+                approval_kind,
+                escalation_reasons,
                 ..
             } => {
                 runtime_events.push(CliRuntimeEvent::PendingApproval {
                     tool_name,
                     message: detail.clone().unwrap_or(message),
+                    code,
                     summary: Some(summary),
                     detail,
+                    approval_kind,
+                    escalation_reasons,
                 });
             }
             EngineEvent::Notice { kind, message } => {

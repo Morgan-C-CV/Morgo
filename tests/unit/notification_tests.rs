@@ -142,6 +142,11 @@ fn dispatcher_records_cli_notifications() {
         output_file: Some("/tmp/task-1.log".into()),
         usage: None,
         tool_name: None,
+        approval_code: None,
+        approval_summary: None,
+        approval_detail: None,
+        approval_kind: None,
+        approval_escalation_reasons: Vec::new(),
         notice_kind: None,
         dedupe_key: None,
         wake_up: true,
@@ -179,7 +184,16 @@ fn dispatcher_records_notification_hook_payloads_for_all_notification_types() {
     );
     dispatcher.dispatch(
         InteractionSurface::Cli,
-        Notification::approval_required("session-1", "Bash", "requires explicit approval"),
+        Notification::approval_required(
+            "session-1",
+            "Bash",
+            "requires explicit approval",
+            Some("bash_warning".into()),
+            Some("Bash pending approval".into()),
+            Some("requires explicit approval".into()),
+            Some("tool_permission".into()),
+            vec!["privileged_system".into()],
+        ),
     );
     dispatcher.dispatch(
         InteractionSurface::Cli,
@@ -244,7 +258,16 @@ fn dispatcher_can_deny_approval_notification_via_hook_rule() {
 
     dispatcher.dispatch(
         InteractionSurface::Cli,
-        Notification::approval_required("session-1", "Bash", "requires explicit approval"),
+        Notification::approval_required(
+            "session-1",
+            "Bash",
+            "requires explicit approval",
+            Some("bash_warning".into()),
+            Some("Bash pending approval".into()),
+            Some("requires explicit approval".into()),
+            Some("tool_permission".into()),
+            vec!["privileged_system".into()],
+        ),
     );
 
     let events = registry.recorded_events();
@@ -350,8 +373,11 @@ fn cli_renderer_renders_approval_and_tool_result_panels() {
             CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::PendingApproval {
                 tool_name: "Bash".into(),
                 message: "requires explicit approval".into(),
+                code: Some("bash_warning".into()),
                 summary: Some("Bash pending approval".into()),
                 detail: Some("requires explicit approval".into()),
+                approval_kind: Some("tool_permission".into()),
+                escalation_reasons: vec!["privileged_system".into()],
             }),
             CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::ToolResult {
                 tool_name: "Read".into(),
@@ -382,8 +408,11 @@ fn surface_and_remote_views_preserve_structured_tool_fields() {
             CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::PendingApproval {
                 tool_name: "Bash".into(),
                 message: "requires explicit approval".into(),
+                code: Some("bash_warning".into()),
                 summary: Some("Bash pending approval".into()),
                 detail: Some("requires explicit approval".into()),
+                approval_kind: Some("tool_permission".into()),
+                escalation_reasons: vec!["privileged_system".into()],
             }),
             CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::ToolResult {
                 tool_name: "Read".into(),
@@ -400,12 +429,18 @@ fn surface_and_remote_views_preserve_structured_tool_fields() {
         SurfaceItem::ApprovalRequired {
             tool_name,
             message,
+            code,
             summary,
             detail,
+            approval_kind,
+            escalation_reasons,
         } if tool_name == "Bash"
             && message == "requires explicit approval"
+            && code.as_deref() == Some("bash_warning")
             && summary.as_deref() == Some("Bash pending approval")
             && detail.as_deref() == Some("requires explicit approval")
+            && approval_kind.as_deref() == Some("tool_permission")
+            && escalation_reasons.as_slice() == ["privileged_system"]
     ));
     assert!(matches!(
         &view.items[1],
@@ -430,12 +465,18 @@ fn surface_and_remote_views_preserve_structured_tool_fields() {
         RemoteEventPayload::ApprovalRequired {
             tool_name,
             message,
+            code,
             summary,
             detail,
+            approval_kind,
+            escalation_reasons,
         } if tool_name == "Bash"
             && message == "requires explicit approval"
+            && code.as_deref() == Some("bash_warning")
             && summary.as_deref() == Some("Bash pending approval")
             && detail.as_deref() == Some("requires explicit approval")
+            && approval_kind.as_deref() == Some("tool_permission")
+            && escalation_reasons.as_slice() == ["privileged_system"]
     ));
     assert!(matches!(
         &remote_events[1].payload,
@@ -518,8 +559,11 @@ fn cli_renderer_supports_help_style_primary_text_with_mixed_panels() {
             CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::PendingApproval {
                 tool_name: "Bash".into(),
                 message: "approval needed for follow-up".into(),
+                code: Some("bash_warning".into()),
                 summary: None,
                 detail: None,
+                approval_kind: Some("tool_permission".into()),
+                escalation_reasons: vec!["privileged_system".into()],
             }),
             CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::Notice {
                 kind: "runtime".into(),
@@ -570,8 +614,11 @@ fn cli_renderer_tui_output_keeps_main_panels_and_footer_in_order() {
             CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::PendingApproval {
                 tool_name: "Bash".into(),
                 message: "approval needed for follow-up".into(),
+                code: Some("bash_warning".into()),
                 summary: None,
                 detail: None,
+                approval_kind: Some("tool_permission".into()),
+                escalation_reasons: vec!["privileged_system".into()],
             }),
             CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::ToolResult {
                 tool_name: "Read".into(),
@@ -783,8 +830,11 @@ fn remote_delivery_mode_classifies_dual_channel_and_response_only_surface_items(
     let approval_item = SurfaceItem::ApprovalRequired {
         tool_name: "Bash".into(),
         message: "requires explicit approval".into(),
+        code: Some("bash_warning".into()),
         summary: None,
         detail: None,
+        approval_kind: Some("tool_permission".into()),
+        escalation_reasons: vec!["privileged_system".into()],
     };
     assert_eq!(
         remote_channel_kind_for_surface_item(&approval_item),
@@ -963,6 +1013,11 @@ fn remote_notification_envelope_preserves_task_type_and_uses_generic_fallback() 
             output_file: Some("/tmp/task-fallback.log".into()),
             usage: None,
             tool_name: None,
+            approval_code: None,
+            approval_summary: None,
+            approval_detail: None,
+            approval_kind: None,
+            approval_escalation_reasons: Vec::new(),
             notice_kind: None,
             dedupe_key: None,
             wake_up: true,
@@ -1012,8 +1067,11 @@ fn telegram_view_keeps_only_telegram_relevant_semantic_items() {
             CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::PendingApproval {
                 tool_name: "Bash".into(),
                 message: "requires explicit approval".into(),
+                code: Some("bash_warning".into()),
                 summary: None,
                 detail: None,
+                approval_kind: Some("tool_permission".into()),
+                escalation_reasons: vec!["privileged_system".into()],
             }),
         ],
     };
@@ -1137,6 +1195,11 @@ fn telegram_gateway_rejects_explicit_target_without_matching_binding() {
         output_file: None,
         usage: None,
         tool_name: Some("Bash".into()),
+        approval_code: Some("bash_warning".into()),
+        approval_summary: Some("Bash pending approval".into()),
+        approval_detail: Some("requires explicit approval".into()),
+        approval_kind: Some("tool_permission".into()),
+        approval_escalation_reasons: vec!["privileged_system".into()],
         notice_kind: None,
         dedupe_key: Some("approval_required:Bash:requires explicit approval".into()),
         wake_up: true,
@@ -1207,8 +1270,16 @@ fn telegram_gateway_resolves_remote_actor_delivery_target_only_for_bound_actor()
         }],
         surface_authorizer: DefaultSurfaceAuthorizer::default(),
     };
-    let mut actor_notification =
-        Notification::approval_required("telegram-session-1", "Bash", "needs approval");
+    let mut actor_notification = Notification::approval_required(
+        "telegram-session-1",
+        "Bash",
+        "needs approval",
+        Some("bash_warning".into()),
+        Some("Bash pending approval".into()),
+        Some("needs approval".into()),
+        Some("tool_permission".into()),
+        vec!["privileged_system".into()],
+    );
     actor_notification.target = Some(NotificationTarget::RemoteActor {
         session_id: "telegram-session-1".into(),
         actor_id: "actor-1".into(),
@@ -2011,8 +2082,11 @@ fn same_surface_view_feeds_remote_telegram_and_web_without_cli_renderer_types() 
             CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::PendingApproval {
                 tool_name: "Bash".into(),
                 message: "requires explicit approval".into(),
+                code: Some("bash_warning".into()),
                 summary: None,
                 detail: None,
+                approval_kind: Some("tool_permission".into()),
+                escalation_reasons: vec!["privileged_system".into()],
             }),
             CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::Notice {
                 kind: "delivery".into(),
@@ -2038,8 +2112,15 @@ fn same_surface_view_feeds_remote_telegram_and_web_without_cli_renderer_types() 
         RemoteEventPayload::TaskUpdate(task) if task.task_type == "local_agent"
     ));
     assert!(matches!(
-        remote_events[1].payload,
-        RemoteEventPayload::ApprovalRequired { .. }
+        &remote_events[1].payload,
+        RemoteEventPayload::ApprovalRequired {
+            code,
+            approval_kind,
+            escalation_reasons,
+            ..
+        } if code.as_deref() == Some("bash_warning")
+            && approval_kind.as_deref() == Some("tool_permission")
+            && escalation_reasons == &vec!["privileged_system".to_string()]
     ));
     assert!(matches!(
         &telegram_view.items[0],
@@ -2067,8 +2148,16 @@ fn dispatcher_drains_remote_session_and_actor_notifications() {
         InteractionSurface::Remote,
         Notification::runtime_notice("remote-session", "tool", "session scoped"),
     );
-    let mut actor_notification =
-        Notification::approval_required("remote-session", "Bash", "requires explicit approval");
+    let mut actor_notification = Notification::approval_required(
+        "remote-session",
+        "Bash",
+        "requires explicit approval",
+        Some("bash_warning".into()),
+        Some("Bash pending approval".into()),
+        Some("requires explicit approval".into()),
+        Some("tool_permission".into()),
+        vec!["privileged_system".into()],
+    );
     actor_notification.target = Some(NotificationTarget::RemoteActor {
         session_id: "remote-session".into(),
         actor_id: "actor-1".into(),
@@ -2202,8 +2291,16 @@ fn drain_remote_notifications_maps_structured_payloads() {
         history: None,
         restored_session: None,
     };
-    let mut notification =
-        Notification::approval_required("remote-session", "Bash", "requires explicit approval");
+    let mut notification = Notification::approval_required(
+        "remote-session",
+        "Bash",
+        "requires explicit approval",
+        Some("bash_warning".into()),
+        Some("Bash pending approval".into()),
+        Some("requires explicit approval".into()),
+        Some("tool_permission".into()),
+        vec!["privileged_system".into()],
+    );
     notification.target = Some(NotificationTarget::RemoteActor {
         session_id: "remote-session".into(),
         actor_id: "actor-1".into(),
@@ -2217,8 +2314,22 @@ fn drain_remote_notifications_maps_structured_payloads() {
     assert_eq!(drained[0].event_type, "approval_required");
     assert!(matches!(
         &drained[0].payload,
-        RemoteEventPayload::ApprovalRequired { tool_name, message, .. }
-            if tool_name == "Bash" && message == "requires explicit approval"
+        RemoteEventPayload::ApprovalRequired {
+            tool_name,
+            message,
+            code,
+            summary,
+            detail,
+            approval_kind,
+            escalation_reasons,
+        }
+            if tool_name == "Bash"
+                && message == "requires explicit approval"
+                && code.as_deref() == Some("bash_warning")
+                && summary.as_deref() == Some("Bash pending approval")
+                && detail.as_deref() == Some("requires explicit approval")
+                && approval_kind.as_deref() == Some("tool_permission")
+                && escalation_reasons == &vec!["privileged_system".to_string()]
     ));
 }
 
@@ -2314,6 +2425,11 @@ fn dispatcher_requires_delivery_ready_binding_for_telegram() {
         output_file: Some("/tmp/task-1.log".into()),
         usage: None,
         tool_name: None,
+        approval_code: None,
+        approval_summary: None,
+        approval_detail: None,
+        approval_kind: None,
+        approval_escalation_reasons: Vec::new(),
         notice_kind: None,
         dedupe_key: None,
         wake_up: true,
@@ -2356,7 +2472,16 @@ fn telegram_dispatch_only_enqueues_wake_up_notifications() {
 
     dispatcher.dispatch(
         InteractionSurface::Telegram,
-        Notification::approval_required("telegram-session-1", "Bash", "needs approval"),
+        Notification::approval_required(
+            "telegram-session-1",
+            "Bash",
+            "needs approval",
+            Some("bash_warning".into()),
+            Some("Bash pending approval".into()),
+            Some("needs approval".into()),
+            Some("tool_permission".into()),
+            vec!["privileged_system".into()],
+        ),
     );
     dispatcher.dispatch(
         InteractionSurface::Telegram,

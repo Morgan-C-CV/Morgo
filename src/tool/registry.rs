@@ -237,6 +237,13 @@ impl ToolRegistry {
             crate::tool::definition::PermissionDecision::Ask { message, .. } => {
                 Ok(ToolResult::PendingApproval {
                     tool_name: metadata.name.to_string(),
+                    approval: crate::tool::result::PendingApprovalPayload {
+                        code: None,
+                        summary: format!("{} pending approval", metadata.name),
+                        detail: Some(message.clone()),
+                        approval_kind: Some("tool_permission".into()),
+                        escalation_reasons: Vec::new(),
+                    },
                     message,
                 })
             }

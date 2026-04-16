@@ -46,8 +46,11 @@ pub enum RemoteEventPayload {
     ApprovalRequired {
         tool_name: String,
         message: String,
+        code: Option<String>,
         summary: Option<String>,
         detail: Option<String>,
+        approval_kind: Option<String>,
+        escalation_reasons: Vec<String>,
     },
     RuntimeNotice {
         kind: String,
@@ -275,15 +278,21 @@ impl From<SurfaceItem> for RemoteEventEnvelope {
             SurfaceItem::ApprovalRequired {
                 tool_name,
                 message,
+                code,
                 summary,
                 detail,
+                approval_kind,
+                escalation_reasons,
             } => Self {
                 event_type: "approval_required",
                 payload: RemoteEventPayload::ApprovalRequired {
                     tool_name,
                     message,
+                    code,
                     summary,
                     detail,
+                    approval_kind,
+                    escalation_reasons,
                 },
             },
             SurfaceItem::RuntimeNotice { kind, message } => Self {
@@ -397,8 +406,11 @@ impl From<Notification> for RemoteNotificationEnvelope {
                 payload: RemoteEventPayload::ApprovalRequired {
                     tool_name: notification.tool_name.unwrap_or_default(),
                     message: notification.body,
-                    summary: None,
-                    detail: None,
+                    code: notification.approval_code,
+                    summary: notification.approval_summary,
+                    detail: notification.approval_detail,
+                    approval_kind: notification.approval_kind,
+                    escalation_reasons: notification.approval_escalation_reasons,
                 },
             },
             NotificationType::RuntimeNotice => Self {
@@ -441,7 +453,13 @@ fn notification_from_surface_item(
     match item {
         SurfaceItem::TaskUpdate(_) => None,
         SurfaceItem::ApprovalRequired {
-            tool_name, message, ..
+            tool_name,
+            message,
+            code,
+            summary,
+            detail,
+            approval_kind,
+            escalation_reasons,
         } => Some(notification_from_pending_approval(
             &input.session_id,
             &input.actor.actor_id,
@@ -449,6 +467,11 @@ fn notification_from_surface_item(
                 tool_name: tool_name.clone(),
                 tool_input: String::new(),
                 message: message.clone(),
+                code: code.clone(),
+                summary: summary.clone(),
+                detail: detail.clone(),
+                approval_kind: approval_kind.clone(),
+                escalation_reasons: escalation_reasons.clone(),
             },
         )),
         SurfaceItem::RuntimeNotice { kind, message } => {
@@ -519,8 +542,16 @@ fn notification_from_pending_approval(
     actor_id: &str,
     pending: PendingApproval,
 ) -> Notification {
-    let mut notification =
-        Notification::approval_required(session_id.to_string(), pending.tool_name, pending.message);
+    let mut notification = Notification::approval_required(
+        session_id.to_string(),
+        pending.tool_name,
+        pending.message,
+        pending.code,
+        pending.summary,
+        pending.detail,
+        pending.approval_kind,
+        pending.escalation_reasons,
+    );
     notification.target = Some(NotificationTarget::RemoteActor {
         session_id: session_id.to_string(),
         actor_id: actor_id.to_string(),
@@ -594,13 +625,16 @@ pub fn render_remote_response_debug(response: &RemoteResponse) -> String {
             RemoteEventPayload::ApprovalRequired {
                 tool_name,
                 message,
+                code,
                 summary,
                 detail,
+                approval_kind,
+                escalation_reasons,
             } => {
                 write!(
                     &mut output,
-                    "tool_name={} message={} summary={:?} detail={:?}",
-                    tool_name, message, summary, detail
+                    "tool_name={} message={} code={:?} summary={:?} detail={:?} approval_kind={:?} escalation_reasons={:?}",
+                    tool_name, message, code, summary, detail, approval_kind, escalation_reasons
                 )
                 .expect("write approval event");
             }

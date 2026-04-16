@@ -132,9 +132,9 @@ impl Command for PlanCommand {
         Ok(match result {
             ToolResult::Text(text) => CommandResult::Message(text),
             ToolResult::Denied(reason) => CommandResult::Denied(reason),
-            ToolResult::PendingApproval { tool_name, message } => {
-                CommandResult::Message(format!("approval required for {tool_name}: {message}"))
-            }
+            ToolResult::PendingApproval {
+                tool_name, message, ..
+            } => CommandResult::Message(format!("approval required for {tool_name}: {message}")),
             ToolResult::Interrupted(reason) => {
                 CommandResult::Message(format!("Interrupted: {reason}"))
             }

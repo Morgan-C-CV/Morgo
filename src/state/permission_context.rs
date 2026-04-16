@@ -26,6 +26,11 @@ pub struct PendingApproval {
     pub tool_name: String,
     pub tool_input: String,
     pub message: String,
+    pub code: Option<String>,
+    pub summary: Option<String>,
+    pub detail: Option<String>,
+    pub approval_kind: Option<String>,
+    pub escalation_reasons: Vec<String>,
 }
 
 #[derive(Debug, Clone)]

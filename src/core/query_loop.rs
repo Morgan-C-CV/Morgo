@@ -1030,8 +1030,33 @@ async fn execute_tool_phase(
                         crate::tool::definition::ToolResult::PendingApproval {
                             tool_name,
                             message,
+                            approval,
                         } => {
-                            let pending_message = record.detail.clone().unwrap_or(message.clone());
+                            let pending_summary = record
+                                .pending_approval
+                                .as_ref()
+                                .map(|pending| pending.summary.clone())
+                                .unwrap_or_else(|| approval.summary.clone());
+                            let pending_detail = record
+                                .pending_approval
+                                .as_ref()
+                                .and_then(|pending| pending.detail.clone())
+                                .or_else(|| approval.detail.clone());
+                            let pending_code = record
+                                .pending_approval
+                                .as_ref()
+                                .and_then(|pending| pending.code.clone())
+                                .or_else(|| approval.code.clone());
+                            let pending_kind = record
+                                .pending_approval
+                                .as_ref()
+                                .and_then(|pending| pending.approval_kind.clone())
+                                .or_else(|| approval.approval_kind.clone());
+                            let pending_reasons = record
+                                .pending_approval
+                                .as_ref()
+                                .map(|pending| pending.escalation_reasons.clone())
+                                .unwrap_or_else(|| approval.escalation_reasons.clone());
                             context
                                 .app_state
                                 .permission_context
@@ -1039,20 +1064,30 @@ async fn execute_tool_phase(
                                     crate::state::permission_context::PendingApproval {
                                         tool_name: tool_name.clone(),
                                         tool_input: effective_tool_input.clone(),
-                                        message: pending_message.clone(),
+                                        message: message.clone(),
+                                        code: pending_code.clone(),
+                                        summary: Some(pending_summary.clone()),
+                                        detail: pending_detail.clone(),
+                                        approval_kind: pending_kind.clone(),
+                                        escalation_reasons: pending_reasons.clone(),
                                     },
                                 ));
                             engine_events.push(EngineEvent::PendingApproval {
                                 tool_name: tool_name.clone(),
-                                message: pending_message.clone(),
-                                summary: record.summary.clone(),
-                                detail: record.detail.clone(),
+                                message: message.clone(),
+                                code: pending_code,
+                                summary: pending_summary.clone(),
+                                detail: pending_detail.clone(),
+                                approval_kind: pending_kind,
+                                escalation_reasons: pending_reasons,
                                 report_modifier: record.report_modifier.clone(),
                             });
                             apply_tool_report_context(state, &report);
                             let approval_message = Message::assistant(format!(
                                 "approval required for {tool_name}: {}",
-                                report_detail_or_summary(&report)
+                                pending_detail
+                                    .clone()
+                                    .unwrap_or_else(|| pending_summary.clone())
                             ));
                             engine_events
                                 .push(EngineEvent::MessageCommitted(approval_message.clone()));

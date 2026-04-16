@@ -580,6 +580,13 @@ async fn orchestrator_records_pending_approval_results_in_execution_record() {
         ToolResult::PendingApproval {
             tool_name: "PendingApprovalTool".into(),
             message: "approval required by test policy".into(),
+            approval: rust_agent::tool::result::PendingApprovalPayload {
+                code: None,
+                summary: "PendingApprovalTool pending approval".into(),
+                detail: Some("approval required by test policy".into()),
+                approval_kind: Some("tool_permission".into()),
+                escalation_reasons: Vec::new(),
+            },
         }
     );
     assert_eq!(
@@ -597,6 +604,16 @@ async fn orchestrator_records_pending_approval_results_in_execution_record() {
     assert_eq!(
         outcomes[0].record.report_modifier,
         ToolReportModifier::Pending
+    );
+    assert_eq!(
+        outcomes[0].record.pending_approval,
+        Some(rust_agent::tool::result::PendingApprovalPayload {
+            code: None,
+            summary: "PendingApprovalTool pending approval".into(),
+            detail: Some("approval required by test policy".into()),
+            approval_kind: Some("tool_permission".into()),
+            escalation_reasons: Vec::new(),
+        })
     );
 }
 
@@ -646,6 +663,7 @@ fn aggregate_execution_records_prefers_continue_message_only_for_all_success_rec
             kind: ToolExecutionOutcomeKind::Success,
             summary: "Read succeeded".into(),
             detail: Some("alpha".into()),
+            pending_approval: None,
             report_modifier: ToolReportModifier::None,
             observable_input: None,
             batch_context: ToolBatchContext {
@@ -660,6 +678,7 @@ fn aggregate_execution_records_prefers_continue_message_only_for_all_success_rec
             kind: ToolExecutionOutcomeKind::Success,
             summary: "Glob succeeded".into(),
             detail: Some("beta".into()),
+            pending_approval: None,
             report_modifier: ToolReportModifier::None,
             observable_input: None,
             batch_context: ToolBatchContext {
@@ -691,6 +710,7 @@ fn aggregate_execution_records_escalates_attention_and_uses_pending_summary_for_
             kind: ToolExecutionOutcomeKind::Success,
             summary: "Read succeeded".into(),
             detail: Some("alpha".into()),
+            pending_approval: None,
             report_modifier: ToolReportModifier::None,
             observable_input: None,
             batch_context: ToolBatchContext {
@@ -705,6 +725,7 @@ fn aggregate_execution_records_escalates_attention_and_uses_pending_summary_for_
             kind: ToolExecutionOutcomeKind::Denied,
             summary: "Bash denied".into(),
             detail: Some("blocked".into()),
+            pending_approval: None,
             report_modifier: ToolReportModifier::NeedsAttention,
             observable_input: None,
             batch_context: ToolBatchContext {
@@ -736,6 +757,7 @@ fn aggregate_execution_records_keeps_progress_batches_out_of_continue_message() 
             kind: ToolExecutionOutcomeKind::Success,
             summary: "Read succeeded".into(),
             detail: Some("alpha".into()),
+            pending_approval: None,
             report_modifier: ToolReportModifier::None,
             observable_input: None,
             batch_context: ToolBatchContext {
@@ -750,6 +772,7 @@ fn aggregate_execution_records_keeps_progress_batches_out_of_continue_message() 
             kind: ToolExecutionOutcomeKind::Progress,
             summary: "ProgressTool in progress".into(),
             detail: Some("still running".into()),
+            pending_approval: None,
             report_modifier: ToolReportModifier::Progress,
             observable_input: None,
             batch_context: ToolBatchContext {
@@ -782,6 +805,7 @@ fn aggregate_execution_records_keeps_pending_batches_out_of_continue_message() {
             kind: ToolExecutionOutcomeKind::Success,
             summary: "Read succeeded".into(),
             detail: Some("alpha".into()),
+            pending_approval: None,
             report_modifier: ToolReportModifier::None,
             observable_input: None,
             batch_context: ToolBatchContext {
@@ -796,6 +820,7 @@ fn aggregate_execution_records_keeps_pending_batches_out_of_continue_message() {
             kind: ToolExecutionOutcomeKind::PendingApproval,
             summary: "PendingApprovalTool pending approval".into(),
             detail: Some("approval required by test policy".into()),
+            pending_approval: None,
             report_modifier: ToolReportModifier::Pending,
             observable_input: None,
             batch_context: ToolBatchContext {
@@ -834,6 +859,7 @@ fn aggregate_execution_records_escalates_multiple_attention_records() {
             kind: ToolExecutionOutcomeKind::Denied,
             summary: "Bash denied".into(),
             detail: Some("blocked".into()),
+            pending_approval: None,
             report_modifier: ToolReportModifier::NeedsAttention,
             observable_input: None,
             batch_context: ToolBatchContext {
@@ -848,6 +874,7 @@ fn aggregate_execution_records_escalates_multiple_attention_records() {
             kind: ToolExecutionOutcomeKind::ResultTooLarge,
             summary: "ResultTooLargeTool result too large".into(),
             detail: Some("result exceeded test limit".into()),
+            pending_approval: None,
             report_modifier: ToolReportModifier::NeedsAttention,
             observable_input: None,
             batch_context: ToolBatchContext {
@@ -886,6 +913,7 @@ fn aggregate_execution_records_prioritizes_attention_over_pending_and_progress()
             kind: ToolExecutionOutcomeKind::Progress,
             summary: "ProgressTool in progress".into(),
             detail: Some("still running".into()),
+            pending_approval: None,
             report_modifier: ToolReportModifier::Progress,
             observable_input: None,
             batch_context: ToolBatchContext {
@@ -900,6 +928,7 @@ fn aggregate_execution_records_prioritizes_attention_over_pending_and_progress()
             kind: ToolExecutionOutcomeKind::PendingApproval,
             summary: "PendingApprovalTool pending approval".into(),
             detail: Some("approval required by test policy".into()),
+            pending_approval: None,
             report_modifier: ToolReportModifier::Pending,
             observable_input: None,
             batch_context: ToolBatchContext {
@@ -914,6 +943,7 @@ fn aggregate_execution_records_prioritizes_attention_over_pending_and_progress()
             kind: ToolExecutionOutcomeKind::Denied,
             summary: "Bash denied".into(),
             detail: Some("blocked".into()),
+            pending_approval: None,
             report_modifier: ToolReportModifier::NeedsAttention,
             observable_input: None,
             batch_context: ToolBatchContext {

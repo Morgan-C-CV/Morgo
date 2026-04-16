@@ -17,8 +17,11 @@ pub enum SurfaceItem {
     ApprovalRequired {
         tool_name: String,
         message: String,
+        code: Option<String>,
         summary: Option<String>,
         detail: Option<String>,
+        approval_kind: Option<String>,
+        escalation_reasons: Vec<String>,
     },
     RuntimeNotice {
         kind: String,
@@ -112,13 +115,19 @@ fn surface_item_from_runtime_event(event: &CliRuntimeEvent) -> SurfaceItem {
         CliRuntimeEvent::PendingApproval {
             tool_name,
             message,
+            code,
             summary,
             detail,
+            approval_kind,
+            escalation_reasons,
         } => SurfaceItem::ApprovalRequired {
             tool_name: tool_name.clone(),
             message: message.clone(),
+            code: code.clone(),
             summary: summary.clone(),
             detail: detail.clone(),
+            approval_kind: approval_kind.clone(),
+            escalation_reasons: escalation_reasons.clone(),
         },
         CliRuntimeEvent::Notice { kind, message } => SurfaceItem::RuntimeNotice {
             kind: kind.clone(),
@@ -206,8 +215,11 @@ pub enum WebItem {
     ApprovalRequired {
         tool_name: String,
         message: String,
+        code: Option<String>,
         summary: Option<String>,
         detail: Option<String>,
+        approval_kind: Option<String>,
+        escalation_reasons: Vec<String>,
     },
     RuntimeNotice {
         notice_kind: String,
@@ -334,13 +346,19 @@ pub fn web_item_from_surface_item(item: &SurfaceItem) -> WebItem {
         SurfaceItem::ApprovalRequired {
             tool_name,
             message,
+            code,
             summary,
             detail,
+            approval_kind,
+            escalation_reasons,
         } => WebItem::ApprovalRequired {
             tool_name: tool_name.clone(),
             message: message.clone(),
+            code: code.clone(),
             summary: summary.clone(),
             detail: detail.clone(),
+            approval_kind: approval_kind.clone(),
+            escalation_reasons: escalation_reasons.clone(),
         },
         SurfaceItem::RuntimeNotice { kind, message } => WebItem::RuntimeNotice {
             notice_kind: kind.clone(),

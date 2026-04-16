@@ -57,8 +57,11 @@ pub enum EngineEvent {
     PendingApproval {
         tool_name: String,
         message: String,
+        code: Option<String>,
         summary: String,
         detail: Option<String>,
+        approval_kind: Option<String>,
+        escalation_reasons: Vec<String>,
         report_modifier: ToolReportModifier,
     },
     Notice {

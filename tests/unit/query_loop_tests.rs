@@ -416,17 +416,28 @@ async fn query_loop_pending_approval_uses_aggregated_summary_for_pending_context
         Some(pending)
             if pending.tool_name == "PendingApprovalFixture"
                 && pending.message == "requires explicit approval"
+                && pending.code.is_none()
+                && pending.summary.as_deref() == Some("PendingApprovalFixture pending approval")
+                && pending.detail.as_deref() == Some("requires explicit approval")
+                && pending.approval_kind.as_deref() == Some("tool_permission")
+                && pending.escalation_reasons.is_empty()
     ));
     assert!(result.events.iter().any(|event| matches!(
         event,
         EngineEvent::PendingApproval {
             tool_name,
+            code,
             summary,
             detail,
+            approval_kind,
+            escalation_reasons,
             ..
         } if tool_name == "PendingApprovalFixture"
+            && code.is_none()
             && summary == "PendingApprovalFixture pending approval"
             && detail.as_deref() == Some("requires explicit approval")
+            && approval_kind.as_deref() == Some("tool_permission")
+            && escalation_reasons.is_empty()
     )));
     assert!(result.messages.iter().any(|message| {
         message.content
@@ -1767,11 +1778,12 @@ async fn coordinator_gates_finalization_until_verification_finishes() {
             .iter()
             .any(|message| message.content.contains("<phase>implement</phase>"))
     );
-    assert!(gated.messages.iter().any(|message| {
-        message
-            .content
-            .contains("inspect task output for task-0")
-    }));
+    assert!(
+        gated
+            .messages
+            .iter()
+            .any(|message| { message.content.contains("inspect task output for task-0") })
+    );
 
     let verify = manager.create("verify patch", "test-session", InteractionSurface::Cli);
     manager.set_worker_role(&verify.id, WorkerRole::Verify);
@@ -1798,11 +1810,12 @@ async fn coordinator_gates_finalization_until_verification_finishes() {
             .iter()
             .any(|message| message.content.contains("<phase>verify</phase>"))
     );
-    assert!(verified.messages.iter().any(|message| {
-        message
-            .content
-            .contains("inspect task output for task-1")
-    }));
+    assert!(
+        verified
+            .messages
+            .iter()
+            .any(|message| { message.content.contains("inspect task output for task-1") })
+    );
     assert!(
         verified
             .messages
@@ -1913,11 +1926,12 @@ async fn coordinator_surfaces_verification_failure_and_missing_verification_risk
             .iter()
             .any(|message| message.content.contains("unverified risk remains"))
     );
-    assert!(missing.messages.iter().any(|message| {
-        message
-            .content
-            .contains("inspect task output for task-0")
-    }));
+    assert!(
+        missing
+            .messages
+            .iter()
+            .any(|message| { message.content.contains("inspect task output for task-0") })
+    );
 
     let failed_verify = manager.create(
         "verify risky patch",
@@ -1935,11 +1949,12 @@ async fn coordinator_surfaces_verification_failure_and_missing_verification_risk
         .submit_turn(Message::user("finalize risky implementation"))
         .await;
     assert_eq!(failed.transition, None);
-    assert!(failed.messages.iter().any(|message| {
-        message
-            .content
-            .contains("inspect task output for task-1")
-    }));
+    assert!(
+        failed
+            .messages
+            .iter()
+            .any(|message| { message.content.contains("inspect task output for task-1") })
+    );
     assert!(failed.messages.iter().any(|message| {
         message
             .content
@@ -1985,11 +2000,12 @@ async fn coordinator_surfaces_verification_failure_and_missing_verification_risk
         .submit_turn(Message::user("finalize risky implementation"))
         .await;
     assert_eq!(killed.transition, None);
-    assert!(killed.messages.iter().any(|message| {
-        message
-            .content
-            .contains("inspect task output for task-3")
-    }));
+    assert!(
+        killed
+            .messages
+            .iter()
+            .any(|message| { message.content.contains("inspect task output for task-3") })
+    );
     assert!(
         killed
             .messages

@@ -617,6 +617,11 @@ async fn remote_request_drains_async_remote_notifications() {
         "remote-async-session",
         "Bash",
         "requires explicit approval",
+        Some("bash_warning".into()),
+        Some("Bash pending approval".into()),
+        Some("requires explicit approval".into()),
+        Some("tool_permission".into()),
+        vec!["privileged_system".into()],
     );
     actor_notification.target = Some(NotificationTarget::RemoteActor {
         session_id: "remote-async-session".into(),
@@ -635,8 +640,22 @@ async fn remote_request_drains_async_remote_notifications() {
     assert_eq!(drained.len(), 2);
     assert!(drained.iter().any(|event| matches!(
         &event.payload,
-        RemoteEventPayload::ApprovalRequired { tool_name, message, .. }
-            if tool_name == "Bash" && message == "requires explicit approval"
+        RemoteEventPayload::ApprovalRequired {
+            tool_name,
+            message,
+            code,
+            summary,
+            detail,
+            approval_kind,
+            escalation_reasons,
+        }
+            if tool_name == "Bash"
+                && message == "requires explicit approval"
+                && code.as_deref() == Some("bash_warning")
+                && summary.as_deref() == Some("Bash pending approval")
+                && detail.as_deref() == Some("requires explicit approval")
+                && approval_kind.as_deref() == Some("tool_permission")
+                && escalation_reasons.as_slice() == ["privileged_system"]
     )));
     assert!(drained.iter().any(|event| matches!(
         &event.payload,
@@ -753,6 +772,11 @@ async fn remote_request_preserves_response_boundary_and_async_inbox_semantics() 
             tool_name: "Bash".into(),
             tool_input: serde_json::json!({"command": "ls"}).to_string(),
             message: "requires explicit approval".into(),
+            code: Some("bash_warning".into()),
+            summary: Some("Bash pending approval".into()),
+            detail: Some("requires explicit approval".into()),
+            approval_kind: Some("tool_permission".into()),
+            escalation_reasons: vec!["privileged_system".into()],
         });
     let session_store = Arc::new(InMemorySessionStore::default());
     let app_state = AppState {

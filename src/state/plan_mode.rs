@@ -433,15 +433,28 @@ pub fn request_enter_plan_mode(permissions: &ToolPermissionContext, reason: &str
     } else {
         format!("approve entering plan mode: {}", reason.trim())
     };
+    let approval = crate::tool::result::PendingApprovalPayload {
+        code: Some("enter_plan_mode".into()),
+        summary: "EnterPlanMode pending approval".into(),
+        detail: Some(message.clone()),
+        approval_kind: Some("plan_mode_transition".into()),
+        escalation_reasons: Vec::new(),
+    };
     permissions.set_pending_approval(Some(PendingApproval {
         tool_name: "EnterPlanMode".into(),
         tool_input: reason.trim().to_string(),
         message: message.clone(),
+        code: approval.code.clone(),
+        summary: Some(approval.summary.clone()),
+        detail: approval.detail.clone(),
+        approval_kind: approval.approval_kind.clone(),
+        escalation_reasons: approval.escalation_reasons.clone(),
     }));
 
     ToolResult::PendingApproval {
         tool_name: "EnterPlanMode".into(),
         message,
+        approval,
     }
 }
 
@@ -469,15 +482,28 @@ pub fn request_exit_plan_mode(permissions: &ToolPermissionContext, summary: &str
     } else {
         format!("approve exiting plan mode: {}", summary.trim())
     };
+    let approval = crate::tool::result::PendingApprovalPayload {
+        code: Some("exit_plan_mode".into()),
+        summary: "ExitPlanMode pending approval".into(),
+        detail: Some(message.clone()),
+        approval_kind: Some("plan_mode_transition".into()),
+        escalation_reasons: Vec::new(),
+    };
     permissions.set_pending_approval(Some(PendingApproval {
         tool_name: "ExitPlanMode".into(),
         tool_input: summary.trim().to_string(),
         message: message.clone(),
+        code: approval.code.clone(),
+        summary: Some(approval.summary.clone()),
+        detail: approval.detail.clone(),
+        approval_kind: approval.approval_kind.clone(),
+        escalation_reasons: approval.escalation_reasons.clone(),
     }));
 
     ToolResult::PendingApproval {
         tool_name: "ExitPlanMode".into(),
         message,
+        approval,
     }
 }
 

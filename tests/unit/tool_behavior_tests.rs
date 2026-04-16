@@ -386,6 +386,16 @@ async fn registry_returns_pending_approval_for_ask_only_bash() {
             message:
                 "bash command warning [privileged_system]: command touches privileged system state"
                     .into(),
+            approval: rust_agent::tool::result::PendingApprovalPayload {
+                code: None,
+                summary: "Bash pending approval".into(),
+                detail: Some(
+                    "bash command warning [privileged_system]: command touches privileged system state"
+                        .into(),
+                ),
+                approval_kind: Some("tool_permission".into()),
+                escalation_reasons: Vec::new(),
+            },
         }
     );
 }

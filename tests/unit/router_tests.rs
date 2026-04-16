@@ -1588,6 +1588,11 @@ async fn router_approves_pending_plan_mode_request() {
             tool_name: "EnterPlanMode".into(),
             tool_input: "draft feature work".into(),
             message: "approve entering plan mode: draft feature work".into(),
+            code: Some("enter_plan_mode".into()),
+            summary: Some("EnterPlanMode pending approval".into()),
+            detail: Some("approve entering plan mode: draft feature work".into()),
+            approval_kind: Some("plan_mode_transition".into()),
+            escalation_reasons: Vec::new(),
         });
     let app_state = AppState {
         surface: InteractionSurface::Cli,
@@ -1646,6 +1651,11 @@ async fn router_denies_pending_request_without_session_approval() {
             tool_name: "Bash".into(),
             tool_input: serde_json::json!({"command": "sudo whoami"}).to_string(),
             message: "command touches privileged system state".into(),
+            code: Some("bash_warning".into()),
+            summary: Some("Bash pending approval".into()),
+            detail: Some("command touches privileged system state".into()),
+            approval_kind: Some("tool_permission".into()),
+            escalation_reasons: vec!["privileged_system".into()],
         });
     let app_state = AppState {
         surface: InteractionSurface::Cli,
@@ -1707,6 +1717,11 @@ async fn approval_replay_uses_runtime_tool_registry() {
             tool_name: "Bash".into(),
             tool_input: serde_json::json!({"command": "pwd"}).to_string(),
             message: "approve pwd".into(),
+            code: Some("bash_warning".into()),
+            summary: Some("Bash pending approval".into()),
+            detail: Some("approve pwd".into()),
+            approval_kind: Some("tool_permission".into()),
+            escalation_reasons: vec!["privileged_system".into()],
         });
     let app_state = AppState {
         surface: InteractionSurface::Cli,
@@ -1765,6 +1780,11 @@ async fn permissions_command_reports_session_permission_state() {
             tool_name: "Bash".into(),
             tool_input: serde_json::json!({"command": "pwd"}).to_string(),
             message: "approve pwd".into(),
+            code: Some("bash_warning".into()),
+            summary: Some("Bash pending approval".into()),
+            detail: Some("approve pwd".into()),
+            approval_kind: Some("tool_permission".into()),
+            escalation_reasons: vec!["privileged_system".into()],
         });
     permission_context.add_always_allow_rule("Read");
     permission_context.add_always_deny_rule("Bash");

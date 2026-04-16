@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 use crate::state::permission_context::ToolPermissionContext;
+use crate::tool::result::PendingApprovalPayload;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InterruptBehavior {
@@ -98,7 +99,11 @@ impl PermissionDecision {
 pub enum ToolResult {
     Text(String),
     Denied(String),
-    PendingApproval { tool_name: String, message: String },
+    PendingApproval {
+        tool_name: String,
+        message: String,
+        approval: PendingApprovalPayload,
+    },
     Interrupted(String),
     Progress(String),
     ResultTooLarge(String),

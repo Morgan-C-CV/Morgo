@@ -3,6 +3,15 @@ use serde::{Deserialize, Serialize};
 use crate::tool::definition::ObservableInput;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PendingApprovalPayload {
+    pub code: Option<String>,
+    pub summary: String,
+    pub detail: Option<String>,
+    pub approval_kind: Option<String>,
+    pub escalation_reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ToolExecutionOutcomeKind {
     Success,
     Denied,
@@ -34,6 +43,7 @@ pub struct ToolExecutionRecord {
     pub kind: ToolExecutionOutcomeKind,
     pub summary: String,
     pub detail: Option<String>,
+    pub pending_approval: Option<PendingApprovalPayload>,
     pub report_modifier: ToolReportModifier,
     pub observable_input: Option<ObservableInput>,
     pub batch_context: ToolBatchContext,
