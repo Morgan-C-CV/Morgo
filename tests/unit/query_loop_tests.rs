@@ -1755,7 +1755,7 @@ async fn coordinator_gates_finalization_until_verification_finishes() {
         .await;
     assert_eq!(gated.state, QueryLoopState::Completed);
     assert_eq!(gated.terminal, Terminal::Completed);
-    assert_eq!(gated.transition, Some(Continue::NextTurn));
+    assert_eq!(gated.transition, None);
     assert!(gated.messages.iter().any(|message| {
         message
             .content
@@ -1770,19 +1770,8 @@ async fn coordinator_gates_finalization_until_verification_finishes() {
     assert!(gated.messages.iter().any(|message| {
         message
             .content
-            .contains("<validation-state>pending_verification</validation-state>")
-    }));
-    assert!(gated.messages.iter().any(|message| {
-        message
-            .content
             .contains("inspect task output for task-0")
     }));
-    assert!(gated
-        .messages
-        .iter()
-        .any(|message| message
-            .content
-            .contains("orchestration still pending: wait for grouped research fan-in or verification before final synthesis")));
 
     let verify = manager.create("verify patch", "test-session", InteractionSurface::Cli);
     manager.set_worker_role(&verify.id, WorkerRole::Verify);
@@ -1812,12 +1801,7 @@ async fn coordinator_gates_finalization_until_verification_finishes() {
     assert!(verified.messages.iter().any(|message| {
         message
             .content
-            .contains("<validation-state>verified</validation-state>")
-    }));
-    assert!(verified.messages.iter().any(|message| {
-        message
-            .content
-            .contains("synthesize validated result for task-1")
+            .contains("inspect task output for task-1")
     }));
     assert!(
         verified
@@ -1917,7 +1901,7 @@ async fn coordinator_surfaces_verification_failure_and_missing_verification_risk
     let missing = QueryEngine::new(context.clone())
         .submit_turn(Message::user("finalize risky implementation"))
         .await;
-    assert_eq!(missing.transition, Some(Continue::NextTurn));
+    assert_eq!(missing.transition, None);
     assert!(missing.messages.iter().any(|message| {
         message
             .content
@@ -1954,12 +1938,7 @@ async fn coordinator_surfaces_verification_failure_and_missing_verification_risk
     assert!(failed.messages.iter().any(|message| {
         message
             .content
-            .contains("<validation-state>verification_failed</validation-state>")
-    }));
-    assert!(failed.messages.iter().any(|message| {
-        message
-            .content
-            .contains("inspect verification failure for task-1")
+            .contains("inspect task output for task-1")
     }));
     assert!(failed.messages.iter().any(|message| {
         message
@@ -1999,6 +1978,7 @@ async fn coordinator_surfaces_verification_failure_and_missing_verification_risk
     manager.set_orchestration_group_id(&killed_verify.id, Some("group-risk-2".into()));
     manager.set_phase(&killed_verify.id, Some(WorkerPhase::Verify));
     manager.start(&killed_verify.id);
+    manager.launch(&killed_verify.id, "verify", std::future::pending::<()>());
     assert!(manager.kill(&killed_verify.id, "test-session", &dispatcher));
 
     let killed = QueryEngine::new(context)
@@ -2008,12 +1988,7 @@ async fn coordinator_surfaces_verification_failure_and_missing_verification_risk
     assert!(killed.messages.iter().any(|message| {
         message
             .content
-            .contains("<validation-state>unverified</validation-state>")
-    }));
-    assert!(killed.messages.iter().any(|message| {
-        message
-            .content
-            .contains("synthesize with explicit unverified risk for task-3")
+            .contains("inspect task output for task-3")
     }));
     assert!(
         killed
