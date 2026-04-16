@@ -89,9 +89,9 @@ fn approved_plan_runtime_overlay_updates_with_live_orchestration_state() {
     );
 
     let completed = rust_agent::state::plan_mode::render_plan_show(&permissions);
-    assert!(completed.contains("Runtime orchestration: groups=1, waiting_for_verification=0, ready_for_synthesis=1, still_in_progress=0"));
+    assert!(completed.contains("Runtime orchestration: groups=1, waiting_for_verification=0, ready_for_synthesis=0, still_in_progress=0"));
     assert!(completed.contains(&format!(
-        "runtime group: {} — group {} is ready for synthesis",
+        "runtime group: {} — group {} is ready for inspection",
         second.id, second.id
     )));
     assert!(completed.contains(
@@ -100,7 +100,7 @@ fn approved_plan_runtime_overlay_updates_with_live_orchestration_state() {
 
     let history = rust_agent::state::plan_mode::render_plan_history(&permissions);
     assert!(history.contains("Current runtime overlay:"));
-    assert!(history.contains("ready_for_synthesis_groups=1"));
+    assert!(history.contains("ready_for_synthesis_groups=0"));
 }
 
 #[test]

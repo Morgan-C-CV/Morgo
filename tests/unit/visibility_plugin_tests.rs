@@ -654,7 +654,7 @@ async fn tasks_command_groups_orchestration_tasks_and_hints() {
     assert!(text.contains("Orchestration groups:"));
     assert!(text.contains("- group-1 — group group-1 still in progress"));
     assert!(text.contains("  - [task-0] implement feature (Status: Completed)"));
-    assert!(text.contains("    hint: verification next for task-0"));
+    assert!(text.contains("    hint: inspect task output for task-0"));
     assert!(text.contains("  - [task-1] verify feature (Status: Running)"));
     assert!(text.contains("    parent_task_id: task-0"));
     assert!(text.contains("Standalone tasks:"));

@@ -1670,7 +1670,7 @@ async fn coordinator_waits_for_group_barrier_before_synthesis_follow_up() {
     assert!(second_result.messages.iter().any(|message| {
         message
             .content
-            .contains("synthesize grouped findings for group-1")
+            .contains("inspect grouped task results for group-1")
     }));
     assert!(
         second_result
@@ -1775,7 +1775,7 @@ async fn coordinator_gates_finalization_until_verification_finishes() {
     assert!(gated.messages.iter().any(|message| {
         message
             .content
-            .contains("dispatch verify worker for task-0")
+            .contains("inspect task output for task-0")
     }));
     assert!(gated
         .messages
@@ -1932,7 +1932,7 @@ async fn coordinator_surfaces_verification_failure_and_missing_verification_risk
     assert!(missing.messages.iter().any(|message| {
         message
             .content
-            .contains("dispatch verify worker for task-0")
+            .contains("inspect task output for task-0")
     }));
 
     let failed_verify = manager.create(
