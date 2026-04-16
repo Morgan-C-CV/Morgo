@@ -21,6 +21,7 @@ use rust_agent::interaction::envelope::NormalizedInput;
 use rust_agent::interaction::remote::{RemoteRequest, handle_remote_request};
 use rust_agent::interaction::router::{
     CommandRoutePolicy, CommandRouter, QuerySource, RouteDecision, RouteExecution, RoutedCommand,
+    UnknownCommandPolicy,
 };
 use rust_agent::interaction::telegram::gateway::TelegramGateway;
 use rust_agent::plan::manager::PlanManager;
@@ -291,6 +292,119 @@ async fn router_unknown_slash_fallback_is_shared_by_cli_remote_and_telegram() {
     let cli_decision = router.decide(&cli).await;
     assert_eq!(cli_decision, router.decide(&telegram).await);
     assert_eq!(cli_decision, router.decide(&remote).await);
+}
+
+#[tokio::test]
+async fn router_rejects_unknown_commands_in_strict_mode() {
+    let router = CommandRouter::with_unknown_command_policy(
+        Arc::new(CommandRegistry::new()),
+        Box::new(DefaultSurfaceAuthorizer::default()),
+        UnknownCommandPolicy::Reject,
+    );
+    let input = NormalizedInput::from_raw(InteractionSurface::Cli, "/missing foo");
+
+    assert_eq!(
+        router.decide(&input).await,
+        RouteDecision::RejectUnknownCommand {
+            command_name: "missing".into(),
+        }
+    );
+}
+
+#[tokio::test]
+async fn router_unknown_slash_reject_is_shared_by_cli_remote_and_telegram() {
+    let router = CommandRouter::with_unknown_command_policy(
+        Arc::new(CommandRegistry::new()),
+        Box::new(DefaultSurfaceAuthorizer::default()),
+        UnknownCommandPolicy::Reject,
+    );
+    let cli = NormalizedInput::from_raw(InteractionSurface::Cli, "/missing foo");
+    let telegram = NormalizedInput::from_raw(InteractionSurface::Telegram, "/missing foo");
+    let remote = NormalizedInput::from_remote_raw(
+        "remote-session",
+        "remote-actor",
+        true,
+        true,
+        "/missing foo",
+    );
+
+    let cli_decision = router.decide(&cli).await;
+    assert_eq!(cli_decision, router.decide(&telegram).await);
+    assert_eq!(cli_decision, router.decide(&remote).await);
+    assert_eq!(
+        cli_decision,
+        RouteDecision::RejectUnknownCommand {
+            command_name: "missing".into(),
+        }
+    );
+}
+
+#[tokio::test]
+async fn router_plain_prompt_is_unchanged_under_strict_unknown_command_policy() {
+    let router = CommandRouter::with_unknown_command_policy(
+        Arc::new(CommandRegistry::new()),
+        Box::new(DefaultSurfaceAuthorizer::default()),
+        UnknownCommandPolicy::Reject,
+    );
+    let input = NormalizedInput::from_raw(InteractionSurface::Cli, "hello world");
+
+    assert_eq!(
+        router.decide(&input).await,
+        RouteDecision::EnterQuery {
+            prompt: "hello world".into(),
+            source: QuerySource::PlainPrompt,
+        }
+    );
+}
+
+#[tokio::test]
+async fn router_route_surfaces_strict_unknown_command_as_denied_result() {
+    let router = CommandRouter::with_unknown_command_policy(
+        Arc::new(CommandRegistry::new()),
+        Box::new(DefaultSurfaceAuthorizer::default()),
+        UnknownCommandPolicy::Reject,
+    );
+    let app_state = AppState {
+        surface: InteractionSurface::Cli,
+        session_mode: SessionMode::Interactive,
+        client_type: ClientType::Cli,
+        session_source: SessionSource::LocalCli,
+        runtime_role: RuntimeRole::Coordinator,
+        worker_role: None,
+        permission_context: ToolPermissionContext::new(PermissionMode::Default),
+        command_registry: None,
+        runtime_tool_registry: Some(Arc::new(RwLock::new(ToolRegistry::new()))),
+        skill_registry: None,
+        mcp_runtime: None,
+        plugin_load_result: None,
+        cost_tracker: CostTracker::default(),
+        service_observability_tracker:
+            rust_agent::service::observability::ServiceObservabilityTracker::default(),
+        notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
+        audit_log: Arc::new(std::sync::Mutex::new(
+            rust_agent::security::audit::AuditLog::default(),
+        )),
+        startup_trace: Vec::new(),
+        active_session_id: "test-session".into(),
+        session_store: None,
+        session: None,
+        history: None,
+        restored_session: None,
+    };
+    let result = router
+        .route(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/missing foo"),
+            &app_state,
+        )
+        .await
+        .expect("route should succeed");
+
+    assert_eq!(
+        result,
+        RouteExecution::CommandResult(CommandResult::Denied(
+            "unknown command /missing rejected by strict policy".into()
+        ))
+    );
 }
 
 #[tokio::test]

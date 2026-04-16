@@ -40,11 +40,18 @@ impl QuerySource {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnknownCommandPolicy {
+    FallbackToPrompt,
+    Reject,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RouteDecision {
     ExecuteCommand(RoutedCommand),
     EnterQuery { prompt: String, source: QuerySource },
     ApprovalResponse { approved: bool },
+    RejectUnknownCommand { command_name: String },
     Deny(String),
 }
 
@@ -59,6 +66,7 @@ use std::sync::Arc;
 pub struct CommandRouter {
     registry: Arc<CommandRegistry>,
     authorizer: Box<dyn SurfaceAuthorizer>,
+    unknown_command_policy: UnknownCommandPolicy,
 }
 
 impl CommandRouter {
@@ -66,6 +74,19 @@ impl CommandRouter {
         Self {
             registry,
             authorizer,
+            unknown_command_policy: UnknownCommandPolicy::FallbackToPrompt,
+        }
+    }
+
+    pub fn with_unknown_command_policy(
+        registry: Arc<CommandRegistry>,
+        authorizer: Box<dyn SurfaceAuthorizer>,
+        unknown_command_policy: UnknownCommandPolicy,
+    ) -> Self {
+        Self {
+            registry,
+            authorizer,
+            unknown_command_policy,
         }
     }
 
@@ -129,6 +150,12 @@ impl CommandRouter {
             RouteDecision::EnterQuery { prompt, source } => {
                 Ok(RouteExecution::EnterQuery { prompt, source })
             }
+            RouteDecision::RejectUnknownCommand { command_name } => Ok(
+                RouteExecution::CommandResult(CommandResult::Denied(format!(
+                    "unknown command /{} rejected by strict policy",
+                    command_name
+                ))),
+            ),
             RouteDecision::Deny(reason) => {
                 Ok(RouteExecution::CommandResult(CommandResult::Denied(reason)))
             }
@@ -137,9 +164,14 @@ impl CommandRouter {
 
     fn decide_command(&self, input: &NormalizedInput, name: &str) -> RouteDecision {
         let Some(command) = self.registry.get(name) else {
-            return RouteDecision::EnterQuery {
-                prompt: input.raw.clone(),
-                source: QuerySource::UnknownSlashFallback {
+            return match self.unknown_command_policy {
+                UnknownCommandPolicy::FallbackToPrompt => RouteDecision::EnterQuery {
+                    prompt: input.raw.clone(),
+                    source: QuerySource::UnknownSlashFallback {
+                        command_name: name.to_string(),
+                    },
+                },
+                UnknownCommandPolicy::Reject => RouteDecision::RejectUnknownCommand {
                     command_name: name.to_string(),
                 },
             };

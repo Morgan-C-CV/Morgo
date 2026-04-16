@@ -15,6 +15,7 @@ use rust_agent::interaction::dispatcher::NotificationDispatcher;
 use rust_agent::interaction::envelope::NormalizedInput;
 use rust_agent::interaction::router::{
     CommandRouter, QuerySource, RouteDecision, RouteExecution, RoutedCommand,
+    UnknownCommandPolicy,
 };
 use rust_agent::interaction::telegram::gateway::TelegramGateway;
 use rust_agent::security::authorizer::DefaultSurfaceAuthorizer;
@@ -135,6 +136,30 @@ async fn plain_user_input_routes_through_query_prompt_path() {
             prompt: "hello world".into(),
             source: QuerySource::PlainPrompt,
         }
+    );
+}
+
+#[tokio::test]
+async fn strict_unknown_slash_command_does_not_enter_query_path() {
+    let router = CommandRouter::with_unknown_command_policy(
+        Arc::new(CommandRegistry::new()),
+        Box::new(DefaultSurfaceAuthorizer::default()),
+        UnknownCommandPolicy::Reject,
+    );
+    let app_state = test_app_state();
+    let input = NormalizedInput::from_raw(InteractionSurface::Cli, "/unknown foo");
+
+    assert_eq!(
+        router.decide(&input).await,
+        RouteDecision::RejectUnknownCommand {
+            command_name: "unknown".into(),
+        }
+    );
+    assert_eq!(
+        router.route(&input, &app_state).await.expect("route should succeed"),
+        RouteExecution::CommandResult(CommandResult::Denied(
+            "unknown command /unknown rejected by strict policy".into()
+        ))
     );
 }
 
