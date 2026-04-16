@@ -12,13 +12,17 @@ use rust_agent::hook::registry::{
     HookEvent, HookEventMatcher, HookRegistry, HookRule, HookRuleLayer,
 };
 use rust_agent::security::audit::AuditLog;
-use rust_agent::security::authorizer::{DefaultSurfaceAuthorizer, SurfaceAdmissionPolicy};
+use rust_agent::security::authorizer::{
+    AuthDecision, AuthDenyCategory, DefaultSurfaceAuthorizer, SurfaceAdmissionPolicy,
+    SurfaceAuthorizer,
+};
 use rust_agent::interaction::cli::renderer::{
     build_tui_screen, render_document_output, render_document_tui_output, render_turn_document,
     render_turn_output,
 };
 use rust_agent::interaction::cli::repl::{CliDisplayEvent, CliRuntimeEvent, CliTurnOutput};
 use rust_agent::interaction::dispatcher::NotificationDispatcher;
+use rust_agent::interaction::envelope::NormalizedInput;
 use rust_agent::interaction::notification::{Notification, NotificationTarget, NotificationType};
 use rust_agent::interaction::remote::{
     REMOTE_CHANNEL_MATRIX, RemoteChannelEventKind, RemoteChannelRule, RemoteDeliveryMode,
@@ -1558,6 +1562,93 @@ fn telegram_inbound_intake_rejects_not_allowlisted_rate_limited_and_abuse_blocke
             raw: "/help second".into(),
         }),
         TelegramInboundIntake::Rejected(TelegramInboundBindingAuthorization::AbuseBlocked)
+    );
+}
+
+#[test]
+fn authorizer_uses_audit_aligned_deny_reason_codes() {
+    let authorizer = DefaultSurfaceAuthorizer::default().with_remote_policy(SurfaceAdmissionPolicy {
+        allowlisted_actors: ["approved-actor".to_string()].into_iter().collect(),
+        max_requests_per_window: Some(1),
+        window_seconds: 60,
+        abuse_denial_threshold: Some(2),
+    });
+
+    let unauthenticated = NormalizedInput::from_remote_raw(
+        "session-1",
+        "actor-1",
+        false,
+        true,
+        "hello",
+    );
+    assert_eq!(
+        authorizer.authorize(&unauthenticated),
+        AuthDecision::Deny {
+            category: AuthDenyCategory::Unauthenticated,
+            reason: "unauthenticated: unauthenticated actor for Remote surface".into(),
+        }
+    );
+
+    let not_allowlisted = NormalizedInput::from_remote_raw(
+        "session-1",
+        "actor-1",
+        true,
+        true,
+        "hello",
+    );
+    assert_eq!(
+        authorizer.authorize(&not_allowlisted),
+        AuthDecision::Deny {
+            category: AuthDenyCategory::NotAllowlisted,
+            reason: "not_allowlisted: actor actor-1 is not allowlisted for Remote surface".into(),
+        }
+    );
+    assert_eq!(
+        authorizer.authorize(&not_allowlisted),
+        AuthDecision::Deny {
+            category: AuthDenyCategory::AbuseBlocked,
+            reason: "abuse_blocked: actor actor-1 is temporarily blocked on Remote surface".into(),
+        }
+    );
+
+    let rate_limited_authorizer = DefaultSurfaceAuthorizer::default().with_remote_policy(
+        SurfaceAdmissionPolicy {
+            allowlisted_actors: std::collections::HashSet::new(),
+            max_requests_per_window: Some(1),
+            window_seconds: 60,
+            abuse_denial_threshold: None,
+        },
+    );
+    let rate_limited = NormalizedInput::from_remote_raw(
+        "session-2",
+        "actor-2",
+        true,
+        true,
+        "hello",
+    );
+    assert_eq!(rate_limited_authorizer.authorize(&rate_limited), AuthDecision::Allow);
+    assert_eq!(
+        rate_limited_authorizer.authorize(&rate_limited),
+        AuthDecision::Deny {
+            category: AuthDenyCategory::RateLimited,
+            reason: "rate_limited: actor actor-2 exceeded request rate for Remote surface".into(),
+        }
+    );
+
+    let command_blocked = NormalizedInput::from_remote_raw(
+        "session-3",
+        "actor-3",
+        true,
+        true,
+        "/permissions",
+    );
+    let command_authorizer = DefaultSurfaceAuthorizer::default();
+    assert_eq!(
+        command_authorizer.authorize(&command_blocked),
+        AuthDecision::Deny {
+            category: AuthDenyCategory::SurfaceCommandBlocked,
+            reason: "surface_command_blocked: command is blocked on remote surface".into(),
+        }
     );
 }
 

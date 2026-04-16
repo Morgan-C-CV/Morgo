@@ -534,18 +534,20 @@ async fn remote_request_denies_not_allowlisted_and_records_audit_event() {
             session_id,
             actor_id,
             reason,
+            outcome,
         } if session_id == "remote-audit-session"
             && actor_id == "audit-actor"
-            && reason.contains("not allowlisted")
+            && outcome == "not_allowlisted"
+            && reason.starts_with("not_allowlisted:")
     )));
     assert!(!events.iter().any(|event| matches!(event, AuditEvent::RemoteRequestAccepted { .. })));
     let records = audit_log.lock().expect("audit log poisoned").load_records();
     assert!(records.iter().any(|record| {
-        record.event_kind == "remote_request_denied"
+        record.event_kind == "remote_request_denied_not_allowlisted"
             && record.session_id.as_deref() == Some("remote-audit-session")
             && record.actor_id.as_deref() == Some("audit-actor")
             && record.surface.as_deref() == Some("remote")
-            && record.outcome == "denied"
+            && record.outcome == "not_allowlisted"
     }));
     let _ = fs::remove_dir_all(audit_root);
 }

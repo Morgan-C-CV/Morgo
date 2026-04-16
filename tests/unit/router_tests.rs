@@ -304,7 +304,7 @@ async fn router_denies_unauthenticated_remote_actor() {
 
     assert_eq!(
         router.decide(&input).await,
-        RouteDecision::Deny("unauthenticated actor for remote surface".into())
+        RouteDecision::Deny("unauthenticated: unauthenticated actor for Remote surface".into())
     );
 }
 

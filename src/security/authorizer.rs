@@ -4,13 +4,67 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthDenyCategory {
     Unauthenticated,
     NotAllowlisted,
     RateLimited,
     AbuseBlocked,
     SurfaceCommandBlocked,
+}
+
+impl AuthDenyCategory {
+    pub fn code(self) -> &'static str {
+        match self {
+            AuthDenyCategory::Unauthenticated => "unauthenticated",
+            AuthDenyCategory::NotAllowlisted => "not_allowlisted",
+            AuthDenyCategory::RateLimited => "rate_limited",
+            AuthDenyCategory::AbuseBlocked => "abuse_blocked",
+            AuthDenyCategory::SurfaceCommandBlocked => "surface_command_blocked",
+        }
+    }
+
+    pub fn remote_denial_message(self) -> &'static str {
+        match self {
+            AuthDenyCategory::Unauthenticated => {
+                "Denied: unauthenticated actor for remote surface"
+            }
+            AuthDenyCategory::NotAllowlisted => {
+                "Denied: actor is not allowlisted for remote surface"
+            }
+            AuthDenyCategory::RateLimited => "Denied: remote request rate limit exceeded",
+            AuthDenyCategory::AbuseBlocked => {
+                "Denied: actor is temporarily blocked on remote surface"
+            }
+            AuthDenyCategory::SurfaceCommandBlocked => {
+                "Denied: command is blocked on remote surface"
+            }
+        }
+    }
+
+    pub fn reason(self, input: &NormalizedInput) -> String {
+        let detail = match self {
+            AuthDenyCategory::Unauthenticated => {
+                format!("unauthenticated actor for {:?} surface", input.surface)
+            }
+            AuthDenyCategory::NotAllowlisted => format!(
+                "actor {} is not allowlisted for {:?} surface",
+                input.actor.actor_id, input.surface
+            ),
+            AuthDenyCategory::RateLimited => format!(
+                "actor {} exceeded request rate for {:?} surface",
+                input.actor.actor_id, input.surface
+            ),
+            AuthDenyCategory::AbuseBlocked => format!(
+                "actor {} is temporarily blocked on {:?} surface",
+                input.actor.actor_id, input.surface
+            ),
+            AuthDenyCategory::SurfaceCommandBlocked => {
+                "command is blocked on remote surface".to_string()
+            }
+        };
+        format!("{}: {detail}", self.code())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -112,16 +166,11 @@ impl DefaultSurfaceAuthorizer {
         }
     }
 
-    fn deny(
-        &self,
-        input: &NormalizedInput,
-        category: AuthDenyCategory,
-        reason: impl Into<String>,
-    ) -> AuthDecision {
+    fn deny(&self, input: &NormalizedInput, category: AuthDenyCategory) -> AuthDecision {
         self.note_denial(input);
         AuthDecision::Deny {
             category,
-            reason: reason.into(),
+            reason: category.reason(input),
         }
     }
 }
@@ -137,11 +186,7 @@ impl SurfaceAuthorizer for DefaultSurfaceAuthorizer {
         };
 
         if !input.actor.is_authenticated {
-            return self.deny(
-                input,
-                AuthDenyCategory::Unauthenticated,
-                format!("unauthenticated actor for {:?} surface", input.surface),
-            );
+            return self.deny(input, AuthDenyCategory::Unauthenticated);
         }
 
         let key = Self::tracker_key(input);
@@ -156,10 +201,7 @@ impl SurfaceAuthorizer for DefaultSurfaceAuthorizer {
                 tracker.consecutive_denials += 1;
                 return AuthDecision::Deny {
                     category: AuthDenyCategory::AbuseBlocked,
-                    reason: format!(
-                        "actor {} is temporarily blocked on {:?} surface",
-                        input.actor.actor_id, input.surface
-                    ),
+                    reason: AuthDenyCategory::AbuseBlocked.reason(input),
                 };
             }
 
@@ -169,10 +211,7 @@ impl SurfaceAuthorizer for DefaultSurfaceAuthorizer {
                 tracker.consecutive_denials += 1;
                 return AuthDecision::Deny {
                     category: AuthDenyCategory::NotAllowlisted,
-                    reason: format!(
-                        "actor {} is not allowlisted for {:?} surface",
-                        input.actor.actor_id, input.surface
-                    ),
+                    reason: AuthDenyCategory::NotAllowlisted.reason(input),
                 };
             }
 
@@ -182,10 +221,7 @@ impl SurfaceAuthorizer for DefaultSurfaceAuthorizer {
                 tracker.consecutive_denials += 1;
                 return AuthDecision::Deny {
                     category: AuthDenyCategory::RateLimited,
-                    reason: format!(
-                        "actor {} exceeded request rate for {:?} surface",
-                        input.actor.actor_id, input.surface
-                    ),
+                    reason: AuthDenyCategory::RateLimited.reason(input),
                 };
             }
         }
@@ -193,11 +229,7 @@ impl SurfaceAuthorizer for DefaultSurfaceAuthorizer {
         if matches!(input.surface, InteractionSurface::Remote)
             && matches!(input.raw.trim(), "/permissions" | "/session")
         {
-            return self.deny(
-                input,
-                AuthDenyCategory::SurfaceCommandBlocked,
-                "command is blocked on remote surface",
-            );
+            return self.deny(input, AuthDenyCategory::SurfaceCommandBlocked);
         }
 
         self.note_allowed_request(input, policy.window_seconds);

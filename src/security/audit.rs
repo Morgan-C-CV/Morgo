@@ -20,6 +20,7 @@ pub enum AuditEvent {
         session_id: String,
         actor_id: String,
         reason: String,
+        outcome: String,
     },
     RemoteNotificationQueued {
         session_id: String,
@@ -104,14 +105,15 @@ impl AuditRecord {
             AuditEvent::RemoteRequestDenied {
                 session_id,
                 actor_id,
+                outcome,
                 ..
             } => Self {
                 timestamp,
-                event_kind: "remote_request_denied".into(),
+                event_kind: format!("remote_request_denied_{}", outcome),
                 session_id: Some(session_id.clone()),
                 actor_id: Some(actor_id.clone()),
                 surface: Some("remote".into()),
-                outcome: "denied".into(),
+                outcome: outcome.clone(),
                 event,
             },
             AuditEvent::RemoteNotificationQueued {
@@ -254,17 +256,18 @@ mod tests {
         audit_log.record(AuditEvent::RemoteRequestDenied {
             session_id: "session-1".into(),
             actor_id: "actor-1".into(),
-            reason: "rate limited".into(),
+            reason: "rate_limited: actor actor-1 exceeded request rate for Remote surface".into(),
+            outcome: "rate_limited".into(),
         });
 
         assert_eq!(audit_log.events().len(), 1);
         assert_eq!(audit_log.records().len(), 1);
         let record = &audit_log.records()[0];
-        assert_eq!(record.event_kind, "remote_request_denied");
+        assert_eq!(record.event_kind, "remote_request_denied_rate_limited");
         assert_eq!(record.session_id.as_deref(), Some("session-1"));
         assert_eq!(record.actor_id.as_deref(), Some("actor-1"));
         assert_eq!(record.surface.as_deref(), Some("remote"));
-        assert_eq!(record.outcome, "denied");
+        assert_eq!(record.outcome, "rate_limited");
     }
 
     #[test]
@@ -280,7 +283,8 @@ mod tests {
         audit_log.record(AuditEvent::RemoteRequestDenied {
             session_id: "session-1".into(),
             actor_id: "actor-1".into(),
-            reason: "not allowlisted".into(),
+            reason: "not_allowlisted: actor actor-1 is not allowlisted for Remote surface".into(),
+            outcome: "not_allowlisted".into(),
         });
         audit_log.record(AuditEvent::RemoteNotificationQueued {
             session_id: "session-1".into(),
@@ -291,7 +295,7 @@ mod tests {
         let reloaded = AuditLog::file_backed(temp_root.clone());
         let records = reloaded.load_records();
         assert_eq!(records.len(), 2);
-        assert_eq!(records[0].event_kind, "remote_request_denied");
+        assert_eq!(records[0].event_kind, "remote_request_denied_not_allowlisted");
         assert_eq!(records[1].event_kind, "remote_notification_queued");
 
         let _ = std::fs::remove_dir_all(temp_root);

@@ -195,6 +195,7 @@ pub async fn handle_remote_request(
                 session_id: input.session_id.clone(),
                 actor_id: input.actor.actor_id.clone(),
                 reason,
+                outcome: category.code().into(),
             },
         );
         return Ok(RemoteResponse {
@@ -229,6 +230,7 @@ pub async fn handle_remote_request(
                     session_id: input.session_id.clone(),
                     actor_id: input.actor.actor_id.clone(),
                     reason: error.to_string(),
+                    outcome: "runtime_error".into(),
                 },
             );
             return Err(error);
@@ -558,13 +560,7 @@ fn remote_surface_authorizer(app_state: &AppState) -> DefaultSurfaceAuthorizer {
 }
 
 fn denial_message_for_category(category: AuthDenyCategory) -> String {
-    match category {
-        AuthDenyCategory::Unauthenticated => "Denied: unauthenticated actor for remote surface".into(),
-        AuthDenyCategory::NotAllowlisted => "Denied: actor is not allowlisted for remote surface".into(),
-        AuthDenyCategory::RateLimited => "Denied: remote request rate limit exceeded".into(),
-        AuthDenyCategory::AbuseBlocked => "Denied: actor is temporarily blocked on remote surface".into(),
-        AuthDenyCategory::SurfaceCommandBlocked => "Denied: command is blocked on remote surface".into(),
-    }
+    category.remote_denial_message().into()
 }
 
 fn leak_string(value: String) -> &'static str {
