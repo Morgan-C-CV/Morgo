@@ -1,6 +1,6 @@
 use std::fmt;
 
-use crate::service::api::streaming::StreamError;
+use crate::service::api::streaming::{ProviderFailureDisposition, StreamError};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApiErrorKind {
@@ -16,13 +16,20 @@ pub enum ApiErrorKind {
 pub struct ApiError {
     pub kind: ApiErrorKind,
     pub message: String,
+    pub disposition: ProviderFailureDisposition,
 }
 
 impl ApiError {
     pub fn http_status(status: u16, message: impl Into<String>) -> Self {
+        let disposition = if status == 429 || (500..=599).contains(&status) {
+            ProviderFailureDisposition::PreStreamRetryable
+        } else {
+            ProviderFailureDisposition::PreStreamTerminal
+        };
         Self {
             kind: ApiErrorKind::HttpStatus(status),
             message: message.into(),
+            disposition,
         }
     }
 
@@ -30,6 +37,7 @@ impl ApiError {
         Self {
             kind: ApiErrorKind::RequestBuild,
             message: message.into(),
+            disposition: ProviderFailureDisposition::PreStreamTerminal,
         }
     }
 
@@ -37,6 +45,7 @@ impl ApiError {
         Self {
             kind: ApiErrorKind::Transport,
             message: message.into(),
+            disposition: ProviderFailureDisposition::PreStreamRetryable,
         }
     }
 
@@ -44,6 +53,7 @@ impl ApiError {
         Self {
             kind: ApiErrorKind::Timeout,
             message: message.into(),
+            disposition: ProviderFailureDisposition::PreStreamRetryable,
         }
     }
 
@@ -51,6 +61,7 @@ impl ApiError {
         Self {
             kind: ApiErrorKind::InvalidResponse,
             message: message.into(),
+            disposition: ProviderFailureDisposition::PreStreamTerminal,
         }
     }
 
@@ -58,12 +69,17 @@ impl ApiError {
         Self {
             kind: ApiErrorKind::SseProtocol,
             message: message.into(),
+            disposition: ProviderFailureDisposition::PreStreamTerminal,
         }
     }
 
+    pub fn with_disposition(mut self, disposition: ProviderFailureDisposition) -> Self {
+        self.disposition = disposition;
+        self
+    }
+
     pub fn is_retryable(&self) -> bool {
-        matches!(self.kind, ApiErrorKind::Transport | ApiErrorKind::Timeout)
-            || matches!(self.kind, ApiErrorKind::HttpStatus(status) if status == 429 || (500..=599).contains(&status))
+        self.disposition.is_pre_stream_retryable()
     }
 
     pub fn kind_label(&self) -> &'static str {
@@ -83,6 +99,20 @@ impl ApiError {
             kind: self.kind_label().to_string(),
             message: self.message.clone(),
             retryable: self.is_retryable(),
+            disposition: match self.disposition {
+                ProviderFailureDisposition::PreStreamRetryable => {
+                    ProviderFailureDisposition::PreStreamRetryable
+                }
+                ProviderFailureDisposition::PreStreamTerminal => {
+                    ProviderFailureDisposition::PreStreamTerminal
+                }
+                ProviderFailureDisposition::StreamInterrupted => {
+                    ProviderFailureDisposition::StreamInterrupted
+                }
+                ProviderFailureDisposition::StreamTerminal => {
+                    ProviderFailureDisposition::StreamTerminal
+                }
+            },
             status_code: match self.kind {
                 ApiErrorKind::HttpStatus(status) => Some(status),
                 _ => None,

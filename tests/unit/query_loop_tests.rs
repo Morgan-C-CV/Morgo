@@ -17,7 +17,9 @@ use rust_agent::interaction::telegram::gateway::TelegramGateway;
 use rust_agent::service::api::client::{ModelProviderClient, parse_anthropic_sse_response};
 use rust_agent::service::api::errors::ApiError;
 use rust_agent::service::api::retry::RetryPolicy;
-use rust_agent::service::api::streaming::{StopReason, StreamError, StreamEvent, UsageEvent};
+use rust_agent::service::api::streaming::{
+    ProviderFailureDisposition, StopReason, StreamError, StreamEvent, UsageEvent,
+};
 use rust_agent::service::compact::reactive_compact::ReactiveCompactor;
 use rust_agent::state::app_state::WorkerRole;
 use rust_agent::task::types::{TaskOwner, ValidationState, WorkerPhase};
@@ -508,6 +510,7 @@ async fn query_loop_surfaces_stream_errors_after_recovery_attempt() {
                 kind: "provider_stream".into(),
                 message: "boom".into(),
                 retryable: false,
+                disposition: ProviderFailureDisposition::StreamInterrupted,
                 status_code: None,
             })],
             vec![StreamEvent::Error(StreamError {
@@ -515,6 +518,7 @@ async fn query_loop_surfaces_stream_errors_after_recovery_attempt() {
                 kind: "provider_stream".into(),
                 message: "boom again".into(),
                 retryable: false,
+                disposition: ProviderFailureDisposition::StreamInterrupted,
                 status_code: None,
             })],
         ],
@@ -1034,13 +1038,14 @@ fn provider_sse_parsing_maps_standard_events() {
         "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":4}}\n\n"
     );
 
-    let events =
-        parse_anthropic_sse_response(body, "default-model").expect("provider SSE should parse");
+    let events = parse_anthropic_sse_response("anthropic", body, "default-model")
+        .expect("provider SSE should parse");
     assert!(matches!(events[0], StreamEvent::MessageStart));
     assert!(matches!(events[1], StreamEvent::Usage(_)));
     assert!(matches!(events[2], StreamEvent::TextDelta(_)));
+    assert!(matches!(events[3], StreamEvent::Usage(_)));
     assert!(matches!(
-        events[3],
+        events[4],
         StreamEvent::MessageStop {
             stop_reason: StopReason::EndTurn
         }
@@ -1056,11 +1061,14 @@ fn retry_policy_retries_only_retryable_pre_stream_errors() {
     };
     let retryable = ApiError::http_status(429, "rate limited");
     let fatal = ApiError::invalid_response("bad json");
+    let provider_terminal = ApiError::http_status(503, "provider says do not retry")
+        .with_disposition(ProviderFailureDisposition::PreStreamTerminal);
 
     assert!(policy.should_retry(0, &retryable, false));
     assert!(!policy.should_retry(2, &retryable, false));
     assert!(!policy.should_retry(0, &retryable, true));
     assert!(!policy.should_retry(0, &fatal, false));
+    assert!(!policy.should_retry(0, &provider_terminal, false));
 }
 
 #[tokio::test]
@@ -2047,6 +2055,7 @@ async fn query_loop_retries_with_model_fallback_before_other_stream_recovery() {
                 kind: "model_fallback".into(),
                 message: "fallback:model_error: upstream overloaded".into(),
                 retryable: true,
+                disposition: ProviderFailureDisposition::StreamInterrupted,
                 status_code: Some(503),
             })],
             vec![
@@ -2083,7 +2092,7 @@ async fn query_loop_retries_with_model_fallback_before_other_stream_recovery() {
             message,
             code,
         } if message.contains("model fallback retry")
-            && code == &Some(rust_agent::core::events::ServiceFailureCode::ApiProviderError)
+            && code == &Some(rust_agent::core::events::ServiceFailureCode::ApiStreamError)
     )));
 }
 
@@ -2096,6 +2105,7 @@ async fn query_loop_escalates_fallback_failure_to_terminal_model_error() {
                 kind: "model_fallback".into(),
                 message: "fallback:model_error: upstream overloaded".into(),
                 retryable: true,
+                disposition: ProviderFailureDisposition::StreamInterrupted,
                 status_code: Some(503),
             })],
             vec![StreamEvent::Error(StreamError {
@@ -2103,6 +2113,7 @@ async fn query_loop_escalates_fallback_failure_to_terminal_model_error() {
                 kind: "model_fallback".into(),
                 message: "fallback:model_error: still failing".into(),
                 retryable: true,
+                disposition: ProviderFailureDisposition::StreamInterrupted,
                 status_code: Some(503),
             })],
             vec![StreamEvent::Error(StreamError {
@@ -2110,6 +2121,7 @@ async fn query_loop_escalates_fallback_failure_to_terminal_model_error() {
                 kind: "provider_stream".into(),
                 message: "residual collapse failure".into(),
                 retryable: false,
+                disposition: ProviderFailureDisposition::StreamInterrupted,
                 status_code: None,
             })],
             vec![StreamEvent::Error(StreamError {
@@ -2117,6 +2129,7 @@ async fn query_loop_escalates_fallback_failure_to_terminal_model_error() {
                 kind: "provider_stream".into(),
                 message: "fatal after retries".into(),
                 retryable: false,
+                disposition: ProviderFailureDisposition::StreamInterrupted,
                 status_code: None,
             })],
         ],
@@ -2139,6 +2152,38 @@ async fn query_loop_escalates_fallback_failure_to_terminal_model_error() {
         }
     );
     assert_eq!(result.transition, Some(Continue::CollapseDrainRetry));
+}
+
+#[tokio::test]
+async fn query_loop_terminal_stream_failures_do_not_enter_recovery() {
+    let context = test_context_with_turns(
+        vec![vec![StreamEvent::Error(StreamError {
+            provider_id: "anthropic".into(),
+            kind: "provider_terminal".into(),
+            message: "fatal terminal failure".into(),
+            retryable: false,
+            disposition: ProviderFailureDisposition::StreamTerminal,
+            status_code: Some(400),
+        })]],
+        ToolRegistry::new(),
+    );
+
+    let result = run_query_loop_with_params(
+        &context,
+        Message::user("terminal failure"),
+        QueryParams::default(),
+    )
+    .await;
+
+    assert_eq!(result.state, QueryLoopState::Failed);
+    assert_eq!(
+        result.terminal,
+        Terminal::ModelError {
+            message: "fatal terminal failure".into(),
+            code: Some(rust_agent::core::events::ServiceFailureCode::ApiStreamError),
+        }
+    );
+    assert_eq!(result.transition, None);
 }
 
 #[tokio::test]
@@ -2199,6 +2244,7 @@ async fn submit_turn_emits_runtime_events_for_compact_recovery_and_terminal_path
                 kind: "model_fallback".into(),
                 message: "fallback:model_error: upstream overloaded".into(),
                 retryable: true,
+                disposition: ProviderFailureDisposition::StreamInterrupted,
                 status_code: Some(503),
             })],
             vec![StreamEvent::Error(StreamError {
@@ -2206,6 +2252,7 @@ async fn submit_turn_emits_runtime_events_for_compact_recovery_and_terminal_path
                 kind: "provider_stream".into(),
                 message: "still overloaded".into(),
                 retryable: false,
+                disposition: ProviderFailureDisposition::StreamInterrupted,
                 status_code: None,
             })],
             vec![

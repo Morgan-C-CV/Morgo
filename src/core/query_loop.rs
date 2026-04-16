@@ -3,7 +3,9 @@ use crate::core::events::{EngineEvent, ServiceFailureCode};
 use crate::core::message::Message;
 use crate::hook::executor::{HookDecision, run_hook};
 use crate::hook::registry::HookEvent;
-use crate::service::api::streaming::{StopReason, StreamEvent};
+use crate::service::api::streaming::{
+    ProviderFailureDisposition, StopReason, StreamError, StreamEvent,
+};
 use crate::service::compact::{CompactPlanKind, CompactRecoveryErrorContext};
 use crate::tool::orchestrator::{ToolExecutionOutcome, aggregate_execution_records};
 use crate::tool::result::{
@@ -399,7 +401,7 @@ async fn stream_model_turn(
         if let Some(index) = streamed.iter().position(|event| {
             matches!(
                 event,
-                StreamEvent::Error(error) if error.kind == "model_fallback"
+                StreamEvent::Error(error) if error.disposition.is_stream_interrupted()
             ) || matches!(
                 event,
                 StreamEvent::MessageStop {
@@ -407,11 +409,12 @@ async fn stream_model_turn(
                 }
             )
         }) {
-            streamed[index] = StreamEvent::Error(crate::service::api::streaming::StreamError {
+            streamed[index] = StreamEvent::Error(StreamError {
                 provider_id: context.api_client.provider_config().provider_id,
                 kind: "model_fallback_failed".into(),
                 message: "model fallback retry failed".into(),
                 retryable: false,
+                disposition: ProviderFailureDisposition::StreamInterrupted,
                 status_code: None,
             });
         }
@@ -646,164 +649,43 @@ async fn consume_model_stream(
                         engine_events.push(EngineEvent::MessageCommitted(message.clone()));
                         state.messages.push(message);
                     }
-                    if state.transition != Some(Continue::ModelFallbackRetry) {
-                        engine_events.push(EngineEvent::Notice {
-                            kind: "recovery",
-                            message: "stream stop error triggered model fallback retry".into(),
-                            code: Some(ServiceFailureCode::ApiStreamError),
-                        });
-                        return TurnOutcome {
-                            state: state.clone(),
-                            events: engine_events,
-                            decision: TurnDecision::ContinueWith(
-                                Message::user("Retry after model fallback recovery."),
-                                Continue::ModelFallbackRetry,
-                            ),
-                        };
-                    }
-                    let plan = context.compactor.plan_stream_error_recovery(
-                        state.has_attempted_reactive_compact,
-                        state.transition == Some(Continue::CollapseDrainRetry),
-                        None,
-                    );
-                    engine_events.push(EngineEvent::CompactPlanIssued {
-                        kind: plan.kind.clone(),
-                        message: plan.notice_message.clone(),
-                    });
-                    engine_events.push(EngineEvent::Notice {
-                        kind: plan.notice_kind,
-                        message: plan.notice_message.clone(),
-                        code: Some(ServiceFailureCode::CompactRecoveryError),
-                    });
-                    match plan.kind {
-                        CompactPlanKind::ReactiveCompact => {
-                            state.has_attempted_reactive_compact = true;
-                            state.auto_compact_tracking = Some("reactive_compact".into());
-                            return TurnOutcome {
-                                state: state.clone(),
-                                events: engine_events,
-                                decision: TurnDecision::ContinueWith(
-                                    Message::user(
-                                        plan.retry_prompt.expect("reactive compact prompt"),
-                                    ),
-                                    Continue::ReactiveCompactRetry,
-                                ),
-                            };
-                        }
-                        CompactPlanKind::CollapseDrain => {
-                            state.auto_compact_tracking = Some("collapse_drain".into());
-                            return TurnOutcome {
-                                state: state.clone(),
-                                events: engine_events,
-                                decision: TurnDecision::ContinueWith(
-                                    Message::user(
-                                        plan.retry_prompt.expect("collapse drain prompt"),
-                                    ),
-                                    Continue::CollapseDrainRetry,
-                                ),
-                            };
-                        }
-                        CompactPlanKind::Exhausted => {
-                            state.auto_compact_tracking = Some("exhausted".into());
-                            return TurnOutcome {
-                                state: state.clone(),
-                                events: engine_events,
-                                decision: TurnDecision::Return(
-                                    state.clone(),
-                                    Terminal::ModelError {
-                                        message: "stream stopped with error".into(),
-                                        code: Some(ServiceFailureCode::ApiStreamError),
-                                    },
-                                ),
-                            };
-                        }
-                        CompactPlanKind::AutoCompact => {
-                            unreachable!("auto compact is pre-stream only")
-                        }
-                    }
-                }
-            },
-            StreamEvent::Error(error) => {
-                let error_message = Message::assistant(format!("stream error: {}", error.message));
-                engine_events.push(EngineEvent::MessageCommitted(error_message.clone()));
-                state.messages.push(error_message);
-                if state.transition != Some(Continue::ModelFallbackRetry)
-                    && error.kind == "model_fallback"
-                {
-                    engine_events.push(EngineEvent::Notice {
-                        kind: "recovery",
-                        message: format!(
-                            "model fallback retry triggered after stream error [{}]: {}",
-                            error.kind, error.message
-                        ),
-                        code: Some(classify_service_failure_code(&error.kind)),
-                    });
-                    return TurnOutcome {
-                        state: state.clone(),
-                        events: engine_events,
-                        decision: TurnDecision::ContinueWith(
-                            Message::user("Retry after model fallback recovery."),
-                            Continue::ModelFallbackRetry,
-                        ),
-                    };
-                }
-                let plan = context.compactor.plan_stream_error_recovery(
-                    state.has_attempted_reactive_compact,
-                    state.transition == Some(Continue::CollapseDrainRetry),
-                    Some(CompactRecoveryErrorContext {
-                        kind: &error.kind,
-                        message: &error.message,
-                    }),
-                );
-                engine_events.push(EngineEvent::CompactPlanIssued {
-                    kind: plan.kind.clone(),
-                    message: plan.notice_message.clone(),
-                });
-                engine_events.push(EngineEvent::Notice {
-                    kind: plan.notice_kind,
-                    message: plan.notice_message.clone(),
-                    code: Some(ServiceFailureCode::CompactRecoveryError),
-                });
-                match plan.kind {
-                    CompactPlanKind::ReactiveCompact => {
-                        state.has_attempted_reactive_compact = true;
-                        state.auto_compact_tracking = Some("reactive_compact".into());
-                        return TurnOutcome {
-                            state: state.clone(),
-                            events: engine_events,
-                            decision: TurnDecision::ContinueWith(
-                                Message::user(plan.retry_prompt.expect("reactive compact prompt")),
-                                Continue::ReactiveCompactRetry,
-                            ),
-                        };
-                    }
-                    CompactPlanKind::CollapseDrain => {
-                        state.auto_compact_tracking = Some("collapse_drain".into());
-                        return TurnOutcome {
-                            state: state.clone(),
-                            events: engine_events,
-                            decision: TurnDecision::ContinueWith(
-                                Message::user(plan.retry_prompt.expect("collapse drain prompt")),
-                                Continue::CollapseDrainRetry,
-                            ),
-                        };
-                    }
-                    CompactPlanKind::Exhausted => {
-                        state.auto_compact_tracking = Some("exhausted".into());
+                    let stop_error = synthetic_stop_reason_error(state.transition.as_ref());
+                    if stop_error.disposition.is_stream_terminal() {
+                        let code = classify_service_failure_code(&stop_error);
                         return TurnOutcome {
                             state: state.clone(),
                             events: engine_events,
                             decision: TurnDecision::Return(
                                 state.clone(),
                                 Terminal::ModelError {
-                                    message: error.message,
-                                    code: Some(classify_service_failure_code(&error.kind)),
+                                    message: stop_error.message,
+                                    code: Some(code),
                                 },
                             ),
                         };
                     }
-                    CompactPlanKind::AutoCompact => unreachable!("auto compact is pre-stream only"),
+                    return continue_after_stream_error(context, state, engine_events, stop_error);
                 }
+            },
+            StreamEvent::Error(error) => {
+                let error_message = Message::assistant(format!("stream error: {}", error.message));
+                engine_events.push(EngineEvent::MessageCommitted(error_message.clone()));
+                state.messages.push(error_message);
+                if error.disposition.is_stream_terminal() {
+                    let code = classify_service_failure_code(&error);
+                    return TurnOutcome {
+                        state: state.clone(),
+                        events: engine_events,
+                        decision: TurnDecision::Return(
+                            state.clone(),
+                            Terminal::ModelError {
+                                message: error.message,
+                                code: Some(code),
+                            },
+                        ),
+                    };
+                }
+                return continue_after_stream_error(context, state, engine_events, error);
             }
         }
     }
@@ -1453,10 +1335,119 @@ fn terminal_state(terminal: &Terminal) -> QueryLoopState {
     }
 }
 
-fn classify_service_failure_code(error_kind: &str) -> ServiceFailureCode {
-    match error_kind {
-        "provider_stream" | "sse_protocol" => ServiceFailureCode::ApiStreamError,
-        _ => ServiceFailureCode::ApiProviderError,
+fn continue_after_stream_error(
+    context: &QueryContext,
+    state: &mut LoopState,
+    mut engine_events: Vec<EngineEvent>,
+    error: StreamError,
+) -> TurnOutcome {
+    if state.transition != Some(Continue::ModelFallbackRetry)
+        && should_trigger_model_fallback(&error)
+    {
+        engine_events.push(EngineEvent::Notice {
+            kind: "recovery",
+            message: format!(
+                "model fallback retry triggered after stream error [{}]: {}",
+                error.kind, error.message
+            ),
+            code: Some(classify_service_failure_code(&error)),
+        });
+        return TurnOutcome {
+            state: state.clone(),
+            events: engine_events,
+            decision: TurnDecision::ContinueWith(
+                Message::user("Retry after model fallback recovery."),
+                Continue::ModelFallbackRetry,
+            ),
+        };
+    }
+    let plan = context.compactor.plan_stream_error_recovery(
+        state.has_attempted_reactive_compact,
+        state.transition == Some(Continue::CollapseDrainRetry),
+        Some(CompactRecoveryErrorContext {
+            kind: &error.kind,
+            message: &error.message,
+        }),
+    );
+    engine_events.push(EngineEvent::CompactPlanIssued {
+        kind: plan.kind.clone(),
+        message: plan.notice_message.clone(),
+    });
+    engine_events.push(EngineEvent::Notice {
+        kind: plan.notice_kind,
+        message: plan.notice_message.clone(),
+        code: Some(ServiceFailureCode::CompactRecoveryError),
+    });
+    match plan.kind {
+        CompactPlanKind::ReactiveCompact => {
+            state.has_attempted_reactive_compact = true;
+            state.auto_compact_tracking = Some("reactive_compact".into());
+            TurnOutcome {
+                state: state.clone(),
+                events: engine_events,
+                decision: TurnDecision::ContinueWith(
+                    Message::user(plan.retry_prompt.expect("reactive compact prompt")),
+                    Continue::ReactiveCompactRetry,
+                ),
+            }
+        }
+        CompactPlanKind::CollapseDrain => {
+            state.auto_compact_tracking = Some("collapse_drain".into());
+            TurnOutcome {
+                state: state.clone(),
+                events: engine_events,
+                decision: TurnDecision::ContinueWith(
+                    Message::user(plan.retry_prompt.expect("collapse drain prompt")),
+                    Continue::CollapseDrainRetry,
+                ),
+            }
+        }
+        CompactPlanKind::Exhausted => {
+            state.auto_compact_tracking = Some("exhausted".into());
+            let code = classify_service_failure_code(&error);
+            TurnOutcome {
+                state: state.clone(),
+                events: engine_events,
+                decision: TurnDecision::Return(
+                    state.clone(),
+                    Terminal::ModelError {
+                        message: error.message,
+                        code: Some(code),
+                    },
+                ),
+            }
+        }
+        CompactPlanKind::AutoCompact => unreachable!("auto compact is pre-stream only"),
+    }
+}
+
+fn should_trigger_model_fallback(error: &StreamError) -> bool {
+    error.kind == "model_fallback" || (error.disposition.is_stream_interrupted() && error.retryable)
+}
+
+fn synthetic_stop_reason_error(transition: Option<&Continue>) -> StreamError {
+    let kind = if matches!(transition, Some(Continue::ModelFallbackRetry)) {
+        "model_fallback_failed"
+    } else {
+        "stream_stop_error"
+    };
+    let disposition = ProviderFailureDisposition::StreamInterrupted;
+    StreamError {
+        provider_id: "provider".into(),
+        kind: kind.into(),
+        message: "stream stopped with error".into(),
+        retryable: false,
+        disposition,
+        status_code: None,
+    }
+}
+
+fn classify_service_failure_code(error: &StreamError) -> ServiceFailureCode {
+    match error.disposition {
+        ProviderFailureDisposition::StreamInterrupted
+        | ProviderFailureDisposition::StreamTerminal => ServiceFailureCode::ApiStreamError,
+        ProviderFailureDisposition::PreStreamRetryable
+        | ProviderFailureDisposition::PreStreamTerminal => ServiceFailureCode::ApiProviderError,
     }
 }
 

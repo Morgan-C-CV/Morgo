@@ -22,7 +22,7 @@ impl RetryPolicy {
         if saw_stream_event {
             return false;
         }
-        attempt + 1 < self.max_attempts && error.is_retryable()
+        attempt + 1 < self.max_attempts && error.disposition.is_pre_stream_retryable()
     }
 
     pub fn backoff_for_attempt(&self, attempt: usize) -> std::time::Duration {

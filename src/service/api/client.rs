@@ -8,7 +8,9 @@ use tokio::time::{sleep, timeout};
 use crate::core::message::Message;
 use crate::service::api::errors::ApiError;
 use crate::service::api::retry::RetryPolicy;
-use crate::service::api::streaming::{StopReason, StreamError, StreamEvent, UsageEvent};
+use crate::service::api::streaming::{
+    ProviderFailureDisposition, StopReason, StreamError, StreamEvent, UsageEvent,
+};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ModelPricing {
@@ -264,7 +266,9 @@ fn parse_stream_response_for_provider(
     default_model: &str,
 ) -> Result<Vec<StreamEvent>, ApiError> {
     match normalized_provider_id(provider_id) {
-        "anthropic" | "default-provider" => parse_anthropic_sse_response(body, default_model),
+        "anthropic" | "default-provider" => {
+            parse_anthropic_sse_response(provider_id, body, default_model)
+        }
         _ => Err(ApiError::invalid_response(format!(
             "unsupported provider id: {provider_id}"
         ))),
@@ -281,6 +285,7 @@ fn normalized_provider_id(provider_id: &str) -> &str {
 }
 
 pub fn parse_anthropic_sse_response(
+    provider_id: &str,
     body: &str,
     default_model: &str,
 ) -> Result<Vec<StreamEvent>, ApiError> {
@@ -304,13 +309,20 @@ pub fn parse_anthropic_sse_response(
         let json: Value = serde_json::from_str(&payload).map_err(|error| {
             ApiError::sse_protocol(format!("invalid SSE JSON payload: {error}"))
         })?;
-        map_provider_event(&json, default_model, &mut saw_message_start, &mut events)?;
+        map_provider_event(
+            provider_id,
+            &json,
+            default_model,
+            &mut saw_message_start,
+            &mut events,
+        )?;
     }
 
     Ok(events)
 }
 
 fn map_provider_event(
+    provider_id: &str,
     payload: &Value,
     default_model: &str,
     saw_message_start: &mut bool,
@@ -378,6 +390,12 @@ fn map_provider_event(
             }
         }
         "message_delta" => {
+            if let Some(usage) = payload.get("usage") {
+                output.push(StreamEvent::Usage(parse_usage(
+                    usage,
+                    payload_model(payload).unwrap_or(default_model),
+                )));
+            }
             if let Some(stop_reason) = payload
                 .get("delta")
                 .and_then(|delta| delta.get("stop_reason"))
@@ -386,12 +404,6 @@ fn map_provider_event(
                 output.push(StreamEvent::MessageStop {
                     stop_reason: map_stop_reason(stop_reason),
                 });
-            }
-            if let Some(usage) = payload.get("usage") {
-                output.push(StreamEvent::Usage(parse_usage(
-                    usage,
-                    payload_model(payload).unwrap_or(default_model),
-                )));
             }
         }
         "message_stop" => {
@@ -411,11 +423,17 @@ fn map_provider_event(
                 .and_then(Value::as_str)
                 .unwrap_or("provider stream error")
                 .to_string();
+            let raw_kind = payload
+                .get("error")
+                .and_then(|error| error.get("type"))
+                .and_then(Value::as_str)
+                .unwrap_or("provider_stream");
             output.push(StreamEvent::Error(StreamError {
-                provider_id: "anthropic".into(),
-                kind: "provider_stream".into(),
+                provider_id: normalized_provider_id(provider_id).to_string(),
+                kind: raw_kind.to_string(),
                 message,
                 retryable: false,
+                disposition: classify_stream_error_disposition(raw_kind),
                 status_code: None,
             }));
         }
@@ -458,19 +476,29 @@ fn map_stop_reason(reason: &str) -> StopReason {
     match reason {
         "tool_use" => StopReason::ToolUse,
         "max_tokens" => StopReason::MaxTokens,
-        "error" => StopReason::Error,
+        "error" | "model_error" => StopReason::Error,
         _ => StopReason::EndTurn,
+    }
+}
+
+fn classify_stream_error_disposition(raw_kind: &str) -> ProviderFailureDisposition {
+    match raw_kind {
+        "model_fallback" | "provider_stream" | "overloaded_error" => {
+            ProviderFailureDisposition::StreamInterrupted
+        }
+        _ => ProviderFailureDisposition::StreamTerminal,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        ModelProviderConfig, ProviderTimeout, build_messages_url_for_provider, map_stop_reason,
-        parse_anthropic_sse_response, parse_stream_response_for_provider,
+        ModelProviderConfig, ProviderTimeout, build_messages_url_for_provider,
+        classify_stream_error_disposition, map_stop_reason, parse_anthropic_sse_response,
+        parse_stream_response_for_provider,
     };
     use crate::service::api::retry::RetryPolicy;
-    use crate::service::api::streaming::{StopReason, StreamEvent};
+    use crate::service::api::streaming::{ProviderFailureDisposition, StopReason, StreamEvent};
 
     #[test]
     fn stop_reason_mapping_matches_expected_values() {
@@ -478,6 +506,7 @@ mod tests {
         assert_eq!(map_stop_reason("tool_use"), StopReason::ToolUse);
         assert_eq!(map_stop_reason("max_tokens"), StopReason::MaxTokens);
         assert_eq!(map_stop_reason("error"), StopReason::Error);
+        assert_eq!(map_stop_reason("model_error"), StopReason::Error);
     }
 
     #[test]
@@ -495,13 +524,15 @@ mod tests {
             "data: {\"type\":\"message_stop\"}\n\n"
         );
 
-        let events = parse_anthropic_sse_response(body, "default-model").expect("sse should parse");
+        let events = parse_anthropic_sse_response("anthropic", body, "default-model")
+            .expect("sse should parse");
         assert!(matches!(events[0], StreamEvent::MessageStart));
         assert!(matches!(events[1], StreamEvent::Usage(_)));
         assert!(matches!(events[2], StreamEvent::TextDelta(_)));
         assert!(matches!(events[3], StreamEvent::ToolUse { .. }));
+        assert!(matches!(events[4], StreamEvent::Usage(_)));
         assert!(matches!(
-            events[4],
+            events[5],
             StreamEvent::MessageStop {
                 stop_reason: StopReason::ToolUse
             }
@@ -542,18 +573,36 @@ mod tests {
     fn parses_error_events_into_structured_stream_errors() {
         let body = concat!(
             "event: message\n",
-            "data: {\"type\":\"error\",\"error\":{\"message\":\"provider exploded\"}}\n\n"
+            "data: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"provider exploded\"}}\n\n"
         );
 
-        let events = parse_anthropic_sse_response(body, "default-model").expect("sse should parse");
+        let events = parse_anthropic_sse_response("anthropic", body, "default-model")
+            .expect("sse should parse");
         assert!(matches!(
             &events[0],
             StreamEvent::Error(error)
                 if error.provider_id == "anthropic"
-                    && error.kind == "provider_stream"
+                    && error.kind == "overloaded_error"
                     && error.message == "provider exploded"
                     && !error.retryable
+                    && error.disposition == ProviderFailureDisposition::StreamInterrupted
                     && error.status_code.is_none()
         ));
+    }
+
+    #[test]
+    fn classifies_provider_stream_dispositions() {
+        assert_eq!(
+            classify_stream_error_disposition("model_fallback"),
+            ProviderFailureDisposition::StreamInterrupted
+        );
+        assert_eq!(
+            classify_stream_error_disposition("provider_stream"),
+            ProviderFailureDisposition::StreamInterrupted
+        );
+        assert_eq!(
+            classify_stream_error_disposition("bad_request"),
+            ProviderFailureDisposition::StreamTerminal
+        );
     }
 }

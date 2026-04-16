@@ -86,7 +86,8 @@ fn parsed_usage_event_can_be_recorded_into_cost_tracker() {
         "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":12,\"cache_creation_input_tokens\":3,\"cache_read_input_tokens\":1}}\n\n"
     );
 
-    let events = parse_anthropic_sse_response(body, "claude-test").expect("usage SSE should parse");
+    let events = parse_anthropic_sse_response("anthropic", body, "claude-test")
+        .expect("usage SSE should parse");
     for event in events {
         if let rust_agent::service::api::streaming::StreamEvent::Usage(usage) = event {
             cost_tracker.record_model_usage(
