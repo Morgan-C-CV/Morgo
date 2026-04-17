@@ -6,9 +6,7 @@ use crate::hook::registry::HookEvent;
 use crate::service::api::streaming::{
     ProviderFailureDisposition, StopReason, StreamError, StreamEvent,
 };
-use crate::service::compact::{
-    CompactPlanKind, CompactRecoveryErrorContext, CompactRecoveryNextStep,
-};
+use crate::service::compact::{CompactRecoveryErrorContext, CompactServiceNextStep};
 use crate::tool::orchestrator::{ToolExecutionOutcome, aggregate_execution_records};
 use crate::tool::result::{
     ToolExecutionRecord, ToolExecutionReport, ToolReportContextModifier, ToolReportModifier,
@@ -321,38 +319,40 @@ fn prepare_turn(
         return Err(result);
     }
 
-    if let Some(plan) = context
+    if let Some(compact) = context
         .compactor
         .plan_auto_compact(prepared.token_estimate, 4096)
     {
-        if let Some(compact_message) = plan.assistant_message.clone() {
+        if let Some(compact_message) = compact.plan.assistant_message.clone() {
             let compact_message = Message::assistant(compact_message);
             events.push(EngineEvent::CompactPlanIssued {
-                kind: plan.kind.clone(),
-                message: plan.notice_message.clone(),
+                kind: compact.plan.kind.clone(),
+                message: compact.plan.notice_message.clone(),
             });
             events.push(EngineEvent::Notice {
-                kind: plan.notice_kind,
-                message: plan.notice_message,
+                kind: compact.plan.notice_kind,
+                message: compact.plan.notice_message,
                 code: Some(ServiceFailureCode::CompactRecoveryError),
                 service_failure: Some(ServiceFailureNotice {
                     service_failure_code: ServiceFailureCode::CompactRecoveryError,
                     provider_kind: None,
                     status_code: None,
-                    retryable: true,
+                    retryable: compact.next_step != CompactServiceNextStep::Exhausted,
                     surface_visible: true,
                 }),
             });
-            events.push(EngineEvent::Transition(Continue::ReactiveCompactRetry));
+            let continue_reason = match compact.next_step {
+                CompactServiceNextStep::RetryReactiveCompact => Continue::ReactiveCompactRetry,
+                CompactServiceNextStep::RetryCollapseDrain => Continue::CollapseDrainRetry,
+                CompactServiceNextStep::Exhausted => {
+                    unreachable!("auto compact cannot terminate as exhausted")
+                }
+            };
+            events.push(EngineEvent::Transition(continue_reason.clone()));
             events.push(EngineEvent::MessageCommitted(compact_message.clone()));
-            state.transition = Some(Continue::ReactiveCompactRetry);
+            state.transition = Some(continue_reason);
             state.has_attempted_reactive_compact = true;
-            state.auto_compact_tracking = Some(match plan.kind {
-                CompactPlanKind::AutoCompact => "auto_compact".into(),
-                CompactPlanKind::ReactiveCompact => "reactive_compact".into(),
-                CompactPlanKind::CollapseDrain => "collapse_drain".into(),
-                CompactPlanKind::Exhausted => "exhausted".into(),
-            });
+            state.auto_compact_tracking = Some(compact.tracking_key.into());
             state.messages.push(compact_message);
             return Err(finalize_turn(
                 context,
@@ -1401,7 +1401,7 @@ fn continue_after_stream_error(
             service_failure_code: ServiceFailureCode::CompactRecoveryError,
             provider_kind: Some(error.provider_id.clone()),
             status_code: error.status_code,
-            retryable: recovery.next_step != CompactRecoveryNextStep::Exhausted,
+            retryable: recovery.next_step != CompactServiceNextStep::Exhausted,
             surface_visible: true,
         }),
     });
@@ -1413,7 +1413,7 @@ fn continue_after_stream_error(
     }
     state.auto_compact_tracking = Some(recovery.tracking_key.into());
     match recovery.next_step {
-        CompactRecoveryNextStep::RetryReactiveCompact => {
+        CompactServiceNextStep::RetryReactiveCompact => {
             state.has_attempted_reactive_compact = true;
             TurnOutcome {
                 state: state.clone(),
@@ -1429,7 +1429,7 @@ fn continue_after_stream_error(
                 ),
             }
         }
-        CompactRecoveryNextStep::RetryCollapseDrain => TurnOutcome {
+        CompactServiceNextStep::RetryCollapseDrain => TurnOutcome {
             state: state.clone(),
             events: engine_events,
             decision: TurnDecision::ContinueWith(
@@ -1442,7 +1442,7 @@ fn continue_after_stream_error(
                 Continue::CollapseDrainRetry,
             ),
         },
-        CompactRecoveryNextStep::Exhausted => {
+        CompactServiceNextStep::Exhausted => {
             let code = classify_service_failure_code(&error);
             TurnOutcome {
                 state: state.clone(),

@@ -21,7 +21,7 @@ use rust_agent::service::api::streaming::{
     ProviderFailureDisposition, StopReason, StreamError, StreamEvent, UsageEvent,
 };
 use rust_agent::service::compact::reactive_compact::{
-    CompactRecoveryNextStep, ReactiveCompactor,
+    CompactServiceNextStep, ReactiveCompactor,
 };
 use rust_agent::service::observability::ServiceObservabilityTracker;
 use rust_agent::state::app_state::WorkerRole;
@@ -517,6 +517,24 @@ async fn query_loop_uses_max_output_escalation_then_recovery() {
     );
 }
 
+#[test]
+fn compact_service_returns_typed_auto_compact_contract() {
+    let compactor = ReactiveCompactor;
+    let compact = compactor
+        .plan_auto_compact(5000, 4096)
+        .expect("oversized input should request auto compact");
+
+    assert_eq!(compact.plan.kind, rust_agent::service::compact::CompactPlanKind::AutoCompact);
+    assert_eq!(compact.next_step, CompactServiceNextStep::RetryReactiveCompact);
+    assert_eq!(compact.tracking_key, "auto_compact");
+    assert!(!compact.should_record_observability_hit);
+    assert_eq!(
+        compact.plan.assistant_message.as_deref(),
+        Some("compaction requested before continuing the turn")
+    );
+    assert_eq!(compact.plan.retry_prompt, None);
+}
+
 #[tokio::test]
 async fn query_loop_requests_compaction_for_large_input() {
     let engine = QueryEngine::new(test_context(Vec::new()));
@@ -533,6 +551,28 @@ async fn query_loop_requests_compaction_for_large_input() {
             "compaction requested before continuing the turn"
         )]
     );
+    assert!(result.events.iter().any(|event| matches!(
+        event,
+        EngineEvent::CompactPlanIssued { kind, message }
+            if *kind == rust_agent::service::compact::CompactPlanKind::AutoCompact
+                && message == "reactive compact requested before continuing the turn"
+    )));
+    assert!(result.events.iter().any(|event| matches!(
+        event,
+        EngineEvent::Notice {
+            kind: "compaction",
+            message,
+            ..
+        } if message == "reactive compact requested before continuing the turn"
+    )));
+
+    let snapshot = engine
+        .context
+        .app_state
+        .service_observability_tracker
+        .snapshot();
+    assert_eq!(snapshot.compact_recovery_hits.get("reactive_compact"), None);
+    assert_eq!(snapshot.compact_recovery_hits.get("collapse_drain"), None);
 }
 
 #[tokio::test]
@@ -2277,7 +2317,7 @@ fn compact_service_returns_typed_stream_error_recovery_contract() {
         }),
     );
     assert_eq!(reactive.plan.kind, rust_agent::service::compact::CompactPlanKind::ReactiveCompact);
-    assert_eq!(reactive.next_step, CompactRecoveryNextStep::RetryReactiveCompact);
+    assert_eq!(reactive.next_step, CompactServiceNextStep::RetryReactiveCompact);
     assert_eq!(reactive.tracking_key, "reactive_compact");
     assert!(reactive.should_record_observability_hit);
     assert_eq!(
@@ -2294,7 +2334,7 @@ fn compact_service_returns_typed_stream_error_recovery_contract() {
         }),
     );
     assert_eq!(collapse.plan.kind, rust_agent::service::compact::CompactPlanKind::CollapseDrain);
-    assert_eq!(collapse.next_step, CompactRecoveryNextStep::RetryCollapseDrain);
+    assert_eq!(collapse.next_step, CompactServiceNextStep::RetryCollapseDrain);
     assert_eq!(collapse.tracking_key, "collapse_drain");
     assert!(collapse.should_record_observability_hit);
     assert_eq!(
@@ -2311,7 +2351,7 @@ fn compact_service_returns_typed_stream_error_recovery_contract() {
         }),
     );
     assert_eq!(exhausted.plan.kind, rust_agent::service::compact::CompactPlanKind::Exhausted);
-    assert_eq!(exhausted.next_step, CompactRecoveryNextStep::Exhausted);
+    assert_eq!(exhausted.next_step, CompactServiceNextStep::Exhausted);
     assert_eq!(exhausted.tracking_key, "exhausted");
     assert!(!exhausted.should_record_observability_hit);
     assert_eq!(exhausted.plan.retry_prompt, None);
