@@ -470,10 +470,12 @@ impl RuntimeBootstrap {
             .unwrap_or_default();
         discovered_skills.extend(loaded_skills.skills);
         let skill_registry = Arc::new(SkillRegistry::new(discovered_skills));
+        let service_observability_tracker = ServiceObservabilityTracker::default();
         let mcp_config_result = load_server_configs_with_diagnostics(&state.current_cwd);
-        let mcp_runtime = Arc::new(McpRuntime::new_with_config_result(
+        let mcp_runtime = Arc::new(McpRuntime::new_with_config_result_and_observability(
             Arc::new(crate::service::mcp::client::RoutingMcpClient::default()),
             mcp_config_result,
+            service_observability_tracker.clone(),
         ));
         let tool_inventory = self.build_tool_registry();
         let (tool_inventory, plugin_tool_diagnostics) =
@@ -545,7 +547,7 @@ impl RuntimeBootstrap {
             mcp_runtime: Some(mcp_runtime.clone()),
             plugin_load_result: Some(plugin_load_result.clone()),
             cost_tracker: CostTracker::default(),
-            service_observability_tracker: ServiceObservabilityTracker::default(),
+            service_observability_tracker: service_observability_tracker.clone(),
             notification_dispatcher: notification_dispatcher.clone(),
             audit_log: Arc::new(Mutex::new(AuditLog::file_backed(
                 AuditLog::default_root_from(&state.current_cwd),
@@ -564,7 +566,10 @@ impl RuntimeBootstrap {
         let snapshot = build_runtime_plugin_snapshot(&app_state);
         let command_registry = snapshot.command_registry.clone();
         let provider_config = self.build_model_provider_config();
-        let api_client = ModelProviderClient::from_config(provider_config.clone());
+        let api_client = ModelProviderClient::from_config_with_observability(
+            provider_config.clone(),
+            service_observability_tracker.clone(),
+        );
 
         RuntimeInitializeBundle {
             hook_registry,
@@ -620,7 +625,7 @@ impl RuntimeBootstrap {
                 initialize_bundle.provider_config.model_id.clone(),
                 initialize_bundle.provider_config.pricing.clone(),
             ),
-            service_observability_tracker: ServiceObservabilityTracker::default(),
+            service_observability_tracker: initialize_bundle.api_client.observability_tracker(),
             notification_dispatcher: initialize_bundle.notification_dispatcher.clone(),
             audit_log: Arc::new(Mutex::new(AuditLog::file_backed(
                 AuditLog::default_root_from(&std::path::PathBuf::from(

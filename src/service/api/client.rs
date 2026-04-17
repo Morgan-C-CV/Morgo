@@ -11,6 +11,7 @@ use crate::service::api::retry::RetryPolicy;
 use crate::service::api::streaming::{
     ProviderFailureDisposition, StopReason, StreamError, StreamEvent, UsageEvent,
 };
+use crate::service::observability::ServiceObservabilityTracker;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ModelPricing {
@@ -77,6 +78,7 @@ enum ProviderTransport {
     Production {
         config: ModelProviderConfig,
         client: reqwest::Client,
+        observability: ServiceObservabilityTracker,
     },
 }
 
@@ -92,6 +94,27 @@ impl Default for ModelProviderClient {
 }
 
 impl ModelProviderClient {
+    pub fn from_config(config: ModelProviderConfig) -> Self {
+        Self::from_config_with_observability(config, ServiceObservabilityTracker::default())
+    }
+
+    pub fn from_config_with_observability(
+        config: ModelProviderConfig,
+        observability: ServiceObservabilityTracker,
+    ) -> Self {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_millis(config.timeout.request_timeout_ms))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
+        Self {
+            transport: ProviderTransport::Production {
+                config,
+                client,
+                observability,
+            },
+        }
+    }
+
     pub fn with_scripted_events(scripted_events: Vec<StreamEvent>) -> Self {
         Self::with_scripted_turns(vec![scripted_events])
     }
@@ -104,20 +127,17 @@ impl ModelProviderClient {
         }
     }
 
-    pub fn from_config(config: ModelProviderConfig) -> Self {
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_millis(config.timeout.request_timeout_ms))
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
-        Self {
-            transport: ProviderTransport::Production { config, client },
-        }
-    }
-
     pub fn provider_config(&self) -> ModelProviderConfig {
         match &self.transport {
             ProviderTransport::Scripted { .. } => ModelProviderConfig::default(),
             ProviderTransport::Production { config, .. } => config.clone(),
+        }
+    }
+
+    pub fn observability_tracker(&self) -> ServiceObservabilityTracker {
+        match &self.transport {
+            ProviderTransport::Scripted { .. } => ServiceObservabilityTracker::default(),
+            ProviderTransport::Production { observability, .. } => observability.clone(),
         }
     }
 
@@ -135,11 +155,18 @@ impl ModelProviderClient {
                     turns.remove(0)
                 }
             }
-            ProviderTransport::Production { config, client } => {
+            ProviderTransport::Production {
+                config,
+                client,
+                observability,
+            } => {
                 if input.content.trim().is_empty() {
                     return Vec::new();
                 }
-                match self.stream_message_with_retry(config, client, input).await {
+                match self
+                    .stream_message_with_retry(config, client, observability, input)
+                    .await
+                {
                     Ok(events) => events,
                     Err(error) => vec![StreamEvent::Error(
                         error.to_stream_error(&config.provider_id),
@@ -153,6 +180,7 @@ impl ModelProviderClient {
         &self,
         config: &ModelProviderConfig,
         client: &reqwest::Client,
+        observability: &ServiceObservabilityTracker,
         input: &Message,
     ) -> Result<Vec<StreamEvent>, ApiError> {
         let mut attempt = 0;
@@ -160,6 +188,7 @@ impl ModelProviderClient {
             match self.stream_message_once(config, client, input).await {
                 Ok(events) => return Ok(events),
                 Err(error) => {
+                    observability.record_api_client_error(&config.provider_id, &error);
                     if config.retry_policy.should_retry(attempt, &error, false) {
                         sleep(config.retry_policy.backoff_for_attempt(attempt)).await;
                         attempt += 1;

@@ -99,7 +99,21 @@ fn service_observability_tracker_counts_failures_and_compact_hits() {
     );
     tracker.record_compact_recovery_hit(&rust_agent::service::compact::CompactPlanKind::Exhausted);
 
+    tracker.record_api_client_error(
+        "anthropic",
+        &rust_agent::service::api::errors::ApiError::http_status(
+            503,
+            "provider request failed with status 503",
+        ),
+    );
+    tracker.record_api_client_error(
+        "anthropic",
+        &rust_agent::service::api::errors::ApiError::timeout("provider request timed out"),
+    );
+    tracker.record_mcp_server_failure("filesystem", "list_tools");
+
     let snapshot = tracker.snapshot();
+    assert_eq!(snapshot.service_failures_total, 2);
     assert_eq!(
         snapshot.by_failure_code.get("api_provider_http_5xx"),
         Some(&1)
@@ -116,6 +130,17 @@ fn service_observability_tracker_counts_failures_and_compact_hits() {
         Some(&1)
     );
     assert!(!snapshot.compact_recovery_hits.contains_key("exhausted"));
+    assert_eq!(snapshot.api_errors_by_kind.get("http_status"), Some(&1));
+    assert_eq!(snapshot.api_errors_by_kind.get("timeout"), Some(&1));
+    assert_eq!(snapshot.api_errors_by_provider.get("anthropic"), Some(&2));
+    assert_eq!(snapshot.api_errors_by_status.get("503"), Some(&1));
+    assert_eq!(snapshot.mcp_failures_by_kind.get("list_tools"), Some(&1));
+    assert_eq!(snapshot.mcp_failures_by_server.get("filesystem"), Some(&1));
+    assert_eq!(snapshot.recent_events.len(), 6);
+    assert_eq!(snapshot.recent_events[0].category, "service_failure");
+    assert_eq!(snapshot.recent_events[2].category, "compact_recovery");
+    assert_eq!(snapshot.recent_events[3].category, "api_client_error");
+    assert_eq!(snapshot.recent_events[5].category, "mcp_server_failure");
 }
 
 #[test]

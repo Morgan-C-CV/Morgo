@@ -383,10 +383,14 @@ fn build_parent_query_context(permissions: ToolPermissionContext) -> QueryContex
     let tools_prompt =
         crate::prompt::tools::build_tools_prompt(&tool_registry, &app_state.permission_context);
     let context_prompt = crate::prompt::context::build_context_prompt(&app_state);
+    let service_observability_tracker = app_state.service_observability_tracker.clone();
     QueryContext {
         app_state,
         tool_registry,
-        api_client: crate::service::api::client::ModelProviderClient::default(),
+        api_client: crate::service::api::client::ModelProviderClient::from_config_with_observability(
+            crate::service::api::client::ModelProviderConfig::default(),
+            service_observability_tracker,
+        ),
         compactor: ReactiveCompactor,
         hook_registry,
         agent_id: None,

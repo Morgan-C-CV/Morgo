@@ -125,6 +125,7 @@ fn fake_config(command: &str) -> McpServerConfig {
 }
 
 fn test_app_state(runtime: Arc<McpRuntime>) -> AppState {
+    let service_observability_tracker = runtime.observability_tracker();
     let permission_context = ToolPermissionContext::new(PermissionMode::Default)
         .with_task_manager(Arc::new(TaskManager::default()))
         .with_mcp_runtime(runtime.clone());
@@ -142,7 +143,7 @@ fn test_app_state(runtime: Arc<McpRuntime>) -> AppState {
         mcp_runtime: Some(runtime),
         plugin_load_result: None,
         cost_tracker: CostTracker::default(),
-        service_observability_tracker: rust_agent::service::observability::ServiceObservabilityTracker::default(),
+        service_observability_tracker,
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
         audit_log: Arc::new(std::sync::Mutex::new(rust_agent::security::audit::AuditLog::default())),
         startup_trace: Vec::new(),
@@ -258,6 +259,15 @@ async fn mcp_command_and_tool_surface_protocol_errors() {
         .await
         .expect_err("server error should surface via tool");
     assert!(tool_error.to_string().contains("server exploded"));
+
+    let snapshot = runtime.observability_tracker().snapshot();
+    assert_eq!(snapshot.mcp_failures_by_kind.get("connect"), Some(&3));
+    assert_eq!(snapshot.mcp_failures_by_kind.get("call_tool"), Some(&1));
+    assert_eq!(snapshot.mcp_failures_by_server.get("fake"), Some(&4));
+    assert_eq!(
+        snapshot.recent_events.last().map(|event| event.category),
+        Some("mcp_server_failure")
+    );
 }
 
 #[tokio::test]

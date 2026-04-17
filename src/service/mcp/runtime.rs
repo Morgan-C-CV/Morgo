@@ -10,6 +10,7 @@ use crate::service::mcp::types::{
     McpAction, McpConnectInfo, McpConnectionStatus, McpRequest, McpResourceInfo, McpResponse,
     McpServerConfig, McpServerState, McpToolInfo,
 };
+use crate::service::observability::ServiceObservabilityTracker;
 
 #[derive(Clone)]
 pub struct McpRuntime {
@@ -19,6 +20,7 @@ pub struct McpRuntime {
     cached_resources: Arc<RwLock<BTreeMap<String, Vec<McpResourceInfo>>>>,
     config_fingerprints: Arc<RwLock<BTreeMap<String, u64>>>,
     config_load_result: Arc<McpConfigLoadResult>,
+    observability: ServiceObservabilityTracker,
 }
 
 impl std::fmt::Debug for McpRuntime {
@@ -45,7 +47,19 @@ impl Default for McpRuntime {
 
 impl McpRuntime {
     pub fn new(client: Arc<dyn McpClient>, configs: Vec<McpServerConfig>) -> Self {
-        Self::new_with_config_result(
+        Self::new_with_observability(
+            client,
+            configs,
+            ServiceObservabilityTracker::default(),
+        )
+    }
+
+    pub fn new_with_observability(
+        client: Arc<dyn McpClient>,
+        configs: Vec<McpServerConfig>,
+        observability: ServiceObservabilityTracker,
+    ) -> Self {
+        Self::new_with_config_result_and_observability(
             client,
             McpConfigLoadResult {
                 path: std::path::PathBuf::from(".claude/mcp_servers.json"),
@@ -53,12 +67,25 @@ impl McpRuntime {
                 configs,
                 diagnostics: Vec::new(),
             },
+            observability,
         )
     }
 
     pub fn new_with_config_result(
         client: Arc<dyn McpClient>,
         config_load_result: McpConfigLoadResult,
+    ) -> Self {
+        Self::new_with_config_result_and_observability(
+            client,
+            config_load_result,
+            ServiceObservabilityTracker::default(),
+        )
+    }
+
+    pub fn new_with_config_result_and_observability(
+        client: Arc<dyn McpClient>,
+        config_load_result: McpConfigLoadResult,
+        observability: ServiceObservabilityTracker,
     ) -> Self {
         let servers = config_load_result
             .configs
@@ -94,6 +121,7 @@ impl McpRuntime {
             cached_resources: Arc::new(RwLock::new(BTreeMap::new())),
             config_fingerprints: Arc::new(RwLock::new(fingerprints)),
             config_load_result: Arc::new(config_load_result),
+            observability,
         }
     }
 
@@ -103,6 +131,10 @@ impl McpRuntime {
 
     pub fn config_load_result(&self) -> Arc<McpConfigLoadResult> {
         self.config_load_result.clone()
+    }
+
+    pub fn observability_tracker(&self) -> ServiceObservabilityTracker {
+        self.observability.clone()
     }
 
     pub async fn reconnect(&self, server: &str) -> anyhow::Result<McpServerState> {
@@ -349,6 +381,7 @@ impl McpRuntime {
         detail: Option<String>,
     ) -> anyhow::Result<T> {
         self.invalidate_server_cache(server).await;
+        self.observability.record_mcp_server_failure(server, kind);
         let _ = self
             .set_status(
                 server,
