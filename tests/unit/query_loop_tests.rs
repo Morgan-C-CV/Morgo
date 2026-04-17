@@ -2263,6 +2263,188 @@ async fn query_loop_escalates_fallback_failure_to_terminal_model_error() {
 }
 
 #[tokio::test]
+async fn query_loop_uses_reactive_compact_before_collapse_drain_on_first_stream_error() {
+    let context = test_context_with_turns(
+        vec![
+            vec![StreamEvent::Error(StreamError {
+                provider_id: "anthropic".into(),
+                kind: "provider_stream".into(),
+                message: "first failure".into(),
+                retryable: false,
+                disposition: ProviderFailureDisposition::StreamInterrupted,
+                status_code: None,
+            })],
+            vec![
+                StreamEvent::MessageStart,
+                StreamEvent::TextDelta("recovered after reactive compact".into()),
+                StreamEvent::MessageStop {
+                    stop_reason: StopReason::EndTurn,
+                },
+            ],
+        ],
+        ToolRegistry::new(),
+    );
+
+    let result = run_query_loop_with_params(
+        &context,
+        Message::user("needs first recovery"),
+        QueryParams::default(),
+    )
+    .await;
+
+    assert_eq!(result.state, QueryLoopState::Completed);
+    assert_eq!(result.terminal, Terminal::Completed);
+    assert_eq!(result.transition, Some(Continue::ReactiveCompactRetry));
+    assert!(result.events.iter().any(|event| matches!(
+        event,
+        EngineEvent::Notice {
+            kind: "recovery",
+            message,
+            ..
+        } if message == "reactive compact retry triggered after stream error [provider_stream]: first failure"
+    )));
+    assert!(result.events.iter().any(|event| matches!(
+        event,
+        EngineEvent::CompactPlanIssued { kind, message }
+            if *kind == rust_agent::service::compact::CompactPlanKind::ReactiveCompact
+                && message == "reactive compact retry triggered after stream error [provider_stream]: first failure"
+    )));
+
+    let snapshot = context.app_state.service_observability_tracker.snapshot();
+    assert_eq!(snapshot.compact_recovery_hits.get("reactive_compact"), Some(&1));
+    assert_eq!(snapshot.compact_recovery_hits.get("collapse_drain"), None);
+}
+
+#[tokio::test]
+async fn query_loop_uses_collapse_drain_after_reactive_compact_boundary() {
+    let context = test_context_with_turns(
+        vec![
+            vec![StreamEvent::Error(StreamError {
+                provider_id: "anthropic".into(),
+                kind: "provider_stream".into(),
+                message: "first failure".into(),
+                retryable: false,
+                disposition: ProviderFailureDisposition::StreamInterrupted,
+                status_code: None,
+            })],
+            vec![StreamEvent::Error(StreamError {
+                provider_id: "anthropic".into(),
+                kind: "provider_stream".into(),
+                message: "second failure".into(),
+                retryable: false,
+                disposition: ProviderFailureDisposition::StreamInterrupted,
+                status_code: None,
+            })],
+            vec![
+                StreamEvent::MessageStart,
+                StreamEvent::TextDelta("recovered after collapse drain".into()),
+                StreamEvent::MessageStop {
+                    stop_reason: StopReason::EndTurn,
+                },
+            ],
+        ],
+        ToolRegistry::new(),
+    );
+
+    let result = run_query_loop_with_params(
+        &context,
+        Message::user("needs collapse drain"),
+        QueryParams::default(),
+    )
+    .await;
+
+    assert_eq!(result.state, QueryLoopState::Completed);
+    assert_eq!(result.terminal, Terminal::Completed);
+    assert_eq!(result.transition, Some(Continue::CollapseDrainRetry));
+    assert!(result.events.iter().any(|event| matches!(
+        event,
+        EngineEvent::Notice {
+            kind: "recovery",
+            message,
+            ..
+        } if message == "collapse drain retry triggered after repeated stream error [provider_stream]: second failure"
+    )));
+    assert!(result.events.iter().any(|event| matches!(
+        event,
+        EngineEvent::CompactPlanIssued { kind, message }
+            if *kind == rust_agent::service::compact::CompactPlanKind::CollapseDrain
+                && message == "collapse drain retry triggered after repeated stream error [provider_stream]: second failure"
+    )));
+
+    let snapshot = context.app_state.service_observability_tracker.snapshot();
+    assert_eq!(snapshot.compact_recovery_hits.get("reactive_compact"), Some(&1));
+    assert_eq!(snapshot.compact_recovery_hits.get("collapse_drain"), Some(&1));
+}
+
+#[tokio::test]
+async fn query_loop_exhausts_after_collapse_drain_and_surfaces_terminal_error() {
+    let context = test_context_with_turns(
+        vec![
+            vec![StreamEvent::Error(StreamError {
+                provider_id: "anthropic".into(),
+                kind: "provider_stream".into(),
+                message: "first failure".into(),
+                retryable: false,
+                disposition: ProviderFailureDisposition::StreamInterrupted,
+                status_code: None,
+            })],
+            vec![StreamEvent::Error(StreamError {
+                provider_id: "anthropic".into(),
+                kind: "provider_stream".into(),
+                message: "second failure".into(),
+                retryable: false,
+                disposition: ProviderFailureDisposition::StreamInterrupted,
+                status_code: None,
+            })],
+            vec![StreamEvent::Error(StreamError {
+                provider_id: "anthropic".into(),
+                kind: "provider_stream".into(),
+                message: "third failure".into(),
+                retryable: false,
+                disposition: ProviderFailureDisposition::StreamInterrupted,
+                status_code: None,
+            })],
+        ],
+        ToolRegistry::new(),
+    );
+
+    let result = run_query_loop_with_params(
+        &context,
+        Message::user("recovery exhausted"),
+        QueryParams::default(),
+    )
+    .await;
+
+    assert_eq!(result.state, QueryLoopState::Failed);
+    assert_eq!(
+        result.terminal,
+        Terminal::ModelError {
+            message: "third failure".into(),
+            code: Some(rust_agent::core::events::ServiceFailureCode::ApiStreamInterrupted),
+        }
+    );
+    assert_eq!(result.transition, Some(Continue::CollapseDrainRetry));
+    assert!(result.events.iter().any(|event| matches!(
+        event,
+        EngineEvent::Notice {
+            kind: "recovery",
+            message,
+            ..
+        } if message == "stream recovery exhausted after error [provider_stream]: third failure"
+    )));
+    assert!(result.events.iter().any(|event| matches!(
+        event,
+        EngineEvent::CompactPlanIssued { kind, message }
+            if *kind == rust_agent::service::compact::CompactPlanKind::Exhausted
+                && message == "stream recovery exhausted after error [provider_stream]: third failure"
+    )));
+
+    let snapshot = context.app_state.service_observability_tracker.snapshot();
+    assert_eq!(snapshot.compact_recovery_hits.get("reactive_compact"), Some(&1));
+    assert_eq!(snapshot.compact_recovery_hits.get("collapse_drain"), Some(&1));
+}
+
+#[tokio::test]
 async fn query_loop_terminal_stream_failures_do_not_enter_recovery() {
     let context = test_context_with_turns(
         vec![vec![StreamEvent::Error(StreamError {
