@@ -159,6 +159,11 @@ fn approved_plan_reorder_and_task_binding_survive_restore() {
     );
     assert_eq!(synced_tasks[0].subject, "Execute task linkage");
     assert_eq!(synced_tasks[1].subject, "Inspect current state");
+    assert_eq!(synced_tasks[0].status, rust_agent::task::list_types::TaskListStatus::InProgress);
+    assert_eq!(synced_tasks[1].status, rust_agent::task::list_types::TaskListStatus::Pending);
+    assert!(synced_tasks[0].blocked_by.is_empty());
+    assert_eq!(synced_tasks[0].blocks, vec![synced_tasks[1].id.clone()]);
+    assert_eq!(synced_tasks[1].blocked_by, vec![synced_tasks[0].id.clone()]);
 
     let restored_plan = store
         .load_plan_state(&session_id)
@@ -192,11 +197,12 @@ fn approved_plan_reorder_and_task_binding_survive_restore() {
     let rendered = rust_agent::state::plan_mode::render_plan_show(&restored_permissions);
     assert!(rendered.contains("Plan status: approved"));
     assert!(rendered.contains(
-        "Step summary: total=2, completed=0, in_progress=0, pending=2, linked=2, unlinked=0"
+        "Step summary: total=2, completed=0, in_progress=1, pending=1, linked=2, unlinked=0"
     ));
+    assert!(rendered.contains("Active step: step-2"));
     assert!(rendered.contains(&second.id));
     assert!(rendered.contains(&first.id));
-    assert!(rendered.contains("linked task: task-0 [pending]"));
+    assert!(rendered.contains("linked task: task-0 [in_progress]"));
     assert!(rendered.contains("linked task: task-1 [pending]"));
 
     std::fs::remove_dir_all(root).expect("cleanup durable plan resume store");

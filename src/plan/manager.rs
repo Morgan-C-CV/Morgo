@@ -293,6 +293,23 @@ impl PlanManager {
         Ok(updated)
     }
 
+    pub fn replace_state_with_history(
+        &self,
+        mut next_state: PlanState,
+        action: &str,
+        summary: impl Into<String>,
+    ) -> PlanState {
+        let updated = {
+            let mut slot = self.state.write().expect("plan state poisoned");
+            recalculate_execution(&mut next_state);
+            push_history(&mut next_state, action, summary);
+            *slot = Some(next_state.clone());
+            next_state
+        };
+        self.persist_state();
+        updated
+    }
+
     fn persist_state(&self) {
         let Some(persistence) = &self.persistence else {
             return;

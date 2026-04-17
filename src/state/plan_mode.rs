@@ -397,7 +397,8 @@ pub fn update_plan_step(
     let Some(plan_manager) = permissions.plan_manager.as_ref() else {
         anyhow::bail!("No plan manager is available in this session.");
     };
-    plan_manager.update_step(step_id, title, details, status)?;
+    let updated = plan_manager.update_step(step_id, title, details, status)?;
+    sync_plan_execution_contract(permissions, &updated, "plan_step_updated", format!("updated {step_id}"))?;
     Ok(format!("Updated plan step {step_id}"))
 }
 
@@ -408,7 +409,8 @@ pub fn complete_plan_step(
     let Some(plan_manager) = permissions.plan_manager.as_ref() else {
         anyhow::bail!("No plan manager is available in this session.");
     };
-    plan_manager.mark_step_status(step_id, PlanStepStatus::Completed)?;
+    let updated = plan_manager.mark_step_status(step_id, PlanStepStatus::Completed)?;
+    sync_plan_execution_contract(permissions, &updated, "plan_step_completed", format!("completed {step_id}"))?;
     Ok(format!("Completed plan step {step_id}"))
 }
 
@@ -419,7 +421,13 @@ pub fn reorder_plan_steps(
     let Some(plan_manager) = permissions.plan_manager.as_ref() else {
         anyhow::bail!("No plan manager is available in this session.");
     };
-    plan_manager.reorder_steps(ordered_ids)?;
+    let updated = plan_manager.reorder_steps(ordered_ids)?;
+    sync_plan_execution_contract(
+        permissions,
+        &updated,
+        "plan_steps_reordered",
+        format!("reordered {} plan steps", ordered_ids.len()),
+    )?;
     Ok(format!("Reordered {} plan steps", ordered_ids.len()))
 }
 
@@ -525,9 +533,12 @@ pub fn apply_exit_plan_mode(
 ) -> anyhow::Result<String> {
     if let Some(plan_manager) = permissions.plan_manager.as_ref() {
         let approved = plan_manager.approve(non_empty(summary))?;
-        if let Some(task_list_manager) = permissions.task_list_manager.as_ref() {
-            task_list_manager.sync_plan_state(&approved);
-        }
+        sync_plan_execution_contract(
+            permissions,
+            &approved,
+            "plan_approved",
+            summary_text_or_default(summary, "approved plan"),
+        )?;
     }
     permissions.set_mode(PermissionMode::Default);
     Ok(if summary.trim().is_empty() {
@@ -535,6 +546,35 @@ pub fn apply_exit_plan_mode(
     } else {
         format!("plan approved; exited plan mode: {}", summary.trim())
     })
+}
+
+fn sync_plan_execution_contract(
+    permissions: &ToolPermissionContext,
+    state: &PlanState,
+    action: &str,
+    summary: impl Into<String>,
+) -> anyhow::Result<PlanState> {
+    let mut next_state = state.clone();
+    if let Some(task_list_manager) = permissions.task_list_manager.as_ref() {
+        task_list_manager.sync_plan_state(&next_state);
+        if let Some(reconciled) = task_list_manager.reconcile_plan_state(&next_state) {
+            next_state = reconciled;
+        }
+    }
+    if let Some(plan_manager) = permissions.plan_manager.as_ref() {
+        Ok(plan_manager.replace_state_with_history(next_state, action, summary))
+    } else {
+        Ok(next_state)
+    }
+}
+
+fn summary_text_or_default<'a>(summary: &'a str, fallback: &'a str) -> &'a str {
+    let trimmed = summary.trim();
+    if trimmed.is_empty() {
+        fallback
+    } else {
+        trimmed
+    }
 }
 
 fn summarize_plan_state(state: &PlanState) -> String {

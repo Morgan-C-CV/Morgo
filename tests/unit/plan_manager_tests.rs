@@ -137,47 +137,74 @@ fn task_list_reconciliation_updates_plan_execution_view() {
     let approved = manager.approve(Some("execute")).expect("approve plan");
 
     let task_list = TaskListManager::default();
-    let first_task = task_list.create(
-        "Inspect",
-        "inspect repo",
-        None,
-        None,
-        Some(first.id.clone()),
-    );
-    let second_task = task_list.create("Patch", "patch repo", None, None, Some(second.id.clone()));
+    task_list.sync_plan_state(&approved);
+    let synced = task_list.list();
+    assert_eq!(synced.len(), 2);
+    assert_eq!(synced[0].plan_step_id.as_deref(), Some(first.id.as_str()));
+    assert_eq!(synced[0].status, TaskListStatus::InProgress);
+    assert_eq!(synced[0].blocked_by, Vec::<String>::new());
+    assert_eq!(synced[0].blocks, vec![synced[1].id.clone()]);
+    assert_eq!(synced[1].plan_step_id.as_deref(), Some(second.id.as_str()));
+    assert_eq!(synced[1].status, TaskListStatus::Pending);
+    assert_eq!(synced[1].blocked_by, vec![synced[0].id.clone()]);
+
     task_list
         .update(
-            &first_task.id,
+            &synced[0].id,
             TaskListUpdate {
                 status: Some(TaskListStatus::Completed),
                 ..Default::default()
             },
         )
         .expect("complete first linked task");
+    task_list.sync_plan_state(&approved);
+    let progressed = task_list.list();
+    assert_eq!(progressed[1].status, TaskListStatus::InProgress);
+    assert!(progressed[1].blocked_by.is_empty());
+
     task_list
         .update(
-            &second_task.id,
+            &progressed[1].id,
             TaskListUpdate {
-                status: Some(TaskListStatus::InProgress),
+                status: Some(TaskListStatus::Completed),
                 ..Default::default()
             },
         )
-        .expect("start second linked task");
+        .expect("complete second linked task");
 
     let reconciled = task_list
         .reconcile_plan_state(&approved)
         .expect("reconciled plan should change");
     let draft = reconciled.draft.expect("draft should exist");
     assert_eq!(draft.steps[0].status, PlanStepStatus::Completed);
-    assert_eq!(draft.steps[1].status, PlanStepStatus::InProgress);
+    assert_eq!(draft.steps[1].status, PlanStepStatus::Completed);
     let execution = reconciled.execution.expect("execution should exist");
-    assert_eq!(execution.completed_steps, 1);
+    assert_eq!(execution.completed_steps, 2);
     assert_eq!(execution.total_steps, 2);
-    assert_eq!(execution.progress_percent, 50);
-    assert_eq!(
-        execution.active_step_id.as_deref(),
-        Some(second.id.as_str())
-    );
+    assert_eq!(execution.progress_percent, 100);
+    assert_eq!(execution.active_step_id, None);
+}
+
+#[test]
+fn sync_plan_state_promotes_first_pending_step_into_active_task() {
+    let manager = PlanManager::default();
+    manager.ensure_draft(None);
+    manager.set_summary("Promote first step into execution");
+    let first = manager.add_step("Inspect", None).expect("add first step");
+    let second = manager.add_step("Patch", None).expect("add second step");
+    let approved = manager.approve(Some("execute")).expect("approve plan");
+
+    let task_list = TaskListManager::default();
+    task_list.sync_plan_state(&approved);
+
+    let tasks = task_list.list();
+    assert_eq!(tasks.len(), 2);
+    assert_eq!(tasks[0].plan_step_id.as_deref(), Some(first.id.as_str()));
+    assert_eq!(tasks[0].status, TaskListStatus::InProgress);
+    assert_eq!(tasks[1].plan_step_id.as_deref(), Some(second.id.as_str()));
+    assert_eq!(tasks[1].status, TaskListStatus::Pending);
+    assert_eq!(tasks[0].blocks, vec![tasks[1].id.clone()]);
+    assert_eq!(tasks[1].blocked_by, vec![tasks[0].id.clone()]);
 }
 
 #[test]

@@ -138,13 +138,45 @@ impl TaskListManager {
         let mut changed = false;
         {
             let mut store = self.store.write().expect("task list store poisoned");
+            let effective_step_statuses = draft
+                .steps
+                .iter()
+                .map(|step| {
+                    let task_status = store
+                        .tasks
+                        .iter()
+                        .find(|task| task.plan_step_id.as_deref() == Some(step.id.as_str()))
+                        .map(|task| match task.status {
+                            TaskListStatus::Pending => PlanStepStatus::Pending,
+                            TaskListStatus::InProgress => PlanStepStatus::InProgress,
+                            TaskListStatus::Completed => PlanStepStatus::Completed,
+                        })
+                        .unwrap_or(step.status);
+                    (step.id.as_str(), task_status)
+                })
+                .collect::<std::collections::BTreeMap<_, _>>();
+            let active_step_id = draft
+                .steps
+                .iter()
+                .find(|step| {
+                    effective_step_statuses
+                        .get(step.id.as_str())
+                        .copied()
+                        .unwrap_or(step.status)
+                        != PlanStepStatus::Completed
+                })
+                .map(|step| step.id.as_str());
             for step in &draft.steps {
+                let effective_status = effective_step_statuses
+                    .get(step.id.as_str())
+                    .copied()
+                    .unwrap_or(step.status);
+                let next_status = task_list_status_for_effective_step(step.id.as_str(), effective_status, active_step_id);
                 if let Some(existing) = store
                     .tasks
                     .iter_mut()
                     .find(|task| task.plan_step_id.as_deref() == Some(step.id.as_str()))
                 {
-                    let next_status = task_status_from_plan_step(step.status);
                     if existing.subject != step.title {
                         existing.subject = step.title.clone();
                         changed = true;
@@ -166,7 +198,7 @@ impl TaskListManager {
                     subject: step.title.clone(),
                     description: plan_step_description(step),
                     active_form: None,
-                    status: task_status_from_plan_step(step.status),
+                    status: next_status,
                     owner: None,
                     plan_step_id: Some(step.id.clone()),
                     blocks: Vec::new(),
@@ -177,6 +209,13 @@ impl TaskListManager {
                 changed = true;
             }
 
+            if wire_plan_task_dependencies(
+                &mut store.tasks,
+                draft.steps.as_slice(),
+                &effective_step_statuses,
+            ) {
+                changed = true;
+            }
             if changed {
                 reorder_plan_tasks(&mut store.tasks, draft.steps.as_slice());
             }
@@ -400,12 +439,85 @@ fn push_unique(values: &mut Vec<String>, value: String) {
     }
 }
 
-fn task_status_from_plan_step(status: PlanStepStatus) -> TaskListStatus {
+fn task_list_status_for_effective_step(
+    step_id: &str,
+    status: PlanStepStatus,
+    active_step_id: Option<&str>,
+) -> TaskListStatus {
     match status {
-        PlanStepStatus::Pending => TaskListStatus::Pending,
-        PlanStepStatus::InProgress => TaskListStatus::InProgress,
         PlanStepStatus::Completed => TaskListStatus::Completed,
+        PlanStepStatus::InProgress => TaskListStatus::InProgress,
+        PlanStepStatus::Pending if active_step_id == Some(step_id) => TaskListStatus::InProgress,
+        PlanStepStatus::Pending => TaskListStatus::Pending,
     }
+}
+
+fn wire_plan_task_dependencies(
+    tasks: &mut [TaskListItem],
+    steps: &[PlanStep],
+    step_statuses: &std::collections::BTreeMap<&str, PlanStepStatus>,
+) -> bool {
+    let mut changed = false;
+    for index in 0..steps.len() {
+        let step = &steps[index];
+        let Some(task_index) = tasks
+            .iter()
+            .position(|task| task.plan_step_id.as_deref() == Some(step.id.as_str()))
+        else {
+            continue;
+        };
+
+        let expected_blocked_by = if index == 0 {
+            Vec::new()
+        } else {
+            let previous = &steps[index - 1];
+            let previous_status = step_statuses
+                .get(previous.id.as_str())
+                .copied()
+                .unwrap_or(previous.status);
+            if previous_status == PlanStepStatus::Completed {
+                Vec::new()
+            } else if let Some(previous_task) = tasks
+                .iter()
+                .find(|task| task.plan_step_id.as_deref() == Some(previous.id.as_str()))
+            {
+                vec![previous_task.id.clone()]
+            } else {
+                Vec::new()
+            }
+        };
+
+        let expected_blocks = if index + 1 >= steps.len() {
+            Vec::new()
+        } else {
+            let next = &steps[index + 1];
+            let next_status = step_statuses
+                .get(next.id.as_str())
+                .copied()
+                .unwrap_or(next.status);
+            if next_status == PlanStepStatus::Completed {
+                Vec::new()
+            } else if let Some(next_task) = tasks
+                .iter()
+                .find(|task| task.plan_step_id.as_deref() == Some(next.id.as_str()))
+            {
+                vec![next_task.id.clone()]
+            } else {
+                Vec::new()
+            }
+        };
+
+        let task = &mut tasks[task_index];
+        if task.blocked_by != expected_blocked_by {
+            task.blocked_by = expected_blocked_by;
+            changed = true;
+        }
+        if task.blocks != expected_blocks {
+            task.blocks = expected_blocks;
+            changed = true;
+        }
+    }
+    changed
 }
 
 fn plan_step_description(step: &PlanStep) -> String {
