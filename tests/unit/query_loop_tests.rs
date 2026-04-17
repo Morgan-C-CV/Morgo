@@ -20,7 +20,9 @@ use rust_agent::service::api::retry::RetryPolicy;
 use rust_agent::service::api::streaming::{
     ProviderFailureDisposition, StopReason, StreamError, StreamEvent, UsageEvent,
 };
-use rust_agent::service::compact::reactive_compact::ReactiveCompactor;
+use rust_agent::service::compact::reactive_compact::{
+    CompactRecoveryNextStep, ReactiveCompactor,
+};
 use rust_agent::service::observability::ServiceObservabilityTracker;
 use rust_agent::state::app_state::WorkerRole;
 use rust_agent::task::types::{TaskOwner, ValidationState, WorkerPhase};
@@ -2260,6 +2262,59 @@ async fn query_loop_escalates_fallback_failure_to_terminal_model_error() {
         }
     );
     assert_eq!(result.transition, Some(Continue::CollapseDrainRetry));
+}
+
+#[test]
+fn compact_service_returns_typed_stream_error_recovery_contract() {
+    let compactor = ReactiveCompactor;
+
+    let reactive = compactor.plan_stream_error_recovery(
+        false,
+        false,
+        Some(rust_agent::service::compact::CompactRecoveryErrorContext {
+            kind: "provider_stream",
+            message: "first failure",
+        }),
+    );
+    assert_eq!(reactive.plan.kind, rust_agent::service::compact::CompactPlanKind::ReactiveCompact);
+    assert_eq!(reactive.next_step, CompactRecoveryNextStep::RetryReactiveCompact);
+    assert_eq!(reactive.tracking_key, "reactive_compact");
+    assert!(reactive.should_record_observability_hit);
+    assert_eq!(
+        reactive.plan.retry_prompt.as_deref(),
+        Some("Retry after reactive compact recovery.")
+    );
+
+    let collapse = compactor.plan_stream_error_recovery(
+        true,
+        false,
+        Some(rust_agent::service::compact::CompactRecoveryErrorContext {
+            kind: "provider_stream",
+            message: "second failure",
+        }),
+    );
+    assert_eq!(collapse.plan.kind, rust_agent::service::compact::CompactPlanKind::CollapseDrain);
+    assert_eq!(collapse.next_step, CompactRecoveryNextStep::RetryCollapseDrain);
+    assert_eq!(collapse.tracking_key, "collapse_drain");
+    assert!(collapse.should_record_observability_hit);
+    assert_eq!(
+        collapse.plan.retry_prompt.as_deref(),
+        Some("Retry after collapse drain recovery.")
+    );
+
+    let exhausted = compactor.plan_stream_error_recovery(
+        true,
+        true,
+        Some(rust_agent::service::compact::CompactRecoveryErrorContext {
+            kind: "provider_stream",
+            message: "third failure",
+        }),
+    );
+    assert_eq!(exhausted.plan.kind, rust_agent::service::compact::CompactPlanKind::Exhausted);
+    assert_eq!(exhausted.next_step, CompactRecoveryNextStep::Exhausted);
+    assert_eq!(exhausted.tracking_key, "exhausted");
+    assert!(!exhausted.should_record_observability_hit);
+    assert_eq!(exhausted.plan.retry_prompt, None);
 }
 
 #[tokio::test]

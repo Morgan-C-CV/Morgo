@@ -21,6 +21,21 @@ pub struct CompactRecoveryErrorContext<'a> {
     pub message: &'a str,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CompactRecoveryNextStep {
+    RetryReactiveCompact,
+    RetryCollapseDrain,
+    Exhausted,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompactRecoveryResult {
+    pub plan: CompactPlan,
+    pub next_step: CompactRecoveryNextStep,
+    pub tracking_key: &'static str,
+    pub should_record_observability_hit: bool,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ReactiveCompactor;
 
@@ -40,7 +55,7 @@ impl ReactiveCompactor {
         has_attempted_reactive_compact: bool,
         has_attempted_collapse_drain: bool,
         error: Option<CompactRecoveryErrorContext<'_>>,
-    ) -> CompactPlan {
+    ) -> CompactRecoveryResult {
         if !has_attempted_reactive_compact {
             let detail = error
                 .map(|value| {
@@ -50,12 +65,17 @@ impl ReactiveCompactor {
                     )
                 })
                 .unwrap_or_else(|| "stream stop error triggered reactive compact retry".into());
-            return CompactPlan {
-                kind: CompactPlanKind::ReactiveCompact,
-                notice_kind: "recovery",
-                notice_message: detail,
-                assistant_message: None,
-                retry_prompt: Some("Retry after reactive compact recovery.".into()),
+            return CompactRecoveryResult {
+                plan: CompactPlan {
+                    kind: CompactPlanKind::ReactiveCompact,
+                    notice_kind: "recovery",
+                    notice_message: detail,
+                    assistant_message: None,
+                    retry_prompt: Some("Retry after reactive compact recovery.".into()),
+                },
+                next_step: CompactRecoveryNextStep::RetryReactiveCompact,
+                tracking_key: "reactive_compact",
+                should_record_observability_hit: true,
             };
         }
 
@@ -68,28 +88,38 @@ impl ReactiveCompactor {
                     )
                 })
                 .unwrap_or_else(|| "draining collapsed context before final model error".into());
-            return CompactPlan {
-                kind: CompactPlanKind::CollapseDrain,
-                notice_kind: "recovery",
-                notice_message: detail,
-                assistant_message: None,
-                retry_prompt: Some("Retry after collapse drain recovery.".into()),
+            return CompactRecoveryResult {
+                plan: CompactPlan {
+                    kind: CompactPlanKind::CollapseDrain,
+                    notice_kind: "recovery",
+                    notice_message: detail,
+                    assistant_message: None,
+                    retry_prompt: Some("Retry after collapse drain recovery.".into()),
+                },
+                next_step: CompactRecoveryNextStep::RetryCollapseDrain,
+                tracking_key: "collapse_drain",
+                should_record_observability_hit: true,
             };
         }
 
-        CompactPlan {
-            kind: CompactPlanKind::Exhausted,
-            notice_kind: "recovery",
-            notice_message: error
-                .map(|value| {
-                    format!(
-                        "stream recovery exhausted after error [{}]: {}",
-                        value.kind, value.message
-                    )
-                })
-                .unwrap_or_else(|| "stream recovery exhausted after stop error".into()),
-            assistant_message: None,
-            retry_prompt: None,
+        CompactRecoveryResult {
+            plan: CompactPlan {
+                kind: CompactPlanKind::Exhausted,
+                notice_kind: "recovery",
+                notice_message: error
+                    .map(|value| {
+                        format!(
+                            "stream recovery exhausted after error [{}]: {}",
+                            value.kind, value.message
+                        )
+                    })
+                    .unwrap_or_else(|| "stream recovery exhausted after stop error".into()),
+                assistant_message: None,
+                retry_prompt: None,
+            },
+            next_step: CompactRecoveryNextStep::Exhausted,
+            tracking_key: "exhausted",
+            should_record_observability_hit: false,
         }
     }
 }

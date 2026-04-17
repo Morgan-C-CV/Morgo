@@ -6,7 +6,9 @@ use crate::hook::registry::HookEvent;
 use crate::service::api::streaming::{
     ProviderFailureDisposition, StopReason, StreamError, StreamEvent,
 };
-use crate::service::compact::{CompactPlanKind, CompactRecoveryErrorContext};
+use crate::service::compact::{
+    CompactPlanKind, CompactRecoveryErrorContext, CompactRecoveryNextStep,
+};
 use crate::tool::orchestrator::{ToolExecutionOutcome, aggregate_execution_records};
 use crate::tool::result::{
     ToolExecutionRecord, ToolExecutionReport, ToolReportContextModifier, ToolReportModifier,
@@ -1379,7 +1381,7 @@ fn continue_after_stream_error(
             ),
         };
     }
-    let plan = context.compactor.plan_stream_error_recovery(
+    let recovery = context.compactor.plan_stream_error_recovery(
         state.has_attempted_reactive_compact,
         state.transition == Some(Continue::CollapseDrainRetry),
         Some(CompactRecoveryErrorContext {
@@ -1388,56 +1390,59 @@ fn continue_after_stream_error(
         }),
     );
     engine_events.push(EngineEvent::CompactPlanIssued {
-        kind: plan.kind.clone(),
-        message: plan.notice_message.clone(),
+        kind: recovery.plan.kind.clone(),
+        message: recovery.plan.notice_message.clone(),
     });
     engine_events.push(EngineEvent::Notice {
-        kind: plan.notice_kind,
-        message: plan.notice_message.clone(),
+        kind: recovery.plan.notice_kind,
+        message: recovery.plan.notice_message.clone(),
         code: Some(ServiceFailureCode::CompactRecoveryError),
         service_failure: Some(ServiceFailureNotice {
             service_failure_code: ServiceFailureCode::CompactRecoveryError,
             provider_kind: Some(error.provider_id.clone()),
             status_code: error.status_code,
-            retryable: true,
+            retryable: recovery.next_step != CompactRecoveryNextStep::Exhausted,
             surface_visible: true,
         }),
     });
-    if matches!(
-        plan.kind,
-        CompactPlanKind::ReactiveCompact | CompactPlanKind::CollapseDrain
-    ) {
+    if recovery.should_record_observability_hit {
         context
             .app_state
             .service_observability_tracker
-            .record_compact_recovery_hit(&plan.kind);
+            .record_compact_recovery_hit(&recovery.plan.kind);
     }
-    match plan.kind {
-        CompactPlanKind::ReactiveCompact => {
+    state.auto_compact_tracking = Some(recovery.tracking_key.into());
+    match recovery.next_step {
+        CompactRecoveryNextStep::RetryReactiveCompact => {
             state.has_attempted_reactive_compact = true;
-            state.auto_compact_tracking = Some("reactive_compact".into());
             TurnOutcome {
                 state: state.clone(),
                 events: engine_events,
                 decision: TurnDecision::ContinueWith(
-                    Message::user(plan.retry_prompt.expect("reactive compact prompt")),
+                    Message::user(
+                        recovery
+                            .plan
+                            .retry_prompt
+                            .expect("reactive compact prompt"),
+                    ),
                     Continue::ReactiveCompactRetry,
                 ),
             }
         }
-        CompactPlanKind::CollapseDrain => {
-            state.auto_compact_tracking = Some("collapse_drain".into());
-            TurnOutcome {
-                state: state.clone(),
-                events: engine_events,
-                decision: TurnDecision::ContinueWith(
-                    Message::user(plan.retry_prompt.expect("collapse drain prompt")),
-                    Continue::CollapseDrainRetry,
+        CompactRecoveryNextStep::RetryCollapseDrain => TurnOutcome {
+            state: state.clone(),
+            events: engine_events,
+            decision: TurnDecision::ContinueWith(
+                Message::user(
+                    recovery
+                        .plan
+                        .retry_prompt
+                        .expect("collapse drain prompt"),
                 ),
-            }
-        }
-        CompactPlanKind::Exhausted => {
-            state.auto_compact_tracking = Some("exhausted".into());
+                Continue::CollapseDrainRetry,
+            ),
+        },
+        CompactRecoveryNextStep::Exhausted => {
             let code = classify_service_failure_code(&error);
             TurnOutcome {
                 state: state.clone(),
@@ -1451,7 +1456,6 @@ fn continue_after_stream_error(
                 ),
             }
         }
-        CompactPlanKind::AutoCompact => unreachable!("auto compact is pre-stream only"),
     }
 }
 
