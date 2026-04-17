@@ -4,6 +4,7 @@ use tokio::sync::RwLock;
 
 use async_trait::async_trait;
 use rust_agent::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
+use rust_agent::command::builtin::compact::CompactCommand;
 use rust_agent::command::registry::CommandRegistry;
 use rust_agent::command::types::{
     Command, CommandAvailability, CommandMetadata, CommandResult, CommandSource, CommandType,
@@ -184,6 +185,42 @@ async fn prompt_command_is_interpreted_before_query_engine() {
             source: QuerySource::PromptCommand {
                 command: RoutedCommand {
                     name: "prompt-cmd".into(),
+                    policy: rust_agent::interaction::router::CommandRoutePolicy {
+                        availability: CommandAvailability::Everywhere,
+                        command_type: CommandType::Prompt,
+                        disable_model_invocation: false,
+                        immediate: false,
+                        is_sensitive: false,
+                        enters_query_engine: true,
+                    },
+                },
+            },
+        }
+    );
+}
+
+#[tokio::test]
+async fn compact_builtin_is_interpreted_before_query_engine() {
+    let router = CommandRouter::new(
+        Arc::new(CommandRegistry::new().register(Arc::new(CompactCommand))),
+        Box::new(DefaultSurfaceAuthorizer::default()),
+    );
+    let app_state = test_app_state();
+    let result = router
+        .route(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/compact"),
+            &app_state,
+        )
+        .await
+        .expect("route should succeed");
+    assert_eq!(
+        result,
+        RouteExecution::EnterQuery {
+            prompt: "Please compact the current conversation while preserving relevant context."
+                .into(),
+            source: QuerySource::PromptCommand {
+                command: RoutedCommand {
+                    name: "compact".into(),
                     policy: rust_agent::interaction::router::CommandRoutePolicy {
                         availability: CommandAvailability::Everywhere,
                         command_type: CommandType::Prompt,

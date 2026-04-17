@@ -5,6 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use rust_agent::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
+use rust_agent::command::builtin::compact::CompactCommand;
 use rust_agent::command::builtin::help::HelpCommand;
 use rust_agent::command::builtin::permissions::PermissionsCommand;
 use rust_agent::command::builtin::plan::PlanCommand;
@@ -479,6 +480,58 @@ async fn router_execute_command_decision_is_shared_by_cli_remote_and_telegram() 
 }
 
 #[tokio::test]
+async fn router_compact_decision_is_shared_by_cli_remote_and_telegram() {
+    let router = CommandRouter::new(
+        Arc::new(CommandRegistry::new().register(Arc::new(CompactCommand))),
+        Box::new(DefaultSurfaceAuthorizer::default()),
+    );
+    let cli = NormalizedInput::from_raw(InteractionSurface::Cli, "/compact");
+    let telegram = NormalizedInput::from_raw(InteractionSurface::Telegram, "/compact");
+    let remote = NormalizedInput::from_remote_raw(
+        "remote-session",
+        "remote-actor",
+        true,
+        true,
+        "/compact",
+    );
+
+    let shared = RouteDecision::ExecuteCommand(RoutedCommand {
+        name: "compact".into(),
+        policy: CommandRoutePolicy {
+            availability: CommandAvailability::Everywhere,
+            command_type: CommandType::Prompt,
+            disable_model_invocation: false,
+            immediate: false,
+            is_sensitive: false,
+            enters_query_engine: true,
+        },
+    });
+    assert_eq!(router.decide(&cli).await, shared);
+    assert_eq!(router.decide(&telegram).await, shared);
+    assert_eq!(router.decide(&remote).await, shared);
+}
+
+#[tokio::test]
+async fn router_compact_denies_untrusted_remote_under_generic_policy() {
+    let router = CommandRouter::new(
+        Arc::new(CommandRegistry::new().register(Arc::new(CompactCommand))),
+        Box::new(DefaultSurfaceAuthorizer::default()),
+    );
+    let input = NormalizedInput::from_remote_raw(
+        "remote-session",
+        "remote-actor",
+        true,
+        false,
+        "/compact",
+    );
+
+    assert_eq!(
+        router.decide(&input).await,
+        RouteDecision::Deny("command compact is not allowed on remote surface".into())
+    );
+}
+
+#[tokio::test]
 async fn router_plain_prompt_decision_is_shared_by_cli_remote_and_telegram() {
     let router = CommandRouter::new(
         Arc::new(CommandRegistry::new()),
@@ -629,6 +682,70 @@ async fn prompt_command_with_model_invocation_disabled_never_enters_query_engine
         RouteExecution::CommandResult(CommandResult::Denied(
             "command prompt-no-model cannot invoke the model on this surface".into()
         ))
+    );
+}
+
+#[tokio::test]
+async fn router_compact_route_enters_query_engine_with_builtin_prompt() {
+    let router = CommandRouter::new(
+        Arc::new(CommandRegistry::new().register(Arc::new(CompactCommand))),
+        Box::new(DefaultSurfaceAuthorizer::default()),
+    );
+    let app_state = AppState {
+        surface: InteractionSurface::Cli,
+        session_mode: SessionMode::Interactive,
+        client_type: ClientType::Cli,
+        session_source: SessionSource::LocalCli,
+        runtime_role: RuntimeRole::Coordinator,
+        worker_role: None,
+        permission_context: ToolPermissionContext::new(PermissionMode::Default),
+        command_registry: None,
+        runtime_tool_registry: Some(Arc::new(RwLock::new(ToolRegistry::new()))),
+        skill_registry: None,
+        mcp_runtime: None,
+        plugin_load_result: None,
+        cost_tracker: CostTracker::default(),
+        service_observability_tracker:
+            rust_agent::service::observability::ServiceObservabilityTracker::default(),
+        notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
+        audit_log: Arc::new(std::sync::Mutex::new(
+            rust_agent::security::audit::AuditLog::default(),
+        )),
+        startup_trace: Vec::new(),
+        active_session_id: "test-session".into(),
+        session_store: None,
+        session: None,
+        history: None,
+        restored_session: None,
+    };
+
+    let result = router
+        .route(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/compact"),
+            &app_state,
+        )
+        .await
+        .expect("route should succeed");
+
+    assert_eq!(
+        result,
+        RouteExecution::EnterQuery {
+            prompt: "Please compact the current conversation while preserving relevant context."
+                .into(),
+            source: QuerySource::PromptCommand {
+                command: RoutedCommand {
+                    name: "compact".into(),
+                    policy: CommandRoutePolicy {
+                        availability: CommandAvailability::Everywhere,
+                        command_type: CommandType::Prompt,
+                        disable_model_invocation: false,
+                        immediate: false,
+                        is_sensitive: false,
+                        enters_query_engine: true,
+                    },
+                },
+            },
+        }
     );
 }
 
