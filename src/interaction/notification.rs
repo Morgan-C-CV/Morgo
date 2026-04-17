@@ -55,6 +55,46 @@ pub struct Notification {
     pub target: Option<NotificationTarget>,
 }
 
+fn approval_required_dedupe_key(
+    tool_name: &str,
+    approval_code: Option<&str>,
+    approval_kind: Option<&str>,
+) -> String {
+    format!(
+        "approval_required:{tool_name}:{}:{}",
+        approval_kind.unwrap_or("unknown_kind"),
+        approval_code.unwrap_or("unknown_code")
+    )
+}
+
+fn runtime_notice_dedupe_key(
+    kind: &str,
+    notice_code: Option<&str>,
+    runtime_kind: Option<&str>,
+    service_failure_code: Option<&str>,
+    provider_kind: Option<&str>,
+    status_code: Option<u16>,
+    retryable: Option<bool>,
+    surface_visible: Option<bool>,
+) -> String {
+    format!(
+        "runtime_notice:{kind}:{}:{}:{}:{}:{}:{}:{}",
+        notice_code.unwrap_or("unknown_notice_code"),
+        runtime_kind.unwrap_or("unknown_runtime_kind"),
+        service_failure_code.unwrap_or("unknown_failure_code"),
+        provider_kind.unwrap_or("unknown_provider"),
+        status_code
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "unknown_status".into()),
+        retryable
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "unknown_retryable".into()),
+        surface_visible
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "unknown_surface_visible".into())
+    )
+}
+
 impl Notification {
     pub fn task_update(
         session_id: impl Into<String>,
@@ -118,7 +158,7 @@ impl Notification {
     ) -> Self {
         let tool_name = tool_name.into();
         let message = message.into();
-        let dedupe_key = format!("approval_required:{tool_name}:{message}");
+        let dedupe_key = approval_required_dedupe_key(&tool_name, approval_code.as_deref(), approval_kind.as_deref());
         Self {
             session_id: session_id.into(),
             title: format!("Approval required: {tool_name}"),
@@ -168,10 +208,16 @@ impl Notification {
     ) -> Self {
         let kind = kind.into();
         let message = message.into();
-        let dedupe_key = match service_failure_code.as_deref() {
-            Some(code) => format!("runtime_notice:{kind}:{message}:{code}"),
-            None => format!("runtime_notice:{kind}:{message}"),
-        };
+        let dedupe_key = runtime_notice_dedupe_key(
+            &kind,
+            notice_code.as_deref(),
+            runtime_kind.as_deref(),
+            service_failure_code.as_deref(),
+            provider_kind.as_deref(),
+            status_code,
+            retryable,
+            surface_visible,
+        );
         Self {
             session_id: session_id.into(),
             title: format!("Runtime notice: {kind}"),

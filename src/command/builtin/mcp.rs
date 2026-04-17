@@ -108,6 +108,13 @@ impl Command for McpCommand {
                 {
                     lines.push(format!("  last_error: {}", error.trim()));
                 }
+                if let Some(failure) = server.last_failure.as_ref() {
+                    lines.push(format!(
+                        "  last_failure: operation={}, code={}",
+                        failure.operation.as_str(),
+                        failure.code.as_str()
+                    ));
+                }
             }
             return Ok(CommandResult::Message(lines.join("\n")));
         }

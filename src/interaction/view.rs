@@ -157,16 +157,16 @@ fn surface_item_from_runtime_event(event: &CliRuntimeEvent) -> SurfaceItem {
             retryable: *retryable,
             surface_visible: *surface_visible,
         },
-        CliRuntimeEvent::Transition { text } => SurfaceItem::Transition {
-            kind: stable_transition_kind(text).to_string(),
+        CliRuntimeEvent::Transition { kind, text } => SurfaceItem::Transition {
+            kind: kind.clone(),
             text: text.clone(),
         },
-        CliRuntimeEvent::Terminal { text } => SurfaceItem::Terminal {
-            kind: stable_terminal_kind(text).to_string(),
+        CliRuntimeEvent::Terminal { kind, text } => SurfaceItem::Terminal {
+            kind: kind.clone(),
             text: text.clone(),
         },
-        CliRuntimeEvent::SessionMilestone { text } => SurfaceItem::SessionMilestone {
-            kind: stable_session_milestone_kind(text).to_string(),
+        CliRuntimeEvent::SessionMilestone { kind, text } => SurfaceItem::SessionMilestone {
+            kind: kind.clone(),
             text: text.clone(),
         },
     }
@@ -464,40 +464,3 @@ impl From<&TaskEvent> for TaskView {
     }
 }
 
-pub fn stable_transition_kind(text: &str) -> &str {
-    match text {
-        "next_turn" => "next_turn",
-        "tool_use_follow_up" => "tool_use_follow_up",
-        "max_output_tokens_escalate" => "max_output_tokens_escalate",
-        "max_output_tokens_recovery" => "max_output_tokens_recovery",
-        "collapse_drain_retry" => "collapse_drain_retry",
-        "reactive_compact_retry" => "reactive_compact_retry",
-        "stop_hook_blocking" => "stop_hook_blocking",
-        "token_budget_continuation" => "token_budget_continuation",
-        "model_fallback_retry" => "model_fallback_retry",
-        _ => "unknown_transition",
-    }
-}
-
-pub fn stable_terminal_kind(text: &str) -> &str {
-    match text {
-        "completed" => "completed",
-        "max_turns" => "max_turns",
-        "max_budget" => "max_budget",
-        "stop_hook_prevented" => "stop_hook_prevented",
-        "aborted_streaming" => "aborted_streaming",
-        "aborted_tools" => "aborted_tools",
-        "model_error" => "model_error",
-        _ => "unknown_terminal",
-    }
-}
-
-pub fn stable_session_milestone_kind(text: &str) -> &str {
-    match text {
-        "user_input_committed" => "user_input_committed",
-        "assistant_message_committed" => "assistant_message_committed",
-        "tool_result_committed" => "tool_result_committed",
-        "turn_completed" => "turn_completed",
-        _ => "unknown_milestone",
-    }
-}

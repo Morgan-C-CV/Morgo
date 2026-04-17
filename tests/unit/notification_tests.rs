@@ -1323,7 +1323,7 @@ fn telegram_gateway_rejects_explicit_target_without_matching_binding() {
         status_code: None,
         retryable: None,
         surface_visible: None,
-        dedupe_key: Some("approval_required:Bash:requires explicit approval".into()),
+        dedupe_key: Some("approval_required:Bash:tool_permission:bash_warning".into()),
         wake_up: true,
         target: Some(NotificationTarget::Telegram(TelegramDeliveryTarget {
             chat_id: "chat-other".into(),
@@ -2152,6 +2152,7 @@ fn web_view_is_derived_from_surface_view_with_frontend_friendly_kinds() {
                 surface_visible: Some(true),
             }),
             CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::Transition {
+                kind: "next_turn".into(),
                 text: "next_turn".into(),
             }),
             CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::ToolResult {
@@ -2381,34 +2382,34 @@ fn dispatcher_drains_remote_session_and_actor_notifications() {
 #[test]
 fn remote_drain_dedupes_session_and_actor_notifications() {
     let dispatcher = NotificationDispatcher::new(TelegramGateway::default());
-    let mut session_notification = Notification::runtime_notice(
+    let session_notification = Notification::runtime_notice(
         "remote-session",
         "tool",
         "same message",
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
+        Some("api_stream_interrupted".into()),
+        Some("RetryScheduled".into()),
+        Some("api_stream_interrupted".into()),
+        Some("anthropic".into()),
+        Some(503),
+        Some(true),
+        Some(true),
     );
-    session_notification.dedupe_key = Some("notice-1".into());
+    let session_dedupe = session_notification.dedupe_key.clone();
     dispatcher.dispatch(InteractionSurface::Remote, session_notification);
 
     let mut actor_notification = Notification::runtime_notice(
         "remote-session",
         "tool",
-        "same message",
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
+        "different display message",
+        Some("api_stream_interrupted".into()),
+        Some("RetryScheduled".into()),
+        Some("api_stream_interrupted".into()),
+        Some("anthropic".into()),
+        Some(503),
+        Some(true),
+        Some(true),
     );
-    actor_notification.dedupe_key = Some("notice-1".into());
+    assert_eq!(actor_notification.dedupe_key, session_dedupe);
     actor_notification.target = Some(NotificationTarget::RemoteActor {
         session_id: "remote-session".into(),
         actor_id: "actor-1".into(),
@@ -2465,6 +2466,57 @@ fn remote_task_update_notifications_use_dedupe_key() {
     let drained = dispatcher.drain_remote_notifications("remote-session", Some("actor-1"));
     assert_eq!(drained.len(), 1);
     assert_eq!(drained[0].notification_type, NotificationType::TaskUpdate);
+}
+
+#[test]
+fn approval_and_runtime_notice_dedupe_keys_ignore_display_message_text() {
+    let approval_a = Notification::approval_required(
+        "remote-session",
+        "Bash",
+        "requires explicit approval",
+        Some("bash_warning".into()),
+        Some("Bash pending approval".into()),
+        Some("requires explicit approval".into()),
+        Some("tool_permission".into()),
+        vec!["privileged_system".into()],
+    );
+    let approval_b = Notification::approval_required(
+        "remote-session",
+        "Bash",
+        "wording changed but same approval",
+        Some("bash_warning".into()),
+        Some("Bash pending approval".into()),
+        Some("wording changed but same approval".into()),
+        Some("tool_permission".into()),
+        vec!["privileged_system".into()],
+    );
+    assert_eq!(approval_a.dedupe_key, approval_b.dedupe_key);
+
+    let runtime_a = Notification::runtime_notice(
+        "remote-session",
+        "tool",
+        "background update",
+        Some("api_stream_interrupted".into()),
+        Some("RetryScheduled".into()),
+        Some("api_stream_interrupted".into()),
+        Some("anthropic".into()),
+        Some(503),
+        Some(true),
+        Some(true),
+    );
+    let runtime_b = Notification::runtime_notice(
+        "remote-session",
+        "tool",
+        "different wording for same runtime state",
+        Some("api_stream_interrupted".into()),
+        Some("RetryScheduled".into()),
+        Some("api_stream_interrupted".into()),
+        Some("anthropic".into()),
+        Some(503),
+        Some(true),
+        Some(true),
+    );
+    assert_eq!(runtime_a.dedupe_key, runtime_b.dedupe_key);
 }
 
 #[test]

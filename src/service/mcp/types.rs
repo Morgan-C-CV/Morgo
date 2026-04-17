@@ -187,6 +187,69 @@ pub struct McpConnectInfo {
     pub peer: McpPeerInfo,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum McpOperationKind {
+    Connect,
+    Disconnect,
+    ListTools,
+    ListResources,
+    CallTool,
+    ReadResource,
+    RequestValidation,
+    ConfigLookup,
+}
+
+impl McpOperationKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Connect => "connect",
+            Self::Disconnect => "disconnect",
+            Self::ListTools => "list_tools",
+            Self::ListResources => "list_resources",
+            Self::CallTool => "call_tool",
+            Self::ReadResource => "read_resource",
+            Self::RequestValidation => "request_validation",
+            Self::ConfigLookup => "config_lookup",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum McpFailureCode {
+    UnknownServer,
+    MissingTool,
+    MissingResource,
+    Transport,
+    Protocol,
+    Execution,
+    Inventory,
+    RequestValidation,
+}
+
+impl McpFailureCode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::UnknownServer => "unknown_server",
+            Self::MissingTool => "missing_tool",
+            Self::MissingResource => "missing_resource",
+            Self::Transport => "transport",
+            Self::Protocol => "protocol",
+            Self::Execution => "execution",
+            Self::Inventory => "inventory",
+            Self::RequestValidation => "request_validation",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpFailureNotice {
+    pub operation: McpOperationKind,
+    pub code: McpFailureCode,
+    pub detail: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct McpServerState {
     pub config: McpServerConfig,
@@ -196,8 +259,7 @@ pub struct McpServerState {
     pub tool_names_preview: Vec<String>,
     pub resource_names_preview: Vec<String>,
     pub last_error: Option<String>,
-    pub last_error_kind: Option<String>,
-    pub last_error_detail: Option<String>,
+    pub last_failure: Option<McpFailureNotice>,
     pub protocol_initialized: bool,
     pub pid: Option<u32>,
     pub server_name: Option<String>,

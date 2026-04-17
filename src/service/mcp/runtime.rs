@@ -7,8 +7,9 @@ use tokio::sync::RwLock;
 use crate::service::mcp::client::{McpClient, RoutingMcpClient};
 use crate::service::mcp::config::{McpConfigLoadResult, McpConfigSource, default_server_configs};
 use crate::service::mcp::types::{
-    McpAction, McpConnectInfo, McpConnectionStatus, McpRequest, McpResourceInfo, McpResponse,
-    McpServerConfig, McpServerState, McpToolInfo,
+    McpAction, McpConnectInfo, McpConnectionStatus, McpFailureCode, McpFailureNotice,
+    McpOperationKind, McpRequest, McpResourceInfo, McpResponse, McpServerConfig, McpServerState,
+    McpToolInfo,
 };
 use crate::service::observability::ServiceObservabilityTracker;
 
@@ -99,8 +100,7 @@ impl McpRuntime {
                 tool_names_preview: Vec::new(),
                 resource_names_preview: Vec::new(),
                 last_error: None,
-                last_error_kind: None,
-                last_error_detail: None,
+                last_failure: None,
                 protocol_initialized: false,
                 pid: None,
                 server_name: None,
@@ -138,7 +138,7 @@ impl McpRuntime {
     }
 
     pub async fn reconnect(&self, server: &str) -> anyhow::Result<McpServerState> {
-        self.set_status(server, McpConnectionStatus::Reconnecting, None, None, None)
+        self.set_status(server, McpConnectionStatus::Reconnecting, None, None)
             .await?;
         self.invalidate_server_cache(server).await;
         let _ = self.disconnect(server).await;
@@ -148,7 +148,7 @@ impl McpRuntime {
     pub async fn connect(&self, server: &str) -> anyhow::Result<McpServerState> {
         self.refresh_stale_server_config(server).await?;
         let config = self.server_config(server).await?;
-        self.set_status(server, McpConnectionStatus::Connecting, None, None, None)
+        self.set_status(server, McpConnectionStatus::Connecting, None, None)
             .await?;
         let connect_info = match self.client.connect(&config).await {
             Ok(value) => value,
@@ -156,7 +156,8 @@ impl McpRuntime {
                 return self
                     .fail_server(
                         server,
-                        "connect",
+                        McpOperationKind::Connect,
+                        classify_client_failure(&error, McpFailureCode::Transport),
                         error.to_string(),
                         Some(error.to_string()),
                     )
@@ -169,7 +170,8 @@ impl McpRuntime {
                 return self
                     .fail_server(
                         server,
-                        "connect",
+                        McpOperationKind::Connect,
+                        classify_client_failure(&error, McpFailureCode::Inventory),
                         error.to_string(),
                         Some(error.to_string()),
                     )
@@ -182,7 +184,8 @@ impl McpRuntime {
                 return self
                     .fail_server(
                         server,
-                        "connect",
+                        McpOperationKind::Connect,
+                        classify_client_failure(&error, McpFailureCode::Inventory),
                         error.to_string(),
                         Some(error.to_string()),
                     )
@@ -208,7 +211,8 @@ impl McpRuntime {
             return self
                 .fail_server(
                     server,
-                    "disconnect",
+                    McpOperationKind::Disconnect,
+                    classify_client_failure(&error, McpFailureCode::Transport),
                     error.to_string(),
                     Some(error.to_string()),
                 )
@@ -241,7 +245,8 @@ impl McpRuntime {
                     Err(error) => {
                         self.fail_server(
                             &request.server,
-                            "list_tools",
+                            McpOperationKind::ListTools,
+                            classify_client_failure(&error, McpFailureCode::Inventory),
                             error.to_string(),
                             Some(error.to_string()),
                         )
@@ -268,7 +273,8 @@ impl McpRuntime {
                     Err(error) => {
                         self.fail_server(
                             &request.server,
-                            "list_resources",
+                            McpOperationKind::ListResources,
+                            classify_client_failure(&error, McpFailureCode::Inventory),
                             error.to_string(),
                             Some(error.to_string()),
                         )
@@ -277,10 +283,13 @@ impl McpRuntime {
                 }
             }
             McpAction::CallTool => {
-                let tool = request
-                    .tool
-                    .as_deref()
-                    .ok_or_else(|| anyhow::anyhow!("tool is required for call_tool"))?;
+                let tool = request.tool.as_deref().ok_or_else(|| {
+                    mcp_request_error(
+                        McpOperationKind::CallTool,
+                        McpFailureCode::MissingTool,
+                        "tool is required for call_tool",
+                    )
+                })?;
                 match self.client.call_tool(&config, tool, request.input).await {
                     Ok(value) => {
                         self.clear_last_error(&request.server).await?;
@@ -289,7 +298,8 @@ impl McpRuntime {
                     Err(error) => {
                         self.fail_server(
                             &request.server,
-                            "call_tool",
+                            McpOperationKind::CallTool,
+                            classify_client_failure(&error, McpFailureCode::Execution),
                             error.to_string(),
                             Some(error.to_string()),
                         )
@@ -298,10 +308,13 @@ impl McpRuntime {
                 }
             }
             McpAction::ReadResource => {
-                let resource = request
-                    .resource
-                    .as_deref()
-                    .ok_or_else(|| anyhow::anyhow!("resource is required for read_resource"))?;
+                let resource = request.resource.as_deref().ok_or_else(|| {
+                    mcp_request_error(
+                        McpOperationKind::ReadResource,
+                        McpFailureCode::MissingResource,
+                        "resource is required for read_resource",
+                    )
+                })?;
                 match self.client.read_resource(&config, resource).await {
                     Ok(content) => {
                         self.clear_last_error(&request.server).await?;
@@ -310,7 +323,8 @@ impl McpRuntime {
                     Err(error) => {
                         self.fail_server(
                             &request.server,
-                            "read_resource",
+                            McpOperationKind::ReadResource,
+                            classify_client_failure(&error, McpFailureCode::Execution),
                             error.to_string(),
                             Some(error.to_string()),
                         )
@@ -340,7 +354,13 @@ impl McpRuntime {
             .iter()
             .find(|entry| entry.config.id == server || entry.config.name == server)
             .cloned()
-            .ok_or_else(|| anyhow::anyhow!("unknown MCP server: {server}"))
+            .ok_or_else(|| {
+                mcp_request_error(
+                    McpOperationKind::ConfigLookup,
+                    McpFailureCode::UnknownServer,
+                    format!("unknown MCP server: {server}"),
+                )
+            })
     }
 
     async fn server_config(&self, server: &str) -> anyhow::Result<McpServerConfig> {
@@ -352,43 +372,51 @@ impl McpRuntime {
         server: &str,
         status: McpConnectionStatus,
         last_error: Option<String>,
-        last_error_kind: Option<String>,
-        last_error_detail: Option<String>,
+        last_failure: Option<McpFailureNotice>,
     ) -> anyhow::Result<McpServerState> {
         let mut servers = self.servers.write().await;
         let state = servers
             .iter_mut()
             .find(|entry| entry.config.id == server || entry.config.name == server)
-            .ok_or_else(|| anyhow::anyhow!("unknown MCP server: {server}"))?;
+            .ok_or_else(|| {
+                mcp_request_error(
+                    McpOperationKind::ConfigLookup,
+                    McpFailureCode::UnknownServer,
+                    format!("unknown MCP server: {server}"),
+                )
+            })?;
         state.status = status;
         state.last_error = last_error;
-        state.last_error_kind = last_error_kind;
-        state.last_error_detail = last_error_detail;
+        state.last_failure = last_failure;
         Ok(state.clone())
     }
 
     async fn clear_last_error(&self, server: &str) -> anyhow::Result<McpServerState> {
         let state = self.find_server(server).await?;
-        self.set_status(server, state.status, None, None, None)
-            .await
+        self.set_status(server, state.status, None, None).await
     }
 
     async fn fail_server<T>(
         &self,
         server: &str,
-        kind: &str,
+        operation: McpOperationKind,
+        code: McpFailureCode,
         message: String,
         detail: Option<String>,
     ) -> anyhow::Result<T> {
         self.invalidate_server_cache(server).await;
-        self.observability.record_mcp_server_failure(server, kind);
+        self.observability
+            .record_mcp_server_failure(server, operation.as_str());
         let _ = self
             .set_status(
                 server,
                 McpConnectionStatus::Failed,
                 Some(message.clone()),
-                Some(kind.to_string()),
-                detail,
+                Some(McpFailureNotice {
+                    operation,
+                    code,
+                    detail,
+                }),
             )
             .await;
         anyhow::bail!(message)
@@ -412,8 +440,7 @@ impl McpRuntime {
         state.tool_names_preview = preview_names_from_tools(tools);
         state.resource_names_preview = preview_names_from_resources(resources);
         state.last_error = None;
-        state.last_error_kind = None;
-        state.last_error_detail = None;
+        state.last_failure = None;
         state.protocol_initialized = connect_info.protocol_initialized;
         state.pid = connect_info.pid;
         state.server_name = connect_info.peer.server_name;
@@ -457,8 +484,7 @@ impl McpRuntime {
         state.tool_names_preview.clear();
         state.resource_names_preview.clear();
         state.last_error = None;
-        state.last_error_kind = None;
-        state.last_error_detail = None;
+        state.last_failure = None;
         state.protocol_initialized = false;
         state.pid = None;
         state.server_name = None;
@@ -494,6 +520,28 @@ impl McpRuntime {
             .insert(state.config.id.clone(), current_fingerprint);
         let _ = self.update_disconnected(server).await;
         Ok(())
+    }
+}
+
+fn mcp_request_error(
+    operation: McpOperationKind,
+    code: McpFailureCode,
+    message: impl Into<String>,
+) -> anyhow::Error {
+    anyhow::anyhow!(
+        "MCP {} {}: {}",
+        operation.as_str(),
+        code.as_str(),
+        message.into()
+    )
+}
+
+fn classify_client_failure(error: &anyhow::Error, fallback: McpFailureCode) -> McpFailureCode {
+    let message = error.to_string();
+    if message.contains("Content-Length") || message.contains("id mismatch") {
+        McpFailureCode::Protocol
+    } else {
+        fallback
     }
 }
 
@@ -550,8 +598,8 @@ mod tests {
     use super::{McpRuntime, fingerprint_config, replace_runtime_server_config};
     use crate::service::mcp::client::{McpClient, MockMcpClient};
     use crate::service::mcp::types::{
-        McpAction, McpConnectInfo, McpRequest, McpResourceInfo, McpServerConfig, McpToolInfo,
-        McpTransportKind,
+        McpAction, McpConnectInfo, McpFailureCode, McpOperationKind, McpRequest,
+        McpResourceInfo, McpServerConfig, McpToolInfo, McpTransportKind,
     };
     use async_trait::async_trait;
     use serde_json::Value;
@@ -654,10 +702,12 @@ mod tests {
         assert!(error.to_string().contains("list_tools exploded"));
 
         let servers = runtime.list_servers().await;
-        assert_eq!(servers[0].last_error_kind.as_deref(), Some("connect"));
-        assert_eq!(
-            servers[0].last_error_detail.as_deref(),
-            Some("list_tools exploded")
-        );
+        let failure = servers[0]
+            .last_failure
+            .clone()
+            .expect("failure metadata should be recorded");
+        assert_eq!(failure.operation, McpOperationKind::Connect);
+        assert_eq!(failure.code, McpFailureCode::Inventory);
+        assert_eq!(failure.detail.as_deref(), Some("list_tools exploded"));
     }
 }

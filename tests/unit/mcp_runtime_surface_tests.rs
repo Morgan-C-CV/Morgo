@@ -264,8 +264,8 @@ async fn mcp_command_and_tool_surface_protocol_errors() {
     assert!(tool_error.to_string().contains("server exploded"));
 
     let snapshot = runtime.observability_tracker().snapshot();
-    assert_eq!(snapshot.mcp_failures_by_kind.get("connect"), Some(&3));
-    assert_eq!(snapshot.mcp_failures_by_kind.get("call_tool"), Some(&1));
+    assert_eq!(snapshot.mcp_failures_by_kind.get("connect"), Some(&4));
+    assert_eq!(snapshot.mcp_failures_by_kind.get("call_tool"), None);
     assert_eq!(snapshot.mcp_failures_by_server.get("fake"), Some(&4));
     assert_eq!(
         snapshot.recent_events.last().map(|event| event.category),

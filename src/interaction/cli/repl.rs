@@ -44,12 +44,15 @@ pub enum CliRuntimeEvent {
         surface_visible: Option<bool>,
     },
     Transition {
+        kind: String,
         text: String,
     },
     Terminal {
+        kind: String,
         text: String,
     },
     SessionMilestone {
+        kind: String,
         text: String,
     },
 }
@@ -72,9 +75,9 @@ impl CliRuntimeEvent {
                 format!("[approval] {tool_name}: {message}")
             }
             Self::Notice { kind, message, .. } => format!("[notice:{kind}] {message}"),
-            Self::Transition { text } => format!("[transition] {text}"),
-            Self::Terminal { text } => format!("[terminal] {text}"),
-            Self::SessionMilestone { text } => format!("[milestone] {text}"),
+            Self::Transition { text, .. } => format!("[transition] {text}"),
+            Self::Terminal { text, .. } => format!("[terminal] {text}"),
+            Self::SessionMilestone { text, .. } => format!("[milestone] {text}"),
         }
     }
 }
@@ -299,6 +302,7 @@ async fn collect_stream_messages(
             }
             EngineEvent::Transition(transition) => {
                 runtime_events.push(CliRuntimeEvent::Transition {
+                    kind: transition.as_str().to_string(),
                     text: transition.as_str().to_string(),
                 });
             }
@@ -331,11 +335,13 @@ async fn collect_stream_messages(
             }
             EngineEvent::Terminal(terminal) => {
                 runtime_events.push(CliRuntimeEvent::Terminal {
+                    kind: terminal.as_str().to_string(),
                     text: terminal.as_str().to_string(),
                 });
             }
             EngineEvent::SessionMilestoneWritten(milestone) => {
                 runtime_events.push(CliRuntimeEvent::SessionMilestone {
+                    kind: milestone.as_str().to_string(),
                     text: milestone.as_str().to_string(),
                 });
             }
