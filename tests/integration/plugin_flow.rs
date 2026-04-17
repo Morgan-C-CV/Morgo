@@ -196,6 +196,9 @@ async fn plugin_runtime_exposes_command_hook_tool_and_diagnostics() {
     assert!(status_text.contains("- by_failure_code: none"));
     assert!(status_text.contains("- by_provider_kind: none"));
     assert!(status_text.contains("- compact_recovery_hits: none"));
+    assert!(!status_text.contains("service_failures_total"));
+    assert!(!status_text.contains("api_errors_by_kind"));
+    assert!(!status_text.contains("mcp_failures_by_kind"));
     assert!(status_text.contains("normalized runtime failure signals"));
     assert!(
         help_text

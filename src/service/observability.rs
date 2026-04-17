@@ -35,6 +35,12 @@ pub struct ServiceObservabilityEventRecord {
     pub detail: String,
 }
 
+pub trait ServiceObservabilityExportSink {
+    fn record_scalar(&mut self, name: &'static str, value: usize);
+    fn record_bucket_entry(&mut self, group: &'static str, key: &str, value: usize);
+    fn record_recent_event(&mut self, event: &ServiceObservabilityEventRecord);
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ObservabilityEvent {
     ServiceFailure {
@@ -70,6 +76,27 @@ struct ServiceObservabilityState {
     mcp_failures_by_kind: BTreeMap<String, usize>,
     mcp_failures_by_server: BTreeMap<String, usize>,
     recent_events: Vec<ServiceObservabilityEventRecord>,
+}
+
+impl ServiceObservabilitySnapshot {
+    pub fn export_to(&self, sink: &mut impl ServiceObservabilityExportSink) {
+        sink.record_scalar("service_failures_total", self.service_failures_total);
+        sink.record_scalar("retryable_count", self.retryable_count);
+        sink.record_scalar("terminal_count", self.terminal_count);
+
+        export_bucket_group(sink, "by_failure_code", &self.by_failure_code);
+        export_bucket_group(sink, "by_provider_kind", &self.by_provider_kind);
+        export_bucket_group(sink, "compact_recovery_hits", &self.compact_recovery_hits);
+        export_bucket_group(sink, "api_errors_by_kind", &self.api_errors_by_kind);
+        export_bucket_group(sink, "api_errors_by_provider", &self.api_errors_by_provider);
+        export_bucket_group(sink, "api_errors_by_status", &self.api_errors_by_status);
+        export_bucket_group(sink, "mcp_failures_by_kind", &self.mcp_failures_by_kind);
+        export_bucket_group(sink, "mcp_failures_by_server", &self.mcp_failures_by_server);
+
+        for event in &self.recent_events {
+            sink.record_recent_event(event);
+        }
+    }
 }
 
 impl ServiceObservabilityTracker {
@@ -127,6 +154,10 @@ impl ServiceObservabilityTracker {
         }
     }
 
+    pub fn export_snapshot_to(&self, sink: &mut impl ServiceObservabilityExportSink) {
+        self.snapshot().export_to(sink);
+    }
+
     fn record_event(&self, event: ObservabilityEvent) {
         let mut state = self
             .inner
@@ -181,6 +212,16 @@ impl ServiceObservabilityTracker {
     }
 }
 
+fn export_bucket_group(
+    sink: &mut impl ServiceObservabilityExportSink,
+    group: &'static str,
+    entries: &BTreeMap<String, usize>,
+) {
+    for (key, value) in entries {
+        sink.record_bucket_entry(group, key, *value);
+    }
+}
+
 fn push_recent_event(events: &mut Vec<ServiceObservabilityEventRecord>, event: ObservabilityEvent) {
     let record = match event {
         ObservabilityEvent::ServiceFailure {
@@ -232,5 +273,155 @@ fn compact_recovery_key(kind: &CompactPlanKind) -> Option<&'static str> {
         CompactPlanKind::ReactiveCompact => Some("reactive_compact"),
         CompactPlanKind::CollapseDrain => Some("collapse_drain"),
         CompactPlanKind::Exhausted | CompactPlanKind::AutoCompact => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        ServiceObservabilityEventRecord, ServiceObservabilityExportSink,
+        ServiceObservabilitySnapshot, ServiceObservabilityTracker,
+    };
+    use crate::core::events::{ServiceFailureCode, ServiceFailureNotice};
+    use crate::service::api::errors::ApiError;
+    use crate::service::compact::CompactPlanKind;
+
+    #[derive(Debug, Default, PartialEq, Eq)]
+    struct CapturedExport {
+        scalars: Vec<(&'static str, usize)>,
+        buckets: Vec<(&'static str, String, usize)>,
+        recent_events: Vec<ServiceObservabilityEventRecord>,
+    }
+
+    impl ServiceObservabilityExportSink for CapturedExport {
+        fn record_scalar(&mut self, name: &'static str, value: usize) {
+            self.scalars.push((name, value));
+        }
+
+        fn record_bucket_entry(&mut self, group: &'static str, key: &str, value: usize) {
+            self.buckets.push((group, key.to_string(), value));
+        }
+
+        fn record_recent_event(&mut self, event: &ServiceObservabilityEventRecord) {
+            self.recent_events.push(event.clone());
+        }
+    }
+
+    #[test]
+    fn snapshot_exports_stable_shape_in_order() {
+        let snapshot = ServiceObservabilitySnapshot {
+            service_failures_total: 2,
+            by_failure_code: [
+                ("api_provider_http_5xx".to_string(), 1),
+                ("api_stream_terminal".to_string(), 1),
+            ]
+            .into_iter()
+            .collect(),
+            retryable_count: 1,
+            terminal_count: 1,
+            by_provider_kind: [("anthropic".to_string(), 1)].into_iter().collect(),
+            compact_recovery_hits: [("reactive_compact".to_string(), 1)].into_iter().collect(),
+            api_errors_by_kind: [("http_status".to_string(), 1)].into_iter().collect(),
+            api_errors_by_provider: [("anthropic".to_string(), 1)].into_iter().collect(),
+            api_errors_by_status: [("503".to_string(), 1)].into_iter().collect(),
+            mcp_failures_by_kind: [("list_tools".to_string(), 1)].into_iter().collect(),
+            mcp_failures_by_server: [("filesystem".to_string(), 1)].into_iter().collect(),
+            recent_events: vec![
+                ServiceObservabilityEventRecord {
+                    category: "service_failure",
+                    key: "api_provider_http_5xx".into(),
+                    detail: "provider=anthropic retryable=true".into(),
+                },
+                ServiceObservabilityEventRecord {
+                    category: "mcp_server_failure",
+                    key: "list_tools".into(),
+                    detail: "server=filesystem".into(),
+                },
+            ],
+        };
+
+        let mut sink = CapturedExport::default();
+        snapshot.export_to(&mut sink);
+
+        assert_eq!(
+            sink.scalars,
+            vec![
+                ("service_failures_total", 2),
+                ("retryable_count", 1),
+                ("terminal_count", 1),
+            ]
+        );
+        assert_eq!(
+            sink.buckets,
+            vec![
+                ("by_failure_code", "api_provider_http_5xx".into(), 1),
+                ("by_failure_code", "api_stream_terminal".into(), 1),
+                ("by_provider_kind", "anthropic".into(), 1),
+                ("compact_recovery_hits", "reactive_compact".into(), 1),
+                ("api_errors_by_kind", "http_status".into(), 1),
+                ("api_errors_by_provider", "anthropic".into(), 1),
+                ("api_errors_by_status", "503".into(), 1),
+                ("mcp_failures_by_kind", "list_tools".into(), 1),
+                ("mcp_failures_by_server", "filesystem".into(), 1),
+            ]
+        );
+        assert_eq!(sink.recent_events, snapshot.recent_events);
+    }
+
+    #[test]
+    fn tracker_export_matches_runtime_api_and_mcp_snapshot_counters() {
+        let tracker = ServiceObservabilityTracker::default();
+        tracker.record_service_failure(&ServiceFailureNotice {
+            service_failure_code: ServiceFailureCode::ApiProviderHttp5xx,
+            provider_kind: Some("anthropic".into()),
+            status_code: Some(503),
+            retryable: true,
+            surface_visible: true,
+        });
+        tracker.record_compact_recovery_hit(&CompactPlanKind::ReactiveCompact);
+        tracker.record_api_client_error(
+            "anthropic",
+            &ApiError::http_status(503, "provider request failed with status 503"),
+        );
+        tracker.record_mcp_server_failure("filesystem", "list_tools");
+
+        let snapshot = tracker.snapshot();
+        let mut sink = CapturedExport::default();
+        tracker.export_snapshot_to(&mut sink);
+
+        assert_eq!(sink.scalars[0], ("service_failures_total", snapshot.service_failures_total));
+        assert!(sink.buckets.contains(&(
+            "by_failure_code",
+            "api_provider_http_5xx".into(),
+            *snapshot
+                .by_failure_code
+                .get("api_provider_http_5xx")
+                .expect("runtime failure code should export")
+        )));
+        assert!(sink.buckets.contains(&(
+            "compact_recovery_hits",
+            "reactive_compact".into(),
+            *snapshot
+                .compact_recovery_hits
+                .get("reactive_compact")
+                .expect("compact recovery bucket should export")
+        )));
+        assert!(sink.buckets.contains(&(
+            "api_errors_by_kind",
+            "http_status".into(),
+            *snapshot
+                .api_errors_by_kind
+                .get("http_status")
+                .expect("api error kind should export")
+        )));
+        assert!(sink.buckets.contains(&(
+            "mcp_failures_by_server",
+            "filesystem".into(),
+            *snapshot
+                .mcp_failures_by_server
+                .get("filesystem")
+                .expect("mcp server failure should export")
+        )));
+        assert_eq!(sink.recent_events, snapshot.recent_events);
     }
 }
