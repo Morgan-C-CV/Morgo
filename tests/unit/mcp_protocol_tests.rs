@@ -6,13 +6,14 @@ use serde_json::json;
 
 #[tokio::test]
 async fn stdio_mcp_client_round_trips_list_call_and_read() {
-    let script = r#"
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let script = r#"
 import json, sys
 
 
 def write(msg):
     data = json.dumps(msg).encode()
-    sys.stdout.write(f'Content-Length: {len(data)}\\r\\n\\r\\n')
+    sys.stdout.write(f'Content-Length: {len(data)}\r\n\r\n')
     sys.stdout.flush()
     sys.stdout.buffer.write(data)
     sys.stdout.buffer.flush()
@@ -46,38 +47,37 @@ while True:
         write({'jsonrpc': '2.0', 'id': payload['id'], 'result': {'tools': [{'name': 'echo', 'description': 'Echo tool', 'input_schema': {'type': 'object'}}]}})
     elif method == 'resources/list':
         write({'jsonrpc': '2.0', 'id': payload['id'], 'result': {'resources': [{'name': 'readme', 'uri': 'mcp://fake/readme', 'description': 'Readme', 'mime_type': 'text/plain'}]}})
-    elif method == 'tools/call':
-        write({'jsonrpc': '2.0', 'id': payload['id'], 'result': {'content': [{'type': 'text', 'text': payload['params']['name']}], 'structured': payload['params']['arguments']}})
-    elif method == 'resources/read':
-        write({'jsonrpc': '2.0', 'id': payload['id'], 'result': {'contents': [{'uri': payload['params']['uri'], 'text': 'resource-body'}]}})
     else:
         write({'jsonrpc': '2.0', 'id': payload.get('id'), 'error': {'code': -32601, 'message': 'unknown method'}})
 "#;
 
-    let config = McpServerConfig {
-        id: "fake".into(),
-        name: "fake".into(),
-        command: "python3".into(),
-        args: vec!["-c".into(), script.into()],
-        env: BTreeMap::new(),
-        transport: McpTransportKind::StdioProcess,
-    };
+        let config = McpServerConfig {
+            id: "fake".into(),
+            name: "fake".into(),
+            command: "python3".into(),
+            args: vec!["-c".into(), script.into()],
+            env: BTreeMap::new(),
+            transport: McpTransportKind::StdioProcess,
+        };
 
-    let client = RoutingMcpClient::default();
-    let info = client.connect(&config).await.expect("connect fake mcp");
-    assert!(info.protocol_initialized);
-    assert_eq!(info.peer.server_name.as_deref(), Some("fake-mcp"));
-    assert_eq!(info.peer.capabilities, McpCapabilities::from_initialize_result(Some(&json!({"tools": {}, "resources": {}}))));
+        let client = RoutingMcpClient::default();
+        let info = client.connect(&config).await.expect("connect fake mcp");
+        assert!(info.protocol_initialized);
+        assert_eq!(info.peer.server_name.as_deref(), Some("fake-mcp"));
+        assert_eq!(info.peer.capabilities, McpCapabilities::from_initialize_result(Some(&json!({"tools": {}, "resources": {}}))));
 
-    let tools = client.list_tools(&config).await.expect("list tools");
-    assert_eq!(tools.len(), 1);
-    assert_eq!(tools[0].name, "echo");
+        let tools = client.list_tools(&config).await.expect("list tools");
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].name, "echo");
 
-    let resources = client.list_resources(&config).await.expect("list resources");
-    assert_eq!(resources.len(), 1);
-    assert_eq!(resources[0].uri, "mcp://fake/readme");
+        let resources = client.list_resources(&config).await.expect("list resources");
+        assert_eq!(resources.len(), 1);
+        assert_eq!(resources[0].uri, "mcp://fake/readme");
 
-    client.disconnect(&config).await.expect("disconnect fake mcp");
+        client.disconnect(&config).await.expect("disconnect fake mcp");
+    })
+    .await
+    .expect("legacy MCP round-trip test should not hang");
 }
 
 #[tokio::test]
