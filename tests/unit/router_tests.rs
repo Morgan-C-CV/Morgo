@@ -6,6 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use rust_agent::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
 use rust_agent::command::builtin::compact::CompactCommand;
+use rust_agent::command::builtin::cost::CostCommand;
 use rust_agent::command::builtin::help::HelpCommand;
 use rust_agent::command::builtin::permissions::PermissionsCommand;
 use rust_agent::command::builtin::plan::PlanCommand;
@@ -512,6 +513,58 @@ async fn router_compact_decision_is_shared_by_cli_remote_and_telegram() {
 }
 
 #[tokio::test]
+async fn router_cost_decision_is_shared_by_cli_remote_and_telegram() {
+    let router = CommandRouter::new(
+        Arc::new(CommandRegistry::new().register(Arc::new(CostCommand))),
+        Box::new(DefaultSurfaceAuthorizer::default()),
+    );
+    let cli = NormalizedInput::from_raw(InteractionSurface::Cli, "/cost");
+    let telegram = NormalizedInput::from_raw(InteractionSurface::Telegram, "/cost");
+    let remote = NormalizedInput::from_remote_raw(
+        "remote-session",
+        "remote-actor",
+        true,
+        true,
+        "/cost",
+    );
+
+    let shared = RouteDecision::ExecuteCommand(RoutedCommand {
+        name: "cost".into(),
+        policy: CommandRoutePolicy {
+            availability: CommandAvailability::Everywhere,
+            command_type: CommandType::Local,
+            disable_model_invocation: false,
+            immediate: false,
+            is_sensitive: false,
+            enters_query_engine: false,
+        },
+    });
+    assert_eq!(router.decide(&cli).await, shared);
+    assert_eq!(router.decide(&telegram).await, shared);
+    assert_eq!(router.decide(&remote).await, shared);
+}
+
+#[tokio::test]
+async fn router_cost_denies_untrusted_remote_under_generic_policy() {
+    let router = CommandRouter::new(
+        Arc::new(CommandRegistry::new().register(Arc::new(CostCommand))),
+        Box::new(DefaultSurfaceAuthorizer::default()),
+    );
+    let input = NormalizedInput::from_remote_raw(
+        "remote-session",
+        "remote-actor",
+        true,
+        false,
+        "/cost",
+    );
+
+    assert_eq!(
+        router.decide(&input).await,
+        RouteDecision::Deny("command cost is not allowed on remote surface".into())
+    );
+}
+
+#[tokio::test]
 async fn router_compact_denies_untrusted_remote_under_generic_policy() {
     let router = CommandRouter::new(
         Arc::new(CommandRegistry::new().register(Arc::new(CompactCommand))),
@@ -747,6 +800,58 @@ async fn router_compact_route_enters_query_engine_with_builtin_prompt() {
             },
         }
     );
+}
+
+#[tokio::test]
+async fn router_cost_route_returns_local_message_without_entering_query_engine() {
+    let router = CommandRouter::new(
+        Arc::new(CommandRegistry::new().register(Arc::new(CostCommand))),
+        Box::new(DefaultSurfaceAuthorizer::default()),
+    );
+    let cost_tracker =
+        CostTracker::with_default_pricing("default-model".into(), Default::default());
+    cost_tracker.record_model_usage("default-model", 123, 45, 10, 5);
+    let app_state = AppState {
+        surface: InteractionSurface::Cli,
+        session_mode: SessionMode::Interactive,
+        client_type: ClientType::Cli,
+        session_source: SessionSource::LocalCli,
+        runtime_role: RuntimeRole::Coordinator,
+        worker_role: None,
+        permission_context: ToolPermissionContext::new(PermissionMode::Default),
+        command_registry: None,
+        runtime_tool_registry: Some(Arc::new(RwLock::new(ToolRegistry::new()))),
+        skill_registry: None,
+        mcp_runtime: None,
+        plugin_load_result: None,
+        cost_tracker,
+        service_observability_tracker:
+            rust_agent::service::observability::ServiceObservabilityTracker::default(),
+        notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
+        audit_log: Arc::new(std::sync::Mutex::new(
+            rust_agent::security::audit::AuditLog::default(),
+        )),
+        startup_trace: Vec::new(),
+        active_session_id: "test-session".into(),
+        session_store: None,
+        session: None,
+        history: None,
+        restored_session: None,
+    };
+
+    let result = router
+        .route(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/cost"),
+            &app_state,
+        )
+        .await
+        .expect("route should succeed");
+
+    let RouteExecution::CommandResult(CommandResult::Message(text)) = result else {
+        panic!("expected local cost command result");
+    };
+    assert!(text.contains("Session cost summary"));
+    assert!(text.contains("requests: 1"));
 }
 
 #[tokio::test]
