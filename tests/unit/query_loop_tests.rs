@@ -39,6 +39,7 @@ use rust_agent::tool::registry::ToolRegistry;
 
 struct ProgressFixtureTool;
 struct PendingApprovalFixtureTool;
+struct DeniedFixtureTool;
 
 #[async_trait]
 impl Tool for ProgressFixtureTool {
@@ -106,6 +107,35 @@ impl Tool for PendingApprovalFixtureTool {
         _permissions: &ToolPermissionContext,
     ) -> anyhow::Result<ToolResult> {
         Ok(ToolResult::Text("should not execute".into()))
+    }
+}
+
+#[async_trait]
+impl Tool for DeniedFixtureTool {
+    fn metadata(&self) -> ToolMetadata {
+        ToolMetadata {
+            name: "DeniedFixture".into(),
+            description: "Returns denied tool results".into(),
+            aliases: &[],
+            search_hint: None,
+            read_only: true,
+            destructive: false,
+            concurrency_safe: true,
+            always_load: true,
+            should_defer: false,
+            requires_auth: false,
+            requires_user_interaction: false,
+            is_open_world: false,
+            is_search_or_read_command: false,
+        }
+    }
+
+    async fn invoke(
+        &self,
+        _call: &ToolCall,
+        _permissions: &ToolPermissionContext,
+    ) -> anyhow::Result<ToolResult> {
+        Ok(ToolResult::Denied("requires policy escalation".into()))
     }
 }
 
@@ -550,7 +580,7 @@ async fn query_loop_surfaces_stream_errors_after_recovery_attempt() {
 }
 
 #[tokio::test]
-async fn query_loop_fails_when_tool_is_unknown() {
+async fn query_loop_compensates_missing_tool_result_after_tool_failure() {
     let engine = QueryEngine::new(test_context(vec![
         StreamEvent::MessageStart,
         StreamEvent::ToolUse {
@@ -568,6 +598,7 @@ async fn query_loop_fails_when_tool_is_unknown() {
 
     assert_eq!(result.state, QueryLoopState::Interrupted);
     assert_eq!(result.terminal, Terminal::AbortedTools);
+    assert_eq!(result.messages.len(), 2);
     assert!(
         result.messages[0]
             .content
@@ -576,8 +607,59 @@ async fn query_loop_fails_when_tool_is_unknown() {
     assert!(
         result.messages[1]
             .content
-            .contains("result missing; synthesized failure result")
+            .contains("tool MissingTool result missing; synthesized failure result preserved")
     );
+    assert!(result.events.iter().any(|event| matches!(
+        event,
+        EngineEvent::Notice {
+            kind: "tool",
+            message,
+            ..
+        } if message == "injecting missing tool result after tool failure for MissingTool"
+    )));
+}
+
+#[tokio::test]
+async fn query_loop_preserves_synthesized_missing_tool_result_for_denied_tool() {
+    let registry = ToolRegistry::new().register(Arc::new(DeniedFixtureTool));
+    let engine = QueryEngine::new(test_context_with_turns(
+        vec![vec![
+            StreamEvent::MessageStart,
+            StreamEvent::ToolUse {
+                tool_name: "DeniedFixture".into(),
+                input: "payload".into(),
+            },
+            StreamEvent::MessageStop {
+                stop_reason: StopReason::ToolUse,
+            },
+        ]],
+        registry,
+    ));
+
+    let result = engine
+        .submit_turn(Message::user("trigger denied tool"))
+        .await;
+
+    assert_eq!(result.state, QueryLoopState::Interrupted);
+    assert_eq!(result.terminal, Terminal::AbortedTools);
+    assert_eq!(result.messages.len(), 2);
+    assert!(
+        result.messages[0]
+            .content
+            .contains("tool DeniedFixture denied: requires policy escalation")
+    );
+    assert!(
+        result.messages[1]
+            .content
+            .contains("tool DeniedFixture result missing; synthesized denial result preserved")
+    );
+    assert!(result.events.iter().any(|event| matches!(
+        event,
+        EngineEvent::MessageCommitted(message)
+            if message
+                .content
+                .contains("tool DeniedFixture result missing; synthesized denial result preserved")
+    )));
 }
 
 #[tokio::test]
