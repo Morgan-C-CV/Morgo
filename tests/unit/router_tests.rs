@@ -96,6 +96,7 @@ impl Command for RemoteSafeTestCommand {
 }
 
 struct PromptNoModelCommand;
+struct AliasTestCommand;
 
 #[async_trait]
 impl Command for SensitiveRemoteCommand {
@@ -234,6 +235,33 @@ impl Command for PromptImmediateMetadataCommand {
     }
 }
 
+#[async_trait]
+impl Command for AliasTestCommand {
+    fn metadata(&self) -> CommandMetadata {
+        CommandMetadata {
+            name: "alias-target".into(),
+            description: "Alias resolution test command".into(),
+            source: CommandSource::Builtin,
+            category: "test".into(),
+            command_type: CommandType::Local,
+            availability: CommandAvailability::Everywhere,
+            aliases: vec!["alias-short".into()],
+            is_hidden: false,
+            disable_model_invocation: false,
+            immediate: true,
+            is_sensitive: false,
+        }
+    }
+
+    async fn execute(
+        &self,
+        _input: &NormalizedInput,
+        _app_state: &AppState,
+    ) -> anyhow::Result<CommandResult> {
+        Ok(CommandResult::Message("alias command response".into()))
+    }
+}
+
 #[tokio::test]
 async fn router_executes_known_commands_before_query() {
     let registry = Arc::new(CommandRegistry::new().register(Arc::new(HelpCommand)));
@@ -244,6 +272,28 @@ async fn router_executes_known_commands_before_query() {
         router.decide(&input).await,
         RouteDecision::ExecuteCommand(RoutedCommand {
             name: "help".into(),
+            policy: CommandRoutePolicy {
+                availability: CommandAvailability::Everywhere,
+                command_type: CommandType::Local,
+                disable_model_invocation: false,
+                immediate: true,
+                is_sensitive: false,
+                enters_query_engine: false,
+            },
+        })
+    );
+}
+
+#[tokio::test]
+async fn router_resolves_command_aliases_through_shared_registry() {
+    let registry = Arc::new(CommandRegistry::new().register(Arc::new(AliasTestCommand)));
+    let router = CommandRouter::new(registry, Box::new(DefaultSurfaceAuthorizer::default()));
+    let input = NormalizedInput::from_raw(InteractionSurface::Cli, "/alias-short");
+
+    assert_eq!(
+        router.decide(&input).await,
+        RouteDecision::ExecuteCommand(RoutedCommand {
+            name: "alias-target".into(),
             policy: CommandRoutePolicy {
                 availability: CommandAvailability::Everywhere,
                 command_type: CommandType::Local,

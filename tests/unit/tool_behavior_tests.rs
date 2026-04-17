@@ -742,6 +742,39 @@ fn open_world_tools_are_filtered_from_remote_and_headless_assembly() {
 }
 
 #[test]
+fn tool_registry_resolves_tool_aliases_in_find_and_worker_allowlist() {
+    let registry = ToolRegistry::new()
+        .register(Arc::new(FileReadTool))
+        .register(Arc::new(FileWriteTool));
+
+    let alias_call = ToolCall {
+        name: "FileWrite".into(),
+        input: "payload".into(),
+    };
+    let resolved = registry.find(&alias_call).expect("alias should resolve");
+    assert_eq!(resolved.metadata().name, "Write");
+
+    let worker = registry.assemble_worker_registry(Some(&["FileWrite".to_string()]));
+    let names = worker
+        .all_metadata()
+        .iter()
+        .map(|tool| tool.name)
+        .collect::<Vec<_>>();
+    assert_eq!(names, vec!["Write"]);
+}
+
+#[test]
+fn builtins_preserve_search_or_read_metadata_classification() {
+    assert!(FileReadTool.metadata().is_search_or_read_command);
+    assert!(GlobTool.metadata().is_search_or_read_command);
+    assert!(GrepTool.metadata().is_search_or_read_command);
+    assert!(WebSearchTool.metadata().is_search_or_read_command);
+    assert!(!FileWriteTool.metadata().is_search_or_read_command);
+    assert!(!FileEditTool.metadata().is_search_or_read_command);
+    assert!(!BashTool.metadata().is_search_or_read_command);
+}
+
+#[test]
 fn assembly_environment_can_explicitly_disable_open_world_tools() {
     let registry = ToolRegistry::new()
         .register(Arc::new(FileReadTool))

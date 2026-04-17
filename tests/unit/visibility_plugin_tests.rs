@@ -862,6 +862,56 @@ async fn plugin_slash_command_returns_prompt_result() {
 }
 
 #[test]
+fn plugin_prompt_tool_maps_read_only_into_search_or_read_metadata() {
+    let load_result = PluginLoadResult {
+        root: PathBuf::from("/tmp/project/.claude/plugins"),
+        source: PluginConfigSource::Directory,
+        plugins: vec![PluginDefinition {
+            name: "demo-plugin".into(),
+            version: Some("0.1.0".into()),
+            description: "demo".into(),
+            manifest_path: PathBuf::from("/tmp/project/.claude/plugins/demo/plugin.json"),
+            capabilities: vec![PluginCapability::Tools],
+            diagnostics_metadata: Some(PluginDiagnosticsMetadata {
+                homepage: None,
+                docs: Some("https://example.com/docs".into()),
+                issues: None,
+                support_level: Some("community".into()),
+            }),
+            commands: vec![],
+            tools: vec![sample_plugin_tool("plugin-tool")],
+            hooks: vec![],
+            governance: PluginGovernanceState::default(),
+            lifecycle_state: PluginLifecycleState::Enabled,
+            apply_status: PluginApplyStatus::Applied,
+            activation: PluginActivationSummary {
+                commands: 0,
+                tools: 1,
+                hooks: 0,
+            },
+        }],
+        diagnostics: vec![],
+        orphaned_governance_entries: vec![],
+    };
+
+    let (registry, diagnostics) =
+        augment_tool_registry_with_plugins(ToolRegistry::new(), &load_result);
+    assert!(diagnostics.is_empty());
+
+    let metadata = registry
+        .all_metadata()
+        .into_iter()
+        .find(|metadata| metadata.name == "plugin.demo-plugin.plugin-tool")
+        .expect("plugin tool metadata should exist");
+
+    assert_eq!(metadata.name, "plugin.demo-plugin.plugin-tool");
+    assert!(metadata.read_only);
+    assert!(metadata.is_search_or_read_command);
+    assert_eq!(metadata.aliases, vec!["plugin-tool-alias"]);
+    assert_eq!(metadata.search_hint, Some("plugin demo tool"));
+}
+
+#[test]
 fn plugin_slash_command_metadata_preserves_contract_flags() {
     let command = PluginSlashCommand::new(metadata_rich_plugin_command("plugin-cmd"));
     let metadata = command.metadata();
