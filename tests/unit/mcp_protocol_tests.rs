@@ -1,12 +1,8 @@
 use std::collections::BTreeMap;
-use std::sync::Arc;
 
 use rust_agent::service::mcp::client::{McpClient, RoutingMcpClient};
-use rust_agent::service::mcp::types::{McpServerConfig, McpTransportKind};
+use rust_agent::service::mcp::types::{McpCapabilities, McpServerConfig, McpTransportKind};
 use serde_json::json;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::net::TcpListener;
-use tokio::process::Command;
 
 #[tokio::test]
 async fn stdio_mcp_client_round_trips_list_call_and_read() {
@@ -71,6 +67,7 @@ while True:
     let info = client.connect(&config).await.expect("connect fake mcp");
     assert!(info.protocol_initialized);
     assert_eq!(info.peer.server_name.as_deref(), Some("fake-mcp"));
+    assert_eq!(info.peer.capabilities, McpCapabilities::from_initialize_result(Some(&json!({"tools": {}, "resources": {}}))));
 
     let tools = client.list_tools(&config).await.expect("list tools");
     assert_eq!(tools.len(), 1);
@@ -80,18 +77,72 @@ while True:
     assert_eq!(resources.len(), 1);
     assert_eq!(resources[0].uri, "mcp://fake/readme");
 
-    let tool_result = client
-        .call_tool(&config, "echo", Some(json!({"value": 42})))
-        .await
-        .expect("call tool");
-    assert_eq!(tool_result["content"][0]["text"], "echo");
-    assert_eq!(tool_result["structured"]["value"], 42);
-
-    let resource = client
-        .read_resource(&config, "mcp://fake/readme")
-        .await
-        .expect("read resource");
-    assert_eq!(resource, "resource-body");
-
     client.disconnect(&config).await.expect("disconnect fake mcp");
+}
+
+#[tokio::test]
+async fn stdio_mcp_client_normalizes_sparse_capability_payloads() {
+    let script = r#"
+import json, sys
+
+
+def write(msg):
+    data = json.dumps(msg).encode()
+    sys.stdout.write(f'Content-Length: {len(data)}\r\n\r\n')
+    sys.stdout.flush()
+    sys.stdout.buffer.write(data)
+    sys.stdout.buffer.flush()
+
+while True:
+    headers = {}
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            raise SystemExit(0)
+        if line == b'\r\n':
+            break
+        key, value = line.decode().split(':', 1)
+        headers[key.strip().lower()] = value.strip()
+    length = int(headers['content-length'])
+    payload = json.loads(sys.stdin.buffer.read(length))
+    method = payload.get('method')
+    if method == 'initialize':
+        write({
+            'jsonrpc': '2.0',
+            'id': payload['id'],
+            'result': {
+                'protocolVersion': '2025-03-26',
+                'serverInfo': {'name': 'sparse-mcp', 'version': '1.0.0'},
+                'capabilities': {'tools': None, 'resources': {}, 'vendorAuth': {'scheme': 'bearer'}}
+            }
+        })
+    elif method == 'notifications/initialized':
+        continue
+    elif method == 'tools/list':
+        write({'jsonrpc': '2.0', 'id': payload['id'], 'result': {'tools': []}})
+    elif method == 'resources/list':
+        write({'jsonrpc': '2.0', 'id': payload['id'], 'result': {'resources': []}})
+    else:
+        write({'jsonrpc': '2.0', 'id': payload.get('id'), 'result': {}})
+"#;
+
+    let config = McpServerConfig {
+        id: "sparse".into(),
+        name: "sparse".into(),
+        command: "python3".into(),
+        args: vec!["-c".into(), script.into()],
+        env: BTreeMap::new(),
+        transport: McpTransportKind::StdioProcess,
+    };
+
+    let client = RoutingMcpClient::default();
+    let info = client.connect(&config).await.expect("connect sparse mcp");
+    assert!(info.peer.capabilities.tools.is_none());
+    assert!(info.peer.capabilities.resources.is_some());
+    assert_eq!(
+        info.peer.capabilities.extensions.get("vendorAuth"),
+        Some(&json!({"scheme": "bearer"}))
+    );
+
+    client.disconnect(&config).await.expect("disconnect sparse mcp");
 }

@@ -10,7 +10,8 @@ use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::Mutex;
 
 use crate::service::mcp::types::{
-    McpConnectInfo, McpPeerInfo, McpResourceInfo, McpServerConfig, McpToolInfo, McpTransportKind,
+    McpCapabilities, McpConnectInfo, McpPeerInfo, McpResourceInfo, McpServerConfig, McpToolInfo,
+    McpTransportKind,
 };
 
 #[async_trait]
@@ -117,7 +118,7 @@ impl McpClient for MockMcpClient {
                 server_name: Some(config.name.clone()),
                 server_version: Some("mock".to_string()),
                 protocol_version: Some("mock".to_string()),
-                capabilities: Some(json!({"tools": {}, "resources": {}})),
+                capabilities: McpCapabilities::from_initialize_result(Some(&json!({"tools": {}, "resources": {}}))),
             },
         })
     }
@@ -365,7 +366,7 @@ impl StdioProcessMcpClient {
                     .get("protocolVersion")
                     .and_then(Value::as_str)
                     .map(ToString::to_string),
-                capabilities: result.get("capabilities").cloned(),
+                capabilities: McpCapabilities::from_initialize_result(result.get("capabilities")),
             },
         })
     }

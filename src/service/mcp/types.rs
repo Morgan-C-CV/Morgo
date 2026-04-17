@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, Hash)]
 #[serde(rename_all = "snake_case")]
@@ -72,11 +72,112 @@ pub struct McpResourceInfo {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct McpCapabilityEntry {
+    #[serde(default)]
+    pub declared: bool,
+    #[serde(default)]
+    pub details: Map<String, Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct McpCapabilities {
+    #[serde(default)]
+    pub tools: Option<McpCapabilityEntry>,
+    #[serde(default)]
+    pub resources: Option<McpCapabilityEntry>,
+    #[serde(default)]
+    pub prompts: Option<McpCapabilityEntry>,
+    #[serde(default)]
+    pub experimental: Option<McpCapabilityEntry>,
+    #[serde(default)]
+    pub extensions: BTreeMap<String, Value>,
+}
+
+impl McpCapabilities {
+    pub fn from_initialize_result(value: Option<&Value>) -> Self {
+        let Some(Value::Object(object)) = value else {
+            return Self::default();
+        };
+
+        let mut capabilities = Self::default();
+        for (key, value) in object {
+            let normalized = normalize_capability_entry(value);
+            match key.as_str() {
+                "tools" => capabilities.tools = normalized,
+                "resources" => capabilities.resources = normalized,
+                "prompts" => capabilities.prompts = normalized,
+                "experimental" => capabilities.experimental = normalized,
+                other => {
+                    capabilities.extensions.insert(other.to_string(), value.clone());
+                }
+            }
+        }
+        capabilities
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.tools.is_none()
+            && self.resources.is_none()
+            && self.prompts.is_none()
+            && self.experimental.is_none()
+            && self.extensions.is_empty()
+    }
+}
+
+fn normalize_capability_entry(value: &Value) -> Option<McpCapabilityEntry> {
+    match value {
+        Value::Null => None,
+        Value::Object(details) => Some(McpCapabilityEntry {
+            declared: true,
+            details: details.clone(),
+        }),
+        _ => Some(McpCapabilityEntry {
+            declared: true,
+            details: Map::new(),
+        }),
+    }
+}
+
+impl std::fmt::Display for McpCapabilities {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut parts = Vec::new();
+        push_capability_label(&mut parts, "tools", self.tools.as_ref());
+        push_capability_label(&mut parts, "resources", self.resources.as_ref());
+        push_capability_label(&mut parts, "prompts", self.prompts.as_ref());
+        push_capability_label(&mut parts, "experimental", self.experimental.as_ref());
+        if !self.extensions.is_empty() {
+            let names = self.extensions.keys().cloned().collect::<Vec<_>>().join(",");
+            parts.push(format!("extensions={names}"));
+        }
+        if parts.is_empty() {
+            write!(f, "none")
+        } else {
+            write!(f, "{}", parts.join(", "))
+        }
+    }
+}
+
+fn push_capability_label(
+    parts: &mut Vec<String>,
+    label: &str,
+    entry: Option<&McpCapabilityEntry>,
+) {
+    if let Some(entry) = entry {
+        if entry.details.is_empty() {
+            parts.push(label.to_string());
+        } else {
+            let detail_keys = entry.details.keys().cloned().collect::<Vec<_>>().join(",");
+            parts.push(format!("{label}({detail_keys})"));
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct McpPeerInfo {
     pub server_name: Option<String>,
     pub server_version: Option<String>,
     pub protocol_version: Option<String>,
-    pub capabilities: Option<Value>,
+    pub capabilities: McpCapabilities,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -102,7 +203,7 @@ pub struct McpServerState {
     pub server_name: Option<String>,
     pub server_version: Option<String>,
     pub server_protocol_version: Option<String>,
-    pub server_capabilities: Option<Value>,
+    pub server_capabilities: McpCapabilities,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

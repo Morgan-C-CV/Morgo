@@ -85,8 +85,8 @@ impl Command for McpCommand {
                             .unwrap_or_default()
                     ));
                 }
-                if let Some(capabilities) = server.server_capabilities.as_ref() {
-                    lines.push(format!("  capabilities: {}", capabilities));
+                if !server.server_capabilities.is_empty() {
+                    lines.push(format!("  capabilities: {}", server.server_capabilities));
                 }
                 lines.push(format!(
                     "  inventory: tools={}, resources={}",

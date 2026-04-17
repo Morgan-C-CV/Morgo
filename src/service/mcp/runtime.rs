@@ -106,7 +106,7 @@ impl McpRuntime {
                 server_name: None,
                 server_version: None,
                 server_protocol_version: None,
-                server_capabilities: None,
+                server_capabilities: crate::service::mcp::types::McpCapabilities::default(),
             })
             .collect::<Vec<_>>();
         let fingerprints = config_load_result
@@ -464,7 +464,7 @@ impl McpRuntime {
         state.server_name = None;
         state.server_version = None;
         state.server_protocol_version = None;
-        state.server_capabilities = None;
+        state.server_capabilities = crate::service::mcp::types::McpCapabilities::default();
         Ok(state.clone())
     }
 

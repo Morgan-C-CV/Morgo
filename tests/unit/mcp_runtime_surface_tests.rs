@@ -13,14 +13,14 @@ use rust_agent::service::mcp::client::McpClient;
 use rust_agent::service::mcp::config::{McpConfigLoadResult, McpConfigSource};
 use rust_agent::service::mcp::runtime::{McpRuntime, replace_runtime_server_config};
 use rust_agent::service::mcp::types::{
-    McpAction, McpConnectInfo, McpPeerInfo, McpRequest, McpResourceInfo, McpServerConfig,
-    McpToolInfo, McpTransportKind,
+    McpAction, McpCapabilities, McpConnectInfo, McpPeerInfo, McpRequest, McpResourceInfo,
+    McpServerConfig, McpToolInfo, McpTransportKind,
 };
 use rust_agent::state::app_state::{AppState, RuntimeRole};
 use rust_agent::state::permission_context::{PermissionMode, ToolPermissionContext};
 use rust_agent::task::manager::TaskManager;
 use rust_agent::tool::builtin::mcp::McpTool;
-use rust_agent::tool::definition::{Tool, ToolCall, ToolResult};
+use rust_agent::tool::definition::{Tool, ToolCall};
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
 
@@ -51,7 +51,7 @@ impl McpClient for FakeMcpClient {
         match self.mode.lock().await.clone() {
             FakeMode::MalformedHeader => anyhow::bail!("MCP stdio response did not include Content-Length header"),
             FakeMode::IdMismatch => anyhow::bail!("MCP response id mismatch for method initialize"),
-            FakeMode::ServerError => anyhow::bail!("MCP initialize failed: {\"code\":-32000,\"message\":\"server exploded\"}"),
+            FakeMode::ServerError => anyhow::bail!("{}", r#"MCP initialize failed: {"code":-32000,"message":"server exploded"}"#),
             FakeMode::Ok => Ok(McpConnectInfo {
                 protocol_initialized: true,
                 pid: Some(42),
@@ -59,7 +59,7 @@ impl McpClient for FakeMcpClient {
                     server_name: Some("fake".into()),
                     server_version: Some("1.0.0".into()),
                     protocol_version: Some("2025-03-26".into()),
-                    capabilities: Some(json!({"tools": {}, "resources": {}})),
+                    capabilities: McpCapabilities::from_initialize_result(Some(&json!({"tools": {}, "resources": {}}))),
                 },
             }),
         }
@@ -71,7 +71,7 @@ impl McpClient for FakeMcpClient {
 
     async fn list_tools(&self, _config: &McpServerConfig) -> anyhow::Result<Vec<McpToolInfo>> {
         match self.mode.lock().await.clone() {
-            FakeMode::ServerError => anyhow::bail!("MCP tools/list failed: {\"code\":-32000,\"message\":\"server exploded\"}"),
+            FakeMode::ServerError => anyhow::bail!("{}", r#"MCP tools/list failed: {"code":-32000,"message":"server exploded"}"#),
             FakeMode::MalformedHeader => anyhow::bail!("MCP stdio response did not include Content-Length header"),
             FakeMode::IdMismatch => anyhow::bail!("MCP response id mismatch for method tools/list"),
             FakeMode::Ok => Ok(vec![
@@ -84,7 +84,7 @@ impl McpClient for FakeMcpClient {
 
     async fn list_resources(&self, _config: &McpServerConfig) -> anyhow::Result<Vec<McpResourceInfo>> {
         match self.mode.lock().await.clone() {
-            FakeMode::ServerError => anyhow::bail!("MCP resources/list failed: {\"code\":-32000,\"message\":\"server exploded\"}"),
+            FakeMode::ServerError => anyhow::bail!("{}", r#"MCP resources/list failed: {"code":-32000,"message":"server exploded"}"#),
             FakeMode::MalformedHeader => anyhow::bail!("MCP stdio response did not include Content-Length header"),
             FakeMode::IdMismatch => anyhow::bail!("MCP response id mismatch for method resources/list"),
             FakeMode::Ok => Ok(vec![
@@ -96,7 +96,7 @@ impl McpClient for FakeMcpClient {
 
     async fn call_tool(&self, _config: &McpServerConfig, tool: &str, input: Option<Value>) -> anyhow::Result<Value> {
         match self.mode.lock().await.clone() {
-            FakeMode::ServerError => anyhow::bail!("MCP tools/call failed: {\"code\":-32000,\"message\":\"server exploded\"}"),
+            FakeMode::ServerError => anyhow::bail!("{}", r#"MCP tools/call failed: {"code":-32000,"message":"server exploded"}"#),
             FakeMode::MalformedHeader => anyhow::bail!("MCP stdio response did not include Content-Length header"),
             FakeMode::IdMismatch => anyhow::bail!("MCP response id mismatch for method tools/call"),
             FakeMode::Ok => Ok(json!({"tool": tool, "input": input})),
@@ -105,7 +105,7 @@ impl McpClient for FakeMcpClient {
 
     async fn read_resource(&self, _config: &McpServerConfig, resource: &str) -> anyhow::Result<String> {
         match self.mode.lock().await.clone() {
-            FakeMode::ServerError => anyhow::bail!("MCP resources/read failed: {\"code\":-32000,\"message\":\"server exploded\"}"),
+            FakeMode::ServerError => anyhow::bail!("{}", r#"MCP resources/read failed: {"code":-32000,"message":"server exploded"}"#),
             FakeMode::MalformedHeader => anyhow::bail!("MCP stdio response did not include Content-Length header"),
             FakeMode::IdMismatch => anyhow::bail!("MCP response id mismatch for method resources/read"),
             FakeMode::Ok => Ok(format!("resource:{resource}")),
@@ -170,7 +170,7 @@ async fn mcp_status_shows_reconnecting_and_inventory_summaries() {
     runtime.connect("fake").await.expect("connect fake server");
     runtime.reconnect("fake").await.expect("reconnect fake server");
 
-    let app_state = test_app_state(runtime);
+    let app_state = test_app_state(runtime.clone());
     let result = McpCommand
         .execute(&NormalizedInput::from_raw(InteractionSurface::Cli, "/mcp status"), &app_state)
         .await
@@ -178,9 +178,12 @@ async fn mcp_status_shows_reconnecting_and_inventory_summaries() {
     let CommandResult::Message(text) = result else {
         panic!("expected mcp status message");
     };
+    let servers = runtime.list_servers().await;
+    assert!(servers[0].server_capabilities.tools.is_some());
+    assert!(servers[0].server_capabilities.resources.is_some());
     assert!(text.contains("status: connected"));
     assert!(text.contains("inventory: tools=3, resources=2"));
-    assert!(text.contains("capabilities:"));
+    assert!(text.contains("capabilities: tools, resources"));
 }
 
 #[tokio::test]

@@ -8,6 +8,10 @@ mod context_prompt_tests;
 mod coordinator_tests;
 #[path = "unit/cost_tests.rs"]
 mod cost_tests;
+#[path = "unit/mcp_protocol_tests.rs"]
+mod mcp_protocol_tests;
+#[path = "unit/mcp_runtime_surface_tests.rs"]
+mod mcp_runtime_surface_tests;
 #[path = "unit/hook_config_tests.rs"]
 mod hook_config_tests;
 #[path = "unit/hook_loop3_tests.rs"]
