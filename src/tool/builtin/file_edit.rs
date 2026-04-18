@@ -68,10 +68,15 @@ impl Tool for FileEditTool {
     async fn invoke(
         &self,
         call: &ToolCall,
-        _permissions: &ToolPermissionContext,
+        permissions: &ToolPermissionContext,
     ) -> anyhow::Result<ToolResult> {
         let input = parse_input(&call.input)?;
         let path = PathBuf::from(input.file_path.trim());
+        if let Some(policy) = permissions.filesystem_policy() {
+            policy
+                .check_existing_or_create_path_for_write(&path)
+                .into_result()?;
+        }
         let metadata = fs::metadata(&path)
             .await
             .map_err(|error| anyhow::anyhow!("failed to access {}: {error}", path.display()))?;

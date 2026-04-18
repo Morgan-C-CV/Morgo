@@ -63,13 +63,19 @@ impl Tool for GlobTool {
     async fn invoke(
         &self,
         call: &ToolCall,
-        _permissions: &ToolPermissionContext,
+        permissions: &ToolPermissionContext,
     ) -> anyhow::Result<ToolResult> {
         let root = std::env::current_dir()
             .map_err(|error| anyhow::anyhow!("failed to resolve cwd: {error}"))?;
         let pattern = parse_pattern(call)?;
         let mut matches = Vec::new();
         collect_matches(&root, &root, pattern.trim(), &mut matches)?;
+        if let Some(policy) = permissions.filesystem_policy() {
+            let absolute_matches = matches.iter().map(|matched| root.join(matched)).collect::<Vec<_>>();
+            policy
+                .check_discovered_paths_for_read(&absolute_matches, crate::security::filesystem_policy::FilesystemAccessKind::Search)
+                .into_result()?;
+        }
         matches.sort();
         Ok(ToolResult::Text(matches.join("\n")))
     }

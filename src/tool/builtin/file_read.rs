@@ -64,10 +64,13 @@ impl Tool for FileReadTool {
     async fn invoke(
         &self,
         call: &ToolCall,
-        _permissions: &ToolPermissionContext,
+        permissions: &ToolPermissionContext,
     ) -> anyhow::Result<ToolResult> {
         let raw_path = parse_input(call)?;
         let path = Path::new(raw_path.trim());
+        if let Some(policy) = permissions.filesystem_policy() {
+            policy.check_existing_path_for_read(path).into_result()?;
+        }
         let contents = fs::read_to_string(path)
             .await
             .map_err(|error| anyhow::anyhow!("failed to read {}: {error}", path.display()))?;

@@ -63,13 +63,19 @@ impl Tool for GrepTool {
     async fn invoke(
         &self,
         call: &ToolCall,
-        _permissions: &ToolPermissionContext,
+        permissions: &ToolPermissionContext,
     ) -> anyhow::Result<ToolResult> {
         let root = std::env::current_dir()
             .map_err(|error| anyhow::anyhow!("failed to resolve cwd: {error}"))?;
         let query = parse_pattern(call)?;
         let mut matches = Vec::new();
-        collect_matches(&root, &root, query.trim(), &mut matches)?;
+        let mut searched_paths = Vec::new();
+        collect_matches(&root, &root, query.trim(), &mut searched_paths, &mut matches)?;
+        if let Some(policy) = permissions.filesystem_policy() {
+            policy
+                .check_discovered_paths_for_read(&searched_paths, crate::security::filesystem_policy::FilesystemAccessKind::Search)
+                .into_result()?;
+        }
         matches.sort();
         Ok(ToolResult::Text(matches.join("\n")))
     }
@@ -79,6 +85,7 @@ fn collect_matches(
     root: &Path,
     current: &Path,
     query: &str,
+    searched_paths: &mut Vec<std::path::PathBuf>,
     matches: &mut Vec<String>,
 ) -> anyhow::Result<()> {
     for entry in fs::read_dir(current).map_err(|error| {
@@ -96,10 +103,11 @@ fn collect_matches(
         })?;
 
         if file_type.is_dir() {
-            collect_matches(root, &entry_path, query, matches)?;
+            collect_matches(root, &entry_path, query, searched_paths, matches)?;
             continue;
         }
 
+        searched_paths.push(entry_path.clone());
         let Ok(contents) = fs::read_to_string(&entry_path) else {
             continue;
         };

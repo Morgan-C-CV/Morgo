@@ -70,6 +70,13 @@ impl FilesystemPolicyDecision {
         matches!(self, Self::Allow { .. })
     }
 
+    pub fn into_result(self) -> anyhow::Result<()> {
+        match self {
+            Self::Allow { .. } => Ok(()),
+            Self::Deny { reason } => anyhow::bail!(reason),
+        }
+    }
+
     pub fn deny_reason(&self) -> Option<&str> {
         match self {
             Self::Allow { .. } => None,
@@ -157,6 +164,43 @@ impl FilesystemPolicy {
             path: rule.path.display().to_string(),
             level: rule.level,
         })
+    }
+
+    pub fn check_existing_path_for_read(&self, path: &Path) -> FilesystemPolicyDecision {
+        self.check_existing_target(path, FilesystemAccessKind::Read)
+    }
+
+    pub fn check_existing_path_for_search(&self, path: &Path) -> FilesystemPolicyDecision {
+        self.check_existing_target(path, FilesystemAccessKind::Search)
+    }
+
+    pub fn check_existing_or_create_path_for_write(&self, path: &Path) -> FilesystemPolicyDecision {
+        if path.exists() {
+            self.check_existing_target(path, FilesystemAccessKind::Write)
+        } else {
+            self.check_create_target(path, FilesystemAccessKind::Create)
+        }
+    }
+
+    pub fn check_discovered_paths_for_read<I, P>(
+        &self,
+        paths: I,
+        access: FilesystemAccessKind,
+    ) -> FilesystemPolicyDecision
+    where
+        I: IntoIterator<Item = P>,
+        P: AsRef<Path>,
+    {
+        for path in paths {
+            let decision = self.check_existing_target(path.as_ref(), access);
+            if !decision.is_allowed() {
+                return decision;
+            }
+        }
+        FilesystemPolicyDecision::Allow {
+            matched_path: PathBuf::from("<all_paths_within_policy>"),
+            level: FilesystemPermissionLevel::Allow,
+        }
     }
 
     fn from_config_with_base(
@@ -310,6 +354,14 @@ fn normalize_policy_path(raw: &str, base_dir: &Path) -> anyhow::Result<PathBuf> 
     } else {
         base_dir.join(path)
     };
+    if absolute.exists() {
+        return std::fs::canonicalize(&absolute).map_err(|error| {
+            anyhow::anyhow!(
+                "failed to canonicalize filesystem policy path {}: {error}",
+                absolute.display()
+            )
+        });
+    }
     Ok(normalize_path_lexically(&absolute))
 }
 

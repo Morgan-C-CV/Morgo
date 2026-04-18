@@ -57,10 +57,15 @@ impl Tool for FileWriteTool {
     async fn invoke(
         &self,
         call: &ToolCall,
-        _permissions: &ToolPermissionContext,
+        permissions: &ToolPermissionContext,
     ) -> anyhow::Result<ToolResult> {
         let input = parse_input(call)?;
         let path = Path::new(input.file_path.trim());
+        if let Some(policy) = permissions.filesystem_policy() {
+            policy
+                .check_existing_or_create_path_for_write(path)
+                .into_result()?;
+        }
         fs::write(path, input.content)
             .await
             .map_err(|error| anyhow::anyhow!("failed to write {}: {error}", path.display()))?;

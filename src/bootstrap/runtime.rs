@@ -247,7 +247,7 @@ impl RuntimeBootstrap {
             task_manager.clone(),
             task_list_manager.clone(),
             plan_manager.clone(),
-        )?;
+        );
 
         state.record_phase(BootstrapPhase::InitializeSettings);
         // Phase 7: settings/model/agent initialization
@@ -457,7 +457,7 @@ impl RuntimeBootstrap {
         task_manager: Arc<TaskManager>,
         task_list_manager: Arc<TaskListManager>,
         plan_manager: Arc<PlanManager>,
-    ) -> anyhow::Result<RuntimeInitializeBundle> {
+    ) -> RuntimeInitializeBundle {
         let base_hook_registry = load_hook_registry(&state.current_cwd);
         let plugin_load_result = Arc::new(load_plugins(&state.current_cwd));
         let hook_registry =
@@ -518,7 +518,9 @@ impl RuntimeBootstrap {
         let runtime_tool_registry = Arc::new(RwLock::new(coordinator_tools.clone()));
         let notification_dispatcher = NotificationDispatcher::new(self.build_telegram_gateway())
             .with_hook_registry(hook_registry.clone());
-        let filesystem_policy = self.load_filesystem_policy()?.map(Arc::new);
+        let filesystem_policy = self.load_filesystem_policy().unwrap_or_else(|error| {
+            panic!("failed to load filesystem policy during bootstrap: {error}")
+        }).map(Arc::new);
         let mut permission_context = ToolAssemblyContext::coordinator(state.surface, state.session_mode)
             .permission_context(if self.cli.init_only {
                 PermissionMode::Plan
@@ -576,7 +578,7 @@ impl RuntimeBootstrap {
             service_observability_tracker.clone(),
         );
 
-        Ok(RuntimeInitializeBundle {
+        RuntimeInitializeBundle {
             hook_registry,
             notification_dispatcher,
             skill_registry,
@@ -589,7 +591,7 @@ impl RuntimeBootstrap {
             provider_config,
             api_client,
             compactor: ReactiveCompactor,
-        })
+        }
     }
 
     fn build_runtime_seed_state(

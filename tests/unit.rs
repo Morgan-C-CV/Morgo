@@ -28,6 +28,8 @@ mod query_loop_tests;
 mod router_tests;
 #[path = "unit/security_loop3_tests.rs"]
 mod security_loop3_tests;
+#[path = "unit/filesystem_policy_tests.rs"]
+mod filesystem_policy_tests;
 #[path = "unit/security_tests.rs"]
 mod security_tests;
 #[path = "unit/skill_prompt_tests.rs"]
