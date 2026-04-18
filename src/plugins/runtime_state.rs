@@ -179,23 +179,60 @@ pub async fn rebuild_runtime_plugin_state(
         });
     };
     let snapshot = build_runtime_plugin_snapshot(app_state);
-    let generation = runtime_plugin_state.replace(snapshot.clone()).await;
-    let report = PluginRuntimeApplyReport {
-        outcome: PluginRuntimeApplyOutcome::Applied,
-        generation,
-        message: format!(
-            "applied runtime plugin snapshot generation {} (plugins={}, active_commands={}, active_tools={}, active_hooks={})",
-            generation,
-            snapshot.plugin_load_result.plugins.len(),
-            snapshot.plugin_load_result.active_command_count(),
-            snapshot.plugin_load_result.active_tool_count(),
-            snapshot.plugin_load_result.active_hook_count(),
-        ),
-        diagnostics: snapshot.plugin_load_result.diagnostics.clone(),
-        orphaned_governance_entries: snapshot
+    let has_apply_failures = snapshot
+        .plugin_load_result
+        .plugins
+        .iter()
+        .any(|plugin| {
+            plugin.apply_status == PluginApplyStatus::ApplyFailed
+                || plugin.lifecycle_state == PluginLifecycleState::Error
+        });
+
+    let report = if has_apply_failures {
+        let generation = runtime_plugin_state.generation().await;
+        let failing_plugins = snapshot
             .plugin_load_result
-            .orphaned_governance_entries
-            .clone(),
+            .plugins
+            .iter()
+            .filter(|plugin| {
+                plugin.apply_status == PluginApplyStatus::ApplyFailed
+                    || plugin.lifecycle_state == PluginLifecycleState::Error
+            })
+            .map(|plugin| plugin.name.clone())
+            .collect::<Vec<_>>();
+        PluginRuntimeApplyReport {
+            outcome: PluginRuntimeApplyOutcome::RetainedPreviousSnapshot,
+            generation,
+            message: format!(
+                "retained runtime plugin snapshot generation {} after plugin apply failure(s): {}",
+                generation,
+                failing_plugins.join(", ")
+            ),
+            diagnostics: snapshot.plugin_load_result.diagnostics.clone(),
+            orphaned_governance_entries: snapshot
+                .plugin_load_result
+                .orphaned_governance_entries
+                .clone(),
+        }
+    } else {
+        let generation = runtime_plugin_state.replace(snapshot.clone()).await;
+        PluginRuntimeApplyReport {
+            outcome: PluginRuntimeApplyOutcome::Applied,
+            generation,
+            message: format!(
+                "applied runtime plugin snapshot generation {} (plugins={}, active_commands={}, active_tools={}, active_hooks={})",
+                generation,
+                snapshot.plugin_load_result.plugins.len(),
+                snapshot.plugin_load_result.active_command_count(),
+                snapshot.plugin_load_result.active_tool_count(),
+                snapshot.plugin_load_result.active_hook_count(),
+            ),
+            diagnostics: snapshot.plugin_load_result.diagnostics.clone(),
+            orphaned_governance_entries: snapshot
+                .plugin_load_result
+                .orphaned_governance_entries
+                .clone(),
+        }
     };
     runtime_plugin_state
         .set_last_apply_report(report.clone())

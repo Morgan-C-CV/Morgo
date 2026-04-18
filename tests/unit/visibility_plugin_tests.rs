@@ -22,7 +22,10 @@ use rust_agent::plugins::loader::load_plugins;
 use rust_agent::plugins::runtime::{
     augment_hook_registry_with_plugins, augment_tool_registry_with_plugins,
 };
-use rust_agent::plugins::runtime_state::{RuntimePluginState, build_runtime_plugin_snapshot};
+use rust_agent::plugins::runtime_state::{
+    RuntimePluginState, build_runtime_plugin_snapshot, hydrate_app_state_from_snapshot,
+    rebuild_runtime_plugin_state,
+};
 use rust_agent::plugins::types::{
     PluginActivationSummary, PluginApplyStatus, PluginCapability, PluginCommandDefinition,
     PluginConfigSource, PluginDefinition, PluginDiagnostic, PluginDiagnosticSeverity,
@@ -609,6 +612,155 @@ async fn plugins_command_lists_show_details_and_persists_governance_state() {
     assert!(persisted.contains("\"enabled\": true"));
 
     fs::remove_dir_all(root).expect("plugins command temp dir should be cleaned up");
+}
+
+#[tokio::test]
+async fn runtime_plugin_rebuild_retains_previous_snapshot_on_apply_failure() {
+    let root = unique_temp_path("rust-agent-plugin-retained-snapshot");
+    let plugin_dir = root.join(".claude").join("plugins").join("demo");
+    let manifest_path = plugin_dir.join("plugin.json");
+    fs::create_dir_all(&plugin_dir).expect("plugin dir should exist");
+    fs::write(
+        &manifest_path,
+        r#"{
+  "name": "demo-plugin",
+  "version": "0.1.0",
+  "description": "Demo plugin",
+  "capabilities": ["commands", "tools"],
+  "commands": [
+    {
+      "name": "plugin-cmd",
+      "description": "Plugin command",
+      "prompt": "Do plugin command work"
+    }
+  ],
+  "tools": [
+    {
+      "name": "demo_tool",
+      "description": "Demo tool",
+      "prompt": "Inspect plugin-owned files",
+      "read_only": true
+    }
+  ]
+}"#,
+    )
+    .expect("good plugin manifest should be written");
+
+    let mut app_state = test_app_state(None, Some(Arc::new(TaskManager::default())), None, None);
+    app_state.session = Some(SessionSnapshot {
+        session_id: SessionId("plugin-test-session".into()),
+        surface: InteractionSurface::Cli,
+        session_mode: SessionMode::Interactive,
+        cwd: root.display().to_string(),
+        last_turn_at: None,
+        prompt_seed: None,
+    });
+    let runtime_plugin_state = RuntimePluginState::new(build_runtime_plugin_snapshot(&app_state));
+    let initial_snapshot = runtime_plugin_state.snapshot().await;
+    hydrate_app_state_from_snapshot(&mut app_state, &initial_snapshot);
+    app_state.permission_context = app_state
+        .permission_context
+        .clone()
+        .with_runtime_plugin_state(runtime_plugin_state.clone());
+
+    fs::write(
+        &manifest_path,
+        r#"{
+  "name": "demo-plugin",
+  "version": "0.2.0",
+  "description": "Broken demo plugin",
+  "capabilities": ["commands", "tools"],
+  "commands": [
+    {
+      "name": "broken-plugin-cmd",
+      "description": "Broken plugin command"
+    }
+  ]
+}"#,
+    )
+    .expect("broken plugin manifest should be written");
+
+    let report = rebuild_runtime_plugin_state(&app_state)
+        .await
+        .expect("plugin rebuild should produce retained report");
+    assert_eq!(report.outcome.as_str(), "retained_previous_snapshot");
+    assert_eq!(report.generation, 0);
+    assert!(report.message.contains("retained runtime plugin snapshot generation 0"));
+    assert!(report.message.contains("demo-plugin"));
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "plugin-command-prompt-invalid")
+    );
+
+    let retained_snapshot = runtime_plugin_state.snapshot().await;
+    assert_eq!(retained_snapshot.plugin_load_result.plugins[0].version.as_deref(), Some("0.1.0"));
+    assert_eq!(retained_snapshot.plugin_load_result.active_command_count(), 1);
+    assert_eq!(retained_snapshot.plugin_load_result.active_tool_count(), 1);
+    assert_eq!(runtime_plugin_state.generation().await, 0);
+    assert_eq!(
+        runtime_plugin_state
+            .last_apply_report()
+            .await
+            .expect("apply report should be retained")
+            .outcome
+            .as_str(),
+        "retained_previous_snapshot"
+    );
+
+    let status_result = StatusCommand
+        .execute(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/status"),
+            &app_state,
+        )
+        .await
+        .expect("status should render retained apply state");
+    let CommandResult::Message(status_text) = status_result else {
+        panic!("expected status message");
+    };
+    assert!(status_text.contains("- runtime_apply: outcome=retained_previous_snapshot, generation=0"));
+    assert!(status_text.contains("- runtime_apply_summary: retained runtime plugin snapshot generation 0"));
+    assert!(status_text.contains("demo-plugin v0.1.0 — state=enabled, applied=applied"));
+    assert!(!status_text.contains("broken-plugin-cmd"));
+
+    let show_result = PluginsCommand
+        .execute(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/plugins show demo-plugin"),
+            &app_state,
+        )
+        .await
+        .expect("plugins show should render retained apply state");
+    let CommandResult::Message(show_text) = show_result else {
+        panic!("expected plugins show message");
+    };
+    assert!(show_text.contains("- runtime_apply:"));
+    assert!(show_text.contains("  - outcome: retained_previous_snapshot"));
+    assert!(show_text.contains("  - generation: 0"));
+    assert!(show_text.contains("  - summary: retained runtime plugin snapshot generation 0"));
+
+    let mut next_turn_app_state = test_app_state(None, Some(Arc::new(TaskManager::default())), None, None);
+    hydrate_app_state_from_snapshot(&mut next_turn_app_state, &retained_snapshot);
+    assert_eq!(
+        next_turn_app_state
+            .plugin_load_result
+            .as_ref()
+            .expect("next turn should have plugin result")
+            .plugins[0]
+            .version
+            .as_deref(),
+        Some("0.1.0")
+    );
+    assert_eq!(
+        next_turn_app_state
+            .plugin_load_result
+            .as_ref()
+            .expect("next turn should have plugin result")
+            .active_command_count(),
+        1
+    );
+
+    fs::remove_dir_all(root).expect("retained snapshot temp dir should be cleaned up");
 }
 
 #[tokio::test]
