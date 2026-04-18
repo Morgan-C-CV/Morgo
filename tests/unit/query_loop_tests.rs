@@ -754,6 +754,74 @@ async fn query_loop_treats_stream_terminal_protocol_errors_as_immediate_terminal
 }
 
 #[tokio::test]
+async fn query_loop_maps_tool_use_protocol_errors_to_stream_protocol_code() {
+    let engine = QueryEngine::new(test_context(vec![StreamEvent::Error(StreamError {
+        provider_id: "anthropic".into(),
+        kind: "tool_use_protocol".into(),
+        message: "tool stop without tool payload".into(),
+        retryable: false,
+        disposition: ProviderFailureDisposition::StreamTerminal,
+        status_code: None,
+    })]));
+
+    let result = engine.submit_turn(Message::user("trigger tool protocol error")).await;
+
+    assert_eq!(result.state, QueryLoopState::Failed);
+    assert_eq!(
+        result.terminal,
+        Terminal::ModelError {
+            message: "tool stop without tool payload".into(),
+            code: Some(rust_agent::core::events::ServiceFailureCode::ApiStreamProtocol),
+        }
+    );
+}
+
+#[tokio::test]
+async fn query_loop_maps_structured_output_invalid_errors_to_stream_protocol_code() {
+    let engine = QueryEngine::new(test_context(vec![StreamEvent::Error(StreamError {
+        provider_id: "anthropic".into(),
+        kind: "structured_output_invalid".into(),
+        message: "structured output block ended without complete JSON payload".into(),
+        retryable: false,
+        disposition: ProviderFailureDisposition::StreamTerminal,
+        status_code: None,
+    })]));
+
+    let result = engine.submit_turn(Message::user("trigger structured output error")).await;
+
+    assert_eq!(result.state, QueryLoopState::Failed);
+    assert_eq!(
+        result.terminal,
+        Terminal::ModelError {
+            message: "structured output block ended without complete JSON payload".into(),
+            code: Some(rust_agent::core::events::ServiceFailureCode::ApiStreamProtocol),
+        }
+    );
+}
+
+#[tokio::test]
+async fn query_loop_treats_stop_reason_error_as_terminal_protocol_failure() {
+    let engine = QueryEngine::new(test_context(vec![
+        StreamEvent::MessageStart,
+        StreamEvent::MessageStop {
+            stop_reason: StopReason::Error,
+        },
+    ]));
+
+    let result = engine.submit_turn(Message::user("trigger stop error")).await;
+
+    assert_eq!(result.state, QueryLoopState::Failed);
+    assert_eq!(
+        result.terminal,
+        Terminal::ModelError {
+            message: "stream stopped with error".into(),
+            code: Some(rust_agent::core::events::ServiceFailureCode::ApiStreamProtocol),
+        }
+    );
+    assert_eq!(result.transition, None);
+}
+
+#[tokio::test]
 async fn query_loop_compensates_missing_tool_result_after_tool_failure() {
     let engine = QueryEngine::new(test_context(vec![
         StreamEvent::MessageStart,

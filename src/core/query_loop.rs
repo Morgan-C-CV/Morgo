@@ -585,8 +585,8 @@ async fn consume_model_stream(
                         state.messages.push(message);
                     }
                     let Some((tool_name, tool_input)) = pending_tool_use.take() else {
-                        let error_message =
-                            Message::assistant("stream error: tool stop without tool payload");
+                        let message = "tool stop without tool payload";
+                        let error_message = Message::assistant(format!("stream error: {message}"));
                         engine_events.push(EngineEvent::MessageCommitted(error_message.clone()));
                         state.messages.push(error_message);
                         return TurnOutcome {
@@ -595,8 +595,8 @@ async fn consume_model_stream(
                             decision: TurnDecision::Return(
                                 state.clone(),
                                 Terminal::ModelError {
-                                    message: "tool stop without tool payload".into(),
-                                    code: None,
+                                    message: message.into(),
+                                    code: Some(ServiceFailureCode::ApiStreamProtocol),
                                 },
                             ),
                         };
@@ -1516,7 +1516,11 @@ fn synthetic_stop_reason_error(transition: Option<&Continue>) -> StreamError {
     } else {
         "stream_stop_error"
     };
-    let disposition = ProviderFailureDisposition::StreamInterrupted;
+    let disposition = if matches!(transition, Some(Continue::ModelFallbackRetry)) {
+        ProviderFailureDisposition::StreamInterrupted
+    } else {
+        ProviderFailureDisposition::StreamTerminal
+    };
     StreamError {
         provider_id: "provider".into(),
         kind: kind.into(),
@@ -1548,7 +1552,9 @@ fn classify_pre_stream_failure_code(kind: &str, status_code: Option<u16>) -> Ser
         "invalid_response" | "empty_body" | "bad_content_type" => {
             ServiceFailureCode::ApiProviderInvalidResponse
         }
-        "sse_protocol" => ServiceFailureCode::ApiStreamProtocol,
+        "sse_protocol" | "tool_use_protocol" | "structured_output_invalid" => {
+            ServiceFailureCode::ApiStreamProtocol
+        }
         "http_status" => match status_code {
             Some(429) => ServiceFailureCode::ApiProviderHttp429,
             Some(500..=599) => ServiceFailureCode::ApiProviderHttp5xx,
@@ -1566,7 +1572,9 @@ fn classify_stream_failure_code(
     match kind {
         "model_fallback" | "model_fallback_failed" => ServiceFailureCode::ApiStreamModelFallback,
         "overloaded_error" => ServiceFailureCode::ApiStreamOverloaded,
-        "sse_protocol" => ServiceFailureCode::ApiStreamProtocol,
+        "sse_protocol" | "tool_use_protocol" | "structured_output_invalid" | "stream_stop_error" => {
+            ServiceFailureCode::ApiStreamProtocol
+        }
         _ if disposition.is_stream_interrupted() => ServiceFailureCode::ApiStreamInterrupted,
         _ => ServiceFailureCode::ApiStreamTerminal,
     }

@@ -453,11 +453,20 @@ struct PendingToolUseBlock {
     emitted: bool,
 }
 
+#[derive(Debug, Default, Clone)]
+struct PendingStructuredOutputBlock {
+    value: Option<Value>,
+    partial_json: String,
+    emitted: bool,
+}
+
 struct ProviderStreamParser<'a> {
     provider_id: &'a str,
     default_model: &'a str,
     saw_message_start: bool,
+    emitted_tool_use: bool,
     pending_tool_use: Option<PendingToolUseBlock>,
+    pending_structured_output: Option<PendingStructuredOutputBlock>,
 }
 
 impl<'a> ProviderStreamParser<'a> {
@@ -466,7 +475,9 @@ impl<'a> ProviderStreamParser<'a> {
             provider_id,
             default_model,
             saw_message_start: false,
+            emitted_tool_use: false,
             pending_tool_use: None,
+            pending_structured_output: None,
         }
     }
 
@@ -508,19 +519,29 @@ impl<'a> ProviderStreamParser<'a> {
                         let tool_name = block
                             .get("name")
                             .and_then(Value::as_str)
-                            .ok_or_else(|| self.protocol_error("tool_use content block missing name"))?;
+                            .ok_or_else(|| self.tool_use_protocol_error("tool_use content block missing name"))?;
                         let mut pending = PendingToolUseBlock {
                             tool_name: Some(tool_name.to_string()),
-                            input: block.get("input").cloned(),
+                            input: normalize_tool_use_input(block)?,
                             partial_json: String::new(),
                             emitted: false,
                         };
                         Self::emit_pending_tool_use_if_ready(
                             self.saw_message_start,
+                            &mut self.emitted_tool_use,
                             &mut pending,
                             output,
                         )?;
                         self.pending_tool_use = Some(pending);
+                    }
+                    Some("json") | Some("structured_output") => {
+                        let mut pending = PendingStructuredOutputBlock {
+                            value: normalize_structured_output_value(block)?,
+                            partial_json: String::new(),
+                            emitted: false,
+                        };
+                        Self::emit_pending_structured_output_if_ready(&mut pending, output)?;
+                        self.pending_structured_output = Some(pending);
                     }
                     _ => {}
                 }
@@ -544,11 +565,45 @@ impl<'a> ProviderStreamParser<'a> {
                             pending.input = Some(value);
                         }
                     }
-                    Self::emit_pending_tool_use_if_ready(self.saw_message_start, pending, output)?;
+                    if let Some(input_delta) = payload
+                        .get("delta")
+                        .and_then(|delta| delta.get("input_json_delta"))
+                    {
+                        pending.input = Some(normalize_json_like_value(input_delta, "tool_use input")?);
+                    }
+                    Self::emit_pending_tool_use_if_ready(
+                        self.saw_message_start,
+                        &mut self.emitted_tool_use,
+                        pending,
+                        output,
+                    )?;
+                }
+                if let Some(pending) = self.pending_structured_output.as_mut() {
+                    if let Some(partial_json) = payload
+                        .get("delta")
+                        .and_then(|delta| delta.get("partial_json"))
+                        .and_then(Value::as_str)
+                    {
+                        pending.partial_json.push_str(partial_json);
+                        if let Ok(value) = serde_json::from_str::<Value>(&pending.partial_json) {
+                            pending.value = Some(value);
+                        }
+                    }
+                    if let Some(output_delta) = payload
+                        .get("delta")
+                        .and_then(|delta| delta.get("output_json_delta"))
+                    {
+                        pending.value = Some(normalize_json_like_value(
+                            output_delta,
+                            "structured output",
+                        )?);
+                    }
+                    Self::emit_pending_structured_output_if_ready(pending, output)?;
                 }
             }
             "content_block_stop" => {
                 self.finalize_pending_tool_use(output)?;
+                self.finalize_pending_structured_output(output)?;
             }
             "message_delta" => {
                 if let Some(usage) = payload.get("usage") {
@@ -562,14 +617,16 @@ impl<'a> ProviderStreamParser<'a> {
                     .and_then(|delta| delta.get("stop_reason"))
                     .and_then(Value::as_str)
                 {
+                    let stop_reason = map_stop_reason(stop_reason);
                     self.finalize_pending_tool_use(output)?;
-                    output.push(StreamEvent::MessageStop {
-                        stop_reason: map_stop_reason(stop_reason),
-                    });
+                    self.finalize_pending_structured_output(output)?;
+                    self.validate_stop_reason(&stop_reason)?;
+                    output.push(StreamEvent::MessageStop { stop_reason });
                 }
             }
             "message_stop" => {
                 self.finalize_pending_tool_use(output)?;
+                self.finalize_pending_structured_output(output)?;
                 if !output
                     .iter()
                     .any(|event| matches!(event, StreamEvent::MessageStop { .. }))
@@ -608,7 +665,8 @@ impl<'a> ProviderStreamParser<'a> {
     }
 
     fn finish(&mut self, output: &mut Vec<StreamEvent>) -> Result<(), ApiError> {
-        self.finalize_pending_tool_use(output)
+        self.finalize_pending_tool_use(output)?;
+        self.finalize_pending_structured_output(output)
     }
 
     fn ensure_message_start(&mut self, output: &mut Vec<StreamEvent>) {
@@ -620,9 +678,31 @@ impl<'a> ProviderStreamParser<'a> {
 
     fn finalize_pending_tool_use(&mut self, output: &mut Vec<StreamEvent>) -> Result<(), ApiError> {
         if let Some(mut pending) = self.pending_tool_use.take() {
-            Self::emit_pending_tool_use_if_ready(self.saw_message_start, &mut pending, output)?;
+            Self::emit_pending_tool_use_if_ready(
+                self.saw_message_start,
+                &mut self.emitted_tool_use,
+                &mut pending,
+                output,
+            )?;
             if !pending.emitted {
-                return Err(self.protocol_error("tool_use block ended without complete input payload"));
+                return Err(self.tool_use_protocol_error(
+                    "tool_use block ended without complete input payload",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn finalize_pending_structured_output(
+        &mut self,
+        output: &mut Vec<StreamEvent>,
+    ) -> Result<(), ApiError> {
+        if let Some(mut pending) = self.pending_structured_output.take() {
+            Self::emit_pending_structured_output_if_ready(&mut pending, output)?;
+            if !pending.emitted {
+                return Err(self.structured_output_error(
+                    "structured output block ended without complete JSON payload",
+                ));
             }
         }
         Ok(())
@@ -630,6 +710,7 @@ impl<'a> ProviderStreamParser<'a> {
 
     fn emit_pending_tool_use_if_ready(
         saw_message_start: bool,
+        emitted_tool_use: &mut bool,
         pending: &mut PendingToolUseBlock,
         output: &mut Vec<StreamEvent>,
     ) -> Result<(), ApiError> {
@@ -637,7 +718,7 @@ impl<'a> ProviderStreamParser<'a> {
             return Ok(());
         }
         let Some(tool_name) = pending.tool_name.clone() else {
-            return Err(ApiError::sse_protocol_with_disposition(
+            return Err(ApiError::tool_use_protocol_with_disposition(
                 "tool_use content block missing name",
                 if saw_message_start {
                     ProviderFailureDisposition::StreamTerminal
@@ -650,6 +731,7 @@ impl<'a> ProviderStreamParser<'a> {
             return Ok(());
         };
         pending.emitted = true;
+        *emitted_tool_use = true;
         output.push(StreamEvent::ToolUse {
             tool_name,
             input: input.to_string(),
@@ -657,8 +739,55 @@ impl<'a> ProviderStreamParser<'a> {
         Ok(())
     }
 
+    fn emit_pending_structured_output_if_ready(
+        pending: &mut PendingStructuredOutputBlock,
+        output: &mut Vec<StreamEvent>,
+    ) -> Result<(), ApiError> {
+        if pending.emitted {
+            return Ok(());
+        }
+        let Some(value) = pending.value.clone() else {
+            return Ok(());
+        };
+        pending.emitted = true;
+        output.push(StreamEvent::TextDelta(value.to_string()));
+        Ok(())
+    }
+
+    fn validate_stop_reason(&self, stop_reason: &StopReason) -> Result<(), ApiError> {
+        if matches!(stop_reason, StopReason::ToolUse) && !self.emitted_tool_use {
+            return Err(self.tool_use_protocol_error("tool stop without tool payload"));
+        }
+        if !matches!(stop_reason, StopReason::ToolUse) && self.pending_tool_use.is_some() {
+            return Err(self.tool_use_protocol_error("tool_use block did not complete before stop"));
+        }
+        Ok(())
+    }
+
     fn protocol_error(&self, message: impl Into<String>) -> ApiError {
         ApiError::sse_protocol_with_disposition(
+            message,
+            if self.saw_message_start {
+                ProviderFailureDisposition::StreamTerminal
+            } else {
+                ProviderFailureDisposition::PreStreamTerminal
+            },
+        )
+    }
+
+    fn tool_use_protocol_error(&self, message: impl Into<String>) -> ApiError {
+        ApiError::tool_use_protocol_with_disposition(
+            message,
+            if self.saw_message_start {
+                ProviderFailureDisposition::StreamTerminal
+            } else {
+                ProviderFailureDisposition::PreStreamTerminal
+            },
+        )
+    }
+
+    fn structured_output_error(&self, message: impl Into<String>) -> ApiError {
+        ApiError::structured_output_invalid_with_disposition(
             message,
             if self.saw_message_start {
                 ProviderFailureDisposition::StreamTerminal
@@ -696,6 +825,58 @@ fn parse_usage(usage: &Value, default_model: &str) -> UsageEvent {
             .and_then(Value::as_u64)
             .unwrap_or_default() as usize,
     }
+}
+
+fn normalize_tool_use_input(block: &Value) -> Result<Option<Value>, ApiError> {
+    let Some(raw) = block
+        .get("input")
+        .or_else(|| block.get("args"))
+        .or_else(|| block.get("arguments"))
+        .or_else(|| block.get("payload"))
+    else {
+        return Ok(None);
+    };
+
+    if raw.is_null() {
+        return Ok(Some(Value::Object(Default::default())));
+    }
+
+    normalize_json_like_value(raw, "tool_use input").map(Some)
+}
+
+fn normalize_structured_output_value(block: &Value) -> Result<Option<Value>, ApiError> {
+    let Some(raw) = block
+        .get("json")
+        .or_else(|| block.get("output"))
+        .or_else(|| block.get("value"))
+    else {
+        return Ok(None);
+    };
+
+    if raw.is_null() {
+        return Ok(Some(Value::Object(Default::default())));
+    }
+
+    normalize_json_like_value(raw, "structured output").map(Some)
+}
+
+fn normalize_json_like_value(raw: &Value, label: &str) -> Result<Value, ApiError> {
+    match raw {
+        Value::String(text) => {
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                Ok(Value::Object(Default::default()))
+            } else {
+                serde_json::from_str::<Value>(trimmed).or_else(|_| Ok(Value::String(text.clone())))
+            }
+        }
+        Value::Array(_) | Value::Object(_) | Value::Bool(_) | Value::Number(_) => Ok(raw.clone()),
+        Value::Null => Ok(Value::Object(Default::default())),
+    }
+    .map_err(|error: serde_json::Error| match label {
+        "tool_use input" => ApiError::tool_use_protocol(format!("invalid {label}: {error}")),
+        _ => ApiError::structured_output_invalid(format!("invalid {label}: {error}")),
+    })
 }
 
 fn map_stop_reason(reason: &str) -> StopReason {
@@ -746,11 +927,12 @@ mod tests {
     use super::{
         ModelProviderConfig, ProviderTimeout, build_messages_url_for_provider,
         classify_stream_error, classify_stream_error_disposition, map_stop_reason,
-        parse_anthropic_sse_response, parse_stream_response_for_provider,
+        normalize_json_like_value, parse_anthropic_sse_response, parse_stream_response_for_provider,
         validate_streaming_response_headers,
     };
     use crate::service::api::retry::RetryPolicy;
     use crate::service::api::streaming::{ProviderFailureDisposition, StopReason, StreamEvent};
+    use serde_json::Value;
     use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderValue};
     use reqwest::StatusCode;
 
@@ -895,7 +1077,7 @@ mod tests {
 
         let error = parse_anthropic_sse_response("anthropic", body, "default-model")
             .expect_err("incomplete tool payload should fail");
-        assert_eq!(error.kind_label(), "sse_protocol");
+        assert_eq!(error.kind_label(), "tool_use_protocol");
         assert_eq!(
             error.disposition,
             ProviderFailureDisposition::StreamTerminal
@@ -903,6 +1085,118 @@ mod tests {
         assert!(error
             .message
             .contains("tool_use block ended without complete input payload"));
+    }
+
+    #[test]
+    fn normalizes_tool_use_alias_and_null_payload_variants() {
+        let body = concat!(
+            "event: message\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-test\"}}\n\n",
+            "event: message\n",
+            "data: {\"type\":\"content_block_start\",\"content_block\":{\"type\":\"tool_use\",\"name\":\"Read\",\"arguments\":null}}\n\n",
+            "event: message\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"}}\n\n",
+            "event: message\n",
+            "data: {\"type\":\"message_stop\"}\n\n"
+        );
+
+        let events = parse_anthropic_sse_response("anthropic", body, "default-model")
+            .expect("null tool payload should normalize");
+        assert!(events.iter().any(|event| matches!(
+            event,
+            StreamEvent::ToolUse { tool_name, input }
+                if tool_name == "Read" && input == "{}"
+        )));
+    }
+
+    #[test]
+    fn parses_stringified_tool_use_payload_from_alias_field() {
+        let body = concat!(
+            "event: message\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-test\"}}\n\n",
+            "event: message\n",
+            "data: {\"type\":\"content_block_start\",\"content_block\":{\"type\":\"tool_use\",\"name\":\"Read\",\"args\":\"{\\\"path\\\":\\\"foo\\\"}\"}}\n\n",
+            "event: message\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"}}\n\n",
+            "event: message\n",
+            "data: {\"type\":\"message_stop\"}\n\n"
+        );
+
+        let events = parse_anthropic_sse_response("anthropic", body, "default-model")
+            .expect("stringified tool payload should parse");
+        assert!(events.iter().any(|event| matches!(
+            event,
+            StreamEvent::ToolUse { tool_name, input }
+                if tool_name == "Read" && input == "{\"path\":\"foo\"}"
+        )));
+    }
+
+    #[test]
+    fn rejects_tool_stop_without_payload_as_typed_protocol_error() {
+        let body = concat!(
+            "event: message\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-test\"}}\n\n",
+            "event: message\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"}}\n\n",
+            "event: message\n",
+            "data: {\"type\":\"message_stop\"}\n\n"
+        );
+
+        let error = parse_anthropic_sse_response("anthropic", body, "default-model")
+            .expect_err("tool stop without payload should fail");
+        assert_eq!(error.kind_label(), "tool_use_protocol");
+        assert_eq!(error.disposition, ProviderFailureDisposition::StreamTerminal);
+        assert!(error.message.contains("tool stop without tool payload"));
+    }
+
+    #[test]
+    fn accepts_structured_output_block_with_stringified_json() {
+        let body = concat!(
+            "event: message\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-test\"}}\n\n",
+            "event: message\n",
+            "data: {\"type\":\"content_block_start\",\"content_block\":{\"type\":\"structured_output\",\"value\":\"{\\\"answer\\\":42}\"}}\n\n",
+            "event: message\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n",
+            "event: message\n",
+            "data: {\"type\":\"message_stop\"}\n\n"
+        );
+
+        let events = parse_anthropic_sse_response("anthropic", body, "default-model")
+            .expect("structured output should parse");
+        assert!(events.iter().any(|event| matches!(
+            event,
+            StreamEvent::TextDelta(text) if text == "{\"answer\":42}"
+        )));
+    }
+
+    #[test]
+    fn rejects_incomplete_structured_output_payload_at_end_of_stream() {
+        let body = concat!(
+            "event: message\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-test\"}}\n\n",
+            "event: message\n",
+            "data: {\"type\":\"content_block_start\",\"content_block\":{\"type\":\"structured_output\"}}\n\n",
+            "event: message\n",
+            "data: {\"type\":\"content_block_delta\",\"delta\":{\"partial_json\":\"{\\\"answer\\\":\"}}\n\n",
+            "event: message\n",
+            "data: {\"type\":\"message_stop\"}\n\n"
+        );
+
+        let error = parse_anthropic_sse_response("anthropic", body, "default-model")
+            .expect_err("incomplete structured output should fail");
+        assert_eq!(error.kind_label(), "structured_output_invalid");
+        assert_eq!(error.disposition, ProviderFailureDisposition::StreamTerminal);
+        assert!(error
+            .message
+            .contains("structured output block ended without complete JSON payload"));
+    }
+
+    #[test]
+    fn normalize_json_like_value_preserves_plain_strings_for_tool_inputs() {
+        let value = normalize_json_like_value(&Value::String("inspect file".into()), "tool_use input")
+            .expect("plain string should stay string");
+        assert_eq!(value, Value::String("inspect file".into()));
     }
 
     #[test]

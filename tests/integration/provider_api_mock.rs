@@ -151,6 +151,43 @@ async fn production_provider_assembles_partial_tool_use_payload_metadata() {
 }
 
 #[tokio::test]
+async fn production_provider_normalizes_stringified_tool_use_alias_payload() {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind mock provider listener");
+    let addr = listener.local_addr().expect("listener addr");
+    let server = tokio::spawn(run_stringified_tool_use_alias_response_server(listener));
+
+    let config = ModelProviderConfig {
+        provider_id: "anthropic".into(),
+        base_url: format!("http://{}", addr),
+        api_key: Some("test-key".into()),
+        model_id: "claude-test".into(),
+        timeout: ProviderTimeout {
+            request_timeout_ms: 5_000,
+        },
+        retry_policy: RetryPolicy {
+            max_attempts: 1,
+            initial_backoff_ms: 1,
+            max_backoff_ms: 1,
+        },
+        pricing: Default::default(),
+    };
+
+    let events = ModelProviderClient::from_config(config)
+        .stream_message(&Message::user("inspect file"))
+        .await;
+
+    assert!(events.iter().any(|event| matches!(
+        event,
+        StreamEvent::ToolUse { tool_name, input }
+            if tool_name == "Agent" && input == "{\"prompt\":\"inspect file\"}"
+    )));
+
+    server.await.expect("mock provider server finished");
+}
+
+#[tokio::test]
 async fn production_provider_preserves_terminal_http_compatibility_metadata() {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
@@ -293,6 +330,88 @@ async fn production_provider_surfaces_malformed_stream_as_protocol_failure() {
         StreamEvent::Error(error)
             if error.provider_id == "anthropic"
                 && error.kind == "sse_protocol"
+                && !error.retryable
+                && error.disposition == ProviderFailureDisposition::StreamTerminal
+                && error.status_code.is_none()
+    ));
+
+    server.await.expect("mock provider server finished");
+}
+
+#[tokio::test]
+async fn production_provider_surfaces_tool_use_protocol_failure() {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind mock provider listener");
+    let addr = listener.local_addr().expect("listener addr");
+    let server = tokio::spawn(run_tool_stop_without_payload_response_server(listener));
+
+    let config = ModelProviderConfig {
+        provider_id: "anthropic".into(),
+        base_url: format!("http://{}", addr),
+        api_key: Some("test-key".into()),
+        model_id: "claude-test".into(),
+        timeout: ProviderTimeout {
+            request_timeout_ms: 5_000,
+        },
+        retry_policy: RetryPolicy {
+            max_attempts: 1,
+            initial_backoff_ms: 1,
+            max_backoff_ms: 1,
+        },
+        pricing: Default::default(),
+    };
+
+    let events = ModelProviderClient::from_config(config)
+        .stream_message(&Message::user("hello"))
+        .await;
+
+    assert!(matches!(
+        &events[0],
+        StreamEvent::Error(error)
+            if error.provider_id == "anthropic"
+                && error.kind == "tool_use_protocol"
+                && !error.retryable
+                && error.disposition == ProviderFailureDisposition::StreamTerminal
+                && error.status_code.is_none()
+    ));
+
+    server.await.expect("mock provider server finished");
+}
+
+#[tokio::test]
+async fn production_provider_surfaces_structured_output_protocol_failure() {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind mock provider listener");
+    let addr = listener.local_addr().expect("listener addr");
+    let server = tokio::spawn(run_incomplete_structured_output_response_server(listener));
+
+    let config = ModelProviderConfig {
+        provider_id: "anthropic".into(),
+        base_url: format!("http://{}", addr),
+        api_key: Some("test-key".into()),
+        model_id: "claude-test".into(),
+        timeout: ProviderTimeout {
+            request_timeout_ms: 5_000,
+        },
+        retry_policy: RetryPolicy {
+            max_attempts: 1,
+            initial_backoff_ms: 1,
+            max_backoff_ms: 1,
+        },
+        pricing: Default::default(),
+    };
+
+    let events = ModelProviderClient::from_config(config)
+        .stream_message(&Message::user("hello"))
+        .await;
+
+    assert!(matches!(
+        &events[0],
+        StreamEvent::Error(error)
+            if error.provider_id == "anthropic"
+                && error.kind == "structured_output_invalid"
                 && !error.retryable
                 && error.disposition == ProviderFailureDisposition::StreamTerminal
                 && error.status_code.is_none()
@@ -619,6 +738,36 @@ async fn run_partial_tool_use_response_server(listener: TcpListener) {
     stream.flush().await.expect("flush mock provider response");
 }
 
+async fn run_stringified_tool_use_alias_response_server(listener: TcpListener) {
+    let (mut stream, _peer): (tokio::net::TcpStream, SocketAddr) = listener
+        .accept()
+        .await
+        .expect("accept mock provider request");
+    let mut buffer = vec![0_u8; 16 * 1024];
+    let _ = stream.read(&mut buffer).await.expect("read request");
+
+    let sse = concat!(
+        "event: message\r\n",
+        "data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-test\"}}\r\n\r\n",
+        "event: message\r\n",
+        "data: {\"type\":\"content_block_start\",\"content_block\":{\"type\":\"tool_use\",\"name\":\"Agent\",\"args\":\"{\\\"prompt\\\":\\\"inspect file\\\"}\"}}\r\n\r\n",
+        "event: message\r\n",
+        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"}}\r\n\r\n",
+        "event: message\r\n",
+        "data: {\"type\":\"message_stop\"}\r\n\r\n"
+    );
+    let response = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+        sse.len(),
+        sse
+    );
+    stream
+        .write_all(response.as_bytes())
+        .await
+        .expect("write mock provider response");
+    stream.flush().await.expect("flush mock provider response");
+}
+
 async fn run_interrupted_stream_response_server(listener: TcpListener) {
     let (mut stream, _peer): (tokio::net::TcpStream, SocketAddr) = listener
         .accept()
@@ -673,6 +822,70 @@ async fn run_malformed_stream_response_server(listener: TcpListener) {
         .flush()
         .await
         .expect("flush malformed stream response");
+}
+
+async fn run_tool_stop_without_payload_response_server(listener: TcpListener) {
+    let (mut stream, _peer): (tokio::net::TcpStream, SocketAddr) = listener
+        .accept()
+        .await
+        .expect("accept mock provider request");
+    let mut buffer = vec![0_u8; 16 * 1024];
+    let _ = stream.read(&mut buffer).await.expect("read request");
+
+    let sse = concat!(
+        "event: message\r\n",
+        "data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-test\"}}\r\n\r\n",
+        "event: message\r\n",
+        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"}}\r\n\r\n",
+        "event: message\r\n",
+        "data: {\"type\":\"message_stop\"}\r\n\r\n"
+    );
+    let response = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+        sse.len(),
+        sse
+    );
+    stream
+        .write_all(response.as_bytes())
+        .await
+        .expect("write malformed tool-use response");
+    stream
+        .flush()
+        .await
+        .expect("flush malformed tool-use response");
+}
+
+async fn run_incomplete_structured_output_response_server(listener: TcpListener) {
+    let (mut stream, _peer): (tokio::net::TcpStream, SocketAddr) = listener
+        .accept()
+        .await
+        .expect("accept mock provider request");
+    let mut buffer = vec![0_u8; 16 * 1024];
+    let _ = stream.read(&mut buffer).await.expect("read request");
+
+    let sse = concat!(
+        "event: message\r\n",
+        "data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-test\"}}\r\n\r\n",
+        "event: message\r\n",
+        "data: {\"type\":\"content_block_start\",\"content_block\":{\"type\":\"structured_output\"}}\r\n\r\n",
+        "event: message\r\n",
+        "data: {\"type\":\"content_block_delta\",\"delta\":{\"partial_json\":\"{\\\"answer\\\":\"}}\r\n\r\n",
+        "event: message\r\n",
+        "data: {\"type\":\"message_stop\"}\r\n\r\n"
+    );
+    let response = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+        sse.len(),
+        sse
+    );
+    stream
+        .write_all(response.as_bytes())
+        .await
+        .expect("write incomplete structured output response");
+    stream
+        .flush()
+        .await
+        .expect("flush incomplete structured output response");
 }
 
 async fn run_single_error_response_server(listener: TcpListener) {

@@ -13,6 +13,8 @@ pub enum ApiErrorKind {
     BadContentType,
     InvalidResponse,
     SseProtocol,
+    ToolUseProtocol,
+    StructuredOutputInvalid,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -110,6 +112,42 @@ impl ApiError {
         }
     }
 
+    pub fn tool_use_protocol(message: impl Into<String>) -> Self {
+        Self::tool_use_protocol_with_disposition(
+            message,
+            ProviderFailureDisposition::PreStreamTerminal,
+        )
+    }
+
+    pub fn tool_use_protocol_with_disposition(
+        message: impl Into<String>,
+        disposition: ProviderFailureDisposition,
+    ) -> Self {
+        Self {
+            kind: ApiErrorKind::ToolUseProtocol,
+            message: message.into(),
+            disposition,
+        }
+    }
+
+    pub fn structured_output_invalid(message: impl Into<String>) -> Self {
+        Self::structured_output_invalid_with_disposition(
+            message,
+            ProviderFailureDisposition::PreStreamTerminal,
+        )
+    }
+
+    pub fn structured_output_invalid_with_disposition(
+        message: impl Into<String>,
+        disposition: ProviderFailureDisposition,
+    ) -> Self {
+        Self {
+            kind: ApiErrorKind::StructuredOutputInvalid,
+            message: message.into(),
+            disposition,
+        }
+    }
+
     pub fn with_disposition(mut self, disposition: ProviderFailureDisposition) -> Self {
         self.disposition = disposition;
         self
@@ -130,6 +168,8 @@ impl ApiError {
             ApiErrorKind::BadContentType => "bad_content_type",
             ApiErrorKind::InvalidResponse => "invalid_response",
             ApiErrorKind::SseProtocol => "sse_protocol",
+            ApiErrorKind::ToolUseProtocol => "tool_use_protocol",
+            ApiErrorKind::StructuredOutputInvalid => "structured_output_invalid",
         }
     }
 
