@@ -66,10 +66,20 @@ impl ApiError {
     }
 
     pub fn sse_protocol(message: impl Into<String>) -> Self {
+        Self::sse_protocol_with_disposition(
+            message,
+            ProviderFailureDisposition::PreStreamTerminal,
+        )
+    }
+
+    pub fn sse_protocol_with_disposition(
+        message: impl Into<String>,
+        disposition: ProviderFailureDisposition,
+    ) -> Self {
         Self {
             kind: ApiErrorKind::SseProtocol,
             message: message.into(),
-            disposition: ProviderFailureDisposition::PreStreamTerminal,
+            disposition,
         }
     }
 

@@ -319,7 +319,7 @@ pub fn parse_anthropic_sse_response(
     default_model: &str,
 ) -> Result<Vec<StreamEvent>, ApiError> {
     let mut events = Vec::new();
-    let mut saw_message_start = false;
+    let mut parser = ProviderStreamParser::new(provider_id, default_model);
     let normalized = body.replace("\r\n", "\n");
 
     for frame in normalized
@@ -336,140 +336,244 @@ pub fn parse_anthropic_sse_response(
             continue;
         }
         let json: Value = serde_json::from_str(&payload).map_err(|error| {
-            ApiError::sse_protocol(format!("invalid SSE JSON payload: {error}"))
+            ApiError::sse_protocol_with_disposition(
+                format!("invalid SSE JSON payload: {error}"),
+                if parser.saw_message_start {
+                    ProviderFailureDisposition::StreamTerminal
+                } else {
+                    ProviderFailureDisposition::PreStreamTerminal
+                },
+            )
         })?;
-        map_provider_event(
-            provider_id,
-            &json,
-            default_model,
-            &mut saw_message_start,
-            &mut events,
-        )?;
+        parser.map_provider_event(&json, &mut events)?;
     }
 
+    parser.finish(&mut events)?;
     Ok(events)
 }
 
-fn map_provider_event(
-    provider_id: &str,
-    payload: &Value,
-    default_model: &str,
-    saw_message_start: &mut bool,
-    output: &mut Vec<StreamEvent>,
-) -> Result<(), ApiError> {
-    let event_type = payload
-        .get("type")
-        .and_then(Value::as_str)
-        .ok_or_else(|| ApiError::invalid_response("provider event missing type"))?;
+#[derive(Debug, Default, Clone)]
+struct PendingToolUseBlock {
+    tool_name: Option<String>,
+    input: Option<Value>,
+    partial_json: String,
+    emitted: bool,
+}
 
-    match event_type {
-        "message_start" => {
-            if !*saw_message_start {
-                output.push(StreamEvent::MessageStart);
-                *saw_message_start = true;
-            }
-            if let Some(usage) = payload
-                .get("message")
-                .and_then(|message| message.get("usage"))
-            {
-                output.push(StreamEvent::Usage(parse_usage(
-                    usage,
-                    payload_model(payload).unwrap_or(default_model),
-                )));
-            }
+struct ProviderStreamParser<'a> {
+    provider_id: &'a str,
+    default_model: &'a str,
+    saw_message_start: bool,
+    pending_tool_use: Option<PendingToolUseBlock>,
+}
+
+impl<'a> ProviderStreamParser<'a> {
+    fn new(provider_id: &'a str, default_model: &'a str) -> Self {
+        Self {
+            provider_id,
+            default_model,
+            saw_message_start: false,
+            pending_tool_use: None,
         }
-        "content_block_start" => {
-            if !*saw_message_start {
-                output.push(StreamEvent::MessageStart);
-                *saw_message_start = true;
-            }
-            let block = payload.get("content_block").ok_or_else(|| {
-                ApiError::invalid_response("content_block_start missing content_block")
-            })?;
-            match block.get("type").and_then(Value::as_str) {
-                Some("text") => {
-                    if let Some(text) = block.get("text").and_then(Value::as_str) {
-                        output.push(StreamEvent::TextDelta(text.to_string()));
-                    }
-                }
-                Some("tool_use") => {
-                    let tool_name = block.get("name").and_then(Value::as_str).ok_or_else(|| {
-                        ApiError::invalid_response("tool_use content block missing name")
-                    })?;
-                    let tool_input = block
-                        .get("input")
-                        .cloned()
-                        .unwrap_or(Value::Null)
-                        .to_string();
-                    output.push(StreamEvent::ToolUse {
-                        tool_name: tool_name.to_string(),
-                        input: tool_input,
-                    });
-                }
-                _ => {}
-            }
-        }
-        "content_block_delta" => {
-            if let Some(text) = payload
-                .get("delta")
-                .and_then(|delta| delta.get("text"))
-                .and_then(Value::as_str)
-            {
-                output.push(StreamEvent::TextDelta(text.to_string()));
-            }
-        }
-        "message_delta" => {
-            if let Some(usage) = payload.get("usage") {
-                output.push(StreamEvent::Usage(parse_usage(
-                    usage,
-                    payload_model(payload).unwrap_or(default_model),
-                )));
-            }
-            if let Some(stop_reason) = payload
-                .get("delta")
-                .and_then(|delta| delta.get("stop_reason"))
-                .and_then(Value::as_str)
-            {
-                output.push(StreamEvent::MessageStop {
-                    stop_reason: map_stop_reason(stop_reason),
-                });
-            }
-        }
-        "message_stop" => {
-            if !output
-                .iter()
-                .any(|event| matches!(event, StreamEvent::MessageStop { .. }))
-            {
-                output.push(StreamEvent::MessageStop {
-                    stop_reason: StopReason::EndTurn,
-                });
-            }
-        }
-        "error" => {
-            let message = payload
-                .get("error")
-                .and_then(|error| error.get("message"))
-                .and_then(Value::as_str)
-                .unwrap_or("provider stream error")
-                .to_string();
-            let raw_kind = payload
-                .get("error")
-                .and_then(|error| error.get("type"))
-                .and_then(Value::as_str)
-                .unwrap_or("provider_stream");
-            output.push(StreamEvent::Error(StreamError {
-                provider_id: normalized_provider_id(provider_id).to_string(),
-                kind: raw_kind.to_string(),
-                message,
-                retryable: false,
-                disposition: classify_stream_error_disposition(raw_kind),
-                status_code: None,
-            }));
-        }
-        _ => {}
     }
 
-    Ok(())
+    fn map_provider_event(
+        &mut self,
+        payload: &Value,
+        output: &mut Vec<StreamEvent>,
+    ) -> Result<(), ApiError> {
+        let event_type = payload
+            .get("type")
+            .and_then(Value::as_str)
+            .ok_or_else(|| self.protocol_error("provider event missing type"))?;
+
+        match event_type {
+            "message_start" => {
+                self.ensure_message_start(output);
+                if let Some(usage) = payload
+                    .get("message")
+                    .and_then(|message| message.get("usage"))
+                {
+                    output.push(StreamEvent::Usage(parse_usage(
+                        usage,
+                        payload_model(payload).unwrap_or(self.default_model),
+                    )));
+                }
+            }
+            "content_block_start" => {
+                self.ensure_message_start(output);
+                let block = payload
+                    .get("content_block")
+                    .ok_or_else(|| self.protocol_error("content_block_start missing content_block"))?;
+                match block.get("type").and_then(Value::as_str) {
+                    Some("text") => {
+                        if let Some(text) = block.get("text").and_then(Value::as_str) {
+                            output.push(StreamEvent::TextDelta(text.to_string()));
+                        }
+                    }
+                    Some("tool_use") => {
+                        let tool_name = block
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .ok_or_else(|| self.protocol_error("tool_use content block missing name"))?;
+                        let mut pending = PendingToolUseBlock {
+                            tool_name: Some(tool_name.to_string()),
+                            input: block.get("input").cloned(),
+                            partial_json: String::new(),
+                            emitted: false,
+                        };
+                        Self::emit_pending_tool_use_if_ready(
+                            self.saw_message_start,
+                            &mut pending,
+                            output,
+                        )?;
+                        self.pending_tool_use = Some(pending);
+                    }
+                    _ => {}
+                }
+            }
+            "content_block_delta" => {
+                if let Some(text) = payload
+                    .get("delta")
+                    .and_then(|delta| delta.get("text"))
+                    .and_then(Value::as_str)
+                {
+                    output.push(StreamEvent::TextDelta(text.to_string()));
+                }
+                if let Some(pending) = self.pending_tool_use.as_mut() {
+                    if let Some(partial_json) = payload
+                        .get("delta")
+                        .and_then(|delta| delta.get("partial_json"))
+                        .and_then(Value::as_str)
+                    {
+                        pending.partial_json.push_str(partial_json);
+                        if let Ok(value) = serde_json::from_str::<Value>(&pending.partial_json) {
+                            pending.input = Some(value);
+                        }
+                    }
+                    Self::emit_pending_tool_use_if_ready(self.saw_message_start, pending, output)?;
+                }
+            }
+            "content_block_stop" => {
+                self.finalize_pending_tool_use(output)?;
+            }
+            "message_delta" => {
+                if let Some(usage) = payload.get("usage") {
+                    output.push(StreamEvent::Usage(parse_usage(
+                        usage,
+                        payload_model(payload).unwrap_or(self.default_model),
+                    )));
+                }
+                if let Some(stop_reason) = payload
+                    .get("delta")
+                    .and_then(|delta| delta.get("stop_reason"))
+                    .and_then(Value::as_str)
+                {
+                    self.finalize_pending_tool_use(output)?;
+                    output.push(StreamEvent::MessageStop {
+                        stop_reason: map_stop_reason(stop_reason),
+                    });
+                }
+            }
+            "message_stop" => {
+                self.finalize_pending_tool_use(output)?;
+                if !output
+                    .iter()
+                    .any(|event| matches!(event, StreamEvent::MessageStop { .. }))
+                {
+                    output.push(StreamEvent::MessageStop {
+                        stop_reason: StopReason::EndTurn,
+                    });
+                }
+            }
+            "error" => {
+                let message = payload
+                    .get("error")
+                    .and_then(|error| error.get("message"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("provider stream error")
+                    .to_string();
+                let raw_kind = payload
+                    .get("error")
+                    .and_then(|error| error.get("type"))
+                    .and_then(Value::as_str);
+                let (kind, disposition, retryable) =
+                    classify_stream_error(self.provider_id, raw_kind, None);
+                output.push(StreamEvent::Error(StreamError {
+                    provider_id: normalized_provider_id(self.provider_id).to_string(),
+                    kind,
+                    message,
+                    retryable,
+                    disposition,
+                    status_code: None,
+                }));
+            }
+            _ => {}
+        }
+
+        Ok(())
+    }
+
+    fn finish(&mut self, output: &mut Vec<StreamEvent>) -> Result<(), ApiError> {
+        self.finalize_pending_tool_use(output)
+    }
+
+    fn ensure_message_start(&mut self, output: &mut Vec<StreamEvent>) {
+        if !self.saw_message_start {
+            output.push(StreamEvent::MessageStart);
+            self.saw_message_start = true;
+        }
+    }
+
+    fn finalize_pending_tool_use(&mut self, output: &mut Vec<StreamEvent>) -> Result<(), ApiError> {
+        if let Some(mut pending) = self.pending_tool_use.take() {
+            Self::emit_pending_tool_use_if_ready(self.saw_message_start, &mut pending, output)?;
+            if !pending.emitted {
+                return Err(self.protocol_error("tool_use block ended without complete input payload"));
+            }
+        }
+        Ok(())
+    }
+
+    fn emit_pending_tool_use_if_ready(
+        saw_message_start: bool,
+        pending: &mut PendingToolUseBlock,
+        output: &mut Vec<StreamEvent>,
+    ) -> Result<(), ApiError> {
+        if pending.emitted {
+            return Ok(());
+        }
+        let Some(tool_name) = pending.tool_name.clone() else {
+            return Err(ApiError::sse_protocol_with_disposition(
+                "tool_use content block missing name",
+                if saw_message_start {
+                    ProviderFailureDisposition::StreamTerminal
+                } else {
+                    ProviderFailureDisposition::PreStreamTerminal
+                },
+            ));
+        };
+        let Some(input) = pending.input.clone() else {
+            return Ok(());
+        };
+        pending.emitted = true;
+        output.push(StreamEvent::ToolUse {
+            tool_name,
+            input: input.to_string(),
+        });
+        Ok(())
+    }
+
+    fn protocol_error(&self, message: impl Into<String>) -> ApiError {
+        ApiError::sse_protocol_with_disposition(
+            message,
+            if self.saw_message_start {
+                ProviderFailureDisposition::StreamTerminal
+            } else {
+                ProviderFailureDisposition::PreStreamTerminal
+            },
+        )
+    }
 }
 
 fn payload_model(payload: &Value) -> Option<&str> {
@@ -503,19 +607,44 @@ fn parse_usage(usage: &Value, default_model: &str) -> UsageEvent {
 
 fn map_stop_reason(reason: &str) -> StopReason {
     match reason {
+        "end_turn" => StopReason::EndTurn,
         "tool_use" => StopReason::ToolUse,
         "max_tokens" => StopReason::MaxTokens,
-        "error" | "model_error" => StopReason::Error,
-        _ => StopReason::EndTurn,
+        "error" | "model_error" | "stop_sequence_error" | "pause_turn" => {
+            StopReason::Error
+        }
+        _ => StopReason::Error,
     }
 }
 
-fn classify_stream_error_disposition(raw_kind: &str) -> ProviderFailureDisposition {
+fn classify_stream_error(
+    provider_id: &str,
+    raw_kind: Option<&str>,
+    status_code: Option<u16>,
+) -> (String, ProviderFailureDisposition, bool) {
+    let _ = normalized_provider_id(provider_id);
+    let normalized_kind = raw_kind.unwrap_or("provider_stream");
+    let disposition = classify_stream_error_disposition(normalized_kind, status_code);
+    let retryable = disposition.is_stream_interrupted();
+    (normalized_kind.to_string(), disposition, retryable)
+}
+
+fn classify_stream_error_disposition(
+    raw_kind: &str,
+    status_code: Option<u16>,
+) -> ProviderFailureDisposition {
     match raw_kind {
-        "model_fallback" | "provider_stream" | "overloaded_error" => {
+        "model_fallback" | "provider_stream" | "overloaded_error" | "rate_limit_error" => {
             ProviderFailureDisposition::StreamInterrupted
         }
-        _ => ProviderFailureDisposition::StreamTerminal,
+        "invalid_request_error" | "authentication_error" | "permission_error"
+        | "not_found_error" | "malformed_payload" | "sse_protocol" => {
+            ProviderFailureDisposition::StreamTerminal
+        }
+        _ => match status_code {
+            Some(429) | Some(500..=599) => ProviderFailureDisposition::StreamInterrupted,
+            _ => ProviderFailureDisposition::StreamTerminal,
+        },
     }
 }
 
@@ -523,8 +652,8 @@ fn classify_stream_error_disposition(raw_kind: &str) -> ProviderFailureDispositi
 mod tests {
     use super::{
         ModelProviderConfig, ProviderTimeout, build_messages_url_for_provider,
-        classify_stream_error_disposition, map_stop_reason, parse_anthropic_sse_response,
-        parse_stream_response_for_provider,
+        classify_stream_error, classify_stream_error_disposition, map_stop_reason,
+        parse_anthropic_sse_response, parse_stream_response_for_provider,
     };
     use crate::service::api::retry::RetryPolicy;
     use crate::service::api::streaming::{ProviderFailureDisposition, StopReason, StreamEvent};
@@ -536,6 +665,8 @@ mod tests {
         assert_eq!(map_stop_reason("max_tokens"), StopReason::MaxTokens);
         assert_eq!(map_stop_reason("error"), StopReason::Error);
         assert_eq!(map_stop_reason("model_error"), StopReason::Error);
+        assert_eq!(map_stop_reason("pause_turn"), StopReason::Error);
+        assert_eq!(map_stop_reason("unknown_provider_stop"), StopReason::Error);
     }
 
     #[test]
@@ -613,25 +744,139 @@ mod tests {
                 if error.provider_id == "anthropic"
                     && error.kind == "overloaded_error"
                     && error.message == "provider exploded"
-                    && !error.retryable
+                    && error.retryable
                     && error.disposition == ProviderFailureDisposition::StreamInterrupted
                     && error.status_code.is_none()
         ));
     }
 
     #[test]
-    fn classifies_provider_stream_dispositions() {
-        assert_eq!(
-            classify_stream_error_disposition("model_fallback"),
-            ProviderFailureDisposition::StreamInterrupted
+    fn assembles_partial_tool_use_payloads_across_deltas() {
+        let body = concat!(
+            "event: message\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-test\"}}\n\n",
+            "event: message\n",
+            "data: {\"type\":\"content_block_start\",\"content_block\":{\"type\":\"tool_use\",\"name\":\"Read\"}}\n\n",
+            "event: message\n",
+            "data: {\"type\":\"content_block_delta\",\"delta\":{\"partial_json\":\"{\\\"path\\\":\\\"foo\\\"\"}}\n\n",
+            "event: message\n",
+            "data: {\"type\":\"content_block_delta\",\"delta\":{\"partial_json\":\"}\"}}\n\n",
+            "event: message\n",
+            "data: {\"type\":\"content_block_stop\"}\n\n",
+            "event: message\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"}}\n\n",
+            "event: message\n",
+            "data: {\"type\":\"message_stop\"}\n\n"
         );
-        assert_eq!(
-            classify_stream_error_disposition("provider_stream"),
-            ProviderFailureDisposition::StreamInterrupted
+
+        let events = parse_anthropic_sse_response("anthropic", body, "default-model")
+            .expect("partial tool payload should parse");
+        assert!(events.iter().any(|event| matches!(
+            event,
+            StreamEvent::ToolUse { tool_name, input }
+                if tool_name == "Read" && input == "{\"path\":\"foo\"}"
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            StreamEvent::MessageStop {
+                stop_reason: StopReason::ToolUse
+            }
+        )));
+    }
+
+    #[test]
+    fn rejects_incomplete_tool_use_payload_at_end_of_stream() {
+        let body = concat!(
+            "event: message\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-test\"}}\n\n",
+            "event: message\n",
+            "data: {\"type\":\"content_block_start\",\"content_block\":{\"type\":\"tool_use\",\"name\":\"Read\"}}\n\n",
+            "event: message\n",
+            "data: {\"type\":\"content_block_delta\",\"delta\":{\"partial_json\":\"{\\\"path\\\":\"}}\n\n",
+            "event: message\n",
+            "data: {\"type\":\"message_stop\"}\n\n"
         );
+
+        let error = parse_anthropic_sse_response("anthropic", body, "default-model")
+            .expect_err("incomplete tool payload should fail");
+        assert_eq!(error.kind_label(), "sse_protocol");
         assert_eq!(
-            classify_stream_error_disposition("bad_request"),
+            error.disposition,
             ProviderFailureDisposition::StreamTerminal
         );
+        assert!(error
+            .message
+            .contains("tool_use block ended without complete input payload"));
+    }
+
+    #[test]
+    fn distinguishes_pre_stream_and_mid_stream_sse_protocol_failures() {
+        let pre_stream_error = parse_anthropic_sse_response(
+            "anthropic",
+            "event: message\ndata: {not-json}\n\n",
+            "default-model",
+        )
+        .expect_err("invalid pre-stream json should fail");
+        assert_eq!(pre_stream_error.kind_label(), "sse_protocol");
+        assert_eq!(
+            pre_stream_error.disposition,
+            ProviderFailureDisposition::PreStreamTerminal
+        );
+
+        let mid_stream_error = parse_anthropic_sse_response(
+            "anthropic",
+            concat!(
+                "event: message\n",
+                "data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-test\"}}\n\n",
+                "event: message\n",
+                "data: {not-json}\n\n"
+            ),
+            "default-model",
+        )
+        .expect_err("invalid mid-stream json should fail");
+        assert_eq!(mid_stream_error.kind_label(), "sse_protocol");
+        assert_eq!(
+            mid_stream_error.disposition,
+            ProviderFailureDisposition::StreamTerminal
+        );
+    }
+
+    #[test]
+    fn classifies_provider_stream_dispositions() {
+        assert_eq!(
+            classify_stream_error_disposition("model_fallback", None),
+            ProviderFailureDisposition::StreamInterrupted
+        );
+        assert_eq!(
+            classify_stream_error_disposition("provider_stream", None),
+            ProviderFailureDisposition::StreamInterrupted
+        );
+        assert_eq!(
+            classify_stream_error_disposition("rate_limit_error", Some(429)),
+            ProviderFailureDisposition::StreamInterrupted
+        );
+        assert_eq!(
+            classify_stream_error_disposition("sse_protocol", None),
+            ProviderFailureDisposition::StreamTerminal
+        );
+        assert_eq!(
+            classify_stream_error_disposition("bad_request", None),
+            ProviderFailureDisposition::StreamTerminal
+        );
+    }
+
+    #[test]
+    fn classifies_stream_errors_with_retryable_flag_from_disposition() {
+        let (kind, disposition, retryable) =
+            classify_stream_error("anthropic", Some("overloaded_error"), Some(529));
+        assert_eq!(kind, "overloaded_error");
+        assert_eq!(disposition, ProviderFailureDisposition::StreamInterrupted);
+        assert!(retryable);
+
+        let (kind, disposition, retryable) =
+            classify_stream_error("anthropic", Some("invalid_request_error"), Some(400));
+        assert_eq!(kind, "invalid_request_error");
+        assert_eq!(disposition, ProviderFailureDisposition::StreamTerminal);
+        assert!(!retryable);
     }
 }

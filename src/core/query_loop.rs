@@ -663,7 +663,7 @@ async fn consume_model_stream(
                         state.messages.push(message);
                     }
                     let stop_error = synthetic_stop_reason_error(state.transition.as_ref());
-                    if stop_error.disposition.is_stream_terminal() {
+                    if !should_attempt_stream_recovery(&stop_error) {
                         let code = classify_service_failure_code(&stop_error);
                         return TurnOutcome {
                             state: state.clone(),
@@ -684,7 +684,7 @@ async fn consume_model_stream(
                 let error_message = Message::assistant(format!("stream error: {}", error.message));
                 engine_events.push(EngineEvent::MessageCommitted(error_message.clone()));
                 state.messages.push(error_message);
-                if error.disposition.is_stream_terminal() {
+                if !should_attempt_stream_recovery(&error) {
                     let code = classify_service_failure_code(&error);
                     return TurnOutcome {
                         state: state.clone(),
@@ -1457,6 +1457,10 @@ fn continue_after_stream_error(
             }
         }
     }
+}
+
+fn should_attempt_stream_recovery(error: &StreamError) -> bool {
+    matches!(error.disposition, ProviderFailureDisposition::StreamInterrupted)
 }
 
 fn should_trigger_model_fallback(error: &StreamError) -> bool {

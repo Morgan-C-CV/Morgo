@@ -623,6 +623,100 @@ async fn query_loop_surfaces_stream_errors_after_recovery_attempt() {
 }
 
 #[tokio::test]
+async fn query_loop_treats_pre_stream_terminal_errors_as_immediate_terminal_failures() {
+    let engine = QueryEngine::new(test_context(vec![StreamEvent::Error(StreamError {
+        provider_id: "anthropic".into(),
+        kind: "http_status".into(),
+        message: "provider request failed with status 400".into(),
+        retryable: false,
+        disposition: ProviderFailureDisposition::PreStreamTerminal,
+        status_code: Some(400),
+    })]));
+
+    let result = engine.submit_turn(Message::user("trigger pre-stream terminal")).await;
+
+    assert_eq!(result.state, QueryLoopState::Failed);
+    assert_eq!(
+        result.terminal,
+        Terminal::ModelError {
+            message: "provider request failed with status 400".into(),
+            code: Some(rust_agent::core::events::ServiceFailureCode::ApiProviderHttp4xx),
+        }
+    );
+    assert_eq!(result.transition, None);
+    assert!(result.messages[0].content.contains("stream error: provider request failed"));
+    assert!(!result.events.iter().any(|event| matches!(
+        event,
+        EngineEvent::Notice {
+            kind: "recovery",
+            ..
+        }
+    )));
+}
+
+#[tokio::test]
+async fn query_loop_treats_pre_stream_retryable_errors_as_terminal_after_retries_exhaust() {
+    let engine = QueryEngine::new(test_context(vec![StreamEvent::Error(StreamError {
+        provider_id: "anthropic".into(),
+        kind: "timeout".into(),
+        message: "provider request timed out".into(),
+        retryable: true,
+        disposition: ProviderFailureDisposition::PreStreamRetryable,
+        status_code: None,
+    })]));
+
+    let result = engine.submit_turn(Message::user("trigger pre-stream retryable")).await;
+
+    assert_eq!(result.state, QueryLoopState::Failed);
+    assert_eq!(
+        result.terminal,
+        Terminal::ModelError {
+            message: "provider request timed out".into(),
+            code: Some(rust_agent::core::events::ServiceFailureCode::ApiProviderTimeout),
+        }
+    );
+    assert_eq!(result.transition, None);
+    assert!(!result.events.iter().any(|event| matches!(
+        event,
+        EngineEvent::Notice {
+            kind: "recovery",
+            ..
+        }
+    )));
+}
+
+#[tokio::test]
+async fn query_loop_treats_stream_terminal_protocol_errors_as_immediate_terminal_failures() {
+    let engine = QueryEngine::new(test_context(vec![StreamEvent::Error(StreamError {
+        provider_id: "anthropic".into(),
+        kind: "sse_protocol".into(),
+        message: "tool_use block ended without complete input payload".into(),
+        retryable: false,
+        disposition: ProviderFailureDisposition::StreamTerminal,
+        status_code: None,
+    })]));
+
+    let result = engine.submit_turn(Message::user("trigger stream terminal")).await;
+
+    assert_eq!(result.state, QueryLoopState::Failed);
+    assert_eq!(
+        result.terminal,
+        Terminal::ModelError {
+            message: "tool_use block ended without complete input payload".into(),
+            code: Some(rust_agent::core::events::ServiceFailureCode::ApiStreamProtocol),
+        }
+    );
+    assert_eq!(result.transition, None);
+    assert!(!result.events.iter().any(|event| matches!(
+        event,
+        EngineEvent::Notice {
+            kind: "recovery",
+            ..
+        }
+    )));
+}
+
+#[tokio::test]
 async fn query_loop_compensates_missing_tool_result_after_tool_failure() {
     let engine = QueryEngine::new(test_context(vec![
         StreamEvent::MessageStart,
