@@ -7,7 +7,10 @@ pub enum ApiErrorKind {
     HttpStatus(u16),
     RequestBuild,
     Transport,
+    ConnectionReset,
     Timeout,
+    EmptyBody,
+    BadContentType,
     InvalidResponse,
     SseProtocol,
 }
@@ -49,11 +52,35 @@ impl ApiError {
         }
     }
 
+    pub fn connection_reset(message: impl Into<String>) -> Self {
+        Self {
+            kind: ApiErrorKind::ConnectionReset,
+            message: message.into(),
+            disposition: ProviderFailureDisposition::PreStreamRetryable,
+        }
+    }
+
     pub fn timeout(message: impl Into<String>) -> Self {
         Self {
             kind: ApiErrorKind::Timeout,
             message: message.into(),
             disposition: ProviderFailureDisposition::PreStreamRetryable,
+        }
+    }
+
+    pub fn empty_body(message: impl Into<String>) -> Self {
+        Self {
+            kind: ApiErrorKind::EmptyBody,
+            message: message.into(),
+            disposition: ProviderFailureDisposition::PreStreamTerminal,
+        }
+    }
+
+    pub fn bad_content_type(message: impl Into<String>) -> Self {
+        Self {
+            kind: ApiErrorKind::BadContentType,
+            message: message.into(),
+            disposition: ProviderFailureDisposition::PreStreamTerminal,
         }
     }
 
@@ -97,7 +124,10 @@ impl ApiError {
             ApiErrorKind::HttpStatus(_) => "http_status",
             ApiErrorKind::RequestBuild => "request_build",
             ApiErrorKind::Transport => "transport",
+            ApiErrorKind::ConnectionReset => "connection_reset",
             ApiErrorKind::Timeout => "timeout",
+            ApiErrorKind::EmptyBody => "empty_body",
+            ApiErrorKind::BadContentType => "bad_content_type",
             ApiErrorKind::InvalidResponse => "invalid_response",
             ApiErrorKind::SseProtocol => "sse_protocol",
         }

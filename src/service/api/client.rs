@@ -2,6 +2,7 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
+use reqwest::StatusCode;
 use serde_json::{Value, json};
 use tokio::time::{sleep, timeout};
 
@@ -227,7 +228,7 @@ impl ModelProviderClient {
         )
         .await
         .map_err(|_| ApiError::timeout("provider request timed out"))?
-        .map_err(|error| ApiError::transport(format!("provider request failed: {error}")))?;
+        .map_err(classify_request_transport_error)?;
 
         let status = response.status();
         if !status.is_success() {
@@ -243,6 +244,7 @@ impl ModelProviderClient {
                 ),
             ));
         }
+        validate_streaming_response_headers(response.headers(), status)?;
 
         let body = timeout(
             Duration::from_millis(config.timeout.request_timeout_ms),
@@ -250,10 +252,71 @@ impl ModelProviderClient {
         )
         .await
         .map_err(|_| ApiError::timeout("provider stream timed out while reading response"))?
-        .map_err(|error| ApiError::transport(format!("failed reading provider stream: {error}")))?;
+        .map_err(classify_response_body_error)?;
+
+        if body.trim().is_empty() {
+            return Err(ApiError::empty_body("provider returned empty response body"));
+        }
 
         parse_stream_response_for_provider(&config.provider_id, &body, &config.model_id)
     }
+}
+
+fn classify_request_transport_error(error: reqwest::Error) -> ApiError {
+    let message = format!("provider request failed: {error}");
+    if error.is_timeout() {
+        ApiError::timeout(message)
+    } else if is_connection_reset_error(&error) {
+        ApiError::connection_reset(message)
+    } else {
+        ApiError::transport(message)
+    }
+}
+
+fn classify_response_body_error(error: reqwest::Error) -> ApiError {
+    let message = format!("failed reading provider stream: {error}");
+    if error.is_timeout() {
+        ApiError::timeout(message)
+    } else if is_connection_reset_error(&error) {
+        ApiError::connection_reset(message)
+    } else if error.is_body() {
+        ApiError::sse_protocol_with_disposition(message, ProviderFailureDisposition::StreamTerminal)
+    } else {
+        ApiError::transport(message)
+    }
+}
+
+fn is_connection_reset_error(error: &reqwest::Error) -> bool {
+    let text = error.to_string().to_ascii_lowercase();
+    text.contains("connection reset")
+        || text.contains("broken pipe")
+        || text.contains("unexpected eof")
+        || text.contains("early eof")
+        || text.contains("connection closed before message completed")
+}
+
+fn validate_streaming_response_headers(
+    headers: &reqwest::header::HeaderMap,
+    status: StatusCode,
+) -> Result<(), ApiError> {
+    let Some(content_type) = headers.get(CONTENT_TYPE) else {
+        return Err(ApiError::bad_content_type(format!(
+            "provider returned response without content-type header for status {}",
+            status.as_u16()
+        )));
+    };
+    let content_type = content_type.to_str().map_err(|_| {
+        ApiError::bad_content_type("provider returned non-utf8 content-type header")
+    })?;
+    if !content_type
+        .to_ascii_lowercase()
+        .starts_with("text/event-stream")
+    {
+        return Err(ApiError::bad_content_type(format!(
+            "provider returned unsupported content-type: {content_type}"
+        )));
+    }
+    Ok(())
 }
 
 fn build_messages_url_for_provider(provider_id: &str, base_url: &str) -> Result<String, ApiError> {
@@ -318,14 +381,23 @@ pub fn parse_anthropic_sse_response(
     body: &str,
     default_model: &str,
 ) -> Result<Vec<StreamEvent>, ApiError> {
+    if body.trim().is_empty() {
+        return Err(ApiError::empty_body("provider returned empty response body"));
+    }
+
     let mut events = Vec::new();
     let mut parser = ProviderStreamParser::new(provider_id, default_model);
     let normalized = body.replace("\r\n", "\n");
+    let complete_body = normalized.ends_with("\n\n");
+    let frames = if complete_body {
+        normalized.split("\n\n").collect::<Vec<_>>()
+    } else {
+        normalized
+            .split_terminator("\n\n")
+            .collect::<Vec<_>>()
+    };
 
-    for frame in normalized
-        .split("\n\n")
-        .filter(|frame| !frame.trim().is_empty())
-    {
+    for frame in frames.into_iter().filter(|frame| !frame.trim().is_empty()) {
         let payload = frame
             .lines()
             .filter_map(|line| line.strip_prefix("data:"))
@@ -333,6 +405,16 @@ pub fn parse_anthropic_sse_response(
             .collect::<Vec<_>>()
             .join("\n");
         if payload.is_empty() || payload == "[DONE]" {
+            if !complete_body {
+                return Err(ApiError::sse_protocol_with_disposition(
+                    "provider returned truncated SSE frame",
+                    if parser.saw_message_start {
+                        ProviderFailureDisposition::StreamTerminal
+                    } else {
+                        ProviderFailureDisposition::PreStreamTerminal
+                    },
+                ));
+            }
             continue;
         }
         let json: Value = serde_json::from_str(&payload).map_err(|error| {
@@ -346,6 +428,17 @@ pub fn parse_anthropic_sse_response(
             )
         })?;
         parser.map_provider_event(&json, &mut events)?;
+    }
+
+    if !complete_body {
+        return Err(ApiError::sse_protocol_with_disposition(
+            "provider returned truncated SSE frame",
+            if parser.saw_message_start {
+                ProviderFailureDisposition::StreamTerminal
+            } else {
+                ProviderFailureDisposition::PreStreamTerminal
+            },
+        ));
     }
 
     parser.finish(&mut events)?;
@@ -654,9 +747,12 @@ mod tests {
         ModelProviderConfig, ProviderTimeout, build_messages_url_for_provider,
         classify_stream_error, classify_stream_error_disposition, map_stop_reason,
         parse_anthropic_sse_response, parse_stream_response_for_provider,
+        validate_streaming_response_headers,
     };
     use crate::service::api::retry::RetryPolicy;
     use crate::service::api::streaming::{ProviderFailureDisposition, StopReason, StreamEvent};
+    use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderValue};
+    use reqwest::StatusCode;
 
     #[test]
     fn stop_reason_mapping_matches_expected_values() {
@@ -807,6 +903,89 @@ mod tests {
         assert!(error
             .message
             .contains("tool_use block ended without complete input payload"));
+    }
+
+    #[test]
+    fn rejects_empty_response_body() {
+        let error = parse_anthropic_sse_response("anthropic", "   ", "default-model")
+            .expect_err("empty body should fail");
+        assert_eq!(error.kind_label(), "empty_body");
+        assert_eq!(
+            error.disposition,
+            ProviderFailureDisposition::PreStreamTerminal
+        );
+    }
+
+    #[test]
+    fn rejects_truncated_sse_stream() {
+        let pre_stream_error = parse_anthropic_sse_response(
+            "anthropic",
+            "event: message\ndata: {\"type\":",
+            "default-model",
+        )
+        .expect_err("truncated pre-stream sse should fail");
+        assert_eq!(pre_stream_error.kind_label(), "sse_protocol");
+        assert_eq!(
+            pre_stream_error.disposition,
+            ProviderFailureDisposition::PreStreamTerminal
+        );
+        assert!(
+            pre_stream_error.message.contains("truncated SSE frame")
+                || pre_stream_error.message.contains("invalid SSE JSON payload")
+        );
+
+        let mid_stream_error = parse_anthropic_sse_response(
+            "anthropic",
+            concat!(
+                "event: message\n",
+                "data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-test\"}}\n\n",
+                "event: message\n",
+                "data: {\"type\":\"content_block_delta\",\"delta\":{\"text\":\"partial\"}}"
+            ),
+            "default-model",
+        )
+        .expect_err("truncated mid-stream sse should fail");
+        assert_eq!(mid_stream_error.kind_label(), "sse_protocol");
+        assert_eq!(
+            mid_stream_error.disposition,
+            ProviderFailureDisposition::StreamTerminal
+        );
+    }
+
+    #[test]
+    fn rejects_wrong_content_type() {
+        let mut headers = HeaderMap::new();
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+
+        let error = validate_streaming_response_headers(&headers, StatusCode::OK)
+            .expect_err("wrong content-type should fail");
+        assert_eq!(error.kind_label(), "bad_content_type");
+        assert_eq!(
+            error.disposition,
+            ProviderFailureDisposition::PreStreamTerminal
+        );
+    }
+
+    #[test]
+    fn accepts_event_stream_content_type_with_charset() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            CONTENT_TYPE,
+            HeaderValue::from_static("text/event-stream; charset=utf-8"),
+        );
+
+        validate_streaming_response_headers(&headers, StatusCode::OK)
+            .expect("event-stream content-type should pass");
+    }
+
+    #[test]
+    fn rejects_missing_content_type() {
+        let headers = HeaderMap::new();
+
+        let error = validate_streaming_response_headers(&headers, StatusCode::OK)
+            .expect_err("missing content-type should fail");
+        assert_eq!(error.kind_label(), "bad_content_type");
+        assert!(error.message.contains("without content-type"));
     }
 
     #[test]

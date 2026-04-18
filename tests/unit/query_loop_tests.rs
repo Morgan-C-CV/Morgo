@@ -686,6 +686,43 @@ async fn query_loop_treats_pre_stream_retryable_errors_as_terminal_after_retries
 }
 
 #[tokio::test]
+async fn query_loop_treats_retry_exhausted_connection_failures_as_terminal_failures() {
+    let engine = QueryEngine::new(test_context_with_turns(
+        vec![
+            vec![StreamEvent::Error(StreamError {
+                provider_id: "anthropic".into(),
+                kind: "provider_stream".into(),
+                message: "first interrupted response".into(),
+                retryable: true,
+                disposition: ProviderFailureDisposition::StreamInterrupted,
+                status_code: None,
+            })],
+            vec![StreamEvent::Error(StreamError {
+                provider_id: "anthropic".into(),
+                kind: "connection_reset".into(),
+                message: "connection reset by peer".into(),
+                retryable: true,
+                disposition: ProviderFailureDisposition::PreStreamRetryable,
+                status_code: None,
+            })],
+        ],
+        ToolRegistry::new(),
+    ));
+
+    let result = engine.submit_turn(Message::user("trigger exhausted connection failure")).await;
+
+    assert_eq!(result.state, QueryLoopState::Failed);
+    assert_eq!(
+        result.terminal,
+        Terminal::ModelError {
+            message: "connection reset by peer".into(),
+            code: Some(rust_agent::core::events::ServiceFailureCode::ApiProviderTransport),
+        }
+    );
+    assert_eq!(result.transition, Some(Continue::ModelFallbackRetry));
+}
+
+#[tokio::test]
 async fn query_loop_treats_stream_terminal_protocol_errors_as_immediate_terminal_failures() {
     let engine = QueryEngine::new(test_context(vec![StreamEvent::Error(StreamError {
         provider_id: "anthropic".into(),

@@ -1358,6 +1358,20 @@ fn continue_after_stream_error(
     mut engine_events: Vec<EngineEvent>,
     error: StreamError,
 ) -> TurnOutcome {
+    if should_return_terminal_after_recovery_exhausted(&error, state.transition.as_ref()) {
+        let code = classify_service_failure_code(&error);
+        return TurnOutcome {
+            state: state.clone(),
+            events: engine_events,
+            decision: TurnDecision::Return(
+                state.clone(),
+                Terminal::ModelError {
+                    message: error.message,
+                    code: Some(code),
+                },
+            ),
+        };
+    }
     if state.transition != Some(Continue::ModelFallbackRetry)
         && should_trigger_model_fallback(&error)
     {
@@ -1463,6 +1477,21 @@ fn should_attempt_stream_recovery(error: &StreamError) -> bool {
     matches!(error.disposition, ProviderFailureDisposition::StreamInterrupted)
 }
 
+fn should_return_terminal_after_recovery_exhausted(
+    error: &StreamError,
+    transition: Option<&Continue>,
+) -> bool {
+    matches!(transition, Some(Continue::CollapseDrainRetry))
+        && matches!(
+            error.kind.as_str(),
+            "timeout"
+                | "connection_reset"
+                | "bad_content_type"
+                | "empty_body"
+                | "sse_protocol"
+        )
+}
+
 fn should_trigger_model_fallback(error: &StreamError) -> bool {
     error.kind == "model_fallback" || (error.disposition.is_stream_interrupted() && error.retryable)
 }
@@ -1514,9 +1543,11 @@ fn classify_service_failure_code(error: &StreamError) -> ServiceFailureCode {
 fn classify_pre_stream_failure_code(kind: &str, status_code: Option<u16>) -> ServiceFailureCode {
     match kind {
         "timeout" => ServiceFailureCode::ApiProviderTimeout,
-        "transport" => ServiceFailureCode::ApiProviderTransport,
+        "transport" | "connection_reset" => ServiceFailureCode::ApiProviderTransport,
         "request_build" => ServiceFailureCode::ApiProviderRequestBuild,
-        "invalid_response" => ServiceFailureCode::ApiProviderInvalidResponse,
+        "invalid_response" | "empty_body" | "bad_content_type" => {
+            ServiceFailureCode::ApiProviderInvalidResponse
+        }
         "sse_protocol" => ServiceFailureCode::ApiStreamProtocol,
         "http_status" => match status_code {
             Some(429) => ServiceFailureCode::ApiProviderHttp429,
@@ -1562,6 +1593,7 @@ mod tests {
     use super::{
         LoopState, QueryParams, apply_tool_report_context, classify_pre_stream_failure_code,
         classify_stream_failure_code, report_detail_or_summary,
+        should_return_terminal_after_recovery_exhausted,
     };
     use crate::core::events::ServiceFailureCode;
     use crate::service::api::streaming::ProviderFailureDisposition;
@@ -1652,6 +1684,18 @@ mod tests {
             classify_pre_stream_failure_code("invalid_response", None),
             ServiceFailureCode::ApiProviderInvalidResponse
         );
+        assert_eq!(
+            classify_pre_stream_failure_code("connection_reset", None),
+            ServiceFailureCode::ApiProviderTransport
+        );
+        assert_eq!(
+            classify_pre_stream_failure_code("empty_body", None),
+            ServiceFailureCode::ApiProviderInvalidResponse
+        );
+        assert_eq!(
+            classify_pre_stream_failure_code("bad_content_type", None),
+            ServiceFailureCode::ApiProviderInvalidResponse
+        );
     }
 
     #[test]
@@ -1679,10 +1723,59 @@ mod tests {
         );
         assert_eq!(
             classify_stream_failure_code(
+                "sse_protocol",
+                ProviderFailureDisposition::StreamTerminal
+            ),
+            ServiceFailureCode::ApiStreamProtocol
+        );
+        assert_eq!(
+            classify_stream_failure_code(
                 "provider_terminal",
                 ProviderFailureDisposition::StreamTerminal
             ),
             ServiceFailureCode::ApiStreamTerminal
         );
+    }
+
+    #[test]
+    fn should_return_terminal_after_recovery_exhausted_for_terminal_like_failures() {
+        let timeout = crate::service::api::streaming::StreamError {
+            provider_id: "anthropic".into(),
+            kind: "timeout".into(),
+            message: "provider request timed out".into(),
+            retryable: true,
+            disposition: ProviderFailureDisposition::PreStreamRetryable,
+            status_code: None,
+        };
+        assert!(should_return_terminal_after_recovery_exhausted(
+            &timeout,
+            Some(&crate::core::query_loop::Continue::CollapseDrainRetry)
+        ));
+
+        let protocol = crate::service::api::streaming::StreamError {
+            provider_id: "anthropic".into(),
+            kind: "sse_protocol".into(),
+            message: "provider returned truncated SSE frame".into(),
+            retryable: false,
+            disposition: ProviderFailureDisposition::StreamTerminal,
+            status_code: None,
+        };
+        assert!(should_return_terminal_after_recovery_exhausted(
+            &protocol,
+            Some(&crate::core::query_loop::Continue::CollapseDrainRetry)
+        ));
+
+        let interrupted = crate::service::api::streaming::StreamError {
+            provider_id: "anthropic".into(),
+            kind: "provider_stream".into(),
+            message: "provider overloaded".into(),
+            retryable: true,
+            disposition: ProviderFailureDisposition::StreamInterrupted,
+            status_code: None,
+        };
+        assert!(!should_return_terminal_after_recovery_exhausted(
+            &interrupted,
+            Some(&crate::core::query_loop::Continue::CollapseDrainRetry)
+        ));
     }
 }
