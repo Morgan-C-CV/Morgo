@@ -43,6 +43,7 @@ use crate::plugins::types::{
 };
 use crate::security::audit::AuditLog;
 use crate::security::authorizer::{AuthDecision, DefaultSurfaceAuthorizer, SurfaceAuthorizer};
+use crate::security::filesystem_policy::FilesystemPolicy;
 use crate::service::api::client::{
     ModelPricing, ModelProviderClient, ModelProviderConfig, ProviderTimeout,
 };
@@ -121,6 +122,7 @@ pub struct RuntimeInitializeBundle {
     pub notification_dispatcher: NotificationDispatcher,
     pub skill_registry: Arc<SkillRegistry>,
     pub mcp_runtime: Arc<McpRuntime>,
+    pub filesystem_policy: Option<Arc<FilesystemPolicy>>,
     pub plugin_load_result: Arc<crate::plugins::types::PluginLoadResult>,
     pub coordinator_tools: ToolRegistry,
     pub runtime_tool_registry: Arc<RwLock<ToolRegistry>>,
@@ -245,7 +247,7 @@ impl RuntimeBootstrap {
             task_manager.clone(),
             task_list_manager.clone(),
             plan_manager.clone(),
-        );
+        )?;
 
         state.record_phase(BootstrapPhase::InitializeSettings);
         // Phase 7: settings/model/agent initialization
@@ -455,7 +457,7 @@ impl RuntimeBootstrap {
         task_manager: Arc<TaskManager>,
         task_list_manager: Arc<TaskListManager>,
         plan_manager: Arc<PlanManager>,
-    ) -> RuntimeInitializeBundle {
+    ) -> anyhow::Result<RuntimeInitializeBundle> {
         let base_hook_registry = load_hook_registry(&state.current_cwd);
         let plugin_load_result = Arc::new(load_plugins(&state.current_cwd));
         let hook_registry =
@@ -516,23 +518,26 @@ impl RuntimeBootstrap {
         let runtime_tool_registry = Arc::new(RwLock::new(coordinator_tools.clone()));
         let notification_dispatcher = NotificationDispatcher::new(self.build_telegram_gateway())
             .with_hook_registry(hook_registry.clone());
-        let permission_context =
-            ToolAssemblyContext::coordinator(state.surface, state.session_mode)
-                .permission_context(if self.cli.init_only {
-                    PermissionMode::Plan
-                } else {
-                    PermissionMode::Default
-                })
-                .with_task_manager(task_manager)
-                .with_task_list_manager(task_list_manager)
-                .with_plan_manager(plan_manager)
-                .with_skill_registry(skill_registry.clone())
-                .with_mcp_runtime(mcp_runtime.clone())
-                .with_active_session_id(active_session_id)
-                .with_active_surface(state.surface)
-                .with_notification_dispatcher(notification_dispatcher.clone())
-                .with_inherited_tool_registry(coordinator_tools.clone())
-                .with_inherited_hook_registry(hook_registry.clone());
+        let filesystem_policy = self.load_filesystem_policy()?.map(Arc::new);
+        let mut permission_context = ToolAssemblyContext::coordinator(state.surface, state.session_mode)
+            .permission_context(if self.cli.init_only {
+                PermissionMode::Plan
+            } else {
+                PermissionMode::Default
+            })
+            .with_task_manager(task_manager)
+            .with_task_list_manager(task_list_manager)
+            .with_plan_manager(plan_manager)
+            .with_skill_registry(skill_registry.clone())
+            .with_mcp_runtime(mcp_runtime.clone())
+            .with_active_session_id(active_session_id)
+            .with_active_surface(state.surface)
+            .with_notification_dispatcher(notification_dispatcher.clone())
+            .with_inherited_tool_registry(coordinator_tools.clone())
+            .with_inherited_hook_registry(hook_registry.clone());
+        if let Some(policy) = filesystem_policy.clone() {
+            permission_context = permission_context.with_filesystem_policy(policy);
+        }
         let app_state = AppState {
             surface: state.surface,
             session_mode: state.session_mode,
@@ -571,11 +576,12 @@ impl RuntimeBootstrap {
             service_observability_tracker.clone(),
         );
 
-        RuntimeInitializeBundle {
+        Ok(RuntimeInitializeBundle {
             hook_registry,
             notification_dispatcher,
             skill_registry,
             mcp_runtime,
+            filesystem_policy,
             plugin_load_result,
             coordinator_tools,
             runtime_tool_registry,
@@ -583,7 +589,7 @@ impl RuntimeBootstrap {
             provider_config,
             api_client,
             compactor: ReactiveCompactor,
-        }
+        })
     }
 
     fn build_runtime_seed_state(
@@ -594,7 +600,7 @@ impl RuntimeBootstrap {
         active_session_id: String,
         notification_dispatcher: NotificationDispatcher,
     ) -> AppState {
-        let permission_context = ToolPermissionContext::new(if self.cli.init_only {
+        let mut permission_context = ToolPermissionContext::new(if self.cli.init_only {
             PermissionMode::Plan
         } else {
             PermissionMode::Default
@@ -608,6 +614,9 @@ impl RuntimeBootstrap {
         .with_interactive_tools(true)
         .with_inherited_tool_registry(initialize_bundle.coordinator_tools.clone())
         .with_inherited_hook_registry(initialize_bundle.hook_registry.clone());
+        if let Some(policy) = initialize_bundle.filesystem_policy.clone() {
+            permission_context = permission_context.with_filesystem_policy(policy);
+        }
         let mut app_state = AppState {
             surface: state.surface,
             session_mode: state.session_mode,
@@ -775,6 +784,34 @@ impl RuntimeBootstrap {
 
     fn build_telegram_gateway(&self) -> TelegramGateway {
         TelegramGateway::default()
+    }
+
+    fn load_filesystem_policy(&self) -> anyhow::Result<Option<FilesystemPolicy>> {
+        if let Ok(raw_path) = std::env::var("RUST_AGENT_FILESYSTEM_POLICY") {
+            let trimmed = raw_path.trim();
+            if trimmed.is_empty() {
+                anyhow::bail!("RUST_AGENT_FILESYSTEM_POLICY is set but empty")
+            }
+            let path = std::path::PathBuf::from(trimmed);
+            if !path.is_absolute() {
+                anyhow::bail!(
+                    "RUST_AGENT_FILESYSTEM_POLICY must be an absolute path: {}",
+                    path.display()
+                )
+            }
+            return FilesystemPolicy::load_from_path(&path).map(Some);
+        }
+
+        let Some(home) = std::env::var_os("HOME") else {
+            return Ok(None);
+        };
+        let path = std::path::PathBuf::from(home)
+            .join(".claude")
+            .join("filesystem-policy.json");
+        if !path.exists() {
+            return Ok(None);
+        }
+        FilesystemPolicy::load_from_path(&path).map(Some)
     }
 
     fn build_model_provider_config(&self) -> ModelProviderConfig {

@@ -7,6 +7,7 @@ use crate::interaction::dispatcher::NotificationDispatcher;
 use crate::plan::manager::PlanManager;
 use crate::plugins::runtime_state::RuntimePluginState;
 use crate::security::authorizer::SurfaceAdmissionPolicy;
+use crate::security::filesystem_policy::FilesystemPolicy;
 use crate::service::mcp::runtime::McpRuntime;
 use crate::skills::registry::SkillRegistry;
 use crate::task::list_manager::TaskListManager;
@@ -50,6 +51,7 @@ pub struct ToolPermissionContext {
     pub active_surface: Option<InteractionSurface>,
     pub notification_dispatcher: Option<NotificationDispatcher>,
     pub pending_approval: Arc<RwLock<Option<PendingApproval>>>,
+    pub filesystem_policy: Option<Arc<FilesystemPolicy>>,
     pub subagent_scripted_turns: Option<Vec<Vec<crate::service::api::streaming::StreamEvent>>>,
     pub inherited_tool_registry: Option<ToolRegistry>,
     pub inherited_hook_registry: Option<HookRegistry>,
@@ -78,6 +80,7 @@ impl ToolPermissionContext {
             active_surface: None,
             notification_dispatcher: None,
             pending_approval: Arc::new(RwLock::new(None)),
+            filesystem_policy: None,
             subagent_scripted_turns: None,
             inherited_tool_registry: None,
             inherited_hook_registry: None,
@@ -174,6 +177,15 @@ impl ToolPermissionContext {
             *slot = Some(pending_approval);
         }
         self
+    }
+
+    pub fn with_filesystem_policy(mut self, filesystem_policy: Arc<FilesystemPolicy>) -> Self {
+        self.filesystem_policy = Some(filesystem_policy);
+        self
+    }
+
+    pub fn filesystem_policy(&self) -> Option<Arc<FilesystemPolicy>> {
+        self.filesystem_policy.clone()
     }
 
     pub fn mode(&self) -> PermissionMode {
