@@ -234,16 +234,31 @@ impl ToolRegistry {
             crate::tool::definition::PermissionDecision::Allow => {
                 tool.invoke(call, permissions).await
             }
-            crate::tool::definition::PermissionDecision::Ask { message, .. } => {
-                Ok(ToolResult::PendingApproval {
-                    tool_name: metadata.name.to_string(),
-                    approval: crate::tool::result::PendingApprovalPayload {
+            crate::tool::definition::PermissionDecision::Ask { message, metadata: approval_metadata, .. } => {
+                let approval = if let Some(approval_metadata) = approval_metadata {
+                    crate::tool::result::PendingApprovalPayload {
+                        code: approval_metadata.code,
+                        summary: approval_metadata
+                            .summary
+                            .unwrap_or_else(|| format!("{} pending approval", metadata.name)),
+                        detail: approval_metadata.detail.or_else(|| Some(message.clone())),
+                        approval_kind: approval_metadata
+                            .approval_kind
+                            .or_else(|| Some("tool_permission".into())),
+                        escalation_reasons: approval_metadata.escalation_reasons,
+                    }
+                } else {
+                    crate::tool::result::PendingApprovalPayload {
                         code: None,
                         summary: format!("{} pending approval", metadata.name),
                         detail: Some(message.clone()),
                         approval_kind: Some("tool_permission".into()),
                         escalation_reasons: Vec::new(),
-                    },
+                    }
+                };
+                Ok(ToolResult::PendingApproval {
+                    tool_name: metadata.name.to_string(),
+                    approval,
                     message,
                 })
             }
@@ -278,8 +293,8 @@ fn merge_permission_decisions(
 
     match (base, tool) {
         (Deny { message, reason }, _) | (_, Deny { message, reason }) => Deny { message, reason },
-        (Ask { message, reason }, _) => Ask { message, reason },
-        (_, Ask { message, reason }) => Ask { message, reason },
+        (Ask { message, reason, metadata }, _) => Ask { message, reason, metadata },
+        (_, Ask { message, reason, metadata }) => Ask { message, reason, metadata },
         (Allow, Allow) => Allow,
     }
 }

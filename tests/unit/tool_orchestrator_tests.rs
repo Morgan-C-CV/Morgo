@@ -207,6 +207,7 @@ impl Tool for PendingApprovalTool {
         PermissionDecision::Ask {
             message: "approval required by test policy".into(),
             reason: rust_agent::tool::definition::PermissionDecisionReason::Tool,
+            metadata: None,
         }
     }
 

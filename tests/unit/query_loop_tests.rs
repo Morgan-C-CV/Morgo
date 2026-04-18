@@ -100,6 +100,7 @@ impl Tool for PendingApprovalFixtureTool {
         PermissionDecision::Ask {
             message: "requires explicit approval".into(),
             reason: rust_agent::tool::definition::PermissionDecisionReason::Tool,
+            metadata: None,
         }
     }
 

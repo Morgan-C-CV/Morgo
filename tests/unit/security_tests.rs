@@ -14,7 +14,7 @@ fn unsafe_paths_are_rejected() {
     assert!(is_safe_path("relative/file.txt"));
     assert!(is_safe_path("/tmp/file.txt"));
     assert!(!command_uses_only_safe_paths("cat ../secret.txt"));
-    assert!(command_uses_only_safe_paths("cat /tmp/file.txt"));
+    assert!(!command_uses_only_safe_paths("cat /tmp/file.txt"));
 }
 
 #[test]
@@ -34,6 +34,7 @@ fn destructive_patterns_are_detected() {
 #[test]
 fn shell_operators_require_escalation() {
     assert!(contains_shell_operator("cat file.txt | grep needle"));
+    assert!(!contains_shell_operator("echo 'a | b'"));
     let decision = evaluate_bash_policy("cat file.txt | grep needle");
     assert!(decision.requires_escalation);
 }
@@ -51,7 +52,9 @@ fn sandbox_policy_prefers_read_only_for_safe_commands() {
 fn path_assessment_reports_unsafe_and_absolute_tokens() {
     let findings = command_path_assessment("cat ../secret /tmp/file");
     assert!(findings.iter().any(|item| item == "unsafe:../secret"));
-    assert!(findings.iter().any(|item| item == "safe:/tmp/file"));
+    assert!(findings.iter().any(|item| item == "path.parent_traversal"));
+    assert!(findings.iter().any(|item| item == "unsafe:/tmp/file"));
+    assert!(findings.iter().any(|item| item == "path.absolute_outside_workspace"));
 }
 
 #[test]
@@ -79,6 +82,6 @@ fn bash_policy_tracks_structured_findings() {
         decision
             .escalation_reasons
             .iter()
-            .any(|reason| reason.starts_with("path:"))
+            .any(|reason| reason == "path.parent_traversal")
     );
 }

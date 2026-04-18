@@ -424,8 +424,40 @@ async fn remote_request_records_accept_and_notification_audit_events() {
         &event.payload,
         RemoteEventPayload::ApprovalRequired {
             tool_name,
-            ..
+            message,
+            code,
+            summary,
+            detail,
+            approval_kind,
+            escalation_reasons,
         } if tool_name == "Bash"
+            && message == "command requests disabling sandbox protections"
+            && code.as_deref() == Some("sandbox_disable")
+            && summary.as_deref() == Some("Bash pending approval")
+            && detail.as_deref() == Some("command requests disabling sandbox protections")
+            && approval_kind.as_deref() == Some("tool_permission")
+            && escalation_reasons.as_slice() == ["sandbox_disable"]
+    )));
+
+    let drained =
+        drain_remote_notifications(&app_state, "remote-audit-session", Some("audit-actor"));
+    assert!(drained.iter().any(|event| matches!(
+        &event.payload,
+        RemoteEventPayload::ApprovalRequired {
+            tool_name,
+            message,
+            code,
+            summary,
+            detail,
+            approval_kind,
+            escalation_reasons,
+        } if tool_name == "Bash"
+            && message == "command requests disabling sandbox protections"
+            && code.as_deref() == Some("sandbox_disable")
+            && summary.as_deref() == Some("Bash pending approval")
+            && detail.as_deref() == Some("command requests disabling sandbox protections")
+            && approval_kind.as_deref() == Some("tool_permission")
+            && escalation_reasons.as_slice() == ["sandbox_disable"]
     )));
 
     let events = audit_log

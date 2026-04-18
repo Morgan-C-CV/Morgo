@@ -18,6 +18,7 @@ pub fn resolve_hook_permission_decision(
                     .clone()
                     .unwrap_or_else(|| "Hook requires explicit approval".into()),
                 reason: PermissionDecisionReason::Hook,
+                metadata: None,
             },
         },
         HookPermissionResult::Allow { .. } => match base_decision {

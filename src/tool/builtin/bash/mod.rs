@@ -8,19 +8,22 @@ use tokio::process::Command;
 use tokio::time::timeout;
 
 use crate::state::permission_context::{PermissionMode, ToolPermissionContext};
-use crate::tool::definition::{PermissionDecision, Tool, ToolCall, ToolMetadata, ToolResult};
+use crate::tool::definition::{
+    PermissionApprovalMetadata, PermissionDecision, Tool, ToolCall, ToolMetadata, ToolResult,
+};
 
 pub mod command_helpers;
 pub mod path_validation;
 pub mod permissions;
 pub mod readonly_validation;
 pub mod sandbox;
+pub mod scanner;
 pub mod security;
 pub mod sed_validation;
 
 use crate::tool::classifier::auto_classifier::{ClassifierDecision, classify_bash_command};
 use command_helpers::{command_matches_rule, normalized_command_variants};
-use permissions::evaluate_bash_policy;
+use permissions::{evaluate_bash_policy, evaluate_bash_policy_with_context};
 use sandbox::{SandboxPolicy, execute_with_sandbox};
 
 pub struct BashTool;
@@ -100,7 +103,13 @@ impl Tool for BashTool {
             };
         };
 
-        let policy = evaluate_bash_policy(&input.command);
+        let cwd = resolve_cwd(permissions).unwrap_or_else(|_| PathBuf::from("."));
+        let filesystem_policy = permissions.filesystem_policy();
+        let policy = evaluate_bash_policy_with_context(
+            &input.command,
+            &cwd,
+            filesystem_policy.as_deref(),
+        );
         let variants = normalized_command_variants(&input.command);
 
         if permissions
@@ -127,6 +136,23 @@ impl Tool for BashTool {
         }
 
         if permissions
+            .always_ask_rules()
+            .iter()
+            .any(|rule| rule == self.metadata().name || rule == call.name.as_str())
+            || permissions.always_ask_rules().iter().any(|rule| {
+                variants
+                    .iter()
+                    .any(|variant| command_matches_rule(variant, rule))
+            })
+        {
+            return bash_ask(
+                "bash_explicit_ask_rule",
+                "Bash command requires approval by explicit ask rule",
+                vec!["explicit_ask_rule".into()],
+            );
+        }
+
+        if permissions
             .always_allow_rules()
             .iter()
             .any(|rule| rule == self.metadata().name || rule == call.name.as_str())
@@ -140,13 +166,11 @@ impl Tool for BashTool {
         }
 
         if input.dangerously_disable_sandbox {
-            return PermissionDecision::Ask {
-                message: format_bash_warning(
-                    "sandbox_disable",
-                    "command requests disabling sandbox protections",
-                ),
-                reason: crate::tool::definition::PermissionDecisionReason::Safety,
-            };
+            return bash_ask(
+                "sandbox_disable",
+                "command requests disabling sandbox protections",
+                vec!["sandbox_disable".into()],
+            );
         }
 
         match classify_bash_command(&input.command) {
@@ -157,19 +181,21 @@ impl Tool for BashTool {
                 };
             }
             ClassifierDecision::Ask { code, warning } => {
-                return PermissionDecision::Ask {
-                    message: format_bash_warning(code, &warning),
-                    reason: crate::tool::definition::PermissionDecisionReason::Safety,
-                };
+                return bash_ask(
+                    code,
+                    &warning,
+                    vec![format!("classifier.{code}")],
+                );
             }
             ClassifierDecision::Allow => {}
         }
 
         if policy.requires_escalation {
-            return PermissionDecision::Ask {
-                message: format_policy_warning(&policy),
-                reason: crate::tool::definition::PermissionDecisionReason::Safety,
-            };
+            return bash_ask(
+                "policy_escalation",
+                &format_policy_warning(&policy),
+                policy.escalation_reasons.clone(),
+            );
         }
 
         PermissionDecision::Allow
@@ -216,6 +242,20 @@ fn format_bash_warning(code: &str, warning: &str) -> String {
 
 fn format_bash_denial(code: &str, warning: &str) -> String {
     format!("bash command denied [{code}]: {warning}")
+}
+
+fn bash_ask(code: &str, warning: &str, escalation_reasons: Vec<String>) -> PermissionDecision {
+    PermissionDecision::Ask {
+        message: format_bash_warning(code, warning),
+        reason: crate::tool::definition::PermissionDecisionReason::Safety,
+        metadata: Some(PermissionApprovalMetadata {
+            code: Some(code.to_string()),
+            summary: Some("Bash pending approval".into()),
+            detail: Some(warning.to_string()),
+            approval_kind: Some("tool_permission".into()),
+            escalation_reasons,
+        }),
+    }
 }
 
 fn format_policy_warning(policy: &permissions::BashPolicyDecision) -> String {

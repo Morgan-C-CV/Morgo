@@ -46,6 +46,7 @@ pub fn evaluate_tool_permission(
                 metadata.name
             ),
             reason: crate::tool::definition::PermissionDecisionReason::Rule,
+            metadata: None,
         };
     }
 
@@ -75,6 +76,7 @@ pub fn evaluate_tool_permission(
         return PermissionDecision::Ask {
             message: format!("tool {} requires explicit approval", metadata.name),
             reason: crate::tool::definition::PermissionDecisionReason::Rule,
+            metadata: None,
         };
     }
 

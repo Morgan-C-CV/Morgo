@@ -73,6 +73,15 @@ pub enum PermissionDecisionReason {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PermissionApprovalMetadata {
+    pub code: Option<String>,
+    pub summary: Option<String>,
+    pub detail: Option<String>,
+    pub approval_kind: Option<String>,
+    pub escalation_reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PermissionDecision {
     Allow,
     Deny {
@@ -82,6 +91,7 @@ pub enum PermissionDecision {
     Ask {
         message: String,
         reason: PermissionDecisionReason,
+        metadata: Option<PermissionApprovalMetadata>,
     },
 }
 

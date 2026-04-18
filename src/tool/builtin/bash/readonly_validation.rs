@@ -1,4 +1,5 @@
 use crate::tool::builtin::bash::command_helpers::normalized_command_variants;
+use crate::tool::builtin::bash::scanner::scan_bash_command;
 use crate::tool::builtin::bash::security::contains_shell_operator;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -8,7 +9,8 @@ pub enum ReadOnlyLevel {
 }
 
 fn is_read_only_variant(command: &str) -> bool {
-    let trimmed = command.trim();
+    let scan = scan_bash_command(command);
+    let trimmed = scan.words.join(" ");
     [
         "ls",
         "pwd",

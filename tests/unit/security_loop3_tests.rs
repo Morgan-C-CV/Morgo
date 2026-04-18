@@ -79,8 +79,10 @@ async fn bash_classifier_asks_on_secret_access_patterns() {
 
     assert!(matches!(
         decision,
-        PermissionDecision::Ask { message, .. }
+        PermissionDecision::Ask { message, metadata: Some(metadata), .. }
             if message == "bash command warning [secret_access]: command may access credentials or secrets"
+                && metadata.code.as_deref() == Some("secret_access")
+                && metadata.escalation_reasons.iter().any(|reason| reason == "classifier.secret_access")
     ));
 }
 
@@ -98,9 +100,33 @@ async fn bash_policy_escalation_uses_structured_warning_contract() {
 
     assert!(matches!(
         decision,
-        PermissionDecision::Ask { message, .. }
+        PermissionDecision::Ask { message, metadata: Some(metadata), .. }
             if message.contains("bash command warning [policy_escalation]: explicit approval required")
                 && message.contains("sandbox=WorkspaceWrite")
-                && message.contains("shell_operators=|")
+                && metadata.code.as_deref() == Some("policy_escalation")
+                && metadata.escalation_reasons.iter().any(|reason| reason == "shell_operator.pipe")
+    ));
+}
+
+#[tokio::test]
+async fn bash_command_level_ask_rules_trigger_structured_approval() {
+    let context = ToolPermissionContext::new(PermissionMode::Default);
+    context.add_always_ask_rule("sudo*");
+
+    let decision = BashTool
+        .check_permissions(
+            &ToolCall {
+                name: "Bash".into(),
+                input: serde_json::json!({ "command": "sudo ls" }).to_string(),
+            },
+            &context,
+        )
+        .await;
+
+    assert!(matches!(
+        decision,
+        PermissionDecision::Ask { metadata: Some(metadata), .. }
+            if metadata.code.as_deref() == Some("bash_explicit_ask_rule")
+                && metadata.escalation_reasons.iter().any(|reason| reason == "explicit_ask_rule")
     ));
 }
