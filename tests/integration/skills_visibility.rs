@@ -4,6 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use rust_agent::skills::loader::{SkillLoaderCache, load_skills_with_diagnostics};
 use rust_agent::skills::registry::SkillRegistry;
+use rust_agent::skills::types::SkillWorkflowExecution;
 
 fn unique_temp_path(prefix: &str) -> PathBuf {
     let nanos = SystemTime::now()
@@ -24,7 +25,7 @@ fn skill_visibility_changes_with_cwd_and_cache_invalidation() {
     fs::write(project_a.join("Cargo.toml"), "[package]\nname='a'\n").expect("write cargo");
     fs::write(
         skill_dir.join("SKILL.md"),
-        "---\ndescription: contextual skill\npaths: */project-a*\nrequires-files: Cargo.toml\n---\nbody\n",
+        "---\ndescription: contextual skill\npaths: */project-a*\nrequires-files: Cargo.toml\nworkflow-execution: agent\n---\nbody\n",
     )
     .expect("write skill file");
 
@@ -32,6 +33,7 @@ fn skill_visibility_changes_with_cwd_and_cache_invalidation() {
     let registry = SkillRegistry::new(result.skills.clone());
     assert_eq!(registry.list_user_invocable(&project_a).len(), 1);
     assert!(registry.list_user_invocable(&project_b).is_empty());
+    assert_eq!(result.skills[0].workflow_execution, SkillWorkflowExecution::Agent);
 
     let mut cache = SkillLoaderCache::default();
     let (first, reloaded_first) = cache
@@ -43,7 +45,7 @@ fn skill_visibility_changes_with_cwd_and_cache_invalidation() {
 
     fs::write(
         skill_dir.join("SKILL.md"),
-        "---\ndescription: contextual skill updated\npaths: */project-a*\nrequires-files: Cargo.toml\n---\nbody updated\n",
+        "---\ndescription: contextual skill updated\npaths: */project-a*\nrequires-files: Cargo.toml\nworkflow-execution: agent\n---\nbody updated\n",
     )
     .expect("rewrite skill file");
 
@@ -53,6 +55,7 @@ fn skill_visibility_changes_with_cwd_and_cache_invalidation() {
     assert!(reloaded_third);
     assert_ne!(first.fingerprint, second.fingerprint);
     assert_eq!(second.skills[0].description, "contextual skill updated");
+    assert_eq!(second.skills[0].workflow_execution, SkillWorkflowExecution::Agent);
 
     fs::remove_dir_all(root).expect("cleanup skill visibility root");
 }

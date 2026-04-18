@@ -10,7 +10,9 @@ use rust_agent::interaction::dispatcher::NotificationDispatcher;
 use rust_agent::interaction::telegram::gateway::TelegramGateway;
 use rust_agent::plan::manager::PlanManager;
 use rust_agent::skills::registry::SkillRegistry;
-use rust_agent::skills::types::{SkillDefinition, SkillExecutionContext, SkillSource};
+use rust_agent::skills::types::{
+    SkillDefinition, SkillExecutionContext, SkillSource, SkillWorkflowExecution,
+};
 use rust_agent::state::app_state::{AppState, RuntimeRole, WorkerRole};
 use rust_agent::state::permission_context::{PermissionMode, ToolPermissionContext};
 use rust_agent::state::plan_mode;
@@ -32,6 +34,7 @@ fn sample_skill() -> SkillDefinition {
         ),
         allowed_tools: vec!["Read".into()],
         aliases: vec![],
+        workflow_execution: SkillWorkflowExecution::PromptOnly,
         user_invocable: true,
         disable_model_invocation: false,
         hidden: false,

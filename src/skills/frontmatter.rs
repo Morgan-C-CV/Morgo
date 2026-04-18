@@ -1,4 +1,6 @@
-use crate::skills::types::{SkillExecutionContext, SkillFrontmatter};
+use crate::skills::types::{
+    SkillExecutionContext, SkillFrontmatter, SkillWorkflowExecution,
+};
 
 pub fn parse_frontmatter(markdown: &str) -> anyhow::Result<(SkillFrontmatter, String)> {
     let Some(rest) = markdown.strip_prefix("---\n") else {
@@ -31,6 +33,9 @@ pub fn parse_frontmatter(markdown: &str) -> anyhow::Result<(SkillFrontmatter, St
             "workflow-hint" => frontmatter.workflow_hint = non_empty(value),
             "allowed-tools" => frontmatter.allowed_tools = split_list(value),
             "aliases" => frontmatter.aliases = split_list(value),
+            "workflow-execution" => {
+                frontmatter.workflow_execution = parse_workflow_execution(value)
+            }
             "user-invocable" => frontmatter.user_invocable = parse_bool(value).unwrap_or(true),
             "disable-model-invocation" => {
                 frontmatter.disable_model_invocation = parse_bool(value).unwrap_or(false)
@@ -58,6 +63,13 @@ fn parse_bool(value: &str) -> Option<bool> {
         "true" | "yes" | "1" => Some(true),
         "false" | "no" | "0" => Some(false),
         _ => None,
+    }
+}
+
+fn parse_workflow_execution(value: &str) -> SkillWorkflowExecution {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "agent" => SkillWorkflowExecution::Agent,
+        _ => SkillWorkflowExecution::PromptOnly,
     }
 }
 

@@ -23,6 +23,22 @@ pub enum SkillExecutionContext {
     Fork,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SkillWorkflowExecution {
+    #[default]
+    PromptOnly,
+    Agent,
+}
+
+impl SkillWorkflowExecution {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::PromptOnly => "prompt_only",
+            Self::Agent => "agent",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SkillFrontmatter {
     pub name: Option<String>,
@@ -32,6 +48,7 @@ pub struct SkillFrontmatter {
     pub workflow_hint: Option<String>,
     pub allowed_tools: Vec<String>,
     pub aliases: Vec<String>,
+    pub workflow_execution: SkillWorkflowExecution,
     pub user_invocable: bool,
     pub disable_model_invocation: bool,
     pub hidden: bool,
@@ -51,6 +68,7 @@ pub struct SkillDefinition {
     pub workflow_summary: Option<String>,
     pub allowed_tools: Vec<String>,
     pub aliases: Vec<String>,
+    pub workflow_execution: SkillWorkflowExecution,
     pub user_invocable: bool,
     pub disable_model_invocation: bool,
     pub hidden: bool,

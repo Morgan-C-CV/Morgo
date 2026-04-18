@@ -1,4 +1,6 @@
-use crate::skills::types::{SkillDefinition, SkillExecutionContext, SkillSource};
+use crate::skills::types::{
+    SkillDefinition, SkillExecutionContext, SkillSource, SkillWorkflowExecution,
+};
 
 pub fn bundled_skills() -> Vec<SkillDefinition> {
     vec![SkillDefinition {
@@ -18,6 +20,7 @@ pub fn bundled_skills() -> Vec<SkillDefinition> {
         ),
         allowed_tools: vec!["Edit".to_string(), "Read".to_string()],
         aliases: vec!["config-update".to_string()],
+        workflow_execution: SkillWorkflowExecution::PromptOnly,
         user_invocable: true,
         disable_model_invocation: false,
         hidden: false,

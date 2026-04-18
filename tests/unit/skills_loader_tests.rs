@@ -4,7 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use rust_agent::skills::frontmatter::parse_frontmatter;
 use rust_agent::skills::loader::{SkillLoaderCache, load_skills_with_diagnostics};
-use rust_agent::skills::types::SkillSource;
+use rust_agent::skills::types::{SkillSource, SkillWorkflowExecution};
 
 fn unique_temp_path(prefix: &str) -> PathBuf {
     let nanos = SystemTime::now()
@@ -22,6 +22,7 @@ description: richer skill
 when_to_use: Use when validating skill metadata
 argument-hint: target path
 workflow-hint: inspect then update
+workflow-execution: agent
 allowed-tools: Read, Edit
 aliases: tskill, test-s
 user-invocable: true
@@ -43,6 +44,7 @@ Skill body
     );
     assert_eq!(frontmatter.allowed_tools, vec!["Read", "Edit"]);
     assert_eq!(frontmatter.aliases, vec!["tskill", "test-s"]);
+    assert_eq!(frontmatter.workflow_execution, SkillWorkflowExecution::Agent);
     assert_eq!(frontmatter.exclude_paths, vec!["*/vendor/*"]);
     assert_eq!(
         frontmatter.requires_files,
@@ -117,6 +119,7 @@ fn skill_loader_merges_user_and_project_sources_with_project_override() {
     assert_eq!(skill.description, "project copy");
     assert_eq!(skill.workflow_hint.as_deref(), Some("local workflow"));
     assert_eq!(skill.workflow_summary.as_deref(), Some("local workflow"));
+    assert_eq!(skill.workflow_execution, SkillWorkflowExecution::PromptOnly);
     assert_eq!(skill.source, SkillSource::Filesystem);
     assert_eq!(skill.content, "project body");
 
@@ -138,24 +141,27 @@ fn skill_loader_cache_reloads_only_after_fingerprint_changes() {
     let mut cache = SkillLoaderCache::default();
     let (first, reloaded_first) = cache.load_or_reload(&root).expect("first cache load");
     assert!(reloaded_first);
+    assert_eq!(first.skills[0].workflow_execution, SkillWorkflowExecution::PromptOnly);
     let (second, reloaded_second) = cache.load_or_reload(&root).expect("second cache load");
     assert!(!reloaded_second);
     assert_eq!(first.fingerprint, second.fingerprint);
 
     fs::write(
         skill_dir.join("SKILL.md"),
-        "---\ndescription: cache skill updated\n---\nbody\n",
+        "---\ndescription: cache skill updated\nworkflow-execution: agent\n---\nbody\n",
     )
     .expect("rewrite skill file");
     let (third, reloaded_third) = cache.load_or_reload(&root).expect("third cache load");
     assert!(reloaded_third);
     assert_ne!(second.fingerprint, third.fingerprint);
+    assert_eq!(third.skills[0].workflow_execution, SkillWorkflowExecution::Agent);
 
     cache.invalidate();
-    let (_, reloaded_after_invalidate) = cache
+    let (fourth, reloaded_after_invalidate) = cache
         .load_or_reload(&root)
         .expect("reload after invalidate");
     assert!(reloaded_after_invalidate);
+    assert_eq!(fourth.skills[0].workflow_execution, SkillWorkflowExecution::Agent);
 
     fs::remove_dir_all(root).expect("cleanup cache root");
 }

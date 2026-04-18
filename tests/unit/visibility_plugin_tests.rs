@@ -30,7 +30,9 @@ use rust_agent::plugins::types::{
     PluginLifecycleState, PluginLoadResult, PluginToolDefinition,
 };
 use rust_agent::skills::registry::SkillRegistry;
-use rust_agent::skills::types::{SkillDefinition, SkillExecutionContext, SkillSource};
+use rust_agent::skills::types::{
+    SkillDefinition, SkillExecutionContext, SkillSource, SkillWorkflowExecution,
+};
 use rust_agent::state::app_state::{AppState, RuntimeRole, WorkerRole};
 use rust_agent::state::permission_context::{PermissionMode, ToolPermissionContext};
 use rust_agent::task::manager::TaskManager;
@@ -114,6 +116,7 @@ fn sample_skill_definition(name: &str) -> SkillDefinition {
         ),
         allowed_tools: vec!["Read".into()],
         aliases: vec![],
+        workflow_execution: SkillWorkflowExecution::PromptOnly,
         user_invocable: true,
         disable_model_invocation: true,
         hidden: false,

@@ -1,7 +1,9 @@
 use std::path::Path;
 
 use rust_agent::skills::registry::SkillRegistry;
-use rust_agent::skills::types::{SkillDefinition, SkillExecutionContext, SkillSource};
+use rust_agent::skills::types::{
+    SkillDefinition, SkillExecutionContext, SkillSource, SkillWorkflowExecution,
+};
 
 fn sample_skill(name: &str) -> SkillDefinition {
     SkillDefinition {
@@ -13,6 +15,7 @@ fn sample_skill(name: &str) -> SkillDefinition {
         workflow_summary: None,
         allowed_tools: vec!["Read".into()],
         aliases: Vec::new(),
+        workflow_execution: SkillWorkflowExecution::PromptOnly,
         user_invocable: true,
         disable_model_invocation: false,
         hidden: false,

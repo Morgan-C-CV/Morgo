@@ -141,6 +141,7 @@ fn load_skill_file(path: &PathBuf, source: SkillSource) -> anyhow::Result<SkillD
         workflow_summary,
         allowed_tools: frontmatter.allowed_tools,
         aliases: frontmatter.aliases,
+        workflow_execution: frontmatter.workflow_execution,
         user_invocable: frontmatter.user_invocable,
         disable_model_invocation: frontmatter.disable_model_invocation,
         hidden: frontmatter.hidden,

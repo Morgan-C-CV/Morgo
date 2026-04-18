@@ -3,7 +3,8 @@ use std::path::Path;
 use async_trait::async_trait;
 
 use crate::skills::registry::SkillRegistry;
-use crate::skills::types::SkillDefinition;
+use crate::skills::types::{SkillDefinition, SkillWorkflowExecution};
+use crate::state::app_state::WorkerRole;
 use crate::state::permission_context::ToolPermissionContext;
 use crate::tool::definition::{Tool, ToolCall, ToolMetadata, ToolResult};
 
@@ -21,14 +22,21 @@ pub fn load_skill_prompt(
     if !skill.matches_project_context(cwd) {
         anyhow::bail!("skill {} is not active for {}", skill.name, cwd.display());
     }
-    format_skill_prompt(&skill, args)
+    format_skill_invocation(&skill, args)
 }
 
-pub fn format_skill_prompt(skill: &SkillDefinition, args: &str) -> anyhow::Result<String> {
+pub fn format_skill_invocation(skill: &SkillDefinition, args: &str) -> anyhow::Result<String> {
     if !skill.is_model_invocable() {
         anyhow::bail!("skill {} cannot be invoked by the model", skill.name);
     }
 
+    match skill.workflow_execution {
+        SkillWorkflowExecution::PromptOnly => format_skill_prompt(skill, args),
+        SkillWorkflowExecution::Agent => format_skill_agent_request(skill, args),
+    }
+}
+
+pub fn format_skill_prompt(skill: &SkillDefinition, args: &str) -> anyhow::Result<String> {
     let args_line = if args.trim().is_empty() {
         "Arguments: (none)".to_string()
     } else {
@@ -69,6 +77,35 @@ pub fn format_skill_prompt(skill: &SkillDefinition, args: &str) -> anyhow::Resul
         source,
         args_line,
         skill.content
+    ))
+}
+
+fn format_skill_agent_request(skill: &SkillDefinition, args: &str) -> anyhow::Result<String> {
+    let task = if args.trim().is_empty() {
+        format!(
+            "Follow the loaded skill instructions below.\n\nSkill: {}\n\nSkill instructions:\n{}",
+            skill.name, skill.content
+        )
+    } else {
+        format!(
+            "Follow the loaded skill instructions below.\n\nSkill: {}\nUser arguments: {}\n\nSkill instructions:\n{}",
+            skill.name,
+            args.trim(),
+            skill.content
+        )
+    };
+
+    let payload = serde_json::json!({
+        "task": task,
+        "role": WorkerRole::Research.as_str(),
+        "inherit_context": true,
+        "allowed_tools": (!skill.allowed_tools.is_empty()).then_some(skill.allowed_tools.clone()),
+        "reuse_strategy": "running_only"
+    });
+
+    Ok(format!(
+        "Skill workflow: agent\nAgent request:\n{}",
+        serde_json::to_string_pretty(&payload)?
     ))
 }
 
