@@ -95,5 +95,6 @@ pub fn default_server_configs() -> Vec<McpServerConfig> {
         args: Vec::new(),
         env: BTreeMap::new(),
         transport: McpTransportKind::Mock,
+        governance: Default::default(),
     }]
 }

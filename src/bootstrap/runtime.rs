@@ -51,6 +51,7 @@ use crate::service::api::retry::RetryPolicy;
 use crate::service::compact::reactive_compact::ReactiveCompactor;
 use crate::service::mcp::config::load_server_configs_with_diagnostics;
 use crate::service::mcp::runtime::McpRuntime;
+use crate::service::mcp::state::load_mcp_governance_state_with_diagnostics;
 use crate::service::observability::ServiceObservabilityTracker;
 use crate::skills::bundled::bundled_skills;
 use crate::skills::loader::SkillLoaderCache;
@@ -474,9 +475,11 @@ impl RuntimeBootstrap {
         let skill_registry = Arc::new(SkillRegistry::new(discovered_skills));
         let service_observability_tracker = ServiceObservabilityTracker::default();
         let mcp_config_result = load_server_configs_with_diagnostics(&state.current_cwd);
-        let mcp_runtime = Arc::new(McpRuntime::new_with_config_result_and_observability(
+        let mcp_governance_result = load_mcp_governance_state_with_diagnostics(&state.current_cwd);
+        let mcp_runtime = Arc::new(McpRuntime::new_with_config_and_governance_result_and_observability(
             Arc::new(crate::service::mcp::client::RoutingMcpClient::default()),
             mcp_config_result,
+            mcp_governance_result,
             service_observability_tracker.clone(),
         ));
         let tool_inventory = self.build_tool_registry();

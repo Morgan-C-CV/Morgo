@@ -40,13 +40,19 @@ impl Command for McpCommand {
         if args.is_empty() || args == "list" || args == "status" {
             let servers = runtime.list_servers().await;
             let config_load = runtime.config_load_result();
+            let governance_load = runtime.governance_load_result();
             let mut lines = vec![
                 "MCP servers:".to_string(),
                 format!("  config source: {}", config_load.source.as_str()),
                 format!("  config path: {}", config_load.path.display()),
+                format!("  governance source: {}", governance_load.source.as_str()),
+                format!("  governance path: {}", governance_load.path.display()),
             ];
             for diagnostic in &config_load.diagnostics {
                 lines.push(format!("  diagnostic: {}", diagnostic));
+            }
+            for diagnostic in &governance_load.diagnostics {
+                lines.push(format!("  governance_diagnostic: {}", diagnostic));
             }
             for server in servers {
                 lines.push(String::new());
@@ -115,16 +121,34 @@ impl Command for McpCommand {
                         failure.code.as_str()
                     ));
                 }
+                lines.push(format!(
+                    "  governance: status={}, source={}, risk={}",
+                    server.governance.approval_status.as_str(),
+                    server.governance.approval_source.as_str(),
+                    server.governance.classification.risk_level.as_str()
+                ));
+                lines.push(format!(
+                    "  governance_reasons: {}",
+                    server.governance.classification.reasons.join(", ")
+                ));
+                lines.push(format!(
+                    "  governance_summary: {}",
+                    server.governance.classification.summary
+                ));
+                if let Some(fingerprint) = server.governance.approved_fingerprint {
+                    lines.push(format!("  approved_fingerprint: {}", fingerprint));
+                }
             }
             return Ok(CommandResult::Message(lines.join("\n")));
         }
 
         let mut parts = args.split_whitespace();
         let action = parts.next().unwrap_or_default();
-        let server = parts.collect::<Vec<_>>().join(" ");
+        let remainder = parts.collect::<Vec<_>>();
+        let server = remainder.join(" ");
         if server.trim().is_empty() {
             return Ok(CommandResult::Message(
-                "Usage: /mcp [list|status|connect <server>|disconnect <server>|reconnect <server>]"
+                "Usage: /mcp [list|status|connect <server>|disconnect <server>|reconnect <server>|approve <server>|deny <server> [reason]]"
                     .to_string(),
             ));
         }
@@ -178,6 +202,39 @@ impl Command for McpCommand {
                     state.resource_count
                 )
             }),
+            "approve" => {
+                let cwd = app_state.current_working_directory();
+                runtime.approve_server(server.trim(), &cwd).await.map(|(state, path)| {
+                    format!(
+                        "Approved MCP server {} ({}). governance_path={}; fingerprint={}",
+                        state.config.name,
+                        state.config.id,
+                        path.display(),
+                        state.governance.approved_fingerprint.unwrap_or_default()
+                    )
+                })
+            }
+            "deny" => {
+                let cwd = app_state.current_working_directory();
+                let target = remainder.first().copied().unwrap_or_default();
+                let reason = remainder.iter().skip(1).copied().collect::<Vec<_>>().join(" ");
+                runtime
+                    .deny_server(
+                        target,
+                        &cwd,
+                        (!reason.trim().is_empty()).then_some(reason),
+                    )
+                    .await
+                    .map(|(state, path)| {
+                        format!(
+                            "Denied MCP server {} ({}). governance_path={}; status={}",
+                            state.config.name,
+                            state.config.id,
+                            path.display(),
+                            state.governance.approval_status.as_str()
+                        )
+                    })
+            }
             _ => anyhow::bail!("Unknown /mcp action: {action}"),
         }?;
 

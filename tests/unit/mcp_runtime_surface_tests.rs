@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use rust_agent::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
@@ -12,9 +13,12 @@ use rust_agent::interaction::telegram::gateway::TelegramGateway;
 use rust_agent::service::mcp::client::McpClient;
 use rust_agent::service::mcp::config::{McpConfigLoadResult, McpConfigSource};
 use rust_agent::service::mcp::runtime::{McpRuntime, replace_runtime_server_config};
+use rust_agent::service::mcp::state::{
+    McpGovernanceStateEntry, McpGovernanceStateLoadResult, McpGovernanceStateSource,
+};
 use rust_agent::service::mcp::types::{
     McpAction, McpCapabilities, McpConnectInfo, McpPeerInfo, McpRequest, McpResourceInfo,
-    McpServerConfig, McpToolInfo, McpTransportKind,
+    McpServerConfig, McpServerGovernanceConfig, McpToolInfo, McpTransportKind,
 };
 use rust_agent::state::app_state::{AppState, RuntimeRole};
 use rust_agent::state::permission_context::{PermissionMode, ToolPermissionContext};
@@ -121,7 +125,19 @@ fn fake_config(command: &str) -> McpServerConfig {
         args: vec!["--stdio".into()],
         env: BTreeMap::from([("A".into(), "1".into())]),
         transport: McpTransportKind::StdioProcess,
+        governance: McpServerGovernanceConfig {
+            review_required: false,
+            notes: None,
+        },
     }
+}
+
+fn unique_temp_dir(prefix: &str) -> std::path::PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock should be after unix epoch")
+        .as_nanos();
+    std::env::temp_dir().join(format!("{prefix}-{nanos}"))
 }
 
 fn test_app_state(runtime: Arc<McpRuntime>) -> AppState {
@@ -274,6 +290,65 @@ async fn mcp_command_and_tool_surface_protocol_errors() {
 }
 
 #[tokio::test]
+async fn mcp_connect_requires_governance_approval_until_approved() {
+    let client = Arc::new(FakeMcpClient::default());
+    let mut config = fake_config("fake-server");
+    config.governance.review_required = true;
+    let runtime = Arc::new(McpRuntime::new_with_config_and_governance_result_and_observability(
+        client.clone(),
+        McpConfigLoadResult {
+            path: ".claude/mcp_servers.json".into(),
+            source: McpConfigSource::File,
+            configs: vec![config],
+            diagnostics: Vec::new(),
+        },
+        McpGovernanceStateLoadResult {
+            path: ".claude/mcp-governance.json".into(),
+            source: McpGovernanceStateSource::Defaults,
+            states: BTreeMap::new(),
+            diagnostics: Vec::new(),
+        },
+        rust_agent::service::observability::ServiceObservabilityTracker::default(),
+    ));
+    let app_state = test_app_state(runtime.clone());
+
+    let error = McpCommand
+        .execute(&NormalizedInput::from_raw(InteractionSurface::Cli, "/mcp connect fake"), &app_state)
+        .await
+        .expect_err("approval should be required");
+    assert!(error
+        .to_string()
+        .contains("mcp_governance_review_required"));
+    assert_eq!(*client.connect_calls.lock().await, 0);
+
+    let cwd = unique_temp_dir("mcp-governance-approve");
+    std::fs::create_dir_all(&cwd).expect("create temp cwd");
+    let approve = McpCommand
+        .execute(&NormalizedInput::from_raw(InteractionSurface::Cli, "/mcp approve fake"), &AppState {
+            session: Some(rust_agent::history::session::SessionSnapshot {
+                session_id: rust_agent::history::session::SessionId("session-1".into()),
+                surface: InteractionSurface::Cli,
+                session_mode: SessionMode::Headless,
+                cwd: cwd.display().to_string(),
+                last_turn_at: None,
+                prompt_seed: None,
+            }),
+            ..app_state.clone()
+        })
+        .await
+        .expect("approve should succeed");
+    let CommandResult::Message(approve_text) = approve else {
+        panic!("expected approve message");
+    };
+    assert!(approve_text.contains("Approved MCP server fake (fake)"));
+
+    runtime.connect("fake").await.expect("approved connect should succeed");
+    assert_eq!(*client.connect_calls.lock().await, 1);
+    let servers = runtime.list_servers().await;
+    assert_eq!(servers[0].governance.approval_status.as_str(), "approved");
+}
+
+#[tokio::test]
 async fn stale_config_hash_invalidates_cached_connection() {
     let client = Arc::new(FakeMcpClient::default());
     let runtime = Arc::new(McpRuntime::new(
@@ -306,4 +381,46 @@ async fn stale_config_hash_invalidates_cached_connection() {
     assert_eq!(tools.len(), 3);
     let later_connects = *client.connect_calls.lock().await;
     assert!(later_connects >= initial_connects);
+}
+
+#[tokio::test]
+async fn stale_governance_entry_is_reported_in_status() {
+    let mut config = fake_config("fake-server");
+    config.governance.review_required = true;
+    let old_fingerprint = 7_u64;
+    let runtime = Arc::new(McpRuntime::new_with_config_and_governance_result_and_observability(
+        Arc::new(FakeMcpClient::default()),
+        McpConfigLoadResult {
+            path: ".claude/mcp_servers.json".into(),
+            source: McpConfigSource::File,
+            configs: vec![config],
+            diagnostics: Vec::new(),
+        },
+        McpGovernanceStateLoadResult {
+            path: ".claude/mcp-governance.json".into(),
+            source: McpGovernanceStateSource::File,
+            states: BTreeMap::from([(
+                "fake".into(),
+                McpGovernanceStateEntry {
+                    server_id: "fake".into(),
+                    approved: true,
+                    fingerprint: old_fingerprint,
+                    reason: None,
+                },
+            )]),
+            diagnostics: Vec::new(),
+        },
+        rust_agent::service::observability::ServiceObservabilityTracker::default(),
+    ));
+    let app_state = test_app_state(runtime.clone());
+
+    let result = McpCommand
+        .execute(&NormalizedInput::from_raw(InteractionSurface::Cli, "/mcp status"), &app_state)
+        .await
+        .expect("status should render");
+    let CommandResult::Message(text) = result else {
+        panic!("expected status message");
+    };
+    assert!(text.contains("governance: status=stale"));
+    assert!(text.contains("governance_reasons: transport.stdio_process, governance.review_required"));
 }

@@ -1,15 +1,21 @@
 use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
+use std::path::Path;
 use std::sync::Arc;
 
 use tokio::sync::RwLock;
 
 use crate::service::mcp::client::{McpClient, RoutingMcpClient};
 use crate::service::mcp::config::{McpConfigLoadResult, McpConfigSource, default_server_configs};
+use crate::service::mcp::state::{
+    McpGovernanceStateEntry, McpGovernanceStateLoadResult, McpGovernanceStateSource,
+    write_mcp_governance_state,
+};
 use crate::service::mcp::types::{
-    McpAction, McpConnectInfo, McpConnectionStatus, McpFailureCode, McpFailureNotice,
-    McpOperationKind, McpRequest, McpResourceInfo, McpResponse, McpServerConfig, McpServerState,
-    McpToolInfo,
+    McpAction, McpCapabilities, McpConnectInfo, McpConnectionStatus, McpFailureCode,
+    McpFailureNotice, McpGovernanceApprovalStatus, McpGovernanceSource, McpOperationKind,
+    McpRequest, McpResourceInfo, McpResponse, McpServerClassification, McpServerConfig,
+    McpServerRiskLevel, McpServerRuntimeGovernance, McpServerState, McpToolInfo, McpTransportKind,
 };
 use crate::service::observability::ServiceObservabilityTracker;
 
@@ -20,6 +26,8 @@ pub struct McpRuntime {
     cached_tools: Arc<RwLock<BTreeMap<String, Vec<McpToolInfo>>>>,
     cached_resources: Arc<RwLock<BTreeMap<String, Vec<McpResourceInfo>>>>,
     config_fingerprints: Arc<RwLock<BTreeMap<String, u64>>>,
+    governance_states: Arc<RwLock<BTreeMap<String, McpGovernanceStateEntry>>>,
+    governance_load_result: Arc<McpGovernanceStateLoadResult>,
     config_load_result: Arc<McpConfigLoadResult>,
     observability: ServiceObservabilityTracker,
 }
@@ -88,25 +96,49 @@ impl McpRuntime {
         config_load_result: McpConfigLoadResult,
         observability: ServiceObservabilityTracker,
     ) -> Self {
+        Self::new_with_config_and_governance_result_and_observability(
+            client,
+            config_load_result,
+            McpGovernanceStateLoadResult {
+                path: std::path::PathBuf::from(".claude/mcp-governance.json"),
+                source: McpGovernanceStateSource::Defaults,
+                states: BTreeMap::new(),
+                diagnostics: Vec::new(),
+            },
+            observability,
+        )
+    }
+
+    pub fn new_with_config_and_governance_result_and_observability(
+        client: Arc<dyn McpClient>,
+        config_load_result: McpConfigLoadResult,
+        governance_load_result: McpGovernanceStateLoadResult,
+        observability: ServiceObservabilityTracker,
+    ) -> Self {
         let servers = config_load_result
             .configs
             .iter()
             .cloned()
-            .map(|config| McpServerState {
-                config,
-                status: McpConnectionStatus::Disconnected,
-                tool_count: 0,
-                resource_count: 0,
-                tool_names_preview: Vec::new(),
-                resource_names_preview: Vec::new(),
-                last_error: None,
-                last_failure: None,
-                protocol_initialized: false,
-                pid: None,
-                server_name: None,
-                server_version: None,
-                server_protocol_version: None,
-                server_capabilities: crate::service::mcp::types::McpCapabilities::default(),
+            .map(|config| {
+                let fingerprint = fingerprint_config(&config);
+                let persisted = governance_load_result.states.get(&config.id);
+                McpServerState {
+                    governance: runtime_governance_for_config(&config, fingerprint, persisted),
+                    config,
+                    status: McpConnectionStatus::Disconnected,
+                    tool_count: 0,
+                    resource_count: 0,
+                    tool_names_preview: Vec::new(),
+                    resource_names_preview: Vec::new(),
+                    last_error: None,
+                    last_failure: None,
+                    protocol_initialized: false,
+                    pid: None,
+                    server_name: None,
+                    server_version: None,
+                    server_protocol_version: None,
+                    server_capabilities: McpCapabilities::default(),
+                }
             })
             .collect::<Vec<_>>();
         let fingerprints = config_load_result
@@ -120,6 +152,8 @@ impl McpRuntime {
             cached_tools: Arc::new(RwLock::new(BTreeMap::new())),
             cached_resources: Arc::new(RwLock::new(BTreeMap::new())),
             config_fingerprints: Arc::new(RwLock::new(fingerprints)),
+            governance_states: Arc::new(RwLock::new(governance_load_result.states.clone())),
+            governance_load_result: Arc::new(governance_load_result),
             config_load_result: Arc::new(config_load_result),
             observability,
         }
@@ -131,6 +165,10 @@ impl McpRuntime {
 
     pub fn config_load_result(&self) -> Arc<McpConfigLoadResult> {
         self.config_load_result.clone()
+    }
+
+    pub fn governance_load_result(&self) -> Arc<McpGovernanceStateLoadResult> {
+        self.governance_load_result.clone()
     }
 
     pub fn observability_tracker(&self) -> ServiceObservabilityTracker {
@@ -147,7 +185,20 @@ impl McpRuntime {
 
     pub async fn connect(&self, server: &str) -> anyhow::Result<McpServerState> {
         self.refresh_stale_server_config(server).await?;
-        let config = self.server_config(server).await?;
+        let state = self.find_server(server).await?;
+        if requires_governance_approval(&state) {
+            let message = governance_review_required_message(&state);
+            return self
+                .fail_server(
+                    server,
+                    McpOperationKind::Connect,
+                    McpFailureCode::GovernanceReviewRequired,
+                    message.clone(),
+                    Some(message),
+                )
+                .await;
+        }
+        let config = state.config;
         self.set_status(server, McpConnectionStatus::Connecting, None, None)
             .await?;
         let connect_info = match self.client.connect(&config).await {
@@ -339,6 +390,55 @@ impl McpRuntime {
         self.servers.blocking_read().len()
     }
 
+    pub async fn approve_server(
+        &self,
+        server: &str,
+        cwd: &Path,
+    ) -> anyhow::Result<(McpServerState, std::path::PathBuf)> {
+        self.refresh_stale_server_config(server).await?;
+        let state = self.find_server(server).await?;
+        let fingerprint = fingerprint_config(&state.config);
+        let entry = McpGovernanceStateEntry {
+            server_id: state.config.id.clone(),
+            approved: true,
+            fingerprint,
+            reason: None,
+        };
+        let mut states = self.governance_states.write().await;
+        states.insert(state.config.id.clone(), entry.clone());
+        let path = write_mcp_governance_state(cwd, &states)?;
+        drop(states);
+        let updated = self
+            .update_governance_for_server(&state.config.id, Some(&entry))
+            .await?;
+        Ok((updated, path))
+    }
+
+    pub async fn deny_server(
+        &self,
+        server: &str,
+        cwd: &Path,
+        reason: Option<String>,
+    ) -> anyhow::Result<(McpServerState, std::path::PathBuf)> {
+        self.refresh_stale_server_config(server).await?;
+        let state = self.find_server(server).await?;
+        let fingerprint = fingerprint_config(&state.config);
+        let entry = McpGovernanceStateEntry {
+            server_id: state.config.id.clone(),
+            approved: false,
+            fingerprint,
+            reason,
+        };
+        let mut states = self.governance_states.write().await;
+        states.insert(state.config.id.clone(), entry.clone());
+        let path = write_mcp_governance_state(cwd, &states)?;
+        drop(states);
+        let updated = self
+            .update_governance_for_server(&state.config.id, Some(&entry))
+            .await?;
+        Ok((updated, path))
+    }
+
     async fn ensure_connected(&self, server: &str) -> anyhow::Result<()> {
         let state = self.find_server(server).await?;
         if matches!(state.status, McpConnectionStatus::Connected) {
@@ -396,6 +496,21 @@ impl McpRuntime {
         self.set_status(server, state.status, None, None).await
     }
 
+    async fn update_governance_for_server(
+        &self,
+        server: &str,
+        persisted: Option<&McpGovernanceStateEntry>,
+    ) -> anyhow::Result<McpServerState> {
+        let mut servers = self.servers.write().await;
+        let state = servers
+            .iter_mut()
+            .find(|entry| entry.config.id == server || entry.config.name == server)
+            .ok_or_else(|| anyhow::anyhow!("unknown MCP server: {server}"))?;
+        let fingerprint = fingerprint_config(&state.config);
+        state.governance = runtime_governance_for_config(&state.config, fingerprint, persisted);
+        Ok(state.clone())
+    }
+
     async fn fail_server<T>(
         &self,
         server: &str,
@@ -447,6 +562,8 @@ impl McpRuntime {
         state.server_version = connect_info.peer.server_version;
         state.server_protocol_version = connect_info.peer.protocol_version;
         state.server_capabilities = connect_info.peer.capabilities;
+        state.governance.classification =
+            classify_server_with_capabilities(&state.config, &state.server_capabilities);
         Ok(state.clone())
     }
 
@@ -490,7 +607,8 @@ impl McpRuntime {
         state.server_name = None;
         state.server_version = None;
         state.server_protocol_version = None;
-        state.server_capabilities = crate::service::mcp::types::McpCapabilities::default();
+        state.server_capabilities = McpCapabilities::default();
+        state.governance.classification = classify_server_config(&state.config);
         Ok(state.clone())
     }
 
@@ -519,6 +637,15 @@ impl McpRuntime {
             .await
             .insert(state.config.id.clone(), current_fingerprint);
         let _ = self.update_disconnected(server).await;
+        let persisted = self
+            .governance_states
+            .read()
+            .await
+            .get(&state.config.id)
+            .cloned();
+        let _ = self
+            .update_governance_for_server(&state.config.id, persisted.as_ref())
+            .await;
         Ok(())
     }
 }
@@ -571,12 +698,133 @@ pub async fn replace_runtime_server_config(
     }
     runtime.invalidate_server_cache(&config.id).await;
     let _ = runtime.update_disconnected(&config.id).await;
+    let persisted = runtime
+        .governance_states
+        .read()
+        .await
+        .get(&config.id)
+        .cloned();
+    let _ = runtime
+        .update_governance_for_server(&config.id, persisted.as_ref())
+        .await;
     runtime
         .config_fingerprints
         .write()
         .await
         .insert(config.id.clone(), fingerprint_config(&config));
     Ok(())
+}
+
+pub fn classify_server_config(config: &McpServerConfig) -> McpServerClassification {
+    let mut reasons = Vec::new();
+    let mut risk_level = match config.transport {
+        McpTransportKind::Mock => {
+            reasons.push("transport.mock".to_string());
+            McpServerRiskLevel::Low
+        }
+        McpTransportKind::StdioProcess => {
+            reasons.push("transport.stdio_process".to_string());
+            McpServerRiskLevel::High
+        }
+    };
+    if config.governance.review_required {
+        reasons.push("governance.review_required".to_string());
+        if matches!(risk_level, McpServerRiskLevel::Low) {
+            risk_level = McpServerRiskLevel::Moderate;
+        }
+    }
+    McpServerClassification {
+        summary: format!(
+            "{} risk MCP server via {} transport",
+            risk_level.as_str(),
+            config.transport.as_str()
+        ),
+        risk_level,
+        reasons,
+    }
+}
+
+pub fn classify_server_with_capabilities(
+    config: &McpServerConfig,
+    capabilities: &McpCapabilities,
+) -> McpServerClassification {
+    let mut classification = classify_server_config(config);
+    if capabilities.tools.is_some() {
+        push_unique_reason(&mut classification.reasons, "capability.tools");
+    }
+    if capabilities.resources.is_some() {
+        push_unique_reason(&mut classification.reasons, "capability.resources");
+    }
+    if capabilities.prompts.is_some() {
+        push_unique_reason(&mut classification.reasons, "capability.prompts");
+    }
+    if capabilities.experimental.is_some() {
+        push_unique_reason(&mut classification.reasons, "capability.experimental");
+    }
+    if !capabilities.extensions.is_empty() {
+        push_unique_reason(&mut classification.reasons, "capability.extensions");
+    }
+    classification.summary = format!(
+        "{} risk MCP server via {} transport; capabilities: {}",
+        classification.risk_level.as_str(),
+        config.transport.as_str(),
+        capabilities
+    );
+    classification
+}
+
+fn push_unique_reason(reasons: &mut Vec<String>, reason: &str) {
+    if !reasons.iter().any(|value| value == reason) {
+        reasons.push(reason.to_string());
+    }
+}
+
+pub fn resolve_governance_status(
+    fingerprint: u64,
+    persisted: Option<&McpGovernanceStateEntry>,
+) -> McpGovernanceApprovalStatus {
+    match persisted {
+        None => McpGovernanceApprovalStatus::NotReviewed,
+        Some(entry) if entry.fingerprint != fingerprint => McpGovernanceApprovalStatus::Stale,
+        Some(entry) if entry.approved => McpGovernanceApprovalStatus::Approved,
+        Some(_) => McpGovernanceApprovalStatus::Denied,
+    }
+}
+
+fn runtime_governance_for_config(
+    config: &McpServerConfig,
+    fingerprint: u64,
+    persisted: Option<&McpGovernanceStateEntry>,
+) -> McpServerRuntimeGovernance {
+    McpServerRuntimeGovernance {
+        classification: classify_server_config(config),
+        approval_status: resolve_governance_status(fingerprint, persisted),
+        approval_source: if persisted.is_some() {
+            McpGovernanceSource::File
+        } else {
+            McpGovernanceSource::Default
+        },
+        approved_fingerprint: persisted.map(|entry| entry.fingerprint),
+    }
+}
+
+pub fn requires_governance_approval(state: &McpServerState) -> bool {
+    state.config.governance.review_required
+        && !matches!(
+            state.governance.approval_status,
+            McpGovernanceApprovalStatus::Approved
+        )
+}
+
+fn governance_review_required_message(state: &McpServerState) -> String {
+    format!(
+        "MCP connect mcp_governance_review_required: server {} ({}) requires manual approval. risk={}; reasons={}; approve with /mcp approve {}",
+        state.config.name,
+        state.config.id,
+        state.governance.classification.risk_level.as_str(),
+        state.governance.classification.reasons.join(","),
+        state.config.id
+    )
 }
 
 pub fn fingerprint_config(config: &McpServerConfig) -> u64 {
@@ -586,6 +834,8 @@ pub fn fingerprint_config(config: &McpServerConfig) -> u64 {
     config.command.hash(&mut hasher);
     config.args.hash(&mut hasher);
     config.transport.hash(&mut hasher);
+    config.governance.review_required.hash(&mut hasher);
+    config.governance.notes.hash(&mut hasher);
     for (key, value) in &config.env {
         key.hash(&mut hasher);
         value.hash(&mut hasher);
@@ -656,6 +906,10 @@ mod tests {
             args: Vec::new(),
             env: BTreeMap::new(),
             transport: McpTransportKind::Mock,
+            governance: crate::service::mcp::types::McpServerGovernanceConfig {
+                review_required: false,
+                notes: None,
+            },
         }
     }
 

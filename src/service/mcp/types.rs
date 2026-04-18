@@ -29,6 +29,98 @@ pub struct McpServerConfig {
     pub env: BTreeMap<String, String>,
     #[serde(default)]
     pub transport: McpTransportKind,
+    #[serde(default)]
+    pub governance: McpServerGovernanceConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpServerGovernanceConfig {
+    #[serde(default = "default_review_required")]
+    pub review_required: bool,
+    #[serde(default)]
+    pub notes: Option<String>,
+}
+
+impl Default for McpServerGovernanceConfig {
+    fn default() -> Self {
+        Self {
+            review_required: true,
+            notes: None,
+        }
+    }
+}
+
+fn default_review_required() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum McpServerRiskLevel {
+    Low,
+    Moderate,
+    High,
+}
+
+impl McpServerRiskLevel {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Moderate => "moderate",
+            Self::High => "high",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpServerClassification {
+    pub risk_level: McpServerRiskLevel,
+    pub reasons: Vec<String>,
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum McpGovernanceApprovalStatus {
+    NotReviewed,
+    Approved,
+    Denied,
+    Stale,
+}
+
+impl McpGovernanceApprovalStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::NotReviewed => "not_reviewed",
+            Self::Approved => "approved",
+            Self::Denied => "denied",
+            Self::Stale => "stale",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum McpGovernanceSource {
+    Default,
+    File,
+}
+
+impl McpGovernanceSource {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::File => "file",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpServerRuntimeGovernance {
+    pub classification: McpServerClassification,
+    pub approval_status: McpGovernanceApprovalStatus,
+    pub approval_source: McpGovernanceSource,
+    pub approved_fingerprint: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -226,6 +318,7 @@ pub enum McpFailureCode {
     Execution,
     Inventory,
     RequestValidation,
+    GovernanceReviewRequired,
 }
 
 impl McpFailureCode {
@@ -239,6 +332,7 @@ impl McpFailureCode {
             Self::Execution => "execution",
             Self::Inventory => "inventory",
             Self::RequestValidation => "request_validation",
+            Self::GovernanceReviewRequired => "mcp_governance_review_required",
         }
     }
 }
@@ -266,6 +360,7 @@ pub struct McpServerState {
     pub server_version: Option<String>,
     pub server_protocol_version: Option<String>,
     pub server_capabilities: McpCapabilities,
+    pub governance: McpServerRuntimeGovernance,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -58,6 +58,10 @@ while True:
             args: vec!["-c".into(), script.into()],
             env: BTreeMap::new(),
             transport: McpTransportKind::StdioProcess,
+            governance: rust_agent::service::mcp::types::McpServerGovernanceConfig {
+                review_required: false,
+                notes: None,
+            },
         };
 
         let client = RoutingMcpClient::default();
@@ -133,6 +137,10 @@ while True:
         args: vec!["-c".into(), script.into()],
         env: BTreeMap::new(),
         transport: McpTransportKind::StdioProcess,
+        governance: rust_agent::service::mcp::types::McpServerGovernanceConfig {
+            review_required: false,
+            notes: None,
+        },
     };
 
     let client = RoutingMcpClient::default();
