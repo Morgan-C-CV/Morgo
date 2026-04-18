@@ -238,10 +238,7 @@ impl ModelProviderClient {
                 .unwrap_or_else(|_| "<unavailable>".into());
             return Err(ApiError::http_status(
                 status.as_u16(),
-                format!(
-                    "provider request failed with status {}: {body}",
-                    status.as_u16()
-                ),
+                normalized_http_error_message(status, &body),
             ));
         }
         validate_streaming_response_headers(response.headers(), status)?;
@@ -336,20 +333,40 @@ fn build_request_payload_for_provider(
 ) -> Result<Value, ApiError> {
     match normalized_provider_id(&config.provider_id) {
         "anthropic" | "default-provider" => Ok(json!({
-            "model": config.model_id,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": input.content,
-                }
-            ],
-            "stream": true,
+            "model": normalized_request_model(config),
+            "messages": [normalized_request_message(input)],
+            "stream": normalized_request_stream_flag(),
         })),
         _ => Err(ApiError::invalid_response(format!(
             "unsupported provider id: {}",
             config.provider_id
         ))),
     }
+}
+
+fn normalized_request_model(config: &ModelProviderConfig) -> &str {
+    let trimmed = config.model_id.trim();
+    if trimmed.is_empty() {
+        "default-model"
+    } else {
+        trimmed
+    }
+}
+
+fn normalized_request_message(input: &Message) -> Value {
+    json!({
+        "role": "user",
+        "content": [
+            {
+                "type": "text",
+                "text": input.content,
+            }
+        ],
+    })
+}
+
+fn normalized_request_stream_flag() -> bool {
+    true
 }
 
 fn parse_stream_response_for_provider(
@@ -364,6 +381,58 @@ fn parse_stream_response_for_provider(
         _ => Err(ApiError::invalid_response(format!(
             "unsupported provider id: {provider_id}"
         ))),
+    }
+}
+
+fn normalized_http_error_message(status: StatusCode, body: &str) -> String {
+    let detail = extract_error_detail(body).unwrap_or_else(|| body.trim().to_string());
+    format!(
+        "provider request failed with status {}: {}",
+        status.as_u16(),
+        if detail.is_empty() {
+            "<empty error body>".into()
+        } else {
+            detail
+        }
+    )
+}
+
+fn extract_error_detail(body: &str) -> Option<String> {
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let parsed: Value = serde_json::from_str(trimmed).ok()?;
+    extract_error_detail_from_value(&parsed)
+}
+
+fn extract_error_detail_from_value(value: &Value) -> Option<String> {
+    match value {
+        Value::String(text) => Some(text.clone()),
+        Value::Object(map) => {
+            if let Some(text) = map.get("message").and_then(Value::as_str) {
+                return Some(text.to_string());
+            }
+            if let Some(error) = map.get("error") {
+                return extract_error_detail_from_value(error);
+            }
+            if let Some(text) = map.get("detail").and_then(Value::as_str) {
+                return Some(text.to_string());
+            }
+            if let Some(text) = map.get("error_message").and_then(Value::as_str) {
+                return Some(text.to_string());
+            }
+            if let Some(kind) = map.get("type").and_then(Value::as_str) {
+                return Some(kind.to_string());
+            }
+            Some(value.to_string())
+        }
+        Value::Array(items) => items
+            .iter()
+            .find_map(extract_error_detail_from_value)
+            .or_else(|| Some(value.to_string())),
+        _ => Some(value.to_string()),
     }
 }
 
@@ -494,10 +563,7 @@ impl<'a> ProviderStreamParser<'a> {
         match event_type {
             "message_start" => {
                 self.ensure_message_start(output);
-                if let Some(usage) = payload
-                    .get("message")
-                    .and_then(|message| message.get("usage"))
-                {
+                if let Some(usage) = payload_usage(payload) {
                     output.push(StreamEvent::Usage(parse_usage(
                         usage,
                         payload_model(payload).unwrap_or(self.default_model),
@@ -606,7 +672,7 @@ impl<'a> ProviderStreamParser<'a> {
                 self.finalize_pending_structured_output(output)?;
             }
             "message_delta" => {
-                if let Some(usage) = payload.get("usage") {
+                if let Some(usage) = payload_usage(payload) {
                     output.push(StreamEvent::Usage(parse_usage(
                         usage,
                         payload_model(payload).unwrap_or(self.default_model),
@@ -802,7 +868,15 @@ fn payload_model(payload: &Value) -> Option<&str> {
     payload
         .get("message")
         .and_then(|message| message.get("model"))
+        .or_else(|| payload.get("model"))
         .and_then(Value::as_str)
+}
+
+fn payload_usage<'a>(payload: &'a Value) -> Option<&'a Value> {
+    payload
+        .get("usage")
+        .or_else(|| payload.get("message").and_then(|message| message.get("usage")))
+        .or_else(|| payload.get("delta").and_then(|delta| delta.get("usage")))
 }
 
 fn parse_usage(usage: &Value, default_model: &str) -> UsageEvent {
@@ -810,18 +884,22 @@ fn parse_usage(usage: &Value, default_model: &str) -> UsageEvent {
         model: default_model.to_string(),
         input_tokens: usage
             .get("input_tokens")
+            .or_else(|| usage.get("inputTokens"))
             .and_then(Value::as_u64)
             .unwrap_or_default() as usize,
         output_tokens: usage
             .get("output_tokens")
+            .or_else(|| usage.get("outputTokens"))
             .and_then(Value::as_u64)
             .unwrap_or_default() as usize,
         cache_creation_input_tokens: usage
             .get("cache_creation_input_tokens")
+            .or_else(|| usage.get("cacheCreationInputTokens"))
             .and_then(Value::as_u64)
             .unwrap_or_default() as usize,
         cache_read_input_tokens: usage
             .get("cache_read_input_tokens")
+            .or_else(|| usage.get("cacheReadInputTokens"))
             .and_then(Value::as_u64)
             .unwrap_or_default() as usize,
     }
@@ -926,8 +1004,9 @@ fn classify_stream_error_disposition(
 mod tests {
     use super::{
         ModelProviderConfig, ProviderTimeout, build_messages_url_for_provider,
-        classify_stream_error, classify_stream_error_disposition, map_stop_reason,
-        normalize_json_like_value, parse_anthropic_sse_response, parse_stream_response_for_provider,
+        build_request_payload_for_provider, classify_stream_error, classify_stream_error_disposition,
+        extract_error_detail, map_stop_reason, normalize_json_like_value,
+        parse_anthropic_sse_response, parse_stream_response_for_provider, parse_usage,
         validate_streaming_response_headers,
     };
     use crate::service::api::retry::RetryPolicy;
@@ -990,6 +1069,24 @@ mod tests {
     }
 
     #[test]
+    fn request_payload_uses_normalized_envelope_shape() {
+        let config = ModelProviderConfig {
+            provider_id: "anthropic".into(),
+            model_id: "  ".into(),
+            ..ModelProviderConfig::default()
+        };
+
+        let payload = build_request_payload_for_provider(&config, &crate::core::message::Message::user("hello"))
+            .expect("request payload should build");
+
+        assert_eq!(payload.get("model").and_then(Value::as_str), Some("default-model"));
+        assert_eq!(payload.get("stream").and_then(Value::as_bool), Some(true));
+        let content = &payload["messages"][0]["content"];
+        assert_eq!(content[0]["type"].as_str(), Some("text"));
+        assert_eq!(content[0]["text"].as_str(), Some("hello"));
+    }
+
+    #[test]
     fn rejects_unknown_provider_ids_for_request_and_parse_paths() {
         let config = ModelProviderConfig {
             provider_id: "custom-provider".into(),
@@ -1026,6 +1123,44 @@ mod tests {
                     && error.disposition == ProviderFailureDisposition::StreamInterrupted
                     && error.status_code.is_none()
         ));
+    }
+
+    #[test]
+    fn message_start_accepts_usage_at_top_level() {
+        let body = concat!(
+            "event: message\n",
+            "data: {\"type\":\"message_start\",\"model\":\"claude-alt\",\"usage\":{\"inputTokens\":12}}\n\n",
+            "event: message\n",
+            "data: {\"type\":\"message_stop\"}\n\n"
+        );
+
+        let events = parse_anthropic_sse_response("anthropic", body, "default-model")
+            .expect("top-level usage should parse");
+        assert!(matches!(
+            &events[1],
+            StreamEvent::Usage(usage)
+                if usage.model == "claude-alt" && usage.input_tokens == 12
+        ));
+    }
+
+    #[test]
+    fn message_delta_accepts_usage_nested_under_delta() {
+        let body = concat!(
+            "event: message\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-test\"}}\n\n",
+            "event: message\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"usage\":{\"outputTokens\":9}}}\n\n",
+            "event: message\n",
+            "data: {\"type\":\"message_stop\"}\n\n"
+        );
+
+        let events = parse_anthropic_sse_response("anthropic", body, "default-model")
+            .expect("delta usage should parse");
+        assert!(events.iter().any(|event| matches!(
+            event,
+            StreamEvent::Usage(usage)
+                if usage.model == "default-model" && usage.output_tokens == 9
+        )));
     }
 
     #[test]
@@ -1351,5 +1486,40 @@ mod tests {
         assert_eq!(kind, "invalid_request_error");
         assert_eq!(disposition, ProviderFailureDisposition::StreamTerminal);
         assert!(!retryable);
+    }
+
+    #[test]
+    fn extracts_error_detail_from_variant_http_error_envelopes() {
+        assert_eq!(
+            extract_error_detail(r#"{"error":{"message":"bad request"}}"#),
+            Some("bad request".into())
+        );
+        assert_eq!(
+            extract_error_detail(r#"{"message":"outer message"}"#),
+            Some("outer message".into())
+        );
+        assert_eq!(
+            extract_error_detail(r#"{"detail":"detail message"}"#),
+            Some("detail message".into())
+        );
+    }
+
+    #[test]
+    fn parse_usage_accepts_alternate_field_names() {
+        let usage = parse_usage(
+            &serde_json::json!({
+                "inputTokens": 7,
+                "outputTokens": 3,
+                "cacheCreationInputTokens": 2,
+                "cacheReadInputTokens": 1,
+            }),
+            "claude-test",
+        );
+
+        assert_eq!(usage.model, "claude-test");
+        assert_eq!(usage.input_tokens, 7);
+        assert_eq!(usage.output_tokens, 3);
+        assert_eq!(usage.cache_creation_input_tokens, 2);
+        assert_eq!(usage.cache_read_input_tokens, 1);
     }
 }

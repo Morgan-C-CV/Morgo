@@ -104,6 +104,43 @@ async fn query_engine_submit_turn_works_through_production_provider_path() {
 }
 
 #[tokio::test]
+async fn production_provider_request_envelope_stays_compatible() {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind mock provider listener");
+    let addr = listener.local_addr().expect("listener addr");
+    let server = tokio::spawn(run_request_capture_response_server(listener));
+
+    let config = ModelProviderConfig {
+        provider_id: "anthropic".into(),
+        base_url: format!("http://{}", addr),
+        api_key: Some("test-key".into()),
+        model_id: " ".into(),
+        timeout: ProviderTimeout {
+            request_timeout_ms: 5_000,
+        },
+        retry_policy: RetryPolicy {
+            max_attempts: 1,
+            initial_backoff_ms: 1,
+            max_backoff_ms: 1,
+        },
+        pricing: Default::default(),
+    };
+
+    let events = ModelProviderClient::from_config(config)
+        .stream_message(&Message::user("hello"))
+        .await;
+
+    assert!(events.iter().any(|event| matches!(event, StreamEvent::MessageStart)));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        StreamEvent::TextDelta(text) if text == "request captured"
+    )));
+
+    server.await.expect("mock provider server finished");
+}
+
+#[tokio::test]
 async fn production_provider_assembles_partial_tool_use_payload_metadata() {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
@@ -221,6 +258,119 @@ async fn production_provider_preserves_terminal_http_compatibility_metadata() {
             if error.provider_id == "anthropic"
                 && error.disposition == ProviderFailureDisposition::PreStreamTerminal
                 && error.status_code == Some(400)
+                && error.message == "provider request failed with status 400: bad request"
+    ));
+
+    server.await.expect("mock provider server finished");
+}
+
+#[tokio::test]
+async fn production_provider_accepts_top_level_usage_envelope() {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind mock provider listener");
+    let addr = listener.local_addr().expect("listener addr");
+    let server = tokio::spawn(run_top_level_usage_response_server(listener));
+
+    let config = ModelProviderConfig {
+        provider_id: "anthropic".into(),
+        base_url: format!("http://{}", addr),
+        api_key: Some("test-key".into()),
+        model_id: "claude-test".into(),
+        timeout: ProviderTimeout {
+            request_timeout_ms: 5_000,
+        },
+        retry_policy: RetryPolicy {
+            max_attempts: 1,
+            initial_backoff_ms: 1,
+            max_backoff_ms: 1,
+        },
+        pricing: Default::default(),
+    };
+
+    let events = ModelProviderClient::from_config(config)
+        .stream_message(&Message::user("hello"))
+        .await;
+
+    assert!(events.iter().any(|event| matches!(
+        event,
+        StreamEvent::Usage(usage) if usage.model == "claude-alt" && usage.input_tokens == 11
+    )));
+
+    server.await.expect("mock provider server finished");
+}
+
+#[tokio::test]
+async fn production_provider_accepts_delta_usage_envelope() {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind mock provider listener");
+    let addr = listener.local_addr().expect("listener addr");
+    let server = tokio::spawn(run_delta_usage_response_server(listener));
+
+    let config = ModelProviderConfig {
+        provider_id: "anthropic".into(),
+        base_url: format!("http://{}", addr),
+        api_key: Some("test-key".into()),
+        model_id: "claude-test".into(),
+        timeout: ProviderTimeout {
+            request_timeout_ms: 5_000,
+        },
+        retry_policy: RetryPolicy {
+            max_attempts: 1,
+            initial_backoff_ms: 1,
+            max_backoff_ms: 1,
+        },
+        pricing: Default::default(),
+    };
+
+    let events = ModelProviderClient::from_config(config)
+        .stream_message(&Message::user("hello"))
+        .await;
+
+    assert!(events.iter().any(|event| matches!(
+        event,
+        StreamEvent::Usage(usage) if usage.model == "claude-test" && usage.output_tokens == 6
+    )));
+
+    server.await.expect("mock provider server finished");
+}
+
+#[tokio::test]
+async fn production_provider_extracts_nested_http_error_message() {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind mock provider listener");
+    let addr = listener.local_addr().expect("listener addr");
+    let server = tokio::spawn(run_nested_error_response_server(listener));
+
+    let config = ModelProviderConfig {
+        provider_id: "anthropic".into(),
+        base_url: format!("http://{}", addr),
+        api_key: Some("test-key".into()),
+        model_id: "claude-test".into(),
+        timeout: ProviderTimeout {
+            request_timeout_ms: 5_000,
+        },
+        retry_policy: RetryPolicy {
+            max_attempts: 1,
+            initial_backoff_ms: 1,
+            max_backoff_ms: 1,
+        },
+        pricing: Default::default(),
+    };
+
+    let events = ModelProviderClient::from_config(config)
+        .stream_message(&Message::user("hello"))
+        .await;
+
+    assert!(matches!(
+        &events[0],
+        StreamEvent::Error(error)
+            if error.provider_id == "anthropic"
+                && error.kind == "http_status"
+                && error.status_code == Some(400)
+                && error.message == "provider request failed with status 400: nested provider error"
     ));
 
     server.await.expect("mock provider server finished");
@@ -491,7 +641,7 @@ async fn production_provider_maps_terminal_http_error_to_query_loop_failure_code
     assert_eq!(
         result.terminal,
         Terminal::ModelError {
-            message: "provider request failed with status 400: {\"error\":\"bad request\"}".into(),
+            message: "provider request failed with status 400: bad request".into(),
             code: Some(ServiceFailureCode::ApiProviderHttp4xx),
         }
     );
@@ -702,6 +852,48 @@ async fn production_provider_maps_timeout_after_retries_exhaust_to_query_loop_fa
     server.await.expect("mock provider server finished");
 }
 
+async fn run_request_capture_response_server(listener: TcpListener) {
+    let (mut stream, _peer): (tokio::net::TcpStream, SocketAddr) = listener
+        .accept()
+        .await
+        .expect("accept mock provider request");
+    let mut buffer = vec![0_u8; 16 * 1024];
+    let read = stream.read(&mut buffer).await.expect("read request");
+    let request = String::from_utf8_lossy(&buffer[..read]);
+    let body = request
+        .split("\r\n\r\n")
+        .nth(1)
+        .expect("request body");
+    let parsed: serde_json::Value = serde_json::from_str(body).expect("valid request json");
+
+    assert_eq!(parsed.get("model").and_then(|value| value.as_str()), Some("default-model"));
+    assert_eq!(parsed.get("stream").and_then(|value| value.as_bool()), Some(true));
+    assert_eq!(parsed["messages"][0]["role"].as_str(), Some("user"));
+    assert_eq!(parsed["messages"][0]["content"][0]["type"].as_str(), Some("text"));
+    assert_eq!(parsed["messages"][0]["content"][0]["text"].as_str(), Some("hello"));
+
+    let sse = concat!(
+        "event: message\r\n",
+        "data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-test\"}}\r\n\r\n",
+        "event: message\r\n",
+        "data: {\"type\":\"content_block_delta\",\"delta\":{\"text\":\"request captured\"}}\r\n\r\n",
+        "event: message\r\n",
+        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\r\n\r\n",
+        "event: message\r\n",
+        "data: {\"type\":\"message_stop\"}\r\n\r\n"
+    );
+    let response = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+        sse.len(),
+        sse
+    );
+    stream
+        .write_all(response.as_bytes())
+        .await
+        .expect("write request capture response");
+    stream.flush().await.expect("flush request capture response");
+}
+
 async fn run_partial_tool_use_response_server(listener: TcpListener) {
     let (mut stream, _peer): (tokio::net::TcpStream, SocketAddr) = listener
         .accept()
@@ -910,6 +1102,85 @@ async fn run_single_error_response_server(listener: TcpListener) {
         .flush()
         .await
         .expect("flush mock provider error response");
+}
+
+async fn run_nested_error_response_server(listener: TcpListener) {
+    let (mut stream, _peer): (tokio::net::TcpStream, SocketAddr) = listener
+        .accept()
+        .await
+        .expect("accept mock provider request");
+    let mut buffer = vec![0_u8; 16 * 1024];
+    let _ = stream.read(&mut buffer).await.expect("read request");
+
+    let body = "{\"error\":{\"message\":\"nested provider error\"}}";
+    let response = format!(
+        "HTTP/1.1 400 Bad Request\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    stream
+        .write_all(response.as_bytes())
+        .await
+        .expect("write nested error response");
+    stream.flush().await.expect("flush nested error response");
+}
+
+async fn run_top_level_usage_response_server(listener: TcpListener) {
+    let (mut stream, _peer): (tokio::net::TcpStream, SocketAddr) = listener
+        .accept()
+        .await
+        .expect("accept mock provider request");
+    let mut buffer = vec![0_u8; 16 * 1024];
+    let _ = stream.read(&mut buffer).await.expect("read request");
+
+    let sse = concat!(
+        "event: message\r\n",
+        "data: {\"type\":\"message_start\",\"model\":\"claude-alt\",\"usage\":{\"inputTokens\":11}}\r\n\r\n",
+        "event: message\r\n",
+        "data: {\"type\":\"content_block_delta\",\"delta\":{\"text\":\"hello\"}}\r\n\r\n",
+        "event: message\r\n",
+        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\r\n\r\n",
+        "event: message\r\n",
+        "data: {\"type\":\"message_stop\"}\r\n\r\n"
+    );
+    let response = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+        sse.len(),
+        sse
+    );
+    stream
+        .write_all(response.as_bytes())
+        .await
+        .expect("write top-level usage response");
+    stream.flush().await.expect("flush top-level usage response");
+}
+
+async fn run_delta_usage_response_server(listener: TcpListener) {
+    let (mut stream, _peer): (tokio::net::TcpStream, SocketAddr) = listener
+        .accept()
+        .await
+        .expect("accept mock provider request");
+    let mut buffer = vec![0_u8; 16 * 1024];
+    let _ = stream.read(&mut buffer).await.expect("read request");
+
+    let sse = concat!(
+        "event: message\r\n",
+        "data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-test\"}}\r\n\r\n",
+        "event: message\r\n",
+        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"usage\":{\"outputTokens\":6}}}\r\n\r\n",
+        "event: message\r\n",
+        "data: {\"type\":\"message_stop\"}\r\n\r\n"
+    );
+    let response = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+        sse.len(),
+        sse
+    );
+    stream
+        .write_all(response.as_bytes())
+        .await
+        .expect("write delta usage response");
+    stream.flush().await.expect("flush delta usage response");
 }
 
 async fn run_wrong_content_type_response_server(listener: TcpListener) {
