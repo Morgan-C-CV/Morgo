@@ -21,7 +21,829 @@ use rust_agent::task::manager::TaskManager;
 use rust_agent::tool::registry::ToolRegistry;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
+use tokio::task::JoinHandle;
 use tokio::time::{Duration, Instant, sleep};
+
+#[derive(Clone, Copy)]
+enum FixtureProviderKind {
+    Anthropic,
+    BatchProvider,
+}
+
+impl FixtureProviderKind {
+    fn provider_id(self) -> &'static str {
+        match self {
+            Self::Anthropic => "anthropic",
+            Self::BatchProvider => "batch-provider",
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum FixtureRunMode {
+    StreamOnly,
+    SubmitTurn,
+}
+
+enum MockBody {
+    Sse(&'static str),
+    Raw(&'static str),
+    Empty,
+}
+
+struct MockHttpResponse {
+    status_line: &'static str,
+    content_type: Option<&'static str>,
+    extra_headers: &'static [(&'static str, &'static str)],
+    body: MockBody,
+}
+
+struct MockExchange {
+    response: MockHttpResponse,
+    delay: Option<Duration>,
+}
+
+struct ExpectedUsage {
+    model: &'static str,
+    input_tokens: Option<usize>,
+    output_tokens: Option<usize>,
+    cache_creation_input_tokens: Option<usize>,
+    cache_read_input_tokens: Option<usize>,
+}
+
+struct ExpectedToolUse {
+    tool_name: &'static str,
+    input: &'static str,
+}
+
+struct ExpectedProviderError {
+    provider_id: &'static str,
+    kind: &'static str,
+    disposition: ProviderFailureDisposition,
+    retryable: bool,
+    status_code: Option<u16>,
+    message_contains: &'static str,
+}
+
+struct ExpectedTerminal {
+    state: QueryLoopState,
+    code: Option<ServiceFailureCode>,
+    message_contains: &'static str,
+}
+
+struct ExpectedOutcome {
+    expected_text: &'static [&'static str],
+    expected_usage: Option<ExpectedUsage>,
+    expected_tool_use: Option<ExpectedToolUse>,
+    expected_stop_reason: Option<StopReason>,
+    expected_provider_error: Option<ExpectedProviderError>,
+    expected_terminal: Option<ExpectedTerminal>,
+    expected_usage_notice_count: Option<usize>,
+    expected_cost_report_fragments: &'static [&'static str],
+}
+
+struct ProviderCase {
+    provider_kind: FixtureProviderKind,
+    run_mode: FixtureRunMode,
+    base_url: Option<String>,
+    model_id: &'static str,
+    request_timeout_ms: u64,
+    retry_policy: RetryPolicy,
+    exchanges: Vec<MockExchange>,
+    message: Message,
+    expected: ExpectedOutcome,
+}
+
+struct FixtureResult {
+    events: Vec<StreamEvent>,
+    query_state: Option<QueryLoopState>,
+    query_terminal: Option<Terminal>,
+    query_usage_notice_count: Option<usize>,
+    cost_report: Option<String>,
+    server: Option<JoinHandle<()>>,
+}
+
+async fn run_provider_case(case: ProviderCase) -> FixtureResult {
+    let (base_url, server) = if !case.exchanges.is_empty() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock provider listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let server = tokio::spawn(run_scripted_server(listener, case.exchanges));
+        (format!("http://{}", addr), Some(server))
+    } else {
+        (
+            case.base_url
+                .expect("base_url required when case has no mock exchanges"),
+            None,
+        )
+    };
+
+    let config = ModelProviderConfig {
+        provider_id: case.provider_kind.provider_id().into(),
+        base_url,
+        api_key: Some("test-key".into()),
+        model_id: case.model_id.into(),
+        timeout: ProviderTimeout {
+            request_timeout_ms: case.request_timeout_ms,
+        },
+        retry_policy: case.retry_policy,
+        pricing: Default::default(),
+    };
+    let _ = &case.expected;
+
+    match case.run_mode {
+        FixtureRunMode::StreamOnly => {
+            let events = ModelProviderClient::from_config(config)
+                .stream_message(&case.message)
+                .await;
+            FixtureResult {
+                events,
+                query_state: None,
+                query_terminal: None,
+                query_usage_notice_count: None,
+                cost_report: None,
+                server,
+            }
+        }
+        FixtureRunMode::SubmitTurn => {
+            let cost_tracker =
+                CostTracker::with_default_pricing(config.model_id.clone(), config.pricing.clone());
+            let context = test_query_context(ModelProviderClient::from_config(config), cost_tracker.clone());
+            let result = QueryEngine::new(context).submit_turn(case.message).await;
+            let query_usage_notice_count = result
+                .events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    rust_agent::core::events::EngineEvent::Notice { kind, .. } if kind == &"usage"
+                ))
+                .count();
+            FixtureResult {
+                events: Vec::new(),
+                query_state: Some(result.state),
+                query_terminal: Some(result.terminal),
+                query_usage_notice_count: Some(query_usage_notice_count),
+                cost_report: Some(cost_tracker.format_report()),
+                server,
+            }
+        }
+    }
+}
+
+fn test_query_context(api_client: ModelProviderClient, cost_tracker: CostTracker) -> QueryContext {
+    let permission_context = ToolPermissionContext::new(PermissionMode::Default)
+        .with_task_manager(Arc::new(TaskManager::default()));
+    QueryContext {
+        app_state: AppState {
+            surface: InteractionSurface::Cli,
+            session_mode: SessionMode::Headless,
+            client_type: ClientType::Cli,
+            session_source: SessionSource::LocalCli,
+            runtime_role: RuntimeRole::Coordinator,
+            worker_role: None,
+            permission_context,
+            command_registry: None,
+            runtime_tool_registry: None,
+            skill_registry: None,
+            mcp_runtime: None,
+            plugin_load_result: None,
+            cost_tracker,
+            service_observability_tracker:
+                rust_agent::service::observability::ServiceObservabilityTracker::default(),
+            notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
+            audit_log: Arc::new(std::sync::Mutex::new(
+                rust_agent::security::audit::AuditLog::default(),
+            )),
+            startup_trace: Vec::new(),
+            active_session_id: "provider-it-session".into(),
+            session_store: None,
+            session: None,
+            history: None,
+            restored_session: None,
+        },
+        tool_registry: ToolRegistry::new(),
+        api_client,
+        compactor: ReactiveCompactor,
+        hook_registry: HookRegistry::default(),
+        agent_id: None,
+        system_prompt: "system".into(),
+        tools_prompt: "tools".into(),
+        context_prompt: "context".into(),
+    }
+}
+
+fn assert_expected_text(events: &[StreamEvent], expected_text: &[&str]) {
+    for expected in expected_text {
+        assert!(events.iter().any(|event| matches!(
+            event,
+            StreamEvent::TextDelta(text) if text == expected
+        )));
+    }
+}
+
+fn assert_expected_usage(events: &[StreamEvent], expected: &ExpectedUsage) {
+    assert!(events.iter().any(|event| matches!(
+        event,
+        StreamEvent::Usage(usage)
+            if usage.model == expected.model
+                && expected.input_tokens.is_none_or(|value| usage.input_tokens == value)
+                && expected.output_tokens.is_none_or(|value| usage.output_tokens == value)
+                && expected
+                    .cache_creation_input_tokens
+                    .is_none_or(|value| usage.cache_creation_input_tokens == value)
+                && expected
+                    .cache_read_input_tokens
+                    .is_none_or(|value| usage.cache_read_input_tokens == value)
+    )));
+}
+
+fn assert_expected_tool_use(events: &[StreamEvent], expected: &ExpectedToolUse) {
+    assert!(events.iter().any(|event| matches!(
+        event,
+        StreamEvent::ToolUse { tool_name, input }
+            if tool_name == expected.tool_name && input == expected.input
+    )));
+}
+
+fn assert_expected_stop_reason(events: &[StreamEvent], expected: StopReason) {
+    assert!(events.iter().any(|event| matches!(
+        event,
+        StreamEvent::MessageStop { stop_reason } if *stop_reason == expected
+    )));
+}
+
+fn assert_expected_provider_error(events: &[StreamEvent], expected: &ExpectedProviderError) {
+    match events.first() {
+        Some(StreamEvent::Error(error)) => {
+            assert_eq!(error.provider_id, expected.provider_id);
+            assert_eq!(error.kind, expected.kind);
+            assert_eq!(error.disposition, expected.disposition);
+            assert_eq!(error.retryable, expected.retryable);
+            assert_eq!(error.status_code, expected.status_code);
+            assert!(
+                error.message.contains(expected.message_contains),
+                "expected error message {:?} to contain {:?}",
+                error.message,
+                expected.message_contains
+            );
+        }
+        other => panic!("expected first stream event to be error, got {other:?}"),
+    }
+}
+
+fn assert_expected_terminal(result: &FixtureResult, expected: &ExpectedTerminal) {
+    assert_eq!(result.query_state, Some(expected.state.clone()));
+    match result.query_terminal.as_ref().expect("query terminal") {
+        Terminal::Completed => {
+            assert_eq!(expected.state, QueryLoopState::Completed);
+            assert!(expected.code.is_none());
+        }
+        Terminal::ModelError { message, code } => {
+            assert_eq!(*code, expected.code);
+            assert!(message.contains(expected.message_contains));
+        }
+        other => panic!("unexpected terminal variant: {other:?}"),
+    }
+}
+
+fn assert_provider_case(result: &FixtureResult, expected: &ExpectedOutcome) {
+    if !expected.expected_text.is_empty() {
+        assert_expected_text(&result.events, expected.expected_text);
+    }
+    if let Some(usage) = expected.expected_usage.as_ref() {
+        assert_expected_usage(&result.events, usage);
+    }
+    if let Some(tool_use) = expected.expected_tool_use.as_ref() {
+        assert_expected_tool_use(&result.events, tool_use);
+    }
+    if let Some(stop_reason) = expected.expected_stop_reason.as_ref() {
+        assert_expected_stop_reason(&result.events, stop_reason.clone());
+    }
+    if let Some(provider_error) = expected.expected_provider_error.as_ref() {
+        assert_expected_provider_error(&result.events, provider_error);
+    }
+    if let Some(terminal) = expected.expected_terminal.as_ref() {
+        assert_expected_terminal(result, terminal);
+    }
+    if let Some(expected_usage_notice_count) = expected.expected_usage_notice_count {
+        assert_eq!(
+            result.query_usage_notice_count,
+            Some(expected_usage_notice_count)
+        );
+    }
+    if !expected.expected_cost_report_fragments.is_empty() {
+        let report = result.cost_report.as_ref().expect("cost report for submit_turn case");
+        for fragment in expected.expected_cost_report_fragments {
+            assert!(report.contains(fragment));
+        }
+    }
+}
+
+async fn finish_provider_case(result: FixtureResult) {
+    if let Some(server) = result.server {
+        server.await.expect("mock provider server finished");
+    }
+}
+
+async fn run_scripted_server(listener: TcpListener, exchanges: Vec<MockExchange>) {
+    for exchange in exchanges {
+        let (mut stream, _peer): (tokio::net::TcpStream, SocketAddr) = listener
+            .accept()
+            .await
+            .expect("accept mock provider request");
+        let mut buffer = vec![0_u8; 16 * 1024];
+        let _ = stream.read(&mut buffer).await.expect("read request");
+        if let Some(delay) = exchange.delay {
+            sleep(delay).await;
+        }
+        let response = render_http_response(&exchange.response);
+        stream
+            .write_all(response.as_bytes())
+            .await
+            .expect("write scripted response");
+        stream.flush().await.expect("flush scripted response");
+    }
+}
+
+fn render_http_response(response: &MockHttpResponse) -> String {
+    let body = match response.body {
+        MockBody::Sse(sse) | MockBody::Raw(sse) => sse,
+        MockBody::Empty => "",
+    };
+    let mut rendered = format!("HTTP/1.1 {}\r\n", response.status_line);
+    if let Some(content_type) = response.content_type {
+        rendered.push_str(&format!("content-type: {}\r\n", content_type));
+    }
+    for (name, value) in response.extra_headers {
+        rendered.push_str(&format!("{}: {}\r\n", name, value));
+    }
+    rendered.push_str(&format!(
+        "content-length: {}\r\nconnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    ));
+    rendered
+}
+
+#[tokio::test]
+async fn provider_fixture_harness_covers_normal_text_and_merged_usage() {
+    let case = ProviderCase {
+        provider_kind: FixtureProviderKind::Anthropic,
+        run_mode: FixtureRunMode::SubmitTurn,
+        base_url: None,
+        model_id: "claude-test",
+        request_timeout_ms: 5_000,
+        retry_policy: RetryPolicy {
+            max_attempts: 1,
+            initial_backoff_ms: 1,
+            max_backoff_ms: 1,
+        },
+        exchanges: vec![MockExchange {
+            delay: None,
+            response: MockHttpResponse {
+                status_line: "200 OK",
+                content_type: Some("text/event-stream"),
+                extra_headers: &[],
+                body: MockBody::Sse(concat!(
+                    "event: message\r\n",
+                    "data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-test\",\"usage\":{\"prompt_tokens\":123}}}\r\n\r\n",
+                    "event: message\r\n",
+                    "data: {\"type\":\"content_block_delta\",\"delta\":{\"text\":\"hello from usage matrix\"}}\r\n\r\n",
+                    "event: message\r\n",
+                    "data: {\"type\":\"message_delta\",\"delta\":{\"usage\":{\"completion_tokens\":5}}}\r\n\r\n",
+                    "event: message\r\n",
+                    "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"usage\":{\"completion_tokens\":7,\"cacheWriteTokens\":2}}}\r\n\r\n",
+                    "event: message\r\n",
+                    "data: {\"type\":\"message_stop\",\"terminal\":{\"usage\":{\"cacheReadTokens\":1}}}\r\n\r\n"
+                )),
+            },
+        }],
+        message: Message::user("hello"),
+        expected: ExpectedOutcome {
+            expected_text: &[],
+            expected_usage: None,
+            expected_tool_use: None,
+            expected_stop_reason: None,
+            expected_provider_error: None,
+            expected_terminal: Some(ExpectedTerminal {
+                state: QueryLoopState::Completed,
+                code: None,
+                message_contains: "",
+            }),
+            expected_usage_notice_count: Some(1),
+            expected_cost_report_fragments: &[
+                "model claude-test -> requests: 1",
+                "output_tokens: 7",
+                "cache_creation_input_tokens: 2",
+                "cache_read_input_tokens: 1",
+            ],
+        },
+    };
+
+    let expected = ExpectedOutcome {
+        expected_text: &[],
+        expected_usage: None,
+        expected_tool_use: None,
+        expected_stop_reason: None,
+        expected_provider_error: None,
+        expected_terminal: Some(ExpectedTerminal {
+            state: QueryLoopState::Completed,
+            code: None,
+            message_contains: "",
+        }),
+        expected_usage_notice_count: Some(1),
+        expected_cost_report_fragments: &[
+            "model claude-test -> requests: 1",
+            "output_tokens: 7",
+            "cache_creation_input_tokens: 2",
+            "cache_read_input_tokens: 1",
+        ],
+    };
+
+    let result = run_provider_case(case).await;
+    assert_provider_case(&result, &expected);
+    finish_provider_case(result).await;
+}
+
+#[tokio::test]
+async fn provider_fixture_harness_covers_partial_tool_use_payload() {
+    let case = ProviderCase {
+        provider_kind: FixtureProviderKind::Anthropic,
+        run_mode: FixtureRunMode::StreamOnly,
+        base_url: None,
+        model_id: "claude-test",
+        request_timeout_ms: 5_000,
+        retry_policy: RetryPolicy {
+            max_attempts: 1,
+            initial_backoff_ms: 1,
+            max_backoff_ms: 1,
+        },
+        exchanges: vec![MockExchange {
+            delay: None,
+            response: MockHttpResponse {
+                status_line: "200 OK",
+                content_type: Some("text/event-stream"),
+                extra_headers: &[],
+                body: MockBody::Sse(concat!(
+                    "event: message\r\n",
+                    "data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-test\",\"usage\":{\"input_tokens\":5}}}\r\n\r\n",
+                    "event: message\r\n",
+                    "data: {\"type\":\"content_block_delta\",\"delta\":{\"text\":\"planning...\"}}\r\n\r\n",
+                    "event: message\r\n",
+                    "data: {\"type\":\"content_block_start\",\"content_block\":{\"type\":\"tool_use\",\"name\":\"Agent\"}}\r\n\r\n",
+                    "event: message\r\n",
+                    "data: {\"type\":\"content_block_delta\",\"delta\":{\"partial_json\":\"\\\"inspect file\\\"\"}}\r\n\r\n",
+                    "event: message\r\n",
+                    "data: {\"type\":\"content_block_stop\"}\r\n\r\n",
+                    "event: message\r\n",
+                    "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"}}\r\n\r\n",
+                    "event: message\r\n",
+                    "data: {\"type\":\"message_stop\"}\r\n\r\n"
+                )),
+            },
+        }],
+        message: Message::user("inspect file"),
+        expected: ExpectedOutcome {
+            expected_text: &["planning..."],
+            expected_usage: None,
+            expected_tool_use: Some(ExpectedToolUse {
+                tool_name: "Agent",
+                input: "\"inspect file\"",
+            }),
+            expected_stop_reason: Some(StopReason::ToolUse),
+            expected_provider_error: None,
+            expected_terminal: None,
+            expected_usage_notice_count: None,
+            expected_cost_report_fragments: &[],
+        },
+    };
+
+    let expected = ExpectedOutcome {
+        expected_text: &["planning..."],
+        expected_usage: None,
+        expected_tool_use: Some(ExpectedToolUse {
+            tool_name: "Agent",
+            input: "\"inspect file\"",
+        }),
+        expected_stop_reason: Some(StopReason::ToolUse),
+        expected_provider_error: None,
+        expected_terminal: None,
+        expected_usage_notice_count: None,
+        expected_cost_report_fragments: &[],
+    };
+
+    let result = run_provider_case(case).await;
+    assert_provider_case(&result, &expected);
+    finish_provider_case(result).await;
+}
+
+#[tokio::test]
+async fn provider_fixture_harness_covers_tool_use_protocol_failure() {
+    let case = ProviderCase {
+        provider_kind: FixtureProviderKind::Anthropic,
+        run_mode: FixtureRunMode::StreamOnly,
+        base_url: None,
+        model_id: "claude-test",
+        request_timeout_ms: 5_000,
+        retry_policy: RetryPolicy {
+            max_attempts: 1,
+            initial_backoff_ms: 1,
+            max_backoff_ms: 1,
+        },
+        exchanges: vec![MockExchange {
+            delay: None,
+            response: MockHttpResponse {
+                status_line: "200 OK",
+                content_type: Some("text/event-stream"),
+                extra_headers: &[],
+                body: MockBody::Sse(concat!(
+                    "event: message\r\n",
+                    "data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-test\"}}\r\n\r\n",
+                    "event: message\r\n",
+                    "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"}}\r\n\r\n",
+                    "event: message\r\n",
+                    "data: {\"type\":\"message_stop\"}\r\n\r\n"
+                )),
+            },
+        }],
+        message: Message::user("hello"),
+        expected: ExpectedOutcome {
+            expected_text: &[],
+            expected_usage: None,
+            expected_tool_use: None,
+            expected_stop_reason: None,
+            expected_provider_error: Some(ExpectedProviderError {
+                provider_id: "anthropic",
+                kind: "tool_use_protocol",
+                disposition: ProviderFailureDisposition::StreamTerminal,
+                retryable: false,
+                status_code: None,
+                message_contains: "tool use",
+            }),
+            expected_terminal: None,
+            expected_usage_notice_count: None,
+            expected_cost_report_fragments: &[],
+        },
+    };
+
+    let expected = ExpectedOutcome {
+        expected_text: &[],
+        expected_usage: None,
+        expected_tool_use: None,
+        expected_stop_reason: None,
+        expected_provider_error: Some(ExpectedProviderError {
+            provider_id: "anthropic",
+            kind: "tool_use_protocol",
+            disposition: ProviderFailureDisposition::StreamTerminal,
+            retryable: false,
+            status_code: None,
+            message_contains: "tool payload",
+        }),
+        expected_terminal: None,
+        expected_usage_notice_count: None,
+        expected_cost_report_fragments: &[],
+    };
+
+    let result = run_provider_case(case).await;
+    assert_provider_case(&result, &expected);
+    finish_provider_case(result).await;
+}
+
+#[tokio::test]
+async fn provider_fixture_harness_covers_retry_then_success() {
+    let case = ProviderCase {
+        provider_kind: FixtureProviderKind::Anthropic,
+        run_mode: FixtureRunMode::StreamOnly,
+        base_url: None,
+        model_id: "claude-test",
+        request_timeout_ms: 5_000,
+        retry_policy: RetryPolicy {
+            max_attempts: 2,
+            initial_backoff_ms: 1,
+            max_backoff_ms: 1,
+        },
+        exchanges: vec![
+            MockExchange {
+                delay: None,
+                response: MockHttpResponse {
+                    status_line: "429 Too Many Requests",
+                    content_type: Some("application/json"),
+                    extra_headers: &[],
+                    body: MockBody::Raw("{\"error\":\"slow down\"}"),
+                },
+            },
+            MockExchange {
+                delay: None,
+                response: MockHttpResponse {
+                    status_line: "200 OK",
+                    content_type: Some("text/event-stream"),
+                    extra_headers: &[],
+                    body: MockBody::Sse(concat!(
+                        "event: message\r\n",
+                        "data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-test\"}}\r\n\r\n",
+                        "event: message\r\n",
+                        "data: {\"type\":\"content_block_delta\",\"delta\":{\"text\":\"recovered after retry\"}}\r\n\r\n",
+                        "event: message\r\n",
+                        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\r\n\r\n",
+                        "event: message\r\n",
+                        "data: {\"type\":\"message_stop\"}\r\n\r\n"
+                    )),
+                },
+            },
+        ],
+        message: Message::user("hello"),
+        expected: ExpectedOutcome {
+            expected_text: &["recovered after retry"],
+            expected_usage: None,
+            expected_tool_use: None,
+            expected_stop_reason: Some(StopReason::EndTurn),
+            expected_provider_error: None,
+            expected_terminal: None,
+            expected_usage_notice_count: None,
+            expected_cost_report_fragments: &[],
+        },
+    };
+
+    let expected = ExpectedOutcome {
+        expected_text: &["recovered after retry"],
+        expected_usage: None,
+        expected_tool_use: None,
+        expected_stop_reason: Some(StopReason::EndTurn),
+        expected_provider_error: None,
+        expected_terminal: None,
+        expected_usage_notice_count: None,
+        expected_cost_report_fragments: &[],
+    };
+
+    let result = run_provider_case(case).await;
+    assert_provider_case(&result, &expected);
+    finish_provider_case(result).await;
+}
+
+#[tokio::test]
+async fn provider_fixture_harness_covers_invalid_response_paths() {
+    let cases = vec![
+        (
+            ProviderCase {
+                provider_kind: FixtureProviderKind::Anthropic,
+                run_mode: FixtureRunMode::StreamOnly,
+                base_url: None,
+                model_id: "claude-test",
+                request_timeout_ms: 5_000,
+                retry_policy: RetryPolicy {
+                    max_attempts: 1,
+                    initial_backoff_ms: 1,
+                    max_backoff_ms: 1,
+                },
+                exchanges: vec![MockExchange {
+                    delay: None,
+                    response: MockHttpResponse {
+                        status_line: "200 OK",
+                        content_type: Some("application/json"),
+                        extra_headers: &[],
+                        body: MockBody::Raw("{\"type\":\"message_start\"}"),
+                    },
+                }],
+                message: Message::user("hello"),
+                expected: ExpectedOutcome {
+                    expected_text: &[],
+                    expected_usage: None,
+                    expected_tool_use: None,
+                    expected_stop_reason: None,
+                    expected_provider_error: None,
+                    expected_terminal: None,
+                    expected_usage_notice_count: None,
+                    expected_cost_report_fragments: &[],
+                },
+            },
+            ExpectedOutcome {
+                expected_text: &[],
+                expected_usage: None,
+                expected_tool_use: None,
+                expected_stop_reason: None,
+                expected_provider_error: Some(ExpectedProviderError {
+                    provider_id: "anthropic",
+                    kind: "bad_content_type",
+                    disposition: ProviderFailureDisposition::PreStreamTerminal,
+                    retryable: false,
+                    status_code: None,
+                    message_contains: "content-type",
+                }),
+                expected_terminal: None,
+                expected_usage_notice_count: None,
+                expected_cost_report_fragments: &[],
+            },
+        ),
+        (
+            ProviderCase {
+                provider_kind: FixtureProviderKind::Anthropic,
+                run_mode: FixtureRunMode::StreamOnly,
+                base_url: None,
+                model_id: "claude-test",
+                request_timeout_ms: 5_000,
+                retry_policy: RetryPolicy {
+                    max_attempts: 1,
+                    initial_backoff_ms: 1,
+                    max_backoff_ms: 1,
+                },
+                exchanges: vec![MockExchange {
+                    delay: None,
+                    response: MockHttpResponse {
+                        status_line: "200 OK",
+                        content_type: Some("text/event-stream"),
+                        extra_headers: &[],
+                        body: MockBody::Empty,
+                    },
+                }],
+                message: Message::user("hello"),
+                expected: ExpectedOutcome {
+                    expected_text: &[],
+                    expected_usage: None,
+                    expected_tool_use: None,
+                    expected_stop_reason: None,
+                    expected_provider_error: None,
+                    expected_terminal: None,
+                    expected_usage_notice_count: None,
+                    expected_cost_report_fragments: &[],
+                },
+            },
+            ExpectedOutcome {
+                expected_text: &[],
+                expected_usage: None,
+                expected_tool_use: None,
+                expected_stop_reason: None,
+                expected_provider_error: Some(ExpectedProviderError {
+                    provider_id: "anthropic",
+                    kind: "empty_body",
+                    disposition: ProviderFailureDisposition::PreStreamTerminal,
+                    retryable: false,
+                    status_code: None,
+                    message_contains: "empty",
+                }),
+                expected_terminal: None,
+                expected_usage_notice_count: None,
+                expected_cost_report_fragments: &[],
+            },
+        ),
+    ];
+
+    for (case, expected) in cases {
+        let result = run_provider_case(case).await;
+        assert_provider_case(&result, &expected);
+        finish_provider_case(result).await;
+    }
+}
+
+#[tokio::test]
+async fn provider_fixture_harness_covers_unsupported_capability_without_server() {
+    let case = ProviderCase {
+        provider_kind: FixtureProviderKind::BatchProvider,
+        run_mode: FixtureRunMode::StreamOnly,
+        base_url: Some("http://127.0.0.1:1".into()),
+        model_id: "claude-test",
+        request_timeout_ms: 5_000,
+        retry_policy: RetryPolicy {
+            max_attempts: 1,
+            initial_backoff_ms: 1,
+            max_backoff_ms: 1,
+        },
+        exchanges: Vec::new(),
+        message: Message::user("hello"),
+        expected: ExpectedOutcome {
+            expected_text: &[],
+            expected_usage: None,
+            expected_tool_use: None,
+            expected_stop_reason: None,
+            expected_provider_error: None,
+            expected_terminal: None,
+            expected_usage_notice_count: None,
+            expected_cost_report_fragments: &[],
+        },
+    };
+
+    let expected = ExpectedOutcome {
+        expected_text: &[],
+        expected_usage: None,
+        expected_tool_use: None,
+        expected_stop_reason: None,
+        expected_provider_error: Some(ExpectedProviderError {
+            provider_id: "batch-provider",
+            kind: "capability_unsupported",
+            disposition: ProviderFailureDisposition::PreStreamTerminal,
+            retryable: false,
+            status_code: None,
+            message_contains: "streaming",
+        }),
+        expected_terminal: None,
+        expected_usage_notice_count: None,
+        expected_cost_report_fragments: &[],
+    };
+
+    let result = run_provider_case(case).await;
+    assert_provider_case(&result, &expected);
+    finish_provider_case(result).await;
+}
 
 #[tokio::test]
 async fn query_engine_submit_turn_works_through_production_provider_path() {
