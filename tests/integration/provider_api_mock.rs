@@ -11,7 +11,10 @@ use rust_agent::cost::tracker::CostTracker;
 use rust_agent::hook::registry::HookRegistry;
 use rust_agent::interaction::dispatcher::NotificationDispatcher;
 use rust_agent::interaction::telegram::gateway::TelegramGateway;
-use rust_agent::service::api::client::{ModelProviderClient, ModelProviderConfig, ProviderTimeout};
+use rust_agent::service::api::client::{
+    ModelProviderClient, ModelProviderConfig, ProviderCompatibilityProfileKind, ProviderProtocol,
+    ProviderTimeout,
+};
 use rust_agent::service::api::retry::RetryPolicy;
 use rust_agent::service::api::streaming::{ProviderFailureDisposition, StreamEvent, StopReason};
 use rust_agent::service::compact::reactive_compact::ReactiveCompactor;
@@ -28,6 +31,8 @@ use tokio::time::{Duration, Instant, sleep};
 enum FixtureProviderKind {
     Anthropic,
     BatchProvider,
+    OpenAICompatible,
+    GeminiNative,
 }
 
 impl FixtureProviderKind {
@@ -35,6 +40,8 @@ impl FixtureProviderKind {
         match self {
             Self::Anthropic => "anthropic",
             Self::BatchProvider => "batch-provider",
+            Self::OpenAICompatible => "openai-compatible",
+            Self::GeminiNative => "gemini-native",
         }
     }
 }
@@ -141,6 +148,23 @@ async fn run_provider_case(case: ProviderCase) -> FixtureResult {
 
     let config = ModelProviderConfig {
         provider_id: case.provider_kind.provider_id().into(),
+        protocol: match case.provider_kind {
+            FixtureProviderKind::Anthropic | FixtureProviderKind::BatchProvider => {
+                ProviderProtocol::Anthropic
+            }
+            FixtureProviderKind::OpenAICompatible => ProviderProtocol::OpenAICompatible,
+            FixtureProviderKind::GeminiNative => ProviderProtocol::GeminiNative,
+        },
+        compatibility_profile: match case.provider_kind {
+            FixtureProviderKind::Anthropic => ProviderCompatibilityProfileKind::Anthropic,
+            FixtureProviderKind::BatchProvider => ProviderCompatibilityProfileKind::Batch,
+            FixtureProviderKind::OpenAICompatible => {
+                ProviderCompatibilityProfileKind::OpenAICompatible
+            }
+            FixtureProviderKind::GeminiNative => {
+                ProviderCompatibilityProfileKind::GeminiNativeUnsupported
+            }
+        },
         base_url,
         api_key: Some("test-key".into()),
         model_id: case.model_id.into(),
@@ -1215,6 +1239,112 @@ async fn provider_transcript_fixture_pack_locks_real_provider_boundaries() {
 }
 
 #[tokio::test]
+async fn provider_fixture_harness_covers_openai_compatible_adapter_success_path() {
+    let case = ProviderCase {
+        provider_kind: FixtureProviderKind::OpenAICompatible,
+        run_mode: FixtureRunMode::StreamOnly,
+        base_url: None,
+        model_id: "openai-test",
+        request_timeout_ms: 5_000,
+        retry_policy: RetryPolicy {
+            max_attempts: 1,
+            initial_backoff_ms: 1,
+            max_backoff_ms: 1,
+        },
+        exchanges: vec![transcript_mock_exchange(concat!(
+            "data: {\"id\":\"chatcmpl-redacted\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"hello from openai adapter\"},\"index\":0,\"finish_reason\":null}]}\r\n\r\n",
+            "data: {\"id\":\"chatcmpl-redacted\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_redacted\",\"type\":\"function\",\"function\":{\"name\":\"Read\",\"arguments\":\"{\\\"path\\\":\\\"/redacted/file.rs\\\"}\"}}]},\"index\":0,\"finish_reason\":\"tool_calls\"}],\"usage\":{\"model\":\"gpt-redacted\",\"prompt_tokens\":12,\"completion_tokens\":5,\"total_tokens\":17}}\r\n\r\n",
+            "data: [DONE]\r\n\r\n"
+        ))],
+        message: Message::user("transcript fixture"),
+        expected: ExpectedOutcome {
+            expected_text: &[],
+            expected_usage: None,
+            expected_tool_use: None,
+            expected_stop_reason: None,
+            expected_provider_error: None,
+            expected_terminal: None,
+            expected_usage_notice_count: None,
+            expected_cost_report_fragments: &[],
+        },
+    };
+
+    let expected = ExpectedOutcome {
+        expected_text: &["hello from openai adapter"],
+        expected_usage: Some(ExpectedUsage {
+            model: "gpt-redacted",
+            input_tokens: Some(12),
+            output_tokens: Some(5),
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+        }),
+        expected_tool_use: Some(ExpectedToolUse {
+            tool_name: "Read",
+            input: "{\"path\":\"/redacted/file.rs\"}",
+        }),
+        expected_stop_reason: Some(StopReason::ToolUse),
+        expected_provider_error: None,
+        expected_terminal: None,
+        expected_usage_notice_count: None,
+        expected_cost_report_fragments: &[],
+    };
+
+    let result = run_provider_case(case).await;
+    assert_provider_case(&result, &expected);
+    finish_provider_case(result).await;
+}
+
+#[tokio::test]
+async fn provider_fixture_harness_covers_gemini_native_as_typed_unsupported() {
+    let case = ProviderCase {
+        provider_kind: FixtureProviderKind::GeminiNative,
+        run_mode: FixtureRunMode::StreamOnly,
+        base_url: Some("http://127.0.0.1:1".into()),
+        model_id: "gemini-test",
+        request_timeout_ms: 5_000,
+        retry_policy: RetryPolicy {
+            max_attempts: 1,
+            initial_backoff_ms: 1,
+            max_backoff_ms: 1,
+        },
+        exchanges: Vec::new(),
+        message: Message::user("hello"),
+        expected: ExpectedOutcome {
+            expected_text: &[],
+            expected_usage: None,
+            expected_tool_use: None,
+            expected_stop_reason: None,
+            expected_provider_error: None,
+            expected_terminal: None,
+            expected_usage_notice_count: None,
+            expected_cost_report_fragments: &[],
+        },
+    };
+
+    let expected = ExpectedOutcome {
+        expected_text: &[],
+        expected_usage: None,
+        expected_tool_use: None,
+        expected_stop_reason: None,
+        expected_provider_error: Some(ExpectedProviderError {
+            provider_id: "gemini-native",
+            kind: "capability_unsupported",
+            disposition: ProviderFailureDisposition::PreStreamTerminal,
+            retryable: false,
+            status_code: None,
+            message_contains: "gemini native protocol",
+        }),
+        expected_terminal: None,
+        expected_usage_notice_count: None,
+        expected_cost_report_fragments: &[],
+    };
+
+    let result = run_provider_case(case).await;
+    assert_provider_case(&result, &expected);
+    finish_provider_case(result).await;
+}
+
+#[tokio::test]
 async fn query_engine_submit_turn_works_through_production_provider_path() {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
@@ -1226,6 +1356,8 @@ async fn query_engine_submit_turn_works_through_production_provider_path() {
         .with_task_manager(Arc::new(TaskManager::default()));
     let config = ModelProviderConfig {
         provider_id: "anthropic".into(),
+        protocol: ProviderProtocol::Anthropic,
+        compatibility_profile: ProviderCompatibilityProfileKind::Anthropic,
         base_url: format!("http://{}", addr),
         api_key: Some("test-key".into()),
         model_id: "claude-test".into(),
@@ -1304,6 +1436,8 @@ async fn production_provider_request_envelope_stays_compatible() {
 
     let config = ModelProviderConfig {
         provider_id: "anthropic".into(),
+        protocol: ProviderProtocol::Anthropic,
+        compatibility_profile: ProviderCompatibilityProfileKind::Anthropic,
         base_url: format!("http://{}", addr),
         api_key: Some("test-key".into()),
         model_id: " ".into(),
@@ -1335,6 +1469,8 @@ async fn production_provider_request_envelope_stays_compatible() {
 async fn production_provider_surfaces_unsupported_streaming_as_typed_failure() {
     let config = ModelProviderConfig {
         provider_id: "batch-provider".into(),
+            protocol: ProviderProtocol::Anthropic,
+            compatibility_profile: ProviderCompatibilityProfileKind::Batch,
         base_url: "http://127.0.0.1:1".into(),
         api_key: Some("test-key".into()),
         model_id: "claude-test".into(),
@@ -1374,6 +1510,8 @@ async fn production_provider_assembles_partial_tool_use_payload_metadata() {
 
     let config = ModelProviderConfig {
         provider_id: "anthropic".into(),
+        protocol: ProviderProtocol::Anthropic,
+        compatibility_profile: ProviderCompatibilityProfileKind::Anthropic,
         base_url: format!("http://{}", addr),
         api_key: Some("test-key".into()),
         model_id: "claude-test".into(),
@@ -1421,6 +1559,8 @@ async fn production_provider_normalizes_stringified_tool_use_alias_payload() {
 
     let config = ModelProviderConfig {
         provider_id: "anthropic".into(),
+        protocol: ProviderProtocol::Anthropic,
+        compatibility_profile: ProviderCompatibilityProfileKind::Anthropic,
         base_url: format!("http://{}", addr),
         api_key: Some("test-key".into()),
         model_id: "claude-test".into(),
@@ -1458,6 +1598,8 @@ async fn production_provider_preserves_terminal_http_compatibility_metadata() {
 
     let config = ModelProviderConfig {
         provider_id: "anthropic".into(),
+        protocol: ProviderProtocol::Anthropic,
+        compatibility_profile: ProviderCompatibilityProfileKind::Anthropic,
         base_url: format!("http://{}", addr),
         api_key: Some("test-key".into()),
         model_id: "claude-test".into(),
@@ -1498,6 +1640,8 @@ async fn production_provider_accepts_top_level_usage_envelope() {
 
     let config = ModelProviderConfig {
         provider_id: "anthropic".into(),
+        protocol: ProviderProtocol::Anthropic,
+        compatibility_profile: ProviderCompatibilityProfileKind::Anthropic,
         base_url: format!("http://{}", addr),
         api_key: Some("test-key".into()),
         model_id: "claude-test".into(),
@@ -1534,6 +1678,8 @@ async fn production_provider_accepts_delta_usage_envelope() {
 
     let config = ModelProviderConfig {
         provider_id: "anthropic".into(),
+        protocol: ProviderProtocol::Anthropic,
+        compatibility_profile: ProviderCompatibilityProfileKind::Anthropic,
         base_url: format!("http://{}", addr),
         api_key: Some("test-key".into()),
         model_id: "claude-test".into(),
@@ -1572,6 +1718,8 @@ async fn production_provider_merges_usage_across_provider_envelopes_without_drif
         .with_task_manager(Arc::new(TaskManager::default()));
     let config = ModelProviderConfig {
         provider_id: "anthropic".into(),
+        protocol: ProviderProtocol::Anthropic,
+        compatibility_profile: ProviderCompatibilityProfileKind::Anthropic,
         base_url: format!("http://{}", addr),
         api_key: Some("test-key".into()),
         model_id: "claude-test".into(),
@@ -1662,6 +1810,8 @@ async fn production_provider_extracts_nested_http_error_message() {
 
     let config = ModelProviderConfig {
         provider_id: "anthropic".into(),
+        protocol: ProviderProtocol::Anthropic,
+        compatibility_profile: ProviderCompatibilityProfileKind::Anthropic,
         base_url: format!("http://{}", addr),
         api_key: Some("test-key".into()),
         model_id: "claude-test".into(),
@@ -1732,6 +1882,8 @@ async fn production_provider_surfaces_interrupted_stream_metadata() {
 
     let config = ModelProviderConfig {
         provider_id: "anthropic".into(),
+        protocol: ProviderProtocol::Anthropic,
+        compatibility_profile: ProviderCompatibilityProfileKind::Anthropic,
         base_url: format!("http://{}", addr),
         api_key: Some("test-key".into()),
         model_id: "claude-test".into(),
@@ -1773,6 +1925,8 @@ async fn production_provider_surfaces_malformed_stream_as_protocol_failure() {
 
     let config = ModelProviderConfig {
         provider_id: "anthropic".into(),
+        protocol: ProviderProtocol::Anthropic,
+        compatibility_profile: ProviderCompatibilityProfileKind::Anthropic,
         base_url: format!("http://{}", addr),
         api_key: Some("test-key".into()),
         model_id: "claude-test".into(),
@@ -1814,6 +1968,8 @@ async fn production_provider_surfaces_tool_use_protocol_failure() {
 
     let config = ModelProviderConfig {
         provider_id: "anthropic".into(),
+        protocol: ProviderProtocol::Anthropic,
+        compatibility_profile: ProviderCompatibilityProfileKind::Anthropic,
         base_url: format!("http://{}", addr),
         api_key: Some("test-key".into()),
         model_id: "claude-test".into(),
@@ -1855,6 +2011,8 @@ async fn production_provider_surfaces_structured_output_protocol_failure() {
 
     let config = ModelProviderConfig {
         provider_id: "anthropic".into(),
+        protocol: ProviderProtocol::Anthropic,
+        compatibility_profile: ProviderCompatibilityProfileKind::Anthropic,
         base_url: format!("http://{}", addr),
         api_key: Some("test-key".into()),
         model_id: "claude-test".into(),
@@ -1898,6 +2056,8 @@ async fn production_provider_maps_terminal_http_error_to_query_loop_failure_code
         .with_task_manager(Arc::new(TaskManager::default()));
     let config = ModelProviderConfig {
         provider_id: "anthropic".into(),
+        protocol: ProviderProtocol::Anthropic,
+        compatibility_profile: ProviderCompatibilityProfileKind::Anthropic,
         base_url: format!("http://{}", addr),
         api_key: Some("test-key".into()),
         model_id: "claude-test".into(),
@@ -1975,6 +2135,8 @@ async fn production_provider_rejects_wrong_content_type_as_invalid_response() {
 
     let config = ModelProviderConfig {
         provider_id: "anthropic".into(),
+        protocol: ProviderProtocol::Anthropic,
+        compatibility_profile: ProviderCompatibilityProfileKind::Anthropic,
         base_url: format!("http://{}", addr),
         api_key: Some("test-key".into()),
         model_id: "claude-test".into(),
@@ -2016,6 +2178,8 @@ async fn production_provider_rejects_empty_response_body() {
 
     let config = ModelProviderConfig {
         provider_id: "anthropic".into(),
+        protocol: ProviderProtocol::Anthropic,
+        compatibility_profile: ProviderCompatibilityProfileKind::Anthropic,
         base_url: format!("http://{}", addr),
         api_key: Some("test-key".into()),
         model_id: "claude-test".into(),
@@ -2057,6 +2221,8 @@ async fn production_provider_rejects_truncated_stream_as_protocol_failure() {
 
     let config = ModelProviderConfig {
         provider_id: "anthropic".into(),
+        protocol: ProviderProtocol::Anthropic,
+        compatibility_profile: ProviderCompatibilityProfileKind::Anthropic,
         base_url: format!("http://{}", addr),
         api_key: Some("test-key".into()),
         model_id: "claude-test".into(),
@@ -2100,6 +2266,8 @@ async fn production_provider_maps_timeout_after_retries_exhaust_to_query_loop_fa
         .with_task_manager(Arc::new(TaskManager::default()));
     let config = ModelProviderConfig {
         provider_id: "anthropic".into(),
+        protocol: ProviderProtocol::Anthropic,
+        compatibility_profile: ProviderCompatibilityProfileKind::Anthropic,
         base_url: format!("http://{}", addr),
         api_key: Some("test-key".into()),
         model_id: "claude-test".into(),
@@ -2178,6 +2346,8 @@ async fn production_provider_retries_429_then_succeeds() {
 
     let config = ModelProviderConfig {
         provider_id: "anthropic".into(),
+        protocol: ProviderProtocol::Anthropic,
+        compatibility_profile: ProviderCompatibilityProfileKind::Anthropic,
         base_url: format!("http://{}", addr),
         api_key: Some("test-key".into()),
         model_id: "claude-test".into(),
@@ -2220,6 +2390,8 @@ async fn production_provider_respects_retry_after_header_for_429_retry() {
 
     let config = ModelProviderConfig {
         provider_id: "anthropic".into(),
+        protocol: ProviderProtocol::Anthropic,
+        compatibility_profile: ProviderCompatibilityProfileKind::Anthropic,
         base_url: format!("http://{}", addr),
         api_key: Some("test-key".into()),
         model_id: "claude-test".into(),
@@ -2263,6 +2435,8 @@ async fn production_provider_does_not_retry_terminal_400_errors() {
 
     let config = ModelProviderConfig {
         provider_id: "anthropic".into(),
+        protocol: ProviderProtocol::Anthropic,
+        compatibility_profile: ProviderCompatibilityProfileKind::Anthropic,
         base_url: format!("http://{}", addr),
         api_key: Some("test-key".into()),
         model_id: "claude-test".into(),
@@ -2304,6 +2478,8 @@ async fn production_provider_retries_503_then_surfaces_terminal_protocol_failure
 
     let config = ModelProviderConfig {
         provider_id: "anthropic".into(),
+        protocol: ProviderProtocol::Anthropic,
+        compatibility_profile: ProviderCompatibilityProfileKind::Anthropic,
         base_url: format!("http://{}", addr),
         api_key: Some("test-key".into()),
         model_id: "claude-test".into(),

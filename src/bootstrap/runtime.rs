@@ -46,6 +46,7 @@ use crate::security::authorizer::{AuthDecision, DefaultSurfaceAuthorizer, Surfac
 use crate::security::filesystem_policy::FilesystemPolicy;
 use crate::service::api::client::{
     ModelPricing, ModelProviderClient, ModelProviderConfig, ProviderTimeout,
+    resolve_provider_profile, resolve_provider_protocol,
 };
 use crate::service::api::retry::RetryPolicy;
 use crate::service::compact::reactive_compact::ReactiveCompactor;
@@ -851,8 +852,12 @@ impl RuntimeBootstrap {
             .ok()
             .and_then(|value| value.parse::<u64>().ok())
             .unwrap_or(1_000);
+        let protocol = resolve_provider_protocol(&provider_id);
+        let compatibility_profile = resolve_provider_profile(&provider_id);
         ModelProviderConfig {
             provider_id,
+            protocol,
+            compatibility_profile,
             base_url,
             api_key,
             model_id,

@@ -56,6 +56,38 @@ struct ProviderCompatibilityProfile {
     supports_stop_sequences: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderProtocol {
+    Anthropic,
+    OpenAICompatible,
+    GeminiNative,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderCompatibilityProfileKind {
+    Anthropic,
+    TextOnly,
+    Batch,
+    OpenAICompatible,
+    GeminiNativeUnsupported,
+}
+
+trait ProviderAdapter {
+    fn messages_url(&self, config: &ModelProviderConfig) -> Result<String, ApiError>;
+    fn build_request_payload(
+        &self,
+        config: &ModelProviderConfig,
+        input: &Message,
+        request_options: RequestOptions,
+    ) -> Result<Value, ApiError>;
+    fn parse_stream_response(
+        &self,
+        config: &ModelProviderConfig,
+        body: &str,
+        default_model: &str,
+    ) -> Result<Vec<StreamEvent>, ApiError>;
+}
+
 #[derive(Debug, Clone, PartialEq)]
 struct NormalizedRequestOptions {
     max_tokens: u64,
@@ -87,6 +119,8 @@ impl Default for ProviderTimeout {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ModelProviderConfig {
     pub provider_id: String,
+    pub protocol: ProviderProtocol,
+    pub compatibility_profile: ProviderCompatibilityProfileKind,
     pub base_url: String,
     pub api_key: Option<String>,
     pub model_id: String,
@@ -95,10 +129,26 @@ pub struct ModelProviderConfig {
     pub pricing: ModelPricing,
 }
 
+impl ModelProviderConfig {
+    pub fn from_legacy_provider_id(provider_id: impl Into<String>) -> Self {
+        let provider_id = provider_id.into();
+        let protocol = resolve_provider_protocol(&provider_id);
+        let compatibility_profile = resolve_provider_profile(&provider_id);
+        Self {
+            provider_id,
+            protocol,
+            compatibility_profile,
+            ..Self::default()
+        }
+    }
+}
+
 impl Default for ModelProviderConfig {
     fn default() -> Self {
         Self {
             provider_id: "default-provider".into(),
+            protocol: ProviderProtocol::Anthropic,
+            compatibility_profile: ProviderCompatibilityProfileKind::Anthropic,
             base_url: "http://localhost".into(),
             api_key: None,
             model_id: "default-model".into(),
@@ -256,7 +306,7 @@ impl ModelProviderClient {
         client: &reqwest::Client,
         input: &Message,
     ) -> Result<Vec<StreamEvent>, ApiError> {
-        let url = build_messages_url_for_provider(&config.provider_id, &config.base_url)?;
+        let url = build_messages_url_for_provider(config)?;
         let payload = build_request_payload_for_provider(config, input)?;
         let mut request = client
             .post(url)
@@ -305,7 +355,7 @@ impl ModelProviderClient {
             return Err(ApiError::empty_body("provider returned empty response body"));
         }
 
-        parse_stream_response_for_provider(&config.provider_id, &body, &config.model_id)
+        parse_stream_response_for_provider(config, &body, &config.model_id)
     }
 }
 
@@ -401,15 +451,8 @@ fn validate_streaming_response_headers(
     Ok(())
 }
 
-fn build_messages_url_for_provider(provider_id: &str, base_url: &str) -> Result<String, ApiError> {
-    match normalized_provider_id(provider_id) {
-        "anthropic" | "default-provider" | "text-only-provider" | "batch-provider" => {
-            Ok(format!("{}/v1/messages", base_url.trim_end_matches('/')))
-        }
-        _ => Err(ApiError::invalid_response(format!(
-            "unsupported provider id: {provider_id}"
-        ))),
-    }
+fn build_messages_url_for_provider(config: &ModelProviderConfig) -> Result<String, ApiError> {
+    adapter_for_config(config)?.messages_url(config)
 }
 
 fn build_request_payload_for_provider(
@@ -424,32 +467,7 @@ fn build_request_payload_with_options(
     input: &Message,
     request_options: RequestOptions,
 ) -> Result<Value, ApiError> {
-    let profile = profile_for_provider(&config.provider_id)?;
-    match normalized_provider_id(&config.provider_id) {
-        "anthropic" | "default-provider" | "text-only-provider" | "batch-provider" => {
-            let options = normalize_request_options(&profile, &request_options)?;
-            let mut payload = json!({
-                "model": normalized_request_model(config),
-                "messages": [normalized_request_message(input)],
-                "stream": normalized_request_stream_flag(&profile)?,
-                "max_tokens": options.max_tokens,
-            });
-            if let Some(temperature) = options.temperature {
-                payload["temperature"] = json!(temperature);
-            }
-            if let Some(top_p) = options.top_p {
-                payload["top_p"] = json!(top_p);
-            }
-            if !options.stop_sequences.is_empty() {
-                payload["stop_sequences"] = json!(options.stop_sequences);
-            }
-            Ok(payload)
-        }
-        _ => Err(ApiError::invalid_response(format!(
-            "unsupported provider id: {}",
-            config.provider_id
-        ))),
-    }
+    adapter_for_config(config)?.build_request_payload(config, input, request_options)
 }
 
 fn normalized_request_model(config: &ModelProviderConfig) -> &str {
@@ -473,31 +491,215 @@ fn normalized_request_message(input: &Message) -> Value {
     })
 }
 
-fn profile_for_provider(provider_id: &str) -> Result<ProviderCompatibilityProfile, ApiError> {
-    match normalized_provider_id(provider_id) {
-        "anthropic" | "default-provider" => Ok(ProviderCompatibilityProfile {
-            supports_tools: true,
-            supports_streaming: true,
-            supports_temperature: true,
-            supports_top_p: true,
-            supports_stop_sequences: true,
-        }),
-        "text-only-provider" => Ok(ProviderCompatibilityProfile {
-            supports_tools: false,
-            supports_streaming: true,
-            supports_temperature: false,
-            supports_top_p: false,
-            supports_stop_sequences: false,
-        }),
-        "batch-provider" => Ok(ProviderCompatibilityProfile {
-            supports_tools: true,
-            supports_streaming: false,
-            supports_temperature: true,
-            supports_top_p: true,
-            supports_stop_sequences: true,
-        }),
+struct AnthropicAdapter;
+struct OpenAICompatibleAdapter;
+struct GeminiNativeAdapter;
+
+fn validate_provider_config(config: &ModelProviderConfig) -> Result<(), ApiError> {
+    match normalized_provider_id(&config.provider_id) {
+        "anthropic" | "default-provider" => {
+            if config.protocol == ProviderProtocol::Anthropic
+                && config.compatibility_profile == ProviderCompatibilityProfileKind::Anthropic
+            {
+                Ok(())
+            } else {
+                Err(ApiError::invalid_response(format!(
+                    "provider {} has incompatible protocol/profile configuration",
+                    config.provider_id
+                )))
+            }
+        }
+        "text-only-provider" => {
+            if config.protocol == ProviderProtocol::Anthropic
+                && config.compatibility_profile == ProviderCompatibilityProfileKind::TextOnly
+            {
+                Ok(())
+            } else {
+                Err(ApiError::invalid_response(format!(
+                    "provider {} has incompatible protocol/profile configuration",
+                    config.provider_id
+                )))
+            }
+        }
+        "batch-provider" => {
+            if config.protocol == ProviderProtocol::Anthropic
+                && config.compatibility_profile == ProviderCompatibilityProfileKind::Batch
+            {
+                Ok(())
+            } else {
+                Err(ApiError::invalid_response(format!(
+                    "provider {} has incompatible protocol/profile configuration",
+                    config.provider_id
+                )))
+            }
+        }
+        "openai-compatible" | "openai_compatible" => {
+            if config.protocol == ProviderProtocol::OpenAICompatible
+                && config.compatibility_profile == ProviderCompatibilityProfileKind::OpenAICompatible
+            {
+                Ok(())
+            } else {
+                Err(ApiError::invalid_response(format!(
+                    "provider {} has incompatible protocol/profile configuration",
+                    config.provider_id
+                )))
+            }
+        }
+        "gemini-native" | "gemini_native" => {
+            if config.protocol == ProviderProtocol::GeminiNative
+                && config.compatibility_profile
+                    == ProviderCompatibilityProfileKind::GeminiNativeUnsupported
+            {
+                Ok(())
+            } else {
+                Err(ApiError::invalid_response(format!(
+                    "provider {} has incompatible protocol/profile configuration",
+                    config.provider_id
+                )))
+            }
+        }
         _ => Err(ApiError::invalid_response(format!(
-            "unsupported provider id: {provider_id}"
+            "unsupported provider id: {}",
+            config.provider_id
+        ))),
+    }
+}
+
+fn adapter_for_config(config: &ModelProviderConfig) -> Result<&'static dyn ProviderAdapter, ApiError> {
+    validate_provider_config(config)?;
+    match config.protocol {
+        ProviderProtocol::Anthropic => Ok(&AnthropicAdapter),
+        ProviderProtocol::OpenAICompatible => Ok(&OpenAICompatibleAdapter),
+        ProviderProtocol::GeminiNative => Ok(&GeminiNativeAdapter),
+    }
+}
+
+impl ProviderAdapter for AnthropicAdapter {
+    fn messages_url(&self, config: &ModelProviderConfig) -> Result<String, ApiError> {
+        Ok(format!("{}/v1/messages", config.base_url.trim_end_matches('/')))
+    }
+
+    fn build_request_payload(
+        &self,
+        config: &ModelProviderConfig,
+        input: &Message,
+        request_options: RequestOptions,
+    ) -> Result<Value, ApiError> {
+        let profile = profile_for_provider(config)?;
+        let options = normalize_request_options(&profile, &request_options)?;
+        let mut payload = json!({
+            "model": normalized_request_model(config),
+            "messages": [normalized_request_message(input)],
+            "stream": normalized_request_stream_flag(&profile)?,
+            "max_tokens": options.max_tokens,
+        });
+        if let Some(temperature) = options.temperature {
+            payload["temperature"] = json!(temperature);
+        }
+        if let Some(top_p) = options.top_p {
+            payload["top_p"] = json!(top_p);
+        }
+        if !options.stop_sequences.is_empty() {
+            payload["stop_sequences"] = json!(options.stop_sequences);
+        }
+        Ok(payload)
+    }
+
+    fn parse_stream_response(
+        &self,
+        config: &ModelProviderConfig,
+        body: &str,
+        default_model: &str,
+    ) -> Result<Vec<StreamEvent>, ApiError> {
+        parse_anthropic_sse_response(&config.provider_id, body, default_model)
+    }
+}
+
+impl ProviderAdapter for OpenAICompatibleAdapter {
+    fn messages_url(&self, config: &ModelProviderConfig) -> Result<String, ApiError> {
+        Ok(format!(
+            "{}/v1/chat/completions",
+            config.base_url.trim_end_matches('/')
+        ))
+    }
+
+    fn build_request_payload(
+        &self,
+        config: &ModelProviderConfig,
+        input: &Message,
+        request_options: RequestOptions,
+    ) -> Result<Value, ApiError> {
+        let profile = profile_for_provider(config)?;
+        let options = normalize_request_options(&profile, &request_options)?;
+        let mut payload = json!({
+            "model": normalized_request_model(config),
+            "messages": [{
+                "role": "user",
+                "content": input.content,
+            }],
+            "stream": normalized_request_stream_flag(&profile)?,
+            "max_tokens": options.max_tokens,
+        });
+        if let Some(temperature) = options.temperature {
+            payload["temperature"] = json!(temperature);
+        }
+        if let Some(top_p) = options.top_p {
+            payload["top_p"] = json!(top_p);
+        }
+        if !options.stop_sequences.is_empty() {
+            payload["stop"] = json!(options.stop_sequences);
+        }
+        Ok(payload)
+    }
+
+    fn parse_stream_response(
+        &self,
+        config: &ModelProviderConfig,
+        body: &str,
+        default_model: &str,
+    ) -> Result<Vec<StreamEvent>, ApiError> {
+        parse_openai_compatible_sse_response(&config.provider_id, body, default_model)
+    }
+}
+
+impl ProviderAdapter for GeminiNativeAdapter {
+    fn messages_url(&self, _config: &ModelProviderConfig) -> Result<String, ApiError> {
+        Err(ApiError::capability_unsupported(
+            "gemini native protocol is not supported yet",
+        ))
+    }
+
+    fn build_request_payload(
+        &self,
+        _config: &ModelProviderConfig,
+        _input: &Message,
+        _request_options: RequestOptions,
+    ) -> Result<Value, ApiError> {
+        Err(ApiError::capability_unsupported(
+            "gemini native protocol is not supported yet",
+        ))
+    }
+
+    fn parse_stream_response(
+        &self,
+        _config: &ModelProviderConfig,
+        _body: &str,
+        _default_model: &str,
+    ) -> Result<Vec<StreamEvent>, ApiError> {
+        Err(ApiError::capability_unsupported(
+            "gemini native protocol is not supported yet",
+        ))
+    }
+}
+
+fn profile_for_provider(config: &ModelProviderConfig) -> Result<ProviderCompatibilityProfile, ApiError> {
+    match config.protocol {
+        ProviderProtocol::Anthropic | ProviderProtocol::OpenAICompatible => {
+            Ok(compatibility_profile_for_kind(config.compatibility_profile))
+        }
+        ProviderProtocol::GeminiNative => Err(ApiError::capability_unsupported(format!(
+            "provider protocol {:?} is not supported yet",
+            config.protocol
         ))),
     }
 }
@@ -565,18 +767,11 @@ fn normalized_request_stream_flag(profile: &ProviderCompatibilityProfile) -> Res
 }
 
 fn parse_stream_response_for_provider(
-    provider_id: &str,
+    config: &ModelProviderConfig,
     body: &str,
     default_model: &str,
 ) -> Result<Vec<StreamEvent>, ApiError> {
-    match normalized_provider_id(provider_id) {
-        "anthropic" | "default-provider" => {
-            parse_anthropic_sse_response(provider_id, body, default_model)
-        }
-        _ => Err(ApiError::invalid_response(format!(
-            "unsupported provider id: {provider_id}"
-        ))),
-    }
+    adapter_for_config(config)?.parse_stream_response(config, body, default_model)
 }
 
 fn normalized_http_error_message(status: StatusCode, body: &str) -> String {
@@ -637,6 +832,74 @@ fn normalized_provider_id(provider_id: &str) -> &str {
         "anthropic"
     } else {
         trimmed
+    }
+}
+
+pub fn resolve_provider_protocol(provider_id: &str) -> ProviderProtocol {
+    match normalized_provider_id(provider_id) {
+        "anthropic" | "default-provider" | "text-only-provider" | "batch-provider" => {
+            ProviderProtocol::Anthropic
+        }
+        "openai-compatible" | "openai_compatible" => ProviderProtocol::OpenAICompatible,
+        "gemini-native" | "gemini_native" => ProviderProtocol::GeminiNative,
+        _ => ProviderProtocol::Anthropic,
+    }
+}
+
+pub fn resolve_provider_profile(provider_id: &str) -> ProviderCompatibilityProfileKind {
+    match normalized_provider_id(provider_id) {
+        "anthropic" | "default-provider" => ProviderCompatibilityProfileKind::Anthropic,
+        "text-only-provider" => ProviderCompatibilityProfileKind::TextOnly,
+        "batch-provider" => ProviderCompatibilityProfileKind::Batch,
+        "openai-compatible" | "openai_compatible" => {
+            ProviderCompatibilityProfileKind::OpenAICompatible
+        }
+        "gemini-native" | "gemini_native" => {
+            ProviderCompatibilityProfileKind::GeminiNativeUnsupported
+        }
+        _ => ProviderCompatibilityProfileKind::Anthropic,
+    }
+}
+
+fn compatibility_profile_for_kind(
+    profile: ProviderCompatibilityProfileKind,
+) -> ProviderCompatibilityProfile {
+    match profile {
+        ProviderCompatibilityProfileKind::Anthropic => ProviderCompatibilityProfile {
+            supports_tools: true,
+            supports_streaming: true,
+            supports_temperature: true,
+            supports_top_p: true,
+            supports_stop_sequences: true,
+        },
+        ProviderCompatibilityProfileKind::TextOnly => ProviderCompatibilityProfile {
+            supports_tools: false,
+            supports_streaming: true,
+            supports_temperature: false,
+            supports_top_p: false,
+            supports_stop_sequences: false,
+        },
+        ProviderCompatibilityProfileKind::Batch => ProviderCompatibilityProfile {
+            supports_tools: true,
+            supports_streaming: false,
+            supports_temperature: true,
+            supports_top_p: true,
+            supports_stop_sequences: true,
+        },
+        ProviderCompatibilityProfileKind::OpenAICompatible => ProviderCompatibilityProfile {
+            supports_tools: true,
+            supports_streaming: true,
+            supports_temperature: true,
+            supports_top_p: true,
+            supports_stop_sequences: true,
+        },
+        ProviderCompatibilityProfileKind::GeminiNativeUnsupported => ProviderCompatibilityProfile {
+            supports_tools: false,
+            supports_streaming: true,
+            supports_temperature: false,
+            supports_top_p: false,
+            supports_stop_sequences: false,
+        },
     }
 }
 
@@ -706,6 +969,177 @@ pub fn parse_anthropic_sse_response(
     }
 
     parser.finish(&mut events)?;
+    Ok(events)
+}
+
+pub fn parse_openai_compatible_sse_response(
+    provider_id: &str,
+    body: &str,
+    default_model: &str,
+) -> Result<Vec<StreamEvent>, ApiError> {
+    if body.trim().is_empty() {
+        return Err(ApiError::empty_body("provider returned empty response body"));
+    }
+
+    let normalized = body.replace("\r\n", "\n");
+    let complete_body = normalized.ends_with("\n\n");
+    let frames = if complete_body {
+        normalized.split("\n\n").collect::<Vec<_>>()
+    } else {
+        normalized.split_terminator("\n\n").collect::<Vec<_>>()
+    };
+
+    let mut events = Vec::new();
+    let mut saw_message_start = false;
+    let mut saw_terminal = false;
+    let mut pending_usage: Option<NormalizedUsage> = None;
+    let mut pending_tool_name: Option<String> = None;
+    let mut pending_tool_arguments = String::new();
+    let mut tool_emitted = false;
+
+    for frame in frames.into_iter().filter(|frame| !frame.trim().is_empty()) {
+        let payload = frame
+            .lines()
+            .filter_map(|line| line.strip_prefix("data:"))
+            .map(str::trim)
+            .collect::<Vec<_>>()
+            .join("\n");
+        if payload.is_empty() {
+            continue;
+        }
+        if payload == "[DONE]" {
+            saw_terminal = true;
+            continue;
+        }
+
+        let json: Value = serde_json::from_str(&payload).map_err(|error| {
+            ApiError::sse_protocol_with_disposition(
+                format!("invalid SSE JSON payload: {error}"),
+                if saw_message_start {
+                    ProviderFailureDisposition::StreamTerminal
+                } else {
+                    ProviderFailureDisposition::PreStreamTerminal
+                },
+            )
+        })?;
+
+        let choices = json
+            .get("choices")
+            .and_then(Value::as_array)
+            .ok_or_else(|| {
+                ApiError::sse_protocol_with_disposition(
+                    "openai-compatible event missing choices",
+                    if saw_message_start {
+                        ProviderFailureDisposition::StreamTerminal
+                    } else {
+                        ProviderFailureDisposition::PreStreamTerminal
+                    },
+                )
+            })?;
+
+        if !saw_message_start {
+            events.push(StreamEvent::MessageStart);
+            saw_message_start = true;
+        }
+
+        if let Some(usage) = json.get("usage") {
+            let incoming = normalize_usage(usage, default_model);
+            pending_usage = Some(match pending_usage.take() {
+                Some(existing) => merge_usage(existing, incoming),
+                None => incoming,
+            });
+        }
+
+        for choice in choices {
+            if let Some(text) = choice
+                .get("delta")
+                .and_then(|delta| delta.get("content"))
+                .and_then(Value::as_str)
+            {
+                events.push(StreamEvent::TextDelta(text.to_string()));
+            }
+
+            if let Some(tool_calls) = choice
+                .get("delta")
+                .and_then(|delta| delta.get("tool_calls"))
+                .and_then(Value::as_array)
+            {
+                for tool_call in tool_calls {
+                    if let Some(name) = tool_call
+                        .get("function")
+                        .and_then(|function| function.get("name"))
+                        .and_then(Value::as_str)
+                    {
+                        pending_tool_name = Some(name.to_string());
+                    }
+                    if let Some(arguments) = tool_call
+                        .get("function")
+                        .and_then(|function| function.get("arguments"))
+                    {
+                        match arguments {
+                            Value::String(text) => pending_tool_arguments.push_str(text),
+                            other => pending_tool_arguments.push_str(&other.to_string()),
+                        }
+                    }
+                }
+            }
+
+            if let Some(finish_reason) = choice.get("finish_reason").and_then(Value::as_str) {
+                let stop_reason = match finish_reason {
+                    "stop" => StopReason::EndTurn,
+                    "length" => StopReason::MaxTokens,
+                    "tool_calls" => StopReason::ToolUse,
+                    _ => StopReason::Error,
+                };
+                if matches!(stop_reason, StopReason::ToolUse) {
+                    let Some(tool_name) = pending_tool_name.clone() else {
+                        return Err(ApiError::tool_use_protocol_with_disposition(
+                            "tool_calls stop without tool payload",
+                            ProviderFailureDisposition::StreamTerminal,
+                        ));
+                    };
+                    let input = if pending_tool_arguments.trim().is_empty() {
+                        "{}".to_string()
+                    } else {
+                        normalize_json_like_value(
+                            &Value::String(pending_tool_arguments.clone()),
+                            "tool_use input",
+                        )?
+                        .to_string()
+                    };
+                    if !tool_emitted {
+                        events.push(StreamEvent::ToolUse { tool_name, input });
+                        tool_emitted = true;
+                    }
+                }
+                saw_terminal = true;
+                events.push(StreamEvent::MessageStop { stop_reason });
+            }
+        }
+    }
+
+    if let Some(event) = pending_usage.and_then(|usage| usage.into_usage_event(default_model)) {
+        events.push(StreamEvent::Usage(event));
+    }
+
+    if !complete_body {
+        return Err(ApiError::sse_protocol_with_disposition(
+            "provider returned truncated SSE frame",
+            if saw_message_start {
+                ProviderFailureDisposition::StreamTerminal
+            } else {
+                ProviderFailureDisposition::PreStreamTerminal
+            },
+        ));
+    }
+
+    if !saw_terminal {
+        events.push(StreamEvent::MessageStop {
+            stop_reason: StopReason::EndTurn,
+        });
+    }
+
+    let _ = provider_id;
     Ok(events)
 }
 
@@ -1309,13 +1743,15 @@ fn classify_stream_error_disposition(
 #[cfg(test)]
 mod tests {
     use super::{
-        ModelProviderConfig, NormalizedUsage, ProviderTimeout, RequestOptions, RetryDecision,
+        ModelProviderConfig, NormalizedUsage, ProviderCompatibilityProfileKind,
+        ProviderProtocol, ProviderTimeout, RequestOptions, RetryDecision,
         build_messages_url_for_provider, build_request_payload_for_provider,
         build_request_payload_with_options, classify_retry_policy, classify_stream_error,
         classify_stream_error_disposition, extract_error_detail, map_stop_reason,
         merge_usage, normalize_json_like_value, normalize_usage, parse_anthropic_sse_response,
-        parse_retry_after_ms, parse_stream_response_for_provider, parse_usage,
-        profile_for_provider, validate_streaming_response_headers,
+        parse_openai_compatible_sse_response, parse_retry_after_ms,
+        parse_stream_response_for_provider, parse_usage, profile_for_provider,
+        validate_streaming_response_headers,
     };
     use crate::service::api::retry::RetryPolicy;
     use crate::service::api::errors::ApiError;
@@ -1373,7 +1809,7 @@ mod tests {
         assert_eq!(config.timeout, ProviderTimeout::default());
         assert_eq!(config.retry_policy, RetryPolicy::default());
         assert_eq!(
-            build_messages_url_for_provider(&config.provider_id, &config.base_url)
+            build_messages_url_for_provider(&config)
                 .expect("default provider should resolve URL"),
             "http://localhost/v1/messages"
         );
@@ -1383,6 +1819,8 @@ mod tests {
     fn request_payload_uses_normalized_envelope_shape() {
         let config = ModelProviderConfig {
             provider_id: "anthropic".into(),
+            protocol: ProviderProtocol::Anthropic,
+            compatibility_profile: ProviderCompatibilityProfileKind::Anthropic,
             model_id: "  ".into(),
             ..ModelProviderConfig::default()
         };
@@ -1400,21 +1838,24 @@ mod tests {
 
     #[test]
     fn provider_compatibility_profiles_match_expected_capabilities() {
-        let anthropic = profile_for_provider("anthropic").expect("anthropic profile");
+        let anthropic = profile_for_provider(&ModelProviderConfig::from_legacy_provider_id("anthropic"))
+            .expect("anthropic profile");
         assert!(anthropic.supports_tools);
         assert!(anthropic.supports_streaming);
         assert!(anthropic.supports_temperature);
         assert!(anthropic.supports_top_p);
         assert!(anthropic.supports_stop_sequences);
 
-        let text_only = profile_for_provider("text-only-provider").expect("text-only profile");
+        let text_only = profile_for_provider(&ModelProviderConfig::from_legacy_provider_id("text-only-provider"))
+            .expect("text-only profile");
         assert!(!text_only.supports_tools);
         assert!(text_only.supports_streaming);
         assert!(!text_only.supports_temperature);
         assert!(!text_only.supports_top_p);
         assert!(!text_only.supports_stop_sequences);
 
-        let batch = profile_for_provider("batch-provider").expect("batch profile");
+        let batch = profile_for_provider(&ModelProviderConfig::from_legacy_provider_id("batch-provider"))
+            .expect("batch profile");
         assert!(batch.supports_tools);
         assert!(!batch.supports_streaming);
         assert!(batch.supports_temperature);
@@ -1426,6 +1867,8 @@ mod tests {
     fn supported_provider_keeps_request_options_intact() {
         let config = ModelProviderConfig {
             provider_id: "anthropic".into(),
+            protocol: ProviderProtocol::Anthropic,
+            compatibility_profile: ProviderCompatibilityProfileKind::Anthropic,
             ..ModelProviderConfig::default()
         };
         let payload = build_request_payload_with_options(
@@ -1451,6 +1894,8 @@ mod tests {
     fn unsupported_optional_request_options_are_dropped() {
         let config = ModelProviderConfig {
             provider_id: "text-only-provider".into(),
+            protocol: ProviderProtocol::Anthropic,
+            compatibility_profile: ProviderCompatibilityProfileKind::TextOnly,
             ..ModelProviderConfig::default()
         };
         let payload = build_request_payload_with_options(
@@ -1476,6 +1921,8 @@ mod tests {
     fn unsupported_streaming_returns_typed_capability_failure() {
         let config = ModelProviderConfig {
             provider_id: "batch-provider".into(),
+            protocol: ProviderProtocol::Anthropic,
+            compatibility_profile: ProviderCompatibilityProfileKind::Batch,
             ..ModelProviderConfig::default()
         };
 
@@ -1491,6 +1938,8 @@ mod tests {
     fn unsupported_tools_returns_typed_capability_failure() {
         let config = ModelProviderConfig {
             provider_id: "text-only-provider".into(),
+            protocol: ProviderProtocol::Anthropic,
+            compatibility_profile: ProviderCompatibilityProfileKind::TextOnly,
             ..ModelProviderConfig::default()
         };
 
@@ -1513,6 +1962,8 @@ mod tests {
     fn invalid_numeric_options_return_typed_failure() {
         let config = ModelProviderConfig {
             provider_id: "anthropic".into(),
+            protocol: ProviderProtocol::Anthropic,
+            compatibility_profile: ProviderCompatibilityProfileKind::Anthropic,
             ..ModelProviderConfig::default()
         };
 
@@ -1551,19 +2002,55 @@ mod tests {
     }
 
     #[test]
+    fn parses_openai_compatible_sse_stream_into_stream_events() {
+        let body = concat!(
+            "data: {\"id\":\"chatcmpl-redacted\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"hello openai\"},\"index\":0,\"finish_reason\":null}]}\n\n",
+            "data: {\"id\":\"chatcmpl-redacted\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_redacted\",\"type\":\"function\",\"function\":{\"name\":\"Read\",\"arguments\":\"{\\\"path\\\":\\\"foo\\\"}\"}}]},\"index\":0,\"finish_reason\":\"tool_calls\"}],\"usage\":{\"model\":\"gpt-redacted\",\"prompt_tokens\":12,\"completion_tokens\":5,\"total_tokens\":17}}\n\n",
+            "data: [DONE]\n\n"
+        );
+
+        let events = parse_openai_compatible_sse_response("openai-compatible", body, "default-model")
+            .expect("openai-compatible sse should parse");
+        assert!(matches!(events[0], StreamEvent::MessageStart));
+        assert!(events.iter().any(|event| matches!(event, StreamEvent::TextDelta(text) if text == "hello openai")));
+        assert!(events.iter().any(|event| matches!(event, StreamEvent::ToolUse { tool_name, input } if tool_name == "Read" && input == "{\"path\":\"foo\"}")));
+        assert!(events.iter().any(|event| matches!(event, StreamEvent::Usage(usage)
+            if usage.model == "gpt-redacted"
+                && usage.input_tokens == 12
+                && usage.output_tokens == 5)));
+        assert!(matches!(
+            events.iter().find(|event| matches!(event, StreamEvent::MessageStop { .. })),
+            Some(StreamEvent::MessageStop {
+                stop_reason: StopReason::ToolUse
+            })
+        ));
+    }
+
+    #[test]
     fn rejects_unknown_provider_ids_for_request_and_parse_paths() {
         let config = ModelProviderConfig {
             provider_id: "custom-provider".into(),
+            protocol: ProviderProtocol::Anthropic,
+            compatibility_profile: ProviderCompatibilityProfileKind::Anthropic,
             ..ModelProviderConfig::default()
         };
 
-        let request_error = build_messages_url_for_provider(&config.provider_id, &config.base_url)
+        let request_error = build_messages_url_for_provider(&config)
             .expect_err("unknown provider should be rejected");
         assert_eq!(request_error.kind_label(), "invalid_response");
         assert!(request_error.message.contains("custom-provider"));
 
-        let parse_error = parse_stream_response_for_provider("custom-provider", "", "model")
-            .expect_err("unknown provider parser should be rejected");
+        let parse_error = parse_stream_response_for_provider(
+            &ModelProviderConfig {
+                provider_id: "custom-provider".into(),
+                protocol: ProviderProtocol::Anthropic,
+                compatibility_profile: ProviderCompatibilityProfileKind::Anthropic,
+                ..ModelProviderConfig::default()
+            },
+            "",
+            "model",
+        )
+        .expect_err("unknown provider parser should be rejected");
         assert_eq!(parse_error.kind_label(), "invalid_response");
         assert!(parse_error.message.contains("custom-provider"));
     }
