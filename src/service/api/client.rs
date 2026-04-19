@@ -1,13 +1,13 @@
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
-use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
+use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, RETRY_AFTER};
 use reqwest::StatusCode;
 use serde_json::{Value, json};
 use tokio::time::{sleep, timeout};
 
 use crate::core::message::Message;
-use crate::service::api::errors::ApiError;
+use crate::service::api::errors::{ApiError, ApiErrorKind};
 use crate::service::api::retry::RetryPolicy;
 use crate::service::api::streaming::{
     ProviderFailureDisposition, StopReason, StreamError, StreamEvent, UsageEvent,
@@ -190,8 +190,19 @@ impl ModelProviderClient {
                 Ok(events) => return Ok(events),
                 Err(error) => {
                     observability.record_api_client_error(&config.provider_id, &error);
-                    if config.retry_policy.should_retry(attempt, &error, false) {
-                        sleep(config.retry_policy.backoff_for_attempt(attempt)).await;
+                    let retry_decision = classify_retry_policy(&error);
+                    if config.retry_policy.should_retry(attempt, &error, false)
+                        && !matches!(retry_decision, RetryDecision::DoNotRetry)
+                    {
+                        match retry_decision {
+                            RetryDecision::DoNotRetry => {}
+                            RetryDecision::RetryDefaultBackoff => {
+                                sleep(config.retry_policy.backoff_for_attempt(attempt)).await;
+                            }
+                            RetryDecision::RetryAfterMs(delay_ms) => {
+                                sleep(Duration::from_millis(delay_ms)).await;
+                            }
+                        }
                         attempt += 1;
                         continue;
                     }
@@ -231,15 +242,16 @@ impl ModelProviderClient {
         .map_err(classify_request_transport_error)?;
 
         let status = response.status();
+        let retry_after_ms = parse_retry_after_ms(response.headers());
         if !status.is_success() {
             let body = response
                 .text()
                 .await
                 .unwrap_or_else(|_| "<unavailable>".into());
-            return Err(ApiError::http_status(
-                status.as_u16(),
-                normalized_http_error_message(status, &body),
-            ));
+            return Err(
+                ApiError::http_status(status.as_u16(), normalized_http_error_message(status, &body))
+                    .with_retry_after_ms(retry_after_ms),
+            );
         }
         validate_streaming_response_headers(response.headers(), status)?;
 
@@ -257,6 +269,13 @@ impl ModelProviderClient {
 
         parse_stream_response_for_provider(&config.provider_id, &body, &config.model_id)
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RetryDecision {
+    DoNotRetry,
+    RetryDefaultBackoff,
+    RetryAfterMs(u64),
 }
 
 fn classify_request_transport_error(error: reqwest::Error) -> ApiError {
@@ -281,6 +300,32 @@ fn classify_response_body_error(error: reqwest::Error) -> ApiError {
     } else {
         ApiError::transport(message)
     }
+}
+
+fn classify_retry_policy(error: &ApiError) -> RetryDecision {
+    match error.kind {
+        ApiErrorKind::Timeout | ApiErrorKind::ConnectionReset => RetryDecision::RetryDefaultBackoff,
+        ApiErrorKind::HttpStatus(429) => error
+            .retry_after_ms
+            .map(RetryDecision::RetryAfterMs)
+            .unwrap_or(RetryDecision::RetryDefaultBackoff),
+        ApiErrorKind::HttpStatus(500..=599) => RetryDecision::RetryDefaultBackoff,
+        ApiErrorKind::HttpStatus(_)
+        | ApiErrorKind::RequestBuild
+        | ApiErrorKind::Transport
+        | ApiErrorKind::EmptyBody
+        | ApiErrorKind::BadContentType
+        | ApiErrorKind::InvalidResponse
+        | ApiErrorKind::SseProtocol
+        | ApiErrorKind::ToolUseProtocol
+        | ApiErrorKind::StructuredOutputInvalid => RetryDecision::DoNotRetry,
+    }
+}
+
+fn parse_retry_after_ms(headers: &reqwest::header::HeaderMap) -> Option<u64> {
+    let value = headers.get(RETRY_AFTER)?.to_str().ok()?.trim();
+    let seconds = value.parse::<u64>().ok()?;
+    Some(seconds.saturating_mul(1000))
 }
 
 fn is_connection_reset_error(error: &reqwest::Error) -> bool {
@@ -1003,16 +1048,17 @@ fn classify_stream_error_disposition(
 #[cfg(test)]
 mod tests {
     use super::{
-        ModelProviderConfig, ProviderTimeout, build_messages_url_for_provider,
-        build_request_payload_for_provider, classify_stream_error, classify_stream_error_disposition,
-        extract_error_detail, map_stop_reason, normalize_json_like_value,
-        parse_anthropic_sse_response, parse_stream_response_for_provider, parse_usage,
-        validate_streaming_response_headers,
+        ModelProviderConfig, ProviderTimeout, RetryDecision, build_messages_url_for_provider,
+        build_request_payload_for_provider, classify_retry_policy, classify_stream_error,
+        classify_stream_error_disposition, extract_error_detail, map_stop_reason,
+        normalize_json_like_value, parse_anthropic_sse_response, parse_retry_after_ms,
+        parse_stream_response_for_provider, parse_usage, validate_streaming_response_headers,
     };
     use crate::service::api::retry::RetryPolicy;
+    use crate::service::api::errors::ApiError;
     use crate::service::api::streaming::{ProviderFailureDisposition, StopReason, StreamEvent};
     use serde_json::Value;
-    use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderValue};
+    use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderValue, RETRY_AFTER};
     use reqwest::StatusCode;
 
     #[test]
@@ -1521,5 +1567,56 @@ mod tests {
         assert_eq!(usage.output_tokens, 3);
         assert_eq!(usage.cache_creation_input_tokens, 2);
         assert_eq!(usage.cache_read_input_tokens, 1);
+    }
+
+    #[test]
+    fn retry_policy_only_retries_expected_error_kinds() {
+        assert_eq!(
+            classify_retry_policy(&ApiError::timeout("timed out")),
+            RetryDecision::RetryDefaultBackoff
+        );
+        assert_eq!(
+            classify_retry_policy(&ApiError::connection_reset("reset")),
+            RetryDecision::RetryDefaultBackoff
+        );
+        assert_eq!(
+            classify_retry_policy(&ApiError::http_status(429, "rate limited")),
+            RetryDecision::RetryDefaultBackoff
+        );
+        assert_eq!(
+            classify_retry_policy(&ApiError::http_status(503, "unavailable")),
+            RetryDecision::RetryDefaultBackoff
+        );
+        assert_eq!(
+            classify_retry_policy(&ApiError::http_status(400, "bad request")),
+            RetryDecision::DoNotRetry
+        );
+        assert_eq!(
+            classify_retry_policy(&ApiError::transport("transport")),
+            RetryDecision::DoNotRetry
+        );
+        assert_eq!(
+            classify_retry_policy(&ApiError::sse_protocol("protocol")),
+            RetryDecision::DoNotRetry
+        );
+    }
+
+    #[test]
+    fn retry_policy_prefers_retry_after_hint_for_429() {
+        let error = ApiError::http_status(429, "rate limited").with_retry_after_ms(Some(1_500));
+        assert_eq!(
+            classify_retry_policy(&error),
+            RetryDecision::RetryAfterMs(1_500)
+        );
+    }
+
+    #[test]
+    fn retry_after_parser_accepts_seconds_and_ignores_invalid_values() {
+        let mut headers = HeaderMap::new();
+        headers.insert(RETRY_AFTER, HeaderValue::from_static("2"));
+        assert_eq!(parse_retry_after_ms(&headers), Some(2_000));
+
+        headers.insert(RETRY_AFTER, HeaderValue::from_static("nonsense"));
+        assert_eq!(parse_retry_after_ms(&headers), None);
     }
 }

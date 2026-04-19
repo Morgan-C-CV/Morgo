@@ -13,7 +13,7 @@ use rust_agent::interaction::dispatcher::NotificationDispatcher;
 use rust_agent::interaction::telegram::gateway::TelegramGateway;
 use rust_agent::service::api::client::{ModelProviderClient, ModelProviderConfig, ProviderTimeout};
 use rust_agent::service::api::retry::RetryPolicy;
-use rust_agent::service::api::streaming::{ProviderFailureDisposition, StreamEvent};
+use rust_agent::service::api::streaming::{ProviderFailureDisposition, StreamEvent, StopReason};
 use rust_agent::service::compact::reactive_compact::ReactiveCompactor;
 use rust_agent::state::app_state::{AppState, RuntimeRole};
 use rust_agent::state::permission_context::{PermissionMode, ToolPermissionContext};
@@ -21,7 +21,7 @@ use rust_agent::task::manager::TaskManager;
 use rust_agent::tool::registry::ToolRegistry;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
-use tokio::time::{Duration, sleep};
+use tokio::time::{Duration, Instant, sleep};
 
 #[tokio::test]
 async fn query_engine_submit_turn_works_through_production_provider_path() {
@@ -852,6 +852,173 @@ async fn production_provider_maps_timeout_after_retries_exhaust_to_query_loop_fa
     server.await.expect("mock provider server finished");
 }
 
+#[tokio::test]
+async fn production_provider_retries_429_then_succeeds() {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind mock provider listener");
+    let addr = listener.local_addr().expect("listener addr");
+    let server = tokio::spawn(run_retry_then_success_response_server(listener, None));
+
+    let config = ModelProviderConfig {
+        provider_id: "anthropic".into(),
+        base_url: format!("http://{}", addr),
+        api_key: Some("test-key".into()),
+        model_id: "claude-test".into(),
+        timeout: ProviderTimeout {
+            request_timeout_ms: 5_000,
+        },
+        retry_policy: RetryPolicy {
+            max_attempts: 2,
+            initial_backoff_ms: 1,
+            max_backoff_ms: 1,
+        },
+        pricing: Default::default(),
+    };
+
+    let events = ModelProviderClient::from_config(config)
+        .stream_message(&Message::user("hello"))
+        .await;
+
+    assert!(events.iter().any(|event| matches!(
+        event,
+        StreamEvent::TextDelta(text) if text == "recovered after retry"
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        StreamEvent::MessageStop {
+            stop_reason: StopReason::EndTurn
+        }
+    )));
+
+    server.await.expect("mock provider server finished");
+}
+
+#[tokio::test]
+async fn production_provider_respects_retry_after_header_for_429_retry() {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind mock provider listener");
+    let addr = listener.local_addr().expect("listener addr");
+    let server = tokio::spawn(run_retry_then_success_response_server(listener, Some("1")));
+
+    let config = ModelProviderConfig {
+        provider_id: "anthropic".into(),
+        base_url: format!("http://{}", addr),
+        api_key: Some("test-key".into()),
+        model_id: "claude-test".into(),
+        timeout: ProviderTimeout {
+            request_timeout_ms: 5_000,
+        },
+        retry_policy: RetryPolicy {
+            max_attempts: 2,
+            initial_backoff_ms: 1,
+            max_backoff_ms: 1,
+        },
+        pricing: Default::default(),
+    };
+
+    let started = Instant::now();
+    let events = ModelProviderClient::from_config(config)
+        .stream_message(&Message::user("hello"))
+        .await;
+    let elapsed = started.elapsed();
+
+    assert!(elapsed >= Duration::from_millis(900));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        StreamEvent::TextDelta(text) if text == "recovered after retry"
+    )));
+
+    server.await.expect("mock provider server finished");
+}
+
+#[tokio::test]
+async fn production_provider_does_not_retry_terminal_400_errors() {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind mock provider listener");
+    let addr = listener.local_addr().expect("listener addr");
+    let server = tokio::spawn(run_retry_then_terminal_http_response_server(
+        listener,
+        "400 Bad Request",
+        "{\"error\":\"bad request\"}",
+    ));
+
+    let config = ModelProviderConfig {
+        provider_id: "anthropic".into(),
+        base_url: format!("http://{}", addr),
+        api_key: Some("test-key".into()),
+        model_id: "claude-test".into(),
+        timeout: ProviderTimeout {
+            request_timeout_ms: 5_000,
+        },
+        retry_policy: RetryPolicy {
+            max_attempts: 3,
+            initial_backoff_ms: 1,
+            max_backoff_ms: 1,
+        },
+        pricing: Default::default(),
+    };
+
+    let events = ModelProviderClient::from_config(config)
+        .stream_message(&Message::user("hello"))
+        .await;
+
+    assert!(matches!(
+        &events[0],
+        StreamEvent::Error(error)
+            if error.provider_id == "anthropic"
+                && error.kind == "http_status"
+                && error.status_code == Some(400)
+                && error.disposition == ProviderFailureDisposition::PreStreamTerminal
+                && !error.retryable
+    ));
+
+    server.await.expect("mock provider server finished");
+}
+
+#[tokio::test]
+async fn production_provider_retries_503_then_surfaces_terminal_protocol_failure() {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind mock provider listener");
+    let addr = listener.local_addr().expect("listener addr");
+    let server = tokio::spawn(run_retry_then_stream_protocol_failure_server(listener));
+
+    let config = ModelProviderConfig {
+        provider_id: "anthropic".into(),
+        base_url: format!("http://{}", addr),
+        api_key: Some("test-key".into()),
+        model_id: "claude-test".into(),
+        timeout: ProviderTimeout {
+            request_timeout_ms: 5_000,
+        },
+        retry_policy: RetryPolicy {
+            max_attempts: 2,
+            initial_backoff_ms: 1,
+            max_backoff_ms: 1,
+        },
+        pricing: Default::default(),
+    };
+
+    let events = ModelProviderClient::from_config(config)
+        .stream_message(&Message::user("hello"))
+        .await;
+
+    assert!(matches!(
+        &events[0],
+        StreamEvent::Error(error)
+            if error.provider_id == "anthropic"
+                && error.kind == "sse_protocol"
+                && error.disposition == ProviderFailureDisposition::StreamTerminal
+                && !error.retryable
+                && error.status_code.is_none()
+    ));
+
+    server.await.expect("mock provider server finished");
+}
+
 async fn run_request_capture_response_server(listener: TcpListener) {
     let (mut stream, _peer): (tokio::net::TcpStream, SocketAddr) = listener
         .accept()
@@ -1262,5 +1429,126 @@ async fn run_delayed_timeout_response_server(listener: TcpListener, attempts: us
         let _ = stream.read(&mut buffer).await.expect("read request");
         sleep(Duration::from_millis(100)).await;
         let _ = stream.shutdown().await;
+    }
+}
+
+async fn run_retry_then_success_response_server(listener: TcpListener, retry_after: Option<&'static str>) {
+    let mut served_retry = false;
+    loop {
+        let (mut stream, _peer): (tokio::net::TcpStream, SocketAddr) = listener
+            .accept()
+            .await
+            .expect("accept mock provider request");
+        let mut buffer = vec![0_u8; 16 * 1024];
+        let _ = stream.read(&mut buffer).await.expect("read request");
+
+        if !served_retry {
+            served_retry = true;
+            let body = "{\"error\":\"slow down\"}";
+            let retry_header = retry_after
+                .map(|value| format!("retry-after: {value}\r\n"))
+                .unwrap_or_default();
+            let response = format!(
+                "HTTP/1.1 429 Too Many Requests\r\ncontent-type: application/json\r\n{}content-length: {}\r\nconnection: close\r\n\r\n{}",
+                retry_header,
+                body.len(),
+                body
+            );
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .expect("write retry response");
+            stream.flush().await.expect("flush retry response");
+            continue;
+        }
+
+        let sse = concat!(
+            "event: message\r\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-test\"}}\r\n\r\n",
+            "event: message\r\n",
+            "data: {\"type\":\"content_block_delta\",\"delta\":{\"text\":\"recovered after retry\"}}\r\n\r\n",
+            "event: message\r\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\r\n\r\n",
+            "event: message\r\n",
+            "data: {\"type\":\"message_stop\"}\r\n\r\n"
+        );
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+            sse.len(),
+            sse
+        );
+        stream
+            .write_all(response.as_bytes())
+            .await
+            .expect("write retry success response");
+        stream.flush().await.expect("flush retry success response");
+        break;
+    }
+}
+
+async fn run_retry_then_terminal_http_response_server(listener: TcpListener, status_line: &'static str, body: &'static str) {
+    let (mut stream, _peer): (tokio::net::TcpStream, SocketAddr) = listener
+        .accept()
+        .await
+        .expect("accept retry terminal request");
+    let mut buffer = vec![0_u8; 16 * 1024];
+    let _ = stream.read(&mut buffer).await.expect("read request");
+
+    let response = format!(
+        "HTTP/1.1 {}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+        status_line,
+        body.len(),
+        body
+    );
+    stream
+        .write_all(response.as_bytes())
+        .await
+        .expect("write retry terminal response");
+    stream.flush().await.expect("flush retry terminal response");
+}
+
+async fn run_retry_then_stream_protocol_failure_server(listener: TcpListener) {
+    let mut served_retry = false;
+    loop {
+        let (mut stream, _peer): (tokio::net::TcpStream, SocketAddr) = listener
+            .accept()
+            .await
+            .expect("accept retry protocol request");
+        let mut buffer = vec![0_u8; 16 * 1024];
+        let _ = stream.read(&mut buffer).await.expect("read request");
+
+        if !served_retry {
+            served_retry = true;
+            let body = "{\"error\":\"server overloaded\"}";
+            let response = format!(
+                "HTTP/1.1 503 Service Unavailable\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .expect("write retryable 503 response");
+            stream.flush().await.expect("flush retryable 503 response");
+            continue;
+        }
+
+        let sse = concat!(
+            "event: message\r\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-test\"}}\r\n\r\n",
+            "event: message\r\n",
+            "data: {not-json}\r\n\r\n"
+        );
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+            sse.len(),
+            sse
+        );
+        stream
+            .write_all(response.as_bytes())
+            .await
+            .expect("write protocol failure response");
+        stream.flush().await.expect("flush protocol failure response");
+        break;
     }
 }

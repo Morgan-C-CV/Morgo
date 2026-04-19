@@ -22,6 +22,7 @@ pub struct ApiError {
     pub kind: ApiErrorKind,
     pub message: String,
     pub disposition: ProviderFailureDisposition,
+    pub retry_after_ms: Option<u64>,
 }
 
 impl ApiError {
@@ -35,6 +36,7 @@ impl ApiError {
             kind: ApiErrorKind::HttpStatus(status),
             message: message.into(),
             disposition,
+            retry_after_ms: None,
         }
     }
 
@@ -43,6 +45,7 @@ impl ApiError {
             kind: ApiErrorKind::RequestBuild,
             message: message.into(),
             disposition: ProviderFailureDisposition::PreStreamTerminal,
+            retry_after_ms: None,
         }
     }
 
@@ -51,6 +54,7 @@ impl ApiError {
             kind: ApiErrorKind::Transport,
             message: message.into(),
             disposition: ProviderFailureDisposition::PreStreamRetryable,
+            retry_after_ms: None,
         }
     }
 
@@ -59,6 +63,7 @@ impl ApiError {
             kind: ApiErrorKind::ConnectionReset,
             message: message.into(),
             disposition: ProviderFailureDisposition::PreStreamRetryable,
+            retry_after_ms: None,
         }
     }
 
@@ -67,6 +72,7 @@ impl ApiError {
             kind: ApiErrorKind::Timeout,
             message: message.into(),
             disposition: ProviderFailureDisposition::PreStreamRetryable,
+            retry_after_ms: None,
         }
     }
 
@@ -75,6 +81,7 @@ impl ApiError {
             kind: ApiErrorKind::EmptyBody,
             message: message.into(),
             disposition: ProviderFailureDisposition::PreStreamTerminal,
+            retry_after_ms: None,
         }
     }
 
@@ -83,6 +90,7 @@ impl ApiError {
             kind: ApiErrorKind::BadContentType,
             message: message.into(),
             disposition: ProviderFailureDisposition::PreStreamTerminal,
+            retry_after_ms: None,
         }
     }
 
@@ -91,6 +99,7 @@ impl ApiError {
             kind: ApiErrorKind::InvalidResponse,
             message: message.into(),
             disposition: ProviderFailureDisposition::PreStreamTerminal,
+            retry_after_ms: None,
         }
     }
 
@@ -109,6 +118,7 @@ impl ApiError {
             kind: ApiErrorKind::SseProtocol,
             message: message.into(),
             disposition,
+            retry_after_ms: None,
         }
     }
 
@@ -127,6 +137,7 @@ impl ApiError {
             kind: ApiErrorKind::ToolUseProtocol,
             message: message.into(),
             disposition,
+            retry_after_ms: None,
         }
     }
 
@@ -145,11 +156,17 @@ impl ApiError {
             kind: ApiErrorKind::StructuredOutputInvalid,
             message: message.into(),
             disposition,
+            retry_after_ms: None,
         }
     }
 
     pub fn with_disposition(mut self, disposition: ProviderFailureDisposition) -> Self {
         self.disposition = disposition;
+        self
+    }
+
+    pub fn with_retry_after_ms(mut self, retry_after_ms: Option<u64>) -> Self {
+        self.retry_after_ms = retry_after_ms;
         self
     }
 
