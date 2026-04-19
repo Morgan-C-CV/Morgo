@@ -386,6 +386,365 @@ fn render_http_response(response: &MockHttpResponse) -> String {
     rendered
 }
 
+struct TranscriptProviderCase {
+    label: &'static str,
+    case: ProviderCase,
+    expected: ExpectedOutcome,
+}
+
+fn transcript_mock_exchange(transcript: &'static str) -> MockExchange {
+    MockExchange {
+        delay: None,
+        response: MockHttpResponse {
+            status_line: "200 OK",
+            content_type: Some("text/event-stream"),
+            extra_headers: &[],
+            body: MockBody::Sse(transcript),
+        },
+    }
+}
+
+fn provider_transcript_fixture_cases() -> Vec<TranscriptProviderCase> {
+    vec![
+        TranscriptProviderCase {
+            label: "anthropic_like_success",
+            case: ProviderCase {
+                provider_kind: FixtureProviderKind::Anthropic,
+                run_mode: FixtureRunMode::StreamOnly,
+                base_url: None,
+                model_id: "transcript-model",
+                request_timeout_ms: 5_000,
+                retry_policy: RetryPolicy {
+                    max_attempts: 1,
+                    initial_backoff_ms: 1,
+                    max_backoff_ms: 1,
+                },
+                exchanges: vec![transcript_mock_exchange(concat!(
+                    "event: message\r\n",
+                    "data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-redacted\",\"usage\":{\"input_tokens\":42}}}\r\n\r\n",
+                    "event: message\r\n",
+                    "data: {\"type\":\"content_block_delta\",\"delta\":{\"text\":\"redacted answer\"}}\r\n\r\n",
+                    "event: message\r\n",
+                    "data: {\"type\":\"content_block_start\",\"content_block\":{\"type\":\"tool_use\",\"name\":\"Read\",\"input\":{\"path\":\"/redacted/file.rs\"}}}\r\n\r\n",
+                    "event: message\r\n",
+                    "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":9}}\r\n\r\n",
+                    "event: message\r\n",
+                    "data: {\"type\":\"message_stop\"}\r\n\r\n"
+                ))],
+                message: Message::user("transcript fixture"),
+                expected: ExpectedOutcome {
+                    expected_text: &[],
+                    expected_usage: None,
+                    expected_tool_use: None,
+                    expected_stop_reason: None,
+                    expected_provider_error: None,
+                    expected_terminal: None,
+                    expected_usage_notice_count: None,
+                    expected_cost_report_fragments: &[],
+                },
+            },
+            expected: ExpectedOutcome {
+                expected_text: &["redacted answer"],
+                expected_usage: Some(ExpectedUsage {
+                    model: "claude-redacted",
+                    input_tokens: Some(42),
+                    output_tokens: Some(9),
+                    cache_creation_input_tokens: None,
+                    cache_read_input_tokens: None,
+                }),
+                expected_tool_use: Some(ExpectedToolUse {
+                    tool_name: "Read",
+                    input: "{\"path\":\"/redacted/file.rs\"}",
+                }),
+                expected_stop_reason: Some(StopReason::ToolUse),
+                expected_provider_error: None,
+                expected_terminal: None,
+                expected_usage_notice_count: None,
+                expected_cost_report_fragments: &[],
+            },
+        },
+        TranscriptProviderCase {
+            label: "openai_compatible_like_text_incompatibility",
+            case: ProviderCase {
+                provider_kind: FixtureProviderKind::Anthropic,
+                run_mode: FixtureRunMode::StreamOnly,
+                base_url: None,
+                model_id: "transcript-model",
+                request_timeout_ms: 5_000,
+                retry_policy: RetryPolicy {
+                    max_attempts: 1,
+                    initial_backoff_ms: 1,
+                    max_backoff_ms: 1,
+                },
+                exchanges: vec![transcript_mock_exchange(concat!(
+                    "data: {\"id\":\"chatcmpl-redacted\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"hello from redacted openai-compatible\"},\"index\":0}]}\r\n\r\n",
+                    "data: [DONE]\r\n\r\n"
+                ))],
+                message: Message::user("transcript fixture"),
+                expected: ExpectedOutcome {
+                    expected_text: &[],
+                    expected_usage: None,
+                    expected_tool_use: None,
+                    expected_stop_reason: None,
+                    expected_provider_error: None,
+                    expected_terminal: None,
+                    expected_usage_notice_count: None,
+                    expected_cost_report_fragments: &[],
+                },
+            },
+            expected: ExpectedOutcome {
+                expected_text: &[],
+                expected_usage: None,
+                expected_tool_use: None,
+                expected_stop_reason: None,
+                expected_provider_error: Some(ExpectedProviderError {
+                    provider_id: "anthropic",
+                    kind: "sse_protocol",
+                    disposition: ProviderFailureDisposition::PreStreamTerminal,
+                    retryable: false,
+                    status_code: None,
+                    message_contains: "type",
+                }),
+                expected_terminal: None,
+                expected_usage_notice_count: None,
+                expected_cost_report_fragments: &[],
+            },
+        },
+        TranscriptProviderCase {
+            label: "openai_compatible_like_usage_incompatibility",
+            case: ProviderCase {
+                provider_kind: FixtureProviderKind::Anthropic,
+                run_mode: FixtureRunMode::StreamOnly,
+                base_url: None,
+                model_id: "transcript-model",
+                request_timeout_ms: 5_000,
+                retry_policy: RetryPolicy {
+                    max_attempts: 1,
+                    initial_backoff_ms: 1,
+                    max_backoff_ms: 1,
+                },
+                exchanges: vec![transcript_mock_exchange(concat!(
+                    "data: {\"id\":\"chatcmpl-redacted\",\"object\":\"chat.completion.chunk\",\"choices\":[],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":4,\"total_tokens\":16}}\r\n\r\n",
+                    "data: [DONE]\r\n\r\n"
+                ))],
+                message: Message::user("transcript fixture"),
+                expected: ExpectedOutcome {
+                    expected_text: &[],
+                    expected_usage: None,
+                    expected_tool_use: None,
+                    expected_stop_reason: None,
+                    expected_provider_error: None,
+                    expected_terminal: None,
+                    expected_usage_notice_count: None,
+                    expected_cost_report_fragments: &[],
+                },
+            },
+            expected: ExpectedOutcome {
+                expected_text: &[],
+                expected_usage: None,
+                expected_tool_use: None,
+                expected_stop_reason: None,
+                expected_provider_error: Some(ExpectedProviderError {
+                    provider_id: "anthropic",
+                    kind: "sse_protocol",
+                    disposition: ProviderFailureDisposition::PreStreamTerminal,
+                    retryable: false,
+                    status_code: None,
+                    message_contains: "type",
+                }),
+                expected_terminal: None,
+                expected_usage_notice_count: None,
+                expected_cost_report_fragments: &[],
+            },
+        },
+        TranscriptProviderCase {
+            label: "openai_compatible_like_tool_incompatibility",
+            case: ProviderCase {
+                provider_kind: FixtureProviderKind::Anthropic,
+                run_mode: FixtureRunMode::StreamOnly,
+                base_url: None,
+                model_id: "transcript-model",
+                request_timeout_ms: 5_000,
+                retry_policy: RetryPolicy {
+                    max_attempts: 1,
+                    initial_backoff_ms: 1,
+                    max_backoff_ms: 1,
+                },
+                exchanges: vec![transcript_mock_exchange(concat!(
+                    "data: {\"id\":\"chatcmpl-redacted\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_redacted\",\"type\":\"function\",\"function\":{\"name\":\"Read\",\"arguments\":\"{\\\"path\\\":\\\"/redacted/file.rs\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}\r\n\r\n",
+                    "data: [DONE]\r\n\r\n"
+                ))],
+                message: Message::user("transcript fixture"),
+                expected: ExpectedOutcome {
+                    expected_text: &[],
+                    expected_usage: None,
+                    expected_tool_use: None,
+                    expected_stop_reason: None,
+                    expected_provider_error: None,
+                    expected_terminal: None,
+                    expected_usage_notice_count: None,
+                    expected_cost_report_fragments: &[],
+                },
+            },
+            expected: ExpectedOutcome {
+                expected_text: &[],
+                expected_usage: None,
+                expected_tool_use: None,
+                expected_stop_reason: None,
+                expected_provider_error: Some(ExpectedProviderError {
+                    provider_id: "anthropic",
+                    kind: "sse_protocol",
+                    disposition: ProviderFailureDisposition::PreStreamTerminal,
+                    retryable: false,
+                    status_code: None,
+                    message_contains: "type",
+                }),
+                expected_terminal: None,
+                expected_usage_notice_count: None,
+                expected_cost_report_fragments: &[],
+            },
+        },
+        TranscriptProviderCase {
+            label: "gemini_like_text_incompatibility",
+            case: ProviderCase {
+                provider_kind: FixtureProviderKind::Anthropic,
+                run_mode: FixtureRunMode::StreamOnly,
+                base_url: None,
+                model_id: "transcript-model",
+                request_timeout_ms: 5_000,
+                retry_policy: RetryPolicy {
+                    max_attempts: 1,
+                    initial_backoff_ms: 1,
+                    max_backoff_ms: 1,
+                },
+                exchanges: vec![transcript_mock_exchange(concat!(
+                    "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"hello from redacted gemini\"}]},\"finishReason\":\"STOP\"}]}\r\n\r\n"
+                ))],
+                message: Message::user("transcript fixture"),
+                expected: ExpectedOutcome {
+                    expected_text: &[],
+                    expected_usage: None,
+                    expected_tool_use: None,
+                    expected_stop_reason: None,
+                    expected_provider_error: None,
+                    expected_terminal: None,
+                    expected_usage_notice_count: None,
+                    expected_cost_report_fragments: &[],
+                },
+            },
+            expected: ExpectedOutcome {
+                expected_text: &[],
+                expected_usage: None,
+                expected_tool_use: None,
+                expected_stop_reason: None,
+                expected_provider_error: Some(ExpectedProviderError {
+                    provider_id: "anthropic",
+                    kind: "sse_protocol",
+                    disposition: ProviderFailureDisposition::PreStreamTerminal,
+                    retryable: false,
+                    status_code: None,
+                    message_contains: "type",
+                }),
+                expected_terminal: None,
+                expected_usage_notice_count: None,
+                expected_cost_report_fragments: &[],
+            },
+        },
+        TranscriptProviderCase {
+            label: "gemini_like_usage_incompatibility",
+            case: ProviderCase {
+                provider_kind: FixtureProviderKind::Anthropic,
+                run_mode: FixtureRunMode::StreamOnly,
+                base_url: None,
+                model_id: "transcript-model",
+                request_timeout_ms: 5_000,
+                retry_policy: RetryPolicy {
+                    max_attempts: 1,
+                    initial_backoff_ms: 1,
+                    max_backoff_ms: 1,
+                },
+                exchanges: vec![transcript_mock_exchange(concat!(
+                    "data: {\"usageMetadata\":{\"promptTokenCount\":11,\"candidatesTokenCount\":5,\"totalTokenCount\":16},\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"redacted\"}]}}]}\r\n\r\n"
+                ))],
+                message: Message::user("transcript fixture"),
+                expected: ExpectedOutcome {
+                    expected_text: &[],
+                    expected_usage: None,
+                    expected_tool_use: None,
+                    expected_stop_reason: None,
+                    expected_provider_error: None,
+                    expected_terminal: None,
+                    expected_usage_notice_count: None,
+                    expected_cost_report_fragments: &[],
+                },
+            },
+            expected: ExpectedOutcome {
+                expected_text: &[],
+                expected_usage: None,
+                expected_tool_use: None,
+                expected_stop_reason: None,
+                expected_provider_error: Some(ExpectedProviderError {
+                    provider_id: "anthropic",
+                    kind: "sse_protocol",
+                    disposition: ProviderFailureDisposition::PreStreamTerminal,
+                    retryable: false,
+                    status_code: None,
+                    message_contains: "type",
+                }),
+                expected_terminal: None,
+                expected_usage_notice_count: None,
+                expected_cost_report_fragments: &[],
+            },
+        },
+        TranscriptProviderCase {
+            label: "gemini_like_tool_incompatibility",
+            case: ProviderCase {
+                provider_kind: FixtureProviderKind::Anthropic,
+                run_mode: FixtureRunMode::StreamOnly,
+                base_url: None,
+                model_id: "transcript-model",
+                request_timeout_ms: 5_000,
+                retry_policy: RetryPolicy {
+                    max_attempts: 1,
+                    initial_backoff_ms: 1,
+                    max_backoff_ms: 1,
+                },
+                exchanges: vec![transcript_mock_exchange(concat!(
+                    "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"functionCall\":{\"name\":\"Read\",\"args\":{\"path\":\"/redacted/file.rs\"}}}]},\"finishReason\":\"STOP\"}]}\r\n\r\n"
+                ))],
+                message: Message::user("transcript fixture"),
+                expected: ExpectedOutcome {
+                    expected_text: &[],
+                    expected_usage: None,
+                    expected_tool_use: None,
+                    expected_stop_reason: None,
+                    expected_provider_error: None,
+                    expected_terminal: None,
+                    expected_usage_notice_count: None,
+                    expected_cost_report_fragments: &[],
+                },
+            },
+            expected: ExpectedOutcome {
+                expected_text: &[],
+                expected_usage: None,
+                expected_tool_use: None,
+                expected_stop_reason: None,
+                expected_provider_error: Some(ExpectedProviderError {
+                    provider_id: "anthropic",
+                    kind: "sse_protocol",
+                    disposition: ProviderFailureDisposition::PreStreamTerminal,
+                    retryable: false,
+                    status_code: None,
+                    message_contains: "type",
+                }),
+                expected_terminal: None,
+                expected_usage_notice_count: None,
+                expected_cost_report_fragments: &[],
+            },
+        },
+    ]
+}
+
 #[tokio::test]
 async fn provider_fixture_harness_covers_normal_text_and_merged_usage() {
     let case = ProviderCase {
@@ -843,6 +1202,16 @@ async fn provider_fixture_harness_covers_unsupported_capability_without_server()
     let result = run_provider_case(case).await;
     assert_provider_case(&result, &expected);
     finish_provider_case(result).await;
+}
+
+#[tokio::test]
+async fn provider_transcript_fixture_pack_locks_real_provider_boundaries() {
+    for transcript_case in provider_transcript_fixture_cases() {
+        let result = run_provider_case(transcript_case.case).await;
+        assert_provider_case(&result, &transcript_case.expected);
+        finish_provider_case(result).await;
+        let _ = transcript_case.label;
+    }
 }
 
 #[tokio::test]
