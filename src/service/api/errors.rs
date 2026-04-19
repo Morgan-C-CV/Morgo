@@ -12,6 +12,8 @@ pub enum ApiErrorKind {
     EmptyBody,
     BadContentType,
     InvalidResponse,
+    CapabilityUnsupported,
+    InvalidRequestOption,
     SseProtocol,
     ToolUseProtocol,
     StructuredOutputInvalid,
@@ -103,6 +105,24 @@ impl ApiError {
         }
     }
 
+    pub fn capability_unsupported(message: impl Into<String>) -> Self {
+        Self {
+            kind: ApiErrorKind::CapabilityUnsupported,
+            message: message.into(),
+            disposition: ProviderFailureDisposition::PreStreamTerminal,
+            retry_after_ms: None,
+        }
+    }
+
+    pub fn invalid_request_option(message: impl Into<String>) -> Self {
+        Self {
+            kind: ApiErrorKind::InvalidRequestOption,
+            message: message.into(),
+            disposition: ProviderFailureDisposition::PreStreamTerminal,
+            retry_after_ms: None,
+        }
+    }
+
     pub fn sse_protocol(message: impl Into<String>) -> Self {
         Self::sse_protocol_with_disposition(
             message,
@@ -184,6 +204,8 @@ impl ApiError {
             ApiErrorKind::EmptyBody => "empty_body",
             ApiErrorKind::BadContentType => "bad_content_type",
             ApiErrorKind::InvalidResponse => "invalid_response",
+            ApiErrorKind::CapabilityUnsupported => "capability_unsupported",
+            ApiErrorKind::InvalidRequestOption => "invalid_request_option",
             ApiErrorKind::SseProtocol => "sse_protocol",
             ApiErrorKind::ToolUseProtocol => "tool_use_protocol",
             ApiErrorKind::StructuredOutputInvalid => "structured_output_invalid",

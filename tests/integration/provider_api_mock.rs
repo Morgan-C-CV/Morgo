@@ -141,6 +141,39 @@ async fn production_provider_request_envelope_stays_compatible() {
 }
 
 #[tokio::test]
+async fn production_provider_surfaces_unsupported_streaming_as_typed_failure() {
+    let config = ModelProviderConfig {
+        provider_id: "batch-provider".into(),
+        base_url: "http://127.0.0.1:1".into(),
+        api_key: Some("test-key".into()),
+        model_id: "claude-test".into(),
+        timeout: ProviderTimeout {
+            request_timeout_ms: 5_000,
+        },
+        retry_policy: RetryPolicy {
+            max_attempts: 1,
+            initial_backoff_ms: 1,
+            max_backoff_ms: 1,
+        },
+        pricing: Default::default(),
+    };
+
+    let events = ModelProviderClient::from_config(config)
+        .stream_message(&Message::user("hello"))
+        .await;
+
+    assert!(matches!(
+        &events[0],
+        StreamEvent::Error(error)
+            if error.provider_id == "batch-provider"
+                && error.kind == "capability_unsupported"
+                && !error.retryable
+                && error.disposition == ProviderFailureDisposition::PreStreamTerminal
+                && error.message.contains("streaming")
+    ));
+}
+
+#[tokio::test]
 async fn production_provider_assembles_partial_tool_use_payload_metadata() {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await

@@ -38,6 +38,44 @@ pub struct ProviderTimeout {
     pub request_timeout_ms: u64,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+struct RequestOptions {
+    max_tokens: Option<u64>,
+    temperature: Option<f64>,
+    top_p: Option<f64>,
+    stop_sequences: Vec<String>,
+    require_tools: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ProviderCompatibilityProfile {
+    supports_tools: bool,
+    supports_streaming: bool,
+    supports_temperature: bool,
+    supports_top_p: bool,
+    supports_stop_sequences: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct NormalizedRequestOptions {
+    max_tokens: u64,
+    temperature: Option<f64>,
+    top_p: Option<f64>,
+    stop_sequences: Vec<String>,
+}
+
+impl Default for RequestOptions {
+    fn default() -> Self {
+        Self {
+            max_tokens: Some(4096),
+            temperature: None,
+            top_p: None,
+            stop_sequences: Vec::new(),
+            require_tools: false,
+        }
+    }
+}
+
 impl Default for ProviderTimeout {
     fn default() -> Self {
         Self {
@@ -316,6 +354,8 @@ fn classify_retry_policy(error: &ApiError) -> RetryDecision {
         | ApiErrorKind::EmptyBody
         | ApiErrorKind::BadContentType
         | ApiErrorKind::InvalidResponse
+        | ApiErrorKind::CapabilityUnsupported
+        | ApiErrorKind::InvalidRequestOption
         | ApiErrorKind::SseProtocol
         | ApiErrorKind::ToolUseProtocol
         | ApiErrorKind::StructuredOutputInvalid => RetryDecision::DoNotRetry,
@@ -363,7 +403,7 @@ fn validate_streaming_response_headers(
 
 fn build_messages_url_for_provider(provider_id: &str, base_url: &str) -> Result<String, ApiError> {
     match normalized_provider_id(provider_id) {
-        "anthropic" | "default-provider" => {
+        "anthropic" | "default-provider" | "text-only-provider" | "batch-provider" => {
             Ok(format!("{}/v1/messages", base_url.trim_end_matches('/')))
         }
         _ => Err(ApiError::invalid_response(format!(
@@ -376,12 +416,35 @@ fn build_request_payload_for_provider(
     config: &ModelProviderConfig,
     input: &Message,
 ) -> Result<Value, ApiError> {
+    build_request_payload_with_options(config, input, RequestOptions::default())
+}
+
+fn build_request_payload_with_options(
+    config: &ModelProviderConfig,
+    input: &Message,
+    request_options: RequestOptions,
+) -> Result<Value, ApiError> {
+    let profile = profile_for_provider(&config.provider_id)?;
     match normalized_provider_id(&config.provider_id) {
-        "anthropic" | "default-provider" => Ok(json!({
-            "model": normalized_request_model(config),
-            "messages": [normalized_request_message(input)],
-            "stream": normalized_request_stream_flag(),
-        })),
+        "anthropic" | "default-provider" | "text-only-provider" | "batch-provider" => {
+            let options = normalize_request_options(&profile, &request_options)?;
+            let mut payload = json!({
+                "model": normalized_request_model(config),
+                "messages": [normalized_request_message(input)],
+                "stream": normalized_request_stream_flag(&profile)?,
+                "max_tokens": options.max_tokens,
+            });
+            if let Some(temperature) = options.temperature {
+                payload["temperature"] = json!(temperature);
+            }
+            if let Some(top_p) = options.top_p {
+                payload["top_p"] = json!(top_p);
+            }
+            if !options.stop_sequences.is_empty() {
+                payload["stop_sequences"] = json!(options.stop_sequences);
+            }
+            Ok(payload)
+        }
         _ => Err(ApiError::invalid_response(format!(
             "unsupported provider id: {}",
             config.provider_id
@@ -410,8 +473,95 @@ fn normalized_request_message(input: &Message) -> Value {
     })
 }
 
-fn normalized_request_stream_flag() -> bool {
-    true
+fn profile_for_provider(provider_id: &str) -> Result<ProviderCompatibilityProfile, ApiError> {
+    match normalized_provider_id(provider_id) {
+        "anthropic" | "default-provider" => Ok(ProviderCompatibilityProfile {
+            supports_tools: true,
+            supports_streaming: true,
+            supports_temperature: true,
+            supports_top_p: true,
+            supports_stop_sequences: true,
+        }),
+        "text-only-provider" => Ok(ProviderCompatibilityProfile {
+            supports_tools: false,
+            supports_streaming: true,
+            supports_temperature: false,
+            supports_top_p: false,
+            supports_stop_sequences: false,
+        }),
+        "batch-provider" => Ok(ProviderCompatibilityProfile {
+            supports_tools: true,
+            supports_streaming: false,
+            supports_temperature: true,
+            supports_top_p: true,
+            supports_stop_sequences: true,
+        }),
+        _ => Err(ApiError::invalid_response(format!(
+            "unsupported provider id: {provider_id}"
+        ))),
+    }
+}
+
+fn normalize_request_options(
+    profile: &ProviderCompatibilityProfile,
+    options: &RequestOptions,
+) -> Result<NormalizedRequestOptions, ApiError> {
+    if options.require_tools && !profile.supports_tools {
+        return Err(ApiError::capability_unsupported(
+            "provider does not support tool-use requests",
+        ));
+    }
+    let max_tokens = options.max_tokens.unwrap_or(4096);
+    if max_tokens == 0 {
+        return Err(ApiError::invalid_request_option(
+            "max_tokens must be greater than zero",
+        ));
+    }
+    if let Some(temperature) = options.temperature {
+        if !(0.0..=2.0).contains(&temperature) || !temperature.is_finite() {
+            return Err(ApiError::invalid_request_option(
+                "temperature must be finite and between 0.0 and 2.0",
+            ));
+        }
+    }
+    if let Some(top_p) = options.top_p {
+        if !(0.0..=1.0).contains(&top_p) || !top_p.is_finite() {
+            return Err(ApiError::invalid_request_option(
+                "top_p must be finite and between 0.0 and 1.0",
+            ));
+        }
+    }
+    if options
+        .stop_sequences
+        .iter()
+        .any(|sequence| sequence.trim().is_empty())
+    {
+        return Err(ApiError::invalid_request_option(
+            "stop_sequences cannot contain empty values",
+        ));
+    }
+
+    Ok(NormalizedRequestOptions {
+        max_tokens,
+        temperature: options
+            .temperature
+            .filter(|_| profile.supports_temperature),
+        top_p: options.top_p.filter(|_| profile.supports_top_p),
+        stop_sequences: if profile.supports_stop_sequences {
+            options.stop_sequences.clone()
+        } else {
+            Vec::new()
+        },
+    })
+}
+
+fn normalized_request_stream_flag(profile: &ProviderCompatibilityProfile) -> Result<bool, ApiError> {
+    if !profile.supports_streaming {
+        return Err(ApiError::capability_unsupported(
+            "provider does not support streaming requests",
+        ));
+    }
+    Ok(true)
 }
 
 fn parse_stream_response_for_provider(
@@ -1048,11 +1198,13 @@ fn classify_stream_error_disposition(
 #[cfg(test)]
 mod tests {
     use super::{
-        ModelProviderConfig, ProviderTimeout, RetryDecision, build_messages_url_for_provider,
-        build_request_payload_for_provider, classify_retry_policy, classify_stream_error,
+        ModelProviderConfig, ProviderTimeout, RequestOptions, RetryDecision,
+        build_messages_url_for_provider, build_request_payload_for_provider,
+        build_request_payload_with_options, classify_retry_policy, classify_stream_error,
         classify_stream_error_disposition, extract_error_detail, map_stop_reason,
         normalize_json_like_value, parse_anthropic_sse_response, parse_retry_after_ms,
-        parse_stream_response_for_provider, parse_usage, validate_streaming_response_headers,
+        parse_stream_response_for_provider, parse_usage, profile_for_provider,
+        validate_streaming_response_headers,
     };
     use crate::service::api::retry::RetryPolicy;
     use crate::service::api::errors::ApiError;
@@ -1127,9 +1279,162 @@ mod tests {
 
         assert_eq!(payload.get("model").and_then(Value::as_str), Some("default-model"));
         assert_eq!(payload.get("stream").and_then(Value::as_bool), Some(true));
+        assert_eq!(payload.get("max_tokens").and_then(Value::as_u64), Some(4096));
         let content = &payload["messages"][0]["content"];
         assert_eq!(content[0]["type"].as_str(), Some("text"));
         assert_eq!(content[0]["text"].as_str(), Some("hello"));
+    }
+
+    #[test]
+    fn provider_compatibility_profiles_match_expected_capabilities() {
+        let anthropic = profile_for_provider("anthropic").expect("anthropic profile");
+        assert!(anthropic.supports_tools);
+        assert!(anthropic.supports_streaming);
+        assert!(anthropic.supports_temperature);
+        assert!(anthropic.supports_top_p);
+        assert!(anthropic.supports_stop_sequences);
+
+        let text_only = profile_for_provider("text-only-provider").expect("text-only profile");
+        assert!(!text_only.supports_tools);
+        assert!(text_only.supports_streaming);
+        assert!(!text_only.supports_temperature);
+        assert!(!text_only.supports_top_p);
+        assert!(!text_only.supports_stop_sequences);
+
+        let batch = profile_for_provider("batch-provider").expect("batch profile");
+        assert!(batch.supports_tools);
+        assert!(!batch.supports_streaming);
+        assert!(batch.supports_temperature);
+        assert!(batch.supports_top_p);
+        assert!(batch.supports_stop_sequences);
+    }
+
+    #[test]
+    fn supported_provider_keeps_request_options_intact() {
+        let config = ModelProviderConfig {
+            provider_id: "anthropic".into(),
+            ..ModelProviderConfig::default()
+        };
+        let payload = build_request_payload_with_options(
+            &config,
+            &crate::core::message::Message::user("hello"),
+            RequestOptions {
+                max_tokens: Some(2048),
+                temperature: Some(0.7),
+                top_p: Some(0.9),
+                stop_sequences: vec!["STOP".into()],
+                require_tools: true,
+            },
+        )
+        .expect("supported options should build");
+
+        assert_eq!(payload.get("max_tokens").and_then(Value::as_u64), Some(2048));
+        assert_eq!(payload.get("temperature").and_then(Value::as_f64), Some(0.7));
+        assert_eq!(payload.get("top_p").and_then(Value::as_f64), Some(0.9));
+        assert_eq!(payload["stop_sequences"][0].as_str(), Some("STOP"));
+    }
+
+    #[test]
+    fn unsupported_optional_request_options_are_dropped() {
+        let config = ModelProviderConfig {
+            provider_id: "text-only-provider".into(),
+            ..ModelProviderConfig::default()
+        };
+        let payload = build_request_payload_with_options(
+            &config,
+            &crate::core::message::Message::user("hello"),
+            RequestOptions {
+                max_tokens: Some(1024),
+                temperature: Some(0.5),
+                top_p: Some(0.8),
+                stop_sequences: vec!["END".into()],
+                require_tools: false,
+            },
+        )
+        .expect("unsupported optional options should be dropped");
+
+        assert_eq!(payload.get("max_tokens").and_then(Value::as_u64), Some(1024));
+        assert!(payload.get("temperature").is_none());
+        assert!(payload.get("top_p").is_none());
+        assert!(payload.get("stop_sequences").is_none());
+    }
+
+    #[test]
+    fn unsupported_streaming_returns_typed_capability_failure() {
+        let config = ModelProviderConfig {
+            provider_id: "batch-provider".into(),
+            ..ModelProviderConfig::default()
+        };
+
+        let error = build_request_payload_for_provider(&config, &crate::core::message::Message::user("hello"))
+            .expect_err("streaming mismatch should fail");
+
+        assert_eq!(error.kind_label(), "capability_unsupported");
+        assert_eq!(error.disposition, ProviderFailureDisposition::PreStreamTerminal);
+        assert!(error.message.contains("streaming"));
+    }
+
+    #[test]
+    fn unsupported_tools_returns_typed_capability_failure() {
+        let config = ModelProviderConfig {
+            provider_id: "text-only-provider".into(),
+            ..ModelProviderConfig::default()
+        };
+
+        let error = build_request_payload_with_options(
+            &config,
+            &crate::core::message::Message::user("hello"),
+            RequestOptions {
+                require_tools: true,
+                ..RequestOptions::default()
+            },
+        )
+        .expect_err("tool mismatch should fail");
+
+        assert_eq!(error.kind_label(), "capability_unsupported");
+        assert_eq!(error.disposition, ProviderFailureDisposition::PreStreamTerminal);
+        assert!(error.message.contains("tool-use"));
+    }
+
+    #[test]
+    fn invalid_numeric_options_return_typed_failure() {
+        let config = ModelProviderConfig {
+            provider_id: "anthropic".into(),
+            ..ModelProviderConfig::default()
+        };
+
+        let max_tokens_error = build_request_payload_with_options(
+            &config,
+            &crate::core::message::Message::user("hello"),
+            RequestOptions {
+                max_tokens: Some(0),
+                ..RequestOptions::default()
+            },
+        )
+        .expect_err("zero max_tokens should fail");
+        assert_eq!(max_tokens_error.kind_label(), "invalid_request_option");
+
+        let temperature_error = build_request_payload_with_options(
+            &config,
+            &crate::core::message::Message::user("hello"),
+            RequestOptions {
+                temperature: Some(2.1),
+                ..RequestOptions::default()
+            },
+        )
+        .expect_err("invalid temperature should fail");
+        assert_eq!(temperature_error.kind_label(), "invalid_request_option");
+
+        let top_p_error = build_request_payload_with_options(
+            &config,
+            &crate::core::message::Message::user("hello"),
+            RequestOptions {
+                top_p: Some(1.1),
+                ..RequestOptions::default()
+            },
+        )
+        .expect_err("invalid top_p should fail");
+        assert_eq!(top_p_error.kind_label(), "invalid_request_option");
     }
 
     #[test]
