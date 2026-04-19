@@ -169,9 +169,44 @@ fn parsed_usage_event_can_be_recorded_into_cost_tracker() {
     }
 
     let report = cost_tracker.format_report();
-    assert!(report.contains("model claude-test -> requests: 2"));
+    assert!(report.contains("model claude-test -> requests: 1"));
     assert!(report.contains("input_tokens: 50"));
     assert!(report.contains("output_tokens: 12"));
     assert!(report.contains("cache_creation_input_tokens: 3"));
     assert!(report.contains("cache_read_input_tokens: 1"));
+}
+
+#[test]
+fn latest_usage_wins_without_double_counting() {
+    let cost_tracker =
+        CostTracker::with_default_pricing("claude-test".into(), ModelPricing::default());
+    let body = concat!(
+        "event: message\n",
+        "data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-test\",\"usage\":{\"prompt_tokens\":40}}}\n\n",
+        "event: message\n",
+        "data: {\"type\":\"message_delta\",\"delta\":{\"usage\":{\"completion_tokens\":5}}}\n\n",
+        "event: message\n",
+        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"usage\":{\"completion_tokens\":7}}}\n\n",
+        "event: message\n",
+        "data: {\"type\":\"message_stop\"}\n\n"
+    );
+
+    let events = parse_anthropic_sse_response("anthropic", body, "claude-test")
+        .expect("usage SSE should parse");
+    for event in events {
+        if let rust_agent::service::api::streaming::StreamEvent::Usage(usage) = event {
+            cost_tracker.record_model_usage(
+                &usage.model,
+                usage.input_tokens,
+                usage.output_tokens,
+                usage.cache_creation_input_tokens,
+                usage.cache_read_input_tokens,
+            );
+        }
+    }
+
+    let snapshot = cost_tracker.snapshot();
+    assert_eq!(snapshot.requests, 1);
+    assert_eq!(snapshot.input_tokens, 40);
+    assert_eq!(snapshot.output_tokens, 7);
 }

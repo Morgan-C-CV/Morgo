@@ -370,6 +370,98 @@ async fn production_provider_accepts_delta_usage_envelope() {
 }
 
 #[tokio::test]
+async fn production_provider_merges_usage_across_provider_envelopes_without_drift() {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind mock provider listener");
+    let addr = listener.local_addr().expect("listener addr");
+    let server = tokio::spawn(run_multi_envelope_usage_response_server(listener));
+
+    let permission_context = ToolPermissionContext::new(PermissionMode::Default)
+        .with_task_manager(Arc::new(TaskManager::default()));
+    let config = ModelProviderConfig {
+        provider_id: "anthropic".into(),
+        base_url: format!("http://{}", addr),
+        api_key: Some("test-key".into()),
+        model_id: "claude-test".into(),
+        timeout: ProviderTimeout {
+            request_timeout_ms: 5_000,
+        },
+        retry_policy: RetryPolicy {
+            max_attempts: 1,
+            initial_backoff_ms: 1,
+            max_backoff_ms: 1,
+        },
+        pricing: Default::default(),
+    };
+    let cost_tracker =
+        CostTracker::with_default_pricing(config.model_id.clone(), config.pricing.clone());
+
+    let context = QueryContext {
+        app_state: AppState {
+            surface: InteractionSurface::Cli,
+            session_mode: SessionMode::Headless,
+            client_type: ClientType::Cli,
+            session_source: SessionSource::LocalCli,
+            runtime_role: RuntimeRole::Coordinator,
+            worker_role: None,
+            permission_context,
+            command_registry: None,
+            runtime_tool_registry: None,
+            skill_registry: None,
+            mcp_runtime: None,
+            plugin_load_result: None,
+            cost_tracker: cost_tracker.clone(),
+            service_observability_tracker:
+                rust_agent::service::observability::ServiceObservabilityTracker::default(),
+            notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
+            audit_log: Arc::new(std::sync::Mutex::new(
+                rust_agent::security::audit::AuditLog::default(),
+            )),
+            startup_trace: Vec::new(),
+            active_session_id: "provider-usage-session".into(),
+            session_store: None,
+            session: None,
+            history: None,
+            restored_session: None,
+        },
+        tool_registry: ToolRegistry::new(),
+        api_client: ModelProviderClient::from_config(config),
+        compactor: ReactiveCompactor,
+        hook_registry: HookRegistry::default(),
+        agent_id: None,
+        system_prompt: "system".into(),
+        tools_prompt: "tools".into(),
+        context_prompt: "context".into(),
+    };
+
+    let engine = QueryEngine::new(context);
+    let result = engine.submit_turn(Message::user("hello")).await;
+
+    assert_eq!(result.state, QueryLoopState::Completed);
+    let snapshot = cost_tracker.snapshot();
+    assert_eq!(snapshot.requests, 2);
+    assert_eq!(snapshot.output_tokens, 7);
+    assert_eq!(snapshot.cache_creation_input_tokens, 2);
+    assert_eq!(snapshot.cache_read_input_tokens, 1);
+    let report = cost_tracker.format_report();
+    assert!(report.contains("model claude-test -> requests: 1"));
+    assert!(report.contains("output_tokens: 7"));
+    assert!(report.contains("cache_creation_input_tokens: 2"));
+    assert!(report.contains("cache_read_input_tokens: 1"));
+    assert_eq!(
+        result
+            .events
+            .iter()
+            .filter(|event| matches!(event, rust_agent::core::events::EngineEvent::Notice { kind, .. } if kind == &"usage"))
+            .count(),
+        1
+    );
+
+    server.await.expect("mock provider server finished");
+}
+
+#[tokio::test]
 async fn production_provider_extracts_nested_http_error_message() {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
@@ -1381,6 +1473,38 @@ async fn run_delta_usage_response_server(listener: TcpListener) {
         .await
         .expect("write delta usage response");
     stream.flush().await.expect("flush delta usage response");
+}
+
+async fn run_multi_envelope_usage_response_server(listener: TcpListener) {
+    let (mut stream, _peer): (tokio::net::TcpStream, SocketAddr) = listener
+        .accept()
+        .await
+        .expect("accept mock provider request");
+    let mut buffer = vec![0_u8; 16 * 1024];
+    let _ = stream.read(&mut buffer).await.expect("read request");
+
+    let sse = concat!(
+        "event: message\r\n",
+        "data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-test\",\"usage\":{\"prompt_tokens\":123}}}\r\n\r\n",
+        "event: message\r\n",
+        "data: {\"type\":\"content_block_delta\",\"delta\":{\"text\":\"hello from usage matrix\"}}\r\n\r\n",
+        "event: message\r\n",
+        "data: {\"type\":\"message_delta\",\"delta\":{\"usage\":{\"completion_tokens\":5}}}\r\n\r\n",
+        "event: message\r\n",
+        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"usage\":{\"completion_tokens\":7,\"cacheWriteTokens\":2}}}\r\n\r\n",
+        "event: message\r\n",
+        "data: {\"type\":\"message_stop\",\"terminal\":{\"usage\":{\"cacheReadTokens\":1}}}\r\n\r\n"
+    );
+    let response = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+        sse.len(),
+        sse
+    );
+    stream
+        .write_all(response.as_bytes())
+        .await
+        .expect("write multi envelope usage response");
+    stream.flush().await.expect("flush multi envelope usage response");
 }
 
 async fn run_wrong_content_type_response_server(listener: TcpListener) {

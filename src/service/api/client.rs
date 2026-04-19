@@ -724,6 +724,16 @@ struct PendingStructuredOutputBlock {
     emitted: bool,
 }
 
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct NormalizedUsage {
+    model: Option<String>,
+    input_tokens: Option<usize>,
+    output_tokens: Option<usize>,
+    cache_creation_input_tokens: Option<usize>,
+    cache_read_input_tokens: Option<usize>,
+    total_tokens: Option<usize>,
+}
+
 struct ProviderStreamParser<'a> {
     provider_id: &'a str,
     default_model: &'a str,
@@ -731,6 +741,8 @@ struct ProviderStreamParser<'a> {
     emitted_tool_use: bool,
     pending_tool_use: Option<PendingToolUseBlock>,
     pending_structured_output: Option<PendingStructuredOutputBlock>,
+    pending_usage: Option<NormalizedUsage>,
+    pending_stop_reason: Option<StopReason>,
 }
 
 impl<'a> ProviderStreamParser<'a> {
@@ -742,6 +754,8 @@ impl<'a> ProviderStreamParser<'a> {
             emitted_tool_use: false,
             pending_tool_use: None,
             pending_structured_output: None,
+            pending_usage: None,
+            pending_stop_reason: None,
         }
     }
 
@@ -755,15 +769,11 @@ impl<'a> ProviderStreamParser<'a> {
             .and_then(Value::as_str)
             .ok_or_else(|| self.protocol_error("provider event missing type"))?;
 
+        self.collect_usage(payload);
+
         match event_type {
             "message_start" => {
                 self.ensure_message_start(output);
-                if let Some(usage) = payload_usage(payload) {
-                    output.push(StreamEvent::Usage(parse_usage(
-                        usage,
-                        payload_model(payload).unwrap_or(self.default_model),
-                    )));
-                }
             }
             "content_block_start" => {
                 self.ensure_message_start(output);
@@ -867,34 +877,25 @@ impl<'a> ProviderStreamParser<'a> {
                 self.finalize_pending_structured_output(output)?;
             }
             "message_delta" => {
-                if let Some(usage) = payload_usage(payload) {
-                    output.push(StreamEvent::Usage(parse_usage(
-                        usage,
-                        payload_model(payload).unwrap_or(self.default_model),
-                    )));
-                }
                 if let Some(stop_reason) = payload
                     .get("delta")
                     .and_then(|delta| delta.get("stop_reason"))
                     .and_then(Value::as_str)
                 {
-                    let stop_reason = map_stop_reason(stop_reason);
-                    self.finalize_pending_tool_use(output)?;
-                    self.finalize_pending_structured_output(output)?;
-                    self.validate_stop_reason(&stop_reason)?;
-                    output.push(StreamEvent::MessageStop { stop_reason });
+                    self.pending_stop_reason = Some(map_stop_reason(stop_reason));
                 }
             }
             "message_stop" => {
                 self.finalize_pending_tool_use(output)?;
                 self.finalize_pending_structured_output(output)?;
+                self.flush_usage(output);
+                let stop_reason = self.pending_stop_reason.take().unwrap_or(StopReason::EndTurn);
+                self.validate_stop_reason(&stop_reason)?;
                 if !output
                     .iter()
                     .any(|event| matches!(event, StreamEvent::MessageStop { .. }))
                 {
-                    output.push(StreamEvent::MessageStop {
-                        stop_reason: StopReason::EndTurn,
-                    });
+                    output.push(StreamEvent::MessageStop { stop_reason });
                 }
             }
             "error" => {
@@ -927,13 +928,47 @@ impl<'a> ProviderStreamParser<'a> {
 
     fn finish(&mut self, output: &mut Vec<StreamEvent>) -> Result<(), ApiError> {
         self.finalize_pending_tool_use(output)?;
-        self.finalize_pending_structured_output(output)
+        self.finalize_pending_structured_output(output)?;
+        self.flush_usage(output);
+        if let Some(stop_reason) = self.pending_stop_reason.take() {
+            self.validate_stop_reason(&stop_reason)?;
+            if !output
+                .iter()
+                .any(|event| matches!(event, StreamEvent::MessageStop { .. }))
+            {
+                output.push(StreamEvent::MessageStop { stop_reason });
+            }
+        }
+        Ok(())
     }
 
     fn ensure_message_start(&mut self, output: &mut Vec<StreamEvent>) {
         if !self.saw_message_start {
             output.push(StreamEvent::MessageStart);
             self.saw_message_start = true;
+        }
+    }
+
+    fn collect_usage(&mut self, payload: &Value) {
+        let Some(usage) = payload_usage(payload) else {
+            return;
+        };
+        let mut incoming = normalize_usage(usage, self.default_model);
+        if incoming.model.is_none() {
+            incoming.model = payload_model(payload).map(str::to_string);
+        }
+        self.pending_usage = Some(match self.pending_usage.take() {
+            Some(existing) => merge_usage(existing, incoming),
+            None => incoming,
+        });
+    }
+
+    fn flush_usage(&mut self, output: &mut Vec<StreamEvent>) {
+        let Some(usage) = self.pending_usage.take() else {
+            return;
+        };
+        if let Some(event) = usage.into_usage_event(self.default_model) {
+            output.push(StreamEvent::Usage(event));
         }
     }
 
@@ -1072,32 +1107,108 @@ fn payload_usage<'a>(payload: &'a Value) -> Option<&'a Value> {
         .get("usage")
         .or_else(|| payload.get("message").and_then(|message| message.get("usage")))
         .or_else(|| payload.get("delta").and_then(|delta| delta.get("usage")))
+        .or_else(|| payload.get("message_delta").and_then(|delta| delta.get("usage")))
+        .or_else(|| payload.get("terminal").and_then(|terminal| terminal.get("usage")))
+        .or_else(|| payload.get("response").and_then(|response| response.get("usage")))
 }
 
-fn parse_usage(usage: &Value, default_model: &str) -> UsageEvent {
-    UsageEvent {
-        model: default_model.to_string(),
+impl NormalizedUsage {
+    fn into_usage_event(self, default_model: &str) -> Option<UsageEvent> {
+        let model = self
+            .model
+            .unwrap_or_else(|| default_model.to_string());
+        let input_tokens = self.input_tokens.or(self.total_tokens).unwrap_or_default();
+        let output_tokens = self.output_tokens.unwrap_or_default();
+        let cache_creation_input_tokens = self.cache_creation_input_tokens.unwrap_or_default();
+        let cache_read_input_tokens = self.cache_read_input_tokens.unwrap_or_default();
+        if input_tokens == 0
+            && output_tokens == 0
+            && cache_creation_input_tokens == 0
+            && cache_read_input_tokens == 0
+        {
+            return None;
+        }
+        Some(UsageEvent {
+            model,
+            input_tokens,
+            output_tokens,
+            cache_creation_input_tokens,
+            cache_read_input_tokens,
+        })
+    }
+}
+
+fn normalize_usage(usage: &Value, _default_model: &str) -> NormalizedUsage {
+    NormalizedUsage {
+        model: usage
+            .get("model")
+            .or_else(|| usage.get("model_id"))
+            .and_then(Value::as_str)
+            .map(|value| value.to_string()),
         input_tokens: usage
             .get("input_tokens")
             .or_else(|| usage.get("inputTokens"))
+            .or_else(|| usage.get("prompt_tokens"))
+            .or_else(|| usage.get("promptTokens"))
             .and_then(Value::as_u64)
-            .unwrap_or_default() as usize,
+            .map(|value| value as usize),
         output_tokens: usage
             .get("output_tokens")
             .or_else(|| usage.get("outputTokens"))
+            .or_else(|| usage.get("completion_tokens"))
+            .or_else(|| usage.get("completionTokens"))
             .and_then(Value::as_u64)
-            .unwrap_or_default() as usize,
+            .map(|value| value as usize),
         cache_creation_input_tokens: usage
             .get("cache_creation_input_tokens")
             .or_else(|| usage.get("cacheCreationInputTokens"))
+            .or_else(|| usage.get("cache_write_input_tokens"))
+            .or_else(|| usage.get("cacheWriteInputTokens"))
+            .or_else(|| usage.get("cache_write_tokens"))
+            .or_else(|| usage.get("cacheWriteTokens"))
             .and_then(Value::as_u64)
-            .unwrap_or_default() as usize,
+            .map(|value| value as usize),
         cache_read_input_tokens: usage
             .get("cache_read_input_tokens")
             .or_else(|| usage.get("cacheReadInputTokens"))
+            .or_else(|| usage.get("cache_read_tokens"))
+            .or_else(|| usage.get("cacheReadTokens"))
             .and_then(Value::as_u64)
-            .unwrap_or_default() as usize,
+            .map(|value| value as usize),
+        total_tokens: usage
+            .get("total_tokens")
+            .or_else(|| usage.get("totalTokens"))
+            .and_then(Value::as_u64)
+            .map(|value| value as usize),
     }
+}
+
+fn merge_usage(existing: NormalizedUsage, incoming: NormalizedUsage) -> NormalizedUsage {
+    NormalizedUsage {
+        model: incoming.model.or(existing.model),
+        input_tokens: incoming.input_tokens.or(existing.input_tokens),
+        output_tokens: incoming.output_tokens.or(existing.output_tokens),
+        cache_creation_input_tokens: incoming
+            .cache_creation_input_tokens
+            .or(existing.cache_creation_input_tokens),
+        cache_read_input_tokens: incoming
+            .cache_read_input_tokens
+            .or(existing.cache_read_input_tokens),
+        total_tokens: incoming.total_tokens.or(existing.total_tokens),
+    }
+}
+
+#[cfg(test)]
+fn parse_usage(usage: &Value, default_model: &str) -> UsageEvent {
+    normalize_usage(usage, default_model)
+        .into_usage_event(default_model)
+        .unwrap_or(UsageEvent {
+            model: default_model.to_string(),
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+        })
 }
 
 fn normalize_tool_use_input(block: &Value) -> Result<Option<Value>, ApiError> {
@@ -1198,13 +1309,13 @@ fn classify_stream_error_disposition(
 #[cfg(test)]
 mod tests {
     use super::{
-        ModelProviderConfig, ProviderTimeout, RequestOptions, RetryDecision,
+        ModelProviderConfig, NormalizedUsage, ProviderTimeout, RequestOptions, RetryDecision,
         build_messages_url_for_provider, build_request_payload_for_provider,
         build_request_payload_with_options, classify_retry_policy, classify_stream_error,
         classify_stream_error_disposition, extract_error_detail, map_stop_reason,
-        normalize_json_like_value, parse_anthropic_sse_response, parse_retry_after_ms,
-        parse_stream_response_for_provider, parse_usage, profile_for_provider,
-        validate_streaming_response_headers,
+        merge_usage, normalize_json_like_value, normalize_usage, parse_anthropic_sse_response,
+        parse_retry_after_ms, parse_stream_response_for_provider, parse_usage,
+        profile_for_provider, validate_streaming_response_headers,
     };
     use crate::service::api::retry::RetryPolicy;
     use crate::service::api::errors::ApiError;
@@ -1242,15 +1353,17 @@ mod tests {
         let events = parse_anthropic_sse_response("anthropic", body, "default-model")
             .expect("sse should parse");
         assert!(matches!(events[0], StreamEvent::MessageStart));
-        assert!(matches!(events[1], StreamEvent::Usage(_)));
-        assert!(matches!(events[2], StreamEvent::TextDelta(_)));
-        assert!(matches!(events[3], StreamEvent::ToolUse { .. }));
-        assert!(matches!(events[4], StreamEvent::Usage(_)));
+        assert!(events.iter().any(|event| matches!(event, StreamEvent::TextDelta(text) if text == "hello ")));
+        assert!(events.iter().any(|event| matches!(event, StreamEvent::ToolUse { tool_name, input } if tool_name == "Read" && input == "{\"path\":\"foo\"}")));
+        assert!(events.iter().any(|event| matches!(event, StreamEvent::Usage(usage)
+            if usage.model == "claude-test"
+                && usage.input_tokens == 12
+                && usage.output_tokens == 7)));
         assert!(matches!(
-            events[5],
-            StreamEvent::MessageStop {
+            events.last(),
+            Some(StreamEvent::MessageStop {
                 stop_reason: StopReason::ToolUse
-            }
+            })
         ));
     }
 
@@ -1872,6 +1985,142 @@ mod tests {
         assert_eq!(usage.output_tokens, 3);
         assert_eq!(usage.cache_creation_input_tokens, 2);
         assert_eq!(usage.cache_read_input_tokens, 1);
+    }
+
+    #[test]
+    fn parse_usage_accepts_prompt_completion_and_total_token_fields() {
+        let prompt_completion = parse_usage(
+            &serde_json::json!({
+                "prompt_tokens": 9,
+                "completion_tokens": 4,
+                "cache_write_tokens": 2,
+                "cache_read_tokens": 1,
+            }),
+            "claude-test",
+        );
+        assert_eq!(prompt_completion.input_tokens, 9);
+        assert_eq!(prompt_completion.output_tokens, 4);
+        assert_eq!(prompt_completion.cache_creation_input_tokens, 2);
+        assert_eq!(prompt_completion.cache_read_input_tokens, 1);
+
+        let total_only = parse_usage(
+            &serde_json::json!({
+                "total_tokens": 13,
+            }),
+            "claude-test",
+        );
+        assert_eq!(total_only.input_tokens, 13);
+        assert_eq!(total_only.output_tokens, 0);
+    }
+
+    #[test]
+    fn merge_usage_latest_wins_without_clearing_missing_fields() {
+        let existing = NormalizedUsage {
+            model: Some("claude-test".into()),
+            input_tokens: Some(10),
+            output_tokens: Some(3),
+            cache_creation_input_tokens: Some(2),
+            cache_read_input_tokens: None,
+            total_tokens: None,
+        };
+        let incoming = NormalizedUsage {
+            model: None,
+            input_tokens: None,
+            output_tokens: Some(6),
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: Some(1),
+            total_tokens: Some(16),
+        };
+
+        let merged = merge_usage(existing, incoming);
+        assert_eq!(merged.model.as_deref(), Some("claude-test"));
+        assert_eq!(merged.input_tokens, Some(10));
+        assert_eq!(merged.output_tokens, Some(6));
+        assert_eq!(merged.cache_creation_input_tokens, Some(2));
+        assert_eq!(merged.cache_read_input_tokens, Some(1));
+        assert_eq!(merged.total_tokens, Some(16));
+    }
+
+    #[test]
+    fn normalizes_usage_with_terminal_and_response_envelopes() {
+        let terminal = normalize_usage(
+            &serde_json::json!({
+                "outputTokens": 8,
+            }),
+            "claude-test",
+        )
+        .into_usage_event("claude-test")
+        .expect("terminal usage should normalize");
+        assert_eq!(terminal.output_tokens, 8);
+
+        let response_body = concat!(
+            "event: message\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-test\"}}\n\n",
+            "event: message\n",
+            "data: {\"type\":\"content_block_delta\",\"delta\":{\"text\":\"hello\"}}\n\n",
+            "event: message\n",
+            "data: {\"type\":\"message_stop\",\"response\":{\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2}}}\n\n"
+        );
+        let events = parse_anthropic_sse_response("anthropic", response_body, "claude-test")
+            .expect("response envelope usage should parse");
+        assert!(events.iter().any(|event| matches!(
+            event,
+            StreamEvent::Usage(usage)
+                if usage.model == "claude-test" && usage.input_tokens == 10 && usage.output_tokens == 2
+        )));
+    }
+
+    #[test]
+    fn multiple_usage_deltas_latest_wins() {
+        let body = concat!(
+            "event: message\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-test\",\"usage\":{\"input_tokens\":10}}}\n\n",
+            "event: message\n",
+            "data: {\"type\":\"content_block_delta\",\"delta\":{\"text\":\"hello\"}}\n\n",
+            "event: message\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"usage\":{\"output_tokens\":3}}}\n\n",
+            "event: message\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"usage\":{\"output_tokens\":5}}}\n\n",
+            "event: message\n",
+            "data: {\"type\":\"message_stop\"}\n\n"
+        );
+
+        let events = parse_anthropic_sse_response("anthropic", body, "claude-test")
+            .expect("usage deltas should parse");
+        let usages = events
+            .iter()
+            .filter_map(|event| match event {
+                StreamEvent::Usage(usage) => Some(usage),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(usages.len(), 1);
+        assert_eq!(usages[0].input_tokens, 10);
+        assert_eq!(usages[0].output_tokens, 5);
+    }
+
+    #[test]
+    fn usage_before_stop_reason_and_after_content_delta_is_preserved() {
+        let body = concat!(
+            "event: message\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-test\",\"usage\":{\"input_tokens\":7}}}\n\n",
+            "event: message\n",
+            "data: {\"type\":\"content_block_delta\",\"delta\":{\"text\":\"partial\"}}\n\n",
+            "event: message\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"usage\":{\"output_tokens\":4}}}\n\n",
+            "event: message\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n",
+            "event: message\n",
+            "data: {\"type\":\"message_stop\",\"terminal\":{\"usage\":{\"cache_read_tokens\":1}}}\n\n"
+        );
+
+        let events = parse_anthropic_sse_response("anthropic", body, "claude-test")
+            .expect("usage ordering should parse");
+        assert!(events.iter().any(|event| matches!(
+            event,
+            StreamEvent::Usage(usage)
+                if usage.input_tokens == 7 && usage.output_tokens == 4 && usage.cache_read_input_tokens == 1
+        )));
     }
 
     #[test]

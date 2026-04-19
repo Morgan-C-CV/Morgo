@@ -224,6 +224,54 @@ async fn query_loop_records_usage_events_into_cost_tracker() {
 }
 
 #[tokio::test]
+async fn query_loop_uses_latest_usage_without_double_counting() {
+    let context = test_context(vec![
+        StreamEvent::MessageStart,
+        StreamEvent::Usage(UsageEvent {
+            model: "default-model".into(),
+            input_tokens: 100,
+            output_tokens: 20,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+        }),
+        StreamEvent::TextDelta("usage tracked".into()),
+        StreamEvent::Usage(UsageEvent {
+            model: "default-model".into(),
+            input_tokens: 101,
+            output_tokens: 24,
+            cache_creation_input_tokens: 2,
+            cache_read_input_tokens: 1,
+        }),
+        StreamEvent::MessageStop {
+            stop_reason: StopReason::EndTurn,
+        },
+    ]);
+
+    let result = run_query_loop(&context, Message::user("track usage")).await;
+
+    assert_eq!(result.state, QueryLoopState::Completed);
+    let snapshot = context.app_state.cost_tracker.snapshot();
+    assert_eq!(snapshot.requests, 2);
+    assert_eq!(snapshot.output_tokens, 24);
+    assert_eq!(snapshot.cache_creation_input_tokens, 2);
+    assert_eq!(snapshot.cache_read_input_tokens, 1);
+    let report = context.app_state.cost_tracker.format_report();
+    assert!(report.contains("model default-model -> requests: 1"));
+    assert!(report.contains("input_tokens: 101"));
+    assert!(report.contains("output_tokens: 24"));
+    assert!(report.contains("cache_creation_input_tokens: 2"));
+    assert!(report.contains("cache_read_input_tokens: 1"));
+    assert_eq!(
+        result
+            .events
+            .iter()
+            .filter(|event| matches!(event, EngineEvent::Notice { kind, .. } if kind == &"usage"))
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
 async fn engine_stream_turn_yields_committed_messages() {
     let engine = QueryEngine::new(test_context(vec![
         StreamEvent::MessageStart,
@@ -1372,14 +1420,16 @@ fn provider_sse_parsing_maps_standard_events() {
     let events = parse_anthropic_sse_response("anthropic", body, "default-model")
         .expect("provider SSE should parse");
     assert!(matches!(events[0], StreamEvent::MessageStart));
-    assert!(matches!(events[1], StreamEvent::Usage(_)));
-    assert!(matches!(events[2], StreamEvent::TextDelta(_)));
-    assert!(matches!(events[3], StreamEvent::Usage(_)));
+    assert!(events.iter().any(|event| matches!(event, StreamEvent::TextDelta(text) if text == "hello")));
+    assert!(events.iter().any(|event| matches!(event, StreamEvent::Usage(usage)
+        if usage.model == "claude-test"
+            && usage.input_tokens == 11
+            && usage.output_tokens == 4)));
     assert!(matches!(
-        events[4],
-        StreamEvent::MessageStop {
+        events.last(),
+        Some(StreamEvent::MessageStop {
             stop_reason: StopReason::EndTurn
-        }
+        })
     ));
 }
 

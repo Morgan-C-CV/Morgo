@@ -516,6 +516,29 @@ async fn decide_next_turn(
     }
 }
 
+fn record_usage_notice(
+    context: &QueryContext,
+    engine_events: &mut Vec<EngineEvent>,
+    usage: crate::service::api::streaming::UsageEvent,
+) {
+    context.app_state.cost_tracker.record_model_usage(
+        &usage.model,
+        usage.input_tokens,
+        usage.output_tokens,
+        usage.cache_creation_input_tokens,
+        usage.cache_read_input_tokens,
+    );
+    engine_events.push(EngineEvent::Notice {
+        kind: "usage",
+        message: format!(
+            "recorded usage for model {} (input={}, output={})",
+            usage.model, usage.input_tokens, usage.output_tokens
+        ),
+        code: None,
+        service_failure: None,
+    });
+}
+
 async fn consume_model_stream(
     context: &QueryContext,
     state: &mut LoopState,
@@ -525,6 +548,7 @@ async fn consume_model_stream(
 ) -> TurnOutcome {
     let mut aggregated_text = String::new();
     let mut pending_tool_use: Option<(String, String)> = None;
+    let mut pending_usage: Option<crate::service::api::streaming::UsageEvent> = None;
 
     for event in stream_events {
         match event {
@@ -541,25 +565,13 @@ async fn consume_model_stream(
                 pending_tool_use = Some((tool_name, input));
             }
             StreamEvent::Usage(usage) => {
-                context.app_state.cost_tracker.record_model_usage(
-                    &usage.model,
-                    usage.input_tokens,
-                    usage.output_tokens,
-                    usage.cache_creation_input_tokens,
-                    usage.cache_read_input_tokens,
-                );
-                engine_events.push(EngineEvent::Notice {
-                    kind: "usage",
-                    message: format!(
-                        "recorded usage for model {} (input={}, output={})",
-                        usage.model, usage.input_tokens, usage.output_tokens
-                    ),
-                    code: None,
-                    service_failure: None,
-                });
+                pending_usage = Some(usage);
             }
             StreamEvent::MessageStop { stop_reason } => match stop_reason {
                 StopReason::EndTurn => {
+                    if let Some(usage) = pending_usage.take() {
+                        record_usage_notice(context, &mut engine_events, usage);
+                    }
                     if !aggregated_text.is_empty() {
                         let message = Message::assistant(aggregated_text.clone());
                         engine_events.push(EngineEvent::MessageCommitted(message.clone()));
@@ -579,6 +591,9 @@ async fn consume_model_stream(
                     };
                 }
                 StopReason::ToolUse => {
+                    if let Some(usage) = pending_usage.take() {
+                        record_usage_notice(context, &mut engine_events, usage);
+                    }
                     if !aggregated_text.is_empty() {
                         let message = Message::assistant(aggregated_text.clone());
                         engine_events.push(EngineEvent::MessageCommitted(message.clone()));
@@ -607,6 +622,9 @@ async fn consume_model_stream(
                     return tool_outcome;
                 }
                 StopReason::MaxTokens => {
+                    if let Some(usage) = pending_usage.take() {
+                        record_usage_notice(context, &mut engine_events, usage);
+                    }
                     if !aggregated_text.is_empty() {
                         let message = Message::assistant(aggregated_text.clone());
                         engine_events.push(EngineEvent::MessageCommitted(message.clone()));
@@ -681,6 +699,9 @@ async fn consume_model_stream(
                 }
             },
             StreamEvent::Error(error) => {
+                if let Some(usage) = pending_usage.take() {
+                    record_usage_notice(context, &mut engine_events, usage);
+                }
                 let error_message = Message::assistant(format!("stream error: {}", error.message));
                 engine_events.push(EngineEvent::MessageCommitted(error_message.clone()));
                 state.messages.push(error_message);
@@ -701,6 +722,10 @@ async fn consume_model_stream(
                 return continue_after_stream_error(context, state, engine_events, error);
             }
         }
+    }
+
+    if let Some(usage) = pending_usage.take() {
+        record_usage_notice(context, &mut engine_events, usage);
     }
 
     TurnOutcome {
