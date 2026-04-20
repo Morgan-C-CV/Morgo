@@ -13,6 +13,11 @@ use rust_agent::history::session::{
     SessionRestoreRequest, SessionSnapshot, SessionStore,
 };
 use rust_agent::hook::registry::{HookConfigSource, HookEvent, load_hook_registry};
+use rust_agent::service::api::client::{
+    ModelPricing, ModelProviderConfig, ProviderAuthStrategy, ProviderCompatibilityProfileKind,
+    ProviderProtocol, ProviderTimeout,
+};
+use rust_agent::service::api::retry::RetryPolicy;
 use rust_agent::state::app_state::{AppState, AppStateRuntimeChange, RuntimeRole};
 use rust_agent::state::permission_context::{PermissionMode, ToolPermissionContext};
 use rust_agent::state::store::AppStateStore;
@@ -31,6 +36,28 @@ fn runtime_for_surface(surface: &str, interactive: bool, init_only: bool) -> Run
         tui: false,
         surface: surface.into(),
     })
+    .with_provider_config(test_model_provider_config())
+}
+
+fn test_model_provider_config() -> ModelProviderConfig {
+    ModelProviderConfig {
+        provider_id: "anthropic".into(),
+        protocol: ProviderProtocol::Anthropic,
+        compatibility_profile: ProviderCompatibilityProfileKind::Anthropic,
+        base_url: "http://localhost".into(),
+        auth_strategy: ProviderAuthStrategy::NoAuth,
+        api_key: None,
+        model_id: "test-model".into(),
+        timeout: ProviderTimeout {
+            request_timeout_ms: 30_000,
+        },
+        retry_policy: RetryPolicy {
+            max_attempts: 1,
+            initial_backoff_ms: 0,
+            max_backoff_ms: 0,
+        },
+        pricing: ModelPricing::default(),
+    }
 }
 
 fn initialized_tool_names(
@@ -49,14 +76,15 @@ fn initialized_tool_names(
     );
     let mut state = BootstrapState::new(surface, session_mode, false);
     state.current_cwd = std::env::current_dir().expect("cwd available");
-    let bundle = runtime.initialize_runtime(
-        &state,
-        format!("session-{surface:?}-{session_mode:?}"),
-        Arc::new(rust_agent::task::manager::TaskManager::default()),
-        Arc::new(rust_agent::task::list_manager::TaskListManager::default()),
-        Arc::new(rust_agent::plan::manager::PlanManager::default()),
-    )
-    .expect("runtime should initialize");
+    let bundle = runtime
+        .initialize_runtime(
+            &state,
+            format!("session-{surface:?}-{session_mode:?}"),
+            Arc::new(rust_agent::task::manager::TaskManager::default()),
+            Arc::new(rust_agent::task::list_manager::TaskListManager::default()),
+            Arc::new(rust_agent::plan::manager::PlanManager::default()),
+        )
+        .expect("runtime should initialize");
     let permission_context = ToolAssemblyContext::coordinator(surface, session_mode)
         .permission_context(if init_only {
             PermissionMode::Plan
@@ -587,14 +615,15 @@ fn initialize_runtime_builds_consistent_runtime_bundle_shape() {
     let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::Headless, false);
     state.current_cwd = std::env::current_dir().expect("cwd available");
 
-    let bundle = runtime.initialize_runtime(
-        &state,
-        "session-init".into(),
-        Arc::new(rust_agent::task::manager::TaskManager::default()),
-        Arc::new(rust_agent::task::list_manager::TaskListManager::default()),
-        Arc::new(rust_agent::plan::manager::PlanManager::default()),
-    )
-    .expect("runtime should initialize");
+    let bundle = runtime
+        .initialize_runtime(
+            &state,
+            "session-init".into(),
+            Arc::new(rust_agent::task::manager::TaskManager::default()),
+            Arc::new(rust_agent::task::list_manager::TaskListManager::default()),
+            Arc::new(rust_agent::plan::manager::PlanManager::default()),
+        )
+        .expect("runtime should initialize");
 
     assert!(!bundle.command_registry.names().is_empty());
     assert!(!bundle.coordinator_tools.all_metadata().is_empty());
@@ -617,17 +646,19 @@ fn augment_prompt_depends_on_input_state_without_mutating_store() {
         show_tools: false,
         tui: false,
         surface: "cli".into(),
-    });
+    })
+    .with_provider_config(test_model_provider_config());
     let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::Headless, false);
     state.current_cwd = std::env::current_dir().expect("cwd available");
-    let bundle = runtime.initialize_runtime(
-        &state,
-        "session-prompts".into(),
-        Arc::new(rust_agent::task::manager::TaskManager::default()),
-        Arc::new(rust_agent::task::list_manager::TaskListManager::default()),
-        Arc::new(rust_agent::plan::manager::PlanManager::default()),
-    )
-    .expect("runtime should initialize");
+    let bundle = runtime
+        .initialize_runtime(
+            &state,
+            "session-prompts".into(),
+            Arc::new(rust_agent::task::manager::TaskManager::default()),
+            Arc::new(rust_agent::task::list_manager::TaskListManager::default()),
+            Arc::new(rust_agent::plan::manager::PlanManager::default()),
+        )
+        .expect("runtime should initialize");
     let resolved = resolve_session_state(
         &InMemorySessionStore::default(),
         None,
@@ -737,7 +768,8 @@ fn gate_user_access_matches_cli_remote_and_telegram_expectations() {
         show_tools: false,
         tui: false,
         surface: "cli".into(),
-    });
+    })
+    .with_provider_config(test_model_provider_config());
 
     let cli_state = BootstrapState::new(InteractionSurface::Cli, SessionMode::Interactive, false);
     let cli_input = rust_agent::interaction::envelope::NormalizedInput::from_session_raw(
@@ -898,7 +930,8 @@ fn finalize_runtime_state_is_single_writeback_entrypoint() {
         show_tools: false,
         tui: false,
         surface: "cli".into(),
-    });
+    })
+    .with_provider_config(test_model_provider_config());
     let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::Headless, false);
     state.record_phase(BootstrapPhase::InitializeRuntime);
     state.record_phase(BootstrapPhase::AugmentPrompt);
@@ -912,14 +945,15 @@ fn finalize_runtime_state_is_single_writeback_entrypoint() {
         SessionMode::Headless,
         std::path::Path::new("/tmp/finalize"),
     );
-    let bundle = runtime.initialize_runtime(
-        &state,
-        resolved.active_session_id(),
-        Arc::new(rust_agent::task::manager::TaskManager::default()),
-        Arc::new(rust_agent::task::list_manager::TaskListManager::default()),
-        Arc::new(rust_agent::plan::manager::PlanManager::default()),
-    )
-    .expect("runtime should initialize");
+    let bundle = runtime
+        .initialize_runtime(
+            &state,
+            resolved.active_session_id(),
+            Arc::new(rust_agent::task::manager::TaskManager::default()),
+            Arc::new(rust_agent::task::list_manager::TaskListManager::default()),
+            Arc::new(rust_agent::plan::manager::PlanManager::default()),
+        )
+        .expect("runtime should initialize");
     let prompt_state = AppState {
         surface: state.surface,
         session_mode: state.session_mode,
@@ -1017,6 +1051,7 @@ async fn runtime_continue_session_uses_restored_snapshot() {
         tui: false,
         surface: "cli".into(),
     })
+    .with_provider_config(test_model_provider_config())
     .with_session_store(store);
 
     runtime.run().await.expect("runtime should run");
@@ -1048,6 +1083,7 @@ async fn runtime_resume_prefers_restored_surface_and_mode() {
         tui: false,
         surface: "cli".into(),
     })
+    .with_provider_config(test_model_provider_config())
     .with_session_store(store);
 
     runtime
@@ -1068,19 +1104,21 @@ fn initialize_runtime_tracks_surface_mode_visibility_matrix() {
         show_tools: false,
         tui: false,
         surface: "cli".into(),
-    });
+    })
+    .with_provider_config(test_model_provider_config());
 
     let mut cli_state =
         BootstrapState::new(InteractionSurface::Cli, SessionMode::Interactive, false);
     cli_state.current_cwd = std::env::current_dir().expect("cwd available");
-    let cli_bundle = runtime.initialize_runtime(
-        &cli_state,
-        "session-cli-matrix".into(),
-        Arc::new(rust_agent::task::manager::TaskManager::default()),
-        Arc::new(rust_agent::task::list_manager::TaskListManager::default()),
-        Arc::new(rust_agent::plan::manager::PlanManager::default()),
-    )
-    .expect("runtime should initialize");
+    let cli_bundle = runtime
+        .initialize_runtime(
+            &cli_state,
+            "session-cli-matrix".into(),
+            Arc::new(rust_agent::task::manager::TaskManager::default()),
+            Arc::new(rust_agent::task::list_manager::TaskListManager::default()),
+            Arc::new(rust_agent::plan::manager::PlanManager::default()),
+        )
+        .expect("runtime should initialize");
     let cli_names = cli_bundle
         .coordinator_tools
         .visible_tools(
@@ -1098,14 +1136,15 @@ fn initialize_runtime_tracks_surface_mode_visibility_matrix() {
     let mut remote_state =
         BootstrapState::new(InteractionSurface::Remote, SessionMode::Interactive, false);
     remote_state.current_cwd = std::env::current_dir().expect("cwd available");
-    let remote_bundle = runtime.initialize_runtime(
-        &remote_state,
-        "session-remote-matrix".into(),
-        Arc::new(rust_agent::task::manager::TaskManager::default()),
-        Arc::new(rust_agent::task::list_manager::TaskListManager::default()),
-        Arc::new(rust_agent::plan::manager::PlanManager::default()),
-    )
-    .expect("runtime should initialize");
+    let remote_bundle = runtime
+        .initialize_runtime(
+            &remote_state,
+            "session-remote-matrix".into(),
+            Arc::new(rust_agent::task::manager::TaskManager::default()),
+            Arc::new(rust_agent::task::list_manager::TaskListManager::default()),
+            Arc::new(rust_agent::plan::manager::PlanManager::default()),
+        )
+        .expect("runtime should initialize");
     let remote_names = remote_bundle
         .coordinator_tools
         .visible_tools(
@@ -1158,6 +1197,7 @@ async fn runtime_resume_keeps_restored_surface_visibility_contract() {
         tui: false,
         surface: "cli".into(),
     })
+    .with_provider_config(test_model_provider_config())
     .with_session_store(store.clone());
 
     let resolved = resolve_session_state(
@@ -1176,14 +1216,15 @@ async fn runtime_resume_keeps_restored_surface_visibility_contract() {
         false,
     );
     state.current_cwd = std::env::current_dir().expect("cwd available");
-    let bundle = runtime.initialize_runtime(
-        &state,
-        resolved.active_session_id(),
-        Arc::new(rust_agent::task::manager::TaskManager::default()),
-        Arc::new(rust_agent::task::list_manager::TaskListManager::default()),
-        Arc::new(rust_agent::plan::manager::PlanManager::default()),
-    )
-    .expect("runtime should initialize");
+    let bundle = runtime
+        .initialize_runtime(
+            &state,
+            resolved.active_session_id(),
+            Arc::new(rust_agent::task::manager::TaskManager::default()),
+            Arc::new(rust_agent::task::list_manager::TaskListManager::default()),
+            Arc::new(rust_agent::plan::manager::PlanManager::default()),
+        )
+        .expect("runtime should initialize");
 
     let permission_context = ToolAssemblyContext::coordinator(state.surface, state.session_mode)
         .permission_context(PermissionMode::Default)
@@ -1245,6 +1286,7 @@ async fn runtime_restores_persisted_task_list_for_resumed_session() {
         tui: false,
         surface: "cli".into(),
     })
+    .with_provider_config(test_model_provider_config())
     .with_session_store(store);
 
     runtime
@@ -1306,6 +1348,7 @@ async fn runtime_continue_restores_from_file_backed_store_across_instances() {
         tui: false,
         surface: "cli".into(),
     })
+    .with_provider_config(test_model_provider_config())
     .with_session_store(store_b);
 
     runtime
@@ -1331,6 +1374,7 @@ async fn runtime_initializes_fresh_session_record_in_store() {
         tui: false,
         surface: "cli".into(),
     })
+    .with_provider_config(test_model_provider_config())
     .with_session_store(store.clone());
 
     runtime

@@ -7,6 +7,11 @@ use rust_agent::bootstrap::{
     BootstrapCli, BootstrapState, InteractionSurface, RuntimeBootstrap, SessionMode,
 };
 use rust_agent::plan::manager::PlanManager;
+use rust_agent::service::api::client::{
+    ModelPricing, ModelProviderConfig, ProviderAuthStrategy, ProviderCompatibilityProfileKind,
+    ProviderProtocol, ProviderTimeout,
+};
+use rust_agent::service::api::retry::RetryPolicy;
 use rust_agent::state::permission_context::ToolPermissionContext;
 use rust_agent::task::list_manager::TaskListManager;
 use rust_agent::task::manager::TaskManager;
@@ -35,6 +40,27 @@ fn set_env(key: &str, value: &std::ffi::OsStr) {
 fn remove_env(key: &str) {
     // SAFETY: integration tests serialize environment mutation with a global mutex.
     unsafe { std::env::remove_var(key) }
+}
+
+fn test_model_provider_config() -> ModelProviderConfig {
+    ModelProviderConfig {
+        provider_id: "anthropic".into(),
+        protocol: ProviderProtocol::Anthropic,
+        compatibility_profile: ProviderCompatibilityProfileKind::Anthropic,
+        base_url: "http://localhost".into(),
+        auth_strategy: ProviderAuthStrategy::NoAuth,
+        api_key: None,
+        model_id: "test-model".into(),
+        timeout: ProviderTimeout {
+            request_timeout_ms: 30_000,
+        },
+        retry_policy: RetryPolicy {
+            max_attempts: 1,
+            initial_backoff_ms: 0,
+            max_backoff_ms: 0,
+        },
+        pricing: ModelPricing::default(),
+    }
 }
 
 #[tokio::test]
@@ -81,16 +107,18 @@ async fn bootstrap_env_policy_is_attached_and_enforced_by_file_tools() {
         show_tools: false,
         tui: false,
         surface: "cli".into(),
-    });
+    })
+    .with_provider_config(test_model_provider_config());
     let state = BootstrapState::new(InteractionSurface::Cli, SessionMode::Headless, false);
-    let bundle = bootstrap.initialize_runtime(
-        &state,
-        "fs-policy-session".into(),
-        Arc::new(TaskManager::default()),
-        Arc::new(TaskListManager::default()),
-        Arc::new(PlanManager::default()),
-    )
-    .expect("runtime should initialize");
+    let bundle = bootstrap
+        .initialize_runtime(
+            &state,
+            "fs-policy-session".into(),
+            Arc::new(TaskManager::default()),
+            Arc::new(TaskListManager::default()),
+            Arc::new(PlanManager::default()),
+        )
+        .expect("runtime should initialize");
 
     let permissions: ToolPermissionContext =
         ToolPermissionContext::new(rust_agent::state::permission_context::PermissionMode::Default)
@@ -99,7 +127,7 @@ async fn bootstrap_env_policy_is_attached_and_enforced_by_file_tools() {
                     .filesystem_policy
                     .clone()
                     .expect("filesystem policy should load from HOME default path"),
-            )
+            );
 
     let read_result = FileReadTool
         .invoke(
@@ -146,7 +174,7 @@ async fn bootstrap_env_policy_is_attached_and_enforced_by_file_tools() {
     assert_eq!(
         allow_result,
         ToolResult::Text(format!("wrote {}", allowed_dir.join("new.txt").display()))
-    )
+    );
 
     match original_home {
         Some(value) => set_env("HOME", &value),

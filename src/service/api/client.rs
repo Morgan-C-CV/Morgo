@@ -540,7 +540,8 @@ pub fn validate_provider_config(config: &ModelProviderConfig) -> Result<(), ApiE
     if let Some((expected_protocol, expected_profile)) =
         expected_contract_for_provider_id(&config.provider_id)
     {
-        if config.protocol == expected_protocol && config.compatibility_profile == expected_profile {
+        if config.protocol == expected_protocol && config.compatibility_profile == expected_profile
+        {
             return Ok(());
         }
         return Err(ApiError::invalid_configuration(format!(
@@ -856,11 +857,12 @@ fn expected_contract_for_provider_id(
             ProviderProtocol::Anthropic,
             ProviderCompatibilityProfileKind::Batch,
         )),
-        "openai" | "openai-compatible" | "openai_compatible" | "kimi" | "glm"
-        | "minimax" => Some((
-            ProviderProtocol::OpenAICompatible,
-            ProviderCompatibilityProfileKind::OpenAICompatible,
-        )),
+        "openai" | "openai-compatible" | "openai_compatible" | "kimi" | "glm" | "minimax" => {
+            Some((
+                ProviderProtocol::OpenAICompatible,
+                ProviderCompatibilityProfileKind::OpenAICompatible,
+            ))
+        }
         "gemini" | "gemini-native" | "gemini_native" => Some((
             ProviderProtocol::GeminiNative,
             ProviderCompatibilityProfileKind::GeminiNativeUnsupported,
@@ -1855,13 +1857,13 @@ fn classify_stream_error_disposition(
 #[cfg(test)]
 mod tests {
     use super::{
-        ModelProviderConfig, NormalizedUsage, ProviderCompatibilityProfileKind, ProviderProtocol,
-        ProviderTimeout, RequestOptions, RetryDecision, build_messages_url_for_provider,
-        build_request_payload_for_provider, build_request_payload_with_options,
-        classify_retry_policy, classify_stream_error, classify_stream_error_disposition,
-        extract_error_detail, map_openai_finish_reason, map_stop_reason, merge_usage,
-        normalize_json_like_value, normalize_usage, parse_anthropic_sse_response,
-        parse_openai_compatible_sse_response, parse_retry_after_ms,
+        ModelProviderConfig, NormalizedUsage, ProviderAuthStrategy,
+        ProviderCompatibilityProfileKind, ProviderProtocol, ProviderTimeout, RequestOptions,
+        RetryDecision, build_messages_url_for_provider, build_request_payload_for_provider,
+        build_request_payload_with_options, classify_retry_policy, classify_stream_error,
+        classify_stream_error_disposition, extract_error_detail, map_openai_finish_reason,
+        map_stop_reason, merge_usage, normalize_json_like_value, normalize_usage,
+        parse_anthropic_sse_response, parse_openai_compatible_sse_response, parse_retry_after_ms,
         parse_stream_response_for_provider, parse_usage, profile_for_provider,
         validate_streaming_response_headers,
     };
@@ -1941,7 +1943,7 @@ mod tests {
             protocol: ProviderProtocol::Anthropic,
             compatibility_profile: ProviderCompatibilityProfileKind::Anthropic,
             auth_strategy: ProviderAuthStrategy::NoAuth,
-            model_id: "  ".into(),
+            model_id: "test-model".into(),
             ..ModelProviderConfig::default()
         };
 
@@ -1953,7 +1955,7 @@ mod tests {
 
         assert_eq!(
             payload.get("model").and_then(Value::as_str),
-            Some("default-model")
+            Some("test-model")
         );
         assert_eq!(payload.get("stream").and_then(Value::as_bool), Some(true));
         assert_eq!(
@@ -2229,9 +2231,9 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unknown_provider_ids_for_request_and_parse_paths() {
+    fn rejects_provider_protocol_profile_mismatch_for_request_and_parse_paths() {
         let config = ModelProviderConfig {
-            provider_id: "custom-provider".into(),
+            provider_id: "gemini".into(),
             protocol: ProviderProtocol::Anthropic,
             compatibility_profile: ProviderCompatibilityProfileKind::Anthropic,
             auth_strategy: ProviderAuthStrategy::NoAuth,
@@ -2239,13 +2241,13 @@ mod tests {
         };
 
         let request_error = build_messages_url_for_provider(&config)
-            .expect_err("unknown provider should be rejected");
-        assert_eq!(request_error.kind_label(), "invalid_response");
-        assert!(request_error.message.contains("custom-provider"));
+            .expect_err("provider mismatch should be rejected");
+        assert_eq!(request_error.kind_label(), "invalid_configuration");
+        assert!(request_error.message.contains("gemini"));
 
         let parse_error = parse_stream_response_for_provider(
             &ModelProviderConfig {
-                provider_id: "custom-provider".into(),
+                provider_id: "gemini".into(),
                 protocol: ProviderProtocol::Anthropic,
                 compatibility_profile: ProviderCompatibilityProfileKind::Anthropic,
                 auth_strategy: ProviderAuthStrategy::NoAuth,
@@ -2254,9 +2256,9 @@ mod tests {
             "",
             "model",
         )
-        .expect_err("unknown provider parser should be rejected");
-        assert_eq!(parse_error.kind_label(), "invalid_response");
-        assert!(parse_error.message.contains("custom-provider"));
+        .expect_err("provider mismatch parser should be rejected");
+        assert_eq!(parse_error.kind_label(), "invalid_configuration");
+        assert!(parse_error.message.contains("gemini"));
     }
 
     #[test]

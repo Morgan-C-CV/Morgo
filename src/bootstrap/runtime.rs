@@ -65,11 +65,12 @@ fn infer_provider_contract(
             ProviderProtocol::Anthropic,
             ProviderCompatibilityProfileKind::Batch,
         )),
-        "openai" | "openai-compatible" | "openai_compatible" | "kimi" | "glm"
-        | "minimax" => Some((
-            ProviderProtocol::OpenAICompatible,
-            ProviderCompatibilityProfileKind::OpenAICompatible,
-        )),
+        "openai" | "openai-compatible" | "openai_compatible" | "kimi" | "glm" | "minimax" => {
+            Some((
+                ProviderProtocol::OpenAICompatible,
+                ProviderCompatibilityProfileKind::OpenAICompatible,
+            ))
+        }
         "gemini" | "gemini-native" | "gemini_native" => Some((
             ProviderProtocol::GeminiNative,
             ProviderCompatibilityProfileKind::GeminiNativeUnsupported,
@@ -94,9 +95,7 @@ fn parse_provider_compatibility_profile(
 ) -> anyhow::Result<ProviderCompatibilityProfileKind> {
     match value.trim() {
         "anthropic" => Ok(ProviderCompatibilityProfileKind::Anthropic),
-        "text-only" | "text_only" | "textonly" => {
-            Ok(ProviderCompatibilityProfileKind::TextOnly)
-        }
+        "text-only" | "text_only" | "textonly" => Ok(ProviderCompatibilityProfileKind::TextOnly),
         "batch" => Ok(ProviderCompatibilityProfileKind::Batch),
         "openai" | "openai-compatible" | "openai_compatible" => {
             Ok(ProviderCompatibilityProfileKind::OpenAICompatible)
@@ -112,9 +111,7 @@ fn parse_provider_compatibility_profile(
 
 fn parse_provider_auth_strategy(value: &str) -> anyhow::Result<ProviderAuthStrategy> {
     match value.trim() {
-        "bearer" | "bearer_api_key" | "bearer-api-key" => {
-            Ok(ProviderAuthStrategy::BearerApiKey)
-        }
+        "bearer" | "bearer_api_key" | "bearer-api-key" => Ok(ProviderAuthStrategy::BearerApiKey),
         "none" | "no_auth" | "no-auth" => Ok(ProviderAuthStrategy::NoAuth),
         other => anyhow::bail!("invalid_configuration: unsupported auth strategy {other}"),
     }
@@ -180,6 +177,7 @@ pub struct BootstrapCli {
 pub struct RuntimeBootstrap {
     cli: BootstrapCli,
     session_store: Arc<dyn SessionStore>,
+    provider_config_override: Option<ModelProviderConfig>,
 }
 
 impl std::fmt::Debug for RuntimeBootstrap {
@@ -259,11 +257,17 @@ impl RuntimeBootstrap {
         Self {
             cli,
             session_store: Arc::new(FileBackedSessionStore::default()),
+            provider_config_override: None,
         }
     }
 
     pub fn with_session_store(mut self, session_store: Arc<dyn SessionStore>) -> Self {
         self.session_store = session_store;
+        self
+    }
+
+    pub fn with_provider_config(mut self, provider_config: ModelProviderConfig) -> Self {
+        self.provider_config_override = Some(provider_config);
         self
     }
 
@@ -900,6 +904,10 @@ impl RuntimeBootstrap {
     }
 
     fn build_model_provider_config(&self) -> anyhow::Result<ModelProviderConfig> {
+        if let Some(provider_config) = &self.provider_config_override {
+            return Ok(provider_config.clone());
+        }
+
         let provider_id = std::env::var("RUST_AGENT_PROVIDER_ID")
             .ok()
             .filter(|value| !value.trim().is_empty())
@@ -947,7 +955,11 @@ impl RuntimeBootstrap {
             .filter(|value| !value.trim().is_empty())
             .map(|value| parse_provider_compatibility_profile(&value))
             .transpose()?;
-        let (protocol, compatibility_profile) = match (explicit_protocol, explicit_profile, inferred) {
+        let (protocol, compatibility_profile) = match (
+            explicit_protocol,
+            explicit_profile,
+            inferred,
+        ) {
             (Some(protocol), Some(profile), _) => (protocol, profile),
             (None, None, Some(contract)) => contract,
             (None, None, None) => anyhow::bail!(

@@ -1669,7 +1669,7 @@ async fn production_provider_request_envelope_stays_compatible() {
         base_url: format!("http://{}", addr),
         auth_strategy: rust_agent::service::api::client::ProviderAuthStrategy::BearerApiKey,
         api_key: Some("test-key".into()),
-        model_id: " ".into(),
+        model_id: "default-model".into(),
         timeout: ProviderTimeout {
             request_timeout_ms: 5_000,
         },
