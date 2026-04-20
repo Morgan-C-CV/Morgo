@@ -140,8 +140,11 @@ pub struct ModelProviderConfig {
 impl ModelProviderConfig {
     pub fn from_legacy_provider_id(provider_id: impl Into<String>) -> Self {
         let provider_id = provider_id.into();
-        let protocol = resolve_provider_protocol(&provider_id);
-        let compatibility_profile = resolve_provider_profile(&provider_id);
+        let (protocol, compatibility_profile) = expected_contract_for_provider_id(&provider_id)
+            .unwrap_or_else(|| {
+                let default = Self::default();
+                (default.protocol, default.compatibility_profile)
+            });
         Self {
             provider_id,
             protocol,
@@ -871,16 +874,12 @@ fn expected_contract_for_provider_id(
     }
 }
 
-pub fn resolve_provider_protocol(provider_id: &str) -> ProviderProtocol {
-    expected_contract_for_provider_id(provider_id)
-        .map(|(protocol, _)| protocol)
-        .unwrap_or(ProviderProtocol::Anthropic)
+pub fn resolve_provider_protocol(provider_id: &str) -> Option<ProviderProtocol> {
+    expected_contract_for_provider_id(provider_id).map(|(protocol, _)| protocol)
 }
 
-pub fn resolve_provider_profile(provider_id: &str) -> ProviderCompatibilityProfileKind {
-    expected_contract_for_provider_id(provider_id)
-        .map(|(_, profile)| profile)
-        .unwrap_or(ProviderCompatibilityProfileKind::Anthropic)
+pub fn resolve_provider_profile(provider_id: &str) -> Option<ProviderCompatibilityProfileKind> {
+    expected_contract_for_provider_id(provider_id).map(|(_, profile)| profile)
 }
 
 fn compatibility_profile_for_kind(

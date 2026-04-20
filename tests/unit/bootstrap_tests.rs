@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rust_agent::bootstrap::{
@@ -57,6 +57,47 @@ fn test_model_provider_config() -> ModelProviderConfig {
             max_backoff_ms: 0,
         },
         pricing: ModelPricing::default(),
+    }
+}
+
+fn set_env_var(key: &str, value: &str) {
+    unsafe { std::env::set_var(key, value) }
+}
+
+fn remove_env_var(key: &str) {
+    unsafe { std::env::remove_var(key) }
+}
+
+fn bootstrap_env_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+struct BootstrapEnvGuard {
+    keys: [&'static str; 5],
+}
+
+impl BootstrapEnvGuard {
+    fn new() -> Self {
+        let keys = [
+            "RUST_AGENT_PROVIDER_ID",
+            "RUST_AGENT_PROVIDER_BASE_URL",
+            "RUST_AGENT_PROVIDER_API_KEY",
+            "RUST_AGENT_PROVIDER_DEFAULT_MODEL",
+            "RUST_AGENT_PROVIDER_MODEL",
+        ];
+        for key in keys {
+            remove_env_var(key);
+        }
+        Self { keys }
+    }
+}
+
+impl Drop for BootstrapEnvGuard {
+    fn drop(&mut self) {
+        for key in self.keys {
+            remove_env_var(key);
+        }
     }
 }
 
@@ -168,6 +209,96 @@ fn bootstrap_phase_sequence_includes_all_phases() {
     assert!(settings_pos < warmup_pos);
     assert!(warmup_pos < assemble_pos);
     assert!(assemble_pos < finalize_pos);
+}
+
+#[test]
+fn bootstrap_infers_openai_family_provider_contract_from_env() {
+    let _env_lock = bootstrap_env_lock().lock().expect("bootstrap env lock");
+    let _guard = BootstrapEnvGuard::new();
+    set_env_var("RUST_AGENT_PROVIDER_ID", "openai");
+    set_env_var("RUST_AGENT_PROVIDER_BASE_URL", "http://localhost:4010");
+    set_env_var("RUST_AGENT_PROVIDER_API_KEY", "test-key");
+    set_env_var("RUST_AGENT_PROVIDER_DEFAULT_MODEL", "gpt-test");
+
+    let runtime = RuntimeBootstrap::from_cli(BootstrapCli {
+        print: None,
+        interactive: false,
+        init_only: true,
+        continue_session: false,
+        resume: None,
+        trace_startup: false,
+        show_tools: false,
+        tui: false,
+        surface: "cli".into(),
+    });
+    let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::InitOnly, false);
+    state.current_cwd = std::env::current_dir().expect("cwd available");
+
+    let bundle = runtime
+        .initialize_runtime(
+            &state,
+            "provider-env-openai".into(),
+            Arc::new(rust_agent::task::manager::TaskManager::default()),
+            Arc::new(rust_agent::task::list_manager::TaskListManager::default()),
+            Arc::new(rust_agent::plan::manager::PlanManager::default()),
+        )
+        .expect("runtime should initialize with inferred openai-compatible contract");
+
+    assert_eq!(bundle.provider_config.provider_id, "openai");
+    assert_eq!(
+        bundle.provider_config.protocol,
+        ProviderProtocol::OpenAICompatible
+    );
+    assert_eq!(
+        bundle.provider_config.compatibility_profile,
+        ProviderCompatibilityProfileKind::OpenAICompatible
+    );
+    assert_eq!(bundle.provider_config.base_url, "http://localhost:4010");
+    assert_eq!(bundle.provider_config.model_id, "gpt-test");
+    assert_eq!(
+        bundle.provider_config.auth_strategy,
+        ProviderAuthStrategy::BearerApiKey
+    );
+}
+
+#[test]
+fn bootstrap_rejects_unknown_provider_without_explicit_contract() {
+    let _env_lock = bootstrap_env_lock().lock().expect("bootstrap env lock");
+    let _guard = BootstrapEnvGuard::new();
+    set_env_var("RUST_AGENT_PROVIDER_ID", "custom-provider");
+    set_env_var("RUST_AGENT_PROVIDER_BASE_URL", "http://localhost:4010");
+    set_env_var("RUST_AGENT_PROVIDER_API_KEY", "test-key");
+    set_env_var("RUST_AGENT_PROVIDER_DEFAULT_MODEL", "custom-model");
+
+    let runtime = RuntimeBootstrap::from_cli(BootstrapCli {
+        print: None,
+        interactive: false,
+        init_only: true,
+        continue_session: false,
+        resume: None,
+        trace_startup: false,
+        show_tools: false,
+        tui: false,
+        surface: "cli".into(),
+    });
+    let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::InitOnly, false);
+    state.current_cwd = std::env::current_dir().expect("cwd available");
+
+    let error = runtime
+        .initialize_runtime(
+            &state,
+            "provider-env-unknown".into(),
+            Arc::new(rust_agent::task::manager::TaskManager::default()),
+            Arc::new(rust_agent::task::list_manager::TaskListManager::default()),
+            Arc::new(rust_agent::plan::manager::PlanManager::default()),
+        )
+        .expect_err("runtime should reject unknown provider without explicit contract");
+
+    assert!(
+        error
+            .to_string()
+            .contains("invalid_configuration: unknown provider id custom-provider requires explicit protocol and compatibility_profile")
+    );
 }
 
 #[test]
