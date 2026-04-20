@@ -53,9 +53,14 @@ impl McpClient for FakeMcpClient {
     async fn connect(&self, _config: &McpServerConfig) -> anyhow::Result<McpConnectInfo> {
         *self.connect_calls.lock().await += 1;
         match self.mode.lock().await.clone() {
-            FakeMode::MalformedHeader => anyhow::bail!("MCP stdio response did not include Content-Length header"),
+            FakeMode::MalformedHeader => {
+                anyhow::bail!("MCP stdio response did not include Content-Length header")
+            }
             FakeMode::IdMismatch => anyhow::bail!("MCP response id mismatch for method initialize"),
-            FakeMode::ServerError => anyhow::bail!("{}", r#"MCP initialize failed: {"code":-32000,"message":"server exploded"}"#),
+            FakeMode::ServerError => anyhow::bail!(
+                "{}",
+                r#"MCP initialize failed: {"code":-32000,"message":"server exploded"}"#
+            ),
             FakeMode::Ok => Ok(McpConnectInfo {
                 protocol_initialized: true,
                 pid: Some(42),
@@ -63,7 +68,9 @@ impl McpClient for FakeMcpClient {
                     server_name: Some("fake".into()),
                     server_version: Some("1.0.0".into()),
                     protocol_version: Some("2025-03-26".into()),
-                    capabilities: McpCapabilities::from_initialize_result(Some(&json!({"tools": {}, "resources": {}}))),
+                    capabilities: McpCapabilities::from_initialize_result(Some(
+                        &json!({"tools": {}, "resources": {}}),
+                    )),
                 },
             }),
         }
@@ -75,43 +82,101 @@ impl McpClient for FakeMcpClient {
 
     async fn list_tools(&self, _config: &McpServerConfig) -> anyhow::Result<Vec<McpToolInfo>> {
         match self.mode.lock().await.clone() {
-            FakeMode::ServerError => anyhow::bail!("{}", r#"MCP tools/list failed: {"code":-32000,"message":"server exploded"}"#),
-            FakeMode::MalformedHeader => anyhow::bail!("MCP stdio response did not include Content-Length header"),
+            FakeMode::ServerError => anyhow::bail!(
+                "{}",
+                r#"MCP tools/list failed: {"code":-32000,"message":"server exploded"}"#
+            ),
+            FakeMode::MalformedHeader => {
+                anyhow::bail!("MCP stdio response did not include Content-Length header")
+            }
             FakeMode::IdMismatch => anyhow::bail!("MCP response id mismatch for method tools/list"),
             FakeMode::Ok => Ok(vec![
-                McpToolInfo { name: "echo".into(), description: "Echo tool".into(), input_schema: Some(json!({"type": "object"})) },
-                McpToolInfo { name: "sum".into(), description: "Sum tool".into(), input_schema: None },
-                McpToolInfo { name: "inspect".into(), description: "Inspect tool".into(), input_schema: None },
+                McpToolInfo {
+                    name: "echo".into(),
+                    description: "Echo tool".into(),
+                    input_schema: Some(json!({"type": "object"})),
+                },
+                McpToolInfo {
+                    name: "sum".into(),
+                    description: "Sum tool".into(),
+                    input_schema: None,
+                },
+                McpToolInfo {
+                    name: "inspect".into(),
+                    description: "Inspect tool".into(),
+                    input_schema: None,
+                },
             ]),
         }
     }
 
-    async fn list_resources(&self, _config: &McpServerConfig) -> anyhow::Result<Vec<McpResourceInfo>> {
+    async fn list_resources(
+        &self,
+        _config: &McpServerConfig,
+    ) -> anyhow::Result<Vec<McpResourceInfo>> {
         match self.mode.lock().await.clone() {
-            FakeMode::ServerError => anyhow::bail!("{}", r#"MCP resources/list failed: {"code":-32000,"message":"server exploded"}"#),
-            FakeMode::MalformedHeader => anyhow::bail!("MCP stdio response did not include Content-Length header"),
-            FakeMode::IdMismatch => anyhow::bail!("MCP response id mismatch for method resources/list"),
+            FakeMode::ServerError => anyhow::bail!(
+                "{}",
+                r#"MCP resources/list failed: {"code":-32000,"message":"server exploded"}"#
+            ),
+            FakeMode::MalformedHeader => {
+                anyhow::bail!("MCP stdio response did not include Content-Length header")
+            }
+            FakeMode::IdMismatch => {
+                anyhow::bail!("MCP response id mismatch for method resources/list")
+            }
             FakeMode::Ok => Ok(vec![
-                McpResourceInfo { name: "readme".into(), uri: "mcp://fake/readme".into(), description: "Readme".into(), mime_type: Some("text/plain".into()) },
-                McpResourceInfo { name: "config".into(), uri: "mcp://fake/config".into(), description: "Config".into(), mime_type: Some("application/json".into()) },
+                McpResourceInfo {
+                    name: "readme".into(),
+                    uri: "mcp://fake/readme".into(),
+                    description: "Readme".into(),
+                    mime_type: Some("text/plain".into()),
+                },
+                McpResourceInfo {
+                    name: "config".into(),
+                    uri: "mcp://fake/config".into(),
+                    description: "Config".into(),
+                    mime_type: Some("application/json".into()),
+                },
             ]),
         }
     }
 
-    async fn call_tool(&self, _config: &McpServerConfig, tool: &str, input: Option<Value>) -> anyhow::Result<Value> {
+    async fn call_tool(
+        &self,
+        _config: &McpServerConfig,
+        tool: &str,
+        input: Option<Value>,
+    ) -> anyhow::Result<Value> {
         match self.mode.lock().await.clone() {
-            FakeMode::ServerError => anyhow::bail!("{}", r#"MCP tools/call failed: {"code":-32000,"message":"server exploded"}"#),
-            FakeMode::MalformedHeader => anyhow::bail!("MCP stdio response did not include Content-Length header"),
+            FakeMode::ServerError => anyhow::bail!(
+                "{}",
+                r#"MCP tools/call failed: {"code":-32000,"message":"server exploded"}"#
+            ),
+            FakeMode::MalformedHeader => {
+                anyhow::bail!("MCP stdio response did not include Content-Length header")
+            }
             FakeMode::IdMismatch => anyhow::bail!("MCP response id mismatch for method tools/call"),
             FakeMode::Ok => Ok(json!({"tool": tool, "input": input})),
         }
     }
 
-    async fn read_resource(&self, _config: &McpServerConfig, resource: &str) -> anyhow::Result<String> {
+    async fn read_resource(
+        &self,
+        _config: &McpServerConfig,
+        resource: &str,
+    ) -> anyhow::Result<String> {
         match self.mode.lock().await.clone() {
-            FakeMode::ServerError => anyhow::bail!("{}", r#"MCP resources/read failed: {"code":-32000,"message":"server exploded"}"#),
-            FakeMode::MalformedHeader => anyhow::bail!("MCP stdio response did not include Content-Length header"),
-            FakeMode::IdMismatch => anyhow::bail!("MCP response id mismatch for method resources/read"),
+            FakeMode::ServerError => anyhow::bail!(
+                "{}",
+                r#"MCP resources/read failed: {"code":-32000,"message":"server exploded"}"#
+            ),
+            FakeMode::MalformedHeader => {
+                anyhow::bail!("MCP stdio response did not include Content-Length header")
+            }
+            FakeMode::IdMismatch => {
+                anyhow::bail!("MCP response id mismatch for method resources/read")
+            }
             FakeMode::Ok => Ok(format!("resource:{resource}")),
         }
     }
@@ -161,7 +226,9 @@ fn test_app_state(runtime: Arc<McpRuntime>) -> AppState {
         cost_tracker: CostTracker::default(),
         service_observability_tracker,
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
-        audit_log: Arc::new(std::sync::Mutex::new(rust_agent::security::audit::AuditLog::default())),
+        audit_log: Arc::new(std::sync::Mutex::new(
+            rust_agent::security::audit::AuditLog::default(),
+        )),
         startup_trace: Vec::new(),
         active_session_id: "mcp-test-session".into(),
         session_store: None,
@@ -184,11 +251,17 @@ async fn mcp_status_shows_reconnecting_and_inventory_summaries() {
         },
     ));
     runtime.connect("fake").await.expect("connect fake server");
-    runtime.reconnect("fake").await.expect("reconnect fake server");
+    runtime
+        .reconnect("fake")
+        .await
+        .expect("reconnect fake server");
 
     let app_state = test_app_state(runtime.clone());
     let result = McpCommand
-        .execute(&NormalizedInput::from_raw(InteractionSurface::Cli, "/mcp status"), &app_state)
+        .execute(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/mcp status"),
+            &app_state,
+        )
         .await
         .expect("mcp status should render");
     let CommandResult::Message(text) = result else {
@@ -211,10 +284,17 @@ async fn mcp_runtime_marks_unknown_server_as_user_visible_error() {
     let app_state = test_app_state(runtime.clone());
 
     let command_error = McpCommand
-        .execute(&NormalizedInput::from_raw(InteractionSurface::Cli, "/mcp connect missing"), &app_state)
+        .execute(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/mcp connect missing"),
+            &app_state,
+        )
         .await
         .expect_err("unknown server should error");
-    assert!(command_error.to_string().contains("unknown MCP server: missing"));
+    assert!(
+        command_error
+            .to_string()
+            .contains("unknown MCP server: missing")
+    );
 
     let tool = McpTool;
     let tool_error = tool
@@ -227,7 +307,11 @@ async fn mcp_runtime_marks_unknown_server_as_user_visible_error() {
         )
         .await
         .expect_err("unknown server tool request should error");
-    assert!(tool_error.to_string().contains("unknown MCP server: missing"));
+    assert!(
+        tool_error
+            .to_string()
+            .contains("unknown MCP server: missing")
+    );
 }
 
 #[tokio::test]
@@ -241,7 +325,10 @@ async fn mcp_command_and_tool_surface_protocol_errors() {
     let app_state = test_app_state(runtime.clone());
 
     let command_error = McpCommand
-        .execute(&NormalizedInput::from_raw(InteractionSurface::Cli, "/mcp connect fake"), &app_state)
+        .execute(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/mcp connect fake"),
+            &app_state,
+        )
         .await
         .expect_err("malformed header should surface via command");
     assert!(command_error.to_string().contains("Content-Length"));
@@ -261,7 +348,10 @@ async fn mcp_command_and_tool_surface_protocol_errors() {
 
     *client.mode.lock().await = FakeMode::IdMismatch;
     let command_error = McpCommand
-        .execute(&NormalizedInput::from_raw(InteractionSurface::Cli, "/mcp connect fake"), &app_state)
+        .execute(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/mcp connect fake"),
+            &app_state,
+        )
         .await
         .expect_err("id mismatch should surface via command");
     assert!(command_error.to_string().contains("id mismatch"));
@@ -294,47 +384,53 @@ async fn mcp_connect_requires_governance_approval_until_approved() {
     let client = Arc::new(FakeMcpClient::default());
     let mut config = fake_config("fake-server");
     config.governance.review_required = true;
-    let runtime = Arc::new(McpRuntime::new_with_config_and_governance_result_and_observability(
-        client.clone(),
-        McpConfigLoadResult {
-            path: ".claude/mcp_servers.json".into(),
-            source: McpConfigSource::File,
-            configs: vec![config],
-            diagnostics: Vec::new(),
-        },
-        McpGovernanceStateLoadResult {
-            path: ".claude/mcp-governance.json".into(),
-            source: McpGovernanceStateSource::Defaults,
-            states: BTreeMap::new(),
-            diagnostics: Vec::new(),
-        },
-        rust_agent::service::observability::ServiceObservabilityTracker::default(),
-    ));
+    let runtime = Arc::new(
+        McpRuntime::new_with_config_and_governance_result_and_observability(
+            client.clone(),
+            McpConfigLoadResult {
+                path: ".claude/mcp_servers.json".into(),
+                source: McpConfigSource::File,
+                configs: vec![config],
+                diagnostics: Vec::new(),
+            },
+            McpGovernanceStateLoadResult {
+                path: ".claude/mcp-governance.json".into(),
+                source: McpGovernanceStateSource::Defaults,
+                states: BTreeMap::new(),
+                diagnostics: Vec::new(),
+            },
+            rust_agent::service::observability::ServiceObservabilityTracker::default(),
+        ),
+    );
     let app_state = test_app_state(runtime.clone());
 
     let error = McpCommand
-        .execute(&NormalizedInput::from_raw(InteractionSurface::Cli, "/mcp connect fake"), &app_state)
+        .execute(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/mcp connect fake"),
+            &app_state,
+        )
         .await
         .expect_err("approval should be required");
-    assert!(error
-        .to_string()
-        .contains("mcp_governance_review_required"));
+    assert!(error.to_string().contains("mcp_governance_review_required"));
     assert_eq!(*client.connect_calls.lock().await, 0);
 
     let cwd = unique_temp_dir("mcp-governance-approve");
     std::fs::create_dir_all(&cwd).expect("create temp cwd");
     let approve = McpCommand
-        .execute(&NormalizedInput::from_raw(InteractionSurface::Cli, "/mcp approve fake"), &AppState {
-            session: Some(rust_agent::history::session::SessionSnapshot {
-                session_id: rust_agent::history::session::SessionId("session-1".into()),
-                surface: InteractionSurface::Cli,
-                session_mode: SessionMode::Headless,
-                cwd: cwd.display().to_string(),
-                last_turn_at: None,
-                prompt_seed: None,
-            }),
-            ..app_state.clone()
-        })
+        .execute(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/mcp approve fake"),
+            &AppState {
+                session: Some(rust_agent::history::session::SessionSnapshot {
+                    session_id: rust_agent::history::session::SessionId("session-1".into()),
+                    surface: InteractionSurface::Cli,
+                    session_mode: SessionMode::Headless,
+                    cwd: cwd.display().to_string(),
+                    last_turn_at: None,
+                    prompt_seed: None,
+                }),
+                ..app_state.clone()
+            },
+        )
         .await
         .expect("approve should succeed");
     let CommandResult::Message(approve_text) = approve else {
@@ -342,7 +438,10 @@ async fn mcp_connect_requires_governance_approval_until_approved() {
     };
     assert!(approve_text.contains("Approved MCP server fake (fake)"));
 
-    runtime.connect("fake").await.expect("approved connect should succeed");
+    runtime
+        .connect("fake")
+        .await
+        .expect("approved connect should succeed");
     assert_eq!(*client.connect_calls.lock().await, 1);
     let servers = runtime.list_servers().await;
     assert_eq!(servers[0].governance.approval_status.as_str(), "approved");
@@ -388,39 +487,46 @@ async fn stale_governance_entry_is_reported_in_status() {
     let mut config = fake_config("fake-server");
     config.governance.review_required = true;
     let old_fingerprint = 7_u64;
-    let runtime = Arc::new(McpRuntime::new_with_config_and_governance_result_and_observability(
-        Arc::new(FakeMcpClient::default()),
-        McpConfigLoadResult {
-            path: ".claude/mcp_servers.json".into(),
-            source: McpConfigSource::File,
-            configs: vec![config],
-            diagnostics: Vec::new(),
-        },
-        McpGovernanceStateLoadResult {
-            path: ".claude/mcp-governance.json".into(),
-            source: McpGovernanceStateSource::File,
-            states: BTreeMap::from([(
-                "fake".into(),
-                McpGovernanceStateEntry {
-                    server_id: "fake".into(),
-                    approved: true,
-                    fingerprint: old_fingerprint,
-                    reason: None,
-                },
-            )]),
-            diagnostics: Vec::new(),
-        },
-        rust_agent::service::observability::ServiceObservabilityTracker::default(),
-    ));
+    let runtime = Arc::new(
+        McpRuntime::new_with_config_and_governance_result_and_observability(
+            Arc::new(FakeMcpClient::default()),
+            McpConfigLoadResult {
+                path: ".claude/mcp_servers.json".into(),
+                source: McpConfigSource::File,
+                configs: vec![config],
+                diagnostics: Vec::new(),
+            },
+            McpGovernanceStateLoadResult {
+                path: ".claude/mcp-governance.json".into(),
+                source: McpGovernanceStateSource::File,
+                states: BTreeMap::from([(
+                    "fake".into(),
+                    McpGovernanceStateEntry {
+                        server_id: "fake".into(),
+                        approved: true,
+                        fingerprint: old_fingerprint,
+                        reason: None,
+                    },
+                )]),
+                diagnostics: Vec::new(),
+            },
+            rust_agent::service::observability::ServiceObservabilityTracker::default(),
+        ),
+    );
     let app_state = test_app_state(runtime.clone());
 
     let result = McpCommand
-        .execute(&NormalizedInput::from_raw(InteractionSurface::Cli, "/mcp status"), &app_state)
+        .execute(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/mcp status"),
+            &app_state,
+        )
         .await
         .expect("status should render");
     let CommandResult::Message(text) = result else {
         panic!("expected status message");
     };
     assert!(text.contains("governance: status=stale"));
-    assert!(text.contains("governance_reasons: transport.stdio_process, governance.review_required"));
+    assert!(
+        text.contains("governance_reasons: transport.stdio_process, governance.review_required")
+    );
 }

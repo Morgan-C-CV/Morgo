@@ -159,8 +159,14 @@ fn approved_plan_reorder_and_task_binding_survive_restore() {
     );
     assert_eq!(synced_tasks[0].subject, "Execute task linkage");
     assert_eq!(synced_tasks[1].subject, "Inspect current state");
-    assert_eq!(synced_tasks[0].status, rust_agent::task::list_types::TaskListStatus::InProgress);
-    assert_eq!(synced_tasks[1].status, rust_agent::task::list_types::TaskListStatus::Pending);
+    assert_eq!(
+        synced_tasks[0].status,
+        rust_agent::task::list_types::TaskListStatus::InProgress
+    );
+    assert_eq!(
+        synced_tasks[1].status,
+        rust_agent::task::list_types::TaskListStatus::Pending
+    );
     assert!(synced_tasks[0].blocked_by.is_empty());
     assert_eq!(synced_tasks[0].blocks, vec![synced_tasks[1].id.clone()]);
     assert_eq!(synced_tasks[1].blocked_by, vec![synced_tasks[0].id.clone()]);

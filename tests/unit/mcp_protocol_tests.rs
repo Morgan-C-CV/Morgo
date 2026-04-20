@@ -152,5 +152,8 @@ while True:
         Some(&json!({"scheme": "bearer"}))
     );
 
-    client.disconnect(&config).await.expect("disconnect sparse mcp");
+    client
+        .disconnect(&config)
+        .await
+        .expect("disconnect sparse mcp");
 }

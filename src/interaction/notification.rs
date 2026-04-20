@@ -158,7 +158,11 @@ impl Notification {
     ) -> Self {
         let tool_name = tool_name.into();
         let message = message.into();
-        let dedupe_key = approval_required_dedupe_key(&tool_name, approval_code.as_deref(), approval_kind.as_deref());
+        let dedupe_key = approval_required_dedupe_key(
+            &tool_name,
+            approval_code.as_deref(),
+            approval_kind.as_deref(),
+        );
         Self {
             session_id: session_id.into(),
             title: format!("Approval required: {tool_name}"),

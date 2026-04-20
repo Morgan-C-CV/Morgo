@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
-use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, RETRY_AFTER};
 use reqwest::StatusCode;
+use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, RETRY_AFTER};
 use serde_json::{Value, json};
 use tokio::time::{sleep, timeout};
 
@@ -337,10 +337,11 @@ impl ModelProviderClient {
                 .text()
                 .await
                 .unwrap_or_else(|_| "<unavailable>".into());
-            return Err(
-                ApiError::http_status(status.as_u16(), normalized_http_error_message(status, &body))
-                    .with_retry_after_ms(retry_after_ms),
-            );
+            return Err(ApiError::http_status(
+                status.as_u16(),
+                normalized_http_error_message(status, &body),
+            )
+            .with_retry_after_ms(retry_after_ms));
         }
         validate_streaming_response_headers(response.headers(), status)?;
 
@@ -353,7 +354,9 @@ impl ModelProviderClient {
         .map_err(classify_response_body_error)?;
 
         if body.trim().is_empty() {
-            return Err(ApiError::empty_body("provider returned empty response body"));
+            return Err(ApiError::empty_body(
+                "provider returned empty response body",
+            ));
         }
 
         parse_stream_response_for_provider(config, &body, &config.model_id)
@@ -536,7 +539,8 @@ fn validate_provider_config(config: &ModelProviderConfig) -> Result<(), ApiError
         }
         "openai-compatible" | "openai_compatible" => {
             if config.protocol == ProviderProtocol::OpenAICompatible
-                && config.compatibility_profile == ProviderCompatibilityProfileKind::OpenAICompatible
+                && config.compatibility_profile
+                    == ProviderCompatibilityProfileKind::OpenAICompatible
             {
                 Ok(())
             } else {
@@ -566,7 +570,9 @@ fn validate_provider_config(config: &ModelProviderConfig) -> Result<(), ApiError
     }
 }
 
-fn adapter_for_config(config: &ModelProviderConfig) -> Result<&'static dyn ProviderAdapter, ApiError> {
+fn adapter_for_config(
+    config: &ModelProviderConfig,
+) -> Result<&'static dyn ProviderAdapter, ApiError> {
     validate_provider_config(config)?;
     match config.protocol {
         ProviderProtocol::Anthropic => Ok(&AnthropicAdapter),
@@ -577,7 +583,10 @@ fn adapter_for_config(config: &ModelProviderConfig) -> Result<&'static dyn Provi
 
 impl ProviderAdapter for AnthropicAdapter {
     fn messages_url(&self, config: &ModelProviderConfig) -> Result<String, ApiError> {
-        Ok(format!("{}/v1/messages", config.base_url.trim_end_matches('/')))
+        Ok(format!(
+            "{}/v1/messages",
+            config.base_url.trim_end_matches('/')
+        ))
     }
 
     fn build_request_payload(
@@ -693,7 +702,9 @@ impl ProviderAdapter for GeminiNativeAdapter {
     }
 }
 
-fn profile_for_provider(config: &ModelProviderConfig) -> Result<ProviderCompatibilityProfile, ApiError> {
+fn profile_for_provider(
+    config: &ModelProviderConfig,
+) -> Result<ProviderCompatibilityProfile, ApiError> {
     match config.protocol {
         ProviderProtocol::Anthropic | ProviderProtocol::OpenAICompatible => {
             Ok(compatibility_profile_for_kind(config.compatibility_profile))
@@ -746,9 +757,7 @@ fn normalize_request_options(
 
     Ok(NormalizedRequestOptions {
         max_tokens,
-        temperature: options
-            .temperature
-            .filter(|_| profile.supports_temperature),
+        temperature: options.temperature.filter(|_| profile.supports_temperature),
         top_p: options.top_p.filter(|_| profile.supports_top_p),
         stop_sequences: if profile.supports_stop_sequences {
             options.stop_sequences.clone()
@@ -758,7 +767,9 @@ fn normalize_request_options(
     })
 }
 
-fn normalized_request_stream_flag(profile: &ProviderCompatibilityProfile) -> Result<bool, ApiError> {
+fn normalized_request_stream_flag(
+    profile: &ProviderCompatibilityProfile,
+) -> Result<bool, ApiError> {
     if !profile.supports_streaming {
         return Err(ApiError::capability_unsupported(
             "provider does not support streaming requests",
@@ -910,7 +921,9 @@ pub fn parse_anthropic_sse_response(
     default_model: &str,
 ) -> Result<Vec<StreamEvent>, ApiError> {
     if body.trim().is_empty() {
-        return Err(ApiError::empty_body("provider returned empty response body"));
+        return Err(ApiError::empty_body(
+            "provider returned empty response body",
+        ));
     }
 
     let mut events = Vec::new();
@@ -920,9 +933,7 @@ pub fn parse_anthropic_sse_response(
     let frames = if complete_body {
         normalized.split("\n\n").collect::<Vec<_>>()
     } else {
-        normalized
-            .split_terminator("\n\n")
-            .collect::<Vec<_>>()
+        normalized.split_terminator("\n\n").collect::<Vec<_>>()
     };
 
     for frame in frames.into_iter().filter(|frame| !frame.trim().is_empty()) {
@@ -974,12 +985,14 @@ pub fn parse_anthropic_sse_response(
 }
 
 pub fn parse_openai_compatible_sse_response(
-    provider_id: &str,
+    _provider_id: &str,
     body: &str,
     default_model: &str,
 ) -> Result<Vec<StreamEvent>, ApiError> {
     if body.trim().is_empty() {
-        return Err(ApiError::empty_body("provider returned empty response body"));
+        return Err(ApiError::empty_body(
+            "provider returned empty response body",
+        ));
     }
 
     let normalized = body.replace("\r\n", "\n");
@@ -991,7 +1004,7 @@ pub fn parse_openai_compatible_sse_response(
     };
 
     let mut events = Vec::new();
-    let mut parser = OpenAICompatibleStreamParser::new(provider_id, default_model);
+    let mut parser = OpenAICompatibleStreamParser::new(default_model);
 
     for frame in frames.into_iter().filter(|frame| !frame.trim().is_empty()) {
         let payload = frame
@@ -1008,9 +1021,8 @@ pub fn parse_openai_compatible_sse_response(
             continue;
         }
 
-        let json: Value = serde_json::from_str(&payload).map_err(|error| {
-            parser.protocol_error(format!("invalid SSE JSON payload: {error}"))
-        })?;
+        let json: Value = serde_json::from_str(&payload)
+            .map_err(|error| parser.protocol_error(format!("invalid SSE JSON payload: {error}")))?;
         parser.map_event(&json, &mut events)?;
     }
 
@@ -1026,7 +1038,6 @@ struct PendingOpenAIToolCall {
 }
 
 struct OpenAICompatibleStreamParser<'a> {
-    provider_id: &'a str,
     default_model: &'a str,
     saw_message_start: bool,
     saw_terminal: bool,
@@ -1035,9 +1046,8 @@ struct OpenAICompatibleStreamParser<'a> {
 }
 
 impl<'a> OpenAICompatibleStreamParser<'a> {
-    fn new(provider_id: &'a str, default_model: &'a str) -> Self {
+    fn new(default_model: &'a str) -> Self {
         Self {
-            provider_id,
             default_model,
             saw_message_start: false,
             saw_terminal: false,
@@ -1046,7 +1056,11 @@ impl<'a> OpenAICompatibleStreamParser<'a> {
         }
     }
 
-    fn map_event(&mut self, payload: &Value, output: &mut Vec<StreamEvent>) -> Result<(), ApiError> {
+    fn map_event(
+        &mut self,
+        payload: &Value,
+        output: &mut Vec<StreamEvent>,
+    ) -> Result<(), ApiError> {
         if let Some(usage) = payload.get("usage") {
             let incoming = normalize_usage(usage, self.default_model);
             self.pending_usage = Some(match self.pending_usage.take() {
@@ -1086,9 +1100,7 @@ impl<'a> OpenAICompatibleStreamParser<'a> {
                         .and_then(Value::as_u64)
                         .map(|value| value as usize)
                     else {
-                        return Err(self.tool_use_protocol_error(
-                            "tool_call delta missing index",
-                        ));
+                        return Err(self.tool_use_protocol_error("tool_call delta missing index"));
                     };
                     let pending = self.pending_tool_calls.entry(index).or_default();
                     if let Some(name) = tool_call
@@ -1123,7 +1135,11 @@ impl<'a> OpenAICompatibleStreamParser<'a> {
         Ok(())
     }
 
-    fn finish(&mut self, complete_body: bool, output: &mut Vec<StreamEvent>) -> Result<(), ApiError> {
+    fn finish(
+        &mut self,
+        complete_body: bool,
+        output: &mut Vec<StreamEvent>,
+    ) -> Result<(), ApiError> {
         if let Some(event) = self
             .pending_usage
             .take()
@@ -1281,9 +1297,9 @@ impl<'a> ProviderStreamParser<'a> {
             }
             "content_block_start" => {
                 self.ensure_message_start(output);
-                let block = payload
-                    .get("content_block")
-                    .ok_or_else(|| self.protocol_error("content_block_start missing content_block"))?;
+                let block = payload.get("content_block").ok_or_else(|| {
+                    self.protocol_error("content_block_start missing content_block")
+                })?;
                 match block.get("type").and_then(Value::as_str) {
                     Some("text") => {
                         if let Some(text) = block.get("text").and_then(Value::as_str) {
@@ -1291,10 +1307,10 @@ impl<'a> ProviderStreamParser<'a> {
                         }
                     }
                     Some("tool_use") => {
-                        let tool_name = block
-                            .get("name")
-                            .and_then(Value::as_str)
-                            .ok_or_else(|| self.tool_use_protocol_error("tool_use content block missing name"))?;
+                        let tool_name =
+                            block.get("name").and_then(Value::as_str).ok_or_else(|| {
+                                self.tool_use_protocol_error("tool_use content block missing name")
+                            })?;
                         let mut pending = PendingToolUseBlock {
                             tool_name: Some(tool_name.to_string()),
                             input: normalize_tool_use_input(block)?,
@@ -1344,7 +1360,8 @@ impl<'a> ProviderStreamParser<'a> {
                         .get("delta")
                         .and_then(|delta| delta.get("input_json_delta"))
                     {
-                        pending.input = Some(normalize_json_like_value(input_delta, "tool_use input")?);
+                        pending.input =
+                            Some(normalize_json_like_value(input_delta, "tool_use input")?);
                     }
                     Self::emit_pending_tool_use_if_ready(
                         self.saw_message_start,
@@ -1393,7 +1410,10 @@ impl<'a> ProviderStreamParser<'a> {
                 self.finalize_pending_tool_use(output)?;
                 self.finalize_pending_structured_output(output)?;
                 self.flush_usage(output);
-                let stop_reason = self.pending_stop_reason.take().unwrap_or(StopReason::EndTurn);
+                let stop_reason = self
+                    .pending_stop_reason
+                    .take()
+                    .unwrap_or(StopReason::EndTurn);
                 self.validate_stop_reason(&stop_reason)?;
                 if !output
                     .iter()
@@ -1609,18 +1629,32 @@ fn payload_model(payload: &Value) -> Option<&str> {
 fn payload_usage<'a>(payload: &'a Value) -> Option<&'a Value> {
     payload
         .get("usage")
-        .or_else(|| payload.get("message").and_then(|message| message.get("usage")))
+        .or_else(|| {
+            payload
+                .get("message")
+                .and_then(|message| message.get("usage"))
+        })
         .or_else(|| payload.get("delta").and_then(|delta| delta.get("usage")))
-        .or_else(|| payload.get("message_delta").and_then(|delta| delta.get("usage")))
-        .or_else(|| payload.get("terminal").and_then(|terminal| terminal.get("usage")))
-        .or_else(|| payload.get("response").and_then(|response| response.get("usage")))
+        .or_else(|| {
+            payload
+                .get("message_delta")
+                .and_then(|delta| delta.get("usage"))
+        })
+        .or_else(|| {
+            payload
+                .get("terminal")
+                .and_then(|terminal| terminal.get("usage"))
+        })
+        .or_else(|| {
+            payload
+                .get("response")
+                .and_then(|response| response.get("usage"))
+        })
 }
 
 impl NormalizedUsage {
     fn into_usage_event(self, default_model: &str) -> Option<UsageEvent> {
-        let model = self
-            .model
-            .unwrap_or_else(|| default_model.to_string());
+        let model = self.model.unwrap_or_else(|| default_model.to_string());
         let input_tokens = self.input_tokens.or(self.total_tokens).unwrap_or_default();
         let output_tokens = self.output_tokens.unwrap_or_default();
         let cache_creation_input_tokens = self.cache_creation_input_tokens.unwrap_or_default();
@@ -1772,9 +1806,7 @@ fn map_stop_reason(reason: &str) -> StopReason {
         "end_turn" => StopReason::EndTurn,
         "tool_use" => StopReason::ToolUse,
         "max_tokens" => StopReason::MaxTokens,
-        "error" | "model_error" | "stop_sequence_error" | "pause_turn" => {
-            StopReason::Error
-        }
+        "error" | "model_error" | "stop_sequence_error" | "pause_turn" => StopReason::Error,
         _ => StopReason::Error,
     }
 }
@@ -1799,10 +1831,12 @@ fn classify_stream_error_disposition(
         "model_fallback" | "provider_stream" | "overloaded_error" | "rate_limit_error" => {
             ProviderFailureDisposition::StreamInterrupted
         }
-        "invalid_request_error" | "authentication_error" | "permission_error"
-        | "not_found_error" | "malformed_payload" | "sse_protocol" => {
-            ProviderFailureDisposition::StreamTerminal
-        }
+        "invalid_request_error"
+        | "authentication_error"
+        | "permission_error"
+        | "not_found_error"
+        | "malformed_payload"
+        | "sse_protocol" => ProviderFailureDisposition::StreamTerminal,
         _ => match status_code {
             Some(429) | Some(500..=599) => ProviderFailureDisposition::StreamInterrupted,
             _ => ProviderFailureDisposition::StreamTerminal,
@@ -1813,22 +1847,22 @@ fn classify_stream_error_disposition(
 #[cfg(test)]
 mod tests {
     use super::{
-        ModelProviderConfig, NormalizedUsage, ProviderCompatibilityProfileKind,
-        ProviderProtocol, ProviderTimeout, RequestOptions, RetryDecision,
-        build_messages_url_for_provider, build_request_payload_for_provider,
-        build_request_payload_with_options, classify_retry_policy, classify_stream_error,
-        classify_stream_error_disposition, extract_error_detail, map_stop_reason,
-        merge_usage, normalize_json_like_value, normalize_usage, parse_anthropic_sse_response,
-        map_openai_finish_reason, parse_openai_compatible_sse_response, parse_retry_after_ms,
+        ModelProviderConfig, NormalizedUsage, ProviderCompatibilityProfileKind, ProviderProtocol,
+        ProviderTimeout, RequestOptions, RetryDecision, build_messages_url_for_provider,
+        build_request_payload_for_provider, build_request_payload_with_options,
+        classify_retry_policy, classify_stream_error, classify_stream_error_disposition,
+        extract_error_detail, map_openai_finish_reason, map_stop_reason, merge_usage,
+        normalize_json_like_value, normalize_usage, parse_anthropic_sse_response,
+        parse_openai_compatible_sse_response, parse_retry_after_ms,
         parse_stream_response_for_provider, parse_usage, profile_for_provider,
         validate_streaming_response_headers,
     };
-    use crate::service::api::retry::RetryPolicy;
     use crate::service::api::errors::ApiError;
+    use crate::service::api::retry::RetryPolicy;
     use crate::service::api::streaming::{ProviderFailureDisposition, StopReason, StreamEvent};
-    use serde_json::Value;
-    use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderValue, RETRY_AFTER};
     use reqwest::StatusCode;
+    use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderValue, RETRY_AFTER};
+    use serde_json::Value;
 
     #[test]
     fn stop_reason_mapping_matches_expected_values() {
@@ -1859,12 +1893,20 @@ mod tests {
         let events = parse_anthropic_sse_response("anthropic", body, "default-model")
             .expect("sse should parse");
         assert!(matches!(events[0], StreamEvent::MessageStart));
-        assert!(events.iter().any(|event| matches!(event, StreamEvent::TextDelta(text) if text == "hello ")));
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, StreamEvent::TextDelta(text) if text == "hello "))
+        );
         assert!(events.iter().any(|event| matches!(event, StreamEvent::ToolUse { tool_name, input } if tool_name == "Read" && input == "{\"path\":\"foo\"}")));
-        assert!(events.iter().any(|event| matches!(event, StreamEvent::Usage(usage)
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, StreamEvent::Usage(usage)
             if usage.model == "claude-test"
                 && usage.input_tokens == 12
-                && usage.output_tokens == 7)));
+                && usage.output_tokens == 7))
+        );
         assert!(matches!(
             events.last(),
             Some(StreamEvent::MessageStop {
@@ -1879,8 +1921,7 @@ mod tests {
         assert_eq!(config.timeout, ProviderTimeout::default());
         assert_eq!(config.retry_policy, RetryPolicy::default());
         assert_eq!(
-            build_messages_url_for_provider(&config)
-                .expect("default provider should resolve URL"),
+            build_messages_url_for_provider(&config).expect("default provider should resolve URL"),
             "http://localhost/v1/messages"
         );
     }
@@ -1895,12 +1936,21 @@ mod tests {
             ..ModelProviderConfig::default()
         };
 
-        let payload = build_request_payload_for_provider(&config, &crate::core::message::Message::user("hello"))
-            .expect("request payload should build");
+        let payload = build_request_payload_for_provider(
+            &config,
+            &crate::core::message::Message::user("hello"),
+        )
+        .expect("request payload should build");
 
-        assert_eq!(payload.get("model").and_then(Value::as_str), Some("default-model"));
+        assert_eq!(
+            payload.get("model").and_then(Value::as_str),
+            Some("default-model")
+        );
         assert_eq!(payload.get("stream").and_then(Value::as_bool), Some(true));
-        assert_eq!(payload.get("max_tokens").and_then(Value::as_u64), Some(4096));
+        assert_eq!(
+            payload.get("max_tokens").and_then(Value::as_u64),
+            Some(4096)
+        );
         let content = &payload["messages"][0]["content"];
         assert_eq!(content[0]["type"].as_str(), Some("text"));
         assert_eq!(content[0]["text"].as_str(), Some("hello"));
@@ -1908,24 +1958,29 @@ mod tests {
 
     #[test]
     fn provider_compatibility_profiles_match_expected_capabilities() {
-        let anthropic = profile_for_provider(&ModelProviderConfig::from_legacy_provider_id("anthropic"))
-            .expect("anthropic profile");
+        let anthropic =
+            profile_for_provider(&ModelProviderConfig::from_legacy_provider_id("anthropic"))
+                .expect("anthropic profile");
         assert!(anthropic.supports_tools);
         assert!(anthropic.supports_streaming);
         assert!(anthropic.supports_temperature);
         assert!(anthropic.supports_top_p);
         assert!(anthropic.supports_stop_sequences);
 
-        let text_only = profile_for_provider(&ModelProviderConfig::from_legacy_provider_id("text-only-provider"))
-            .expect("text-only profile");
+        let text_only = profile_for_provider(&ModelProviderConfig::from_legacy_provider_id(
+            "text-only-provider",
+        ))
+        .expect("text-only profile");
         assert!(!text_only.supports_tools);
         assert!(text_only.supports_streaming);
         assert!(!text_only.supports_temperature);
         assert!(!text_only.supports_top_p);
         assert!(!text_only.supports_stop_sequences);
 
-        let batch = profile_for_provider(&ModelProviderConfig::from_legacy_provider_id("batch-provider"))
-            .expect("batch profile");
+        let batch = profile_for_provider(&ModelProviderConfig::from_legacy_provider_id(
+            "batch-provider",
+        ))
+        .expect("batch profile");
         assert!(batch.supports_tools);
         assert!(!batch.supports_streaming);
         assert!(batch.supports_temperature);
@@ -1954,8 +2009,14 @@ mod tests {
         )
         .expect("supported options should build");
 
-        assert_eq!(payload.get("max_tokens").and_then(Value::as_u64), Some(2048));
-        assert_eq!(payload.get("temperature").and_then(Value::as_f64), Some(0.7));
+        assert_eq!(
+            payload.get("max_tokens").and_then(Value::as_u64),
+            Some(2048)
+        );
+        assert_eq!(
+            payload.get("temperature").and_then(Value::as_f64),
+            Some(0.7)
+        );
         assert_eq!(payload.get("top_p").and_then(Value::as_f64), Some(0.9));
         assert_eq!(payload["stop_sequences"][0].as_str(), Some("STOP"));
     }
@@ -1981,7 +2042,10 @@ mod tests {
         )
         .expect("unsupported optional options should be dropped");
 
-        assert_eq!(payload.get("max_tokens").and_then(Value::as_u64), Some(1024));
+        assert_eq!(
+            payload.get("max_tokens").and_then(Value::as_u64),
+            Some(1024)
+        );
         assert!(payload.get("temperature").is_none());
         assert!(payload.get("top_p").is_none());
         assert!(payload.get("stop_sequences").is_none());
@@ -1996,11 +2060,17 @@ mod tests {
             ..ModelProviderConfig::default()
         };
 
-        let error = build_request_payload_for_provider(&config, &crate::core::message::Message::user("hello"))
-            .expect_err("streaming mismatch should fail");
+        let error = build_request_payload_for_provider(
+            &config,
+            &crate::core::message::Message::user("hello"),
+        )
+        .expect_err("streaming mismatch should fail");
 
         assert_eq!(error.kind_label(), "capability_unsupported");
-        assert_eq!(error.disposition, ProviderFailureDisposition::PreStreamTerminal);
+        assert_eq!(
+            error.disposition,
+            ProviderFailureDisposition::PreStreamTerminal
+        );
         assert!(error.message.contains("streaming"));
     }
 
@@ -2024,7 +2094,10 @@ mod tests {
         .expect_err("tool mismatch should fail");
 
         assert_eq!(error.kind_label(), "capability_unsupported");
-        assert_eq!(error.disposition, ProviderFailureDisposition::PreStreamTerminal);
+        assert_eq!(
+            error.disposition,
+            ProviderFailureDisposition::PreStreamTerminal
+        );
         assert!(error.message.contains("tool-use"));
     }
 
@@ -2080,17 +2153,28 @@ mod tests {
             "data: [DONE]\n\n"
         );
 
-        let events = parse_openai_compatible_sse_response("openai-compatible", body, "default-model")
-            .expect("openai-compatible sse should parse");
+        let events =
+            parse_openai_compatible_sse_response("openai-compatible", body, "default-model")
+                .expect("openai-compatible sse should parse");
         assert!(matches!(events[0], StreamEvent::MessageStart));
-        assert!(events.iter().any(|event| matches!(event, StreamEvent::TextDelta(text) if text == "hello openai")));
+        assert!(
+            events.iter().any(
+                |event| matches!(event, StreamEvent::TextDelta(text) if text == "hello openai")
+            )
+        );
         assert!(events.iter().any(|event| matches!(event, StreamEvent::ToolUse { tool_name, input } if tool_name == "Read" && input == "{\"path\":\"foo\"}")));
-        assert!(events.iter().any(|event| matches!(event, StreamEvent::Usage(usage)
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, StreamEvent::Usage(usage)
             if usage.model == "gpt-redacted"
                 && usage.input_tokens == 12
-                && usage.output_tokens == 5)));
+                && usage.output_tokens == 5))
+        );
         assert!(matches!(
-            events.iter().find(|event| matches!(event, StreamEvent::MessageStop { .. })),
+            events
+                .iter()
+                .find(|event| matches!(event, StreamEvent::MessageStop { .. })),
             Some(StreamEvent::MessageStop {
                 stop_reason: StopReason::ToolUse
             })
@@ -2105,12 +2189,17 @@ mod tests {
             "data: [DONE]\n\n"
         );
 
-        let events = parse_openai_compatible_sse_response("openai-compatible", body, "default-model")
-            .expect("usage-only chunk should parse");
-        assert!(events.iter().any(|event| matches!(event, StreamEvent::Usage(usage)
+        let events =
+            parse_openai_compatible_sse_response("openai-compatible", body, "default-model")
+                .expect("usage-only chunk should parse");
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, StreamEvent::Usage(usage)
             if usage.model == "gpt-redacted"
                 && usage.input_tokens == 11
-                && usage.output_tokens == 3)));
+                && usage.output_tokens == 3))
+        );
     }
 
     #[test]
@@ -2118,7 +2207,10 @@ mod tests {
         assert_eq!(map_openai_finish_reason("stop"), StopReason::EndTurn);
         assert_eq!(map_openai_finish_reason("tool_calls"), StopReason::ToolUse);
         assert_eq!(map_openai_finish_reason("length"), StopReason::MaxTokens);
-        assert_eq!(map_openai_finish_reason("content_filter"), StopReason::Error);
+        assert_eq!(
+            map_openai_finish_reason("content_filter"),
+            StopReason::Error
+        );
         assert_eq!(map_openai_finish_reason("other"), StopReason::Error);
     }
 
@@ -2264,9 +2356,11 @@ mod tests {
             error.disposition,
             ProviderFailureDisposition::StreamTerminal
         );
-        assert!(error
-            .message
-            .contains("tool_use block ended without complete input payload"));
+        assert!(
+            error
+                .message
+                .contains("tool_use block ended without complete input payload")
+        );
     }
 
     #[test]
@@ -2327,7 +2421,10 @@ mod tests {
         let error = parse_anthropic_sse_response("anthropic", body, "default-model")
             .expect_err("tool stop without payload should fail");
         assert_eq!(error.kind_label(), "tool_use_protocol");
-        assert_eq!(error.disposition, ProviderFailureDisposition::StreamTerminal);
+        assert_eq!(
+            error.disposition,
+            ProviderFailureDisposition::StreamTerminal
+        );
         assert!(error.message.contains("tool stop without tool payload"));
     }
 
@@ -2368,16 +2465,22 @@ mod tests {
         let error = parse_anthropic_sse_response("anthropic", body, "default-model")
             .expect_err("incomplete structured output should fail");
         assert_eq!(error.kind_label(), "structured_output_invalid");
-        assert_eq!(error.disposition, ProviderFailureDisposition::StreamTerminal);
-        assert!(error
-            .message
-            .contains("structured output block ended without complete JSON payload"));
+        assert_eq!(
+            error.disposition,
+            ProviderFailureDisposition::StreamTerminal
+        );
+        assert!(
+            error
+                .message
+                .contains("structured output block ended without complete JSON payload")
+        );
     }
 
     #[test]
     fn normalize_json_like_value_preserves_plain_strings_for_tool_inputs() {
-        let value = normalize_json_like_value(&Value::String("inspect file".into()), "tool_use input")
-            .expect("plain string should stay string");
+        let value =
+            normalize_json_like_value(&Value::String("inspect file".into()), "tool_use input")
+                .expect("plain string should stay string");
         assert_eq!(value, Value::String("inspect file".into()));
     }
 
@@ -2407,7 +2510,9 @@ mod tests {
         );
         assert!(
             pre_stream_error.message.contains("truncated SSE frame")
-                || pre_stream_error.message.contains("invalid SSE JSON payload")
+                || pre_stream_error
+                    .message
+                    .contains("invalid SSE JSON payload")
         );
 
         let mid_stream_error = parse_anthropic_sse_response(

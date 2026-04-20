@@ -65,8 +65,8 @@ fn existing_or_create_write_is_rejected_in_read_only_directory() {
     std::fs::write(root.join("readonly").join("sample.txt"), "hello").expect("write file");
 
     let policy = policy_for(&root);
-    let decision = policy
-        .check_existing_or_create_path_for_write(&root.join("readonly").join("sample.txt"));
+    let decision =
+        policy.check_existing_or_create_path_for_write(&root.join("readonly").join("sample.txt"));
     assert!(!decision.is_allowed());
     assert!(
         decision
@@ -85,9 +85,8 @@ fn protected_path_is_always_rejected() {
     std::fs::write(root.join("protected").join("secret.txt"), "shh").expect("write file");
 
     let policy = policy_for(&root);
-    let decision = policy.check_existing_or_create_path_for_write(
-        &root.join("protected").join("secret.txt"),
-    );
+    let decision =
+        policy.check_existing_or_create_path_for_write(&root.join("protected").join("secret.txt"));
     assert!(!decision.is_allowed());
     assert!(
         decision
@@ -105,8 +104,8 @@ fn create_target_uses_existing_parent_directory_rule() {
     std::fs::create_dir_all(root.join("allowed")).expect("create allowed dir");
 
     let policy = policy_for(&root);
-    let decision = policy
-        .check_existing_or_create_path_for_write(&root.join("allowed").join("new.txt"));
+    let decision =
+        policy.check_existing_or_create_path_for_write(&root.join("allowed").join("new.txt"));
     assert!(decision.is_allowed());
 
     std::fs::remove_dir_all(root).expect("cleanup");
@@ -137,7 +136,9 @@ fn existing_target_resolves_symlink_final_target() {
 #[tokio::test]
 async fn read_tool_allows_read_only_directory() {
     let root = std::env::temp_dir().join(unique_name("fs-tool-read"));
-    fs::create_dir_all(root.join("readonly")).await.expect("create dir");
+    fs::create_dir_all(root.join("readonly"))
+        .await
+        .expect("create dir");
     let file = root.join("readonly").join("sample.txt");
     fs::write(&file, "hello policy").await.expect("write file");
     let permissions = ToolPermissionContext::new(PermissionMode::Default)
@@ -161,7 +162,9 @@ async fn read_tool_allows_read_only_directory() {
 #[tokio::test]
 async fn write_tool_rejects_read_only_directory() {
     let root = std::env::temp_dir().join(unique_name("fs-tool-write-readonly"));
-    fs::create_dir_all(root.join("readonly")).await.expect("create dir");
+    fs::create_dir_all(root.join("readonly"))
+        .await
+        .expect("create dir");
     let file = root.join("readonly").join("sample.txt");
     fs::write(&file, "hello policy").await.expect("write file");
     let permissions = ToolPermissionContext::new(PermissionMode::Default)
@@ -189,7 +192,9 @@ async fn write_tool_rejects_read_only_directory() {
 #[tokio::test]
 async fn edit_tool_rejects_protected_path() {
     let root = std::env::temp_dir().join(unique_name("fs-tool-edit-protected"));
-    fs::create_dir_all(root.join("protected")).await.expect("create dir");
+    fs::create_dir_all(root.join("protected"))
+        .await
+        .expect("create dir");
     let file = root.join("protected").join("sample.txt");
     fs::write(&file, "before").await.expect("write file");
     let permissions = ToolPermissionContext::new(PermissionMode::Default)
@@ -218,7 +223,9 @@ async fn edit_tool_rejects_protected_path() {
 #[tokio::test]
 async fn write_tool_uses_parent_rule_for_new_file() {
     let root = std::env::temp_dir().join(unique_name("fs-tool-write-create"));
-    fs::create_dir_all(root.join("allowed")).await.expect("create dir");
+    fs::create_dir_all(root.join("allowed"))
+        .await
+        .expect("create dir");
     let file = root.join("allowed").join("new.txt");
     let permissions = ToolPermissionContext::new(PermissionMode::Default)
         .with_filesystem_policy(std::sync::Arc::new(policy_for(&root)));
@@ -238,15 +245,22 @@ async fn write_tool_uses_parent_rule_for_new_file() {
         .await
         .expect("write should succeed");
 
-    assert_eq!(result, ToolResult::Text(format!("wrote {}", file.display())));
+    assert_eq!(
+        result,
+        ToolResult::Text(format!("wrote {}", file.display()))
+    );
     fs::remove_dir_all(root).await.expect("cleanup");
 }
 
 #[tokio::test]
 async fn glob_tool_rejects_policy_external_matches() {
     let root = std::env::temp_dir().join(unique_name("fs-tool-glob"));
-    fs::create_dir_all(root.join("allowed")).await.expect("create allowed");
-    fs::create_dir_all(root.join("outside")).await.expect("create outside");
+    fs::create_dir_all(root.join("allowed"))
+        .await
+        .expect("create allowed");
+    fs::create_dir_all(root.join("outside"))
+        .await
+        .expect("create outside");
     fs::write(root.join("allowed").join("ok.rs"), "fn ok() {}")
         .await
         .expect("write ok");
@@ -255,14 +269,16 @@ async fn glob_tool_rejects_policy_external_matches() {
         .expect("write bad");
 
     let dir_for_call = root.clone();
-    let policy = std::sync::Arc::new(FilesystemPolicy::from_config(FilesystemPolicyConfig {
-        protected_paths: vec![],
-        rules: vec![FilesystemPolicyRule {
-            path: root.join("allowed").display().to_string(),
-            level: FilesystemPermissionLevel::Allow,
-        }],
-    })
-    .expect("policy should build"));
+    let policy = std::sync::Arc::new(
+        FilesystemPolicy::from_config(FilesystemPolicyConfig {
+            protected_paths: vec![],
+            rules: vec![FilesystemPolicyRule {
+                path: root.join("allowed").display().to_string(),
+                level: FilesystemPermissionLevel::Allow,
+            }],
+        })
+        .expect("policy should build"),
+    );
 
     let error = tokio::task::spawn_blocking(move || {
         let _guard = cwd_lock().lock().expect("cwd lock poisoned");
@@ -297,8 +313,12 @@ async fn glob_tool_rejects_policy_external_matches() {
 #[tokio::test]
 async fn grep_tool_rejects_policy_external_matches() {
     let root = std::env::temp_dir().join(unique_name("fs-tool-grep"));
-    fs::create_dir_all(root.join("allowed")).await.expect("create allowed");
-    fs::create_dir_all(root.join("outside")).await.expect("create outside");
+    fs::create_dir_all(root.join("allowed"))
+        .await
+        .expect("create allowed");
+    fs::create_dir_all(root.join("outside"))
+        .await
+        .expect("create outside");
     fs::write(root.join("allowed").join("ok.txt"), "needle here")
         .await
         .expect("write ok");
@@ -307,14 +327,16 @@ async fn grep_tool_rejects_policy_external_matches() {
         .expect("write bad");
 
     let dir_for_call = root.clone();
-    let policy = std::sync::Arc::new(FilesystemPolicy::from_config(FilesystemPolicyConfig {
-        protected_paths: vec![],
-        rules: vec![FilesystemPolicyRule {
-            path: root.join("allowed").display().to_string(),
-            level: FilesystemPermissionLevel::Allow,
-        }],
-    })
-    .expect("policy should build"));
+    let policy = std::sync::Arc::new(
+        FilesystemPolicy::from_config(FilesystemPolicyConfig {
+            protected_paths: vec![],
+            rules: vec![FilesystemPolicyRule {
+                path: root.join("allowed").display().to_string(),
+                level: FilesystemPermissionLevel::Allow,
+            }],
+        })
+        .expect("policy should build"),
+    );
 
     let error = tokio::task::spawn_blocking(move || {
         let _guard = cwd_lock().lock().expect("cwd lock poisoned");

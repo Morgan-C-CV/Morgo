@@ -56,11 +56,7 @@ impl Default for McpRuntime {
 
 impl McpRuntime {
     pub fn new(client: Arc<dyn McpClient>, configs: Vec<McpServerConfig>) -> Self {
-        Self::new_with_observability(
-            client,
-            configs,
-            ServiceObservabilityTracker::default(),
-        )
+        Self::new_with_observability(client, configs, ServiceObservabilityTracker::default())
     }
 
     pub fn new_with_observability(
@@ -848,8 +844,8 @@ mod tests {
     use super::{McpRuntime, fingerprint_config, replace_runtime_server_config};
     use crate::service::mcp::client::{McpClient, MockMcpClient};
     use crate::service::mcp::types::{
-        McpAction, McpConnectInfo, McpFailureCode, McpOperationKind, McpRequest,
-        McpResourceInfo, McpServerConfig, McpToolInfo, McpTransportKind,
+        McpAction, McpConnectInfo, McpFailureCode, McpOperationKind, McpRequest, McpResourceInfo,
+        McpServerConfig, McpToolInfo, McpTransportKind,
     };
     use async_trait::async_trait;
     use serde_json::Value;

@@ -685,7 +685,11 @@ async fn runtime_plugin_rebuild_retains_previous_snapshot_on_apply_failure() {
         .expect("plugin rebuild should produce retained report");
     assert_eq!(report.outcome.as_str(), "retained_previous_snapshot");
     assert_eq!(report.generation, 0);
-    assert!(report.message.contains("retained runtime plugin snapshot generation 0"));
+    assert!(
+        report
+            .message
+            .contains("retained runtime plugin snapshot generation 0")
+    );
     assert!(report.message.contains("demo-plugin"));
     assert!(
         report
@@ -695,8 +699,16 @@ async fn runtime_plugin_rebuild_retains_previous_snapshot_on_apply_failure() {
     );
 
     let retained_snapshot = runtime_plugin_state.snapshot().await;
-    assert_eq!(retained_snapshot.plugin_load_result.plugins[0].version.as_deref(), Some("0.1.0"));
-    assert_eq!(retained_snapshot.plugin_load_result.active_command_count(), 1);
+    assert_eq!(
+        retained_snapshot.plugin_load_result.plugins[0]
+            .version
+            .as_deref(),
+        Some("0.1.0")
+    );
+    assert_eq!(
+        retained_snapshot.plugin_load_result.active_command_count(),
+        1
+    );
     assert_eq!(retained_snapshot.plugin_load_result.active_tool_count(), 1);
     assert_eq!(runtime_plugin_state.generation().await, 0);
     assert_eq!(
@@ -719,8 +731,13 @@ async fn runtime_plugin_rebuild_retains_previous_snapshot_on_apply_failure() {
     let CommandResult::Message(status_text) = status_result else {
         panic!("expected status message");
     };
-    assert!(status_text.contains("- runtime_apply: outcome=retained_previous_snapshot, generation=0"));
-    assert!(status_text.contains("- runtime_apply_summary: retained runtime plugin snapshot generation 0"));
+    assert!(
+        status_text.contains("- runtime_apply: outcome=retained_previous_snapshot, generation=0")
+    );
+    assert!(
+        status_text
+            .contains("- runtime_apply_summary: retained runtime plugin snapshot generation 0")
+    );
     assert!(status_text.contains("demo-plugin v0.1.0 — state=enabled, applied=applied"));
     assert!(!status_text.contains("broken-plugin-cmd"));
 
@@ -739,7 +756,8 @@ async fn runtime_plugin_rebuild_retains_previous_snapshot_on_apply_failure() {
     assert!(show_text.contains("  - generation: 0"));
     assert!(show_text.contains("  - summary: retained runtime plugin snapshot generation 0"));
 
-    let mut next_turn_app_state = test_app_state(None, Some(Arc::new(TaskManager::default())), None, None);
+    let mut next_turn_app_state =
+        test_app_state(None, Some(Arc::new(TaskManager::default())), None, None);
     hydrate_app_state_from_snapshot(&mut next_turn_app_state, &retained_snapshot);
     assert_eq!(
         next_turn_app_state

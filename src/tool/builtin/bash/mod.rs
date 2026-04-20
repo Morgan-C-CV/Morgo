@@ -105,11 +105,8 @@ impl Tool for BashTool {
 
         let cwd = resolve_cwd(permissions).unwrap_or_else(|_| PathBuf::from("."));
         let filesystem_policy = permissions.filesystem_policy();
-        let policy = evaluate_bash_policy_with_context(
-            &input.command,
-            &cwd,
-            filesystem_policy.as_deref(),
-        );
+        let policy =
+            evaluate_bash_policy_with_context(&input.command, &cwd, filesystem_policy.as_deref());
         let variants = normalized_command_variants(&input.command);
 
         if permissions
@@ -181,11 +178,7 @@ impl Tool for BashTool {
                 };
             }
             ClassifierDecision::Ask { code, warning } => {
-                return bash_ask(
-                    code,
-                    &warning,
-                    vec![format!("classifier.{code}")],
-                );
+                return bash_ask(code, &warning, vec![format!("classifier.{code}")]);
             }
             ClassifierDecision::Allow => {}
         }

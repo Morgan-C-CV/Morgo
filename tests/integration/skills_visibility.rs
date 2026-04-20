@@ -33,7 +33,10 @@ fn skill_visibility_changes_with_cwd_and_cache_invalidation() {
     let registry = SkillRegistry::new(result.skills.clone());
     assert_eq!(registry.list_user_invocable(&project_a).len(), 1);
     assert!(registry.list_user_invocable(&project_b).is_empty());
-    assert_eq!(result.skills[0].workflow_execution, SkillWorkflowExecution::Agent);
+    assert_eq!(
+        result.skills[0].workflow_execution,
+        SkillWorkflowExecution::Agent
+    );
 
     let mut cache = SkillLoaderCache::default();
     let (first, reloaded_first) = cache
@@ -55,7 +58,10 @@ fn skill_visibility_changes_with_cwd_and_cache_invalidation() {
     assert!(reloaded_third);
     assert_ne!(first.fingerprint, second.fingerprint);
     assert_eq!(second.skills[0].description, "contextual skill updated");
-    assert_eq!(second.skills[0].workflow_execution, SkillWorkflowExecution::Agent);
+    assert_eq!(
+        second.skills[0].workflow_execution,
+        SkillWorkflowExecution::Agent
+    );
 
     fs::remove_dir_all(root).expect("cleanup skill visibility root");
 }

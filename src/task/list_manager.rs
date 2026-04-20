@@ -171,7 +171,11 @@ impl TaskListManager {
                     .get(step.id.as_str())
                     .copied()
                     .unwrap_or(step.status);
-                let next_status = task_list_status_for_effective_step(step.id.as_str(), effective_status, active_step_id);
+                let next_status = task_list_status_for_effective_step(
+                    step.id.as_str(),
+                    effective_status,
+                    active_step_id,
+                );
                 if let Some(existing) = store
                     .tasks
                     .iter_mut()

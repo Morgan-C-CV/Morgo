@@ -398,7 +398,12 @@ pub fn update_plan_step(
         anyhow::bail!("No plan manager is available in this session.");
     };
     let updated = plan_manager.update_step(step_id, title, details, status)?;
-    sync_plan_execution_contract(permissions, &updated, "plan_step_updated", format!("updated {step_id}"))?;
+    sync_plan_execution_contract(
+        permissions,
+        &updated,
+        "plan_step_updated",
+        format!("updated {step_id}"),
+    )?;
     Ok(format!("Updated plan step {step_id}"))
 }
 
@@ -410,7 +415,12 @@ pub fn complete_plan_step(
         anyhow::bail!("No plan manager is available in this session.");
     };
     let updated = plan_manager.mark_step_status(step_id, PlanStepStatus::Completed)?;
-    sync_plan_execution_contract(permissions, &updated, "plan_step_completed", format!("completed {step_id}"))?;
+    sync_plan_execution_contract(
+        permissions,
+        &updated,
+        "plan_step_completed",
+        format!("completed {step_id}"),
+    )?;
     Ok(format!("Completed plan step {step_id}"))
 }
 

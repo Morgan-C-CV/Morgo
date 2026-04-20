@@ -3,7 +3,9 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rust_agent::bootstrap::{BootstrapCli, BootstrapState, InteractionSurface, RuntimeBootstrap, SessionMode};
+use rust_agent::bootstrap::{
+    BootstrapCli, BootstrapState, InteractionSurface, RuntimeBootstrap, SessionMode,
+};
 use rust_agent::plan::manager::PlanManager;
 use rust_agent::state::permission_context::ToolPermissionContext;
 use rust_agent::task::list_manager::TaskListManager;
@@ -89,15 +91,14 @@ async fn bootstrap_env_policy_is_attached_and_enforced_by_file_tools() {
         Arc::new(PlanManager::default()),
     );
 
-    let permissions: ToolPermissionContext = ToolPermissionContext::new(
-        rust_agent::state::permission_context::PermissionMode::Default,
-    )
-    .with_filesystem_policy(
-        bundle
-            .filesystem_policy
-            .clone()
-            .expect("filesystem policy should load from HOME default path"),
-    );
+    let permissions: ToolPermissionContext =
+        ToolPermissionContext::new(rust_agent::state::permission_context::PermissionMode::Default)
+            .with_filesystem_policy(
+                bundle
+                    .filesystem_policy
+                    .clone()
+                    .expect("filesystem policy should load from HOME default path"),
+            );
 
     let read_result = FileReadTool
         .invoke(

@@ -71,9 +71,15 @@ impl Tool for GlobTool {
         let mut matches = Vec::new();
         collect_matches(&root, &root, pattern.trim(), &mut matches)?;
         if let Some(policy) = permissions.filesystem_policy() {
-            let absolute_matches = matches.iter().map(|matched| root.join(matched)).collect::<Vec<_>>();
+            let absolute_matches = matches
+                .iter()
+                .map(|matched| root.join(matched))
+                .collect::<Vec<_>>();
             policy
-                .check_discovered_paths_for_read(&absolute_matches, crate::security::filesystem_policy::FilesystemAccessKind::Search)
+                .check_discovered_paths_for_read(
+                    &absolute_matches,
+                    crate::security::filesystem_policy::FilesystemAccessKind::Search,
+                )
                 .into_result()?;
         }
         matches.sort();

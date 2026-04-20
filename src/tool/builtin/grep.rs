@@ -70,10 +70,19 @@ impl Tool for GrepTool {
         let query = parse_pattern(call)?;
         let mut matches = Vec::new();
         let mut searched_paths = Vec::new();
-        collect_matches(&root, &root, query.trim(), &mut searched_paths, &mut matches)?;
+        collect_matches(
+            &root,
+            &root,
+            query.trim(),
+            &mut searched_paths,
+            &mut matches,
+        )?;
         if let Some(policy) = permissions.filesystem_policy() {
             policy
-                .check_discovered_paths_for_read(&searched_paths, crate::security::filesystem_policy::FilesystemAccessKind::Search)
+                .check_discovered_paths_for_read(
+                    &searched_paths,
+                    crate::security::filesystem_policy::FilesystemAccessKind::Search,
+                )
                 .into_result()?;
         }
         matches.sort();

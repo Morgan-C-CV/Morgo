@@ -8,16 +8,18 @@ mod context_prompt_tests;
 mod coordinator_tests;
 #[path = "unit/cost_tests.rs"]
 mod cost_tests;
-#[path = "unit/mcp_protocol_tests.rs"]
-mod mcp_protocol_tests;
-#[path = "unit/mcp_runtime_surface_tests.rs"]
-mod mcp_runtime_surface_tests;
+#[path = "unit/filesystem_policy_tests.rs"]
+mod filesystem_policy_tests;
 #[path = "unit/hook_config_tests.rs"]
 mod hook_config_tests;
 #[path = "unit/hook_loop3_tests.rs"]
 mod hook_loop3_tests;
 #[path = "unit/hook_tests.rs"]
 mod hook_tests;
+#[path = "unit/mcp_protocol_tests.rs"]
+mod mcp_protocol_tests;
+#[path = "unit/mcp_runtime_surface_tests.rs"]
+mod mcp_runtime_surface_tests;
 #[path = "unit/notification_tests.rs"]
 mod notification_tests;
 #[path = "unit/plan_manager_tests.rs"]
@@ -28,8 +30,6 @@ mod query_loop_tests;
 mod router_tests;
 #[path = "unit/security_loop3_tests.rs"]
 mod security_loop3_tests;
-#[path = "unit/filesystem_policy_tests.rs"]
-mod filesystem_policy_tests;
 #[path = "unit/security_tests.rs"]
 mod security_tests;
 #[path = "unit/skill_prompt_tests.rs"]

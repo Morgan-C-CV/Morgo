@@ -1458,12 +1458,7 @@ fn continue_after_stream_error(
                 state: state.clone(),
                 events: engine_events,
                 decision: TurnDecision::ContinueWith(
-                    Message::user(
-                        recovery
-                            .plan
-                            .retry_prompt
-                            .expect("reactive compact prompt"),
-                    ),
+                    Message::user(recovery.plan.retry_prompt.expect("reactive compact prompt")),
                     Continue::ReactiveCompactRetry,
                 ),
             }
@@ -1472,12 +1467,7 @@ fn continue_after_stream_error(
             state: state.clone(),
             events: engine_events,
             decision: TurnDecision::ContinueWith(
-                Message::user(
-                    recovery
-                        .plan
-                        .retry_prompt
-                        .expect("collapse drain prompt"),
-                ),
+                Message::user(recovery.plan.retry_prompt.expect("collapse drain prompt")),
                 Continue::CollapseDrainRetry,
             ),
         },
@@ -1499,7 +1489,10 @@ fn continue_after_stream_error(
 }
 
 fn should_attempt_stream_recovery(error: &StreamError) -> bool {
-    matches!(error.disposition, ProviderFailureDisposition::StreamInterrupted)
+    matches!(
+        error.disposition,
+        ProviderFailureDisposition::StreamInterrupted
+    )
 }
 
 fn should_return_terminal_after_recovery_exhausted(
@@ -1509,11 +1502,7 @@ fn should_return_terminal_after_recovery_exhausted(
     matches!(transition, Some(Continue::CollapseDrainRetry))
         && matches!(
             error.kind.as_str(),
-            "timeout"
-                | "connection_reset"
-                | "bad_content_type"
-                | "empty_body"
-                | "sse_protocol"
+            "timeout" | "connection_reset" | "bad_content_type" | "empty_body" | "sse_protocol"
         )
 }
 
@@ -1597,9 +1586,10 @@ fn classify_stream_failure_code(
     match kind {
         "model_fallback" | "model_fallback_failed" => ServiceFailureCode::ApiStreamModelFallback,
         "overloaded_error" => ServiceFailureCode::ApiStreamOverloaded,
-        "sse_protocol" | "tool_use_protocol" | "structured_output_invalid" | "stream_stop_error" => {
-            ServiceFailureCode::ApiStreamProtocol
-        }
+        "sse_protocol"
+        | "tool_use_protocol"
+        | "structured_output_invalid"
+        | "stream_stop_error" => ServiceFailureCode::ApiStreamProtocol,
         _ if disposition.is_stream_interrupted() => ServiceFailureCode::ApiStreamInterrupted,
         _ => ServiceFailureCode::ApiStreamTerminal,
     }

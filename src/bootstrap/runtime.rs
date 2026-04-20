@@ -477,12 +477,14 @@ impl RuntimeBootstrap {
         let service_observability_tracker = ServiceObservabilityTracker::default();
         let mcp_config_result = load_server_configs_with_diagnostics(&state.current_cwd);
         let mcp_governance_result = load_mcp_governance_state_with_diagnostics(&state.current_cwd);
-        let mcp_runtime = Arc::new(McpRuntime::new_with_config_and_governance_result_and_observability(
-            Arc::new(crate::service::mcp::client::RoutingMcpClient::default()),
-            mcp_config_result,
-            mcp_governance_result,
-            service_observability_tracker.clone(),
-        ));
+        let mcp_runtime = Arc::new(
+            McpRuntime::new_with_config_and_governance_result_and_observability(
+                Arc::new(crate::service::mcp::client::RoutingMcpClient::default()),
+                mcp_config_result,
+                mcp_governance_result,
+                service_observability_tracker.clone(),
+            ),
+        );
         let tool_inventory = self.build_tool_registry();
         let (tool_inventory, plugin_tool_diagnostics) =
             augment_tool_registry_with_plugins(tool_inventory, plugin_load_result.as_ref());
@@ -522,25 +524,29 @@ impl RuntimeBootstrap {
         let runtime_tool_registry = Arc::new(RwLock::new(coordinator_tools.clone()));
         let notification_dispatcher = NotificationDispatcher::new(self.build_telegram_gateway())
             .with_hook_registry(hook_registry.clone());
-        let filesystem_policy = self.load_filesystem_policy().unwrap_or_else(|error| {
-            panic!("failed to load filesystem policy during bootstrap: {error}")
-        }).map(Arc::new);
-        let mut permission_context = ToolAssemblyContext::coordinator(state.surface, state.session_mode)
-            .permission_context(if self.cli.init_only {
-                PermissionMode::Plan
-            } else {
-                PermissionMode::Default
+        let filesystem_policy = self
+            .load_filesystem_policy()
+            .unwrap_or_else(|error| {
+                panic!("failed to load filesystem policy during bootstrap: {error}")
             })
-            .with_task_manager(task_manager)
-            .with_task_list_manager(task_list_manager)
-            .with_plan_manager(plan_manager)
-            .with_skill_registry(skill_registry.clone())
-            .with_mcp_runtime(mcp_runtime.clone())
-            .with_active_session_id(active_session_id)
-            .with_active_surface(state.surface)
-            .with_notification_dispatcher(notification_dispatcher.clone())
-            .with_inherited_tool_registry(coordinator_tools.clone())
-            .with_inherited_hook_registry(hook_registry.clone());
+            .map(Arc::new);
+        let mut permission_context =
+            ToolAssemblyContext::coordinator(state.surface, state.session_mode)
+                .permission_context(if self.cli.init_only {
+                    PermissionMode::Plan
+                } else {
+                    PermissionMode::Default
+                })
+                .with_task_manager(task_manager)
+                .with_task_list_manager(task_list_manager)
+                .with_plan_manager(plan_manager)
+                .with_skill_registry(skill_registry.clone())
+                .with_mcp_runtime(mcp_runtime.clone())
+                .with_active_session_id(active_session_id)
+                .with_active_surface(state.surface)
+                .with_notification_dispatcher(notification_dispatcher.clone())
+                .with_inherited_tool_registry(coordinator_tools.clone())
+                .with_inherited_hook_registry(hook_registry.clone());
         if let Some(policy) = filesystem_policy.clone() {
             permission_context = permission_context.with_filesystem_policy(policy);
         }

@@ -44,7 +44,10 @@ Skill body
     );
     assert_eq!(frontmatter.allowed_tools, vec!["Read", "Edit"]);
     assert_eq!(frontmatter.aliases, vec!["tskill", "test-s"]);
-    assert_eq!(frontmatter.workflow_execution, SkillWorkflowExecution::Agent);
+    assert_eq!(
+        frontmatter.workflow_execution,
+        SkillWorkflowExecution::Agent
+    );
     assert_eq!(frontmatter.exclude_paths, vec!["*/vendor/*"]);
     assert_eq!(
         frontmatter.requires_files,
@@ -141,7 +144,10 @@ fn skill_loader_cache_reloads_only_after_fingerprint_changes() {
     let mut cache = SkillLoaderCache::default();
     let (first, reloaded_first) = cache.load_or_reload(&root).expect("first cache load");
     assert!(reloaded_first);
-    assert_eq!(first.skills[0].workflow_execution, SkillWorkflowExecution::PromptOnly);
+    assert_eq!(
+        first.skills[0].workflow_execution,
+        SkillWorkflowExecution::PromptOnly
+    );
     let (second, reloaded_second) = cache.load_or_reload(&root).expect("second cache load");
     assert!(!reloaded_second);
     assert_eq!(first.fingerprint, second.fingerprint);
@@ -154,14 +160,20 @@ fn skill_loader_cache_reloads_only_after_fingerprint_changes() {
     let (third, reloaded_third) = cache.load_or_reload(&root).expect("third cache load");
     assert!(reloaded_third);
     assert_ne!(second.fingerprint, third.fingerprint);
-    assert_eq!(third.skills[0].workflow_execution, SkillWorkflowExecution::Agent);
+    assert_eq!(
+        third.skills[0].workflow_execution,
+        SkillWorkflowExecution::Agent
+    );
 
     cache.invalidate();
     let (fourth, reloaded_after_invalidate) = cache
         .load_or_reload(&root)
         .expect("reload after invalidate");
     assert!(reloaded_after_invalidate);
-    assert_eq!(fourth.skills[0].workflow_execution, SkillWorkflowExecution::Agent);
+    assert_eq!(
+        fourth.skills[0].workflow_execution,
+        SkillWorkflowExecution::Agent
+    );
 
     fs::remove_dir_all(root).expect("cleanup cache root");
 }

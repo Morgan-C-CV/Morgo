@@ -118,7 +118,9 @@ impl McpClient for MockMcpClient {
                 server_name: Some(config.name.clone()),
                 server_version: Some("mock".to_string()),
                 protocol_version: Some("mock".to_string()),
-                capabilities: McpCapabilities::from_initialize_result(Some(&json!({"tools": {}, "resources": {}}))),
+                capabilities: McpCapabilities::from_initialize_result(Some(
+                    &json!({"tools": {}, "resources": {}}),
+                )),
             },
         })
     }

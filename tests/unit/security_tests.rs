@@ -54,7 +54,11 @@ fn path_assessment_reports_unsafe_and_absolute_tokens() {
     assert!(findings.iter().any(|item| item == "unsafe:../secret"));
     assert!(findings.iter().any(|item| item == "path.parent_traversal"));
     assert!(findings.iter().any(|item| item == "unsafe:/tmp/file"));
-    assert!(findings.iter().any(|item| item == "path.absolute_outside_workspace"));
+    assert!(
+        findings
+            .iter()
+            .any(|item| item == "path.absolute_outside_workspace")
+    );
 }
 
 #[test]

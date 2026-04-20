@@ -200,7 +200,9 @@ impl McpCapabilities {
                 "prompts" => capabilities.prompts = normalized,
                 "experimental" => capabilities.experimental = normalized,
                 other => {
-                    capabilities.extensions.insert(other.to_string(), value.clone());
+                    capabilities
+                        .extensions
+                        .insert(other.to_string(), value.clone());
                 }
             }
         }
@@ -238,7 +240,12 @@ impl std::fmt::Display for McpCapabilities {
         push_capability_label(&mut parts, "prompts", self.prompts.as_ref());
         push_capability_label(&mut parts, "experimental", self.experimental.as_ref());
         if !self.extensions.is_empty() {
-            let names = self.extensions.keys().cloned().collect::<Vec<_>>().join(",");
+            let names = self
+                .extensions
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(",");
             parts.push(format!("extensions={names}"));
         }
         if parts.is_empty() {
@@ -249,11 +256,7 @@ impl std::fmt::Display for McpCapabilities {
     }
 }
 
-fn push_capability_label(
-    parts: &mut Vec<String>,
-    label: &str,
-    entry: Option<&McpCapabilityEntry>,
-) {
+fn push_capability_label(parts: &mut Vec<String>, label: &str, entry: Option<&McpCapabilityEntry>) {
     if let Some(entry) = entry {
         if entry.details.is_empty() {
             parts.push(label.to_string());

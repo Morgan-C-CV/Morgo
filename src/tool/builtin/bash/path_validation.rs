@@ -2,7 +2,7 @@ use std::path::{Component, Path, PathBuf};
 
 use crate::security::filesystem_policy::{FilesystemAccessKind, FilesystemPolicy};
 use crate::tool::builtin::bash::readonly_validation::is_read_only_command;
-use crate::tool::builtin::bash::scanner::{scan_bash_command, ShellOperator};
+use crate::tool::builtin::bash::scanner::{ShellOperator, scan_bash_command};
 use crate::tool::builtin::bash::security::contains_write_redirection;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,8 +25,12 @@ pub fn command_uses_only_safe_paths(command: &str) -> bool {
 }
 
 pub fn command_path_assessment(command: &str) -> Vec<String> {
-    assess_command_paths(command, &std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")), None)
-        .findings
+    assess_command_paths(
+        command,
+        &std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        None,
+    )
+    .findings
 }
 
 pub fn assess_command_paths(
@@ -88,14 +92,16 @@ pub fn assess_command_paths(
 }
 
 fn candidate_path_tokens(words: &[String]) -> Vec<String> {
-    words.iter()
+    words
+        .iter()
         .filter(|token| token.contains('/') || token.starts_with('.') || token.starts_with('~'))
         .cloned()
         .collect()
 }
 
 fn infer_access_kind(command: &str, operators: &[ShellOperator]) -> FilesystemAccessKind {
-    if operators.iter().any(|operator| operator.is_redirection()) || contains_write_redirection(command)
+    if operators.iter().any(|operator| operator.is_redirection())
+        || contains_write_redirection(command)
     {
         return FilesystemAccessKind::Create;
     }

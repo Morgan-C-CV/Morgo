@@ -47,7 +47,10 @@ impl FilesystemAccessKind {
         match level {
             FilesystemPermissionLevel::Allow => true,
             FilesystemPermissionLevel::ReadOnly => {
-                matches!(self, FilesystemAccessKind::Read | FilesystemAccessKind::Search)
+                matches!(
+                    self,
+                    FilesystemAccessKind::Read | FilesystemAccessKind::Search
+                )
             }
             FilesystemPermissionLevel::Deny => false,
         }
@@ -116,8 +119,9 @@ impl FilesystemPolicy {
     }
 
     pub fn from_config(config: FilesystemPolicyConfig) -> anyhow::Result<Self> {
-        let cwd = env::current_dir()
-            .map_err(|error| anyhow::anyhow!("failed to resolve cwd for filesystem policy: {error}"))?;
+        let cwd = env::current_dir().map_err(|error| {
+            anyhow::anyhow!("failed to resolve cwd for filesystem policy: {error}")
+        })?;
         Self::from_config_with_base(config, &cwd)
     }
 
@@ -160,10 +164,11 @@ impl FilesystemPolicy {
     }
 
     pub fn match_rule(&self, target: &Path) -> Option<FilesystemPolicyRule> {
-        self.match_normalized_rule(target).map(|rule| FilesystemPolicyRule {
-            path: rule.path.display().to_string(),
-            level: rule.level,
-        })
+        self.match_normalized_rule(target)
+            .map(|rule| FilesystemPolicyRule {
+                path: rule.path.display().to_string(),
+                level: rule.level,
+            })
     }
 
     pub fn check_existing_path_for_read(&self, path: &Path) -> FilesystemPolicyDecision {
@@ -284,9 +289,9 @@ impl FilesystemPolicy {
     }
 
     fn match_normalized_rule(&self, target: &Path) -> Option<&NormalizedFilesystemPolicyRule> {
-        self.rules.iter().find(|rule| {
-            target == rule.path.as_path() || target.starts_with(&rule.path)
-        })
+        self.rules
+            .iter()
+            .find(|rule| target == rule.path.as_path() || target.starts_with(&rule.path))
     }
 }
 

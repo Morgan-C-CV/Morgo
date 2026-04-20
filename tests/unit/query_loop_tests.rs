@@ -20,9 +20,7 @@ use rust_agent::service::api::retry::RetryPolicy;
 use rust_agent::service::api::streaming::{
     ProviderFailureDisposition, StopReason, StreamError, StreamEvent, UsageEvent,
 };
-use rust_agent::service::compact::reactive_compact::{
-    CompactServiceNextStep, ReactiveCompactor,
-};
+use rust_agent::service::compact::reactive_compact::{CompactServiceNextStep, ReactiveCompactor};
 use rust_agent::service::observability::ServiceObservabilityTracker;
 use rust_agent::state::app_state::WorkerRole;
 use rust_agent::task::types::{TaskOwner, ValidationState, WorkerPhase};
@@ -573,8 +571,14 @@ fn compact_service_returns_typed_auto_compact_contract() {
         .plan_auto_compact(5000, 4096)
         .expect("oversized input should request auto compact");
 
-    assert_eq!(compact.plan.kind, rust_agent::service::compact::CompactPlanKind::AutoCompact);
-    assert_eq!(compact.next_step, CompactServiceNextStep::RetryReactiveCompact);
+    assert_eq!(
+        compact.plan.kind,
+        rust_agent::service::compact::CompactPlanKind::AutoCompact
+    );
+    assert_eq!(
+        compact.next_step,
+        CompactServiceNextStep::RetryReactiveCompact
+    );
     assert_eq!(compact.tracking_key, "auto_compact");
     assert!(!compact.should_record_observability_hit);
     assert_eq!(
@@ -681,7 +685,9 @@ async fn query_loop_treats_pre_stream_terminal_errors_as_immediate_terminal_fail
         status_code: Some(400),
     })]));
 
-    let result = engine.submit_turn(Message::user("trigger pre-stream terminal")).await;
+    let result = engine
+        .submit_turn(Message::user("trigger pre-stream terminal"))
+        .await;
 
     assert_eq!(result.state, QueryLoopState::Failed);
     assert_eq!(
@@ -692,7 +698,11 @@ async fn query_loop_treats_pre_stream_terminal_errors_as_immediate_terminal_fail
         }
     );
     assert_eq!(result.transition, None);
-    assert!(result.messages[0].content.contains("stream error: provider request failed"));
+    assert!(
+        result.messages[0]
+            .content
+            .contains("stream error: provider request failed")
+    );
     assert!(!result.events.iter().any(|event| matches!(
         event,
         EngineEvent::Notice {
@@ -713,7 +723,9 @@ async fn query_loop_treats_pre_stream_retryable_errors_as_terminal_after_retries
         status_code: None,
     })]));
 
-    let result = engine.submit_turn(Message::user("trigger pre-stream retryable")).await;
+    let result = engine
+        .submit_turn(Message::user("trigger pre-stream retryable"))
+        .await;
 
     assert_eq!(result.state, QueryLoopState::Failed);
     assert_eq!(
@@ -757,7 +769,9 @@ async fn query_loop_treats_retry_exhausted_connection_failures_as_terminal_failu
         ToolRegistry::new(),
     ));
 
-    let result = engine.submit_turn(Message::user("trigger exhausted connection failure")).await;
+    let result = engine
+        .submit_turn(Message::user("trigger exhausted connection failure"))
+        .await;
 
     assert_eq!(result.state, QueryLoopState::Failed);
     assert_eq!(
@@ -781,7 +795,9 @@ async fn query_loop_treats_stream_terminal_protocol_errors_as_immediate_terminal
         status_code: None,
     })]));
 
-    let result = engine.submit_turn(Message::user("trigger stream terminal")).await;
+    let result = engine
+        .submit_turn(Message::user("trigger stream terminal"))
+        .await;
 
     assert_eq!(result.state, QueryLoopState::Failed);
     assert_eq!(
@@ -812,7 +828,9 @@ async fn query_loop_maps_tool_use_protocol_errors_to_stream_protocol_code() {
         status_code: None,
     })]));
 
-    let result = engine.submit_turn(Message::user("trigger tool protocol error")).await;
+    let result = engine
+        .submit_turn(Message::user("trigger tool protocol error"))
+        .await;
 
     assert_eq!(result.state, QueryLoopState::Failed);
     assert_eq!(
@@ -835,7 +853,9 @@ async fn query_loop_maps_structured_output_invalid_errors_to_stream_protocol_cod
         status_code: None,
     })]));
 
-    let result = engine.submit_turn(Message::user("trigger structured output error")).await;
+    let result = engine
+        .submit_turn(Message::user("trigger structured output error"))
+        .await;
 
     assert_eq!(result.state, QueryLoopState::Failed);
     assert_eq!(
@@ -856,7 +876,9 @@ async fn query_loop_treats_stop_reason_error_as_terminal_protocol_failure() {
         },
     ]));
 
-    let result = engine.submit_turn(Message::user("trigger stop error")).await;
+    let result = engine
+        .submit_turn(Message::user("trigger stop error"))
+        .await;
 
     assert_eq!(result.state, QueryLoopState::Failed);
     assert_eq!(
@@ -1420,11 +1442,19 @@ fn provider_sse_parsing_maps_standard_events() {
     let events = parse_anthropic_sse_response("anthropic", body, "default-model")
         .expect("provider SSE should parse");
     assert!(matches!(events[0], StreamEvent::MessageStart));
-    assert!(events.iter().any(|event| matches!(event, StreamEvent::TextDelta(text) if text == "hello")));
-    assert!(events.iter().any(|event| matches!(event, StreamEvent::Usage(usage)
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, StreamEvent::TextDelta(text) if text == "hello"))
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, StreamEvent::Usage(usage)
         if usage.model == "claude-test"
             && usage.input_tokens == 11
-            && usage.output_tokens == 4)));
+            && usage.output_tokens == 4))
+    );
     assert!(matches!(
         events.last(),
         Some(StreamEvent::MessageStop {
@@ -2566,8 +2596,14 @@ fn compact_service_returns_typed_stream_error_recovery_contract() {
             message: "first failure",
         }),
     );
-    assert_eq!(reactive.plan.kind, rust_agent::service::compact::CompactPlanKind::ReactiveCompact);
-    assert_eq!(reactive.next_step, CompactServiceNextStep::RetryReactiveCompact);
+    assert_eq!(
+        reactive.plan.kind,
+        rust_agent::service::compact::CompactPlanKind::ReactiveCompact
+    );
+    assert_eq!(
+        reactive.next_step,
+        CompactServiceNextStep::RetryReactiveCompact
+    );
     assert_eq!(reactive.tracking_key, "reactive_compact");
     assert!(reactive.should_record_observability_hit);
     assert_eq!(
@@ -2583,8 +2619,14 @@ fn compact_service_returns_typed_stream_error_recovery_contract() {
             message: "second failure",
         }),
     );
-    assert_eq!(collapse.plan.kind, rust_agent::service::compact::CompactPlanKind::CollapseDrain);
-    assert_eq!(collapse.next_step, CompactServiceNextStep::RetryCollapseDrain);
+    assert_eq!(
+        collapse.plan.kind,
+        rust_agent::service::compact::CompactPlanKind::CollapseDrain
+    );
+    assert_eq!(
+        collapse.next_step,
+        CompactServiceNextStep::RetryCollapseDrain
+    );
     assert_eq!(collapse.tracking_key, "collapse_drain");
     assert!(collapse.should_record_observability_hit);
     assert_eq!(
@@ -2600,7 +2642,10 @@ fn compact_service_returns_typed_stream_error_recovery_contract() {
             message: "third failure",
         }),
     );
-    assert_eq!(exhausted.plan.kind, rust_agent::service::compact::CompactPlanKind::Exhausted);
+    assert_eq!(
+        exhausted.plan.kind,
+        rust_agent::service::compact::CompactPlanKind::Exhausted
+    );
     assert_eq!(exhausted.next_step, CompactServiceNextStep::Exhausted);
     assert_eq!(exhausted.tracking_key, "exhausted");
     assert!(!exhausted.should_record_observability_hit);
@@ -2656,7 +2701,10 @@ async fn query_loop_uses_reactive_compact_before_collapse_drain_on_first_stream_
     )));
 
     let snapshot = context.app_state.service_observability_tracker.snapshot();
-    assert_eq!(snapshot.compact_recovery_hits.get("reactive_compact"), Some(&1));
+    assert_eq!(
+        snapshot.compact_recovery_hits.get("reactive_compact"),
+        Some(&1)
+    );
     assert_eq!(snapshot.compact_recovery_hits.get("collapse_drain"), None);
 }
 
@@ -2717,8 +2765,14 @@ async fn query_loop_uses_collapse_drain_after_reactive_compact_boundary() {
     )));
 
     let snapshot = context.app_state.service_observability_tracker.snapshot();
-    assert_eq!(snapshot.compact_recovery_hits.get("reactive_compact"), Some(&1));
-    assert_eq!(snapshot.compact_recovery_hits.get("collapse_drain"), Some(&1));
+    assert_eq!(
+        snapshot.compact_recovery_hits.get("reactive_compact"),
+        Some(&1)
+    );
+    assert_eq!(
+        snapshot.compact_recovery_hits.get("collapse_drain"),
+        Some(&1)
+    );
 }
 
 #[tokio::test]
@@ -2785,8 +2839,14 @@ async fn query_loop_exhausts_after_collapse_drain_and_surfaces_terminal_error() 
     )));
 
     let snapshot = context.app_state.service_observability_tracker.snapshot();
-    assert_eq!(snapshot.compact_recovery_hits.get("reactive_compact"), Some(&1));
-    assert_eq!(snapshot.compact_recovery_hits.get("collapse_drain"), Some(&1));
+    assert_eq!(
+        snapshot.compact_recovery_hits.get("reactive_compact"),
+        Some(&1)
+    );
+    assert_eq!(
+        snapshot.compact_recovery_hits.get("collapse_drain"),
+        Some(&1)
+    );
 }
 
 #[tokio::test]

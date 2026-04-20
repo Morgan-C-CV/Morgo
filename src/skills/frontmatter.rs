@@ -1,6 +1,4 @@
-use crate::skills::types::{
-    SkillExecutionContext, SkillFrontmatter, SkillWorkflowExecution,
-};
+use crate::skills::types::{SkillExecutionContext, SkillFrontmatter, SkillWorkflowExecution};
 
 pub fn parse_frontmatter(markdown: &str) -> anyhow::Result<(SkillFrontmatter, String)> {
     let Some(rest) = markdown.strip_prefix("---\n") else {

@@ -16,7 +16,7 @@ use rust_agent::service::api::client::{
     ProviderTimeout,
 };
 use rust_agent::service::api::retry::RetryPolicy;
-use rust_agent::service::api::streaming::{ProviderFailureDisposition, StreamEvent, StopReason};
+use rust_agent::service::api::streaming::{ProviderFailureDisposition, StopReason, StreamEvent};
 use rust_agent::service::compact::reactive_compact::ReactiveCompactor;
 use rust_agent::state::app_state::{AppState, RuntimeRole};
 use rust_agent::state::permission_context::{PermissionMode, ToolPermissionContext};
@@ -193,7 +193,10 @@ async fn run_provider_case(case: ProviderCase) -> FixtureResult {
         FixtureRunMode::SubmitTurn => {
             let cost_tracker =
                 CostTracker::with_default_pricing(config.model_id.clone(), config.pricing.clone());
-            let context = test_query_context(ModelProviderClient::from_config(config), cost_tracker.clone());
+            let context = test_query_context(
+                ModelProviderClient::from_config(config),
+                cost_tracker.clone(),
+            );
             let result = QueryEngine::new(context).submit_turn(case.message).await;
             let query_usage_notice_count = result
                 .events
@@ -357,7 +360,10 @@ fn assert_provider_case(result: &FixtureResult, expected: &ExpectedOutcome) {
         );
     }
     if !expected.expected_cost_report_fragments.is_empty() {
-        let report = result.cost_report.as_ref().expect("cost report for submit_turn case");
+        let report = result
+            .cost_report
+            .as_ref()
+            .expect("cost report for submit_turn case");
         for fragment in expected.expected_cost_report_fragments {
             assert!(report.contains(fragment));
         }
@@ -1467,7 +1473,9 @@ async fn provider_fixture_harness_covers_openai_compatible_429_retry_then_succes
                     status_line: "429 Too Many Requests",
                     content_type: Some("application/json"),
                     extra_headers: &[],
-                    body: MockBody::Raw("{\"error\":{\"message\":\"slow down\",\"type\":\"rate_limit\",\"code\":\"too_many_requests\"}}"),
+                    body: MockBody::Raw(
+                        "{\"error\":{\"message\":\"slow down\",\"type\":\"rate_limit\",\"code\":\"too_many_requests\"}}",
+                    ),
                 },
             },
             MockExchange {
@@ -1674,7 +1682,11 @@ async fn production_provider_request_envelope_stays_compatible() {
         .stream_message(&Message::user("hello"))
         .await;
 
-    assert!(events.iter().any(|event| matches!(event, StreamEvent::MessageStart)));
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, StreamEvent::MessageStart))
+    );
     assert!(events.iter().any(|event| matches!(
         event,
         StreamEvent::TextDelta(text) if text == "request captured"
@@ -1687,8 +1699,8 @@ async fn production_provider_request_envelope_stays_compatible() {
 async fn production_provider_surfaces_unsupported_streaming_as_typed_failure() {
     let config = ModelProviderConfig {
         provider_id: "batch-provider".into(),
-            protocol: ProviderProtocol::Anthropic,
-            compatibility_profile: ProviderCompatibilityProfileKind::Batch,
+        protocol: ProviderProtocol::Anthropic,
+        compatibility_profile: ProviderCompatibilityProfileKind::Batch,
         base_url: "http://127.0.0.1:1".into(),
         api_key: Some("test-key".into()),
         model_id: "claude-test".into(),
@@ -2737,17 +2749,26 @@ async fn run_request_capture_response_server(listener: TcpListener) {
     let mut buffer = vec![0_u8; 16 * 1024];
     let read = stream.read(&mut buffer).await.expect("read request");
     let request = String::from_utf8_lossy(&buffer[..read]);
-    let body = request
-        .split("\r\n\r\n")
-        .nth(1)
-        .expect("request body");
+    let body = request.split("\r\n\r\n").nth(1).expect("request body");
     let parsed: serde_json::Value = serde_json::from_str(body).expect("valid request json");
 
-    assert_eq!(parsed.get("model").and_then(|value| value.as_str()), Some("default-model"));
-    assert_eq!(parsed.get("stream").and_then(|value| value.as_bool()), Some(true));
+    assert_eq!(
+        parsed.get("model").and_then(|value| value.as_str()),
+        Some("default-model")
+    );
+    assert_eq!(
+        parsed.get("stream").and_then(|value| value.as_bool()),
+        Some(true)
+    );
     assert_eq!(parsed["messages"][0]["role"].as_str(), Some("user"));
-    assert_eq!(parsed["messages"][0]["content"][0]["type"].as_str(), Some("text"));
-    assert_eq!(parsed["messages"][0]["content"][0]["text"].as_str(), Some("hello"));
+    assert_eq!(
+        parsed["messages"][0]["content"][0]["type"].as_str(),
+        Some("text")
+    );
+    assert_eq!(
+        parsed["messages"][0]["content"][0]["text"].as_str(),
+        Some("hello")
+    );
 
     let sse = concat!(
         "event: message\r\n",
@@ -2768,7 +2789,10 @@ async fn run_request_capture_response_server(listener: TcpListener) {
         .write_all(response.as_bytes())
         .await
         .expect("write request capture response");
-    stream.flush().await.expect("flush request capture response");
+    stream
+        .flush()
+        .await
+        .expect("flush request capture response");
 }
 
 async fn run_partial_tool_use_response_server(listener: TcpListener) {
@@ -3029,7 +3053,10 @@ async fn run_top_level_usage_response_server(listener: TcpListener) {
         .write_all(response.as_bytes())
         .await
         .expect("write top-level usage response");
-    stream.flush().await.expect("flush top-level usage response");
+    stream
+        .flush()
+        .await
+        .expect("flush top-level usage response");
 }
 
 async fn run_delta_usage_response_server(listener: TcpListener) {
@@ -3089,7 +3116,10 @@ async fn run_multi_envelope_usage_response_server(listener: TcpListener) {
         .write_all(response.as_bytes())
         .await
         .expect("write multi envelope usage response");
-    stream.flush().await.expect("flush multi envelope usage response");
+    stream
+        .flush()
+        .await
+        .expect("flush multi envelope usage response");
 }
 
 async fn run_wrong_content_type_response_server(listener: TcpListener) {
@@ -3174,7 +3204,10 @@ async fn run_delayed_timeout_response_server(listener: TcpListener, attempts: us
     }
 }
 
-async fn run_retry_then_success_response_server(listener: TcpListener, retry_after: Option<&'static str>) {
+async fn run_retry_then_success_response_server(
+    listener: TcpListener,
+    retry_after: Option<&'static str>,
+) {
     let mut served_retry = false;
     loop {
         let (mut stream, _peer): (tokio::net::TcpStream, SocketAddr) = listener
@@ -3228,7 +3261,11 @@ async fn run_retry_then_success_response_server(listener: TcpListener, retry_aft
     }
 }
 
-async fn run_retry_then_terminal_http_response_server(listener: TcpListener, status_line: &'static str, body: &'static str) {
+async fn run_retry_then_terminal_http_response_server(
+    listener: TcpListener,
+    status_line: &'static str,
+    body: &'static str,
+) {
     let (mut stream, _peer): (tokio::net::TcpStream, SocketAddr) = listener
         .accept()
         .await
@@ -3290,7 +3327,10 @@ async fn run_retry_then_stream_protocol_failure_server(listener: TcpListener) {
             .write_all(response.as_bytes())
             .await
             .expect("write protocol failure response");
-        stream.flush().await.expect("flush protocol failure response");
+        stream
+            .flush()
+            .await
+            .expect("flush protocol failure response");
         break;
     }
 }

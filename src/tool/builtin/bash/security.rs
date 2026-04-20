@@ -1,4 +1,4 @@
-use crate::tool::builtin::bash::scanner::{scan_bash_command, ShellOperator};
+use crate::tool::builtin::bash::scanner::{ShellOperator, scan_bash_command};
 
 pub fn contains_destructive_pattern(command: &str) -> bool {
     let words = scan_bash_command(command).words;
@@ -16,8 +16,12 @@ pub fn contains_destructive_pattern(command: &str) -> bool {
             return true;
         }
     }
-    words.iter().any(|word| word.starts_with("dd") && word.contains("if="))
-        || words.first().is_some_and(|word| word == "mv" || word == "cp")
+    words
+        .iter()
+        .any(|word| word.starts_with("dd") && word.contains("if="))
+        || words
+            .first()
+            .is_some_and(|word| word == "mv" || word == "cp")
 }
 
 pub fn contains_shell_operator(command: &str) -> bool {
@@ -41,8 +45,10 @@ pub fn shell_operator_reason_codes(command: &str) -> Vec<String> {
 }
 
 pub fn contains_write_redirection(command: &str) -> bool {
-    scan_bash_command(command)
-        .operators
-        .iter()
-        .any(|operator| matches!(operator, ShellOperator::RedirectWrite | ShellOperator::RedirectAppend))
+    scan_bash_command(command).operators.iter().any(|operator| {
+        matches!(
+            operator,
+            ShellOperator::RedirectWrite | ShellOperator::RedirectAppend
+        )
+    })
 }

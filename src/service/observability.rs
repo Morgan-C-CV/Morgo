@@ -170,7 +170,10 @@ impl ServiceObservabilityTracker {
                 retryable,
             } => {
                 state.service_failures_total += 1;
-                *state.by_failure_code.entry(failure_code.clone()).or_default() += 1;
+                *state
+                    .by_failure_code
+                    .entry(failure_code.clone())
+                    .or_default() += 1;
                 if *retryable {
                     state.retryable_count += 1;
                 } else {
@@ -205,7 +208,10 @@ impl ServiceObservabilityTracker {
             }
             ObservabilityEvent::McpServerFailure { server, kind } => {
                 *state.mcp_failures_by_kind.entry(kind.clone()).or_default() += 1;
-                *state.mcp_failures_by_server.entry(server.clone()).or_default() += 1;
+                *state
+                    .mcp_failures_by_server
+                    .entry(server.clone())
+                    .or_default() += 1;
             }
         }
         push_recent_event(&mut state.recent_events, event);
@@ -389,39 +395,50 @@ mod tests {
         let mut sink = CapturedExport::default();
         tracker.export_snapshot_to(&mut sink);
 
-        assert_eq!(sink.scalars[0], ("service_failures_total", snapshot.service_failures_total));
-        assert!(sink.buckets.contains(&(
-            "by_failure_code",
-            "api_provider_http_5xx".into(),
-            *snapshot
-                .by_failure_code
-                .get("api_provider_http_5xx")
-                .expect("runtime failure code should export")
-        )));
-        assert!(sink.buckets.contains(&(
-            "compact_recovery_hits",
-            "reactive_compact".into(),
-            *snapshot
-                .compact_recovery_hits
-                .get("reactive_compact")
-                .expect("compact recovery bucket should export")
-        )));
-        assert!(sink.buckets.contains(&(
-            "api_errors_by_kind",
-            "http_status".into(),
-            *snapshot
-                .api_errors_by_kind
-                .get("http_status")
-                .expect("api error kind should export")
-        )));
-        assert!(sink.buckets.contains(&(
-            "mcp_failures_by_server",
-            "filesystem".into(),
-            *snapshot
-                .mcp_failures_by_server
-                .get("filesystem")
-                .expect("mcp server failure should export")
-        )));
+        assert_eq!(
+            sink.scalars[0],
+            ("service_failures_total", snapshot.service_failures_total)
+        );
+        assert!(
+            sink.buckets.contains(&(
+                "by_failure_code",
+                "api_provider_http_5xx".into(),
+                *snapshot
+                    .by_failure_code
+                    .get("api_provider_http_5xx")
+                    .expect("runtime failure code should export")
+            ))
+        );
+        assert!(
+            sink.buckets.contains(&(
+                "compact_recovery_hits",
+                "reactive_compact".into(),
+                *snapshot
+                    .compact_recovery_hits
+                    .get("reactive_compact")
+                    .expect("compact recovery bucket should export")
+            ))
+        );
+        assert!(
+            sink.buckets.contains(&(
+                "api_errors_by_kind",
+                "http_status".into(),
+                *snapshot
+                    .api_errors_by_kind
+                    .get("http_status")
+                    .expect("api error kind should export")
+            ))
+        );
+        assert!(
+            sink.buckets.contains(&(
+                "mcp_failures_by_server",
+                "filesystem".into(),
+                *snapshot
+                    .mcp_failures_by_server
+                    .get("filesystem")
+                    .expect("mcp server failure should export")
+            ))
+        );
         assert_eq!(sink.recent_events, snapshot.recent_events);
     }
 }

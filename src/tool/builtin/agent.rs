@@ -387,10 +387,11 @@ fn build_parent_query_context(permissions: ToolPermissionContext) -> QueryContex
     QueryContext {
         app_state,
         tool_registry,
-        api_client: crate::service::api::client::ModelProviderClient::from_config_with_observability(
-            crate::service::api::client::ModelProviderConfig::default(),
-            service_observability_tracker,
-        ),
+        api_client:
+            crate::service::api::client::ModelProviderClient::from_config_with_observability(
+                crate::service::api::client::ModelProviderConfig::default(),
+                service_observability_tracker,
+            ),
         compactor: ReactiveCompactor,
         hook_registry,
         agent_id: None,

@@ -538,13 +538,8 @@ async fn router_compact_decision_is_shared_by_cli_remote_and_telegram() {
     );
     let cli = NormalizedInput::from_raw(InteractionSurface::Cli, "/compact");
     let telegram = NormalizedInput::from_raw(InteractionSurface::Telegram, "/compact");
-    let remote = NormalizedInput::from_remote_raw(
-        "remote-session",
-        "remote-actor",
-        true,
-        true,
-        "/compact",
-    );
+    let remote =
+        NormalizedInput::from_remote_raw("remote-session", "remote-actor", true, true, "/compact");
 
     let shared = RouteDecision::ExecuteCommand(RoutedCommand {
         name: "compact".into(),
@@ -570,13 +565,8 @@ async fn router_cost_decision_is_shared_by_cli_remote_and_telegram() {
     );
     let cli = NormalizedInput::from_raw(InteractionSurface::Cli, "/cost");
     let telegram = NormalizedInput::from_raw(InteractionSurface::Telegram, "/cost");
-    let remote = NormalizedInput::from_remote_raw(
-        "remote-session",
-        "remote-actor",
-        true,
-        true,
-        "/cost",
-    );
+    let remote =
+        NormalizedInput::from_remote_raw("remote-session", "remote-actor", true, true, "/cost");
 
     let shared = RouteDecision::ExecuteCommand(RoutedCommand {
         name: "cost".into(),
@@ -600,13 +590,8 @@ async fn router_cost_denies_untrusted_remote_under_generic_policy() {
         Arc::new(CommandRegistry::new().register(Arc::new(CostCommand))),
         Box::new(DefaultSurfaceAuthorizer::default()),
     );
-    let input = NormalizedInput::from_remote_raw(
-        "remote-session",
-        "remote-actor",
-        true,
-        false,
-        "/cost",
-    );
+    let input =
+        NormalizedInput::from_remote_raw("remote-session", "remote-actor", true, false, "/cost");
 
     assert_eq!(
         router.decide(&input).await,
@@ -620,13 +605,8 @@ async fn router_compact_denies_untrusted_remote_under_generic_policy() {
         Arc::new(CommandRegistry::new().register(Arc::new(CompactCommand))),
         Box::new(DefaultSurfaceAuthorizer::default()),
     );
-    let input = NormalizedInput::from_remote_raw(
-        "remote-session",
-        "remote-actor",
-        true,
-        false,
-        "/compact",
-    );
+    let input =
+        NormalizedInput::from_remote_raw("remote-session", "remote-actor", true, false, "/compact");
 
     assert_eq!(
         router.decide(&input).await,

@@ -40,7 +40,11 @@ pub struct CompactServiceResult {
 pub struct ReactiveCompactor;
 
 impl ReactiveCompactor {
-    pub fn plan_auto_compact(&self, token_estimate: usize, limit: usize) -> Option<CompactServiceResult> {
+    pub fn plan_auto_compact(
+        &self,
+        token_estimate: usize,
+        limit: usize,
+    ) -> Option<CompactServiceResult> {
         (token_estimate >= limit).then(|| CompactServiceResult {
             plan: CompactPlan {
                 kind: CompactPlanKind::AutoCompact,

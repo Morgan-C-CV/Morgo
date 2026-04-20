@@ -15,8 +15,7 @@ use rust_agent::core::message::Message;
 use rust_agent::interaction::dispatcher::NotificationDispatcher;
 use rust_agent::interaction::envelope::NormalizedInput;
 use rust_agent::interaction::router::{
-    CommandRouter, QuerySource, RouteDecision, RouteExecution, RoutedCommand,
-    UnknownCommandPolicy,
+    CommandRouter, QuerySource, RouteDecision, RouteExecution, RoutedCommand, UnknownCommandPolicy,
 };
 use rust_agent::interaction::telegram::gateway::TelegramGateway;
 use rust_agent::security::authorizer::DefaultSurfaceAuthorizer;
@@ -157,7 +156,10 @@ async fn strict_unknown_slash_command_does_not_enter_query_path() {
         }
     );
     assert_eq!(
-        router.route(&input, &app_state).await.expect("route should succeed"),
+        router
+            .route(&input, &app_state)
+            .await
+            .expect("route should succeed"),
         RouteExecution::CommandResult(CommandResult::Denied(
             "unknown command /unknown rejected by strict policy".into()
         ))

@@ -1,9 +1,7 @@
 use std::path::Path;
 
 use crate::security::filesystem_policy::FilesystemPolicy;
-use crate::tool::builtin::bash::path_validation::{
-    assess_command_paths, command_path_assessment,
-};
+use crate::tool::builtin::bash::path_validation::{assess_command_paths, command_path_assessment};
 use crate::tool::builtin::bash::readonly_validation::classify_read_only_level;
 use crate::tool::builtin::bash::sandbox::{SandboxPolicy, select_sandbox_policy};
 use crate::tool::builtin::bash::security::{
@@ -26,7 +24,11 @@ pub struct BashPolicyDecision {
 }
 
 pub fn evaluate_bash_policy(command: &str) -> BashPolicyDecision {
-    evaluate_bash_policy_with_context(command, &std::env::current_dir().unwrap_or_else(|_| ".".into()), None)
+    evaluate_bash_policy_with_context(
+        command,
+        &std::env::current_dir().unwrap_or_else(|_| ".".into()),
+        None,
+    )
 }
 
 pub fn evaluate_bash_policy_with_context(

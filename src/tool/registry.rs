@@ -234,7 +234,11 @@ impl ToolRegistry {
             crate::tool::definition::PermissionDecision::Allow => {
                 tool.invoke(call, permissions).await
             }
-            crate::tool::definition::PermissionDecision::Ask { message, metadata: approval_metadata, .. } => {
+            crate::tool::definition::PermissionDecision::Ask {
+                message,
+                metadata: approval_metadata,
+                ..
+            } => {
                 let approval = if let Some(approval_metadata) = approval_metadata {
                     crate::tool::result::PendingApprovalPayload {
                         code: approval_metadata.code,
@@ -293,8 +297,30 @@ fn merge_permission_decisions(
 
     match (base, tool) {
         (Deny { message, reason }, _) | (_, Deny { message, reason }) => Deny { message, reason },
-        (Ask { message, reason, metadata }, _) => Ask { message, reason, metadata },
-        (_, Ask { message, reason, metadata }) => Ask { message, reason, metadata },
+        (
+            Ask {
+                message,
+                reason,
+                metadata,
+            },
+            _,
+        ) => Ask {
+            message,
+            reason,
+            metadata,
+        },
+        (
+            _,
+            Ask {
+                message,
+                reason,
+                metadata,
+            },
+        ) => Ask {
+            message,
+            reason,
+            metadata,
+        },
         (Allow, Allow) => Allow,
     }
 }

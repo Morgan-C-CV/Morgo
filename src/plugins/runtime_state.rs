@@ -179,14 +179,10 @@ pub async fn rebuild_runtime_plugin_state(
         });
     };
     let snapshot = build_runtime_plugin_snapshot(app_state);
-    let has_apply_failures = snapshot
-        .plugin_load_result
-        .plugins
-        .iter()
-        .any(|plugin| {
-            plugin.apply_status == PluginApplyStatus::ApplyFailed
-                || plugin.lifecycle_state == PluginLifecycleState::Error
-        });
+    let has_apply_failures = snapshot.plugin_load_result.plugins.iter().any(|plugin| {
+        plugin.apply_status == PluginApplyStatus::ApplyFailed
+            || plugin.lifecycle_state == PluginLifecycleState::Error
+    });
 
     let report = if has_apply_failures {
         let generation = runtime_plugin_state.generation().await;
