@@ -301,6 +301,110 @@ fn bootstrap_rejects_unknown_provider_without_explicit_contract() {
     );
 }
 
+fn bootstrap_provider_alias_matrix(
+    alias: &str,
+    expected_protocol: ProviderProtocol,
+    expected_profile: ProviderCompatibilityProfileKind,
+) {
+    let _env_lock = bootstrap_env_lock().lock().expect("bootstrap env lock");
+    let _guard = BootstrapEnvGuard::new();
+    set_env_var("RUST_AGENT_PROVIDER_ID", alias);
+    set_env_var("RUST_AGENT_PROVIDER_BASE_URL", "http://localhost:4010");
+    set_env_var("RUST_AGENT_PROVIDER_API_KEY", "test-key");
+    set_env_var("RUST_AGENT_PROVIDER_DEFAULT_MODEL", "test-model");
+
+    let runtime = RuntimeBootstrap::from_cli(BootstrapCli {
+        print: None,
+        interactive: false,
+        init_only: true,
+        continue_session: false,
+        resume: None,
+        trace_startup: false,
+        show_tools: false,
+        tui: false,
+        surface: "cli".into(),
+    });
+    let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::InitOnly, false);
+    state.current_cwd = std::env::current_dir().expect("cwd available");
+
+    let bundle = runtime
+        .initialize_runtime(
+            &state,
+            format!("provider-alias-{}", alias),
+            Arc::new(rust_agent::task::manager::TaskManager::default()),
+            Arc::new(rust_agent::task::list_manager::TaskListManager::default()),
+            Arc::new(rust_agent::plan::manager::PlanManager::default()),
+        )
+        .expect("runtime should initialize with provider alias");
+
+    assert_eq!(
+        bundle.provider_config.provider_id, alias,
+        "provider_id mismatch for alias {alias}"
+    );
+    assert_eq!(
+        bundle.provider_config.protocol, expected_protocol,
+        "protocol mismatch for alias {alias}"
+    );
+    assert_eq!(
+        bundle.provider_config.compatibility_profile, expected_profile,
+        "profile mismatch for alias {alias}"
+    );
+}
+
+#[test]
+fn bootstrap_infers_anthropic_provider_alias() {
+    bootstrap_provider_alias_matrix(
+        "anthropic",
+        ProviderProtocol::Anthropic,
+        ProviderCompatibilityProfileKind::Anthropic,
+    );
+}
+
+#[test]
+fn bootstrap_infers_default_provider_alias() {
+    bootstrap_provider_alias_matrix(
+        "default-provider",
+        ProviderProtocol::Anthropic,
+        ProviderCompatibilityProfileKind::Anthropic,
+    );
+}
+
+#[test]
+fn bootstrap_infers_kimi_provider_alias() {
+    bootstrap_provider_alias_matrix(
+        "kimi",
+        ProviderProtocol::OpenAICompatible,
+        ProviderCompatibilityProfileKind::OpenAICompatible,
+    );
+}
+
+#[test]
+fn bootstrap_infers_glm_provider_alias() {
+    bootstrap_provider_alias_matrix(
+        "glm",
+        ProviderProtocol::OpenAICompatible,
+        ProviderCompatibilityProfileKind::OpenAICompatible,
+    );
+}
+
+#[test]
+fn bootstrap_infers_minimax_provider_alias() {
+    bootstrap_provider_alias_matrix(
+        "minimax",
+        ProviderProtocol::OpenAICompatible,
+        ProviderCompatibilityProfileKind::OpenAICompatible,
+    );
+}
+
+#[test]
+fn bootstrap_infers_gemini_provider_alias() {
+    bootstrap_provider_alias_matrix(
+        "gemini",
+        ProviderProtocol::GeminiNative,
+        ProviderCompatibilityProfileKind::GeminiNativeUnsupported,
+    );
+}
+
 #[test]
 fn cli_telegram_remote_share_core_runtime_initialization() {
     // All surfaces should produce identical tool pools for core tools,
