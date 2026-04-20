@@ -1295,6 +1295,224 @@ async fn provider_fixture_harness_covers_openai_compatible_adapter_success_path(
 }
 
 #[tokio::test]
+async fn provider_fixture_harness_covers_openai_compatible_partial_tool_call_assembly() {
+    let case = ProviderCase {
+        provider_kind: FixtureProviderKind::OpenAICompatible,
+        run_mode: FixtureRunMode::StreamOnly,
+        base_url: None,
+        model_id: "openai-test",
+        request_timeout_ms: 5_000,
+        retry_policy: RetryPolicy {
+            max_attempts: 1,
+            initial_backoff_ms: 1,
+            max_backoff_ms: 1,
+        },
+        exchanges: vec![transcript_mock_exchange(concat!(
+            "data: {\"id\":\"chatcmpl-redacted\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"delta\":{\"content\":\"thinking\"},\"index\":0,\"finish_reason\":null}]}\r\n\r\n",
+            "data: {\"id\":\"chatcmpl-redacted\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_redacted\",\"type\":\"function\",\"function\":{\"name\":\"Read\",\"arguments\":\"{\\\"path\\\":\\\"/redacted/file.rs\\\"\"}}]},\"index\":0,\"finish_reason\":null}]}\r\n\r\n",
+            "data: {\"id\":\"chatcmpl-redacted\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"}\"}}]},\"index\":0,\"finish_reason\":\"tool_calls\"}],\"usage\":{\"model\":\"gpt-redacted\",\"prompt_tokens\":15,\"completion_tokens\":4}}\r\n\r\n",
+            "data: [DONE]\r\n\r\n"
+        ))],
+        message: Message::user("transcript fixture"),
+        expected: ExpectedOutcome {
+            expected_text: &[],
+            expected_usage: None,
+            expected_tool_use: None,
+            expected_stop_reason: None,
+            expected_provider_error: None,
+            expected_terminal: None,
+            expected_usage_notice_count: None,
+            expected_cost_report_fragments: &[],
+        },
+    };
+
+    let expected = ExpectedOutcome {
+        expected_text: &["thinking"],
+        expected_usage: Some(ExpectedUsage {
+            model: "gpt-redacted",
+            input_tokens: Some(15),
+            output_tokens: Some(4),
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+        }),
+        expected_tool_use: Some(ExpectedToolUse {
+            tool_name: "Read",
+            input: "{\"path\":\"/redacted/file.rs\"}",
+        }),
+        expected_stop_reason: Some(StopReason::ToolUse),
+        expected_provider_error: None,
+        expected_terminal: None,
+        expected_usage_notice_count: None,
+        expected_cost_report_fragments: &[],
+    };
+
+    let result = run_provider_case(case).await;
+    assert_provider_case(&result, &expected);
+    finish_provider_case(result).await;
+}
+
+#[tokio::test]
+async fn provider_fixture_harness_covers_openai_compatible_length_stop_mapping() {
+    let case = ProviderCase {
+        provider_kind: FixtureProviderKind::OpenAICompatible,
+        run_mode: FixtureRunMode::StreamOnly,
+        base_url: None,
+        model_id: "openai-test",
+        request_timeout_ms: 5_000,
+        retry_policy: RetryPolicy {
+            max_attempts: 1,
+            initial_backoff_ms: 1,
+            max_backoff_ms: 1,
+        },
+        exchanges: vec![transcript_mock_exchange(concat!(
+            "data: {\"id\":\"chatcmpl-redacted\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"delta\":{\"content\":\"partial answer\"},\"index\":0,\"finish_reason\":\"length\"}]}\r\n\r\n",
+            "data: [DONE]\r\n\r\n"
+        ))],
+        message: Message::user("transcript fixture"),
+        expected: ExpectedOutcome {
+            expected_text: &[],
+            expected_usage: None,
+            expected_tool_use: None,
+            expected_stop_reason: None,
+            expected_provider_error: None,
+            expected_terminal: None,
+            expected_usage_notice_count: None,
+            expected_cost_report_fragments: &[],
+        },
+    };
+
+    let expected = ExpectedOutcome {
+        expected_text: &["partial answer"],
+        expected_usage: None,
+        expected_tool_use: None,
+        expected_stop_reason: Some(StopReason::MaxTokens),
+        expected_provider_error: None,
+        expected_terminal: None,
+        expected_usage_notice_count: None,
+        expected_cost_report_fragments: &[],
+    };
+
+    let result = run_provider_case(case).await;
+    assert_provider_case(&result, &expected);
+    finish_provider_case(result).await;
+}
+
+#[tokio::test]
+async fn provider_fixture_harness_covers_openai_compatible_content_filter_as_non_success_stop() {
+    let case = ProviderCase {
+        provider_kind: FixtureProviderKind::OpenAICompatible,
+        run_mode: FixtureRunMode::SubmitTurn,
+        base_url: None,
+        model_id: "openai-test",
+        request_timeout_ms: 5_000,
+        retry_policy: RetryPolicy {
+            max_attempts: 1,
+            initial_backoff_ms: 1,
+            max_backoff_ms: 1,
+        },
+        exchanges: vec![transcript_mock_exchange(concat!(
+            "data: {\"id\":\"chatcmpl-redacted\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"delta\":{\"content\":\"filtered answer\"},\"index\":0,\"finish_reason\":\"content_filter\"}]}\r\n\r\n",
+            "data: [DONE]\r\n\r\n"
+        ))],
+        message: Message::user("transcript fixture"),
+        expected: ExpectedOutcome {
+            expected_text: &[],
+            expected_usage: None,
+            expected_tool_use: None,
+            expected_stop_reason: None,
+            expected_provider_error: None,
+            expected_terminal: None,
+            expected_usage_notice_count: None,
+            expected_cost_report_fragments: &[],
+        },
+    };
+
+    let expected = ExpectedOutcome {
+        expected_text: &[],
+        expected_usage: None,
+        expected_tool_use: None,
+        expected_stop_reason: None,
+        expected_provider_error: None,
+        expected_terminal: Some(ExpectedTerminal {
+            state: QueryLoopState::Failed,
+            code: Some(ServiceFailureCode::ApiStreamProtocol),
+            message_contains: "stream stopped with error",
+        }),
+        expected_usage_notice_count: Some(0),
+        expected_cost_report_fragments: &[],
+    };
+
+    let result = run_provider_case(case).await;
+    assert_provider_case(&result, &expected);
+    finish_provider_case(result).await;
+}
+
+#[tokio::test]
+async fn provider_fixture_harness_covers_openai_compatible_429_retry_then_success() {
+    let case = ProviderCase {
+        provider_kind: FixtureProviderKind::OpenAICompatible,
+        run_mode: FixtureRunMode::StreamOnly,
+        base_url: None,
+        model_id: "openai-test",
+        request_timeout_ms: 5_000,
+        retry_policy: RetryPolicy {
+            max_attempts: 2,
+            initial_backoff_ms: 1,
+            max_backoff_ms: 1,
+        },
+        exchanges: vec![
+            MockExchange {
+                delay: None,
+                response: MockHttpResponse {
+                    status_line: "429 Too Many Requests",
+                    content_type: Some("application/json"),
+                    extra_headers: &[],
+                    body: MockBody::Raw("{\"error\":{\"message\":\"slow down\",\"type\":\"rate_limit\",\"code\":\"too_many_requests\"}}"),
+                },
+            },
+            MockExchange {
+                delay: None,
+                response: MockHttpResponse {
+                    status_line: "200 OK",
+                    content_type: Some("text/event-stream"),
+                    extra_headers: &[],
+                    body: MockBody::Sse(concat!(
+                        "data: {\"id\":\"chatcmpl-redacted\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"delta\":{\"content\":\"recovered after retry\"},\"index\":0,\"finish_reason\":\"stop\"}]}\r\n\r\n",
+                        "data: [DONE]\r\n\r\n"
+                    )),
+                },
+            },
+        ],
+        message: Message::user("hello"),
+        expected: ExpectedOutcome {
+            expected_text: &[],
+            expected_usage: None,
+            expected_tool_use: None,
+            expected_stop_reason: None,
+            expected_provider_error: None,
+            expected_terminal: None,
+            expected_usage_notice_count: None,
+            expected_cost_report_fragments: &[],
+        },
+    };
+
+    let expected = ExpectedOutcome {
+        expected_text: &["recovered after retry"],
+        expected_usage: None,
+        expected_tool_use: None,
+        expected_stop_reason: Some(StopReason::EndTurn),
+        expected_provider_error: None,
+        expected_terminal: None,
+        expected_usage_notice_count: None,
+        expected_cost_report_fragments: &[],
+    };
+
+    let result = run_provider_case(case).await;
+    assert_provider_case(&result, &expected);
+    finish_provider_case(result).await;
+}
+
+#[tokio::test]
 async fn provider_fixture_harness_covers_gemini_native_as_typed_unsupported() {
     let case = ProviderCase {
         provider_kind: FixtureProviderKind::GeminiNative,

@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
@@ -990,12 +991,7 @@ pub fn parse_openai_compatible_sse_response(
     };
 
     let mut events = Vec::new();
-    let mut saw_message_start = false;
-    let mut saw_terminal = false;
-    let mut pending_usage: Option<NormalizedUsage> = None;
-    let mut pending_tool_name: Option<String> = None;
-    let mut pending_tool_arguments = String::new();
-    let mut tool_emitted = false;
+    let mut parser = OpenAICompatibleStreamParser::new(provider_id, default_model);
 
     for frame in frames.into_iter().filter(|frame| !frame.trim().is_empty()) {
         let payload = frame
@@ -1008,47 +1004,67 @@ pub fn parse_openai_compatible_sse_response(
             continue;
         }
         if payload == "[DONE]" {
-            saw_terminal = true;
+            parser.saw_terminal = true;
             continue;
         }
 
         let json: Value = serde_json::from_str(&payload).map_err(|error| {
-            ApiError::sse_protocol_with_disposition(
-                format!("invalid SSE JSON payload: {error}"),
-                if saw_message_start {
-                    ProviderFailureDisposition::StreamTerminal
-                } else {
-                    ProviderFailureDisposition::PreStreamTerminal
-                },
-            )
+            parser.protocol_error(format!("invalid SSE JSON payload: {error}"))
         })?;
+        parser.map_event(&json, &mut events)?;
+    }
 
-        let choices = json
-            .get("choices")
-            .and_then(Value::as_array)
-            .ok_or_else(|| {
-                ApiError::sse_protocol_with_disposition(
-                    "openai-compatible event missing choices",
-                    if saw_message_start {
-                        ProviderFailureDisposition::StreamTerminal
-                    } else {
-                        ProviderFailureDisposition::PreStreamTerminal
-                    },
-                )
-            })?;
+    parser.finish(complete_body, &mut events)?;
+    Ok(events)
+}
 
-        if !saw_message_start {
-            events.push(StreamEvent::MessageStart);
-            saw_message_start = true;
+#[derive(Debug, Default, Clone)]
+struct PendingOpenAIToolCall {
+    name: Option<String>,
+    arguments: String,
+    emitted: bool,
+}
+
+struct OpenAICompatibleStreamParser<'a> {
+    provider_id: &'a str,
+    default_model: &'a str,
+    saw_message_start: bool,
+    saw_terminal: bool,
+    pending_usage: Option<NormalizedUsage>,
+    pending_tool_calls: BTreeMap<usize, PendingOpenAIToolCall>,
+}
+
+impl<'a> OpenAICompatibleStreamParser<'a> {
+    fn new(provider_id: &'a str, default_model: &'a str) -> Self {
+        Self {
+            provider_id,
+            default_model,
+            saw_message_start: false,
+            saw_terminal: false,
+            pending_usage: None,
+            pending_tool_calls: BTreeMap::new(),
         }
+    }
 
-        if let Some(usage) = json.get("usage") {
-            let incoming = normalize_usage(usage, default_model);
-            pending_usage = Some(match pending_usage.take() {
+    fn map_event(&mut self, payload: &Value, output: &mut Vec<StreamEvent>) -> Result<(), ApiError> {
+        if let Some(usage) = payload.get("usage") {
+            let incoming = normalize_usage(usage, self.default_model);
+            self.pending_usage = Some(match self.pending_usage.take() {
                 Some(existing) => merge_usage(existing, incoming),
                 None => incoming,
             });
         }
+
+        let choices = payload
+            .get("choices")
+            .and_then(Value::as_array)
+            .ok_or_else(|| self.protocol_error("openai-compatible event missing choices"))?;
+
+        if choices.is_empty() {
+            return Ok(());
+        }
+
+        self.ensure_message_start(output);
 
         for choice in choices {
             if let Some(text) = choice
@@ -1056,7 +1072,7 @@ pub fn parse_openai_compatible_sse_response(
                 .and_then(|delta| delta.get("content"))
                 .and_then(Value::as_str)
             {
-                events.push(StreamEvent::TextDelta(text.to_string()));
+                output.push(StreamEvent::TextDelta(text.to_string()));
             }
 
             if let Some(tool_calls) = choice
@@ -1065,82 +1081,136 @@ pub fn parse_openai_compatible_sse_response(
                 .and_then(Value::as_array)
             {
                 for tool_call in tool_calls {
+                    let Some(index) = tool_call
+                        .get("index")
+                        .and_then(Value::as_u64)
+                        .map(|value| value as usize)
+                    else {
+                        return Err(self.tool_use_protocol_error(
+                            "tool_call delta missing index",
+                        ));
+                    };
+                    let pending = self.pending_tool_calls.entry(index).or_default();
                     if let Some(name) = tool_call
                         .get("function")
                         .and_then(|function| function.get("name"))
                         .and_then(Value::as_str)
                     {
-                        pending_tool_name = Some(name.to_string());
+                        pending.name = Some(name.to_string());
                     }
                     if let Some(arguments) = tool_call
                         .get("function")
                         .and_then(|function| function.get("arguments"))
                     {
                         match arguments {
-                            Value::String(text) => pending_tool_arguments.push_str(text),
-                            other => pending_tool_arguments.push_str(&other.to_string()),
+                            Value::String(text) => pending.arguments.push_str(text),
+                            other => pending.arguments.push_str(&other.to_string()),
                         }
                     }
                 }
             }
 
             if let Some(finish_reason) = choice.get("finish_reason").and_then(Value::as_str) {
-                let stop_reason = match finish_reason {
-                    "stop" => StopReason::EndTurn,
-                    "length" => StopReason::MaxTokens,
-                    "tool_calls" => StopReason::ToolUse,
-                    _ => StopReason::Error,
-                };
+                self.saw_terminal = true;
+                let stop_reason = map_openai_finish_reason(finish_reason);
                 if matches!(stop_reason, StopReason::ToolUse) {
-                    let Some(tool_name) = pending_tool_name.clone() else {
-                        return Err(ApiError::tool_use_protocol_with_disposition(
-                            "tool_calls stop without tool payload",
-                            ProviderFailureDisposition::StreamTerminal,
-                        ));
-                    };
-                    let input = if pending_tool_arguments.trim().is_empty() {
-                        "{}".to_string()
-                    } else {
-                        normalize_json_like_value(
-                            &Value::String(pending_tool_arguments.clone()),
-                            "tool_use input",
-                        )?
-                        .to_string()
-                    };
-                    if !tool_emitted {
-                        events.push(StreamEvent::ToolUse { tool_name, input });
-                        tool_emitted = true;
-                    }
+                    self.finalize_tool_calls(output)?;
                 }
-                saw_terminal = true;
-                events.push(StreamEvent::MessageStop { stop_reason });
+                output.push(StreamEvent::MessageStop { stop_reason });
             }
+        }
+
+        Ok(())
+    }
+
+    fn finish(&mut self, complete_body: bool, output: &mut Vec<StreamEvent>) -> Result<(), ApiError> {
+        if let Some(event) = self
+            .pending_usage
+            .take()
+            .and_then(|usage| usage.into_usage_event(self.default_model))
+        {
+            output.push(StreamEvent::Usage(event));
+        }
+
+        if !complete_body {
+            return Err(self.protocol_error("provider returned truncated SSE frame"));
+        }
+
+        if !self.saw_terminal {
+            output.push(StreamEvent::MessageStop {
+                stop_reason: StopReason::EndTurn,
+            });
+        }
+
+        Ok(())
+    }
+
+    fn finalize_tool_calls(&mut self, output: &mut Vec<StreamEvent>) -> Result<(), ApiError> {
+        if self.pending_tool_calls.is_empty() {
+            return Err(self.tool_use_protocol_error("tool_calls stop without tool payload"));
+        }
+
+        for pending in self.pending_tool_calls.values_mut() {
+            if pending.emitted {
+                continue;
+            }
+            let Some(tool_name) = pending.name.clone() else {
+                return Err(self.tool_use_protocol_error("tool_call missing function name"));
+            };
+            let input = if pending.arguments.trim().is_empty() {
+                "{}".to_string()
+            } else {
+                normalize_json_like_value(
+                    &Value::String(pending.arguments.clone()),
+                    "tool_use input",
+                )?
+                .to_string()
+            };
+            pending.emitted = true;
+            output.push(StreamEvent::ToolUse { tool_name, input });
+        }
+
+        Ok(())
+    }
+
+    fn ensure_message_start(&mut self, output: &mut Vec<StreamEvent>) {
+        if !self.saw_message_start {
+            output.push(StreamEvent::MessageStart);
+            self.saw_message_start = true;
         }
     }
 
-    if let Some(event) = pending_usage.and_then(|usage| usage.into_usage_event(default_model)) {
-        events.push(StreamEvent::Usage(event));
-    }
-
-    if !complete_body {
-        return Err(ApiError::sse_protocol_with_disposition(
-            "provider returned truncated SSE frame",
-            if saw_message_start {
+    fn protocol_error(&self, message: impl Into<String>) -> ApiError {
+        ApiError::sse_protocol_with_disposition(
+            message,
+            if self.saw_message_start {
                 ProviderFailureDisposition::StreamTerminal
             } else {
                 ProviderFailureDisposition::PreStreamTerminal
             },
-        ));
+        )
     }
 
-    if !saw_terminal {
-        events.push(StreamEvent::MessageStop {
-            stop_reason: StopReason::EndTurn,
-        });
+    fn tool_use_protocol_error(&self, message: impl Into<String>) -> ApiError {
+        ApiError::tool_use_protocol_with_disposition(
+            message,
+            if self.saw_message_start {
+                ProviderFailureDisposition::StreamTerminal
+            } else {
+                ProviderFailureDisposition::PreStreamTerminal
+            },
+        )
     }
+}
 
-    let _ = provider_id;
-    Ok(events)
+fn map_openai_finish_reason(reason: &str) -> StopReason {
+    match reason {
+        "stop" => StopReason::EndTurn,
+        "length" => StopReason::MaxTokens,
+        "tool_calls" => StopReason::ToolUse,
+        "content_filter" => StopReason::Error,
+        _ => StopReason::Error,
+    }
 }
 
 #[derive(Debug, Default, Clone)]
@@ -1749,7 +1819,7 @@ mod tests {
         build_request_payload_with_options, classify_retry_policy, classify_stream_error,
         classify_stream_error_disposition, extract_error_detail, map_stop_reason,
         merge_usage, normalize_json_like_value, normalize_usage, parse_anthropic_sse_response,
-        parse_openai_compatible_sse_response, parse_retry_after_ms,
+        map_openai_finish_reason, parse_openai_compatible_sse_response, parse_retry_after_ms,
         parse_stream_response_for_provider, parse_usage, profile_for_provider,
         validate_streaming_response_headers,
     };
@@ -2005,7 +2075,8 @@ mod tests {
     fn parses_openai_compatible_sse_stream_into_stream_events() {
         let body = concat!(
             "data: {\"id\":\"chatcmpl-redacted\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"hello openai\"},\"index\":0,\"finish_reason\":null}]}\n\n",
-            "data: {\"id\":\"chatcmpl-redacted\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_redacted\",\"type\":\"function\",\"function\":{\"name\":\"Read\",\"arguments\":\"{\\\"path\\\":\\\"foo\\\"}\"}}]},\"index\":0,\"finish_reason\":\"tool_calls\"}],\"usage\":{\"model\":\"gpt-redacted\",\"prompt_tokens\":12,\"completion_tokens\":5,\"total_tokens\":17}}\n\n",
+            "data: {\"id\":\"chatcmpl-redacted\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_redacted\",\"type\":\"function\",\"function\":{\"name\":\"Read\",\"arguments\":\"{\\\"path\\\":\\\"foo\\\"\"}}]},\"index\":0,\"finish_reason\":null}]}\n\n",
+            "data: {\"id\":\"chatcmpl-redacted\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"}\"}}]},\"index\":0,\"finish_reason\":\"tool_calls\"}],\"usage\":{\"model\":\"gpt-redacted\",\"prompt_tokens\":12,\"completion_tokens\":5,\"total_tokens\":17}}\n\n",
             "data: [DONE]\n\n"
         );
 
@@ -2024,6 +2095,31 @@ mod tests {
                 stop_reason: StopReason::ToolUse
             })
         ));
+    }
+
+    #[test]
+    fn openai_compatible_usage_only_terminal_chunk_is_accepted() {
+        let body = concat!(
+            "data: {\"id\":\"chatcmpl-redacted\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"delta\":{\"content\":\"hello\"},\"index\":0,\"finish_reason\":\"stop\"}]}\n\n",
+            "data: {\"id\":\"chatcmpl-redacted\",\"object\":\"chat.completion.chunk\",\"choices\":[],\"usage\":{\"model\":\"gpt-redacted\",\"prompt_tokens\":11,\"completion_tokens\":3}}\n\n",
+            "data: [DONE]\n\n"
+        );
+
+        let events = parse_openai_compatible_sse_response("openai-compatible", body, "default-model")
+            .expect("usage-only chunk should parse");
+        assert!(events.iter().any(|event| matches!(event, StreamEvent::Usage(usage)
+            if usage.model == "gpt-redacted"
+                && usage.input_tokens == 11
+                && usage.output_tokens == 3)));
+    }
+
+    #[test]
+    fn openai_finish_reason_mapping_matches_expected_values() {
+        assert_eq!(map_openai_finish_reason("stop"), StopReason::EndTurn);
+        assert_eq!(map_openai_finish_reason("tool_calls"), StopReason::ToolUse);
+        assert_eq!(map_openai_finish_reason("length"), StopReason::MaxTokens);
+        assert_eq!(map_openai_finish_reason("content_filter"), StopReason::Error);
+        assert_eq!(map_openai_finish_reason("other"), StopReason::Error);
     }
 
     #[test]
