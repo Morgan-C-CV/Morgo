@@ -45,9 +45,80 @@ use crate::security::audit::AuditLog;
 use crate::security::authorizer::{AuthDecision, DefaultSurfaceAuthorizer, SurfaceAuthorizer};
 use crate::security::filesystem_policy::FilesystemPolicy;
 use crate::service::api::client::{
-    ModelPricing, ModelProviderClient, ModelProviderConfig, ProviderTimeout,
-    resolve_provider_profile, resolve_provider_protocol,
+    ModelPricing, ModelProviderClient, ModelProviderConfig, ProviderAuthStrategy,
+    ProviderCompatibilityProfileKind, ProviderProtocol, ProviderTimeout, validate_provider_config,
 };
+
+fn infer_provider_contract(
+    provider_id: &str,
+) -> Option<(ProviderProtocol, ProviderCompatibilityProfileKind)> {
+    match provider_id.trim() {
+        "anthropic" | "default-provider" => Some((
+            ProviderProtocol::Anthropic,
+            ProviderCompatibilityProfileKind::Anthropic,
+        )),
+        "text-only-provider" => Some((
+            ProviderProtocol::Anthropic,
+            ProviderCompatibilityProfileKind::TextOnly,
+        )),
+        "batch-provider" => Some((
+            ProviderProtocol::Anthropic,
+            ProviderCompatibilityProfileKind::Batch,
+        )),
+        "openai" | "openai-compatible" | "openai_compatible" | "kimi" | "glm"
+        | "minimax" => Some((
+            ProviderProtocol::OpenAICompatible,
+            ProviderCompatibilityProfileKind::OpenAICompatible,
+        )),
+        "gemini" | "gemini-native" | "gemini_native" => Some((
+            ProviderProtocol::GeminiNative,
+            ProviderCompatibilityProfileKind::GeminiNativeUnsupported,
+        )),
+        _ => None,
+    }
+}
+
+fn parse_provider_protocol(value: &str) -> anyhow::Result<ProviderProtocol> {
+    match value.trim() {
+        "anthropic" => Ok(ProviderProtocol::Anthropic),
+        "openai" | "openai-compatible" | "openai_compatible" => {
+            Ok(ProviderProtocol::OpenAICompatible)
+        }
+        "gemini" | "gemini-native" | "gemini_native" => Ok(ProviderProtocol::GeminiNative),
+        other => anyhow::bail!("invalid_configuration: unsupported provider protocol {other}"),
+    }
+}
+
+fn parse_provider_compatibility_profile(
+    value: &str,
+) -> anyhow::Result<ProviderCompatibilityProfileKind> {
+    match value.trim() {
+        "anthropic" => Ok(ProviderCompatibilityProfileKind::Anthropic),
+        "text-only" | "text_only" | "textonly" => {
+            Ok(ProviderCompatibilityProfileKind::TextOnly)
+        }
+        "batch" => Ok(ProviderCompatibilityProfileKind::Batch),
+        "openai" | "openai-compatible" | "openai_compatible" => {
+            Ok(ProviderCompatibilityProfileKind::OpenAICompatible)
+        }
+        "gemini" | "gemini-native-unsupported" | "gemini_native_unsupported" => {
+            Ok(ProviderCompatibilityProfileKind::GeminiNativeUnsupported)
+        }
+        other => anyhow::bail!(
+            "invalid_configuration: unsupported provider compatibility profile {other}"
+        ),
+    }
+}
+
+fn parse_provider_auth_strategy(value: &str) -> anyhow::Result<ProviderAuthStrategy> {
+    match value.trim() {
+        "bearer" | "bearer_api_key" | "bearer-api-key" => {
+            Ok(ProviderAuthStrategy::BearerApiKey)
+        }
+        "none" | "no_auth" | "no-auth" => Ok(ProviderAuthStrategy::NoAuth),
+        other => anyhow::bail!("invalid_configuration: unsupported auth strategy {other}"),
+    }
+}
 use crate::service::api::retry::RetryPolicy;
 use crate::service::compact::reactive_compact::ReactiveCompactor;
 use crate::service::mcp::config::load_server_configs_with_diagnostics;
@@ -249,7 +320,7 @@ impl RuntimeBootstrap {
             task_manager.clone(),
             task_list_manager.clone(),
             plan_manager.clone(),
-        );
+        )?;
 
         state.record_phase(BootstrapPhase::InitializeSettings);
         // Phase 7: settings/model/agent initialization
@@ -459,7 +530,7 @@ impl RuntimeBootstrap {
         task_manager: Arc<TaskManager>,
         task_list_manager: Arc<TaskListManager>,
         plan_manager: Arc<PlanManager>,
-    ) -> RuntimeInitializeBundle {
+    ) -> anyhow::Result<RuntimeInitializeBundle> {
         let base_hook_registry = load_hook_registry(&state.current_cwd);
         let plugin_load_result = Arc::new(load_plugins(&state.current_cwd));
         let hook_registry =
@@ -582,13 +653,15 @@ impl RuntimeBootstrap {
         };
         let snapshot = build_runtime_plugin_snapshot(&app_state);
         let command_registry = snapshot.command_registry.clone();
-        let provider_config = self.build_model_provider_config();
+        let provider_config = self.build_model_provider_config()?;
+        validate_provider_config(&provider_config)
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
         let api_client = ModelProviderClient::from_config_with_observability(
             provider_config.clone(),
             service_observability_tracker.clone(),
         );
 
-        RuntimeInitializeBundle {
+        Ok(RuntimeInitializeBundle {
             hook_registry,
             notification_dispatcher,
             skill_registry,
@@ -601,7 +674,7 @@ impl RuntimeBootstrap {
             provider_config,
             api_client,
             compactor: ReactiveCompactor,
-        }
+        })
     }
 
     fn build_runtime_seed_state(
@@ -826,7 +899,7 @@ impl RuntimeBootstrap {
         FilesystemPolicy::load_from_path(&path).map(Some)
     }
 
-    fn build_model_provider_config(&self) -> ModelProviderConfig {
+    fn build_model_provider_config(&self) -> anyhow::Result<ModelProviderConfig> {
         let provider_id = std::env::var("RUST_AGENT_PROVIDER_ID")
             .ok()
             .filter(|value| !value.trim().is_empty())
@@ -838,9 +911,14 @@ impl RuntimeBootstrap {
         let api_key = std::env::var("RUST_AGENT_PROVIDER_API_KEY")
             .ok()
             .filter(|value| !value.trim().is_empty());
-        let model_id = std::env::var("RUST_AGENT_PROVIDER_MODEL")
+        let model_id = std::env::var("RUST_AGENT_PROVIDER_DEFAULT_MODEL")
             .ok()
             .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                std::env::var("RUST_AGENT_PROVIDER_MODEL")
+                    .ok()
+                    .filter(|value| !value.trim().is_empty())
+            })
             .unwrap_or_else(|| "default-model".into());
         let request_timeout_ms = std::env::var("RUST_AGENT_PROVIDER_TIMEOUT_MS")
             .ok()
@@ -858,13 +936,39 @@ impl RuntimeBootstrap {
             .ok()
             .and_then(|value| value.parse::<u64>().ok())
             .unwrap_or(1_000);
-        let protocol = resolve_provider_protocol(&provider_id);
-        let compatibility_profile = resolve_provider_profile(&provider_id);
-        ModelProviderConfig {
+        let inferred = infer_provider_contract(&provider_id);
+        let explicit_protocol = std::env::var("RUST_AGENT_PROVIDER_PROTOCOL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| parse_provider_protocol(&value))
+            .transpose()?;
+        let explicit_profile = std::env::var("RUST_AGENT_PROVIDER_COMPATIBILITY_PROFILE")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| parse_provider_compatibility_profile(&value))
+            .transpose()?;
+        let (protocol, compatibility_profile) = match (explicit_protocol, explicit_profile, inferred) {
+            (Some(protocol), Some(profile), _) => (protocol, profile),
+            (None, None, Some(contract)) => contract,
+            (None, None, None) => anyhow::bail!(
+                "invalid_configuration: unknown provider id {provider_id} requires explicit protocol and compatibility_profile"
+            ),
+            _ => anyhow::bail!(
+                "invalid_configuration: provider protocol and compatibility_profile must be configured together"
+            ),
+        };
+        let auth_strategy = std::env::var("RUST_AGENT_PROVIDER_AUTH_STRATEGY")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| parse_provider_auth_strategy(&value))
+            .transpose()?
+            .unwrap_or(ProviderAuthStrategy::BearerApiKey);
+        Ok(ModelProviderConfig {
             provider_id,
             protocol,
             compatibility_profile,
             base_url,
+            auth_strategy,
             api_key,
             model_id,
             timeout: ProviderTimeout { request_timeout_ms },
@@ -874,7 +978,7 @@ impl RuntimeBootstrap {
                 max_backoff_ms,
             },
             pricing: ModelPricing::default(),
-        }
+        })
     }
 
     fn restore_request(&self) -> Option<RestoreRequest> {

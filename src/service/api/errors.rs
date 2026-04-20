@@ -12,6 +12,7 @@ pub enum ApiErrorKind {
     EmptyBody,
     BadContentType,
     InvalidResponse,
+    InvalidConfiguration,
     CapabilityUnsupported,
     InvalidRequestOption,
     SseProtocol,
@@ -99,6 +100,15 @@ impl ApiError {
     pub fn invalid_response(message: impl Into<String>) -> Self {
         Self {
             kind: ApiErrorKind::InvalidResponse,
+            message: message.into(),
+            disposition: ProviderFailureDisposition::PreStreamTerminal,
+            retry_after_ms: None,
+        }
+    }
+
+    pub fn invalid_configuration(message: impl Into<String>) -> Self {
+        Self {
+            kind: ApiErrorKind::InvalidConfiguration,
             message: message.into(),
             disposition: ProviderFailureDisposition::PreStreamTerminal,
             retry_after_ms: None,
@@ -201,6 +211,7 @@ impl ApiError {
             ApiErrorKind::EmptyBody => "empty_body",
             ApiErrorKind::BadContentType => "bad_content_type",
             ApiErrorKind::InvalidResponse => "invalid_response",
+            ApiErrorKind::InvalidConfiguration => "invalid_configuration",
             ApiErrorKind::CapabilityUnsupported => "capability_unsupported",
             ApiErrorKind::InvalidRequestOption => "invalid_request_option",
             ApiErrorKind::SseProtocol => "sse_protocol",

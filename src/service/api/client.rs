@@ -73,6 +73,12 @@ pub enum ProviderCompatibilityProfileKind {
     GeminiNativeUnsupported,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderAuthStrategy {
+    BearerApiKey,
+    NoAuth,
+}
+
 trait ProviderAdapter {
     fn messages_url(&self, config: &ModelProviderConfig) -> Result<String, ApiError>;
     fn build_request_payload(
@@ -123,6 +129,7 @@ pub struct ModelProviderConfig {
     pub protocol: ProviderProtocol,
     pub compatibility_profile: ProviderCompatibilityProfileKind,
     pub base_url: String,
+    pub auth_strategy: ProviderAuthStrategy,
     pub api_key: Option<String>,
     pub model_id: String,
     pub timeout: ProviderTimeout,
@@ -151,6 +158,7 @@ impl Default for ModelProviderConfig {
             protocol: ProviderProtocol::Anthropic,
             compatibility_profile: ProviderCompatibilityProfileKind::Anthropic,
             base_url: "http://localhost".into(),
+            auth_strategy: ProviderAuthStrategy::NoAuth,
             api_key: None,
             model_id: "default-model".into(),
             timeout: ProviderTimeout::default(),
@@ -314,12 +322,14 @@ impl ModelProviderClient {
             .header(ACCEPT, "text/event-stream")
             .header(CONTENT_TYPE, "application/json")
             .json(&payload);
-        if let Some(api_key) = config
-            .api_key
-            .as_ref()
-            .filter(|value| !value.trim().is_empty())
-        {
-            request = request.header(AUTHORIZATION, format!("Bearer {api_key}"));
+        match config.auth_strategy {
+            ProviderAuthStrategy::BearerApiKey => {
+                let api_key = config.api_key.as_ref().ok_or_else(|| {
+                    ApiError::invalid_configuration("provider auth strategy requires api_key")
+                })?;
+                request = request.header(AUTHORIZATION, format!("Bearer {}", api_key.trim()));
+            }
+            ProviderAuthStrategy::NoAuth => {}
         }
 
         let response = timeout(
@@ -408,6 +418,7 @@ fn classify_retry_policy(error: &ApiError) -> RetryDecision {
         | ApiErrorKind::EmptyBody
         | ApiErrorKind::BadContentType
         | ApiErrorKind::InvalidResponse
+        | ApiErrorKind::InvalidConfiguration
         | ApiErrorKind::CapabilityUnsupported
         | ApiErrorKind::InvalidRequestOption
         | ApiErrorKind::SseProtocol
@@ -499,72 +510,59 @@ struct AnthropicAdapter;
 struct OpenAICompatibleAdapter;
 struct GeminiNativeAdapter;
 
-fn validate_provider_config(config: &ModelProviderConfig) -> Result<(), ApiError> {
-    match normalized_provider_id(&config.provider_id) {
-        "anthropic" | "default-provider" => {
-            if config.protocol == ProviderProtocol::Anthropic
-                && config.compatibility_profile == ProviderCompatibilityProfileKind::Anthropic
-            {
-                Ok(())
-            } else {
-                Err(ApiError::invalid_response(format!(
-                    "provider {} has incompatible protocol/profile configuration",
-                    config.provider_id
-                )))
+pub fn validate_provider_config(config: &ModelProviderConfig) -> Result<(), ApiError> {
+    if config.base_url.trim().is_empty() {
+        return Err(ApiError::invalid_configuration(
+            "provider configuration missing base_url",
+        ));
+    }
+    if config.model_id.trim().is_empty() {
+        return Err(ApiError::invalid_configuration(
+            "provider configuration missing default_model",
+        ));
+    }
+    match config.auth_strategy {
+        ProviderAuthStrategy::BearerApiKey => {
+            let Some(api_key) = config.api_key.as_ref() else {
+                return Err(ApiError::invalid_configuration(
+                    "provider configuration missing auth header strategy input api_key",
+                ));
+            };
+            if api_key.trim().is_empty() {
+                return Err(ApiError::invalid_configuration(
+                    "provider configuration missing auth header strategy input api_key",
+                ));
             }
         }
-        "text-only-provider" => {
-            if config.protocol == ProviderProtocol::Anthropic
-                && config.compatibility_profile == ProviderCompatibilityProfileKind::TextOnly
-            {
-                Ok(())
-            } else {
-                Err(ApiError::invalid_response(format!(
-                    "provider {} has incompatible protocol/profile configuration",
-                    config.provider_id
-                )))
-            }
+        ProviderAuthStrategy::NoAuth => {}
+    }
+
+    if let Some((expected_protocol, expected_profile)) =
+        expected_contract_for_provider_id(&config.provider_id)
+    {
+        if config.protocol == expected_protocol && config.compatibility_profile == expected_profile {
+            return Ok(());
         }
-        "batch-provider" => {
-            if config.protocol == ProviderProtocol::Anthropic
-                && config.compatibility_profile == ProviderCompatibilityProfileKind::Batch
-            {
-                Ok(())
-            } else {
-                Err(ApiError::invalid_response(format!(
-                    "provider {} has incompatible protocol/profile configuration",
-                    config.provider_id
-                )))
-            }
-        }
-        "openai-compatible" | "openai_compatible" => {
-            if config.protocol == ProviderProtocol::OpenAICompatible
-                && config.compatibility_profile
-                    == ProviderCompatibilityProfileKind::OpenAICompatible
-            {
-                Ok(())
-            } else {
-                Err(ApiError::invalid_response(format!(
-                    "provider {} has incompatible protocol/profile configuration",
-                    config.provider_id
-                )))
-            }
-        }
-        "gemini-native" | "gemini_native" => {
-            if config.protocol == ProviderProtocol::GeminiNative
-                && config.compatibility_profile
-                    == ProviderCompatibilityProfileKind::GeminiNativeUnsupported
-            {
-                Ok(())
-            } else {
-                Err(ApiError::invalid_response(format!(
-                    "provider {} has incompatible protocol/profile configuration",
-                    config.provider_id
-                )))
-            }
-        }
-        _ => Err(ApiError::invalid_response(format!(
-            "unsupported provider id: {}",
+        return Err(ApiError::invalid_configuration(format!(
+            "provider {} has incompatible protocol/profile configuration",
+            config.provider_id
+        )));
+    }
+
+    match (config.protocol, config.compatibility_profile) {
+        (ProviderProtocol::Anthropic, ProviderCompatibilityProfileKind::Anthropic)
+        | (ProviderProtocol::Anthropic, ProviderCompatibilityProfileKind::TextOnly)
+        | (ProviderProtocol::Anthropic, ProviderCompatibilityProfileKind::Batch)
+        | (
+            ProviderProtocol::OpenAICompatible,
+            ProviderCompatibilityProfileKind::OpenAICompatible,
+        )
+        | (
+            ProviderProtocol::GeminiNative,
+            ProviderCompatibilityProfileKind::GeminiNativeUnsupported,
+        ) => Ok(()),
+        _ => Err(ApiError::invalid_configuration(format!(
+            "provider {} has incompatible protocol/profile configuration",
             config.provider_id
         ))),
     }
@@ -839,38 +837,48 @@ fn extract_error_detail_from_value(value: &Value) -> Option<String> {
 }
 
 fn normalized_provider_id(provider_id: &str) -> &str {
-    let trimmed = provider_id.trim();
-    if trimmed.is_empty() {
-        "anthropic"
-    } else {
-        trimmed
+    provider_id.trim()
+}
+
+fn expected_contract_for_provider_id(
+    provider_id: &str,
+) -> Option<(ProviderProtocol, ProviderCompatibilityProfileKind)> {
+    match normalized_provider_id(provider_id) {
+        "anthropic" | "default-provider" => Some((
+            ProviderProtocol::Anthropic,
+            ProviderCompatibilityProfileKind::Anthropic,
+        )),
+        "text-only-provider" => Some((
+            ProviderProtocol::Anthropic,
+            ProviderCompatibilityProfileKind::TextOnly,
+        )),
+        "batch-provider" => Some((
+            ProviderProtocol::Anthropic,
+            ProviderCompatibilityProfileKind::Batch,
+        )),
+        "openai" | "openai-compatible" | "openai_compatible" | "kimi" | "glm"
+        | "minimax" => Some((
+            ProviderProtocol::OpenAICompatible,
+            ProviderCompatibilityProfileKind::OpenAICompatible,
+        )),
+        "gemini" | "gemini-native" | "gemini_native" => Some((
+            ProviderProtocol::GeminiNative,
+            ProviderCompatibilityProfileKind::GeminiNativeUnsupported,
+        )),
+        _ => None,
     }
 }
 
 pub fn resolve_provider_protocol(provider_id: &str) -> ProviderProtocol {
-    match normalized_provider_id(provider_id) {
-        "anthropic" | "default-provider" | "text-only-provider" | "batch-provider" => {
-            ProviderProtocol::Anthropic
-        }
-        "openai-compatible" | "openai_compatible" => ProviderProtocol::OpenAICompatible,
-        "gemini-native" | "gemini_native" => ProviderProtocol::GeminiNative,
-        _ => ProviderProtocol::Anthropic,
-    }
+    expected_contract_for_provider_id(provider_id)
+        .map(|(protocol, _)| protocol)
+        .unwrap_or(ProviderProtocol::Anthropic)
 }
 
 pub fn resolve_provider_profile(provider_id: &str) -> ProviderCompatibilityProfileKind {
-    match normalized_provider_id(provider_id) {
-        "anthropic" | "default-provider" => ProviderCompatibilityProfileKind::Anthropic,
-        "text-only-provider" => ProviderCompatibilityProfileKind::TextOnly,
-        "batch-provider" => ProviderCompatibilityProfileKind::Batch,
-        "openai-compatible" | "openai_compatible" => {
-            ProviderCompatibilityProfileKind::OpenAICompatible
-        }
-        "gemini-native" | "gemini_native" => {
-            ProviderCompatibilityProfileKind::GeminiNativeUnsupported
-        }
-        _ => ProviderCompatibilityProfileKind::Anthropic,
-    }
+    expected_contract_for_provider_id(provider_id)
+        .map(|(_, profile)| profile)
+        .unwrap_or(ProviderCompatibilityProfileKind::Anthropic)
 }
 
 fn compatibility_profile_for_kind(
@@ -1932,6 +1940,7 @@ mod tests {
             provider_id: "anthropic".into(),
             protocol: ProviderProtocol::Anthropic,
             compatibility_profile: ProviderCompatibilityProfileKind::Anthropic,
+            auth_strategy: ProviderAuthStrategy::NoAuth,
             model_id: "  ".into(),
             ..ModelProviderConfig::default()
         };
@@ -1994,6 +2003,7 @@ mod tests {
             provider_id: "anthropic".into(),
             protocol: ProviderProtocol::Anthropic,
             compatibility_profile: ProviderCompatibilityProfileKind::Anthropic,
+            auth_strategy: ProviderAuthStrategy::NoAuth,
             ..ModelProviderConfig::default()
         };
         let payload = build_request_payload_with_options(
@@ -2027,6 +2037,7 @@ mod tests {
             provider_id: "text-only-provider".into(),
             protocol: ProviderProtocol::Anthropic,
             compatibility_profile: ProviderCompatibilityProfileKind::TextOnly,
+            auth_strategy: ProviderAuthStrategy::NoAuth,
             ..ModelProviderConfig::default()
         };
         let payload = build_request_payload_with_options(
@@ -2057,6 +2068,7 @@ mod tests {
             provider_id: "batch-provider".into(),
             protocol: ProviderProtocol::Anthropic,
             compatibility_profile: ProviderCompatibilityProfileKind::Batch,
+            auth_strategy: ProviderAuthStrategy::NoAuth,
             ..ModelProviderConfig::default()
         };
 
@@ -2080,6 +2092,7 @@ mod tests {
             provider_id: "text-only-provider".into(),
             protocol: ProviderProtocol::Anthropic,
             compatibility_profile: ProviderCompatibilityProfileKind::TextOnly,
+            auth_strategy: ProviderAuthStrategy::NoAuth,
             ..ModelProviderConfig::default()
         };
 
@@ -2107,6 +2120,7 @@ mod tests {
             provider_id: "anthropic".into(),
             protocol: ProviderProtocol::Anthropic,
             compatibility_profile: ProviderCompatibilityProfileKind::Anthropic,
+            auth_strategy: ProviderAuthStrategy::NoAuth,
             ..ModelProviderConfig::default()
         };
 
@@ -2220,6 +2234,7 @@ mod tests {
             provider_id: "custom-provider".into(),
             protocol: ProviderProtocol::Anthropic,
             compatibility_profile: ProviderCompatibilityProfileKind::Anthropic,
+            auth_strategy: ProviderAuthStrategy::NoAuth,
             ..ModelProviderConfig::default()
         };
 
@@ -2233,6 +2248,7 @@ mod tests {
                 provider_id: "custom-provider".into(),
                 protocol: ProviderProtocol::Anthropic,
                 compatibility_profile: ProviderCompatibilityProfileKind::Anthropic,
+                auth_strategy: ProviderAuthStrategy::NoAuth,
                 ..ModelProviderConfig::default()
             },
             "",

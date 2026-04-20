@@ -89,7 +89,8 @@ async fn bootstrap_env_policy_is_attached_and_enforced_by_file_tools() {
         Arc::new(TaskManager::default()),
         Arc::new(TaskListManager::default()),
         Arc::new(PlanManager::default()),
-    );
+    )
+    .expect("runtime should initialize");
 
     let permissions: ToolPermissionContext =
         ToolPermissionContext::new(rust_agent::state::permission_context::PermissionMode::Default)
@@ -98,7 +99,7 @@ async fn bootstrap_env_policy_is_attached_and_enforced_by_file_tools() {
                     .filesystem_policy
                     .clone()
                     .expect("filesystem policy should load from HOME default path"),
-            );
+            )
 
     let read_result = FileReadTool
         .invoke(
@@ -145,7 +146,7 @@ async fn bootstrap_env_policy_is_attached_and_enforced_by_file_tools() {
     assert_eq!(
         allow_result,
         ToolResult::Text(format!("wrote {}", allowed_dir.join("new.txt").display()))
-    );
+    )
 
     match original_home {
         Some(value) => set_env("HOME", &value),

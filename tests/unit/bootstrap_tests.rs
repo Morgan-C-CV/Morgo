@@ -55,7 +55,8 @@ fn initialized_tool_names(
         Arc::new(rust_agent::task::manager::TaskManager::default()),
         Arc::new(rust_agent::task::list_manager::TaskListManager::default()),
         Arc::new(rust_agent::plan::manager::PlanManager::default()),
-    );
+    )
+    .expect("runtime should initialize");
     let permission_context = ToolAssemblyContext::coordinator(surface, session_mode)
         .permission_context(if init_only {
             PermissionMode::Plan
@@ -592,7 +593,8 @@ fn initialize_runtime_builds_consistent_runtime_bundle_shape() {
         Arc::new(rust_agent::task::manager::TaskManager::default()),
         Arc::new(rust_agent::task::list_manager::TaskListManager::default()),
         Arc::new(rust_agent::plan::manager::PlanManager::default()),
-    );
+    )
+    .expect("runtime should initialize");
 
     assert!(!bundle.command_registry.names().is_empty());
     assert!(!bundle.coordinator_tools.all_metadata().is_empty());
@@ -624,7 +626,8 @@ fn augment_prompt_depends_on_input_state_without_mutating_store() {
         Arc::new(rust_agent::task::manager::TaskManager::default()),
         Arc::new(rust_agent::task::list_manager::TaskListManager::default()),
         Arc::new(rust_agent::plan::manager::PlanManager::default()),
-    );
+    )
+    .expect("runtime should initialize");
     let resolved = resolve_session_state(
         &InMemorySessionStore::default(),
         None,
@@ -915,7 +918,8 @@ fn finalize_runtime_state_is_single_writeback_entrypoint() {
         Arc::new(rust_agent::task::manager::TaskManager::default()),
         Arc::new(rust_agent::task::list_manager::TaskListManager::default()),
         Arc::new(rust_agent::plan::manager::PlanManager::default()),
-    );
+    )
+    .expect("runtime should initialize");
     let prompt_state = AppState {
         surface: state.surface,
         session_mode: state.session_mode,
@@ -1075,7 +1079,8 @@ fn initialize_runtime_tracks_surface_mode_visibility_matrix() {
         Arc::new(rust_agent::task::manager::TaskManager::default()),
         Arc::new(rust_agent::task::list_manager::TaskListManager::default()),
         Arc::new(rust_agent::plan::manager::PlanManager::default()),
-    );
+    )
+    .expect("runtime should initialize");
     let cli_names = cli_bundle
         .coordinator_tools
         .visible_tools(
@@ -1099,7 +1104,8 @@ fn initialize_runtime_tracks_surface_mode_visibility_matrix() {
         Arc::new(rust_agent::task::manager::TaskManager::default()),
         Arc::new(rust_agent::task::list_manager::TaskListManager::default()),
         Arc::new(rust_agent::plan::manager::PlanManager::default()),
-    );
+    )
+    .expect("runtime should initialize");
     let remote_names = remote_bundle
         .coordinator_tools
         .visible_tools(
@@ -1176,7 +1182,8 @@ async fn runtime_resume_keeps_restored_surface_visibility_contract() {
         Arc::new(rust_agent::task::manager::TaskManager::default()),
         Arc::new(rust_agent::task::list_manager::TaskListManager::default()),
         Arc::new(rust_agent::plan::manager::PlanManager::default()),
-    );
+    )
+    .expect("runtime should initialize");
 
     let permission_context = ToolAssemblyContext::coordinator(state.surface, state.session_mode)
         .permission_context(PermissionMode::Default)
