@@ -367,8 +367,7 @@ fn build_parent_query_context(permissions: ToolPermissionContext) -> QueryContex
             InteractionSurface::Cli,
             SessionMode::Headless,
         ));
-    let inherited_active_model_snapshot =
-        permissions.inherited_active_model_snapshot.clone();
+    let inherited_active_model_snapshot = permissions.inherited_active_model_snapshot.clone();
     let app_state = AppState {
         surface: InteractionSurface::Cli,
         session_mode: SessionMode::Headless,

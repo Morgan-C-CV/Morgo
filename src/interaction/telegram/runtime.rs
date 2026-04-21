@@ -67,7 +67,8 @@ fn bind_telegram_engine(
         .as_ref()
         .map(|runtime| runtime.snapshot_blocking());
     if let Some(active_model_snapshot) = active_model_snapshot.as_ref() {
-        telegram_app_state.active_model_profile_name = active_model_snapshot.active_profile_name.clone();
+        telegram_app_state.active_model_profile_name =
+            active_model_snapshot.active_profile_name.clone();
         telegram_app_state.active_model_profile_source = active_model_snapshot.source.clone();
         telegram_app_state.active_model_provider_summary = active_model_snapshot.summary.clone();
     }

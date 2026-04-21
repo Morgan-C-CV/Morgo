@@ -2090,16 +2090,29 @@ async fn subagent_context_inherits_active_model_snapshot_without_sharing_handle(
         },
     );
 
-    assert_eq!(child.app_state.active_model_profile_name.as_deref(), Some("runtime-profile"));
-    assert_eq!(child.app_state.active_model_provider_summary.model, "runtime-model");
+    assert_eq!(
+        child.app_state.active_model_profile_name.as_deref(),
+        Some("runtime-profile")
+    );
+    assert_eq!(
+        child.app_state.active_model_provider_summary.model,
+        "runtime-model"
+    );
     assert!(child.app_state.active_model_runtime.is_some());
     assert!(!matches!(
         (&parent.app_state.active_model_runtime, &child.app_state.active_model_runtime),
         (Some(parent_runtime), Some(child_runtime)) if std::ptr::eq(parent_runtime, child_runtime)
     ));
 
-    let result = QueryEngine::new(child).submit_turn(Message::user("run child")).await;
-    assert!(result.messages.iter().any(|message| message.content.contains("parent runtime reply")));
+    let result = QueryEngine::new(child)
+        .submit_turn(Message::user("run child"))
+        .await;
+    assert!(
+        result
+            .messages
+            .iter()
+            .any(|message| message.content.contains("parent runtime reply"))
+    );
 }
 
 #[tokio::test]

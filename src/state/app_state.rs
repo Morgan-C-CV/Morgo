@@ -20,8 +20,8 @@ use tokio_util::sync::CancellationToken;
 use crate::history::resume::{ResolvedSessionState, RestoredSession};
 use crate::history::session::{SessionHistory, SessionId, SessionSnapshot, SessionStore};
 use crate::interaction::dispatcher::NotificationDispatcher;
-use crate::state::active_model_runtime::ActiveModelRuntime;
 use crate::security::audit::AuditLog;
+use crate::state::active_model_runtime::ActiveModelRuntime;
 use crate::state::permission_context::ToolPermissionContext;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

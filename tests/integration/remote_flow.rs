@@ -155,23 +155,24 @@ async fn remote_request_prefers_active_model_runtime_client_for_bound_turns() {
         subagent_limiter: None,
         boss_coordinator: None,
     };
-    let engine = rust_agent::core::engine::QueryEngine::new(rust_agent::core::context::QueryContext {
-        app_state: app_state.clone(),
-        tool_registry: ToolRegistry::new(),
-        api_client: ModelProviderClient::with_scripted_turns(vec![vec![
-            StreamEvent::MessageStart,
-            StreamEvent::TextDelta("stale engine reply".into()),
-            StreamEvent::MessageStop {
-                stop_reason: StopReason::EndTurn,
-            },
-        ]]),
-        compactor: ReactiveCompactor,
-        hook_registry: rust_agent::hook::registry::HookRegistry::default(),
-        agent_id: None,
-        system_prompt: "test system".into(),
-        tools_prompt: "test tools".into(),
-        context_prompt: "test context".into(),
-    });
+    let engine =
+        rust_agent::core::engine::QueryEngine::new(rust_agent::core::context::QueryContext {
+            app_state: app_state.clone(),
+            tool_registry: ToolRegistry::new(),
+            api_client: ModelProviderClient::with_scripted_turns(vec![vec![
+                StreamEvent::MessageStart,
+                StreamEvent::TextDelta("stale engine reply".into()),
+                StreamEvent::MessageStop {
+                    stop_reason: StopReason::EndTurn,
+                },
+            ]]),
+            compactor: ReactiveCompactor,
+            hook_registry: rust_agent::hook::registry::HookRegistry::default(),
+            agent_id: None,
+            system_prompt: "test system".into(),
+            tools_prompt: "test tools".into(),
+            context_prompt: "test context".into(),
+        });
 
     let response = handle_remote_request(
         &router,
