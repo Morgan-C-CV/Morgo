@@ -254,11 +254,7 @@ pub async fn handle_remote_request(
 
     Ok(RemoteResponse {
         primary_text: view.primary_text,
-        events: view
-            .items
-            .into_iter()
-            .map(RemoteEventEnvelope::from)
-            .collect(),
+        events: remote_response_events_from_surface_items(&view.items),
     })
 }
 
@@ -267,11 +263,44 @@ pub fn drain_remote_notifications(
     session_id: &str,
     actor_id: Option<&str>,
 ) -> Vec<RemoteNotificationEnvelope> {
-    app_state
+    let notifications = app_state
         .notification_dispatcher
-        .drain_remote_notifications(session_id, actor_id)
+        .drain_remote_notifications(session_id, actor_id);
+
+    for notification in &notifications {
+        record_remote_notification_dispatched_audit(app_state, notification);
+    }
+
+    notifications
         .into_iter()
+        .filter(is_surface_visible_remote_notification)
         .map(RemoteNotificationEnvelope::from)
+        .collect()
+}
+
+fn record_remote_notification_dispatched_audit(app_state: &AppState, notification: &Notification) {
+    let actor_id = remote_actor_id_for_notification(notification);
+    let notification_kind = remote_notification_kind(notification);
+    record_remote_audit(
+        app_state,
+        AuditEvent::RemoteNotificationDispatched {
+            session_id: notification.session_id.clone(),
+            actor_id,
+            notification_kind: notification_kind.into(),
+            channel: "async_inbox".into(),
+            request_id: notification.session_id.clone(),
+        },
+    );
+}
+
+pub fn remote_response_events_from_surface_items(
+    items: &[SurfaceItem],
+) -> Vec<RemoteEventEnvelope> {
+    items
+        .iter()
+        .filter(|item| !is_surface_invisible_runtime_notice(item))
+        .cloned()
+        .map(RemoteEventEnvelope::from)
         .collect()
 }
 
@@ -458,6 +487,27 @@ impl From<Notification> for RemoteNotificationEnvelope {
     }
 }
 
+fn is_surface_invisible_runtime_notice(item: &SurfaceItem) -> bool {
+    matches!(
+        item,
+        SurfaceItem::RuntimeNotice {
+            surface_visible: Some(false),
+            ..
+        }
+    )
+}
+
+fn is_surface_visible_remote_notification(notification: &Notification) -> bool {
+    !matches!(
+        notification,
+        Notification {
+            notification_type: NotificationType::RuntimeNotice,
+            surface_visible: Some(false),
+            ..
+        }
+    )
+}
+
 fn dispatch_remote_runtime_notifications(
     app_state: &AppState,
     input: &NormalizedInput,
@@ -622,23 +672,33 @@ fn record_remote_audit(app_state: &AppState, event: AuditEvent) {
 }
 
 fn record_remote_notification_audit(app_state: &AppState, notification: &Notification) {
-    let actor_id = match &notification.target {
-        Some(NotificationTarget::RemoteActor { actor_id, .. }) => Some(actor_id.clone()),
-        _ => None,
-    };
-    let notification_type = match notification.notification_type {
-        NotificationType::TaskUpdate => "task_update",
-        NotificationType::ApprovalRequired => "approval_required",
-        NotificationType::RuntimeNotice => "runtime_notice",
-    };
+    let actor_id = remote_actor_id_for_notification(notification);
+    let notification_kind = remote_notification_kind(notification);
     record_remote_audit(
         app_state,
         AuditEvent::RemoteNotificationQueued {
             session_id: notification.session_id.clone(),
             actor_id,
-            notification_type: notification_type.into(),
+            notification_kind: notification_kind.into(),
+            channel: "async_inbox".into(),
+            request_id: notification.session_id.clone(),
         },
     );
+}
+
+fn remote_actor_id_for_notification(notification: &Notification) -> Option<String> {
+    match &notification.target {
+        Some(NotificationTarget::RemoteActor { actor_id, .. }) => Some(actor_id.clone()),
+        _ => None,
+    }
+}
+
+fn remote_notification_kind(notification: &Notification) -> &'static str {
+    match notification.notification_type {
+        NotificationType::TaskUpdate => "task_update",
+        NotificationType::ApprovalRequired => "approval_required",
+        NotificationType::RuntimeNotice => "runtime_notice",
+    }
 }
 
 fn remote_surface_authorizer(app_state: &AppState) -> DefaultSurfaceAuthorizer {

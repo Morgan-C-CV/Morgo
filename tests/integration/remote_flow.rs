@@ -480,10 +480,14 @@ async fn remote_request_records_accept_and_notification_audit_events() {
         AuditEvent::RemoteNotificationQueued {
             session_id,
             actor_id,
-            notification_type,
+            notification_kind,
+            channel,
+            request_id,
         } if session_id == "remote-audit-session"
             && actor_id.as_deref() == Some("audit-actor")
-            && notification_type == "approval_required"
+            && notification_kind == "approval_required"
+            && channel == "async_inbox"
+            && request_id == "remote-audit-session"
     )));
     let records = audit_log.lock().expect("audit log poisoned").load_records();
     assert!(records.iter().any(|record| {
@@ -498,7 +502,20 @@ async fn remote_request_records_accept_and_notification_audit_events() {
             && record.session_id.as_deref() == Some("remote-audit-session")
             && record.actor_id.as_deref() == Some("audit-actor")
             && record.surface.as_deref() == Some("remote")
+            && record.request_id.as_deref() == Some("remote-audit-session")
+            && record.notification_kind.as_deref() == Some("approval_required")
+            && record.channel.as_deref() == Some("async_inbox")
             && record.outcome == "queued"
+    }));
+    assert!(records.iter().any(|record| {
+        record.event_kind == "remote_notification_dispatched"
+            && record.session_id.as_deref() == Some("remote-audit-session")
+            && record.actor_id.as_deref() == Some("audit-actor")
+            && record.surface.as_deref() == Some("remote")
+            && record.request_id.as_deref() == Some("remote-audit-session")
+            && record.notification_kind.as_deref() == Some("approval_required")
+            && record.channel.as_deref() == Some("async_inbox")
+            && record.outcome == "dispatched"
     }));
     let _ = fs::remove_dir_all(audit_root);
 }
@@ -1172,4 +1189,176 @@ async fn remote_request_returns_typed_remote_event_envelopes() {
             .all(|event| event.event_type
                 != "task:task-0:remote task:inspect task output for task-0")
     );
+}
+
+#[tokio::test]
+async fn surface_visible_false_notice_excluded_from_response_events() {
+    use rust_agent::interaction::remote::remote_response_events_from_surface_items;
+    use rust_agent::interaction::view::SurfaceItem;
+
+    let items = vec![
+        SurfaceItem::RuntimeNotice {
+            kind: "info".into(),
+            message: "visible notice".into(),
+            code: None,
+            runtime_kind: None,
+            service_failure_code: None,
+            provider_kind: None,
+            status_code: None,
+            retryable: None,
+            surface_visible: Some(true),
+        },
+        SurfaceItem::RuntimeNotice {
+            kind: "error".into(),
+            message: "should not appear".into(),
+            code: Some("hidden_notice".into()),
+            runtime_kind: Some("HiddenRuntime".into()),
+            service_failure_code: Some("hidden_notice".into()),
+            provider_kind: Some("provider".into()),
+            status_code: Some(500),
+            retryable: Some(false),
+            surface_visible: Some(false),
+        },
+    ];
+
+    let events = remote_response_events_from_surface_items(&items);
+    assert_eq!(events.len(), 1);
+    assert!(matches!(
+        &events[0].payload,
+        RemoteEventPayload::RuntimeNotice {
+            kind,
+            message,
+            surface_visible,
+            ..
+        } if kind == "info"
+            && message == "visible notice"
+            && surface_visible == &Some(true)
+    ));
+}
+
+#[tokio::test]
+async fn drain_remote_notifications_skips_surface_invisible_notice_and_records_dispatched_audit_event()
+ {
+    let command_registry = Arc::new(CommandRegistry::new());
+    let _router = rust_agent::interaction::router::CommandRouter::new(
+        command_registry.clone(),
+        Box::new(DefaultSurfaceAuthorizer::default()),
+    );
+    let permission_context = ToolPermissionContext::new(PermissionMode::Default)
+        .with_task_manager(Arc::new(TaskManager::default()))
+        .with_plan_manager(Arc::new(PlanManager::default()));
+    let session_store = Arc::new(InMemorySessionStore::default());
+    let audit_log = Arc::new(std::sync::Mutex::new(AuditLog::default()));
+    let app_state = AppState {
+        surface: InteractionSurface::Remote,
+        session_mode: SessionMode::Interactive,
+        client_type: ClientType::RemoteControl,
+        session_source: SessionSource::RemoteControl,
+        runtime_role: RuntimeRole::Coordinator,
+        worker_role: None,
+        permission_context,
+        command_registry: Some(command_registry),
+        runtime_tool_registry: Some(Arc::new(RwLock::new(ToolRegistry::new()))),
+        skill_registry: None,
+        mcp_runtime: None,
+        plugin_load_result: None,
+        cost_tracker: CostTracker::default(),
+        service_observability_tracker:
+            rust_agent::service::observability::ServiceObservabilityTracker::default(),
+        notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
+        audit_log: audit_log.clone(),
+        startup_trace: Vec::new(),
+        active_session_id: "audit-lifecycle-session".into(),
+        session_store: Some(session_store),
+        session: None,
+        history: None,
+        restored_session: None,
+    };
+
+    let mut visible_notice = Notification::runtime_notice(
+        "audit-lifecycle-session",
+        "info",
+        "visible notice",
+        Some("visible_notice".into()),
+        Some("VisibleRuntime".into()),
+        Some("visible_notice".into()),
+        Some("provider".into()),
+        Some(200),
+        Some(false),
+        Some(true),
+    );
+    visible_notice.target = Some(NotificationTarget::RemoteActor {
+        session_id: "audit-lifecycle-session".into(),
+        actor_id: "test-actor".into(),
+    });
+
+    let mut hidden_notice = Notification::runtime_notice(
+        "audit-lifecycle-session",
+        "error",
+        "hidden notice",
+        Some("hidden_notice".into()),
+        Some("HiddenRuntime".into()),
+        Some("hidden_notice".into()),
+        Some("provider".into()),
+        Some(500),
+        Some(false),
+        Some(false),
+    );
+    hidden_notice.target = Some(NotificationTarget::RemoteActor {
+        session_id: "audit-lifecycle-session".into(),
+        actor_id: "test-actor".into(),
+    });
+
+    app_state
+        .notification_dispatcher
+        .dispatch(InteractionSurface::Remote, visible_notice);
+    app_state
+        .notification_dispatcher
+        .dispatch(InteractionSurface::Remote, hidden_notice);
+
+    let drained =
+        drain_remote_notifications(&app_state, "audit-lifecycle-session", Some("test-actor"));
+    assert_eq!(drained.len(), 1);
+    assert!(matches!(
+        &drained[0].payload,
+        RemoteEventPayload::RuntimeNotice {
+            kind,
+            message,
+            code,
+            runtime_kind,
+            service_failure_code,
+            provider_kind,
+            status_code,
+            retryable,
+            surface_visible,
+        } if kind == "info"
+            && message == "visible notice"
+            && code.as_deref() == Some("visible_notice")
+            && runtime_kind.as_deref() == Some("VisibleRuntime")
+            && service_failure_code.as_deref() == Some("visible_notice")
+            && provider_kind.as_deref() == Some("provider")
+            && status_code == &Some(200)
+            && retryable == &Some(false)
+            && surface_visible == &Some(true)
+    ));
+
+    let records = audit_log.lock().expect("audit log poisoned").load_records();
+    let dispatched: Vec<_> = records
+        .iter()
+        .filter(|record| record.event_kind == "remote_notification_dispatched")
+        .collect();
+
+    assert_eq!(
+        dispatched.len(),
+        2,
+        "both drained notifications should be audited as dispatched"
+    );
+    assert!(dispatched.iter().all(|record| {
+        record.request_id.as_deref() == Some("audit-lifecycle-session")
+            && record.notification_kind.as_deref() == Some("runtime_notice")
+            && record.channel.as_deref() == Some("async_inbox")
+            && record.surface.as_deref() == Some("remote")
+            && record.actor_id.as_deref() == Some("test-actor")
+            && record.outcome == "dispatched"
+    }));
 }
