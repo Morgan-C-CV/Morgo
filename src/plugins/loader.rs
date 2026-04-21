@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use crate::command::types::CommandAvailability;
 use crate::hook::registry::HookEventMatcher;
-use crate::plugins::state::load_plugin_state_with_diagnostics;
+use crate::plugins::state::load_plugin_state_from_root;
 use crate::plugins::types::PluginCommandDefinition;
 use crate::plugins::types::{
     PluginActivationSummary, PluginApplyStatus, PluginCapability, PluginConfigSource,
@@ -13,10 +13,14 @@ use crate::plugins::types::{
 };
 
 pub fn load_plugins(cwd: &Path) -> PluginLoadResult {
-    let root = cwd.join(".claude").join("plugins");
+    load_plugins_from_root(&cwd.join(".claude"), cwd)
+}
+
+pub fn load_plugins_from_root(config_root: &Path, _cwd: &Path) -> PluginLoadResult {
+    let root = config_root.join("plugins");
     let mut diagnostics = Vec::new();
     let mut plugins = Vec::new();
-    let governance_state = load_plugin_state_with_diagnostics(cwd);
+    let governance_state = load_plugin_state_from_root(config_root);
     diagnostics.extend(
         governance_state
             .diagnostics

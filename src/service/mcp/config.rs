@@ -31,7 +31,11 @@ pub fn load_server_configs(cwd: &Path) -> Vec<McpServerConfig> {
 }
 
 pub fn load_server_configs_with_diagnostics(cwd: &Path) -> McpConfigLoadResult {
-    let path = cwd.join(".claude").join("mcp_servers.json");
+    load_server_configs_from_root(&cwd.join(".claude"))
+}
+
+pub fn load_server_configs_from_root(config_root: &Path) -> McpConfigLoadResult {
+    let path = config_root.join("mcp_servers.json");
     let mut diagnostics = Vec::new();
 
     match std::fs::read_to_string(&path) {

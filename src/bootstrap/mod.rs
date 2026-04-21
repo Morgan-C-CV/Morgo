@@ -1,3 +1,4 @@
+pub mod config_root;
 mod runtime;
 mod setup;
 mod state;

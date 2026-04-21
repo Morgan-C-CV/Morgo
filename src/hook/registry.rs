@@ -167,8 +167,17 @@ pub fn load_hook_registry(cwd: &Path) -> HookRegistry {
     HookRegistry::from_rules(result.rules.clone()).with_config_load_result(result)
 }
 
+pub fn load_hook_registry_from_root(config_root: &Path) -> HookRegistry {
+    let result = load_hook_rules_from_root(config_root);
+    HookRegistry::from_rules(result.rules.clone()).with_config_load_result(result)
+}
+
 pub fn load_hook_rules_with_diagnostics(cwd: &Path) -> HookConfigLoadResult {
-    let path = cwd.join(".claude").join("hooks.json");
+    load_hook_rules_from_root(&cwd.join(".claude"))
+}
+
+pub fn load_hook_rules_from_root(config_root: &Path) -> HookConfigLoadResult {
+    let path = config_root.join("hooks.json");
     let mut diagnostics = Vec::new();
 
     match std::fs::read_to_string(&path) {

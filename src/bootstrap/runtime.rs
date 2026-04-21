@@ -6,6 +6,7 @@ use tokio_util::sync::CancellationToken;
 
 use clap::Parser;
 
+use crate::bootstrap::config_root::resolve_config_root;
 use crate::bootstrap::setup::SetupContext;
 use crate::bootstrap::{BootstrapPhase, BootstrapState, InteractionSurface, SessionMode};
 use crate::command::registry::CommandRegistry;
@@ -18,7 +19,7 @@ use crate::history::resume::{
 };
 use crate::history::session::{FileBackedSessionStore, SessionId, SessionStore};
 use crate::hook::executor::run_hook;
-use crate::hook::registry::{HookEvent, HookRegistry, load_hook_registry};
+use crate::hook::registry::{HookEvent, HookRegistry, load_hook_registry_from_root};
 use crate::interaction::cli::renderer::{
     build_tui_screen, render_document_output, render_document_tui_output, render_output,
     render_tui_screen_output, render_turn_document,
@@ -32,7 +33,7 @@ use crate::interaction::remote::{
 use crate::interaction::router::CommandRouter;
 use crate::interaction::telegram::gateway::TelegramGateway;
 use crate::plan::manager::PlanManager;
-use crate::plugins::loader::load_plugins;
+use crate::plugins::loader::load_plugins_from_root;
 use crate::plugins::runtime::{
     augment_hook_registry_with_plugins, augment_tool_registry_with_plugins,
 };
@@ -122,9 +123,9 @@ fn parse_provider_auth_strategy(value: &str) -> anyhow::Result<ProviderAuthStrat
 use crate::core::concurrency::SubagentLimiter;
 use crate::service::api::retry::RetryPolicy;
 use crate::service::compact::reactive_compact::ReactiveCompactor;
-use crate::service::mcp::config::load_server_configs_with_diagnostics;
+use crate::service::mcp::config::load_server_configs_from_root;
 use crate::service::mcp::runtime::McpRuntime;
-use crate::service::mcp::state::load_mcp_governance_state_with_diagnostics;
+use crate::service::mcp::state::load_mcp_governance_state_from_root;
 use crate::service::observability::ServiceObservabilityTracker;
 use crate::skills::bundled::bundled_skills;
 use crate::skills::loader::SkillLoaderCache;
@@ -557,8 +558,9 @@ impl RuntimeBootstrap {
         task_list_manager: Arc<TaskListManager>,
         plan_manager: Arc<PlanManager>,
     ) -> anyhow::Result<RuntimeInitializeBundle> {
-        let base_hook_registry = load_hook_registry(&state.current_cwd);
-        let plugin_load_result = Arc::new(load_plugins(&state.current_cwd));
+        let config_root = resolve_config_root(&state.current_cwd)?;
+        let base_hook_registry = load_hook_registry_from_root(&config_root);
+        let plugin_load_result = Arc::new(load_plugins_from_root(&config_root, &state.current_cwd));
         let hook_registry =
             augment_hook_registry_with_plugins(base_hook_registry, plugin_load_result.as_ref());
         let _ = run_hook(&hook_registry, HookEvent::SessionStart);
@@ -572,8 +574,8 @@ impl RuntimeBootstrap {
         discovered_skills.extend(loaded_skills.skills);
         let skill_registry = Arc::new(SkillRegistry::new(discovered_skills));
         let service_observability_tracker = ServiceObservabilityTracker::default();
-        let mcp_config_result = load_server_configs_with_diagnostics(&state.current_cwd);
-        let mcp_governance_result = load_mcp_governance_state_with_diagnostics(&state.current_cwd);
+        let mcp_config_result = load_server_configs_from_root(&config_root);
+        let mcp_governance_result = load_mcp_governance_state_from_root(&config_root);
         let mcp_runtime = Arc::new(
             McpRuntime::new_with_config_and_governance_result_and_observability(
                 Arc::new(crate::service::mcp::client::RoutingMcpClient::default()),
@@ -949,12 +951,29 @@ impl RuntimeBootstrap {
             return FilesystemPolicy::load_from_path(&path).map(Some);
         }
 
-        let Some(home) = std::env::var_os("HOME") else {
-            return Ok(None);
+        // If RUST_AGENT_CONFIG_ROOT is set, look for filesystem-policy.json there.
+        // Otherwise fall back to $HOME/.claude/ (the historical default).
+        let policy_dir = if let Ok(raw) = std::env::var("RUST_AGENT_CONFIG_ROOT") {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                anyhow::bail!("RUST_AGENT_CONFIG_ROOT is set but empty");
+            }
+            let p = std::path::PathBuf::from(trimmed);
+            if !p.is_absolute() {
+                anyhow::bail!(
+                    "RUST_AGENT_CONFIG_ROOT must be an absolute path, got: {}",
+                    p.display()
+                );
+            }
+            p
+        } else {
+            let Some(home) = std::env::var_os("HOME") else {
+                return Ok(None);
+            };
+            std::path::PathBuf::from(home).join(".claude")
         };
-        let path = std::path::PathBuf::from(home)
-            .join(".claude")
-            .join("filesystem-policy.json");
+
+        let path = policy_dir.join("filesystem-policy.json");
         if !path.exists() {
             return Ok(None);
         }

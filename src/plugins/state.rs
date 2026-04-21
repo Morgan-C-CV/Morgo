@@ -33,7 +33,11 @@ pub fn plugin_state_path(cwd: &Path) -> PathBuf {
 }
 
 pub fn load_plugin_state_with_diagnostics(cwd: &Path) -> PluginStateLoadResult {
-    let path = plugin_state_path(cwd);
+    load_plugin_state_from_root(&cwd.join(".claude"))
+}
+
+pub fn load_plugin_state_from_root(config_root: &Path) -> PluginStateLoadResult {
+    let path = config_root.join("plugin-state.json");
     let mut diagnostics = Vec::new();
 
     match std::fs::read_to_string(&path) {

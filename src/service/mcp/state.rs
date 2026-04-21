@@ -41,7 +41,11 @@ pub fn mcp_governance_state_path(cwd: &Path) -> PathBuf {
 }
 
 pub fn load_mcp_governance_state_with_diagnostics(cwd: &Path) -> McpGovernanceStateLoadResult {
-    let path = mcp_governance_state_path(cwd);
+    load_mcp_governance_state_from_root(&cwd.join(".claude"))
+}
+
+pub fn load_mcp_governance_state_from_root(config_root: &Path) -> McpGovernanceStateLoadResult {
+    let path = config_root.join("mcp-governance.json");
     let mut diagnostics = Vec::new();
 
     match std::fs::read_to_string(&path) {
