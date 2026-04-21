@@ -1,9 +1,10 @@
 use crate::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
 use crate::command::registry::CommandRegistry;
 use crate::command::types::CommandResult;
+use crate::core::boss::BossCoordinator;
+use crate::core::concurrency::SubagentLimiter;
 use crate::cost::tracker::CostTracker;
 use crate::plugins::types::PluginLoadResult;
-use crate::core::concurrency::SubagentLimiter;
 use crate::service::mcp::runtime::McpRuntime;
 use crate::service::observability::ServiceObservabilityTracker;
 use crate::skills::registry::SkillRegistry;
@@ -15,7 +16,6 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
-use crate::core::boss::BossCoordinator;
 
 use crate::history::resume::{ResolvedSessionState, RestoredSession};
 use crate::history::session::{SessionHistory, SessionId, SessionSnapshot, SessionStore};

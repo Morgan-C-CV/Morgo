@@ -1,13 +1,13 @@
+use crate::core::boss_state::{BossPlan, BossStage, BossStatus};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
-use crate::core::boss_state::{BossStage, BossStatus, BossPlan};
 
 pub struct BossCoordinator {
     pub status: Arc<RwLock<BossStatus>>,
     /// Placed here so the planner can hold and modify it in memory before flushing
     pub plan: Arc<RwLock<Option<BossPlan>>>,
-    
+
     // Decoupled lightweight tracking (Prevents QueryContext RwLock Deadlocks):
     pub agent_a_session_id: Arc<RwLock<Option<String>>>,
     pub agent_b_session_id: Arc<RwLock<Option<String>>>,
@@ -31,14 +31,15 @@ impl BossCoordinator {
     /// If the file doesn't exist, it falls back to a fresh coordinator.
     pub async fn restore_or_init(path: &std::path::Path) -> anyhow::Result<Self> {
         let coordinator = Self::new();
-        
+
         if path.exists() {
             let loaded_plan = load_plan(path).await?;
-            
+
             // Determine stage based on plan progress
             let mut stage = BossStage::Documentation;
             if loaded_plan.accepted_by_user {
-                let all_completed = !loaded_plan.steps.is_empty() && loaded_plan.steps.iter().all(|s| s.completed);
+                let all_completed =
+                    !loaded_plan.steps.is_empty() && loaded_plan.steps.iter().all(|s| s.completed);
                 if all_completed {
                     stage = BossStage::Completed;
                 } else {
@@ -50,7 +51,11 @@ impl BossCoordinator {
             let mut current_step = None;
             let total_steps = Some(loaded_plan.steps.len());
             if loaded_plan.accepted_by_user {
-                current_step = loaded_plan.steps.iter().find(|s| !s.completed).map(|s| s.id);
+                current_step = loaded_plan
+                    .steps
+                    .iter()
+                    .find(|s| !s.completed)
+                    .map(|s| s.id);
             }
 
             {
@@ -87,12 +92,16 @@ impl BossCoordinator {
             (BossStage::WaitingForApproval, BossStage::Documentation) => true, // Rejected by user
             (BossStage::Execution, BossStage::Completed) => true,
             (BossStage::Documentation, BossStage::Documentation) => true, // Re-entering valid
-            (BossStage::Execution, BossStage::Documentation) => true, // Fallback/Fatal failure
+            (BossStage::Execution, BossStage::Documentation) => true,     // Fallback/Fatal failure
             _ => false,
         };
 
         if !valid {
-            anyhow::bail!("Invalid BossStage transition from {:?} to {:?}", status.stage, new_stage);
+            anyhow::bail!(
+                "Invalid BossStage transition from {:?} to {:?}",
+                status.stage,
+                new_stage
+            );
         }
 
         status.stage = new_stage;
@@ -157,12 +166,12 @@ pub async fn save_plan(plan: &BossPlan, path: &std::path::Path) -> anyhow::Resul
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
-    
+
     let content = serde_json::to_string_pretty(plan)?;
     let tmp_path = path.with_extension("tmp");
     tokio::fs::write(&tmp_path, content).await?;
     tokio::fs::rename(tmp_path, path).await?;
-    
+
     Ok(())
 }
 
@@ -186,14 +195,20 @@ mod tests {
     #[tokio::test]
     async fn test_state_transition_to_waiting_for_approval() {
         let coordinator = BossCoordinator::new();
-        coordinator.transition_to(BossStage::WaitingForApproval).await.unwrap();
+        coordinator
+            .transition_to(BossStage::WaitingForApproval)
+            .await
+            .unwrap();
         assert_eq!(coordinator.get_stage().await, BossStage::WaitingForApproval);
     }
 
     #[tokio::test]
     async fn test_user_approval_y_transitions_to_execution() {
         let coordinator = BossCoordinator::new();
-        coordinator.transition_to(BossStage::WaitingForApproval).await.unwrap();
+        coordinator
+            .transition_to(BossStage::WaitingForApproval)
+            .await
+            .unwrap();
         // set dummy plan to avoid ignoring boolean conversion
         {
             let mut plan = coordinator.plan.write().await;
@@ -202,14 +217,28 @@ mod tests {
         let confirmed = coordinator.handle_user_approval("Y").await.unwrap();
         assert!(confirmed);
         assert_eq!(coordinator.get_stage().await, BossStage::Execution);
-        assert!(coordinator.plan.read().await.as_ref().unwrap().accepted_by_user);
+        assert!(
+            coordinator
+                .plan
+                .read()
+                .await
+                .as_ref()
+                .unwrap()
+                .accepted_by_user
+        );
     }
 
     #[tokio::test]
     async fn test_user_approval_feedback_returns_to_documentation() {
         let coordinator = BossCoordinator::new();
-        coordinator.transition_to(BossStage::WaitingForApproval).await.unwrap();
-        let rejected = coordinator.handle_user_approval("Wait, this is wrong").await.unwrap();
+        coordinator
+            .transition_to(BossStage::WaitingForApproval)
+            .await
+            .unwrap();
+        let rejected = coordinator
+            .handle_user_approval("Wait, this is wrong")
+            .await
+            .unwrap();
         assert!(!rejected);
         assert_eq!(coordinator.get_stage().await, BossStage::Documentation);
     }
@@ -251,7 +280,10 @@ mod tests {
     fn test_default_plan_path_uses_claude_boss_dir() {
         let root = std::path::Path::new("/home/user/project");
         let path = BossCoordinator::default_plan_path(root);
-        assert_eq!(path, std::path::Path::new("/home/user/project/.claude/boss/planning.json"));
+        assert_eq!(
+            path,
+            std::path::Path::new("/home/user/project/.claude/boss/planning.json")
+        );
     }
 
     #[tokio::test]
@@ -262,13 +294,27 @@ mod tests {
         // 1. Init without file
         let new_coordinator = BossCoordinator::restore_or_init(&plan_path).await.unwrap();
         assert_eq!(new_coordinator.get_stage().await, BossStage::Documentation);
-        assert_eq!(new_coordinator.status.read().await.planning_file.as_ref().unwrap(), &plan_path.to_string_lossy().into_owned());
+        assert_eq!(
+            new_coordinator
+                .status
+                .read()
+                .await
+                .planning_file
+                .as_ref()
+                .unwrap(),
+            &plan_path.to_string_lossy().into_owned()
+        );
 
         // 2. Save a plan that is accepted
         let plan = BossPlan {
             task_description: "task".into(),
             accepted_by_user: true,
-            steps: vec![crate::core::boss_state::BossPlanStep { id: 0, description: "".into(), completed: false, result_diff: None }],
+            steps: vec![crate::core::boss_state::BossPlanStep {
+                id: 0,
+                description: "".into(),
+                completed: false,
+                result_diff: None,
+            }],
             ..Default::default()
         };
         save_plan(&plan, &plan_path).await.unwrap();

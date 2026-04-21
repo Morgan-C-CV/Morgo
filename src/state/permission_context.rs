@@ -2,6 +2,7 @@ use std::collections::HashSet;
 use std::sync::{Arc, RwLock};
 
 use crate::bootstrap::InteractionSurface;
+use crate::core::concurrency::SubagentLimiter;
 use crate::hook::registry::HookRegistry;
 use crate::interaction::dispatcher::NotificationDispatcher;
 use crate::plan::manager::PlanManager;
@@ -14,7 +15,6 @@ use crate::task::list_manager::TaskListManager;
 use crate::task::manager::TaskManager;
 use crate::tool::registry::ToolRegistry;
 use std::sync::atomic::AtomicU64;
-use crate::core::concurrency::SubagentLimiter;
 use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

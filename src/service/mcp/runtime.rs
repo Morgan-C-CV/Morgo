@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::sync::RwLock;
 
@@ -197,9 +198,25 @@ impl McpRuntime {
         let config = state.config;
         self.set_status(server, McpConnectionStatus::Connecting, None, None)
             .await?;
-        let connect_info = match self.client.connect(&config).await {
-            Ok(value) => value,
-            Err(error) => {
+        let connect_timeout = Duration::from_millis(config.connect_timeout_ms);
+        let connect_result =
+            tokio::time::timeout(connect_timeout, self.client.connect(&config)).await;
+        let connect_info = match connect_result {
+            Err(_elapsed) => {
+                return self
+                    .fail_server(
+                        server,
+                        McpOperationKind::Connect,
+                        McpFailureCode::ConnectionTimeout,
+                        format!(
+                            "MCP server '{}' connect timed out after {}ms",
+                            server, config.connect_timeout_ms
+                        ),
+                        None,
+                    )
+                    .await;
+            }
+            Ok(Err(error)) => {
                 return self
                     .fail_server(
                         server,
@@ -210,6 +227,7 @@ impl McpRuntime {
                     )
                     .await;
             }
+            Ok(Ok(value)) => value,
         };
         let tools = match self.client.list_tools(&config).await {
             Ok(value) => value,

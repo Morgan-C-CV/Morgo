@@ -20,6 +20,10 @@ impl McpTransportKind {
     }
 }
 
+fn default_connect_timeout_ms() -> u64 {
+    10_000
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct McpServerConfig {
     pub id: String,
@@ -31,6 +35,8 @@ pub struct McpServerConfig {
     pub transport: McpTransportKind,
     #[serde(default)]
     pub governance: McpServerGovernanceConfig,
+    #[serde(default = "default_connect_timeout_ms")]
+    pub connect_timeout_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -322,6 +328,7 @@ pub enum McpFailureCode {
     Inventory,
     RequestValidation,
     GovernanceReviewRequired,
+    ConnectionTimeout,
 }
 
 impl McpFailureCode {
@@ -336,6 +343,7 @@ impl McpFailureCode {
             Self::Inventory => "inventory",
             Self::RequestValidation => "request_validation",
             Self::GovernanceReviewRequired => "mcp_governance_review_required",
+            Self::ConnectionTimeout => "connection_timeout",
         }
     }
 }

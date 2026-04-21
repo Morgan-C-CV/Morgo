@@ -127,7 +127,7 @@ impl Tool for AgentTool {
                     session_id.clone(),
                     owner_surface,
                 );
-                
+
                 // Concurrency Control: Acquire permit before launching
                 let permit = if let Some(limiter) = &permissions.subagent_limiter {
                     info!("Acquiring concurrency permit for subagent {}...", task.id);
@@ -202,7 +202,7 @@ fn launch_agent_task(
     tasks.launch(&launched_task_id.clone(), task_input.clone(), async move {
         // Hold the permit for the duration of this async block
         let _permit = permit;
-        
+
         let mut params = QueryParams::default();
         params.max_turns = request.max_turns;
         let usage_before = query_context.app_state.cost_tracker.snapshot();

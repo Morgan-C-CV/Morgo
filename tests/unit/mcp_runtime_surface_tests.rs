@@ -17,8 +17,9 @@ use rust_agent::service::mcp::state::{
     McpGovernanceStateEntry, McpGovernanceStateLoadResult, McpGovernanceStateSource,
 };
 use rust_agent::service::mcp::types::{
-    McpAction, McpCapabilities, McpConnectInfo, McpPeerInfo, McpRequest, McpResourceInfo,
-    McpServerConfig, McpServerGovernanceConfig, McpToolInfo, McpTransportKind,
+    McpAction, McpCapabilities, McpConnectInfo, McpConnectionStatus, McpFailureCode, McpPeerInfo,
+    McpRequest, McpResourceInfo, McpServerConfig, McpServerGovernanceConfig, McpToolInfo,
+    McpTransportKind,
 };
 use rust_agent::state::app_state::{AppState, RuntimeRole};
 use rust_agent::state::permission_context::{PermissionMode, ToolPermissionContext};
@@ -40,6 +41,7 @@ enum FakeMode {
     IdMismatch,
     MalformedHeader,
     ServerError,
+    Hanging,
 }
 
 impl Default for FakeMode {
@@ -61,6 +63,10 @@ impl McpClient for FakeMcpClient {
                 "{}",
                 r#"MCP initialize failed: {"code":-32000,"message":"server exploded"}"#
             ),
+            FakeMode::Hanging => {
+                std::future::pending::<()>().await;
+                unreachable!()
+            }
             FakeMode::Ok => Ok(McpConnectInfo {
                 protocol_initialized: true,
                 pid: Some(42),
@@ -90,7 +96,7 @@ impl McpClient for FakeMcpClient {
                 anyhow::bail!("MCP stdio response did not include Content-Length header")
             }
             FakeMode::IdMismatch => anyhow::bail!("MCP response id mismatch for method tools/list"),
-            FakeMode::Ok => Ok(vec![
+            FakeMode::Ok | FakeMode::Hanging => Ok(vec![
                 McpToolInfo {
                     name: "echo".into(),
                     description: "Echo tool".into(),
@@ -125,7 +131,7 @@ impl McpClient for FakeMcpClient {
             FakeMode::IdMismatch => {
                 anyhow::bail!("MCP response id mismatch for method resources/list")
             }
-            FakeMode::Ok => Ok(vec![
+            FakeMode::Ok | FakeMode::Hanging => Ok(vec![
                 McpResourceInfo {
                     name: "readme".into(),
                     uri: "mcp://fake/readme".into(),
@@ -157,7 +163,7 @@ impl McpClient for FakeMcpClient {
                 anyhow::bail!("MCP stdio response did not include Content-Length header")
             }
             FakeMode::IdMismatch => anyhow::bail!("MCP response id mismatch for method tools/call"),
-            FakeMode::Ok => Ok(json!({"tool": tool, "input": input})),
+            FakeMode::Ok | FakeMode::Hanging => Ok(json!({"tool": tool, "input": input})),
         }
     }
 
@@ -177,7 +183,7 @@ impl McpClient for FakeMcpClient {
             FakeMode::IdMismatch => {
                 anyhow::bail!("MCP response id mismatch for method resources/read")
             }
-            FakeMode::Ok => Ok(format!("resource:{resource}")),
+            FakeMode::Ok | FakeMode::Hanging => Ok(format!("resource:{resource}")),
         }
     }
 }
@@ -194,6 +200,7 @@ fn fake_config(command: &str) -> McpServerConfig {
             review_required: false,
             notes: None,
         },
+        connect_timeout_ms: 10_000,
     }
 }
 
@@ -532,5 +539,49 @@ async fn stale_governance_entry_is_reported_in_status() {
     assert!(text.contains("governance: status=stale"));
     assert!(
         text.contains("governance_reasons: transport.stdio_process, governance.review_required")
+    );
+}
+
+#[tokio::test]
+async fn mcp_connect_timeout_produces_typed_failure_and_does_not_hang() {
+    let client = Arc::new(FakeMcpClient::default());
+    *client.mode.lock().await = FakeMode::Hanging;
+
+    let mut config = fake_config("fake");
+    config.connect_timeout_ms = 50; // very short for test speed
+
+    let runtime = Arc::new(McpRuntime::new(
+        Arc::clone(&client) as Arc<dyn McpClient>,
+        vec![config],
+    ));
+
+    let result = runtime.connect("fake").await;
+
+    assert!(
+        result.is_err(),
+        "connect must fail when server hangs past timeout"
+    );
+    let err = result.unwrap_err();
+    let err_str = err.to_string();
+    assert!(
+        err_str.contains("connection_timeout") || err_str.contains("timed out"),
+        "error must indicate connection_timeout, got: {err_str}"
+    );
+
+    // server state must reflect the timeout failure — session is not hung
+    let servers = runtime.list_servers().await;
+    let server = servers
+        .iter()
+        .find(|s| s.config.id == "fake")
+        .expect("server must exist");
+    assert_eq!(server.status, McpConnectionStatus::Failed);
+    assert!(
+        server
+            .last_failure
+            .as_ref()
+            .map(|f| f.code == McpFailureCode::ConnectionTimeout)
+            .unwrap_or(false),
+        "last_failure must be ConnectionTimeout, got: {:?}",
+        server.last_failure
     );
 }

@@ -62,6 +62,7 @@ while True:
                 review_required: false,
                 notes: None,
             },
+            connect_timeout_ms: 10_000,
         };
 
         let client = RoutingMcpClient::default();
@@ -141,6 +142,7 @@ while True:
             review_required: false,
             notes: None,
         },
+        connect_timeout_ms: 10_000,
     };
 
     let client = RoutingMcpClient::default();

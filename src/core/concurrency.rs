@@ -1,8 +1,8 @@
-use std::sync::Arc;
-use tokio::sync::{Semaphore, OwnedSemaphorePermit, Mutex};
-use sysinfo::System;
 use std::process::Command;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use sysinfo::System;
+use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
 use tracing::{debug, info};
 
 const MAX_SUBAGENTS: usize = 8;
@@ -27,7 +27,7 @@ impl SubagentLimiter {
             restriction_permits: Mutex::new(Vec::new()),
             current_limit: AtomicUsize::new(DEFAULT_SUBAGENTS),
         });
-        
+
         let limiter_clone = limiter.clone();
         // Only spawn the refresh loop if we are in an active Tokio runtime context.
         // This prevents panics in synchronous tests while allowing production usage to work as intended.
@@ -36,16 +36,22 @@ impl SubagentLimiter {
                 limiter_clone.refresh_loop().await;
             });
         } else {
-            debug!("SubagentLimiter: No tokio reactor found, background refresh loop will not be started (expected in sync tests)");
+            debug!(
+                "SubagentLimiter: No tokio reactor found, background refresh loop will not be started (expected in sync tests)"
+            );
         }
-        
+
         limiter
     }
 
     /// Acquires a permit to run a subagent. This will wait until a slot is available
     /// according to the current dynamic limit.
     pub async fn acquire(&self) -> OwnedSemaphorePermit {
-        self.semaphore.clone().acquire_owned().await.expect("semaphore should not be closed")
+        self.semaphore
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("semaphore should not be closed")
     }
 
     /// Internal loop to monitor system health and update the concurrency limit.
@@ -66,7 +72,7 @@ impl SubagentLimiter {
         // available_memory() returns bytes in sysinfo 0.30+
         let available_mb = sys.available_memory() / 1024 / 1024;
         let pressure = get_macos_memory_pressure();
-        
+
         let new_limit = calculate_limit(available_mb, pressure);
         self.apply_limit(new_limit).await;
     }
@@ -76,10 +82,10 @@ impl SubagentLimiter {
         if new_limit == current {
             return;
         }
-        
+
         info!(
             "Updating subagent concurrency limit: {} -> {} (Available RAM: {}MB, Pressure: {})",
-            current, 
+            current,
             new_limit,
             // Logic to get available_mb again to log accurately or just pass it in
             "?",
@@ -88,20 +94,20 @@ impl SubagentLimiter {
 
         // We'll log more detail in the caller or pass values
         self.current_limit.store(new_limit, Ordering::SeqCst);
-        
+
         let mut restriction = self.restriction_permits.lock().await;
         let target_restriction = MAX_SUBAGENTS.saturating_sub(new_limit);
-        
+
         // If we need to decrease capacity, we take permits for ourselves
         while restriction.len() < target_restriction {
             if let Ok(permit) = self.semaphore.clone().try_acquire_owned() {
                 restriction.push(permit);
             } else {
                 debug!("Subagent limit decrease delayed: waiting for active agents to finish");
-                break; 
+                break;
             }
         }
-        
+
         // If we need to increase capacity, we release our borrowed permits
         while restriction.len() > target_restriction {
             restriction.pop();
@@ -123,7 +129,7 @@ fn get_macos_memory_pressure() -> u8 {
             .arg("-n")
             .arg("vm.memory_pressure")
             .output();
-        
+
         if let Ok(out) = output {
             String::from_utf8_lossy(&out.stdout)
                 .trim()
@@ -141,15 +147,27 @@ fn get_macos_memory_pressure() -> u8 {
 
 fn calculate_limit(available_mb: u64, pressure: u8) -> usize {
     // Primary trigger: macOS Memory Pressure
-    if pressure >= 4 { return MIN_SUBAGENTS; } // Critical
-    if pressure >= 2 { return 4; }            // Warning
-    
+    if pressure >= 4 {
+        return MIN_SUBAGENTS;
+    } // Critical
+    if pressure >= 2 {
+        return 4;
+    } // Warning
+
     // Secondary trigger: Raw available memory
-    if available_mb < 1024 { return 3; }       // Very low
-    if available_mb < 2048 { return 4; }       // Low
-    if available_mb < 4096 { return 5; }       // Moderate
-    if available_mb >= 8192 { return 8; }      // High
-    
+    if available_mb < 1024 {
+        return 3;
+    } // Very low
+    if available_mb < 2048 {
+        return 4;
+    } // Low
+    if available_mb < 4096 {
+        return 5;
+    } // Moderate
+    if available_mb >= 8192 {
+        return 8;
+    } // High
+
     DEFAULT_SUBAGENTS
 }
 
@@ -185,7 +203,7 @@ mod tests {
 
         let p1 = limiter.acquire().await;
         let _p2 = limiter.acquire().await;
-        
+
         // p3 should fail to acquire immediately
         let try_p3 = limiter.semaphore.try_acquire();
         assert!(try_p3.is_err());
@@ -195,6 +213,12 @@ mod tests {
         assert!(p3.forget_type_info_is_fine()); // just to keep it alive
     }
 
-    trait Forget { fn forget_type_info_is_fine(&self) -> bool; }
-    impl Forget for OwnedSemaphorePermit { fn forget_type_info_is_fine(&self) -> bool { true } }
+    trait Forget {
+        fn forget_type_info_is_fine(&self) -> bool;
+    }
+    impl Forget for OwnedSemaphorePermit {
+        fn forget_type_info_is_fine(&self) -> bool {
+            true
+        }
+    }
 }

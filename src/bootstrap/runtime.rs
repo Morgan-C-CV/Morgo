@@ -119,6 +119,7 @@ fn parse_provider_auth_strategy(value: &str) -> anyhow::Result<ProviderAuthStrat
         other => anyhow::bail!("invalid_configuration: unsupported auth strategy {other}"),
     }
 }
+use crate::core::concurrency::SubagentLimiter;
 use crate::service::api::retry::RetryPolicy;
 use crate::service::compact::reactive_compact::ReactiveCompactor;
 use crate::service::mcp::config::load_server_configs_with_diagnostics;
@@ -143,7 +144,6 @@ use crate::tool::builtin::{
     todo_write::TodoWriteTool, tool_search::ToolSearchTool, web_fetch::WebFetchTool,
     web_search::WebSearchTool,
 };
-use crate::core::concurrency::SubagentLimiter;
 use crate::tool::registry::{ToolAssemblyContext, ToolRegistry};
 
 pub fn is_tui_exit_input(input: &str) -> bool {
@@ -627,7 +627,7 @@ impl RuntimeBootstrap {
                 panic!("failed to load filesystem policy during bootstrap: {error}")
             })
             .map(Arc::new);
-        
+
         // Initialize the global subagent concurrency limiter
         let subagent_limiter = SubagentLimiter::new();
 

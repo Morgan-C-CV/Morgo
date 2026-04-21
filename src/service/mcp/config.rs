@@ -96,5 +96,6 @@ pub fn default_server_configs() -> Vec<McpServerConfig> {
         env: BTreeMap::new(),
         transport: McpTransportKind::Mock,
         governance: Default::default(),
+        connect_timeout_ms: 10_000,
     }]
 }

@@ -906,18 +906,16 @@ async fn execute_tool_phase(
         context
             .app_state
             .permission_context
-            .set_pending_approval(Some(
-                crate::state::permission_context::PendingApproval {
-                    tool_name: tool_name.clone(),
-                    tool_input: effective_tool_input.clone(),
-                    message: ask_message.clone(),
-                    code: None,
-                    summary: Some(ask_message.clone()),
-                    detail: None,
-                    approval_kind: Some("hook_ask".to_string()),
-                    escalation_reasons: Vec::new(),
-                },
-            ));
+            .set_pending_approval(Some(crate::state::permission_context::PendingApproval {
+                tool_name: tool_name.clone(),
+                tool_input: effective_tool_input.clone(),
+                message: ask_message.clone(),
+                code: None,
+                summary: Some(ask_message.clone()),
+                detail: None,
+                approval_kind: Some("hook_ask".to_string()),
+                escalation_reasons: Vec::new(),
+            }));
         engine_events.push(EngineEvent::PendingApproval {
             tool_name: tool_name.clone(),
             message: ask_message.clone(),
