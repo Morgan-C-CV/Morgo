@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio_util::sync::CancellationToken;
-use tracing::{info, debug, warn};
+use tracing::{info, debug, warn, error};
 
 /// Configuration for the background housekeeping daemon.
 #[derive(Debug, Clone)]

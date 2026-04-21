@@ -1,6 +1,7 @@
 use crate::core::message::Message;
-use crate::hook::output::HookPayload;
+use crate::hook::output::{HookPayload, sanitize_additional_context};
 use crate::hook::registry::{HookEvent, HookEventMatcher, HookRegistry};
+use crate::security::audit::{AuditEvent, AuditLog};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HookDecision {
@@ -30,9 +31,18 @@ impl HookResult {
 }
 
 pub fn run_hook(registry: &HookRegistry, event: HookEvent) -> HookResult {
+    run_hook_with_audit(registry, event, None)
+}
+
+pub fn run_hook_with_audit(
+    registry: &HookRegistry,
+    event: HookEvent,
+    audit_log: Option<&std::sync::Mutex<AuditLog>>,
+) -> HookResult {
     registry.record(event.clone());
 
     let mut result = HookResult::allow();
+    let mut raw_additional_context: Vec<String> = Vec::new();
     let mut matched_rules = registry
         .rules()
         .iter()
@@ -72,7 +82,7 @@ pub fn run_hook(registry: &HookRegistry, event: HookEvent) -> HookResult {
             result.payload.updated_input = Some(updated_input.clone());
         }
         if let Some(additional_context) = &rule.additional_context {
-            result.payload.additional_context = Some(additional_context.clone());
+            raw_additional_context.push(additional_context.clone());
             result
                 .messages
                 .push(Message::assistant(additional_context.clone()));
@@ -101,7 +111,53 @@ pub fn run_hook(registry: &HookRegistry, event: HookEvent) -> HookResult {
         }
     }
 
+    result.payload.additional_context = sanitize_additional_context(raw_additional_context);
+
+    if let Some(log) = audit_log {
+        emit_hook_audit(log, &event, &result);
+    }
+
     result
+}
+
+fn emit_hook_audit(log: &std::sync::Mutex<AuditLog>, event: &HookEvent, result: &HookResult) {
+    let event_kind = hook_event_kind_str(event);
+    if let HookDecision::Deny(ref reason) = result.decision {
+        if let Ok(mut guard) = log.lock() {
+            guard.record(AuditEvent::HookDenied {
+                event_kind: event_kind.to_string(),
+                reason: reason.clone(),
+            });
+        }
+    } else {
+        if result.payload.updated_input.is_some() {
+            if let Ok(mut guard) = log.lock() {
+                guard.record(AuditEvent::HookUpdatedInput {
+                    event_kind: event_kind.to_string(),
+                });
+            }
+        } else if let Ok(mut guard) = log.lock() {
+            guard.record(AuditEvent::HookAllowed {
+                event_kind: event_kind.to_string(),
+            });
+        }
+    }
+}
+
+fn hook_event_kind_str(event: &HookEvent) -> &'static str {
+    match event {
+        HookEvent::SessionStart => "session_start",
+        HookEvent::Setup => "setup",
+        HookEvent::UserPromptSubmit => "user_prompt_submit",
+        HookEvent::PreToolUse { .. } => "pre_tool_use",
+        HookEvent::PostToolUse { .. } => "post_tool_use",
+        HookEvent::PostToolUseFailure { .. } => "post_tool_use_failure",
+        HookEvent::PermissionRequest { .. } => "permission_request",
+        HookEvent::PermissionDenied { .. } => "permission_denied",
+        HookEvent::Stop => "stop",
+        HookEvent::SubagentStop => "subagent_stop",
+        HookEvent::Notification { .. } => "notification",
+    }
 }
 
 fn matches_event(matcher: &HookEventMatcher, event: &HookEvent) -> bool {

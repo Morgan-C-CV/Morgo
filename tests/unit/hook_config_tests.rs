@@ -61,8 +61,8 @@ fn hook_loader_reads_external_rules_from_project_config() {
     );
     assert!(result.prevent_continuation);
     assert_eq!(
-        result.payload.additional_context.as_deref(),
-        Some("loaded from disk")
+        result.payload.additional_context.as_slice(),
+        &["loaded from disk"]
     );
 
     fs::remove_dir_all(root).expect("cleanup hooks config root");

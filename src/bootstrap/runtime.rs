@@ -643,9 +643,16 @@ impl RuntimeBootstrap {
         if let Some(policy) = filesystem_policy.clone() {
             permission_context = permission_context.with_filesystem_policy(policy);
         }
+        let last_activity_ts = Arc::new(std::sync::atomic::AtomicU64::new(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+        ));
+        let cancellation_token = CancellationToken::new();
         permission_context = permission_context
-            .with_last_activity_ts(app_state.last_activity_ts.clone())
-            .with_cancellation_token(app_state.cancellation_token.clone());
+            .with_last_activity_ts(last_activity_ts.clone())
+            .with_cancellation_token(cancellation_token.clone());
         let app_state = AppState {
             surface: state.surface,
             session_mode: state.session_mode,
@@ -675,13 +682,8 @@ impl RuntimeBootstrap {
             session: None,
             history: None,
             restored_session: None,
-            last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs(),
-            )),
-            cancellation_token: CancellationToken::new(),
+            last_activity_ts,
+            cancellation_token,
         };
         let snapshot = build_runtime_plugin_snapshot(&app_state);
         let command_registry = snapshot.command_registry.clone();
@@ -734,9 +736,16 @@ impl RuntimeBootstrap {
         if let Some(policy) = initialize_bundle.filesystem_policy.clone() {
             permission_context = permission_context.with_filesystem_policy(policy);
         }
+        let last_activity_ts = Arc::new(std::sync::atomic::AtomicU64::new(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+        ));
+        let cancellation_token = CancellationToken::new();
         permission_context = permission_context
-            .with_last_activity_ts(initialize_bundle.app_state.last_activity_ts.clone())
-            .with_cancellation_token(initialize_bundle.app_state.cancellation_token.clone());
+            .with_last_activity_ts(last_activity_ts.clone())
+            .with_cancellation_token(cancellation_token.clone());
         let mut app_state = AppState {
             surface: state.surface,
             session_mode: state.session_mode,
@@ -771,13 +780,8 @@ impl RuntimeBootstrap {
             session: None,
             history: None,
             restored_session: None,
-            last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs(),
-            )),
-            cancellation_token: initialize_bundle.app_state.cancellation_token.clone(),
+            last_activity_ts,
+            cancellation_token,
         };
         app_state.apply_resolved_session_state(resolved_session);
         app_state

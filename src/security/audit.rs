@@ -49,6 +49,16 @@ pub enum AuditEvent {
         channel: String,
         request_id: String,
     },
+    HookAllowed {
+        event_kind: String,
+    },
+    HookDenied {
+        event_kind: String,
+        reason: String,
+    },
+    HookUpdatedInput {
+        event_kind: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -196,6 +206,42 @@ impl AuditRecord {
                 notification_kind: Some(notification_kind.clone()),
                 channel: Some(channel.clone()),
                 outcome: "dispatched".into(),
+                event,
+            },
+            AuditEvent::HookAllowed { .. } => Self {
+                timestamp,
+                event_kind: "hook_allowed".into(),
+                session_id: None,
+                actor_id: None,
+                surface: None,
+                request_id: None,
+                notification_kind: None,
+                channel: None,
+                outcome: "allowed".into(),
+                event,
+            },
+            AuditEvent::HookDenied { .. } => Self {
+                timestamp,
+                event_kind: "hook_denied".into(),
+                session_id: None,
+                actor_id: None,
+                surface: None,
+                request_id: None,
+                notification_kind: None,
+                channel: None,
+                outcome: "denied".into(),
+                event,
+            },
+            AuditEvent::HookUpdatedInput { .. } => Self {
+                timestamp,
+                event_kind: "hook_updated_input".into(),
+                session_id: None,
+                actor_id: None,
+                surface: None,
+                request_id: None,
+                notification_kind: None,
+                channel: None,
+                outcome: "updated_input".into(),
                 event,
             },
         }
