@@ -116,9 +116,7 @@ pub fn resolve_active_model_profile_from_registry(
     registry: &ModelProfileRegistry,
 ) -> anyhow::Result<ResolvedModelProfile> {
     resolve_model_profile_from_registry(registry, registry.active.as_str()).map_err(|error| {
-        if error
-            .to_string()
-            .contains("model profile '")
+        if error.to_string().contains("model profile '")
             && error.to_string().contains("' was not found")
         {
             anyhow::anyhow!(

@@ -679,7 +679,7 @@ impl RuntimeBootstrap {
             state.session_mode,
         ));
         let runtime_tool_registry = Arc::new(RwLock::new(coordinator_tools.clone()));
-        
+
         let boss_coordinator = Arc::new(BossCoordinator::new());
 
         let notification_dispatcher = NotificationDispatcher::new(self.build_telegram_gateway())
@@ -846,7 +846,7 @@ impl RuntimeBootstrap {
         .with_inherited_tool_registry(initialize_bundle.coordinator_tools.clone())
         .with_inherited_hook_registry(initialize_bundle.hook_registry.clone())
         .with_subagent_limiter(initialize_bundle.subagent_limiter.clone());
-        
+
         if let Some(boss) = initialize_bundle.boss_coordinator.clone() {
             permission_context = permission_context.with_boss_coordinator(boss);
         }
