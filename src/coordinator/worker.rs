@@ -51,6 +51,7 @@ impl TaskNotification {
             orchestration_group_id: self.orchestration_group_id.clone(),
             phase: self.phase,
             validation_state: self.validation_state,
+            step_id: None,
             output_file: self.output_file.clone(),
             usage: None,
         }

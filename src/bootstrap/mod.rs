@@ -7,7 +7,8 @@ pub mod warnings;
 
 pub use runtime::{
     BootstrapCli, FinalizedRuntime, PromptAugmentation, PromptAugmentationMetadata,
-    RuntimeBootstrap, RuntimeInitializeBundle, UserAccessDecision, is_tui_exit_input,
+    RuntimeBootstrap, RuntimeInitializeBundle, UserAccessDecision,
+    has_explicit_provider_env_override, is_tui_exit_input, summarize_active_model_provider,
     tui_clear_screen_prefix,
 };
 pub use setup::SetupContext;

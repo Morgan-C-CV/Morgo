@@ -246,6 +246,7 @@ pub struct TaskRecord {
     pub orchestration_group_id: Option<String>,
     pub phase: Option<WorkerPhase>,
     pub validation_state: Option<ValidationState>,
+    pub step_id: Option<usize>,
     pub output_file: String,
     pub output_offset: usize,
     pub delivery: TaskDeliveryState,
@@ -271,6 +272,7 @@ pub struct TaskEvent {
     pub orchestration_group_id: Option<String>,
     pub phase: Option<WorkerPhase>,
     pub validation_state: Option<ValidationState>,
+    pub step_id: Option<usize>,
     pub output_file: String,
     pub usage: Option<TaskUsageSummary>,
 }
@@ -286,7 +288,7 @@ impl TaskEvent {
 
         if self.output_file.is_empty() {
             return format!(
-                "<task-notification>\n<task-id>{}</task-id>\n<task-type>{}</task-type>\n<status>{:?}</status>\n<summary>{}</summary>\n<result>{}</result>\n<next-action>{}</next-action>\n<worker-role>{}</worker-role>\n<orchestration-group>{}</orchestration-group>\n<phase>{}</phase>\n<validation-state>{}</validation-state>{}\n</task-notification>",
+                "<task-notification>\n<task-id>{}</task-id>\n<task-type>{}</task-type>\n<status>{:?}</status>\n<summary>{}</summary>\n<result>{}</result>\n<next-action>{}</next-action>\n<worker-role>{}</worker-role>\n<orchestration-group>{}</orchestration-group>\n<phase>{}</phase>\n<validation-state>{}</validation-state>\n<step-id>{}</step-id>{}\n</task-notification>",
                 self.task_id,
                 self.task_type.as_str(),
                 self.status,
@@ -299,12 +301,13 @@ impl TaskEvent {
                 self.validation_state
                     .map(|state| state.as_str())
                     .unwrap_or("none"),
+                self.step_id.map(|id| id.to_string()).unwrap_or("none".into()),
                 usage_block,
             );
         }
 
         format!(
-            "<task-notification>\n<task-id>{}</task-id>\n<task-type>{}</task-type>\n<status>{:?}</status>\n<summary>{}</summary>\n<result>{}</result>\n<next-action>{}</next-action>\n<worker-role>{}</worker-role>\n<orchestration-group>{}</orchestration-group>\n<phase>{}</phase>\n<validation-state>{}</validation-state>{}\n<output-file>{}</output-file>\n</task-notification>",
+            "<task-notification>\n<task-id>{}</task-id>\n<task-type>{}</task-type>\n<status>{:?}</status>\n<summary>{}</summary>\n<result>{}</result>\n<next-action>{}</next-action>\n<worker-role>{}</worker-role>\n<orchestration-group>{}</orchestration-group>\n<phase>{}</phase>\n<validation-state>{}</validation-state>\n<step-id>{}</step-id>{}\n<output-file>{}</output-file>\n</task-notification>",
             self.task_id,
             self.task_type.as_str(),
             self.status,
@@ -317,6 +320,7 @@ impl TaskEvent {
             self.validation_state
                 .map(|state| state.as_str())
                 .unwrap_or("none"),
+            self.step_id.map(|id| id.to_string()).unwrap_or("none".into()),
             usage_block,
             self.output_file,
         )

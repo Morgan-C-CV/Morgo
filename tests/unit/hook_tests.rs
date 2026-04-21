@@ -176,6 +176,7 @@ fn notification_hook_can_match_typed_payload() {
         orchestration_group_id: None,
         phase: Some("research".into()),
         validation_state: Some("not_needed".into()),
+        step_id: None,
         output_file: Some("/tmp/task-9.log".into()),
         usage: None,
         tool_name: None,

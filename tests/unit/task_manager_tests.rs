@@ -288,6 +288,7 @@ fn task_manager_queues_internal_task_notifications() {
             orchestration_group_id: None,
             phase: None,
             validation_state: None,
+            step_id: None,
             output_file: task.output_file.clone(),
             usage: None,
         }

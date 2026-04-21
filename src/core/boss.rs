@@ -3,6 +3,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
+#[derive(Debug)]
 pub struct BossCoordinator {
     pub status: Arc<RwLock<BossStatus>>,
     /// Placed here so the planner can hold and modify it in memory before flushing
@@ -152,6 +153,115 @@ impl BossCoordinator {
             self.transition_to(BossStage::Documentation).await?;
             Ok(false)
         }
+    }
+
+    /// Processes a task completion event to update the BossPlan status.
+    pub async fn on_task_event(&self, event: &crate::task::types::TaskEvent) -> anyhow::Result<()> {
+        let step_id = match event.step_id {
+            Some(id) => id,
+            None => return Ok(()),
+        };
+
+        let mut plan_guard = self.plan.write().await;
+        let plan = match plan_guard.as_mut() {
+            Some(p) => p,
+            None => return Ok(()),
+        };
+
+        if let Some(step) = plan.steps.iter_mut().find(|s| s.id == step_id) {
+            if event.status == crate::task::types::TaskStatus::Completed {
+                step.completed = true;
+                step.worker_task_id = Some(event.task_id.clone());
+                tracing::info!("BossPlan: Step {} marked as completed", step_id);
+                
+                // Update status current_step
+                let mut status = self.status.write().await;
+                status.current_step = plan.steps.iter().find(|s| !s.completed).map(|s| s.id);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Simplified entry point for dispatcher updates.
+    pub async fn on_notification(&self, notification: &crate::interaction::notification::Notification) -> anyhow::Result<()> {
+        if notification.notification_type != crate::interaction::notification::NotificationType::TaskUpdate {
+            return Ok(());
+        }
+
+        let step_id = match notification.step_id {
+            Some(id) => id,
+            None => return Ok(()),
+        };
+
+        let mut plan_guard = self.plan.write().await;
+        let plan = match plan_guard.as_mut() {
+            Some(p) => p,
+            None => return Ok(()),
+        };
+
+        if let Some(step) = plan.steps.iter_mut().find(|s| s.id == step_id) {
+            // We consider the step completed only if the status is "Completed" (case-insensitive check)
+            let status = notification.status.as_deref().unwrap_or("");
+            if status.to_lowercase() == "completed" {
+                step.completed = true;
+                step.worker_task_id = notification.task_id.clone();
+                tracing::info!("BossPlan: Step {} marked as completed via notification", step_id);
+                
+                // Update status current_step
+                let mut status_guard = self.status.write().await;
+                status_guard.current_step = plan.steps.iter().find(|s| !s.completed).map(|s| s.id);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Automatically scans for the next runnable step and returns it.
+    pub async fn get_next_runnable_step(&self) -> Option<usize> {
+        let plan_guard = self.plan.read().await;
+        let plan = plan_guard.as_ref()?;
+        
+        if plan.steps.iter().all(|s| s.completed) {
+            return None;
+        }
+
+        plan.steps.iter()
+            .find(|s| !s.completed)
+            .map(|s| s.id)
+    }
+
+    /// Advances the plan by spawning the next worker if applicable.
+    /// This is the core of the Auto-Sequencing engine.
+    pub async fn advance_plan(&self, app_state: &Arc<crate::state::app_state::AppState>) -> anyhow::Result<Option<String>> {
+        let next_step_id = match self.get_next_runnable_step().await {
+            Some(id) => id,
+            None => return Ok(None),
+        };
+
+        let (task_desc, role, orchestration_group_id) = {
+            let plan_guard = self.plan.read().await;
+            let plan = plan_guard.as_ref().ok_or_else(|| anyhow::anyhow!("No plan loaded"))?;
+            
+            if !plan.auto_sequence {
+                return Ok(None);
+            }
+
+            let step = plan.steps.iter().find(|s| s.id == next_step_id).unwrap();
+            let desc = format!("{} (Boss Mode Auto-Step {})", step.description, next_step_id);
+            // Default to Implement for execution steps if not specified, 
+            // but we might want to infer this from the step description in the future.
+            (desc, crate::state::app_state::WorkerRole::Implement, plan.steps[0].worker_task_id.as_deref().map(|id| id.to_owned()))
+        };
+
+        // We need ToolRegistry to invoke AgentTool.
+        // Or we can just call launch_agent_task directly if we can access it.
+        // For now, let's just mark it as "ready to advance" in the state 
+        // until we decide on the best way to trigger the actual tool call.
+        
+        tracing::info!("BossPlan: Auto-advancing to step {}", next_step_id);
+        
+        Ok(Some(format!("Next recommended action: Spawn agent for step {}: {}", next_step_id, task_desc)))
     }
 }
 

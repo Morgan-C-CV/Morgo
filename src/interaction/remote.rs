@@ -658,6 +658,7 @@ fn notification_from_task_view(session_id: &str, actor_id: &str, task: &TaskView
         task.orchestration_group_id.as_deref(),
         task.phase,
         task.validation_state,
+        None,
         task.output_file.clone(),
         task.usage.clone(),
     );
