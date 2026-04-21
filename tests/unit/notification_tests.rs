@@ -124,6 +124,7 @@ fn telegram_test_app_state(
         restored_session: None,
         last_activity_ts: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         cancellation_token: tokio_util::sync::CancellationToken::new(),
+        subagent_limiter: None,
     }
 }
 
@@ -2551,6 +2552,7 @@ fn drain_remote_notifications_maps_structured_payloads() {
         restored_session: None,
         last_activity_ts: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         cancellation_token: tokio_util::sync::CancellationToken::new(),
+        subagent_limiter: None,
     };
     let mut approval = Notification::approval_required(
         "remote-session",
@@ -2666,6 +2668,7 @@ fn drain_remote_task_update_notifications_preserve_task_type() {
         restored_session: None,
         last_activity_ts: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         cancellation_token: tokio_util::sync::CancellationToken::new(),
+        subagent_limiter: None,
     };
     let mut notification = Notification::task_update(
         "remote-session",

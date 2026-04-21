@@ -178,7 +178,7 @@ mod tests {
         assert_eq!(limiter.current_limit(), 2);
 
         let p1 = limiter.acquire().await;
-        let p2 = limiter.acquire().await;
+        let _p2 = limiter.acquire().await;
         
         // p3 should fail to acquire immediately
         let try_p3 = limiter.semaphore.try_acquire();

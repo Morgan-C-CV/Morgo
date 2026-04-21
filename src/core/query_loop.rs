@@ -895,6 +895,46 @@ async fn execute_tool_phase(
         };
     }
 
+    if let crate::tool::definition::PermissionDecision::Ask { message, .. } =
+        requested_permission_decision
+    {
+        let ask_message = if message.is_empty() {
+            format!("tool {tool_name} requires approval before execution")
+        } else {
+            message
+        };
+        context
+            .app_state
+            .permission_context
+            .set_pending_approval(Some(
+                crate::state::permission_context::PendingApproval {
+                    tool_name: tool_name.clone(),
+                    tool_input: effective_tool_input.clone(),
+                    message: ask_message.clone(),
+                    code: None,
+                    summary: Some(ask_message.clone()),
+                    detail: None,
+                    approval_kind: Some("hook_ask".to_string()),
+                    escalation_reasons: Vec::new(),
+                },
+            ));
+        engine_events.push(EngineEvent::PendingApproval {
+            tool_name: tool_name.clone(),
+            message: ask_message.clone(),
+            code: None,
+            summary: ask_message,
+            detail: None,
+            approval_kind: Some("hook_ask".to_string()),
+            escalation_reasons: Vec::new(),
+            report_modifier: ToolReportModifier::Pending,
+        });
+        return TurnOutcome {
+            state: state.clone(),
+            events: engine_events,
+            decision: TurnDecision::Return(state.clone(), Terminal::AbortedTools),
+        };
+    }
+
     let orchestrator = crate::tool::orchestrator::ToolOrchestrator::new(&context.tool_registry);
     let tool_result = orchestrator
         .execute(

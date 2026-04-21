@@ -192,6 +192,7 @@ fn test_context_with_turns(
             restored_session: None,
             last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             cancellation_token: tokio_util::sync::CancellationToken::new(),
+            subagent_limiter: None,
         },
         tool_registry,
         api_client: ModelProviderClient::with_scripted_turns(turns),
@@ -1089,6 +1090,7 @@ async fn query_loop_stop_hook_can_prevent_continuation() {
             restored_session: None,
             last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             cancellation_token: tokio_util::sync::CancellationToken::new(),
+            subagent_limiter: None,
         },
         tool_registry: ToolRegistry::new(),
         api_client: ModelProviderClient::with_scripted_turns(vec![vec![
@@ -1171,6 +1173,7 @@ async fn query_loop_respects_pre_tool_hook_denial() {
             restored_session: None,
             last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             cancellation_token: tokio_util::sync::CancellationToken::new(),
+            subagent_limiter: None,
         },
         tool_registry: registry,
         api_client: ModelProviderClient::with_scripted_turns(vec![vec![
@@ -1271,6 +1274,7 @@ async fn query_loop_runs_permission_request_hook_before_tool_execution() {
             restored_session: None,
             last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             cancellation_token: tokio_util::sync::CancellationToken::new(),
+            subagent_limiter: None,
         },
         tool_registry: registry,
         api_client: ModelProviderClient::with_scripted_turns(vec![vec![
@@ -1363,6 +1367,7 @@ async fn query_loop_stop_hook_blocking_continues_with_follow_up_turn() {
             restored_session: None,
             last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             cancellation_token: tokio_util::sync::CancellationToken::new(),
+            subagent_limiter: None,
         },
         tool_registry: ToolRegistry::new(),
         api_client: ModelProviderClient::with_scripted_turns(vec![
@@ -1464,6 +1469,7 @@ async fn query_loop_uses_subagent_stop_hook_for_subagent_context() {
             restored_session: None,
             last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             cancellation_token: tokio_util::sync::CancellationToken::new(),
+            subagent_limiter: None,
         },
         tool_registry: ToolRegistry::new(),
         api_client: ModelProviderClient::with_scripted_turns(vec![vec![
@@ -1612,6 +1618,7 @@ async fn engine_drains_internal_task_events() {
             restored_session: None,
             last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             cancellation_token: tokio_util::sync::CancellationToken::new(),
+            subagent_limiter: None,
         },
         tool_registry: ToolRegistry::new(),
         api_client: ModelProviderClient::default(),
@@ -1691,6 +1698,7 @@ async fn worker_query_loop_consumes_mailbox_messages() {
             restored_session: None,
             last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             cancellation_token: tokio_util::sync::CancellationToken::new(),
+            subagent_limiter: None,
         },
         tool_registry: ToolRegistry::new(),
         api_client: ModelProviderClient::with_scripted_turns(vec![
@@ -1789,6 +1797,7 @@ async fn subagent_context_inherits_parent_tools_and_hooks() {
             restored_session: None,
             last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             cancellation_token: tokio_util::sync::CancellationToken::new(),
+            subagent_limiter: None,
         },
         tool_registry: parent_tool_registry.clone(),
         api_client: ModelProviderClient::default(),
@@ -1904,6 +1913,7 @@ async fn subagent_context_does_not_inherit_session_memory_when_disabled() {
             restored_session: None,
             last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             cancellation_token: tokio_util::sync::CancellationToken::new(),
+            subagent_limiter: None,
         },
         tool_registry: ToolRegistry::new(),
         api_client: ModelProviderClient::default(),
@@ -1997,6 +2007,7 @@ async fn subagent_context_reanchors_and_bounds_nested_memory_lineage() {
             restored_session: None,
             last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             cancellation_token: tokio_util::sync::CancellationToken::new(),
+            subagent_limiter: None,
         },
         tool_registry: ToolRegistry::new(),
         api_client: ModelProviderClient::default(),
@@ -2166,6 +2177,7 @@ async fn coordinator_waits_for_group_barrier_before_synthesis_follow_up() {
             restored_session: None,
             last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             cancellation_token: tokio_util::sync::CancellationToken::new(),
+            subagent_limiter: None,
         },
         tool_registry: ToolRegistry::new(),
         api_client: ModelProviderClient::with_scripted_turns(vec![
@@ -2292,6 +2304,7 @@ async fn coordinator_gates_finalization_until_verification_finishes() {
             restored_session: None,
             last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             cancellation_token: tokio_util::sync::CancellationToken::new(),
+            subagent_limiter: None,
         },
         tool_registry: ToolRegistry::new(),
         api_client: ModelProviderClient::with_scripted_turns(vec![
@@ -2428,7 +2441,8 @@ async fn coordinator_surfaces_verification_failure_and_missing_verification_risk
             history: None,
             restored_session: None,
             last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        cancellation_token: tokio_util::sync::CancellationToken::new(),
+            cancellation_token: tokio_util::sync::CancellationToken::new(),
+            subagent_limiter: None,
         },
         tool_registry: ToolRegistry::new(),
         api_client: ModelProviderClient::with_scripted_turns(vec![
@@ -3180,6 +3194,7 @@ async fn submit_turn_distinguishes_stop_hook_prevented_and_blocking_runtime_even
             restored_session: None,
             last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             cancellation_token: tokio_util::sync::CancellationToken::new(),
+            subagent_limiter: None,
         },
         tool_registry: ToolRegistry::new(),
         api_client: ModelProviderClient::with_scripted_turns(vec![vec![
@@ -3235,6 +3250,7 @@ async fn submit_turn_distinguishes_stop_hook_prevented_and_blocking_runtime_even
             restored_session: None,
             last_activity_ts: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             cancellation_token: tokio_util::sync::CancellationToken::new(),
+            subagent_limiter: None,
         },
         tool_registry: ToolRegistry::new(),
         api_client: ModelProviderClient::with_scripted_turns(vec![
@@ -3321,4 +3337,120 @@ async fn query_loop_uses_param_max_output_recovery_limit() {
     assert_eq!(result.state, QueryLoopState::Interrupted);
     assert_eq!(result.terminal, Terminal::AbortedStreaming);
     assert_eq!(result.transition, Some(Continue::MaxOutputTokensEscalate));
+}
+
+struct EchoTool;
+
+#[async_trait]
+impl rust_agent::tool::definition::Tool for EchoTool {
+    fn metadata(&self) -> rust_agent::tool::definition::ToolMetadata {
+        rust_agent::tool::definition::ToolMetadata {
+            name: "Echo".into(),
+            description: "Echoes input".into(),
+            aliases: &[],
+            search_hint: None,
+            read_only: true,
+            destructive: false,
+            concurrency_safe: true,
+            always_load: true,
+            should_defer: false,
+            requires_auth: false,
+            requires_user_interaction: false,
+            is_open_world: false,
+            is_search_or_read_command: false,
+        }
+    }
+
+    async fn invoke(
+        &self,
+        call: &ToolCall,
+        _permissions: &ToolPermissionContext,
+    ) -> anyhow::Result<ToolResult> {
+        Ok(ToolResult::Text(format!("echo: {}", call.input)))
+    }
+}
+
+#[tokio::test]
+async fn hook_ask_does_not_execute_tool_and_produces_pending_approval_event() {
+    let registry = ToolRegistry::new().register(Arc::new(EchoTool));
+    let hook_registry = HookRegistry::default().register_rule(HookRule {
+        event: HookEventMatcher::PermissionRequest,
+        layer: HookRuleLayer::Defaults,
+        deny_match: None,
+        append_message: None,
+        prevent_continuation: false,
+        block_continuation: false,
+        permission_decision: Some("ask".into()),
+        updated_input: None,
+        additional_context: None,
+    });
+
+    let mut context = test_context_with_turns(
+        vec![vec![
+            StreamEvent::MessageStart,
+            StreamEvent::ToolUse {
+                tool_name: "Echo".into(),
+                input: "hello".into(),
+            },
+            StreamEvent::MessageStop {
+                stop_reason: StopReason::ToolUse,
+            },
+        ]],
+        registry,
+    );
+    context.hook_registry = hook_registry;
+
+    let result = run_query_loop(&context, Message::user("run echo")).await;
+
+    assert_eq!(result.terminal, Terminal::AbortedTools);
+    assert!(
+        result.events.iter().any(
+            |e| matches!(e, EngineEvent::PendingApproval { tool_name, approval_kind, .. }
+                if tool_name == "Echo" && approval_kind.as_deref() == Some("hook_ask"))
+        ),
+        "expected PendingApproval event with hook_ask kind"
+    );
+    assert!(
+        !result.messages.iter().any(|m| m.content.contains("echo:")),
+        "tool must not have executed"
+    );
+}
+
+#[tokio::test]
+async fn hook_ask_sets_pending_approval_in_permission_context() {
+    let registry = ToolRegistry::new().register(Arc::new(EchoTool));
+    let hook_registry = HookRegistry::default().register_rule(HookRule {
+        event: HookEventMatcher::PermissionRequest,
+        layer: HookRuleLayer::Defaults,
+        deny_match: None,
+        append_message: None,
+        prevent_continuation: false,
+        block_continuation: false,
+        permission_decision: Some("ask".into()),
+        updated_input: None,
+        additional_context: None,
+    });
+
+    let mut context = test_context_with_turns(
+        vec![vec![
+            StreamEvent::MessageStart,
+            StreamEvent::ToolUse {
+                tool_name: "Echo".into(),
+                input: "world".into(),
+            },
+            StreamEvent::MessageStop {
+                stop_reason: StopReason::ToolUse,
+            },
+        ]],
+        registry,
+    );
+    context.hook_registry = hook_registry;
+
+    run_query_loop(&context, Message::user("run echo")).await;
+
+    let pending = context.app_state.permission_context.pending_approval();
+    assert!(
+        matches!(pending, Some(p) if p.tool_name == "Echo" && p.approval_kind.as_deref() == Some("hook_ask")),
+        "permission_context must have pending approval with hook_ask kind"
+    );
 }

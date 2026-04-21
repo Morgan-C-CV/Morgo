@@ -237,6 +237,7 @@ fn test_app_state(runtime: Arc<McpRuntime>) -> AppState {
         restored_session: None,
         last_activity_ts: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         cancellation_token: tokio_util::sync::CancellationToken::new(),
+            subagent_limiter: None,
     }
 }
 

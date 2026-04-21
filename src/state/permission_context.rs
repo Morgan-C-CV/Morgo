@@ -246,11 +246,6 @@ impl ToolPermissionContext {
         self
     }
 
-    pub fn with_cancellation_token(mut self, cancellation_token: CancellationToken) -> Self {
-        self.cancellation_token = Some(cancellation_token);
-        self
-    }
-
     pub fn with_subagent_limiter(mut self, subagent_limiter: Arc<SubagentLimiter>) -> Self {
         self.subagent_limiter = Some(subagent_limiter);
         self
