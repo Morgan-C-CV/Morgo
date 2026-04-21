@@ -1,6 +1,7 @@
 use std::io::{self, BufRead};
 use std::sync::{Arc, Mutex};
 use tokio::sync::RwLock;
+use tokio_util::sync::CancellationToken;
 
 use clap::Parser;
 
@@ -368,9 +369,16 @@ impl RuntimeBootstrap {
             active_session_id,
         );
         let app_state = finalized.app_state.clone();
-        let initial_snapshot = finalized.snapshot.clone();
         let router = finalized.router;
         let engine = finalized.engine;
+
+        // Initialize and spawn background housekeeping daemon
+        let housekeeping_token = CancellationToken::new();
+        let housekeeping_daemon = crate::core::housekeeping::HousekeepingDaemon::new(
+            crate::core::housekeeping::HousekeepingConfig::default(),
+            housekeeping_token.clone(),
+        );
+        tokio::spawn(housekeeping_daemon.run());
 
         if self.cli.trace_startup {
             println!("startup: {}", state.startup_trace());
