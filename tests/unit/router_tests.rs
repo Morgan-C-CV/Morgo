@@ -11,6 +11,7 @@ use rust_agent::command::builtin::help::HelpCommand;
 use rust_agent::command::builtin::permissions::PermissionsCommand;
 use rust_agent::command::builtin::plan::PlanCommand;
 use rust_agent::command::builtin::plugins::PluginsCommand;
+use rust_agent::command::builtin::status::StatusCommand;
 use rust_agent::command::registry::CommandRegistry;
 use rust_agent::command::types::{
     Command, CommandAvailability, CommandMetadata, CommandResult, CommandSource, CommandType,
@@ -437,6 +438,17 @@ async fn router_route_surfaces_strict_unknown_command_as_denied_result() {
             rust_agent::security::audit::AuditLog::default(),
         )),
         startup_trace: Vec::new(),
+        active_model_profile_name: None,
+        active_model_profile_source:
+            rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
+        active_model_provider_summary: rust_agent::state::app_state::ActiveModelProviderSummary {
+            provider_id: "default-provider".into(),
+            protocol: "Anthropic".into(),
+            compatibility_profile: "Anthropic".into(),
+            base_url_host: "localhost".into(),
+            model: "default-model".into(),
+            auth_status: "env:OPENAI_API_KEY(unset)".into(),
+        },
         active_session_id: "test-session".into(),
         session_store: None,
         session: None,
@@ -461,6 +473,72 @@ async fn router_route_surfaces_strict_unknown_command_as_denied_result() {
             "unknown command /missing rejected by strict policy".into()
         ))
     );
+}
+
+#[tokio::test]
+async fn status_command_shows_active_model_summary_without_secret_leak() {
+    let registry = Arc::new(CommandRegistry::new().register(Arc::new(StatusCommand)));
+    let router = CommandRouter::new(registry, Box::new(DefaultSurfaceAuthorizer::default()));
+    let app_state = AppState {
+        surface: InteractionSurface::Cli,
+        session_mode: SessionMode::Interactive,
+        client_type: ClientType::Cli,
+        session_source: SessionSource::LocalCli,
+        runtime_role: RuntimeRole::Coordinator,
+        worker_role: None,
+        permission_context: ToolPermissionContext::new(PermissionMode::Default),
+        command_registry: None,
+        runtime_tool_registry: Some(Arc::new(RwLock::new(ToolRegistry::new()))),
+        skill_registry: None,
+        mcp_runtime: None,
+        plugin_load_result: None,
+        cost_tracker: CostTracker::default(),
+        service_observability_tracker:
+            rust_agent::service::observability::ServiceObservabilityTracker::default(),
+        notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
+        audit_log: Arc::new(std::sync::Mutex::new(
+            rust_agent::security::audit::AuditLog::default(),
+        )),
+        startup_trace: Vec::new(),
+        active_model_profile_name: Some("openai-fast".into()),
+        active_model_profile_source:
+            rust_agent::state::app_state::ActiveModelProfileSource::ModelsToml,
+        active_model_provider_summary: rust_agent::state::app_state::ActiveModelProviderSummary {
+            provider_id: "openai".into(),
+            protocol: "OpenAICompatible".into(),
+            compatibility_profile: "OpenAICompatible".into(),
+            base_url_host: "api.openai.com".into(),
+            model: "gpt-4.1-mini".into(),
+            auth_status: "env:OPENAI_API_KEY(set)".into(),
+        },
+        active_session_id: "status-model-session".into(),
+        session_store: None,
+        session: None,
+        history: None,
+        restored_session: None,
+        last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        cancellation_token: tokio_util::sync::CancellationToken::new(),
+        subagent_limiter: None,
+        boss_coordinator: None,
+    };
+
+    let result = router
+        .route(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/status"),
+            &app_state,
+        )
+        .await
+        .expect("status route should succeed");
+
+    let RouteExecution::CommandResult(CommandResult::Message(text)) = result else {
+        panic!("expected status command result");
+    };
+    assert!(text.contains("active_model_profile: openai-fast"));
+    assert!(text.contains("active_model_source: models_toml"));
+    assert!(text.contains("provider_id=openai"));
+    assert!(text.contains("model=gpt-4.1-mini"));
+    assert!(text.contains("auth_status=env:OPENAI_API_KEY(set)"));
+    assert!(!text.contains("resolved-secret"));
 }
 
 #[tokio::test]
@@ -749,6 +827,17 @@ async fn prompt_command_with_model_invocation_disabled_never_enters_query_engine
             rust_agent::security::audit::AuditLog::default(),
         )),
         startup_trace: Vec::new(),
+        active_model_profile_name: None,
+        active_model_profile_source:
+            rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
+        active_model_provider_summary: rust_agent::state::app_state::ActiveModelProviderSummary {
+            provider_id: "default-provider".into(),
+            protocol: "Anthropic".into(),
+            compatibility_profile: "Anthropic".into(),
+            base_url_host: "localhost".into(),
+            model: "default-model".into(),
+            auth_status: "env:OPENAI_API_KEY(unset)".into(),
+        },
         active_session_id: "test-session".into(),
         session_store: None,
         session: None,
@@ -803,6 +892,17 @@ async fn router_compact_route_enters_query_engine_with_builtin_prompt() {
             rust_agent::security::audit::AuditLog::default(),
         )),
         startup_trace: Vec::new(),
+        active_model_profile_name: None,
+        active_model_profile_source:
+            rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
+        active_model_provider_summary: rust_agent::state::app_state::ActiveModelProviderSummary {
+            provider_id: "default-provider".into(),
+            protocol: "Anthropic".into(),
+            compatibility_profile: "Anthropic".into(),
+            base_url_host: "localhost".into(),
+            model: "default-model".into(),
+            auth_status: "env:OPENAI_API_KEY(unset)".into(),
+        },
         active_session_id: "test-session".into(),
         session_store: None,
         session: None,
@@ -874,6 +974,17 @@ async fn router_cost_route_returns_local_message_without_entering_query_engine()
             rust_agent::security::audit::AuditLog::default(),
         )),
         startup_trace: Vec::new(),
+        active_model_profile_name: None,
+        active_model_profile_source:
+            rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
+        active_model_provider_summary: rust_agent::state::app_state::ActiveModelProviderSummary {
+            provider_id: "default-provider".into(),
+            protocol: "Anthropic".into(),
+            compatibility_profile: "Anthropic".into(),
+            base_url_host: "localhost".into(),
+            model: "default-model".into(),
+            auth_status: "env:OPENAI_API_KEY(unset)".into(),
+        },
         active_session_id: "test-session".into(),
         session_store: None,
         session: None,
@@ -931,6 +1042,17 @@ async fn cli_repl_handles_multiple_inputs_in_sequence() {
             rust_agent::security::audit::AuditLog::default(),
         )),
         startup_trace: Vec::new(),
+        active_model_profile_name: None,
+        active_model_profile_source:
+            rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
+        active_model_provider_summary: rust_agent::state::app_state::ActiveModelProviderSummary {
+            provider_id: "default-provider".into(),
+            protocol: "Anthropic".into(),
+            compatibility_profile: "Anthropic".into(),
+            base_url_host: "localhost".into(),
+            model: "default-model".into(),
+            auth_status: "env:OPENAI_API_KEY(unset)".into(),
+        },
         active_session_id: "cli-session".into(),
         session_store: None,
         session: None,
@@ -1002,6 +1124,17 @@ async fn cli_repl_surfaces_task_events_for_active_session() {
             rust_agent::security::audit::AuditLog::default(),
         )),
         startup_trace: Vec::new(),
+        active_model_profile_name: None,
+        active_model_profile_source:
+            rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
+        active_model_provider_summary: rust_agent::state::app_state::ActiveModelProviderSummary {
+            provider_id: "default-provider".into(),
+            protocol: "Anthropic".into(),
+            compatibility_profile: "Anthropic".into(),
+            base_url_host: "localhost".into(),
+            model: "default-model".into(),
+            auth_status: "env:OPENAI_API_KEY(unset)".into(),
+        },
         active_session_id: "cli-session".into(),
         session_store: None,
         session: None,
@@ -1096,6 +1229,17 @@ async fn cli_repl_persists_history_for_local_and_query_turns() {
             rust_agent::security::audit::AuditLog::default(),
         )),
         startup_trace: Vec::new(),
+        active_model_profile_name: None,
+        active_model_profile_source:
+            rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
+        active_model_provider_summary: rust_agent::state::app_state::ActiveModelProviderSummary {
+            provider_id: "default-provider".into(),
+            protocol: "Anthropic".into(),
+            compatibility_profile: "Anthropic".into(),
+            base_url_host: "localhost".into(),
+            model: "default-model".into(),
+            auth_status: "env:OPENAI_API_KEY(unset)".into(),
+        },
         active_session_id: "cli-session".into(),
         session_store: Some(session_store.clone()),
         session: None,
@@ -1204,6 +1348,17 @@ async fn remote_handler_preserves_remote_actor_and_session_for_query_flow() {
             rust_agent::security::audit::AuditLog::default(),
         )),
         startup_trace: Vec::new(),
+        active_model_profile_name: None,
+        active_model_profile_source:
+            rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
+        active_model_provider_summary: rust_agent::state::app_state::ActiveModelProviderSummary {
+            provider_id: "default-provider".into(),
+            protocol: "Anthropic".into(),
+            compatibility_profile: "Anthropic".into(),
+            base_url_host: "localhost".into(),
+            model: "default-model".into(),
+            auth_status: "env:OPENAI_API_KEY(unset)".into(),
+        },
         active_session_id: "remote-session".into(),
         session_store: Some(session_store.clone()),
         session: None,
@@ -1345,6 +1500,17 @@ async fn cli_repl_uses_next_turn_plugin_snapshot_after_reload_updates_manifest_s
             rust_agent::security::audit::AuditLog::default(),
         )),
         startup_trace: Vec::new(),
+        active_model_profile_name: None,
+        active_model_profile_source:
+            rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
+        active_model_provider_summary: rust_agent::state::app_state::ActiveModelProviderSummary {
+            provider_id: "default-provider".into(),
+            protocol: "Anthropic".into(),
+            compatibility_profile: "Anthropic".into(),
+            base_url_host: "localhost".into(),
+            model: "default-model".into(),
+            auth_status: "env:OPENAI_API_KEY(unset)".into(),
+        },
         active_session_id: "cli-session".into(),
         session_store: None,
         session: Some(rust_agent::history::session::SessionSnapshot {
@@ -1492,6 +1658,17 @@ async fn cli_repl_uses_next_turn_plugin_snapshot_after_reload_removes_deleted_pl
             rust_agent::security::audit::AuditLog::default(),
         )),
         startup_trace: Vec::new(),
+        active_model_profile_name: None,
+        active_model_profile_source:
+            rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
+        active_model_provider_summary: rust_agent::state::app_state::ActiveModelProviderSummary {
+            provider_id: "default-provider".into(),
+            protocol: "Anthropic".into(),
+            compatibility_profile: "Anthropic".into(),
+            base_url_host: "localhost".into(),
+            model: "default-model".into(),
+            auth_status: "env:OPENAI_API_KEY(unset)".into(),
+        },
         active_session_id: "cli-session".into(),
         session_store: None,
         session: Some(rust_agent::history::session::SessionSnapshot {
@@ -1614,6 +1791,17 @@ async fn cli_repl_applies_disable_and_enable_only_on_next_turn_boundaries() {
             rust_agent::security::audit::AuditLog::default(),
         )),
         startup_trace: Vec::new(),
+        active_model_profile_name: None,
+        active_model_profile_source:
+            rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
+        active_model_provider_summary: rust_agent::state::app_state::ActiveModelProviderSummary {
+            provider_id: "default-provider".into(),
+            protocol: "Anthropic".into(),
+            compatibility_profile: "Anthropic".into(),
+            base_url_host: "localhost".into(),
+            model: "default-model".into(),
+            auth_status: "env:OPENAI_API_KEY(unset)".into(),
+        },
         active_session_id: "cli-session".into(),
         session_store: None,
         session: Some(rust_agent::history::session::SessionSnapshot {
@@ -1836,6 +2024,17 @@ async fn remote_handler_uses_next_turn_plugin_snapshot_after_reload_removes_dele
             rust_agent::security::audit::AuditLog::default(),
         )),
         startup_trace: Vec::new(),
+        active_model_profile_name: None,
+        active_model_profile_source:
+            rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
+        active_model_provider_summary: rust_agent::state::app_state::ActiveModelProviderSummary {
+            provider_id: "default-provider".into(),
+            protocol: "Anthropic".into(),
+            compatibility_profile: "Anthropic".into(),
+            base_url_host: "localhost".into(),
+            model: "default-model".into(),
+            auth_status: "env:OPENAI_API_KEY(unset)".into(),
+        },
         active_session_id: "remote-session".into(),
         session_store: Some(session_store),
         session: Some(rust_agent::history::session::SessionSnapshot {
@@ -1970,6 +2169,17 @@ async fn cli_repl_persists_denied_turns() {
             rust_agent::security::audit::AuditLog::default(),
         )),
         startup_trace: Vec::new(),
+        active_model_profile_name: None,
+        active_model_profile_source:
+            rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
+        active_model_provider_summary: rust_agent::state::app_state::ActiveModelProviderSummary {
+            provider_id: "default-provider".into(),
+            protocol: "Anthropic".into(),
+            compatibility_profile: "Anthropic".into(),
+            base_url_host: "localhost".into(),
+            model: "default-model".into(),
+            auth_status: "env:OPENAI_API_KEY(unset)".into(),
+        },
         active_session_id: "remote-session".into(),
         session_store: Some(session_store.clone()),
         session: None,
@@ -2053,6 +2263,17 @@ async fn router_approves_pending_plan_mode_request() {
             rust_agent::security::audit::AuditLog::default(),
         )),
         startup_trace: Vec::new(),
+        active_model_profile_name: None,
+        active_model_profile_source:
+            rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
+        active_model_provider_summary: rust_agent::state::app_state::ActiveModelProviderSummary {
+            provider_id: "default-provider".into(),
+            protocol: "Anthropic".into(),
+            compatibility_profile: "Anthropic".into(),
+            base_url_host: "localhost".into(),
+            model: "default-model".into(),
+            auth_status: "env:OPENAI_API_KEY(unset)".into(),
+        },
         active_session_id: "cli-session".into(),
         session_store: None,
         session: None,
@@ -2122,6 +2343,17 @@ async fn router_denies_pending_request_without_session_approval() {
             rust_agent::security::audit::AuditLog::default(),
         )),
         startup_trace: Vec::new(),
+        active_model_profile_name: None,
+        active_model_profile_source:
+            rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
+        active_model_provider_summary: rust_agent::state::app_state::ActiveModelProviderSummary {
+            provider_id: "default-provider".into(),
+            protocol: "Anthropic".into(),
+            compatibility_profile: "Anthropic".into(),
+            base_url_host: "localhost".into(),
+            model: "default-model".into(),
+            auth_status: "env:OPENAI_API_KEY(unset)".into(),
+        },
         active_session_id: "cli-session".into(),
         session_store: None,
         session: None,
@@ -2196,6 +2428,17 @@ async fn approval_replay_uses_runtime_tool_registry() {
             rust_agent::security::audit::AuditLog::default(),
         )),
         startup_trace: Vec::new(),
+        active_model_profile_name: None,
+        active_model_profile_source:
+            rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
+        active_model_provider_summary: rust_agent::state::app_state::ActiveModelProviderSummary {
+            provider_id: "default-provider".into(),
+            protocol: "Anthropic".into(),
+            compatibility_profile: "Anthropic".into(),
+            base_url_host: "localhost".into(),
+            model: "default-model".into(),
+            auth_status: "env:OPENAI_API_KEY(unset)".into(),
+        },
         active_session_id: "cli-session".into(),
         session_store: None,
         session: None,
@@ -2266,6 +2509,17 @@ async fn permissions_command_reports_session_permission_state() {
             rust_agent::security::audit::AuditLog::default(),
         )),
         startup_trace: Vec::new(),
+        active_model_profile_name: None,
+        active_model_profile_source:
+            rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
+        active_model_provider_summary: rust_agent::state::app_state::ActiveModelProviderSummary {
+            provider_id: "default-provider".into(),
+            protocol: "Anthropic".into(),
+            compatibility_profile: "Anthropic".into(),
+            base_url_host: "localhost".into(),
+            model: "default-model".into(),
+            auth_status: "env:OPENAI_API_KEY(unset)".into(),
+        },
         active_session_id: "cli-session".into(),
         session_store: None,
         session: None,
@@ -2325,6 +2579,17 @@ async fn plan_command_reports_inactive_status() {
             rust_agent::security::audit::AuditLog::default(),
         )),
         startup_trace: Vec::new(),
+        active_model_profile_name: None,
+        active_model_profile_source:
+            rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
+        active_model_provider_summary: rust_agent::state::app_state::ActiveModelProviderSummary {
+            provider_id: "default-provider".into(),
+            protocol: "Anthropic".into(),
+            compatibility_profile: "Anthropic".into(),
+            base_url_host: "localhost".into(),
+            model: "default-model".into(),
+            auth_status: "env:OPENAI_API_KEY(unset)".into(),
+        },
         active_session_id: "cli-session".into(),
         session_store: None,
         session: None,
@@ -2382,6 +2647,17 @@ async fn plan_command_enter_requests_approval_before_switching_mode() {
             rust_agent::security::audit::AuditLog::default(),
         )),
         startup_trace: Vec::new(),
+        active_model_profile_name: None,
+        active_model_profile_source:
+            rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
+        active_model_provider_summary: rust_agent::state::app_state::ActiveModelProviderSummary {
+            provider_id: "default-provider".into(),
+            protocol: "Anthropic".into(),
+            compatibility_profile: "Anthropic".into(),
+            base_url_host: "localhost".into(),
+            model: "default-model".into(),
+            auth_status: "env:OPENAI_API_KEY(unset)".into(),
+        },
         active_session_id: "cli-session".into(),
         session_store: None,
         session: None,
@@ -2454,6 +2730,17 @@ async fn plan_command_exit_requests_approval_and_approval_exits_mode() {
             rust_agent::security::audit::AuditLog::default(),
         )),
         startup_trace: Vec::new(),
+        active_model_profile_name: None,
+        active_model_profile_source:
+            rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
+        active_model_provider_summary: rust_agent::state::app_state::ActiveModelProviderSummary {
+            provider_id: "default-provider".into(),
+            protocol: "Anthropic".into(),
+            compatibility_profile: "Anthropic".into(),
+            base_url_host: "localhost".into(),
+            model: "default-model".into(),
+            auth_status: "env:OPENAI_API_KEY(unset)".into(),
+        },
         active_session_id: "cli-session".into(),
         session_store: None,
         session: None,
@@ -2570,6 +2857,17 @@ async fn plan_command_handles_status_noop_and_denied_exit() {
             rust_agent::security::audit::AuditLog::default(),
         )),
         startup_trace: Vec::new(),
+        active_model_profile_name: None,
+        active_model_profile_source:
+            rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
+        active_model_provider_summary: rust_agent::state::app_state::ActiveModelProviderSummary {
+            provider_id: "default-provider".into(),
+            protocol: "Anthropic".into(),
+            compatibility_profile: "Anthropic".into(),
+            base_url_host: "localhost".into(),
+            model: "default-model".into(),
+            auth_status: "env:OPENAI_API_KEY(unset)".into(),
+        },
         active_session_id: "cli-session".into(),
         session_store: None,
         session: None,
@@ -2746,6 +3044,17 @@ async fn plan_command_handles_status_noop_and_denied_exit() {
             rust_agent::security::audit::AuditLog::default(),
         )),
         startup_trace: Vec::new(),
+        active_model_profile_name: None,
+        active_model_profile_source:
+            rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
+        active_model_provider_summary: rust_agent::state::app_state::ActiveModelProviderSummary {
+            provider_id: "default-provider".into(),
+            protocol: "Anthropic".into(),
+            compatibility_profile: "Anthropic".into(),
+            base_url_host: "localhost".into(),
+            model: "default-model".into(),
+            auth_status: "env:OPENAI_API_KEY(unset)".into(),
+        },
         active_session_id: "cli-session".into(),
         session_store: None,
         session: None,
@@ -2799,6 +3108,17 @@ async fn permissions_command_mutates_mode_and_rule_lists() {
             rust_agent::security::audit::AuditLog::default(),
         )),
         startup_trace: Vec::new(),
+        active_model_profile_name: None,
+        active_model_profile_source:
+            rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
+        active_model_provider_summary: rust_agent::state::app_state::ActiveModelProviderSummary {
+            provider_id: "default-provider".into(),
+            protocol: "Anthropic".into(),
+            compatibility_profile: "Anthropic".into(),
+            base_url_host: "localhost".into(),
+            model: "default-model".into(),
+            auth_status: "env:OPENAI_API_KEY(unset)".into(),
+        },
         active_session_id: "cli-session".into(),
         session_store: None,
         session: None,

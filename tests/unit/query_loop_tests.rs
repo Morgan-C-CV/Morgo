@@ -185,6 +185,18 @@ fn test_context_with_turns(
                 rust_agent::security::audit::AuditLog::default(),
             )),
             startup_trace: Vec::new(),
+            active_model_profile_name: None,
+            active_model_profile_source:
+                rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
+            active_model_provider_summary:
+                rust_agent::state::app_state::ActiveModelProviderSummary {
+                    provider_id: "default-provider".into(),
+                    protocol: "Anthropic".into(),
+                    compatibility_profile: "Anthropic".into(),
+                    base_url_host: "localhost".into(),
+                    model: "default-model".into(),
+                    auth_status: "env:OPENAI_API_KEY(unset)".into(),
+                },
             active_session_id: "test-session".into(),
             session_store: None,
             session: None,
@@ -1084,6 +1096,18 @@ async fn query_loop_stop_hook_can_prevent_continuation() {
                 rust_agent::security::audit::AuditLog::default(),
             )),
             startup_trace: Vec::new(),
+            active_model_profile_name: None,
+            active_model_profile_source:
+                rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
+            active_model_provider_summary:
+                rust_agent::state::app_state::ActiveModelProviderSummary {
+                    provider_id: "default-provider".into(),
+                    protocol: "Anthropic".into(),
+                    compatibility_profile: "Anthropic".into(),
+                    base_url_host: "localhost".into(),
+                    model: "default-model".into(),
+                    auth_status: "env:OPENAI_API_KEY(unset)".into(),
+                },
             active_session_id: "test-session".into(),
             session_store: None,
             session: None,
@@ -1168,6 +1192,18 @@ async fn query_loop_respects_pre_tool_hook_denial() {
                 rust_agent::security::audit::AuditLog::default(),
             )),
             startup_trace: Vec::new(),
+            active_model_profile_name: None,
+            active_model_profile_source:
+                rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
+            active_model_provider_summary:
+                rust_agent::state::app_state::ActiveModelProviderSummary {
+                    provider_id: "default-provider".into(),
+                    protocol: "Anthropic".into(),
+                    compatibility_profile: "Anthropic".into(),
+                    base_url_host: "localhost".into(),
+                    model: "default-model".into(),
+                    auth_status: "env:OPENAI_API_KEY(unset)".into(),
+                },
             active_session_id: "test-session".into(),
             session_store: None,
             session: None,
@@ -1270,6 +1306,18 @@ async fn query_loop_runs_permission_request_hook_before_tool_execution() {
                 rust_agent::security::audit::AuditLog::default(),
             )),
             startup_trace: Vec::new(),
+            active_model_profile_name: None,
+            active_model_profile_source:
+                rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
+            active_model_provider_summary:
+                rust_agent::state::app_state::ActiveModelProviderSummary {
+                    provider_id: "default-provider".into(),
+                    protocol: "Anthropic".into(),
+                    compatibility_profile: "Anthropic".into(),
+                    base_url_host: "localhost".into(),
+                    model: "default-model".into(),
+                    auth_status: "env:OPENAI_API_KEY(unset)".into(),
+                },
             active_session_id: "test-session".into(),
             session_store: None,
             session: None,
@@ -1364,6 +1412,18 @@ async fn query_loop_stop_hook_blocking_continues_with_follow_up_turn() {
                 rust_agent::security::audit::AuditLog::default(),
             )),
             startup_trace: Vec::new(),
+            active_model_profile_name: None,
+            active_model_profile_source:
+                rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
+            active_model_provider_summary:
+                rust_agent::state::app_state::ActiveModelProviderSummary {
+                    provider_id: "default-provider".into(),
+                    protocol: "Anthropic".into(),
+                    compatibility_profile: "Anthropic".into(),
+                    base_url_host: "localhost".into(),
+                    model: "default-model".into(),
+                    auth_status: "env:OPENAI_API_KEY(unset)".into(),
+                },
             active_session_id: "test-session".into(),
             session_store: None,
             session: None,
@@ -1467,6 +1527,18 @@ async fn query_loop_uses_subagent_stop_hook_for_subagent_context() {
                 rust_agent::security::audit::AuditLog::default(),
             )),
             startup_trace: Vec::new(),
+            active_model_profile_name: None,
+            active_model_profile_source:
+                rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
+            active_model_provider_summary:
+                rust_agent::state::app_state::ActiveModelProviderSummary {
+                    provider_id: "default-provider".into(),
+                    protocol: "Anthropic".into(),
+                    compatibility_profile: "Anthropic".into(),
+                    base_url_host: "localhost".into(),
+                    model: "default-model".into(),
+                    auth_status: "env:OPENAI_API_KEY(unset)".into(),
+                },
             active_session_id: "test-session".into(),
             session_store: None,
             session: None,
@@ -1617,6 +1689,18 @@ async fn engine_drains_internal_task_events() {
                 rust_agent::security::audit::AuditLog::default(),
             )),
             startup_trace: Vec::new(),
+            active_model_profile_name: None,
+            active_model_profile_source:
+                rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
+            active_model_provider_summary:
+                rust_agent::state::app_state::ActiveModelProviderSummary {
+                    provider_id: "default-provider".into(),
+                    protocol: "Anthropic".into(),
+                    compatibility_profile: "Anthropic".into(),
+                    base_url_host: "localhost".into(),
+                    model: "default-model".into(),
+                    auth_status: "env:OPENAI_API_KEY(unset)".into(),
+                },
             active_session_id: "test-session".into(),
             session_store: None,
             session: None,
@@ -1698,6 +1782,18 @@ async fn worker_query_loop_consumes_mailbox_messages() {
                 rust_agent::security::audit::AuditLog::default(),
             )),
             startup_trace: Vec::new(),
+            active_model_profile_name: None,
+            active_model_profile_source:
+                rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
+            active_model_provider_summary:
+                rust_agent::state::app_state::ActiveModelProviderSummary {
+                    provider_id: "default-provider".into(),
+                    protocol: "Anthropic".into(),
+                    compatibility_profile: "Anthropic".into(),
+                    base_url_host: "localhost".into(),
+                    model: "default-model".into(),
+                    auth_status: "env:OPENAI_API_KEY(unset)".into(),
+                },
             active_session_id: "test-session".into(),
             session_store: None,
             session: None,
@@ -1798,6 +1894,18 @@ async fn subagent_context_inherits_parent_tools_and_hooks() {
                 rust_agent::security::audit::AuditLog::default(),
             )),
             startup_trace: vec!["parent-runtime".into()],
+            active_model_profile_name: None,
+            active_model_profile_source:
+                rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
+            active_model_provider_summary:
+                rust_agent::state::app_state::ActiveModelProviderSummary {
+                    provider_id: "default-provider".into(),
+                    protocol: "Anthropic".into(),
+                    compatibility_profile: "Anthropic".into(),
+                    base_url_host: "localhost".into(),
+                    model: "default-model".into(),
+                    auth_status: "env:OPENAI_API_KEY(unset)".into(),
+                },
             active_session_id: "test-session".into(),
             session_store: None,
             session: None,
@@ -1908,6 +2016,18 @@ async fn subagent_context_does_not_inherit_session_memory_when_disabled() {
                 rust_agent::security::audit::AuditLog::default(),
             )),
             startup_trace: vec!["parent-runtime".into()],
+            active_model_profile_name: None,
+            active_model_profile_source:
+                rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
+            active_model_provider_summary:
+                rust_agent::state::app_state::ActiveModelProviderSummary {
+                    provider_id: "default-provider".into(),
+                    protocol: "Anthropic".into(),
+                    compatibility_profile: "Anthropic".into(),
+                    base_url_host: "localhost".into(),
+                    model: "default-model".into(),
+                    auth_status: "env:OPENAI_API_KEY(unset)".into(),
+                },
             active_session_id: "parent-session".into(),
             session_store: None,
             session: None,
@@ -2010,6 +2130,18 @@ async fn subagent_context_reanchors_and_bounds_nested_memory_lineage() {
                 rust_agent::security::audit::AuditLog::default(),
             )),
             startup_trace: vec!["parent-runtime".into()],
+            active_model_profile_name: None,
+            active_model_profile_source:
+                rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
+            active_model_provider_summary:
+                rust_agent::state::app_state::ActiveModelProviderSummary {
+                    provider_id: "default-provider".into(),
+                    protocol: "Anthropic".into(),
+                    compatibility_profile: "Anthropic".into(),
+                    base_url_host: "localhost".into(),
+                    model: "default-model".into(),
+                    auth_status: "env:OPENAI_API_KEY(unset)".into(),
+                },
             active_session_id: "test-session".into(),
             session_store: None,
             session: None,
@@ -2181,6 +2313,18 @@ async fn coordinator_waits_for_group_barrier_before_synthesis_follow_up() {
                 rust_agent::security::audit::AuditLog::default(),
             )),
             startup_trace: Vec::new(),
+            active_model_profile_name: None,
+            active_model_profile_source:
+                rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
+            active_model_provider_summary:
+                rust_agent::state::app_state::ActiveModelProviderSummary {
+                    provider_id: "default-provider".into(),
+                    protocol: "Anthropic".into(),
+                    compatibility_profile: "Anthropic".into(),
+                    base_url_host: "localhost".into(),
+                    model: "default-model".into(),
+                    auth_status: "env:OPENAI_API_KEY(unset)".into(),
+                },
             active_session_id: "test-session".into(),
             session_store: None,
             session: None,
@@ -2309,6 +2453,18 @@ async fn coordinator_gates_finalization_until_verification_finishes() {
                 rust_agent::security::audit::AuditLog::default(),
             )),
             startup_trace: Vec::new(),
+            active_model_profile_name: None,
+            active_model_profile_source:
+                rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
+            active_model_provider_summary:
+                rust_agent::state::app_state::ActiveModelProviderSummary {
+                    provider_id: "default-provider".into(),
+                    protocol: "Anthropic".into(),
+                    compatibility_profile: "Anthropic".into(),
+                    base_url_host: "localhost".into(),
+                    model: "default-model".into(),
+                    auth_status: "env:OPENAI_API_KEY(unset)".into(),
+                },
             active_session_id: "test-session".into(),
             session_store: None,
             session: None,
@@ -2448,6 +2604,18 @@ async fn coordinator_surfaces_verification_failure_and_missing_verification_risk
             notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
             audit_log: Arc::new(std::sync::Mutex::new(rust_agent::security::audit::AuditLog::default())),
             startup_trace: Vec::new(),
+            active_model_profile_name: None,
+            active_model_profile_source:
+                rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
+            active_model_provider_summary:
+                rust_agent::state::app_state::ActiveModelProviderSummary {
+                    provider_id: "default-provider".into(),
+                    protocol: "Anthropic".into(),
+                    compatibility_profile: "Anthropic".into(),
+                    base_url_host: "localhost".into(),
+                    model: "default-model".into(),
+                    auth_status: "env:OPENAI_API_KEY(unset)".into(),
+                },
             active_session_id: "test-session".into(),
             session_store: None,
             session: None,
@@ -3201,6 +3369,18 @@ async fn submit_turn_distinguishes_stop_hook_prevented_and_blocking_runtime_even
                 rust_agent::security::audit::AuditLog::default(),
             )),
             startup_trace: Vec::new(),
+            active_model_profile_name: None,
+            active_model_profile_source:
+                rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
+            active_model_provider_summary:
+                rust_agent::state::app_state::ActiveModelProviderSummary {
+                    provider_id: "default-provider".into(),
+                    protocol: "Anthropic".into(),
+                    compatibility_profile: "Anthropic".into(),
+                    base_url_host: "localhost".into(),
+                    model: "default-model".into(),
+                    auth_status: "env:OPENAI_API_KEY(unset)".into(),
+                },
             active_session_id: "test-session".into(),
             session_store: None,
             session: None,
@@ -3258,6 +3438,18 @@ async fn submit_turn_distinguishes_stop_hook_prevented_and_blocking_runtime_even
                 rust_agent::security::audit::AuditLog::default(),
             )),
             startup_trace: Vec::new(),
+            active_model_profile_name: None,
+            active_model_profile_source:
+                rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
+            active_model_provider_summary:
+                rust_agent::state::app_state::ActiveModelProviderSummary {
+                    provider_id: "default-provider".into(),
+                    protocol: "Anthropic".into(),
+                    compatibility_profile: "Anthropic".into(),
+                    base_url_host: "localhost".into(),
+                    model: "default-model".into(),
+                    auth_status: "env:OPENAI_API_KEY(unset)".into(),
+                },
             active_session_id: "test-session".into(),
             session_store: None,
             session: None,

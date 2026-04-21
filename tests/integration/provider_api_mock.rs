@@ -248,6 +248,18 @@ fn test_query_context(api_client: ModelProviderClient, cost_tracker: CostTracker
                 rust_agent::security::audit::AuditLog::default(),
             )),
             startup_trace: Vec::new(),
+            active_model_profile_name: None,
+            active_model_profile_source:
+                rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
+            active_model_provider_summary:
+                rust_agent::state::app_state::ActiveModelProviderSummary {
+                    provider_id: "default-provider".into(),
+                    protocol: "Anthropic".into(),
+                    compatibility_profile: "Anthropic".into(),
+                    base_url_host: "localhost".into(),
+                    model: "default-model".into(),
+                    auth_status: "env:OPENAI_API_KEY(unset)".into(),
+                },
             active_session_id: "provider-it-session".into(),
             session_store: None,
             session: None,
@@ -1685,6 +1697,18 @@ async fn query_engine_submit_turn_works_through_production_provider_path() {
                 rust_agent::security::audit::AuditLog::default(),
             )),
             startup_trace: Vec::new(),
+            active_model_profile_name: None,
+            active_model_profile_source:
+                rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
+            active_model_provider_summary:
+                rust_agent::state::app_state::ActiveModelProviderSummary {
+                    provider_id: "default-provider".into(),
+                    protocol: "Anthropic".into(),
+                    compatibility_profile: "Anthropic".into(),
+                    base_url_host: "localhost".into(),
+                    model: "default-model".into(),
+                    auth_status: "env:OPENAI_API_KEY(unset)".into(),
+                },
             active_session_id: "provider-it-session".into(),
             session_store: None,
             session: None,
@@ -2079,6 +2103,18 @@ async fn production_provider_merges_usage_across_provider_envelopes_without_drif
                 rust_agent::security::audit::AuditLog::default(),
             )),
             startup_trace: Vec::new(),
+            active_model_profile_name: None,
+            active_model_profile_source:
+                rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
+            active_model_provider_summary:
+                rust_agent::state::app_state::ActiveModelProviderSummary {
+                    provider_id: "default-provider".into(),
+                    protocol: "Anthropic".into(),
+                    compatibility_profile: "Anthropic".into(),
+                    base_url_host: "localhost".into(),
+                    model: "default-model".into(),
+                    auth_status: "env:OPENAI_API_KEY(unset)".into(),
+                },
             active_session_id: "provider-usage-session".into(),
             session_store: None,
             session: None,
@@ -2437,6 +2473,18 @@ async fn production_provider_maps_terminal_http_error_to_query_loop_failure_code
                 rust_agent::security::audit::AuditLog::default(),
             )),
             startup_trace: Vec::new(),
+            active_model_profile_name: None,
+            active_model_profile_source:
+                rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
+            active_model_provider_summary:
+                rust_agent::state::app_state::ActiveModelProviderSummary {
+                    provider_id: "default-provider".into(),
+                    protocol: "Anthropic".into(),
+                    compatibility_profile: "Anthropic".into(),
+                    base_url_host: "localhost".into(),
+                    model: "default-model".into(),
+                    auth_status: "env:OPENAI_API_KEY(unset)".into(),
+                },
             active_session_id: "provider-terminal-session".into(),
             session_store: None,
             session: None,
@@ -2854,6 +2902,18 @@ async fn production_provider_maps_timeout_after_retries_exhaust_to_query_loop_fa
                 rust_agent::security::audit::AuditLog::default(),
             )),
             startup_trace: Vec::new(),
+            active_model_profile_name: None,
+            active_model_profile_source:
+                rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
+            active_model_provider_summary:
+                rust_agent::state::app_state::ActiveModelProviderSummary {
+                    provider_id: "default-provider".into(),
+                    protocol: "Anthropic".into(),
+                    compatibility_profile: "Anthropic".into(),
+                    base_url_host: "localhost".into(),
+                    model: "default-model".into(),
+                    auth_status: "env:OPENAI_API_KEY(unset)".into(),
+                },
             active_session_id: "provider-timeout-session".into(),
             session_store: None,
             session: None,

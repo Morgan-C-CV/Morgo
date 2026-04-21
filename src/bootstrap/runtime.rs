@@ -122,6 +122,28 @@ fn parse_provider_auth_strategy(value: &str) -> anyhow::Result<ProviderAuthStrat
     }
 }
 
+fn summarize_active_model_provider(config: &ModelProviderConfig) -> ActiveModelProviderSummary {
+    ActiveModelProviderSummary {
+        provider_id: config.provider_id.clone(),
+        protocol: format!("{:?}", config.protocol),
+        compatibility_profile: format!("{:?}", config.compatibility_profile),
+        base_url_host: extract_base_url_host(&config.base_url),
+        model: config.model_id.clone(),
+        auth_status: if config.api_key.is_some() {
+            "env:OPENAI_API_KEY(set)".into()
+        } else {
+            "env:OPENAI_API_KEY(unset)".into()
+        },
+    }
+}
+
+fn extract_base_url_host(base_url: &str) -> String {
+    reqwest::Url::parse(base_url)
+        .ok()
+        .and_then(|url| url.host_str().map(|host| host.to_string()))
+        .unwrap_or_else(|| base_url.trim().to_string())
+}
+
 fn has_explicit_provider_env_override() -> bool {
     [
         "RUST_AGENT_PROVIDER_ID",
@@ -157,7 +179,9 @@ use crate::service::observability::ServiceObservabilityTracker;
 use crate::skills::bundled::bundled_skills;
 use crate::skills::loader::SkillLoaderCache;
 use crate::skills::registry::SkillRegistry;
-use crate::state::app_state::{AppState, RuntimeRole};
+use crate::state::app_state::{
+    ActiveModelProfileSource, ActiveModelProviderSummary, AppState, RuntimeRole,
+};
 use crate::state::permission_context::{PermissionMode, ToolPermissionContext};
 use crate::state::store::AppStateStore;
 use crate::task::list_manager::TaskListManager;
@@ -231,6 +255,8 @@ pub struct RuntimeInitializeBundle {
     pub runtime_tool_registry: Arc<RwLock<ToolRegistry>>,
     pub command_registry: Arc<CommandRegistry>,
     pub provider_config: ModelProviderConfig,
+    pub active_model_profile_name: Option<String>,
+    pub active_model_profile_source: ActiveModelProfileSource,
     pub api_client: ModelProviderClient,
     pub compactor: ReactiveCompactor,
     pub subagent_limiter: Arc<SubagentLimiter>,
@@ -717,6 +743,16 @@ impl RuntimeBootstrap {
                 .iter()
                 .map(|phase| format!("{phase:?}"))
                 .collect(),
+            active_model_profile_name: None,
+            active_model_profile_source: ActiveModelProfileSource::BootstrapDefault,
+            active_model_provider_summary: ActiveModelProviderSummary {
+                provider_id: "default-provider".into(),
+                protocol: "Anthropic".into(),
+                compatibility_profile: "Anthropic".into(),
+                base_url_host: "localhost".into(),
+                model: "default-model".into(),
+                auth_status: "env:OPENAI_API_KEY(unset)".into(),
+            },
             active_session_id: String::new(),
             session_store: None,
             session: None,
@@ -729,7 +765,8 @@ impl RuntimeBootstrap {
         };
         let snapshot = build_runtime_plugin_snapshot(&app_state);
         let command_registry = snapshot.command_registry.clone();
-        let provider_config = self.build_model_provider_config(&config_root)?;
+        let (provider_config, active_model_profile_name, active_model_profile_source) =
+            self.build_model_provider_config(&config_root)?;
         validate_provider_config(&provider_config)
             .map_err(|error| anyhow::anyhow!(error.to_string()))?;
         let api_client = ModelProviderClient::from_config_with_observability(
@@ -758,6 +795,8 @@ impl RuntimeBootstrap {
             runtime_tool_registry,
             command_registry,
             provider_config,
+            active_model_profile_name,
+            active_model_profile_source,
             api_client,
             compactor: ReactiveCompactor,
             subagent_limiter,
@@ -831,6 +870,11 @@ impl RuntimeBootstrap {
                 .iter()
                 .map(|phase| format!("{phase:?}"))
                 .collect(),
+            active_model_profile_name: initialize_bundle.active_model_profile_name.clone(),
+            active_model_profile_source: initialize_bundle.active_model_profile_source.clone(),
+            active_model_provider_summary: summarize_active_model_provider(
+                &initialize_bundle.provider_config,
+            ),
             active_session_id,
             session_store: Some(self.session_store.clone()),
             session: None,
@@ -1023,20 +1067,38 @@ impl RuntimeBootstrap {
     fn build_model_provider_config(
         &self,
         config_root: &std::path::Path,
-    ) -> anyhow::Result<ModelProviderConfig> {
+    ) -> anyhow::Result<(
+        ModelProviderConfig,
+        Option<String>,
+        ActiveModelProfileSource,
+    )> {
         if let Some(provider_config) = &self.provider_config_override {
-            return Ok(provider_config.clone());
+            return Ok((
+                provider_config.clone(),
+                None,
+                ActiveModelProfileSource::BootstrapDefault,
+            ));
         }
 
         if has_explicit_provider_env_override() {
-            return self.build_model_provider_config_from_env();
+            let provider_config = self.build_model_provider_config_from_env()?;
+            return Ok((provider_config, None, ActiveModelProfileSource::EnvOverride));
         }
 
         if let Some(resolved) = load_active_model_profile_from_root(config_root)? {
-            return Ok(resolved.config);
+            return Ok((
+                resolved.config,
+                Some(resolved.name),
+                ActiveModelProfileSource::ModelsToml,
+            ));
         }
 
-        self.build_model_provider_config_from_env()
+        let provider_config = self.build_model_provider_config_from_env()?;
+        Ok((
+            provider_config,
+            None,
+            ActiveModelProfileSource::BootstrapDefault,
+        ))
     }
 
     fn build_model_provider_config_from_env(&self) -> anyhow::Result<ModelProviderConfig> {

@@ -237,6 +237,17 @@ fn test_app_state(runtime: Arc<McpRuntime>) -> AppState {
             rust_agent::security::audit::AuditLog::default(),
         )),
         startup_trace: Vec::new(),
+        active_model_profile_name: None,
+        active_model_profile_source:
+            rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
+        active_model_provider_summary: rust_agent::state::app_state::ActiveModelProviderSummary {
+            provider_id: "default-provider".into(),
+            protocol: "Anthropic".into(),
+            compatibility_profile: "Anthropic".into(),
+            base_url_host: "localhost".into(),
+            model: "default-model".into(),
+            auth_status: "env:OPENAI_API_KEY(unset)".into(),
+        },
         active_session_id: "mcp-test-session".into(),
         session_store: None,
         session: None,

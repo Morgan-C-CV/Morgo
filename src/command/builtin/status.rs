@@ -135,6 +135,26 @@ impl Command for StatusCommand {
             "- cost: {}",
             app_state.cost_tracker.format_report()
         ));
+        lines.push(format!(
+            "- active_model_profile: {}",
+            app_state
+                .active_model_profile_name
+                .as_deref()
+                .unwrap_or("default")
+        ));
+        lines.push(format!(
+            "- active_model_source: {}",
+            app_state.active_model_profile_source.as_str()
+        ));
+        lines.push(format!(
+            "- active_model_summary: provider_id={}, protocol={}, compatibility_profile={}, base_url_host={}, model={}, auth_status={}",
+            app_state.active_model_provider_summary.provider_id,
+            app_state.active_model_provider_summary.protocol,
+            app_state.active_model_provider_summary.compatibility_profile,
+            app_state.active_model_provider_summary.base_url_host,
+            app_state.active_model_provider_summary.model,
+            app_state.active_model_provider_summary.auth_status,
+        ));
 
         let observability = app_state.service_observability_tracker.snapshot();
         lines.push(String::new());

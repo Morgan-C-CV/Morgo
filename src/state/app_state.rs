@@ -50,6 +50,33 @@ pub enum WorkerRole {
     Verify,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ActiveModelProfileSource {
+    EnvOverride,
+    ModelsToml,
+    BootstrapDefault,
+}
+
+impl ActiveModelProfileSource {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::EnvOverride => "env_override",
+            Self::ModelsToml => "models_toml",
+            Self::BootstrapDefault => "bootstrap_default",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActiveModelProviderSummary {
+    pub provider_id: String,
+    pub protocol: String,
+    pub compatibility_profile: String,
+    pub base_url_host: String,
+    pub model: String,
+    pub auth_status: String,
+}
+
 impl WorkerRole {
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -79,6 +106,9 @@ pub struct AppState {
     pub notification_dispatcher: NotificationDispatcher,
     pub audit_log: Arc<Mutex<AuditLog>>,
     pub startup_trace: Vec<String>,
+    pub active_model_profile_name: Option<String>,
+    pub active_model_profile_source: ActiveModelProfileSource,
+    pub active_model_provider_summary: ActiveModelProviderSummary,
     pub active_session_id: String,
     pub session_store: Option<Arc<dyn SessionStore>>,
     pub session: Option<SessionSnapshot>,

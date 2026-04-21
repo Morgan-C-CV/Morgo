@@ -10,7 +10,9 @@ use crate::interaction::dispatcher::NotificationDispatcher;
 use crate::interaction::telegram::gateway::TelegramGateway;
 use crate::security::audit::AuditLog;
 use crate::service::compact::reactive_compact::ReactiveCompactor;
-use crate::state::app_state::{AppState, RuntimeRole, WorkerRole};
+use crate::state::app_state::{
+    ActiveModelProfileSource, ActiveModelProviderSummary, AppState, RuntimeRole, WorkerRole,
+};
 use crate::state::permission_context::ToolPermissionContext;
 use crate::task::types::TaskUsageSummary;
 use crate::tool::definition::{Tool, ToolCall, ToolMetadata, ToolResult};
@@ -386,6 +388,16 @@ fn build_parent_query_context(permissions: ToolPermissionContext) -> QueryContex
             .with_hook_registry(hook_registry.clone()),
         audit_log: std::sync::Arc::new(std::sync::Mutex::new(AuditLog::default())),
         startup_trace: Vec::new(),
+        active_model_profile_name: None,
+        active_model_profile_source: ActiveModelProfileSource::BootstrapDefault,
+        active_model_provider_summary: ActiveModelProviderSummary {
+            provider_id: "default-provider".into(),
+            protocol: "Anthropic".into(),
+            compatibility_profile: "Anthropic".into(),
+            base_url_host: "localhost".into(),
+            model: "default-model".into(),
+            auth_status: "env:OPENAI_API_KEY(unset)".into(),
+        },
         active_session_id: permissions
             .active_session_id
             .unwrap_or_else(|| "local-session".into()),
