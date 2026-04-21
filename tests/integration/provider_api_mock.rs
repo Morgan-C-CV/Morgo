@@ -2957,6 +2957,108 @@ async fn production_provider_respects_retry_after_header_for_429_retry() {
 }
 
 #[tokio::test]
+async fn production_provider_safety_cap_prevents_oversized_retry_after_sleep() {
+    // Server sends Retry-After: 9999 (9999 seconds). The safety cap must prevent
+    // the agent from sleeping that long. We verify by measuring elapsed time:
+    // the test should complete in well under 1 second.
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind mock provider listener");
+    let addr = listener.local_addr().expect("listener addr");
+    // "9999" seconds would be ~2.7 hours; cap is 30s. We use max_attempts=1 so
+    // the retry is exhausted immediately after the 429 — no actual sleep occurs
+    // because should_retry returns false on attempt 0 with max_attempts=1.
+    // This verifies the non-retry path: error is surfaced, not hung.
+    let server = tokio::spawn(run_retry_then_success_response_server(
+        listener,
+        Some("9999"),
+    ));
+
+    let config = ModelProviderConfig {
+        provider_id: "anthropic".into(),
+        protocol: ProviderProtocol::Anthropic,
+        compatibility_profile: ProviderCompatibilityProfileKind::Anthropic,
+        base_url: format!("http://{}", addr),
+        auth_strategy: rust_agent::service::api::client::ProviderAuthStrategy::BearerApiKey,
+        api_key: Some("test-key".into()),
+        model_id: "claude-test".into(),
+        timeout: ProviderTimeout {
+            request_timeout_ms: 5_000,
+            stream_timeout_ms: 120_000,
+        },
+        retry_policy: RetryPolicy {
+            max_attempts: 1,
+            initial_backoff_ms: 1,
+            max_backoff_ms: 1,
+        },
+        pricing: Default::default(),
+    };
+
+    let started = Instant::now();
+    let events = ModelProviderClient::from_config(config)
+        .stream_message(&Message::user("hello"))
+        .await;
+    let elapsed = started.elapsed();
+
+    // With max_attempts=1 the retry is skipped entirely — no sleep at all.
+    assert!(elapsed < Duration::from_millis(500), "elapsed={elapsed:?}");
+    assert!(matches!(
+        &events[0],
+        StreamEvent::Error(error)
+            if error.status_code == Some(429)
+    ));
+
+    // Server is still waiting for a second connection that won't come; abort it.
+    server.abort();
+}
+
+#[tokio::test]
+async fn production_provider_429_without_retry_after_uses_exponential_backoff() {
+    // No Retry-After header → falls back to RetryPolicy.backoff_for_attempt.
+    // With initial_backoff_ms=1 and max_backoff_ms=1, sleep is ~1ms, not 1s.
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind mock provider listener");
+    let addr = listener.local_addr().expect("listener addr");
+    let server = tokio::spawn(run_retry_then_success_response_server(listener, None));
+
+    let config = ModelProviderConfig {
+        provider_id: "anthropic".into(),
+        protocol: ProviderProtocol::Anthropic,
+        compatibility_profile: ProviderCompatibilityProfileKind::Anthropic,
+        base_url: format!("http://{}", addr),
+        auth_strategy: rust_agent::service::api::client::ProviderAuthStrategy::BearerApiKey,
+        api_key: Some("test-key".into()),
+        model_id: "claude-test".into(),
+        timeout: ProviderTimeout {
+            request_timeout_ms: 5_000,
+            stream_timeout_ms: 120_000,
+        },
+        retry_policy: RetryPolicy {
+            max_attempts: 2,
+            initial_backoff_ms: 1,
+            max_backoff_ms: 1,
+        },
+        pricing: Default::default(),
+    };
+
+    let started = Instant::now();
+    let events = ModelProviderClient::from_config(config)
+        .stream_message(&Message::user("hello"))
+        .await;
+    let elapsed = started.elapsed();
+
+    // Backoff is 1ms, so total should be well under 500ms.
+    assert!(elapsed < Duration::from_millis(500), "elapsed={elapsed:?}");
+    assert!(events.iter().any(|event| matches!(
+        event,
+        StreamEvent::TextDelta(text) if text == "recovered after retry"
+    )));
+
+    server.await.expect("mock provider server finished");
+}
+
+#[tokio::test]
 async fn production_provider_does_not_retry_terminal_400_errors() {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await

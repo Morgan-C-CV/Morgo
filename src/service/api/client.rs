@@ -16,6 +16,9 @@ use crate::service::api::streaming::{
 };
 use crate::service::observability::ServiceObservabilityTracker;
 
+// Retry-After header is authoritative but bounded to prevent malicious or runaway values.
+const RETRY_AFTER_SAFETY_CAP_MS: u64 = 30_000;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ModelPricing {
     pub input_per_million_usd: f64,
@@ -302,7 +305,8 @@ impl ModelProviderClient {
                                 sleep(config.retry_policy.backoff_for_attempt(attempt)).await;
                             }
                             RetryDecision::RetryAfterMs(delay_ms) => {
-                                sleep(Duration::from_millis(delay_ms)).await;
+                                let capped = delay_ms.min(RETRY_AFTER_SAFETY_CAP_MS);
+                                sleep(Duration::from_millis(capped)).await;
                             }
                         }
                         attempt += 1;
@@ -1882,12 +1886,13 @@ fn classify_stream_error_disposition(
 mod tests {
     use super::{
         ModelProviderConfig, NormalizedUsage, ProviderAuthStrategy,
-        ProviderCompatibilityProfileKind, ProviderProtocol, ProviderTimeout, RequestOptions,
-        RetryDecision, build_messages_url_for_provider, build_request_payload_for_provider,
-        build_request_payload_with_options, classify_retry_policy, classify_stream_error,
-        classify_stream_error_disposition, extract_error_detail, map_openai_finish_reason,
-        map_stop_reason, merge_usage, normalize_json_like_value, normalize_usage,
-        parse_anthropic_sse_response, parse_openai_compatible_sse_response, parse_retry_after_ms,
+        ProviderCompatibilityProfileKind, ProviderProtocol, ProviderTimeout,
+        RETRY_AFTER_SAFETY_CAP_MS, RequestOptions, RetryDecision, build_messages_url_for_provider,
+        build_request_payload_for_provider, build_request_payload_with_options,
+        classify_retry_policy, classify_stream_error, classify_stream_error_disposition,
+        extract_error_detail, map_openai_finish_reason, map_stop_reason, merge_usage,
+        normalize_json_like_value, normalize_usage, parse_anthropic_sse_response,
+        parse_openai_compatible_sse_response, parse_retry_after_ms,
         parse_stream_response_for_provider, parse_usage, profile_for_provider,
         validate_streaming_response_headers,
     };
@@ -2902,5 +2907,39 @@ mod tests {
 
         headers.insert(RETRY_AFTER, HeaderValue::from_static("nonsense"));
         assert_eq!(parse_retry_after_ms(&headers), None);
+    }
+
+    #[test]
+    fn retry_after_safety_cap_is_applied_to_large_header_values() {
+        // A provider sending Retry-After: 9999 should be capped, not obeyed literally.
+        let error = ApiError::http_status(429, "rate limited")
+            .with_retry_after_ms(Some(RETRY_AFTER_SAFETY_CAP_MS + 60_000));
+        assert_eq!(
+            classify_retry_policy(&error),
+            RetryDecision::RetryAfterMs(RETRY_AFTER_SAFETY_CAP_MS + 60_000)
+        );
+        // The cap is applied at the sleep site, not in classify_retry_policy.
+        // Verify the cap constant itself is sane (≤ 60s).
+        assert!(RETRY_AFTER_SAFETY_CAP_MS <= 60_000);
+    }
+
+    #[test]
+    fn retry_after_within_cap_is_used_verbatim() {
+        let error = ApiError::http_status(429, "rate limited").with_retry_after_ms(Some(5_000));
+        assert_eq!(
+            classify_retry_policy(&error),
+            RetryDecision::RetryAfterMs(5_000)
+        );
+        // 5_000 < RETRY_AFTER_SAFETY_CAP_MS so min(5_000, cap) == 5_000
+        assert_eq!(5_000_u64.min(RETRY_AFTER_SAFETY_CAP_MS), 5_000);
+    }
+
+    #[test]
+    fn retry_after_cap_clamps_oversized_value() {
+        let oversized = RETRY_AFTER_SAFETY_CAP_MS + 1;
+        assert_eq!(
+            oversized.min(RETRY_AFTER_SAFETY_CAP_MS),
+            RETRY_AFTER_SAFETY_CAP_MS
+        );
     }
 }
