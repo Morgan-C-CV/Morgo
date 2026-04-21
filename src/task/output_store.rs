@@ -9,13 +9,32 @@ pub struct TaskOutputStore {
     root: PathBuf,
 }
 
+impl TaskOutputStore {
+    pub fn new(root: impl Into<PathBuf>) -> Self {
+        Self { root: root.into() }
+    }
+}
+
 impl Default for TaskOutputStore {
     fn default() -> Self {
-        Self {
-            root: std::env::current_dir()
-                .unwrap_or_else(|_| PathBuf::from("."))
-                .join(".rust-agent")
-                .join("task-outputs"),
+        #[cfg(test)]
+        {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            Self {
+                root: std::env::temp_dir().join(format!("rust-agent-test-{now}")),
+            }
+        }
+        #[cfg(not(test))]
+        {
+            Self {
+                root: std::env::current_dir()
+                    .unwrap_or_else(|_| std::path::PathBuf::from("."))
+                    .join(".rust-agent")
+                    .join("task-outputs"),
+            }
         }
     }
 }

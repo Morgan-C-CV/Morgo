@@ -44,6 +44,16 @@ pub struct TaskManager {
 }
 
 impl TaskManager {
+    pub fn new_with_output_root(root: impl Into<std::path::PathBuf>) -> Self {
+        Self {
+            store: Arc::new(RwLock::new(TaskStore::default())),
+            runtime_store: Arc::new(RwLock::new(TaskRuntimeStore::default())),
+            output_store: TaskOutputStore::new(root),
+        }
+    }
+}
+
+impl TaskManager {
     pub fn create(
         &self,
         description: impl Into<String>,

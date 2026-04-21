@@ -1321,7 +1321,12 @@ async fn send_message_tool_allows_owner_and_rejects_non_owner() {
 
 #[test]
 fn task_output_reads_support_offsets() {
-    let manager = TaskManager::default();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let temp_root = std::env::temp_dir().join(format!("rust-agent-test-{now}"));
+    let manager = TaskManager::new_with_output_root(&temp_root);
     let task = manager.create("offset task", "session-4", InteractionSurface::Cli);
     manager.append_output(&task.id, "hello");
     manager.append_output(&task.id, " world");
@@ -1336,4 +1341,7 @@ fn task_output_reads_support_offsets() {
         .expect("delta output should be readable");
     assert_eq!(second.content, " world");
     assert_eq!(second.next_offset, "hello world".len());
+
+    // Cleanup
+    let _ = std::fs::remove_dir_all(&temp_root);
 }
