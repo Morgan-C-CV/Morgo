@@ -334,6 +334,18 @@ impl ToolPermissionContext {
         self.cancellation_token = Some(cancellation_token);
         self
     }
+
+    /// Records activity for the active session to prevent it from being flagged as a zombie.
+    /// Should be called by long-running tools or during progress milestones.
+    pub fn record_activity(&self) {
+        if let Some(ref ts) = self.last_activity_ts {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            ts.store(now, std::sync::atomic::Ordering::Release);
+        }
+    }
 }
 
 fn add_rule(slot: &Arc<RwLock<Vec<String>>>, rule: impl Into<String>) -> bool {
@@ -440,4 +452,22 @@ fn is_valid_memory_token(value: &str) -> bool {
         && value
             .chars()
             .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+
+    #[test]
+    fn test_permission_context_heartbeat() {
+        let ts = Arc::new(AtomicU64::new(1000));
+        let ctx = ToolPermissionContext::new(PermissionMode::Default)
+            .with_last_activity_ts(ts.clone());
+        
+        ctx.record_activity();
+        
+        let val = ts.load(Ordering::Acquire);
+        assert!(val > 1000, "Heartbeat should have updated the timestamp");
+    }
 }

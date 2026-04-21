@@ -100,11 +100,13 @@ impl AppState {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        self.last_activity_ts.store(now, Ordering::Relaxed);
+        // Use Release ordering to ensure other threads see the updated timestamp
+        self.last_activity_ts.store(now, Ordering::Release);
     }
 
     pub fn get_last_activity_ts(&self) -> u64 {
-        self.last_activity_ts.load(Ordering::Relaxed)
+        // Use Acquire ordering to synchronize with record_activity
+        self.last_activity_ts.load(Ordering::Acquire)
     }
 
     pub fn shutdown(&self) {

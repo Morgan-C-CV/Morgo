@@ -94,7 +94,7 @@ impl HousekeepingDaemon {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        let last_active = self.last_activity_ts.load(Ordering::Relaxed);
+        let last_active = self.last_activity_ts.load(Ordering::Acquire);
         let delta = now.saturating_sub(last_active);
 
         if delta > self.config.stale_threshold_secs {

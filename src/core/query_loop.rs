@@ -165,16 +165,41 @@ pub async fn run_query_loop_with_params(
 
     loop {
         context.app_state.record_activity();
+        
+        // Start a keep-alive heartbeat for the duration of this turn
+        let turn_token = tokio_util::sync::CancellationToken::new();
+        let hb_token = turn_token.clone();
+        let app_state = context.app_state.clone();
+        let hb_handle = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
+            // First tick is immediate, so we skip it to avoid double-reporting at start
+            interval.tick().await; 
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => app_state.record_activity(),
+                    _ = hb_token.cancelled() => break,
+                }
+            }
+        });
+
         if let Some(result) = check_turn_limits(context, &state, &params, &events) {
+            turn_token.cancel();
+            let _ = hb_handle.await;
             return result;
         }
         let prepared = match prepare_turn(context, &mut state, &params, &current_input, &mut events)
         {
             Ok(prepared) => prepared,
-            Err(result) => return result,
+            Err(result) => {
+                turn_token.cancel();
+                let _ = hb_handle.await;
+                return result;
+            }
         };
         let streamed = stream_model_turn(context, &prepared, state.transition.as_ref()).await;
         if streamed.is_empty() {
+            turn_token.cancel();
+            let _ = hb_handle.await;
             return finalize_turn(
                 context,
                 state,
@@ -194,15 +219,20 @@ pub async fn run_query_loop_with_params(
         )
         .await;
 
-        match decide_next_turn(
+        let decision = decide_next_turn(
             context,
             &mut state,
             turn_outcome,
             &mut current_input,
             &mut events,
         )
-        .await
-        {
+        .await;
+
+        // Turn finished, stop heartbeat
+        turn_token.cancel();
+        let _ = hb_handle.await;
+
+        match decision {
             NextTurnDecision::Return(result) => return result,
             NextTurnDecision::Continue => continue,
         }
