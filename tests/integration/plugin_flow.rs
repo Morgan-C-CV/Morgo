@@ -19,6 +19,11 @@ use rust_agent::plugins::loader::load_plugins;
 use rust_agent::plugins::runtime::{
     augment_hook_registry_with_plugins, augment_tool_registry_with_plugins,
 };
+use rust_agent::service::api::client::{
+    ModelPricing, ModelProviderConfig, ProviderAuthStrategy, ProviderCompatibilityProfileKind,
+    ProviderProtocol, ProviderTimeout,
+};
+use rust_agent::service::api::retry::RetryPolicy;
 use rust_agent::state::app_state::{AppState, RuntimeRole};
 use rust_agent::state::permission_context::{PermissionMode, ToolPermissionContext};
 use rust_agent::task::manager::TaskManager;
@@ -31,6 +36,27 @@ fn unique_temp_path(prefix: &str) -> PathBuf {
         .expect("clock should be after unix epoch")
         .as_nanos();
     std::env::temp_dir().join(format!("{prefix}-{nanos}"))
+}
+
+fn test_model_provider_config() -> ModelProviderConfig {
+    ModelProviderConfig {
+        provider_id: "anthropic".into(),
+        protocol: ProviderProtocol::Anthropic,
+        compatibility_profile: ProviderCompatibilityProfileKind::Anthropic,
+        base_url: "http://localhost".into(),
+        auth_strategy: ProviderAuthStrategy::NoAuth,
+        api_key: None,
+        model_id: "test-model".into(),
+        timeout: ProviderTimeout {
+            request_timeout_ms: 30_000,
+        },
+        retry_policy: RetryPolicy {
+            max_attempts: 1,
+            initial_backoff_ms: 0,
+            max_backoff_ms: 0,
+        },
+        pricing: ModelPricing::default(),
+    }
 }
 
 #[tokio::test]
@@ -91,7 +117,8 @@ async fn plugin_runtime_exposes_command_hook_tool_and_diagnostics() {
         tui: false,
         surface: "cli".into(),
     })
-    .with_session_store(session_store);
+    .with_session_store(session_store)
+    .with_provider_config(test_model_provider_config());
 
     bootstrap.run().await.expect("bootstrap should succeed");
 
