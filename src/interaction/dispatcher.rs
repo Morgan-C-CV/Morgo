@@ -15,6 +15,7 @@ pub struct NotificationDispatcher {
     telegram_inboxes: Arc<RwLock<HashMap<String, Vec<Notification>>>>,
     telegram_gateway: TelegramGateway,
     hook_registry: HookRegistry,
+    boss_coordinator: Arc<RwLock<Option<Arc<crate::core::boss::BossCoordinator>>>>,
 }
 
 impl NotificationDispatcher {
@@ -25,6 +26,7 @@ impl NotificationDispatcher {
             telegram_inboxes: Arc::new(RwLock::new(HashMap::new())),
             telegram_gateway,
             hook_registry: HookRegistry::default(),
+            boss_coordinator: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -35,6 +37,16 @@ impl NotificationDispatcher {
 
     pub fn set_hook_registry(&mut self, hook_registry: HookRegistry) {
         self.hook_registry = hook_registry;
+    }
+
+    pub fn with_boss_coordinator(
+        self,
+        boss_coordinator: Arc<crate::core::boss::BossCoordinator>,
+    ) -> Self {
+        if let Ok(mut guard) = self.boss_coordinator.write() {
+            *guard = Some(boss_coordinator);
+        }
+        self
     }
 
     pub fn dispatch(&self, surface: InteractionSurface, notification: Notification) {
@@ -52,6 +64,18 @@ impl NotificationDispatcher {
             output_file: notification.output_file.clone(),
         };
         let hook_result = run_hook(&self.hook_registry, notification_event);
+
+        // Notify BossCoordinator if it's a task update
+        if notification.notification_type == NotificationType::TaskUpdate {
+            if let Some(boss) = self.boss_coordinator.read().unwrap().clone() {
+                let n = notification.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = boss.on_notification(&n).await {
+                        tracing::error!("Failed to update BossCoordinator: {}", e);
+                    }
+                });
+            }
+        }
         if matches!(
             hook_result.decision,
             crate::hook::executor::HookDecision::Deny(_)

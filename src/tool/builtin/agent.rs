@@ -37,6 +37,7 @@ struct SpawnAgentRequest {
     parent_task_id: Option<String>,
     orchestration_group_id: Option<String>,
     phase: Option<crate::task::types::WorkerPhase>,
+    step_id: Option<usize>,
     requires_verification: bool,
 }
 
@@ -57,6 +58,7 @@ struct AgentJsonRequest {
     parent_task_id: Option<String>,
     orchestration_group_id: Option<String>,
     phase: Option<String>,
+    step_id: Option<usize>,
     requires_verification: Option<bool>,
     task_id: Option<String>,
     message: Option<String>,
@@ -143,6 +145,7 @@ impl Tool for AgentTool {
                 tasks.set_parent_task_id(&task.id, request.parent_task_id.clone());
                 tasks.set_orchestration_group_id(&task.id, request.orchestration_group_id.clone());
                 tasks.set_phase(&task.id, request.phase);
+                tasks.set_step_id(&task.id, request.step_id);
                 if request.requires_verification {
                     tasks.set_validation_state(
                         &task.id,
@@ -259,6 +262,7 @@ fn parse_agent_request(input: &str) -> anyhow::Result<AgentRequest> {
                 parent_task_id: request.parent_task_id,
                 orchestration_group_id: request.orchestration_group_id,
                 phase: parse_worker_phase(request.phase.as_deref())?,
+                step_id: request.step_id,
                 requires_verification: request.requires_verification.unwrap_or(false),
             }));
         }
@@ -282,6 +286,7 @@ fn parse_agent_request(input: &str) -> anyhow::Result<AgentRequest> {
         parent_task_id: None,
         orchestration_group_id: None,
         phase: None,
+        step_id: None,
         requires_verification: false,
     }))
 }
@@ -432,7 +437,7 @@ fn build_parent_query_context(permissions: ToolPermissionContext) -> QueryContex
             .clone()
             .unwrap_or_else(tokio_util::sync::CancellationToken::new),
         subagent_limiter: permissions.subagent_limiter.clone(),
-        boss_coordinator: None,
+        boss_coordinator: permissions.boss_coordinator.clone(),
     };
     let system_prompt = crate::prompt::system::build_system_prompt(&app_state);
     let tools_prompt =

@@ -5,9 +5,7 @@ use crate::bootstrap::model_profiles::{
     build_model_profile_display_view, load_model_profiles_registry_from_root,
     resolve_model_profile_from_registry,
 };
-use crate::bootstrap::{
-    has_explicit_provider_env_override, summarize_active_model_provider,
-};
+use crate::bootstrap::{has_explicit_provider_env_override, summarize_active_model_provider};
 use crate::command::types::{
     Command, CommandAvailability, CommandMetadata, CommandResult, CommandSource, CommandType,
 };
@@ -46,7 +44,9 @@ impl Command for ModelCommand {
         let action = parts.next().unwrap_or("");
 
         match action {
-            "" => Ok(CommandResult::Message(render_active_model_summary(app_state))),
+            "" => Ok(CommandResult::Message(render_active_model_summary(
+                app_state,
+            ))),
             "list" => Ok(CommandResult::Message(render_model_list(app_state)?)),
             "show" => {
                 let profile = parts.collect::<Vec<_>>().join(" ");
@@ -228,7 +228,9 @@ async fn apply_model_use(app_state: &AppState, profile: &str) -> anyhow::Result<
     let resolved = match resolve_model_profile_from_registry(&registry, profile) {
         Ok(resolved) => resolved,
         Err(error) if error.to_string().contains("was not found") => {
-            return Ok(CommandResult::Denied(format!("Profile not found: {profile}")));
+            return Ok(CommandResult::Denied(format!(
+                "Profile not found: {profile}"
+            )));
         }
         Err(error) => return Err(error),
     };

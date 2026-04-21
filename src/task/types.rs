@@ -301,7 +301,9 @@ impl TaskEvent {
                 self.validation_state
                     .map(|state| state.as_str())
                     .unwrap_or("none"),
-                self.step_id.map(|id| id.to_string()).unwrap_or("none".into()),
+                self.step_id
+                    .map(|id| id.to_string())
+                    .unwrap_or("none".into()),
                 usage_block,
             );
         }
@@ -320,7 +322,9 @@ impl TaskEvent {
             self.validation_state
                 .map(|state| state.as_str())
                 .unwrap_or("none"),
-            self.step_id.map(|id| id.to_string()).unwrap_or("none".into()),
+            self.step_id
+                .map(|id| id.to_string())
+                .unwrap_or("none".into()),
             usage_block,
             self.output_file,
         )

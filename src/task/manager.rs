@@ -96,6 +96,7 @@ impl TaskManager {
             orchestration_group_id: None,
             phase: None,
             validation_state: None,
+            step_id: None,
             output_file,
             output_offset: 0,
             delivery: TaskDeliveryState {
@@ -178,6 +179,19 @@ impl TaskManager {
             .find(|task| task.id == id)
         {
             task.validation_state = validation_state;
+        }
+    }
+
+    pub fn set_step_id(&self, id: &str, step_id: Option<usize>) {
+        if let Some(task) = self
+            .store
+            .write()
+            .expect("task store poisoned")
+            .tasks
+            .iter_mut()
+            .find(|task| task.id == id)
+        {
+            task.step_id = step_id;
         }
     }
 
@@ -589,6 +603,7 @@ impl TaskManager {
                 orchestration_group_id: task.orchestration_group_id.clone(),
                 phase: task.phase,
                 validation_state: task.validation_state,
+                step_id: task.step_id,
                 output_file: task.output_file.clone(),
                 usage: usage.clone(),
             };
@@ -628,6 +643,7 @@ impl TaskManager {
                     orchestration_group_id: Some(group_id.clone()),
                     phase: None,
                     validation_state: None,
+                    step_id: None,
                     output_file,
                     usage: None,
                 };
@@ -758,6 +774,7 @@ impl TaskManager {
             event.orchestration_group_id.as_deref(),
             event.phase.map(|phase| phase.as_str()),
             event.validation_state.map(|state| state.as_str()),
+            event.step_id,
             event.output_file.clone(),
             event.usage.clone(),
         );

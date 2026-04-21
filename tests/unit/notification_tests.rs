@@ -1031,6 +1031,7 @@ fn remote_event_envelope_preserves_structured_task_payload() {
         orchestration_group_id: Some("group-1".into()),
         phase: Some(rust_agent::task::types::WorkerPhase::Verify),
         validation_state: Some(rust_agent::task::types::ValidationState::Verified),
+        step_id: None,
         output_file: "/tmp/task-1.log".into(),
         usage: Some(TaskUsageSummary {
             requests: 2,

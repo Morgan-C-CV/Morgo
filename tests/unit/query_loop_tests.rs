@@ -2228,7 +2228,7 @@ async fn updated_runtime_snapshot_applies_only_to_next_turn_and_new_subagents() 
         context_prompt: "test context".into(),
     });
     let snapshot = RuntimePluginSnapshot {
-        command_registry: Arc::new(crate::command::registry::CommandRegistry::new()),
+        command_registry: Arc::new(rust_agent::command::registry::CommandRegistry::new()),
         tool_registry: ToolRegistry::new(),
         runtime_tool_registry: Arc::new(RwLock::new(ToolRegistry::new())),
         hook_registry: HookRegistry::default(),
@@ -2244,14 +2244,18 @@ async fn updated_runtime_snapshot_applies_only_to_next_turn_and_new_subagents() 
 
     let old_turn_engine = build_turn_engine(&app_state, &snapshot, &base_engine);
     let old_turn_result = old_turn_engine.submit_turn(Message::user("old turn")).await;
-    assert!(old_turn_result
-        .messages
-        .iter()
-        .any(|message| message.content.contains("old runtime reply")));
-    assert!(!old_turn_result
-        .messages
-        .iter()
-        .any(|message| message.content.contains("new runtime reply")));
+    assert!(
+        old_turn_result
+            .messages
+            .iter()
+            .any(|message| message.content.contains("old runtime reply"))
+    );
+    assert!(
+        !old_turn_result
+            .messages
+            .iter()
+            .any(|message| message.content.contains("new runtime reply"))
+    );
 
     let old_child = old_turn_engine.context.create_subagent_context(
         "child-before-switch",
@@ -2263,7 +2267,10 @@ async fn updated_runtime_snapshot_applies_only_to_next_turn_and_new_subagents() 
             allowed_tools: None,
         },
     );
-    assert_eq!(old_child.app_state.active_model_profile_name.as_deref(), Some("old-profile"));
+    assert_eq!(
+        old_child.app_state.active_model_profile_name.as_deref(),
+        Some("old-profile")
+    );
 
     app_state.active_model_runtime = Some(new_runtime);
     app_state.active_model_profile_name = Some("new-profile".into());
@@ -2271,18 +2278,30 @@ async fn updated_runtime_snapshot_applies_only_to_next_turn_and_new_subagents() 
 
     let next_turn_engine = build_turn_engine(&app_state, &snapshot, &base_engine);
     assert_eq!(
-        next_turn_engine.context.app_state.active_model_profile_name.as_deref(),
+        next_turn_engine
+            .context
+            .app_state
+            .active_model_profile_name
+            .as_deref(),
         Some("new-profile")
     );
     assert_eq!(
-        next_turn_engine.context.app_state.active_model_provider_summary.model,
+        next_turn_engine
+            .context
+            .app_state
+            .active_model_provider_summary
+            .model,
         "new-runtime-model"
     );
-    let next_turn_result = next_turn_engine.submit_turn(Message::user("next turn")).await;
-    assert!(next_turn_result
-        .messages
-        .iter()
-        .any(|message| message.content.contains("new runtime reply")));
+    let next_turn_result = next_turn_engine
+        .submit_turn(Message::user("next turn"))
+        .await;
+    assert!(
+        next_turn_result
+            .messages
+            .iter()
+            .any(|message| message.content.contains("new runtime reply"))
+    );
 
     let new_child = next_turn_engine.context.create_subagent_context(
         "child-after-switch",
@@ -2294,8 +2313,14 @@ async fn updated_runtime_snapshot_applies_only_to_next_turn_and_new_subagents() 
             allowed_tools: None,
         },
     );
-    assert_eq!(new_child.app_state.active_model_profile_name.as_deref(), Some("new-profile"));
-    assert_eq!(new_child.app_state.active_model_provider_summary.model, "new-runtime-model");
+    assert_eq!(
+        new_child.app_state.active_model_profile_name.as_deref(),
+        Some("new-profile")
+    );
+    assert_eq!(
+        new_child.app_state.active_model_provider_summary.model,
+        "new-runtime-model"
+    );
 }
 
 #[tokio::test]

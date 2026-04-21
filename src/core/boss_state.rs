@@ -28,6 +28,7 @@ pub struct BossPlan {
     pub pseudo_code: String,
     pub steps: Vec<BossPlanStep>,
     pub accepted_by_user: bool,
+    pub auto_sequence: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -36,6 +37,7 @@ pub struct BossPlanStep {
     pub description: String,
     pub completed: bool,
     pub result_diff: Option<String>,
+    pub worker_task_id: Option<String>,
 }
 
 impl Default for BossStatus {

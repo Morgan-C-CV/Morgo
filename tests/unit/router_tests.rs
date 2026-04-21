@@ -770,7 +770,10 @@ auth_strategy = "none"
         .as_ref()
         .expect("active model runtime should exist")
         .snapshot_blocking();
-    assert_eq!(runtime_snapshot.active_profile_name.as_deref(), Some("local-dev"));
+    assert_eq!(
+        runtime_snapshot.active_profile_name.as_deref(),
+        Some("local-dev")
+    );
     assert_eq!(runtime_snapshot.config.model_id, "local-model-v2");
     assert_eq!(runtime_snapshot.config.base_url, "http://localhost:1234");
     assert_eq!(

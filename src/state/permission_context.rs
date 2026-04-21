@@ -2,6 +2,7 @@ use std::collections::HashSet;
 use std::sync::{Arc, RwLock};
 
 use crate::bootstrap::InteractionSurface;
+use crate::core::boss::BossCoordinator;
 use crate::core::concurrency::SubagentLimiter;
 use crate::hook::registry::HookRegistry;
 use crate::interaction::dispatcher::NotificationDispatcher;
@@ -68,6 +69,7 @@ pub struct ToolPermissionContext {
     pub last_activity_ts: Option<Arc<AtomicU64>>,
     pub cancellation_token: Option<CancellationToken>,
     pub subagent_limiter: Option<Arc<SubagentLimiter>>,
+    pub boss_coordinator: Option<Arc<BossCoordinator>>,
 }
 
 impl ToolPermissionContext {
@@ -105,6 +107,7 @@ impl ToolPermissionContext {
             last_activity_ts: None,
             cancellation_token: None,
             subagent_limiter: None,
+            boss_coordinator: None,
         }
     }
 
@@ -259,6 +262,11 @@ impl ToolPermissionContext {
 
     pub fn with_subagent_limiter(mut self, subagent_limiter: Arc<SubagentLimiter>) -> Self {
         self.subagent_limiter = Some(subagent_limiter);
+        self
+    }
+
+    pub fn with_boss_coordinator(mut self, boss_coordinator: Arc<BossCoordinator>) -> Self {
+        self.boss_coordinator = Some(boss_coordinator);
         self
     }
 
