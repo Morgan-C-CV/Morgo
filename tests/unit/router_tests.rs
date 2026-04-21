@@ -35,9 +35,10 @@ use rust_agent::plugins::runtime_state::{
     hydrate_app_state_from_snapshot, rebuild_runtime_plugin_state,
 };
 use rust_agent::security::authorizer::{AuthDecision, DefaultSurfaceAuthorizer, SurfaceAuthorizer};
-use rust_agent::service::api::client::ModelProviderClient;
+use rust_agent::service::api::client::{ModelProviderClient, ModelProviderConfig};
 use rust_agent::service::api::streaming::{StopReason, StreamEvent};
 use rust_agent::service::compact::reactive_compact::ReactiveCompactor;
+use rust_agent::state::active_model_runtime::{ActiveModelRuntime, ActiveModelRuntimeSnapshot};
 use rust_agent::state::app_state::{AppState, RuntimeRole, WorkerRole};
 use rust_agent::state::permission_context::{PermissionMode, ToolPermissionContext};
 use rust_agent::task::list_manager::TaskListManager;
@@ -55,6 +56,39 @@ fn unique_temp_path(prefix: &str) -> PathBuf {
 }
 
 fn app_state_with_session_root(root: &std::path::Path) -> AppState {
+    let service_observability_tracker =
+        rust_agent::service::observability::ServiceObservabilityTracker::default();
+    let config = ModelProviderConfig {
+        provider_id: "openai".into(),
+        protocol: rust_agent::service::api::client::ProviderProtocol::OpenAICompatible,
+        compatibility_profile:
+            rust_agent::service::api::client::ProviderCompatibilityProfileKind::OpenAICompatible,
+        base_url: "https://api.openai.com".into(),
+        chat_completions_path: "/v1/chat/completions".into(),
+        auth_strategy: rust_agent::service::api::client::ProviderAuthStrategy::BearerApiKey,
+        api_key: Some("resolved-secret".into()),
+        model_id: "gpt-4.1-mini".into(),
+        timeout: rust_agent::service::api::client::ProviderTimeout::default(),
+        retry_policy: rust_agent::service::api::retry::RetryPolicy::default(),
+        pricing: rust_agent::service::api::client::ModelPricing::default(),
+    };
+    let runtime_snapshot = ActiveModelRuntimeSnapshot {
+        config: config.clone(),
+        client: ModelProviderClient::from_config_with_observability(
+            config,
+            service_observability_tracker.clone(),
+        ),
+        active_profile_name: Some("openai-fast".into()),
+        source: rust_agent::state::app_state::ActiveModelProfileSource::ModelsToml,
+        summary: rust_agent::state::app_state::ActiveModelProviderSummary {
+            provider_id: "openai".into(),
+            protocol: "OpenAICompatible".into(),
+            compatibility_profile: "OpenAICompatible".into(),
+            base_url_host: "api.openai.com".into(),
+            model: "gpt-4.1-mini".into(),
+            auth_status: "env:OPENAI_API_KEY(set)".into(),
+        },
+    };
     AppState {
         surface: InteractionSurface::Cli,
         session_mode: SessionMode::Interactive,
@@ -62,21 +96,21 @@ fn app_state_with_session_root(root: &std::path::Path) -> AppState {
         session_source: SessionSource::LocalCli,
         runtime_role: RuntimeRole::Coordinator,
         worker_role: None,
-        permission_context: ToolPermissionContext::new(PermissionMode::Default),
+        permission_context: ToolPermissionContext::new(PermissionMode::Default)
+            .with_inherited_active_model_snapshot(runtime_snapshot.clone()),
         command_registry: None,
         runtime_tool_registry: Some(Arc::new(RwLock::new(ToolRegistry::new()))),
         skill_registry: None,
         mcp_runtime: None,
         plugin_load_result: None,
         cost_tracker: CostTracker::default(),
-        service_observability_tracker:
-            rust_agent::service::observability::ServiceObservabilityTracker::default(),
+        service_observability_tracker,
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
         audit_log: Arc::new(std::sync::Mutex::new(
             rust_agent::security::audit::AuditLog::default(),
         )),
         startup_trace: Vec::new(),
-        active_model_runtime: None,
+        active_model_runtime: Some(ActiveModelRuntime::new(runtime_snapshot)),
         active_model_profile_name: Some("openai-fast".into()),
         active_model_profile_source:
             rust_agent::state::app_state::ActiveModelProfileSource::ModelsToml,
@@ -718,22 +752,88 @@ auth_strategy = "none"
     assert!(reload_text.contains("active_profile=local-dev"));
     assert!(reload_text.contains("runtime active model remains unchanged"));
 
-    let reject_result = router
+    let use_result = router
+        .route(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/model use local-dev"),
+            &app_state,
+        )
+        .await
+        .expect("model use should succeed locally");
+    let RouteExecution::CommandResult(CommandResult::Message(use_text)) = use_result else {
+        panic!("expected model use result");
+    };
+    assert!(use_text.contains("will apply on next turn"));
+    assert!(!use_text.contains("switched immediately"));
+
+    let runtime_snapshot = app_state
+        .active_model_runtime
+        .as_ref()
+        .expect("active model runtime should exist")
+        .snapshot_blocking();
+    assert_eq!(runtime_snapshot.active_profile_name.as_deref(), Some("local-dev"));
+    assert_eq!(runtime_snapshot.config.model_id, "local-model");
+    assert_eq!(runtime_snapshot.config.base_url, "http://localhost:1234");
+    assert_eq!(
+        runtime_snapshot.source,
+        rust_agent::state::app_state::ActiveModelProfileSource::ModelsToml
+    );
+
+    unsafe { std::env::remove_var("OPENAI_API_KEY") };
+    fs::remove_dir_all(root).expect("cleanup model registry root");
+}
+
+#[tokio::test]
+async fn model_use_rejects_missing_profile_and_env_override() {
+    let registry = Arc::new(CommandRegistry::new().register(Arc::new(ModelCommand)));
+    let router = CommandRouter::new(registry, Box::new(DefaultSurfaceAuthorizer::default()));
+    let root = unique_temp_path("rust-agent-router-model-use-reject");
+    fs::create_dir_all(root.join(".claude")).expect("create config root");
+    fs::write(
+        root.join(".claude/models.toml"),
+        r#"
+active = "openai-fast"
+
+[profiles.openai-fast]
+provider_id = "openai"
+protocol = "openai_compatible"
+compatibility_profile = "openai_compatible"
+base_url = "https://api.openai.com"
+model = "gpt-4.1-mini"
+api_key_env = "OPENAI_API_KEY"
+"#,
+    )
+    .expect("write models.toml");
+    let app_state = app_state_with_session_root(&root);
+
+    let missing_result = router
+        .route(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/model use missing-profile"),
+            &app_state,
+        )
+        .await
+        .expect("missing profile route should succeed locally");
+    assert_eq!(
+        missing_result,
+        RouteExecution::CommandResult(CommandResult::Denied(
+            "Profile not found: missing-profile".into()
+        ))
+    );
+
+    unsafe { std::env::set_var("RUST_AGENT_PROVIDER_ID", "openai") };
+    let env_locked_result = router
         .route(
             &NormalizedInput::from_raw(InteractionSurface::Cli, "/model use openai-fast"),
             &app_state,
         )
         .await
-        .expect("model bad action should succeed locally");
-    assert_eq!(
-        reject_result,
-        RouteExecution::CommandResult(CommandResult::Denied(
-            "Unknown /model action: use. Usage: /model [list|show <profile>|reload]".into()
-        ))
-    );
+        .expect("env override route should succeed locally");
+    let RouteExecution::CommandResult(CommandResult::Denied(reason)) = env_locked_result else {
+        panic!("expected env override denial");
+    };
+    assert!(reason.contains("RUST_AGENT_PROVIDER_*"));
+    unsafe { std::env::remove_var("RUST_AGENT_PROVIDER_ID") };
 
-    unsafe { std::env::remove_var("OPENAI_API_KEY") };
-    fs::remove_dir_all(root).expect("cleanup model registry root");
+    fs::remove_dir_all(root).expect("cleanup model use reject root");
 }
 
 #[tokio::test]

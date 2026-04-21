@@ -14,6 +14,7 @@ use rust_agent::hook::registry::{
 };
 use rust_agent::interaction::dispatcher::NotificationDispatcher;
 use rust_agent::interaction::telegram::gateway::TelegramGateway;
+use rust_agent::plugins::runtime_state::{RuntimePluginSnapshot, build_turn_engine, build_turn_router};
 use rust_agent::service::api::client::{ModelProviderClient, parse_anthropic_sse_response};
 use rust_agent::service::api::errors::ApiError;
 use rust_agent::service::api::retry::RetryPolicy;
@@ -2113,6 +2114,182 @@ async fn subagent_context_inherits_active_model_snapshot_without_sharing_handle(
             .iter()
             .any(|message| message.content.contains("parent runtime reply"))
     );
+}
+
+#[tokio::test]
+async fn updated_runtime_snapshot_applies_only_to_next_turn_and_new_subagents() {
+    let stale_client = ModelProviderClient::with_scripted_turns(vec![vec![
+        StreamEvent::MessageStart,
+        StreamEvent::TextDelta("stale turn reply".into()),
+        StreamEvent::MessageStop {
+            stop_reason: StopReason::EndTurn,
+        },
+    ]]);
+    let old_runtime_client = ModelProviderClient::with_scripted_turns(vec![vec![
+        StreamEvent::MessageStart,
+        StreamEvent::TextDelta("old runtime reply".into()),
+        StreamEvent::MessageStop {
+            stop_reason: StopReason::EndTurn,
+        },
+    ]]);
+    let new_runtime_client = ModelProviderClient::with_scripted_turns(vec![vec![
+        StreamEvent::MessageStart,
+        StreamEvent::TextDelta("new runtime reply".into()),
+        StreamEvent::MessageStop {
+            stop_reason: StopReason::EndTurn,
+        },
+    ]]);
+    let runtime = ActiveModelRuntime::new(ActiveModelRuntimeSnapshot {
+        config: rust_agent::service::api::client::ModelProviderConfig {
+            model_id: "old-runtime-model".into(),
+            ..rust_agent::service::api::client::ModelProviderConfig::default()
+        },
+        client: old_runtime_client,
+        active_profile_name: Some("old-profile".into()),
+        source: rust_agent::state::app_state::ActiveModelProfileSource::ModelsToml,
+        summary: rust_agent::state::app_state::ActiveModelProviderSummary {
+            provider_id: "old-provider".into(),
+            protocol: "OpenAICompatible".into(),
+            compatibility_profile: "OpenAICompatible".into(),
+            base_url_host: "old.example".into(),
+            model: "old-runtime-model".into(),
+            auth_status: "env:RUNTIME_KEY(set)".into(),
+        },
+    });
+    let app_state = AppState {
+        surface: InteractionSurface::Cli,
+        session_mode: SessionMode::Interactive,
+        client_type: ClientType::Cli,
+        session_source: SessionSource::LocalCli,
+        runtime_role: RuntimeRole::Coordinator,
+        worker_role: None,
+        permission_context: ToolPermissionContext::new(PermissionMode::Default)
+            .with_task_manager(Arc::new(TaskManager::default())),
+        command_registry: Some(Arc::new(crate::build_test_registry())),
+        runtime_tool_registry: Some(Arc::new(RwLock::new(ToolRegistry::new()))),
+        skill_registry: None,
+        mcp_runtime: None,
+        plugin_load_result: None,
+        cost_tracker: CostTracker::default(),
+        service_observability_tracker: ServiceObservabilityTracker::default(),
+        notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
+        audit_log: Arc::new(std::sync::Mutex::new(
+            rust_agent::security::audit::AuditLog::default(),
+        )),
+        startup_trace: Vec::new(),
+        active_model_runtime: Some(runtime.clone()),
+        active_model_profile_name: Some("old-profile".into()),
+        active_model_profile_source:
+            rust_agent::state::app_state::ActiveModelProfileSource::ModelsToml,
+        active_model_provider_summary: rust_agent::state::app_state::ActiveModelProviderSummary {
+            provider_id: "old-provider".into(),
+            protocol: "OpenAICompatible".into(),
+            compatibility_profile: "OpenAICompatible".into(),
+            base_url_host: "old.example".into(),
+            model: "old-runtime-model".into(),
+            auth_status: "env:RUNTIME_KEY(set)".into(),
+        },
+        active_session_id: "next-turn-session".into(),
+        session_store: None,
+        session: None,
+        history: None,
+        restored_session: None,
+        last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        cancellation_token: tokio_util::sync::CancellationToken::new(),
+        subagent_limiter: None,
+        boss_coordinator: None,
+    };
+    let base_engine = QueryEngine::new(QueryContext {
+        app_state: app_state.clone(),
+        tool_registry: ToolRegistry::new(),
+        api_client: stale_client,
+        compactor: ReactiveCompactor,
+        hook_registry: HookRegistry::default(),
+        agent_id: None,
+        system_prompt: "test system".into(),
+        tools_prompt: "test tools".into(),
+        context_prompt: "test context".into(),
+    });
+    let snapshot = RuntimePluginSnapshot {
+        command_registry: Arc::new(crate::build_test_registry()),
+        tool_registry: ToolRegistry::new(),
+        runtime_tool_registry: Arc::new(RwLock::new(ToolRegistry::new())),
+        hook_registry: HookRegistry::default(),
+        plugin_load_result: Arc::new(rust_agent::plugins::types::PluginLoadResult::default()),
+        notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
+    };
+
+    let old_turn_engine = build_turn_engine(&app_state, &snapshot, &base_engine);
+
+    runtime
+        .replace(ActiveModelRuntimeSnapshot {
+            config: rust_agent::service::api::client::ModelProviderConfig {
+                model_id: "new-runtime-model".into(),
+                ..rust_agent::service::api::client::ModelProviderConfig::default()
+            },
+            client: new_runtime_client,
+            active_profile_name: Some("new-profile".into()),
+            source: rust_agent::state::app_state::ActiveModelProfileSource::ModelsToml,
+            summary: rust_agent::state::app_state::ActiveModelProviderSummary {
+                provider_id: "new-provider".into(),
+                protocol: "OpenAICompatible".into(),
+                compatibility_profile: "OpenAICompatible".into(),
+                base_url_host: "new.example".into(),
+                model: "new-runtime-model".into(),
+                auth_status: "env:RUNTIME_KEY(set)".into(),
+            },
+        })
+        .await;
+
+    let old_turn_result = old_turn_engine.submit_turn(Message::user("old turn")).await;
+    assert!(old_turn_result
+        .messages
+        .iter()
+        .any(|message| message.content.contains("old runtime reply")));
+    assert!(!old_turn_result
+        .messages
+        .iter()
+        .any(|message| message.content.contains("new runtime reply")));
+
+    let next_turn_engine = build_turn_engine(&app_state, &snapshot, &base_engine);
+    assert_eq!(
+        next_turn_engine.context.app_state.active_model_profile_name.as_deref(),
+        Some("new-profile")
+    );
+    assert_eq!(
+        next_turn_engine.context.app_state.active_model_provider_summary.model,
+        "new-runtime-model"
+    );
+    let next_turn_result = next_turn_engine.submit_turn(Message::user("next turn")).await;
+    assert!(next_turn_result
+        .messages
+        .iter()
+        .any(|message| message.content.contains("new runtime reply")));
+
+    let old_child = old_turn_engine.context.create_subagent_context(
+        "child-before-switch",
+        vec![],
+        SubagentConfig {
+            worker_role: rust_agent::state::app_state::WorkerRole::Research,
+            inherit_context: true,
+            max_turns: None,
+            allowed_tools: None,
+        },
+    );
+    assert_eq!(old_child.app_state.active_model_profile_name.as_deref(), Some("old-profile"));
+
+    let new_child = next_turn_engine.context.create_subagent_context(
+        "child-after-switch",
+        vec![],
+        SubagentConfig {
+            worker_role: rust_agent::state::app_state::WorkerRole::Research,
+            inherit_context: true,
+            max_turns: None,
+            allowed_tools: None,
+        },
+    );
+    assert_eq!(new_child.app_state.active_model_profile_name.as_deref(), Some("new-profile"));
+    assert_eq!(new_child.app_state.active_model_provider_summary.model, "new-runtime-model");
 }
 
 #[tokio::test]
