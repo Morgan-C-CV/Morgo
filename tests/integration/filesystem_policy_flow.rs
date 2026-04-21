@@ -48,6 +48,7 @@ fn test_model_provider_config() -> ModelProviderConfig {
         protocol: ProviderProtocol::Anthropic,
         compatibility_profile: ProviderCompatibilityProfileKind::Anthropic,
         base_url: "http://localhost".into(),
+        chat_completions_path: "/v1/chat/completions".into(),
         auth_strategy: ProviderAuthStrategy::NoAuth,
         api_key: None,
         model_id: "test-model".into(),

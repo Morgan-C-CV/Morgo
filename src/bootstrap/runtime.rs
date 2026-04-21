@@ -1009,6 +1009,20 @@ impl RuntimeBootstrap {
         let api_key = std::env::var("RUST_AGENT_PROVIDER_API_KEY")
             .ok()
             .filter(|value| !value.trim().is_empty());
+        let chat_completions_path = std::env::var("RUST_AGENT_PROVIDER_CHAT_COMPLETIONS_PATH")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "/v1/chat/completions".into());
+        if chat_completions_path.contains("://") {
+            anyhow::bail!(
+                "invalid_configuration: RUST_AGENT_PROVIDER_CHAT_COMPLETIONS_PATH must not be a full URL"
+            );
+        }
+        if !chat_completions_path.trim().starts_with('/') {
+            anyhow::bail!(
+                "invalid_configuration: RUST_AGENT_PROVIDER_CHAT_COMPLETIONS_PATH must start with '/'"
+            );
+        }
         let model_id = std::env::var("RUST_AGENT_PROVIDER_DEFAULT_MODEL")
             .ok()
             .filter(|value| !value.trim().is_empty())
@@ -1074,6 +1088,7 @@ impl RuntimeBootstrap {
             protocol,
             compatibility_profile,
             base_url,
+            chat_completions_path,
             auth_strategy,
             api_key,
             model_id,

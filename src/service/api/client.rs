@@ -135,6 +135,7 @@ pub struct ModelProviderConfig {
     pub protocol: ProviderProtocol,
     pub compatibility_profile: ProviderCompatibilityProfileKind,
     pub base_url: String,
+    pub chat_completions_path: String,
     pub auth_strategy: ProviderAuthStrategy,
     pub api_key: Option<String>,
     pub model_id: String,
@@ -167,6 +168,7 @@ impl Default for ModelProviderConfig {
             protocol: ProviderProtocol::Anthropic,
             compatibility_profile: ProviderCompatibilityProfileKind::Anthropic,
             base_url: "http://localhost".into(),
+            chat_completions_path: "/v1/chat/completions".into(),
             auth_strategy: ProviderAuthStrategy::NoAuth,
             api_key: None,
             model_id: "default-model".into(),
@@ -548,6 +550,7 @@ pub fn validate_provider_config(config: &ModelProviderConfig) -> Result<(), ApiE
             "provider configuration missing base_url",
         ));
     }
+    validate_chat_completions_path(&config.chat_completions_path)?;
     if config.model_id.trim().is_empty() {
         return Err(ApiError::invalid_configuration(
             "provider configuration missing default_model",
@@ -612,6 +615,26 @@ fn adapter_for_config(
     }
 }
 
+fn validate_chat_completions_path(path: &str) -> Result<&str, ApiError> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return Err(ApiError::invalid_configuration(
+            "provider chat completions path is empty",
+        ));
+    }
+    if trimmed.contains("://") {
+        return Err(ApiError::invalid_configuration(
+            "provider chat completions path must not be a full URL",
+        ));
+    }
+    if !trimmed.starts_with('/') {
+        return Err(ApiError::invalid_configuration(
+            "provider chat completions path must start with '/'",
+        ));
+    }
+    Ok(trimmed)
+}
+
 impl ProviderAdapter for AnthropicAdapter {
     fn messages_url(&self, config: &ModelProviderConfig) -> Result<String, ApiError> {
         Ok(format!(
@@ -658,10 +681,8 @@ impl ProviderAdapter for AnthropicAdapter {
 
 impl ProviderAdapter for OpenAICompatibleAdapter {
     fn messages_url(&self, config: &ModelProviderConfig) -> Result<String, ApiError> {
-        Ok(format!(
-            "{}/v1/chat/completions",
-            config.base_url.trim_end_matches('/')
-        ))
+        let path = validate_chat_completions_path(&config.chat_completions_path)?;
+        Ok(format!("{}{}", config.base_url.trim_end_matches('/'), path))
     }
 
     fn build_request_payload(
@@ -1959,10 +1980,67 @@ mod tests {
         let config = ModelProviderConfig::default();
         assert_eq!(config.timeout, ProviderTimeout::default());
         assert_eq!(config.retry_policy, RetryPolicy::default());
+        assert_eq!(config.chat_completions_path, "/v1/chat/completions");
         assert_eq!(
             build_messages_url_for_provider(&config).expect("default provider should resolve URL"),
             "http://localhost/v1/messages"
         );
+    }
+
+    #[test]
+    fn openai_compatible_messages_url_uses_default_path() {
+        let config = ModelProviderConfig {
+            provider_id: "openai".into(),
+            protocol: ProviderProtocol::OpenAICompatible,
+            compatibility_profile: ProviderCompatibilityProfileKind::OpenAICompatible,
+            base_url: "https://api.openai.com/".into(),
+            chat_completions_path: "/v1/chat/completions".into(),
+            auth_strategy: ProviderAuthStrategy::NoAuth,
+            ..ModelProviderConfig::default()
+        };
+
+        assert_eq!(
+            build_messages_url_for_provider(&config)
+                .expect("openai-compatible provider should resolve URL"),
+            "https://api.openai.com/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn openai_compatible_messages_url_uses_custom_path() {
+        let config = ModelProviderConfig {
+            provider_id: "custom-provider".into(),
+            protocol: ProviderProtocol::OpenAICompatible,
+            compatibility_profile: ProviderCompatibilityProfileKind::OpenAICompatible,
+            base_url: "https://generativelanguage.googleapis.com/v1beta/openai/".into(),
+            chat_completions_path: "/chat/completions".into(),
+            auth_strategy: ProviderAuthStrategy::NoAuth,
+            ..ModelProviderConfig::default()
+        };
+
+        assert_eq!(
+            build_messages_url_for_provider(&config)
+                .expect("custom provider should resolve URL with override path"),
+            "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+        );
+    }
+
+    #[test]
+    fn openai_compatible_messages_url_rejects_invalid_path() {
+        let config = ModelProviderConfig {
+            provider_id: "openai".into(),
+            protocol: ProviderProtocol::OpenAICompatible,
+            compatibility_profile: ProviderCompatibilityProfileKind::OpenAICompatible,
+            base_url: "https://api.openai.com".into(),
+            chat_completions_path: "v1/chat/completions".into(),
+            auth_strategy: ProviderAuthStrategy::NoAuth,
+            ..ModelProviderConfig::default()
+        };
+
+        let error = build_messages_url_for_provider(&config)
+            .expect_err("invalid path should be rejected before URL construction");
+        assert_eq!(error.kind_label(), "invalid_configuration");
+        assert!(error.message.contains("must start with '/'"));
     }
 
     #[test]

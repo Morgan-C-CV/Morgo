@@ -45,6 +45,7 @@ fn test_model_provider_config() -> ModelProviderConfig {
         protocol: ProviderProtocol::Anthropic,
         compatibility_profile: ProviderCompatibilityProfileKind::Anthropic,
         base_url: "http://localhost".into(),
+        chat_completions_path: "/v1/chat/completions".into(),
         auth_strategy: ProviderAuthStrategy::NoAuth,
         api_key: None,
         model_id: "test-model".into(),
@@ -75,7 +76,7 @@ fn bootstrap_env_lock() -> &'static Mutex<()> {
 }
 
 struct BootstrapEnvGuard {
-    keys: [&'static str; 5],
+    keys: [&'static str; 8],
 }
 
 impl BootstrapEnvGuard {
@@ -84,8 +85,11 @@ impl BootstrapEnvGuard {
             "RUST_AGENT_PROVIDER_ID",
             "RUST_AGENT_PROVIDER_BASE_URL",
             "RUST_AGENT_PROVIDER_API_KEY",
+            "RUST_AGENT_PROVIDER_CHAT_COMPLETIONS_PATH",
             "RUST_AGENT_PROVIDER_DEFAULT_MODEL",
             "RUST_AGENT_PROVIDER_MODEL",
+            "RUST_AGENT_PROVIDER_PROTOCOL",
+            "RUST_AGENT_PROVIDER_COMPATIBILITY_PROFILE",
         ];
         for key in keys {
             remove_env_var(key);
@@ -300,6 +304,147 @@ fn bootstrap_rejects_unknown_provider_without_explicit_contract() {
             .to_string()
             .contains("invalid_configuration: unknown provider id custom-provider requires explicit protocol and compatibility_profile")
     );
+}
+
+#[test]
+fn bootstrap_uses_default_chat_completions_path_when_env_unset() {
+    let _env_lock = bootstrap_env_lock().lock().expect("bootstrap env lock");
+    let _guard = BootstrapEnvGuard::new();
+    set_env_var("RUST_AGENT_PROVIDER_ID", "openai");
+    set_env_var("RUST_AGENT_PROVIDER_BASE_URL", "https://api.openai.com");
+    set_env_var("RUST_AGENT_PROVIDER_API_KEY", "test-key");
+    set_env_var("RUST_AGENT_PROVIDER_DEFAULT_MODEL", "gpt-test");
+
+    let runtime = RuntimeBootstrap::from_cli(BootstrapCli {
+        print: None,
+        interactive: false,
+        init_only: true,
+        continue_session: false,
+        resume: None,
+        trace_startup: false,
+        show_tools: false,
+        tui: false,
+        surface: "cli".into(),
+    });
+    let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::InitOnly, false);
+    state.current_cwd = std::env::current_dir().expect("cwd available");
+
+    let bundle = runtime
+        .initialize_runtime(
+            &state,
+            "provider-env-default-path".into(),
+            Arc::new(rust_agent::task::manager::TaskManager::default()),
+            Arc::new(rust_agent::task::list_manager::TaskListManager::default()),
+            Arc::new(rust_agent::plan::manager::PlanManager::default()),
+        )
+        .expect("runtime should initialize with default chat completions path");
+
+    assert_eq!(
+        bundle.provider_config.chat_completions_path,
+        "/v1/chat/completions"
+    );
+}
+
+#[test]
+fn bootstrap_accepts_custom_chat_completions_path_for_custom_provider() {
+    let _env_lock = bootstrap_env_lock().lock().expect("bootstrap env lock");
+    let _guard = BootstrapEnvGuard::new();
+    set_env_var("RUST_AGENT_PROVIDER_ID", "custom-provider");
+    set_env_var(
+        "RUST_AGENT_PROVIDER_BASE_URL",
+        "https://generativelanguage.googleapis.com/v1beta/openai",
+    );
+    set_env_var("RUST_AGENT_PROVIDER_API_KEY", "test-key");
+    set_env_var("RUST_AGENT_PROVIDER_DEFAULT_MODEL", "gemini-2.5-flash");
+    set_env_var("RUST_AGENT_PROVIDER_PROTOCOL", "openai-compatible");
+    set_env_var(
+        "RUST_AGENT_PROVIDER_COMPATIBILITY_PROFILE",
+        "openai-compatible",
+    );
+    set_env_var(
+        "RUST_AGENT_PROVIDER_CHAT_COMPLETIONS_PATH",
+        "/chat/completions",
+    );
+
+    let runtime = RuntimeBootstrap::from_cli(BootstrapCli {
+        print: None,
+        interactive: false,
+        init_only: true,
+        continue_session: false,
+        resume: None,
+        trace_startup: false,
+        show_tools: false,
+        tui: false,
+        surface: "cli".into(),
+    });
+    let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::InitOnly, false);
+    state.current_cwd = std::env::current_dir().expect("cwd available");
+
+    let bundle = runtime
+        .initialize_runtime(
+            &state,
+            "provider-env-custom-path".into(),
+            Arc::new(rust_agent::task::manager::TaskManager::default()),
+            Arc::new(rust_agent::task::list_manager::TaskListManager::default()),
+            Arc::new(rust_agent::plan::manager::PlanManager::default()),
+        )
+        .expect("runtime should initialize with custom chat completions path");
+
+    assert_eq!(bundle.provider_config.provider_id, "custom-provider");
+    assert_eq!(
+        bundle.provider_config.protocol,
+        ProviderProtocol::OpenAICompatible
+    );
+    assert_eq!(
+        bundle.provider_config.compatibility_profile,
+        ProviderCompatibilityProfileKind::OpenAICompatible
+    );
+    assert_eq!(
+        bundle.provider_config.chat_completions_path,
+        "/chat/completions"
+    );
+}
+
+#[test]
+fn bootstrap_rejects_invalid_chat_completions_path_env() {
+    let _env_lock = bootstrap_env_lock().lock().expect("bootstrap env lock");
+    let _guard = BootstrapEnvGuard::new();
+    set_env_var("RUST_AGENT_PROVIDER_ID", "openai");
+    set_env_var("RUST_AGENT_PROVIDER_BASE_URL", "https://api.openai.com");
+    set_env_var("RUST_AGENT_PROVIDER_API_KEY", "test-key");
+    set_env_var("RUST_AGENT_PROVIDER_DEFAULT_MODEL", "gpt-test");
+    set_env_var(
+        "RUST_AGENT_PROVIDER_CHAT_COMPLETIONS_PATH",
+        "https://example.com/v1/chat/completions",
+    );
+
+    let runtime = RuntimeBootstrap::from_cli(BootstrapCli {
+        print: None,
+        interactive: false,
+        init_only: true,
+        continue_session: false,
+        resume: None,
+        trace_startup: false,
+        show_tools: false,
+        tui: false,
+        surface: "cli".into(),
+    });
+    let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::InitOnly, false);
+    state.current_cwd = std::env::current_dir().expect("cwd available");
+
+    let error = runtime
+        .initialize_runtime(
+            &state,
+            "provider-env-invalid-path".into(),
+            Arc::new(rust_agent::task::manager::TaskManager::default()),
+            Arc::new(rust_agent::task::list_manager::TaskListManager::default()),
+            Arc::new(rust_agent::plan::manager::PlanManager::default()),
+        )
+        .expect_err("runtime should reject full URL chat completions path");
+
+    assert!(error.to_string().contains(
+        "invalid_configuration: RUST_AGENT_PROVIDER_CHAT_COMPLETIONS_PATH must not be a full URL"
+    ));
 }
 
 fn bootstrap_provider_alias_matrix(
