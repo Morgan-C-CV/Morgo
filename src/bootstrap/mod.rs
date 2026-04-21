@@ -2,6 +2,7 @@ pub mod config_root;
 mod runtime;
 mod setup;
 mod state;
+pub mod warnings;
 
 pub use runtime::{
     BootstrapCli, FinalizedRuntime, PromptAugmentation, PromptAugmentationMetadata,
@@ -12,3 +13,4 @@ pub use setup::SetupContext;
 pub use state::{
     BootstrapPhase, BootstrapState, ClientType, InteractionSurface, SessionMode, SessionSource,
 };
+pub use warnings::{StartupWarning, StartupWarnings};

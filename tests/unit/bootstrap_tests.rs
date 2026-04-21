@@ -3,8 +3,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use rust_agent::bootstrap::{
     BootstrapCli, BootstrapPhase, BootstrapState, InteractionSurface, PromptAugmentationMetadata,
-    RuntimeBootstrap, SessionMode, SessionSource, UserAccessDecision, is_tui_exit_input,
-    tui_clear_screen_prefix,
+    RuntimeBootstrap, SessionMode, SessionSource, StartupWarning, UserAccessDecision,
+    is_tui_exit_input, tui_clear_screen_prefix,
 };
 use rust_agent::core::message::Message;
 use rust_agent::history::resume::{RestoreRequest, RestoreSource, resolve_session_state};
@@ -1737,4 +1737,153 @@ fn tui_exit_input_matches_expected_commands() {
 #[test]
 fn tui_clear_screen_prefix_uses_terminal_escape_sequence() {
     assert_eq!(tui_clear_screen_prefix(), "\x1B[2J\x1B[H");
+}
+
+// ── Startup warnings ──────────────────────────────────────────────────────────
+
+#[test]
+fn startup_warning_provider_base_url_localhost_fires_when_url_is_default() {
+    let warnings = rust_agent::bootstrap::warnings::collect_startup_warnings(
+        "http://localhost",
+        &[],
+        std::path::Path::new("/some/.claude"),
+        false,
+        "anthropic",
+        false,
+    );
+    assert!(
+        warnings.has(|w| matches!(w, StartupWarning::ProviderBaseUrlIsLocalhost)),
+        "expected ProviderBaseUrlIsLocalhost warning"
+    );
+}
+
+#[test]
+fn startup_warning_provider_base_url_localhost_does_not_fire_for_real_url() {
+    let warnings = rust_agent::bootstrap::warnings::collect_startup_warnings(
+        "https://api.anthropic.com",
+        &[],
+        std::path::Path::new("/some/.claude"),
+        false,
+        "anthropic",
+        false,
+    );
+    assert!(
+        !warnings.has(|w| matches!(w, StartupWarning::ProviderBaseUrlIsLocalhost)),
+        "should not warn for real provider URL"
+    );
+}
+
+#[test]
+fn startup_warning_mcp_config_parse_failure_fires_when_diagnostics_present() {
+    let diags = vec!["server 'bad-server': missing required field 'command'".into()];
+    let warnings = rust_agent::bootstrap::warnings::collect_startup_warnings(
+        "https://api.anthropic.com",
+        &diags,
+        std::path::Path::new("/some/.claude"),
+        false,
+        "anthropic",
+        false,
+    );
+    assert!(
+        warnings.has(
+            |w| matches!(w, StartupWarning::McpConfigParseFailure { count, .. } if *count == 1)
+        ),
+        "expected McpConfigParseFailure warning"
+    );
+}
+
+#[test]
+fn startup_warning_filesystem_policy_missing_fires_when_no_policy() {
+    let _guard = bootstrap_env_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    remove_env_var("RUST_AGENT_CONFIG_ROOT");
+    let warnings = rust_agent::bootstrap::warnings::collect_startup_warnings(
+        "https://api.anthropic.com",
+        &[],
+        std::path::Path::new("/some/.claude"),
+        true, // filesystem_policy_missing = true
+        "anthropic",
+        false,
+    );
+    assert!(
+        warnings.has(|w| matches!(w, StartupWarning::FilesystemPolicyMissing)),
+        "expected FilesystemPolicyMissing warning"
+    );
+}
+
+#[test]
+fn startup_warning_config_root_default_fires_when_env_var_unset() {
+    let _guard = bootstrap_env_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    remove_env_var("RUST_AGENT_CONFIG_ROOT");
+    let warnings = rust_agent::bootstrap::warnings::collect_startup_warnings(
+        "https://api.anthropic.com",
+        &[],
+        std::path::Path::new("/project/.claude"),
+        false,
+        "anthropic",
+        false,
+    );
+    assert!(
+        warnings.has(|w| matches!(w, StartupWarning::ConfigRootIsDefault { .. })),
+        "expected ConfigRootIsDefault warning when RUST_AGENT_CONFIG_ROOT is unset"
+    );
+}
+
+#[test]
+fn startup_warning_config_root_default_does_not_fire_when_env_var_set() {
+    let _guard = bootstrap_env_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    set_env_var("RUST_AGENT_CONFIG_ROOT", "/custom/config");
+    let warnings = rust_agent::bootstrap::warnings::collect_startup_warnings(
+        "https://api.anthropic.com",
+        &[],
+        std::path::Path::new("/custom/config"),
+        false,
+        "anthropic",
+        false,
+    );
+    remove_env_var("RUST_AGENT_CONFIG_ROOT");
+    assert!(
+        !warnings.has(|w| matches!(w, StartupWarning::ConfigRootIsDefault { .. })),
+        "should not warn when RUST_AGENT_CONFIG_ROOT is explicitly set"
+    );
+}
+
+#[tokio::test]
+async fn startup_warnings_are_present_in_initialize_runtime_bundle() {
+    // initialize_runtime with http://localhost base_url and no filesystem policy
+    // should produce at least ProviderBaseUrlIsLocalhost and FilesystemPolicyMissing.
+    let _guard = bootstrap_env_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    remove_env_var("RUST_AGENT_CONFIG_ROOT");
+
+    let runtime = runtime_for_surface("cli", false, true);
+    let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::Headless, false);
+    state.current_cwd = std::env::temp_dir(); // temp dir has no .claude/ or filesystem-policy.json
+
+    let bundle = runtime
+        .initialize_runtime(
+            &state,
+            "session-warnings-test".into(),
+            Arc::new(rust_agent::task::manager::TaskManager::default()),
+            Arc::new(rust_agent::task::list_manager::TaskListManager::default()),
+            Arc::new(rust_agent::plan::manager::PlanManager::default()),
+        )
+        .expect("initialize_runtime should succeed despite warnings");
+
+    assert!(
+        bundle
+            .startup_warnings
+            .has(|w| matches!(w, StartupWarning::ProviderBaseUrlIsLocalhost)),
+        "expected ProviderBaseUrlIsLocalhost in bundle warnings"
+    );
+    assert!(
+        !bundle.startup_warnings.warnings.is_empty(),
+        "bundle should have at least one startup warning"
+    );
 }

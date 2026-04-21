@@ -208,6 +208,7 @@ pub struct RuntimeInitializeBundle {
     pub compactor: ReactiveCompactor,
     pub subagent_limiter: Arc<SubagentLimiter>,
     pub boss_coordinator: Option<Arc<BossCoordinator>>,
+    pub startup_warnings: crate::bootstrap::warnings::StartupWarnings,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -576,6 +577,7 @@ impl RuntimeBootstrap {
         let service_observability_tracker = ServiceObservabilityTracker::default();
         let mcp_config_result = load_server_configs_from_root(&config_root);
         let mcp_governance_result = load_mcp_governance_state_from_root(&config_root);
+        let mcp_config_diagnostics = mcp_config_result.diagnostics.clone();
         let mcp_runtime = Arc::new(
             McpRuntime::new_with_config_and_governance_result_and_observability(
                 Arc::new(crate::service::mcp::client::RoutingMcpClient::default()),
@@ -708,6 +710,16 @@ impl RuntimeBootstrap {
             service_observability_tracker.clone(),
         );
 
+        let startup_warnings = crate::bootstrap::warnings::collect_startup_warnings(
+            &provider_config.base_url,
+            &mcp_config_diagnostics,
+            &config_root,
+            filesystem_policy.is_none(),
+            &provider_config.provider_id,
+            false,
+        );
+        startup_warnings.emit_tracing();
+
         Ok(RuntimeInitializeBundle {
             hook_registry,
             notification_dispatcher,
@@ -723,6 +735,7 @@ impl RuntimeBootstrap {
             compactor: ReactiveCompactor,
             subagent_limiter,
             boss_coordinator: None,
+            startup_warnings,
         })
     }
 
