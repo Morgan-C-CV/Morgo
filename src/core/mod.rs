@@ -4,3 +4,5 @@ pub mod events;
 pub mod housekeeping;
 pub mod message;
 pub mod query_loop;
+pub mod boss;
+pub mod boss_state;
