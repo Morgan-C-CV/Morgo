@@ -122,7 +122,7 @@ fn parse_provider_auth_strategy(value: &str) -> anyhow::Result<ProviderAuthStrat
     }
 }
 
-fn summarize_active_model_provider(config: &ModelProviderConfig) -> ActiveModelProviderSummary {
+pub fn summarize_active_model_provider(config: &ModelProviderConfig) -> ActiveModelProviderSummary {
     ActiveModelProviderSummary {
         provider_id: config.provider_id.clone(),
         protocol: format!("{:?}", config.protocol),
@@ -137,14 +137,7 @@ fn summarize_active_model_provider(config: &ModelProviderConfig) -> ActiveModelP
     }
 }
 
-fn extract_base_url_host(base_url: &str) -> String {
-    reqwest::Url::parse(base_url)
-        .ok()
-        .and_then(|url| url.host_str().map(|host| host.to_string()))
-        .unwrap_or_else(|| base_url.trim().to_string())
-}
-
-fn has_explicit_provider_env_override() -> bool {
+pub fn has_explicit_provider_env_override() -> bool {
     [
         "RUST_AGENT_PROVIDER_ID",
         "RUST_AGENT_PROVIDER_BASE_URL",
@@ -169,6 +162,14 @@ fn has_explicit_provider_env_override() -> bool {
             .unwrap_or(false)
     })
 }
+
+fn extract_base_url_host(base_url: &str) -> String {
+    reqwest::Url::parse(base_url)
+        .ok()
+        .and_then(|url| url.host_str().map(|host| host.to_string()))
+        .unwrap_or_else(|| base_url.trim().to_string())
+}
+
 use crate::core::concurrency::SubagentLimiter;
 use crate::service::api::retry::RetryPolicy;
 use crate::service::compact::reactive_compact::ReactiveCompactor;

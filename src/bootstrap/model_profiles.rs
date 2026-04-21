@@ -115,19 +115,36 @@ pub fn resolve_active_model_profile(content: &str) -> anyhow::Result<ResolvedMod
 pub fn resolve_active_model_profile_from_registry(
     registry: &ModelProfileRegistry,
 ) -> anyhow::Result<ResolvedModelProfile> {
-    let spec = registry
-        .profiles
-        .get(registry.active.as_str())
-        .ok_or_else(|| {
+    resolve_model_profile_from_registry(registry, registry.active.as_str()).map_err(|error| {
+        if error
+            .to_string()
+            .contains("model profile '")
+            && error.to_string().contains("' was not found")
+        {
             anyhow::anyhow!(
                 "invalid_configuration: active model profile '{}' was not found",
                 registry.active
             )
-        })?;
-    let config = spec.to_model_provider_config(registry.active.as_str())?;
+        } else {
+            error
+        }
+    })
+}
+
+pub fn resolve_model_profile_from_registry(
+    registry: &ModelProfileRegistry,
+    profile: &str,
+) -> anyhow::Result<ResolvedModelProfile> {
+    let spec = registry.profiles.get(profile).ok_or_else(|| {
+        anyhow::anyhow!(
+            "invalid_configuration: model profile '{}' was not found",
+            profile
+        )
+    })?;
+    let config = spec.to_model_provider_config(profile)?;
     validate_provider_config(&config).map_err(|error| anyhow::anyhow!(error.to_string()))?;
     Ok(ResolvedModelProfile {
-        name: registry.active.clone(),
+        name: profile.to_string(),
         config,
     })
 }
