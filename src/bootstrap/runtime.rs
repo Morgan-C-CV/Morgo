@@ -1,5 +1,6 @@
 use std::io::{self, BufRead};
 use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
@@ -377,6 +378,7 @@ impl RuntimeBootstrap {
         let housekeeping_daemon = crate::core::housekeeping::HousekeepingDaemon::new(
             crate::core::housekeeping::HousekeepingConfig::default(),
             housekeeping_token.clone(),
+            app_state.last_activity_ts.clone(),
         );
         tokio::spawn(housekeeping_daemon.run());
 
@@ -662,6 +664,12 @@ impl RuntimeBootstrap {
             session: None,
             history: None,
             restored_session: None,
+            last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs(),
+            )),
         };
         let snapshot = build_runtime_plugin_snapshot(&app_state);
         let command_registry = snapshot.command_registry.clone();
@@ -748,6 +756,12 @@ impl RuntimeBootstrap {
             session: None,
             history: None,
             restored_session: None,
+            last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs(),
+            )),
         };
         app_state.apply_resolved_session_state(resolved_session);
         app_state

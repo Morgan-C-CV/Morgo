@@ -17,7 +17,9 @@ use crate::interaction::dispatcher::NotificationDispatcher;
 use crate::security::audit::AuditLog;
 use crate::state::permission_context::ToolPermissionContext;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppStateRuntimeChange {
@@ -80,6 +82,7 @@ pub struct AppState {
     pub session: Option<SessionSnapshot>,
     pub history: Option<SessionHistory>,
     pub restored_session: Option<RestoredSession>,
+    pub last_activity_ts: Arc<AtomicU64>,
 }
 
 impl AppState {
@@ -89,6 +92,18 @@ impl AppState {
             .map(|session| PathBuf::from(session.cwd.clone()))
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_else(|| PathBuf::from("."))
+    }
+
+    pub fn record_activity(&self) {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        self.last_activity_ts.store(now, Ordering::Relaxed);
+    }
+
+    pub fn get_last_activity_ts(&self) -> u64 {
+        self.last_activity_ts.load(Ordering::Relaxed)
     }
 
     pub fn classify_runtime_changes(previous: &Self, current: &Self) -> AppStateChangeSet {

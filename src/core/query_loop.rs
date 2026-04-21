@@ -164,6 +164,7 @@ pub async fn run_query_loop_with_params(
     let mut current_input = input;
 
     loop {
+        context.app_state.record_activity();
         if let Some(result) = check_turn_limits(context, &state, &params, &events) {
             return result;
         }
