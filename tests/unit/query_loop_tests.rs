@@ -140,6 +140,19 @@ impl Tool for DeniedFixtureTool {
     }
 }
 
+fn assert_ordered_sections(haystack: &str, headers: &[&str]) {
+    let mut previous = None;
+    for header in headers {
+        let index = haystack
+            .find(header)
+            .unwrap_or_else(|| panic!("missing header: {header}"));
+        if let Some(prev) = previous {
+            assert!(prev < index, "header {header} was out of order");
+        }
+        previous = Some(index);
+    }
+}
+
 fn test_context(events: Vec<StreamEvent>) -> QueryContext {
     test_context_with_turns(vec![events], ToolRegistry::new())
 }
@@ -187,6 +200,23 @@ fn test_context_with_turns(
         tools_prompt: "test tools".into(),
         context_prompt: "test context".into(),
     }
+}
+
+#[test]
+fn query_context_composes_turn_prompt_in_system_tools_context_user_order() {
+    let context =
+        test_context_with_turns(vec![], ToolRegistry::new().register(Arc::new(AgentTool)));
+    let prompt = context.compose_turn_prompt("USER_SENTINEL");
+
+    assert_ordered_sections(
+        &prompt,
+        &[
+            "You are",
+            "Agent -",
+            "Runtime context summary:",
+            "USER_SENTINEL",
+        ],
+    );
 }
 
 #[tokio::test]
@@ -1746,6 +1776,10 @@ async fn subagent_context_inherits_parent_tools_and_hooks() {
             .context_prompt
             .contains("- path: session:test-session -> agent:agent-task-2:inherit_context=true")
     );
+    assert_ordered_sections(
+        &child.context_prompt,
+        &["Git context:", "Session memory:", "Runtime user context:"],
+    );
 
     let result = QueryEngine::new(child.clone())
         .submit_turn(Message::user("run child"))
@@ -1842,6 +1876,10 @@ async fn subagent_context_does_not_inherit_session_memory_when_disabled() {
     assert!(
         child.context_prompt.contains("External memory:")
             && child.context_prompt.contains("external note only")
+    );
+    assert_ordered_sections(
+        &child.context_prompt,
+        &["Git context:", "Session memory:", "Runtime user context:"],
     );
 }
 

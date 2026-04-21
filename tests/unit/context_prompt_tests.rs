@@ -280,6 +280,33 @@ fn context_prompt_includes_truthy_runtime_sections() {
 }
 
 #[test]
+fn context_prompt_renders_sections_in_stable_order() {
+    let repo = init_test_repo("context-prompt-order");
+    let app_state = build_app_state_with_cwd(repo.to_string_lossy().as_ref());
+    let prompt = rust_agent::prompt::context::build_context_prompt(&app_state);
+
+    let summary_index = prompt.find("Runtime context summary:").expect("summary");
+    let git_index = prompt.find("Git context:").expect("git section");
+    let memory_index = prompt.find("Session memory:").expect("memory section");
+    let user_index = prompt.find("Runtime user context:").expect("user section");
+    let plan_index = prompt.find("Approved plan status:").expect("plan section");
+    let skills_index = prompt.find("Available skills:").expect("skills section");
+
+    assert!(summary_index < git_index);
+    assert!(git_index < memory_index);
+    assert!(memory_index < user_index);
+    assert!(user_index < plan_index);
+    assert!(plan_index < skills_index);
+    assert_eq!(prompt.matches("Git context:").count(), 1);
+    assert_eq!(prompt.matches("Session memory:").count(), 1);
+    assert_eq!(prompt.matches("Runtime user context:").count(), 1);
+    assert_eq!(prompt.matches("Approved plan status:").count(), 1);
+    assert_eq!(prompt.matches("Available skills:").count(), 1);
+
+    fs::remove_dir_all(repo).expect("cleanup repo");
+}
+
+#[test]
 fn context_prompt_renders_only_sanitized_memory_metadata() {
     let permissions = build_plan_permissions()
         .with_external_memory_entries(vec![

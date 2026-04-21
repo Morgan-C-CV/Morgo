@@ -263,13 +263,7 @@ fn prepare_turn(
     current_input: &Message,
     events: &mut Vec<EngineEvent>,
 ) -> Result<PreparedTurn, QueryLoopResult> {
-    let prepared_prompt = format!(
-        "{}\n{}\n{}\n{}",
-        context.current_system_prompt(),
-        context.current_tools_prompt(),
-        context.current_context_prompt(),
-        current_input.content
-    );
+    let prepared_prompt = context.compose_turn_prompt(&current_input.content);
     let prepared = PreparedTurn {
         token_estimate: prepared_prompt.len(),
         prompt: prepared_prompt,

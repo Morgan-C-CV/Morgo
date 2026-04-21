@@ -47,6 +47,16 @@ impl QueryContext {
         build_context_prompt(&self.app_state)
     }
 
+    pub fn compose_turn_prompt(&self, user_input: &str) -> String {
+        [
+            self.current_system_prompt(),
+            self.current_tools_prompt(),
+            self.current_context_prompt(),
+            user_input.to_string(),
+        ]
+        .join("\n")
+    }
+
     pub fn create_subagent_context(
         &self,
         agent_id: impl Into<String>,
