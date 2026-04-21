@@ -2,6 +2,9 @@ use std::fs;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use rust_agent::bootstrap::model_profiles::{
+    build_model_profile_display_view, load_model_profiles_registry_from_root,
+};
 use rust_agent::bootstrap::{
     BootstrapCli, BootstrapPhase, BootstrapState, InteractionSurface, PromptAugmentationMetadata,
     RuntimeBootstrap, SessionMode, SessionSource, StartupWarning, UserAccessDecision,
@@ -444,6 +447,105 @@ api_key_env = "OPENAI_API_KEY"
         bundle.provider_config.api_key.as_deref(),
         Some("resolved-secret")
     );
+}
+
+#[test]
+fn bootstrap_model_registry_loader_returns_profiles_and_active_name() {
+    let _env_lock = bootstrap_env_lock().lock().expect("bootstrap env lock");
+    let _guard = BootstrapEnvGuard::new();
+    set_env_var("OPENAI_API_KEY", "models-key");
+    let root = unique_temp_path("rust-agent-model-registry-loader");
+    fs::create_dir_all(root.join(".claude")).expect("create config root");
+    fs::write(
+        root.join(".claude/models.toml"),
+        r#"
+active = "openai-fast"
+
+[profiles.openai-fast]
+provider_id = "openai"
+protocol = "openai_compatible"
+compatibility_profile = "openai_compatible"
+base_url = "https://api.openai.com"
+model = "gpt-4.1-mini"
+api_key_env = "OPENAI_API_KEY"
+
+[profiles.local-dev]
+provider_id = "local"
+protocol = "openai_compatible"
+compatibility_profile = "openai_compatible"
+base_url = "http://localhost:1234"
+model = "local-model"
+auth_strategy = "none"
+"#,
+    )
+    .expect("write models.toml");
+
+    let registry = load_model_profiles_registry_from_root(&root.join(".claude"))
+        .expect("registry should load")
+        .expect("models.toml should exist");
+
+    assert_eq!(registry.active, "openai-fast");
+    assert_eq!(registry.profiles.len(), 2);
+    assert!(registry.profiles.contains_key("openai-fast"));
+    assert!(registry.profiles.contains_key("local-dev"));
+
+    fs::remove_dir_all(root).expect("cleanup model registry loader root");
+}
+
+#[test]
+fn bootstrap_model_profile_display_view_redacts_secret_and_reports_env_status() {
+    let _env_lock = bootstrap_env_lock().lock().expect("bootstrap env lock");
+    let _guard = BootstrapEnvGuard::new();
+    set_env_var("OPENAI_API_KEY", "resolved-secret");
+    let registry = rust_agent::bootstrap::model_profiles::parse_model_profiles_registry(
+        r#"
+active = "openai-fast"
+
+[profiles.openai-fast]
+provider_id = "openai"
+protocol = "openai_compatible"
+compatibility_profile = "openai_compatible"
+base_url = "https://api.openai.com"
+model = "gpt-4.1-mini"
+api_key_env = "OPENAI_API_KEY"
+request_timeout_ms = 10000
+stream_timeout_ms = 90000
+retry_max_attempts = 2
+retry_initial_backoff_ms = 100
+retry_max_backoff_ms = 500
+"#,
+    )
+    .expect("registry should parse");
+    let spec = registry
+        .profiles
+        .get("openai-fast")
+        .expect("profile should exist");
+
+    let view = build_model_profile_display_view("openai-fast", spec).expect("view should build");
+    remove_env_var("OPENAI_API_KEY");
+
+    assert_eq!(view.api_key_env.as_deref(), Some("OPENAI_API_KEY"));
+    assert_eq!(view.api_key_env_status.as_deref(), Some("set"));
+    assert_eq!(view.request_timeout_ms, 10_000);
+    assert_eq!(view.stream_timeout_ms, 90_000);
+    assert_eq!(view.retry_max_attempts, 2);
+    assert_eq!(view.retry_initial_backoff_ms, 100);
+    assert_eq!(view.retry_max_backoff_ms, 500);
+}
+
+#[test]
+fn bootstrap_model_registry_loader_reports_missing_file_cleanly() {
+    let _env_lock = bootstrap_env_lock().lock().expect("bootstrap env lock");
+    let _guard = BootstrapEnvGuard::new();
+    let root = unique_temp_path("rust-agent-model-registry-missing");
+    fs::create_dir_all(root.join(".claude")).expect("create config root");
+
+    let registry = load_model_profiles_registry_from_root(&root.join(".claude"))
+        .expect("missing models.toml should not error");
+
+    assert!(registry.is_none());
+
+    fs::remove_dir_all(root).expect("cleanup model registry missing root");
 }
 
 #[test]

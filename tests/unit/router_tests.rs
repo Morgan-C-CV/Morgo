@@ -6,8 +6,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use rust_agent::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
 use rust_agent::command::builtin::compact::CompactCommand;
+use rust_agent::command::builtin::config::ConfigCommand;
 use rust_agent::command::builtin::cost::CostCommand;
 use rust_agent::command::builtin::help::HelpCommand;
+use rust_agent::command::builtin::model::ModelCommand;
 use rust_agent::command::builtin::permissions::PermissionsCommand;
 use rust_agent::command::builtin::plan::PlanCommand;
 use rust_agent::command::builtin::plugins::PluginsCommand;
@@ -50,6 +52,58 @@ fn unique_temp_path(prefix: &str) -> PathBuf {
         .expect("clock should be after unix epoch")
         .as_nanos();
     std::env::temp_dir().join(format!("{prefix}-{nanos}"))
+}
+
+fn app_state_with_session_root(root: &std::path::Path) -> AppState {
+    AppState {
+        surface: InteractionSurface::Cli,
+        session_mode: SessionMode::Interactive,
+        client_type: ClientType::Cli,
+        session_source: SessionSource::LocalCli,
+        runtime_role: RuntimeRole::Coordinator,
+        worker_role: None,
+        permission_context: ToolPermissionContext::new(PermissionMode::Default),
+        command_registry: None,
+        runtime_tool_registry: Some(Arc::new(RwLock::new(ToolRegistry::new()))),
+        skill_registry: None,
+        mcp_runtime: None,
+        plugin_load_result: None,
+        cost_tracker: CostTracker::default(),
+        service_observability_tracker:
+            rust_agent::service::observability::ServiceObservabilityTracker::default(),
+        notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
+        audit_log: Arc::new(std::sync::Mutex::new(
+            rust_agent::security::audit::AuditLog::default(),
+        )),
+        startup_trace: Vec::new(),
+        active_model_profile_name: Some("openai-fast".into()),
+        active_model_profile_source:
+            rust_agent::state::app_state::ActiveModelProfileSource::ModelsToml,
+        active_model_provider_summary: rust_agent::state::app_state::ActiveModelProviderSummary {
+            provider_id: "openai".into(),
+            protocol: "OpenAICompatible".into(),
+            compatibility_profile: "OpenAICompatible".into(),
+            base_url_host: "api.openai.com".into(),
+            model: "gpt-4.1-mini".into(),
+            auth_status: "env:OPENAI_API_KEY(set)".into(),
+        },
+        active_session_id: "model-test-session".into(),
+        session_store: None,
+        session: Some(rust_agent::history::session::SessionSnapshot {
+            session_id: rust_agent::history::session::SessionId("model-test-session".into()),
+            surface: InteractionSurface::Cli,
+            session_mode: SessionMode::Interactive,
+            cwd: root.display().to_string(),
+            last_turn_at: None,
+            prompt_seed: None,
+        }),
+        history: None,
+        restored_session: None,
+        last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        cancellation_token: tokio_util::sync::CancellationToken::new(),
+        subagent_limiter: None,
+        boss_coordinator: None,
+    }
 }
 
 struct DenyingAuthorizer;
@@ -539,6 +593,184 @@ async fn status_command_shows_active_model_summary_without_secret_leak() {
     assert!(text.contains("model=gpt-4.1-mini"));
     assert!(text.contains("auth_status=env:OPENAI_API_KEY(set)"));
     assert!(!text.contains("resolved-secret"));
+}
+
+#[tokio::test]
+async fn model_command_shows_runtime_active_summary() {
+    let registry = Arc::new(CommandRegistry::new().register(Arc::new(ModelCommand)));
+    let router = CommandRouter::new(registry, Box::new(DefaultSurfaceAuthorizer::default()));
+    let root = unique_temp_path("rust-agent-router-model-summary");
+    fs::create_dir_all(root.join(".claude")).expect("create config root");
+    let app_state = app_state_with_session_root(&root);
+
+    let result = router
+        .route(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/model"),
+            &app_state,
+        )
+        .await
+        .expect("model route should succeed");
+
+    let RouteExecution::CommandResult(CommandResult::Message(text)) = result else {
+        panic!("expected model command result");
+    };
+    assert!(text.contains("active_profile: openai-fast"));
+    assert!(text.contains("source: models_toml"));
+    assert!(text.contains("provider_id: openai"));
+    assert!(text.contains("model: gpt-4.1-mini"));
+    assert!(text.contains("auth_status: env:OPENAI_API_KEY(set)"));
+    assert!(!text.contains("resolved-secret"));
+
+    fs::remove_dir_all(root).expect("cleanup model summary root");
+}
+
+#[tokio::test]
+async fn model_command_list_show_reload_and_local_rejection_work() {
+    let registry = Arc::new(CommandRegistry::new().register(Arc::new(ModelCommand)));
+    let router = CommandRouter::new(registry, Box::new(DefaultSurfaceAuthorizer::default()));
+    let root = unique_temp_path("rust-agent-router-model-registry");
+    fs::create_dir_all(root.join(".claude")).expect("create config root");
+    fs::write(
+        root.join(".claude/models.toml"),
+        r#"
+active = "openai-fast"
+
+[profiles.openai-fast]
+provider_id = "openai"
+protocol = "openai_compatible"
+compatibility_profile = "openai_compatible"
+base_url = "https://api.openai.com"
+model = "gpt-4.1-mini"
+api_key_env = "OPENAI_API_KEY"
+
+[profiles.local-dev]
+provider_id = "local"
+protocol = "openai_compatible"
+compatibility_profile = "openai_compatible"
+base_url = "http://localhost:1234"
+model = "local-model"
+auth_strategy = "none"
+request_timeout_ms = 5000
+"#,
+    )
+    .expect("write models.toml");
+    unsafe { std::env::set_var("OPENAI_API_KEY", "resolved-secret") };
+    let app_state = app_state_with_session_root(&root);
+
+    let list_result = router
+        .route(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/model list"),
+            &app_state,
+        )
+        .await
+        .expect("model list should succeed");
+    let RouteExecution::CommandResult(CommandResult::Message(list_text)) = list_result else {
+        panic!("expected model list result");
+    };
+    assert!(list_text.contains("active_profile: openai-fast"));
+    assert!(list_text.contains("profiles: 2"));
+    assert!(list_text.contains("openai-fast: provider_id=openai"));
+    assert!(list_text.contains("local-dev: provider_id=local"));
+
+    let show_result = router
+        .route(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/model show openai-fast"),
+            &app_state,
+        )
+        .await
+        .expect("model show should succeed");
+    let RouteExecution::CommandResult(CommandResult::Message(show_text)) = show_result else {
+        panic!("expected model show result");
+    };
+    assert!(show_text.contains("Model profile: openai-fast"));
+    assert!(show_text.contains("api_key_env: OPENAI_API_KEY (set)"));
+    assert!(!show_text.contains("resolved-secret"));
+
+    fs::write(
+        root.join(".claude/models.toml"),
+        r#"
+active = "local-dev"
+
+[profiles.local-dev]
+provider_id = "local"
+protocol = "openai_compatible"
+compatibility_profile = "openai_compatible"
+base_url = "http://localhost:1234"
+model = "local-model-v2"
+auth_strategy = "none"
+"#,
+    )
+    .expect("rewrite models.toml");
+
+    let reload_result = router
+        .route(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/model reload"),
+            &app_state,
+        )
+        .await
+        .expect("model reload should succeed");
+    let RouteExecution::CommandResult(CommandResult::Message(reload_text)) = reload_result else {
+        panic!("expected model reload result");
+    };
+    assert!(reload_text.contains("active_profile=local-dev"));
+    assert!(reload_text.contains("runtime active model remains unchanged"));
+
+    let reject_result = router
+        .route(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/model use openai-fast"),
+            &app_state,
+        )
+        .await
+        .expect("model bad action should succeed locally");
+    assert_eq!(
+        reject_result,
+        RouteExecution::CommandResult(CommandResult::Denied(
+            "Unknown /model action: use. Usage: /model [list|show <profile>|reload]".into()
+        ))
+    );
+
+    unsafe { std::env::remove_var("OPENAI_API_KEY") };
+    fs::remove_dir_all(root).expect("cleanup model registry root");
+}
+
+#[tokio::test]
+async fn config_and_model_commands_do_not_conflict() {
+    let registry = Arc::new(
+        CommandRegistry::new()
+            .register(Arc::new(ConfigCommand))
+            .register(Arc::new(ModelCommand)),
+    );
+    let router = CommandRouter::new(registry, Box::new(DefaultSurfaceAuthorizer::default()));
+    let root = unique_temp_path("rust-agent-router-config-model");
+    fs::create_dir_all(root.join(".claude")).expect("create config root");
+    let app_state = app_state_with_session_root(&root);
+
+    let model_result = router
+        .route(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/model"),
+            &app_state,
+        )
+        .await
+        .expect("model route should succeed");
+    let RouteExecution::CommandResult(CommandResult::Message(model_text)) = model_result else {
+        panic!("expected model command result");
+    };
+    assert!(model_text.contains("active_profile: openai-fast"));
+    assert!(!model_text.contains("Config & Model switching"));
+
+    let config_result = router
+        .route(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/config"),
+            &app_state,
+        )
+        .await
+        .expect("config route should succeed");
+    let RouteExecution::CommandResult(CommandResult::Message(config_text)) = config_result else {
+        panic!("expected config command result");
+    };
+    assert!(config_text.contains("Config & Model switching"));
+
+    fs::remove_dir_all(root).expect("cleanup config/model root");
 }
 
 #[tokio::test]

@@ -42,33 +42,138 @@ pub struct ResolvedModelProfile {
     pub config: ModelProviderConfig,
 }
 
+#[derive(Debug, Clone)]
+pub struct ModelProfileRegistry {
+    pub active: String,
+    pub profiles: BTreeMap<String, ModelProfileSpec>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelProfileDisplayView {
+    pub name: String,
+    pub provider_id: String,
+    pub protocol: String,
+    pub compatibility_profile: String,
+    pub base_url: String,
+    pub chat_completions_path: String,
+    pub model: String,
+    pub auth_strategy: String,
+    pub api_key_env: Option<String>,
+    pub api_key_env_status: Option<String>,
+    pub request_timeout_ms: u64,
+    pub stream_timeout_ms: u64,
+    pub retry_max_attempts: usize,
+    pub retry_initial_backoff_ms: u64,
+    pub retry_max_backoff_ms: u64,
+}
+
 pub fn load_active_model_profile_from_root(
     config_root: &Path,
 ) -> anyhow::Result<Option<ResolvedModelProfile>> {
+    load_model_profiles_registry_from_root(config_root)?
+        .map(|registry| resolve_active_model_profile_from_registry(&registry))
+        .transpose()
+}
+
+pub fn load_model_profiles_registry_from_root(
+    config_root: &Path,
+) -> anyhow::Result<Option<ModelProfileRegistry>> {
     let path = config_root.join("models.toml");
     if !path.exists() {
         return Ok(None);
     }
     let content = std::fs::read_to_string(&path)
         .with_context(|| format!("invalid_configuration: failed to read {}", path.display()))?;
-    resolve_active_model_profile(&content).map(Some)
+    parse_model_profiles_registry(&content).map(Some)
 }
 
-pub fn resolve_active_model_profile(content: &str) -> anyhow::Result<ResolvedModelProfile> {
+pub fn parse_model_profiles_registry(content: &str) -> anyhow::Result<ModelProfileRegistry> {
     let file: ModelProfilesFile = toml::from_str(content)
         .map_err(|error| anyhow::anyhow!("invalid_configuration: invalid models.toml: {error}"))?;
     let active = file.active.trim();
     if active.is_empty() {
         bail!("invalid_configuration: models.toml active profile is empty");
     }
-    let spec = file.profiles.get(active).ok_or_else(|| {
-        anyhow::anyhow!("invalid_configuration: active model profile '{active}' was not found")
-    })?;
-    let config = spec.to_model_provider_config(active)?;
+    if !file.profiles.contains_key(active) {
+        bail!("invalid_configuration: active model profile '{active}' was not found");
+    }
+    for (name, spec) in &file.profiles {
+        let config = spec.to_model_provider_config(name)?;
+        validate_provider_config(&config).map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    }
+    Ok(ModelProfileRegistry {
+        active: active.to_string(),
+        profiles: file.profiles,
+    })
+}
+
+pub fn resolve_active_model_profile(content: &str) -> anyhow::Result<ResolvedModelProfile> {
+    let registry = parse_model_profiles_registry(content)?;
+    resolve_active_model_profile_from_registry(&registry)
+}
+
+pub fn resolve_active_model_profile_from_registry(
+    registry: &ModelProfileRegistry,
+) -> anyhow::Result<ResolvedModelProfile> {
+    let spec = registry
+        .profiles
+        .get(registry.active.as_str())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "invalid_configuration: active model profile '{}' was not found",
+                registry.active
+            )
+        })?;
+    let config = spec.to_model_provider_config(registry.active.as_str())?;
     validate_provider_config(&config).map_err(|error| anyhow::anyhow!(error.to_string()))?;
     Ok(ResolvedModelProfile {
-        name: active.to_string(),
+        name: registry.active.clone(),
         config,
+    })
+}
+
+pub fn build_model_profile_display_view(
+    name: &str,
+    spec: &ModelProfileSpec,
+) -> anyhow::Result<ModelProfileDisplayView> {
+    let auth_strategy = parse_auth_strategy(&spec.auth_strategy)?;
+    let api_key_env = spec
+        .api_key_env
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let api_key_env_status = match auth_strategy {
+        ProviderAuthStrategy::BearerApiKey => {
+            let env_name = api_key_env.as_deref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "invalid_configuration: bearer model profile '{name}' requires api_key_env"
+                )
+            })?;
+            Some(match std::env::var(env_name) {
+                Ok(value) if !value.trim().is_empty() => "set".to_string(),
+                _ => "unset".to_string(),
+            })
+        }
+        ProviderAuthStrategy::NoAuth => None,
+    };
+
+    Ok(ModelProfileDisplayView {
+        name: name.to_string(),
+        provider_id: spec.provider_id.trim().to_string(),
+        protocol: spec.protocol.trim().to_string(),
+        compatibility_profile: spec.compatibility_profile.trim().to_string(),
+        base_url: spec.base_url.trim().to_string(),
+        chat_completions_path: spec.chat_completions_path.trim().to_string(),
+        model: spec.model.trim().to_string(),
+        auth_strategy: spec.auth_strategy.trim().to_string(),
+        api_key_env,
+        api_key_env_status,
+        request_timeout_ms: spec.request_timeout_ms.unwrap_or(30_000),
+        stream_timeout_ms: spec.stream_timeout_ms.unwrap_or(120_000),
+        retry_max_attempts: spec.retry_max_attempts.unwrap_or(3),
+        retry_initial_backoff_ms: spec.retry_initial_backoff_ms.unwrap_or(200),
+        retry_max_backoff_ms: spec.retry_max_backoff_ms.unwrap_or(1_000),
     })
 }
 

@@ -5,6 +5,7 @@ pub mod cost;
 pub mod doctor;
 pub mod help;
 pub mod mcp;
+pub mod model;
 pub mod permissions;
 pub mod plan;
 pub mod plugins;
@@ -24,6 +25,7 @@ use cost::CostCommand;
 use doctor::DoctorCommand;
 use help::HelpCommand;
 use mcp::McpCommand;
+use model::ModelCommand;
 use permissions::PermissionsCommand;
 use plan::PlanCommand;
 use plugins::PluginsCommand;
@@ -41,6 +43,7 @@ pub fn register_builtin_commands(registry: CommandRegistry) -> CommandRegistry {
         .register(Arc::new(ClearCommand))
         .register(Arc::new(ConfigCommand))
         .register(Arc::new(DoctorCommand))
+        .register(Arc::new(ModelCommand))
         .register(Arc::new(PermissionsCommand))
         .register(Arc::new(PlanCommand))
         .register(Arc::new(PluginsCommand))

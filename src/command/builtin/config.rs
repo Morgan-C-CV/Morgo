@@ -18,7 +18,7 @@ impl Command for ConfigCommand {
             category: "core".into(),
             command_type: CommandType::Local,
             availability: CommandAvailability::Everywhere,
-            aliases: vec!["settings".into(), "model".into()],
+            aliases: vec!["settings".into()],
             is_hidden: false,
             disable_model_invocation: false,
             immediate: true,
