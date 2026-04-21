@@ -179,6 +179,7 @@ use crate::service::observability::ServiceObservabilityTracker;
 use crate::skills::bundled::bundled_skills;
 use crate::skills::loader::SkillLoaderCache;
 use crate::skills::registry::SkillRegistry;
+use crate::state::active_model_runtime::{ActiveModelRuntime, ActiveModelRuntimeSnapshot};
 use crate::state::app_state::{
     ActiveModelProfileSource, ActiveModelProviderSummary, AppState, RuntimeRole,
 };
@@ -255,6 +256,7 @@ pub struct RuntimeInitializeBundle {
     pub runtime_tool_registry: Arc<RwLock<ToolRegistry>>,
     pub command_registry: Arc<CommandRegistry>,
     pub provider_config: ModelProviderConfig,
+    pub active_model_runtime: ActiveModelRuntime,
     pub active_model_profile_name: Option<String>,
     pub active_model_profile_source: ActiveModelProfileSource,
     pub api_client: ModelProviderClient,
@@ -743,6 +745,7 @@ impl RuntimeBootstrap {
                 .iter()
                 .map(|phase| format!("{phase:?}"))
                 .collect(),
+            active_model_runtime: None,
             active_model_profile_name: None,
             active_model_profile_source: ActiveModelProfileSource::BootstrapDefault,
             active_model_provider_summary: ActiveModelProviderSummary {
@@ -773,6 +776,14 @@ impl RuntimeBootstrap {
             provider_config.clone(),
             service_observability_tracker.clone(),
         );
+        let active_model_snapshot = ActiveModelRuntimeSnapshot {
+            config: provider_config.clone(),
+            client: api_client.clone(),
+            active_profile_name: active_model_profile_name.clone(),
+            source: active_model_profile_source.clone(),
+            summary: summarize_active_model_provider(&provider_config),
+        };
+        let active_model_runtime = ActiveModelRuntime::new(active_model_snapshot.clone());
 
         let startup_warnings = crate::bootstrap::warnings::collect_startup_warnings(
             &provider_config.base_url,
@@ -795,6 +806,7 @@ impl RuntimeBootstrap {
             runtime_tool_registry,
             command_registry,
             provider_config,
+            active_model_runtime,
             active_model_profile_name,
             active_model_profile_source,
             api_client,
@@ -838,9 +850,11 @@ impl RuntimeBootstrap {
                 .as_secs(),
         ));
         let cancellation_token = CancellationToken::new();
+        let active_model_snapshot = initialize_bundle.active_model_runtime.snapshot_blocking();
         permission_context = permission_context
             .with_last_activity_ts(last_activity_ts.clone())
-            .with_cancellation_token(cancellation_token.clone());
+            .with_cancellation_token(cancellation_token.clone())
+            .with_inherited_active_model_snapshot(active_model_snapshot.clone());
         let mut app_state = AppState {
             surface: state.surface,
             session_mode: state.session_mode,
@@ -870,11 +884,10 @@ impl RuntimeBootstrap {
                 .iter()
                 .map(|phase| format!("{phase:?}"))
                 .collect(),
-            active_model_profile_name: initialize_bundle.active_model_profile_name.clone(),
-            active_model_profile_source: initialize_bundle.active_model_profile_source.clone(),
-            active_model_provider_summary: summarize_active_model_provider(
-                &initialize_bundle.provider_config,
-            ),
+            active_model_runtime: Some(initialize_bundle.active_model_runtime.clone()),
+            active_model_profile_name: active_model_snapshot.active_profile_name,
+            active_model_profile_source: active_model_snapshot.source,
+            active_model_provider_summary: active_model_snapshot.summary,
             active_session_id,
             session_store: Some(self.session_store.clone()),
             session: None,

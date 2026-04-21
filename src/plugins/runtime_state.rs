@@ -243,10 +243,21 @@ pub fn build_turn_engine(
 ) -> QueryEngine {
     let mut turn_app_state = app_state.clone();
     hydrate_app_state_from_snapshot(&mut turn_app_state, snapshot);
+    let active_model_snapshot = turn_app_state
+        .active_model_runtime
+        .as_ref()
+        .map(|runtime| runtime.snapshot_blocking());
+    if let Some(active_model_snapshot) = active_model_snapshot.as_ref() {
+        turn_app_state.active_model_profile_name = active_model_snapshot.active_profile_name.clone();
+        turn_app_state.active_model_profile_source = active_model_snapshot.source.clone();
+        turn_app_state.active_model_provider_summary = active_model_snapshot.summary.clone();
+    }
     QueryEngine::new(QueryContext {
         app_state: turn_app_state.clone(),
         tool_registry: snapshot.tool_registry.clone(),
-        api_client: base_engine.context.api_client.clone(),
+        api_client: active_model_snapshot
+            .map(|snapshot| snapshot.client)
+            .unwrap_or_else(|| base_engine.context.api_client.clone()),
         compactor: base_engine.context.compactor.clone(),
         hook_registry: snapshot.hook_registry.clone(),
         agent_id: base_engine.context.agent_id.clone(),

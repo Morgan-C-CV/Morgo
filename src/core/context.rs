@@ -5,6 +5,7 @@ use crate::prompt::{
 use crate::service::api::client::ModelProviderClient;
 use crate::service::api::streaming::StreamEvent;
 use crate::service::compact::ReactiveCompactor;
+use crate::state::active_model_runtime::ActiveModelRuntime;
 use crate::state::app_state::{AppState, RuntimeRole, WorkerRole};
 use crate::state::permission_context::{MAX_NESTED_MEMORY_DEPTH, sanitize_nested_memory_lineage};
 use crate::tool::registry::ToolRegistry;
@@ -71,8 +72,25 @@ impl QueryContext {
             app_state.history = None;
             app_state.restored_session = None;
         }
+        let inherited_active_model_snapshot = app_state
+            .active_model_runtime
+            .as_ref()
+            .map(|runtime| runtime.snapshot_blocking());
+        app_state.active_model_runtime = inherited_active_model_snapshot
+            .as_ref()
+            .cloned()
+            .map(ActiveModelRuntime::new);
+        if let Some(active_model_snapshot) = inherited_active_model_snapshot.as_ref() {
+            app_state.active_model_profile_name = active_model_snapshot.active_profile_name.clone();
+            app_state.active_model_profile_source = active_model_snapshot.source.clone();
+            app_state.active_model_provider_summary = active_model_snapshot.summary.clone();
+        }
         let mut permission_context = app_state.permission_context.clone();
         permission_context.set_pending_approval(None);
+        if let Some(active_model_snapshot) = inherited_active_model_snapshot {
+            permission_context =
+                permission_context.with_inherited_active_model_snapshot(active_model_snapshot);
+        }
         let lineage = build_nested_memory_lineage(self, &child_agent_id, config.inherit_context);
         permission_context.set_nested_memory_lineage(lineage);
         let tool_registry = self
@@ -85,13 +103,23 @@ impl QueryContext {
         use tokio::sync::RwLock;
         app_state.runtime_tool_registry = Some(Arc::new(RwLock::new(tool_registry.clone())));
 
+        let api_client = if scripted_turns.is_empty() {
+            app_state
+                .active_model_runtime
+                .as_ref()
+                .map(|runtime| runtime.snapshot_blocking().client)
+                .unwrap_or_else(ModelProviderClient::default)
+        } else {
+            ModelProviderClient::with_scripted_turns(scripted_turns)
+        };
+
         Self {
             system_prompt: build_system_prompt(&app_state),
             tools_prompt: build_tools_prompt(&tool_registry, &app_state.permission_context),
             context_prompt: build_context_prompt(&app_state),
             app_state,
             tool_registry,
-            api_client: ModelProviderClient::with_scripted_turns(scripted_turns),
+            api_client,
             compactor: self.compactor.clone(),
             hook_registry: self.hook_registry.clone(),
             agent_id: Some(child_agent_id),

@@ -20,6 +20,7 @@ use tokio_util::sync::CancellationToken;
 use crate::history::resume::{ResolvedSessionState, RestoredSession};
 use crate::history::session::{SessionHistory, SessionId, SessionSnapshot, SessionStore};
 use crate::interaction::dispatcher::NotificationDispatcher;
+use crate::state::active_model_runtime::ActiveModelRuntime;
 use crate::security::audit::AuditLog;
 use crate::state::permission_context::ToolPermissionContext;
 
@@ -106,6 +107,7 @@ pub struct AppState {
     pub notification_dispatcher: NotificationDispatcher,
     pub audit_log: Arc<Mutex<AuditLog>>,
     pub startup_trace: Vec<String>,
+    pub active_model_runtime: Option<ActiveModelRuntime>,
     pub active_model_profile_name: Option<String>,
     pub active_model_profile_source: ActiveModelProfileSource,
     pub active_model_provider_summary: ActiveModelProviderSummary,

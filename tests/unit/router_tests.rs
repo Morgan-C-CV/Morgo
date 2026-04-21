@@ -76,6 +76,7 @@ fn app_state_with_session_root(root: &std::path::Path) -> AppState {
             rust_agent::security::audit::AuditLog::default(),
         )),
         startup_trace: Vec::new(),
+        active_model_runtime: None,
         active_model_profile_name: Some("openai-fast".into()),
         active_model_profile_source:
             rust_agent::state::app_state::ActiveModelProfileSource::ModelsToml,
@@ -492,6 +493,7 @@ async fn router_route_surfaces_strict_unknown_command_as_denied_result() {
             rust_agent::security::audit::AuditLog::default(),
         )),
         startup_trace: Vec::new(),
+        active_model_runtime: None,
         active_model_profile_name: None,
         active_model_profile_source:
             rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
@@ -554,6 +556,7 @@ async fn status_command_shows_active_model_summary_without_secret_leak() {
             rust_agent::security::audit::AuditLog::default(),
         )),
         startup_trace: Vec::new(),
+        active_model_runtime: None,
         active_model_profile_name: Some("openai-fast".into()),
         active_model_profile_source:
             rust_agent::state::app_state::ActiveModelProfileSource::ModelsToml,
@@ -1059,6 +1062,7 @@ async fn prompt_command_with_model_invocation_disabled_never_enters_query_engine
             rust_agent::security::audit::AuditLog::default(),
         )),
         startup_trace: Vec::new(),
+        active_model_runtime: None,
         active_model_profile_name: None,
         active_model_profile_source:
             rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
@@ -1124,6 +1128,7 @@ async fn router_compact_route_enters_query_engine_with_builtin_prompt() {
             rust_agent::security::audit::AuditLog::default(),
         )),
         startup_trace: Vec::new(),
+        active_model_runtime: None,
         active_model_profile_name: None,
         active_model_profile_source:
             rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
@@ -1206,6 +1211,7 @@ async fn router_cost_route_returns_local_message_without_entering_query_engine()
             rust_agent::security::audit::AuditLog::default(),
         )),
         startup_trace: Vec::new(),
+        active_model_runtime: None,
         active_model_profile_name: None,
         active_model_profile_source:
             rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
@@ -1274,6 +1280,7 @@ async fn cli_repl_handles_multiple_inputs_in_sequence() {
             rust_agent::security::audit::AuditLog::default(),
         )),
         startup_trace: Vec::new(),
+        active_model_runtime: None,
         active_model_profile_name: None,
         active_model_profile_source:
             rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
@@ -1356,6 +1363,7 @@ async fn cli_repl_surfaces_task_events_for_active_session() {
             rust_agent::security::audit::AuditLog::default(),
         )),
         startup_trace: Vec::new(),
+        active_model_runtime: None,
         active_model_profile_name: None,
         active_model_profile_source:
             rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
@@ -1461,6 +1469,7 @@ async fn cli_repl_persists_history_for_local_and_query_turns() {
             rust_agent::security::audit::AuditLog::default(),
         )),
         startup_trace: Vec::new(),
+        active_model_runtime: None,
         active_model_profile_name: None,
         active_model_profile_source:
             rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
@@ -1580,6 +1589,7 @@ async fn remote_handler_preserves_remote_actor_and_session_for_query_flow() {
             rust_agent::security::audit::AuditLog::default(),
         )),
         startup_trace: Vec::new(),
+        active_model_runtime: None,
         active_model_profile_name: None,
         active_model_profile_source:
             rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
@@ -1732,6 +1742,7 @@ async fn cli_repl_uses_next_turn_plugin_snapshot_after_reload_updates_manifest_s
             rust_agent::security::audit::AuditLog::default(),
         )),
         startup_trace: Vec::new(),
+        active_model_runtime: None,
         active_model_profile_name: None,
         active_model_profile_source:
             rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
@@ -1890,6 +1901,7 @@ async fn cli_repl_uses_next_turn_plugin_snapshot_after_reload_removes_deleted_pl
             rust_agent::security::audit::AuditLog::default(),
         )),
         startup_trace: Vec::new(),
+        active_model_runtime: None,
         active_model_profile_name: None,
         active_model_profile_source:
             rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
@@ -2023,6 +2035,7 @@ async fn cli_repl_applies_disable_and_enable_only_on_next_turn_boundaries() {
             rust_agent::security::audit::AuditLog::default(),
         )),
         startup_trace: Vec::new(),
+        active_model_runtime: None,
         active_model_profile_name: None,
         active_model_profile_source:
             rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
@@ -2256,6 +2269,7 @@ async fn remote_handler_uses_next_turn_plugin_snapshot_after_reload_removes_dele
             rust_agent::security::audit::AuditLog::default(),
         )),
         startup_trace: Vec::new(),
+        active_model_runtime: None,
         active_model_profile_name: None,
         active_model_profile_source:
             rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
@@ -2401,6 +2415,7 @@ async fn cli_repl_persists_denied_turns() {
             rust_agent::security::audit::AuditLog::default(),
         )),
         startup_trace: Vec::new(),
+        active_model_runtime: None,
         active_model_profile_name: None,
         active_model_profile_source:
             rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
@@ -2495,6 +2510,7 @@ async fn router_approves_pending_plan_mode_request() {
             rust_agent::security::audit::AuditLog::default(),
         )),
         startup_trace: Vec::new(),
+        active_model_runtime: None,
         active_model_profile_name: None,
         active_model_profile_source:
             rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
@@ -2575,6 +2591,7 @@ async fn router_denies_pending_request_without_session_approval() {
             rust_agent::security::audit::AuditLog::default(),
         )),
         startup_trace: Vec::new(),
+        active_model_runtime: None,
         active_model_profile_name: None,
         active_model_profile_source:
             rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
@@ -2660,6 +2677,7 @@ async fn approval_replay_uses_runtime_tool_registry() {
             rust_agent::security::audit::AuditLog::default(),
         )),
         startup_trace: Vec::new(),
+        active_model_runtime: None,
         active_model_profile_name: None,
         active_model_profile_source:
             rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
@@ -2741,6 +2759,7 @@ async fn permissions_command_reports_session_permission_state() {
             rust_agent::security::audit::AuditLog::default(),
         )),
         startup_trace: Vec::new(),
+        active_model_runtime: None,
         active_model_profile_name: None,
         active_model_profile_source:
             rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
@@ -2811,6 +2830,7 @@ async fn plan_command_reports_inactive_status() {
             rust_agent::security::audit::AuditLog::default(),
         )),
         startup_trace: Vec::new(),
+        active_model_runtime: None,
         active_model_profile_name: None,
         active_model_profile_source:
             rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
@@ -2879,6 +2899,7 @@ async fn plan_command_enter_requests_approval_before_switching_mode() {
             rust_agent::security::audit::AuditLog::default(),
         )),
         startup_trace: Vec::new(),
+        active_model_runtime: None,
         active_model_profile_name: None,
         active_model_profile_source:
             rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
@@ -2962,6 +2983,7 @@ async fn plan_command_exit_requests_approval_and_approval_exits_mode() {
             rust_agent::security::audit::AuditLog::default(),
         )),
         startup_trace: Vec::new(),
+        active_model_runtime: None,
         active_model_profile_name: None,
         active_model_profile_source:
             rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
@@ -3089,6 +3111,7 @@ async fn plan_command_handles_status_noop_and_denied_exit() {
             rust_agent::security::audit::AuditLog::default(),
         )),
         startup_trace: Vec::new(),
+        active_model_runtime: None,
         active_model_profile_name: None,
         active_model_profile_source:
             rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
@@ -3276,6 +3299,7 @@ async fn plan_command_handles_status_noop_and_denied_exit() {
             rust_agent::security::audit::AuditLog::default(),
         )),
         startup_trace: Vec::new(),
+        active_model_runtime: None,
         active_model_profile_name: None,
         active_model_profile_source:
             rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
@@ -3340,6 +3364,7 @@ async fn permissions_command_mutates_mode_and_rule_lists() {
             rust_agent::security::audit::AuditLog::default(),
         )),
         startup_trace: Vec::new(),
+        active_model_runtime: None,
         active_model_profile_name: None,
         active_model_profile_source:
             rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,

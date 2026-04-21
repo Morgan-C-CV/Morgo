@@ -1103,6 +1103,7 @@ fn app_state_store_notifies_subscribers_after_committed_update() {
             rust_agent::security::audit::AuditLog::default(),
         )),
         startup_trace: Vec::new(),
+        active_model_runtime: None,
         active_model_profile_name: None,
         active_model_profile_source:
             rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
@@ -1172,6 +1173,7 @@ fn app_state_classifies_runtime_visible_changes() {
             rust_agent::security::audit::AuditLog::default(),
         )),
         startup_trace: Vec::new(),
+        active_model_runtime: None,
         active_model_profile_name: None,
         active_model_profile_source:
             rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
@@ -1211,6 +1213,7 @@ fn app_state_classifies_runtime_visible_changes() {
         notification_dispatcher: previous.notification_dispatcher.clone(),
         audit_log: previous.audit_log.clone(),
         startup_trace: previous.startup_trace.clone(),
+        active_model_runtime: previous.active_model_runtime.clone(),
         active_model_profile_name: previous.active_model_profile_name.clone(),
         active_model_profile_source: previous.active_model_profile_source.clone(),
         active_model_provider_summary: previous.active_model_provider_summary.clone(),
@@ -1549,6 +1552,7 @@ fn augment_prompt_depends_on_input_state_without_mutating_store() {
             rust_agent::security::audit::AuditLog::default(),
         )),
         startup_trace: Vec::new(),
+        active_model_runtime: None,
         active_model_profile_name: None,
         active_model_profile_source:
             rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
@@ -1858,6 +1862,7 @@ fn finalize_runtime_state_is_single_writeback_entrypoint() {
             .iter()
             .map(|phase| format!("{phase:?}"))
             .collect(),
+        active_model_runtime: Some(bundle.active_model_runtime.clone()),
         active_model_profile_name: None,
         active_model_profile_source:
             rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,

@@ -49,6 +49,7 @@ async fn cost_command_reports_tracked_usage() {
             rust_agent::security::audit::AuditLog::default(),
         )),
         startup_trace: Vec::new(),
+        active_model_runtime: None,
         active_model_profile_name: None,
         active_model_profile_source:
             rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,

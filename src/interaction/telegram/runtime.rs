@@ -62,10 +62,22 @@ fn bind_telegram_engine(
     telegram_app_state.apply_resolved_session_state(&resolved);
     telegram_app_state.persist_resolved_session_state(&resolved);
 
+    let active_model_snapshot = telegram_app_state
+        .active_model_runtime
+        .as_ref()
+        .map(|runtime| runtime.snapshot_blocking());
+    if let Some(active_model_snapshot) = active_model_snapshot.as_ref() {
+        telegram_app_state.active_model_profile_name = active_model_snapshot.active_profile_name.clone();
+        telegram_app_state.active_model_profile_source = active_model_snapshot.source.clone();
+        telegram_app_state.active_model_provider_summary = active_model_snapshot.summary.clone();
+    }
+
     QueryEngine::new(QueryContext {
         app_state: telegram_app_state,
         tool_registry: engine.context.tool_registry.clone(),
-        api_client: engine.context.api_client.clone(),
+        api_client: active_model_snapshot
+            .map(|snapshot| snapshot.client)
+            .unwrap_or_else(|| engine.context.api_client.clone()),
         compactor: engine.context.compactor.clone(),
         hook_registry: engine.context.hook_registry.clone(),
         agent_id: engine.context.agent_id.clone(),

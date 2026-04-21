@@ -248,6 +248,7 @@ fn test_query_context(api_client: ModelProviderClient, cost_tracker: CostTracker
                 rust_agent::security::audit::AuditLog::default(),
             )),
             startup_trace: Vec::new(),
+            active_model_runtime: None,
             active_model_profile_name: None,
             active_model_profile_source:
                 rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
@@ -1697,6 +1698,7 @@ async fn query_engine_submit_turn_works_through_production_provider_path() {
                 rust_agent::security::audit::AuditLog::default(),
             )),
             startup_trace: Vec::new(),
+            active_model_runtime: None,
             active_model_profile_name: None,
             active_model_profile_source:
                 rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
@@ -2103,6 +2105,7 @@ async fn production_provider_merges_usage_across_provider_envelopes_without_drif
                 rust_agent::security::audit::AuditLog::default(),
             )),
             startup_trace: Vec::new(),
+            active_model_runtime: None,
             active_model_profile_name: None,
             active_model_profile_source:
                 rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
@@ -2473,6 +2476,7 @@ async fn production_provider_maps_terminal_http_error_to_query_loop_failure_code
                 rust_agent::security::audit::AuditLog::default(),
             )),
             startup_trace: Vec::new(),
+            active_model_runtime: None,
             active_model_profile_name: None,
             active_model_profile_source:
                 rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
@@ -2902,6 +2906,7 @@ async fn production_provider_maps_timeout_after_retries_exhaust_to_query_loop_fa
                 rust_agent::security::audit::AuditLog::default(),
             )),
             startup_trace: Vec::new(),
+            active_model_runtime: None,
             active_model_profile_name: None,
             active_model_profile_source:
                 rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,

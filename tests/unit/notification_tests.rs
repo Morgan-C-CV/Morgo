@@ -117,6 +117,7 @@ fn telegram_test_app_state(
         notification_dispatcher: NotificationDispatcher::new(gateway),
         audit_log: Arc::new(std::sync::Mutex::new(AuditLog::default())),
         startup_trace: Vec::new(),
+        active_model_runtime: None,
         active_model_profile_name: None,
         active_model_profile_source:
             rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
@@ -2557,6 +2558,7 @@ fn drain_remote_notifications_maps_structured_payloads() {
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
         audit_log: std::sync::Arc::new(std::sync::Mutex::new(AuditLog::default())),
         startup_trace: Vec::new(),
+        active_model_runtime: None,
         active_model_profile_name: None,
         active_model_profile_source:
             rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
@@ -2685,6 +2687,7 @@ fn drain_remote_task_update_notifications_preserve_task_type() {
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
         audit_log: std::sync::Arc::new(std::sync::Mutex::new(AuditLog::default())),
         startup_trace: Vec::new(),
+        active_model_runtime: None,
         active_model_profile_name: None,
         active_model_profile_source:
             rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,

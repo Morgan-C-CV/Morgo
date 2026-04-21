@@ -179,6 +179,7 @@ async fn plugin_runtime_exposes_command_hook_tool_and_diagnostics() {
             rust_agent::security::audit::AuditLog::default(),
         )),
         startup_trace: Vec::new(),
+        active_model_runtime: None,
         active_model_profile_name: None,
         active_model_profile_source:
             rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,

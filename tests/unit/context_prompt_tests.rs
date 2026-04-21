@@ -205,6 +205,7 @@ fn build_app_state_with_permissions(permissions: ToolPermissionContext) -> AppSt
             rust_agent::security::audit::AuditLog::default(),
         )),
         startup_trace: vec!["DetectSurface".into(), "Setup".into()],
+        active_model_runtime: None,
         active_model_profile_name: None,
         active_model_profile_source:
             rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,

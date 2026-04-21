@@ -22,6 +22,7 @@ use rust_agent::service::api::streaming::{
 };
 use rust_agent::service::compact::reactive_compact::{CompactServiceNextStep, ReactiveCompactor};
 use rust_agent::service::observability::ServiceObservabilityTracker;
+use rust_agent::state::active_model_runtime::{ActiveModelRuntime, ActiveModelRuntimeSnapshot};
 use rust_agent::state::app_state::WorkerRole;
 use rust_agent::task::types::{TaskOwner, ValidationState, WorkerPhase};
 use std::sync::Arc;
@@ -185,6 +186,7 @@ fn test_context_with_turns(
                 rust_agent::security::audit::AuditLog::default(),
             )),
             startup_trace: Vec::new(),
+            active_model_runtime: None,
             active_model_profile_name: None,
             active_model_profile_source:
                 rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
@@ -1096,6 +1098,7 @@ async fn query_loop_stop_hook_can_prevent_continuation() {
                 rust_agent::security::audit::AuditLog::default(),
             )),
             startup_trace: Vec::new(),
+            active_model_runtime: None,
             active_model_profile_name: None,
             active_model_profile_source:
                 rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
@@ -1192,6 +1195,7 @@ async fn query_loop_respects_pre_tool_hook_denial() {
                 rust_agent::security::audit::AuditLog::default(),
             )),
             startup_trace: Vec::new(),
+            active_model_runtime: None,
             active_model_profile_name: None,
             active_model_profile_source:
                 rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
@@ -1306,6 +1310,7 @@ async fn query_loop_runs_permission_request_hook_before_tool_execution() {
                 rust_agent::security::audit::AuditLog::default(),
             )),
             startup_trace: Vec::new(),
+            active_model_runtime: None,
             active_model_profile_name: None,
             active_model_profile_source:
                 rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
@@ -1412,6 +1417,7 @@ async fn query_loop_stop_hook_blocking_continues_with_follow_up_turn() {
                 rust_agent::security::audit::AuditLog::default(),
             )),
             startup_trace: Vec::new(),
+            active_model_runtime: None,
             active_model_profile_name: None,
             active_model_profile_source:
                 rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
@@ -1527,6 +1533,7 @@ async fn query_loop_uses_subagent_stop_hook_for_subagent_context() {
                 rust_agent::security::audit::AuditLog::default(),
             )),
             startup_trace: Vec::new(),
+            active_model_runtime: None,
             active_model_profile_name: None,
             active_model_profile_source:
                 rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
@@ -1689,6 +1696,7 @@ async fn engine_drains_internal_task_events() {
                 rust_agent::security::audit::AuditLog::default(),
             )),
             startup_trace: Vec::new(),
+            active_model_runtime: None,
             active_model_profile_name: None,
             active_model_profile_source:
                 rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
@@ -1782,6 +1790,7 @@ async fn worker_query_loop_consumes_mailbox_messages() {
                 rust_agent::security::audit::AuditLog::default(),
             )),
             startup_trace: Vec::new(),
+            active_model_runtime: None,
             active_model_profile_name: None,
             active_model_profile_source:
                 rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
@@ -1894,6 +1903,7 @@ async fn subagent_context_inherits_parent_tools_and_hooks() {
                 rust_agent::security::audit::AuditLog::default(),
             )),
             startup_trace: vec!["parent-runtime".into()],
+            active_model_runtime: None,
             active_model_profile_name: None,
             active_model_profile_source:
                 rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
@@ -1990,6 +2000,109 @@ async fn subagent_context_inherits_parent_tools_and_hooks() {
 }
 
 #[tokio::test]
+async fn subagent_context_inherits_active_model_snapshot_without_sharing_handle() {
+    let parent_client = ModelProviderClient::with_scripted_turns(vec![vec![
+        StreamEvent::MessageStart,
+        StreamEvent::TextDelta("parent runtime reply".into()),
+        StreamEvent::MessageStop {
+            stop_reason: StopReason::EndTurn,
+        },
+    ]]);
+    let parent_runtime = ActiveModelRuntime::new(ActiveModelRuntimeSnapshot {
+        config: rust_agent::service::api::client::ModelProviderConfig::default(),
+        client: parent_client.clone(),
+        active_profile_name: Some("runtime-profile".into()),
+        source: rust_agent::state::app_state::ActiveModelProfileSource::ModelsToml,
+        summary: rust_agent::state::app_state::ActiveModelProviderSummary {
+            provider_id: "runtime-provider".into(),
+            protocol: "OpenAICompatible".into(),
+            compatibility_profile: "OpenAICompatible".into(),
+            base_url_host: "runtime.example".into(),
+            model: "runtime-model".into(),
+            auth_status: "env:RUNTIME_KEY(set)".into(),
+        },
+    });
+    let permission_context = ToolPermissionContext::new(PermissionMode::Default)
+        .with_task_manager(Arc::new(TaskManager::default()))
+        .with_external_memory_entries(vec!["external note for child".into()]);
+    let parent = QueryContext {
+        app_state: AppState {
+            surface: InteractionSurface::Cli,
+            session_mode: SessionMode::Headless,
+            client_type: ClientType::Cli,
+            session_source: SessionSource::LocalCli,
+            runtime_role: RuntimeRole::Coordinator,
+            worker_role: None,
+            permission_context,
+            command_registry: None,
+            runtime_tool_registry: Some(Arc::new(RwLock::new(ToolRegistry::new()))),
+            skill_registry: None,
+            mcp_runtime: None,
+            plugin_load_result: None,
+            cost_tracker: CostTracker::default(),
+            service_observability_tracker: ServiceObservabilityTracker::default(),
+            notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
+            audit_log: Arc::new(std::sync::Mutex::new(
+                rust_agent::security::audit::AuditLog::default(),
+            )),
+            startup_trace: vec!["parent-runtime".into()],
+            active_model_runtime: Some(parent_runtime.clone()),
+            active_model_profile_name: Some("runtime-profile".into()),
+            active_model_profile_source:
+                rust_agent::state::app_state::ActiveModelProfileSource::ModelsToml,
+            active_model_provider_summary:
+                rust_agent::state::app_state::ActiveModelProviderSummary {
+                    provider_id: "runtime-provider".into(),
+                    protocol: "OpenAICompatible".into(),
+                    compatibility_profile: "OpenAICompatible".into(),
+                    base_url_host: "runtime.example".into(),
+                    model: "runtime-model".into(),
+                    auth_status: "env:RUNTIME_KEY(set)".into(),
+                },
+            active_session_id: "parent-session".into(),
+            session_store: None,
+            session: None,
+            history: None,
+            restored_session: None,
+            last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            cancellation_token: tokio_util::sync::CancellationToken::new(),
+            subagent_limiter: None,
+            boss_coordinator: None,
+        },
+        tool_registry: ToolRegistry::new(),
+        api_client: ModelProviderClient::default(),
+        compactor: ReactiveCompactor,
+        hook_registry: HookRegistry::default(),
+        agent_id: None,
+        system_prompt: "test system".into(),
+        tools_prompt: "test tools".into(),
+        context_prompt: "test context".into(),
+    };
+
+    let child = parent.create_subagent_context(
+        "agent-runtime-child",
+        vec![],
+        SubagentConfig {
+            worker_role: rust_agent::state::app_state::WorkerRole::Research,
+            inherit_context: true,
+            max_turns: None,
+            allowed_tools: None,
+        },
+    );
+
+    assert_eq!(child.app_state.active_model_profile_name.as_deref(), Some("runtime-profile"));
+    assert_eq!(child.app_state.active_model_provider_summary.model, "runtime-model");
+    assert!(child.app_state.active_model_runtime.is_some());
+    assert!(!matches!(
+        (&parent.app_state.active_model_runtime, &child.app_state.active_model_runtime),
+        (Some(parent_runtime), Some(child_runtime)) if std::ptr::eq(parent_runtime, child_runtime)
+    ));
+
+    let result = QueryEngine::new(child).submit_turn(Message::user("run child")).await;
+    assert!(result.messages.iter().any(|message| message.content.contains("parent runtime reply")));
+}
+
+#[tokio::test]
 async fn subagent_context_does_not_inherit_session_memory_when_disabled() {
     let permission_context = ToolPermissionContext::new(PermissionMode::Default)
         .with_task_manager(Arc::new(TaskManager::default()))
@@ -2016,6 +2129,7 @@ async fn subagent_context_does_not_inherit_session_memory_when_disabled() {
                 rust_agent::security::audit::AuditLog::default(),
             )),
             startup_trace: vec!["parent-runtime".into()],
+            active_model_runtime: None,
             active_model_profile_name: None,
             active_model_profile_source:
                 rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
@@ -2130,6 +2244,7 @@ async fn subagent_context_reanchors_and_bounds_nested_memory_lineage() {
                 rust_agent::security::audit::AuditLog::default(),
             )),
             startup_trace: vec!["parent-runtime".into()],
+            active_model_runtime: None,
             active_model_profile_name: None,
             active_model_profile_source:
                 rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
@@ -2313,6 +2428,7 @@ async fn coordinator_waits_for_group_barrier_before_synthesis_follow_up() {
                 rust_agent::security::audit::AuditLog::default(),
             )),
             startup_trace: Vec::new(),
+            active_model_runtime: None,
             active_model_profile_name: None,
             active_model_profile_source:
                 rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
@@ -2453,6 +2569,7 @@ async fn coordinator_gates_finalization_until_verification_finishes() {
                 rust_agent::security::audit::AuditLog::default(),
             )),
             startup_trace: Vec::new(),
+            active_model_runtime: None,
             active_model_profile_name: None,
             active_model_profile_source:
                 rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
@@ -2604,6 +2721,7 @@ async fn coordinator_surfaces_verification_failure_and_missing_verification_risk
             notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
             audit_log: Arc::new(std::sync::Mutex::new(rust_agent::security::audit::AuditLog::default())),
             startup_trace: Vec::new(),
+            active_model_runtime: None,
             active_model_profile_name: None,
             active_model_profile_source:
                 rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
@@ -3369,6 +3487,7 @@ async fn submit_turn_distinguishes_stop_hook_prevented_and_blocking_runtime_even
                 rust_agent::security::audit::AuditLog::default(),
             )),
             startup_trace: Vec::new(),
+            active_model_runtime: None,
             active_model_profile_name: None,
             active_model_profile_source:
                 rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
@@ -3438,6 +3557,7 @@ async fn submit_turn_distinguishes_stop_hook_prevented_and_blocking_runtime_even
                 rust_agent::security::audit::AuditLog::default(),
             )),
             startup_trace: Vec::new(),
+            active_model_runtime: None,
             active_model_profile_name: None,
             active_model_profile_source:
                 rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,

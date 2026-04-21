@@ -10,6 +10,7 @@ use crate::interaction::dispatcher::NotificationDispatcher;
 use crate::interaction::telegram::gateway::TelegramGateway;
 use crate::security::audit::AuditLog;
 use crate::service::compact::reactive_compact::ReactiveCompactor;
+use crate::state::active_model_runtime::ActiveModelRuntime;
 use crate::state::app_state::{
     ActiveModelProfileSource, ActiveModelProviderSummary, AppState, RuntimeRole, WorkerRole,
 };
@@ -366,6 +367,8 @@ fn build_parent_query_context(permissions: ToolPermissionContext) -> QueryContex
             InteractionSurface::Cli,
             SessionMode::Headless,
         ));
+    let inherited_active_model_snapshot =
+        permissions.inherited_active_model_snapshot.clone();
     let app_state = AppState {
         surface: InteractionSurface::Cli,
         session_mode: SessionMode::Headless,
@@ -388,16 +391,28 @@ fn build_parent_query_context(permissions: ToolPermissionContext) -> QueryContex
             .with_hook_registry(hook_registry.clone()),
         audit_log: std::sync::Arc::new(std::sync::Mutex::new(AuditLog::default())),
         startup_trace: Vec::new(),
-        active_model_profile_name: None,
-        active_model_profile_source: ActiveModelProfileSource::BootstrapDefault,
-        active_model_provider_summary: ActiveModelProviderSummary {
-            provider_id: "default-provider".into(),
-            protocol: "Anthropic".into(),
-            compatibility_profile: "Anthropic".into(),
-            base_url_host: "localhost".into(),
-            model: "default-model".into(),
-            auth_status: "env:OPENAI_API_KEY(unset)".into(),
-        },
+        active_model_runtime: inherited_active_model_snapshot
+            .as_ref()
+            .cloned()
+            .map(ActiveModelRuntime::new),
+        active_model_profile_name: inherited_active_model_snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.active_profile_name.clone()),
+        active_model_profile_source: inherited_active_model_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.source.clone())
+            .unwrap_or(ActiveModelProfileSource::BootstrapDefault),
+        active_model_provider_summary: inherited_active_model_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.summary.clone())
+            .unwrap_or(ActiveModelProviderSummary {
+                provider_id: "default-provider".into(),
+                protocol: "Anthropic".into(),
+                compatibility_profile: "Anthropic".into(),
+                base_url_host: "localhost".into(),
+                model: "default-model".into(),
+                auth_status: "env:OPENAI_API_KEY(unset)".into(),
+            }),
         active_session_id: permissions
             .active_session_id
             .unwrap_or_else(|| "local-session".into()),
@@ -424,15 +439,21 @@ fn build_parent_query_context(permissions: ToolPermissionContext) -> QueryContex
     let tools_prompt =
         crate::prompt::tools::build_tools_prompt(&tool_registry, &app_state.permission_context);
     let context_prompt = crate::prompt::context::build_context_prompt(&app_state);
-    let service_observability_tracker = app_state.service_observability_tracker.clone();
-    QueryContext {
-        app_state,
-        tool_registry,
-        api_client:
+    let api_client = app_state
+        .active_model_runtime
+        .as_ref()
+        .map(|runtime| runtime.snapshot_blocking().client)
+        .unwrap_or_else(|| {
+            let service_observability_tracker = app_state.service_observability_tracker.clone();
             crate::service::api::client::ModelProviderClient::from_config_with_observability(
                 crate::service::api::client::ModelProviderConfig::default(),
                 service_observability_tracker,
-            ),
+            )
+        });
+    QueryContext {
+        app_state,
+        tool_registry,
+        api_client,
         compactor: ReactiveCompactor,
         hook_registry,
         agent_id: None,

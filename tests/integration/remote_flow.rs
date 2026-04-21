@@ -26,6 +26,7 @@ use rust_agent::security::authorizer::{DefaultSurfaceAuthorizer, SurfaceAdmissio
 use rust_agent::service::api::client::ModelProviderClient;
 use rust_agent::service::api::streaming::{StopReason, StreamEvent};
 use rust_agent::service::compact::reactive_compact::ReactiveCompactor;
+use rust_agent::state::active_model_runtime::{ActiveModelRuntime, ActiveModelRuntimeSnapshot};
 use rust_agent::state::app_state::{AppState, RuntimeRole};
 use rust_agent::state::permission_context::{PermissionMode, ToolPermissionContext};
 use rust_agent::task::manager::TaskManager;
@@ -83,6 +84,115 @@ impl Command for RemoteSpawnTaskCommand {
 }
 
 #[tokio::test]
+async fn remote_request_prefers_active_model_runtime_client_for_bound_turns() {
+    let command_registry = Arc::new(CommandRegistry::new());
+    let router = rust_agent::interaction::router::CommandRouter::new(
+        command_registry.clone(),
+        Box::new(DefaultSurfaceAuthorizer::default()),
+    );
+    let runtime_client = ModelProviderClient::with_scripted_turns(vec![vec![
+        StreamEvent::MessageStart,
+        StreamEvent::TextDelta("runtime handle reply".into()),
+        StreamEvent::MessageStop {
+            stop_reason: StopReason::EndTurn,
+        },
+    ]]);
+    let app_state = AppState {
+        surface: InteractionSurface::Remote,
+        session_mode: SessionMode::Interactive,
+        client_type: ClientType::RemoteControl,
+        session_source: SessionSource::RemoteControl,
+        runtime_role: RuntimeRole::Coordinator,
+        worker_role: None,
+        permission_context: ToolPermissionContext::new(PermissionMode::Default)
+            .with_task_manager(Arc::new(TaskManager::default()))
+            .with_plan_manager(Arc::new(PlanManager::default())),
+        command_registry: Some(command_registry),
+        runtime_tool_registry: Some(Arc::new(RwLock::new(ToolRegistry::new()))),
+        skill_registry: None,
+        mcp_runtime: None,
+        plugin_load_result: None,
+        cost_tracker: CostTracker::default(),
+        service_observability_tracker:
+            rust_agent::service::observability::ServiceObservabilityTracker::default(),
+        notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
+        audit_log: Arc::new(std::sync::Mutex::new(
+            rust_agent::security::audit::AuditLog::default(),
+        )),
+        startup_trace: Vec::new(),
+        active_model_runtime: Some(ActiveModelRuntime::new(ActiveModelRuntimeSnapshot {
+            config: rust_agent::service::api::client::ModelProviderConfig::default(),
+            client: runtime_client.clone(),
+            active_profile_name: Some("remote-runtime".into()),
+            source: rust_agent::state::app_state::ActiveModelProfileSource::ModelsToml,
+            summary: rust_agent::state::app_state::ActiveModelProviderSummary {
+                provider_id: "runtime-provider".into(),
+                protocol: "OpenAICompatible".into(),
+                compatibility_profile: "OpenAICompatible".into(),
+                base_url_host: "runtime.example".into(),
+                model: "runtime-model".into(),
+                auth_status: "env:RUNTIME_KEY(set)".into(),
+            },
+        })),
+        active_model_profile_name: Some("remote-runtime".into()),
+        active_model_profile_source:
+            rust_agent::state::app_state::ActiveModelProfileSource::ModelsToml,
+        active_model_provider_summary: rust_agent::state::app_state::ActiveModelProviderSummary {
+            provider_id: "runtime-provider".into(),
+            protocol: "OpenAICompatible".into(),
+            compatibility_profile: "OpenAICompatible".into(),
+            base_url_host: "runtime.example".into(),
+            model: "runtime-model".into(),
+            auth_status: "env:RUNTIME_KEY(set)".into(),
+        },
+        active_session_id: "remote-runtime-session".into(),
+        session_store: Some(Arc::new(InMemorySessionStore::default())),
+        session: None,
+        history: None,
+        restored_session: None,
+        last_activity_ts: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        cancellation_token: tokio_util::sync::CancellationToken::new(),
+        subagent_limiter: None,
+        boss_coordinator: None,
+    };
+    let engine = rust_agent::core::engine::QueryEngine::new(rust_agent::core::context::QueryContext {
+        app_state: app_state.clone(),
+        tool_registry: ToolRegistry::new(),
+        api_client: ModelProviderClient::with_scripted_turns(vec![vec![
+            StreamEvent::MessageStart,
+            StreamEvent::TextDelta("stale engine reply".into()),
+            StreamEvent::MessageStop {
+                stop_reason: StopReason::EndTurn,
+            },
+        ]]),
+        compactor: ReactiveCompactor,
+        hook_registry: rust_agent::hook::registry::HookRegistry::default(),
+        agent_id: None,
+        system_prompt: "test system".into(),
+        tools_prompt: "test tools".into(),
+        context_prompt: "test context".into(),
+    });
+
+    let response = handle_remote_request(
+        &router,
+        &engine,
+        &app_state,
+        RemoteRequest {
+            session_id: "remote-runtime-bound".into(),
+            actor_id: "remote-actor".into(),
+            is_authenticated: true,
+            from_trusted_surface: true,
+            raw: "summarize remote chain".into(),
+        },
+    )
+    .await
+    .expect("remote request should succeed");
+
+    assert!(response.primary_text.contains("runtime handle reply"));
+    assert!(!response.primary_text.contains("stale engine reply"));
+}
+
+#[tokio::test]
 async fn remote_request_runs_minimal_query_chain() {
     let command_registry = Arc::new(CommandRegistry::new());
     let router = rust_agent::interaction::router::CommandRouter::new(
@@ -125,6 +235,7 @@ async fn remote_request_runs_minimal_query_chain() {
             rust_agent::security::audit::AuditLog::default(),
         )),
         startup_trace: Vec::new(),
+        active_model_runtime: None,
         active_model_profile_name: None,
         active_model_profile_source:
             rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
@@ -279,6 +390,7 @@ async fn remote_request_uses_shared_session_apply_contract() {
             rust_agent::security::audit::AuditLog::default(),
         )),
         startup_trace: Vec::new(),
+        active_model_runtime: None,
         active_model_profile_name: None,
         active_model_profile_source:
             rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
@@ -398,6 +510,7 @@ async fn remote_request_records_accept_and_notification_audit_events() {
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
         audit_log: audit_log.clone(),
         startup_trace: Vec::new(),
+        active_model_runtime: None,
         active_model_profile_name: None,
         active_model_profile_source:
             rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
@@ -605,6 +718,7 @@ async fn remote_request_denies_not_allowlisted_and_records_audit_event() {
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
         audit_log: audit_log.clone(),
         startup_trace: Vec::new(),
+        active_model_runtime: None,
         active_model_profile_name: None,
         active_model_profile_source:
             rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
@@ -725,6 +839,7 @@ async fn remote_request_drains_async_remote_notifications() {
             rust_agent::security::audit::AuditLog::default(),
         )),
         startup_trace: Vec::new(),
+        active_model_runtime: None,
         active_model_profile_name: None,
         active_model_profile_source:
             rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
@@ -866,6 +981,7 @@ async fn remote_request_drains_async_task_update_notifications() {
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
         audit_log: audit_log.clone(),
         startup_trace: Vec::new(),
+        active_model_runtime: None,
         active_model_profile_name: None,
         active_model_profile_source:
             rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
@@ -1006,6 +1122,7 @@ async fn remote_request_preserves_response_boundary_and_async_inbox_semantics() 
             rust_agent::security::audit::AuditLog::default(),
         )),
         startup_trace: Vec::new(),
+        active_model_runtime: None,
         active_model_profile_name: None,
         active_model_profile_source:
             rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
@@ -1167,6 +1284,7 @@ async fn remote_request_dual_channel_events_appear_in_response_and_async_inbox()
             rust_agent::security::audit::AuditLog::default(),
         )),
         startup_trace: Vec::new(),
+        active_model_runtime: None,
         active_model_profile_name: None,
         active_model_profile_source:
             rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
@@ -1274,6 +1392,7 @@ async fn remote_request_returns_typed_remote_event_envelopes() {
             rust_agent::security::audit::AuditLog::default(),
         )),
         startup_trace: Vec::new(),
+        active_model_runtime: None,
         active_model_profile_name: None,
         active_model_profile_source:
             rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
@@ -1429,6 +1548,7 @@ async fn drain_remote_notifications_skips_surface_invisible_notice_and_records_d
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
         audit_log: audit_log.clone(),
         startup_trace: Vec::new(),
+        active_model_runtime: None,
         active_model_profile_name: None,
         active_model_profile_source:
             rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
