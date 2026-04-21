@@ -68,6 +68,7 @@ struct MockHttpResponse {
 struct MockExchange {
     response: MockHttpResponse,
     delay: Option<Duration>,
+    body_delay: Option<Duration>,
 }
 
 struct ExpectedUsage {
@@ -115,6 +116,7 @@ struct ProviderCase {
     base_url: Option<String>,
     model_id: &'static str,
     request_timeout_ms: u64,
+    stream_timeout_ms: u64,
     retry_policy: RetryPolicy,
     exchanges: Vec<MockExchange>,
     message: Message,
@@ -171,6 +173,7 @@ async fn run_provider_case(case: ProviderCase) -> FixtureResult {
         model_id: case.model_id.into(),
         timeout: ProviderTimeout {
             request_timeout_ms: case.request_timeout_ms,
+            stream_timeout_ms: case.stream_timeout_ms,
         },
         retry_policy: case.retry_policy,
         pricing: Default::default(),
@@ -392,33 +395,54 @@ async fn run_scripted_server(listener: TcpListener, exchanges: Vec<MockExchange>
         if let Some(delay) = exchange.delay {
             sleep(delay).await;
         }
-        let response = render_http_response(&exchange.response);
-        stream
-            .write_all(response.as_bytes())
-            .await
-            .expect("write scripted response");
+        if let Some(body_delay) = exchange.body_delay {
+            let (headers, body) = render_http_response_parts(&exchange.response);
+            stream
+                .write_all(headers.as_bytes())
+                .await
+                .expect("write scripted response headers");
+            stream
+                .flush()
+                .await
+                .expect("flush scripted response headers");
+            sleep(body_delay).await;
+            stream
+                .write_all(body.as_bytes())
+                .await
+                .expect("write scripted response body");
+        } else {
+            let response = render_http_response(&exchange.response);
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .expect("write scripted response");
+        }
         stream.flush().await.expect("flush scripted response");
     }
 }
 
 fn render_http_response(response: &MockHttpResponse) -> String {
+    let (headers, body) = render_http_response_parts(response);
+    format!("{}{}", headers, body)
+}
+
+fn render_http_response_parts(response: &MockHttpResponse) -> (String, &'static str) {
     let body = match response.body {
         MockBody::Sse(sse) | MockBody::Raw(sse) => sse,
         MockBody::Empty => "",
     };
-    let mut rendered = format!("HTTP/1.1 {}\r\n", response.status_line);
+    let mut headers = format!("HTTP/1.1 {}\r\n", response.status_line);
     if let Some(content_type) = response.content_type {
-        rendered.push_str(&format!("content-type: {}\r\n", content_type));
+        headers.push_str(&format!("content-type: {}\r\n", content_type));
     }
     for (name, value) in response.extra_headers {
-        rendered.push_str(&format!("{}: {}\r\n", name, value));
+        headers.push_str(&format!("{}: {}\r\n", name, value));
     }
-    rendered.push_str(&format!(
-        "content-length: {}\r\nconnection: close\r\n\r\n{}",
-        body.len(),
-        body
+    headers.push_str(&format!(
+        "content-length: {}\r\nconnection: close\r\n\r\n",
+        body.len()
     ));
-    rendered
+    (headers, body)
 }
 
 struct TranscriptProviderCase {
@@ -430,6 +454,7 @@ struct TranscriptProviderCase {
 fn transcript_mock_exchange(transcript: &'static str) -> MockExchange {
     MockExchange {
         delay: None,
+        body_delay: None,
         response: MockHttpResponse {
             status_line: "200 OK",
             content_type: Some("text/event-stream"),
@@ -449,6 +474,7 @@ fn provider_transcript_fixture_cases() -> Vec<TranscriptProviderCase> {
                 base_url: None,
                 model_id: "transcript-model",
                 request_timeout_ms: 5_000,
+                stream_timeout_ms: 120_000,
                 retry_policy: RetryPolicy {
                     max_attempts: 1,
                     initial_backoff_ms: 1,
@@ -506,6 +532,7 @@ fn provider_transcript_fixture_cases() -> Vec<TranscriptProviderCase> {
                 base_url: None,
                 model_id: "transcript-model",
                 request_timeout_ms: 5_000,
+                stream_timeout_ms: 120_000,
                 retry_policy: RetryPolicy {
                     max_attempts: 1,
                     initial_backoff_ms: 1,
@@ -553,6 +580,7 @@ fn provider_transcript_fixture_cases() -> Vec<TranscriptProviderCase> {
                 base_url: None,
                 model_id: "transcript-model",
                 request_timeout_ms: 5_000,
+                stream_timeout_ms: 120_000,
                 retry_policy: RetryPolicy {
                     max_attempts: 1,
                     initial_backoff_ms: 1,
@@ -600,6 +628,7 @@ fn provider_transcript_fixture_cases() -> Vec<TranscriptProviderCase> {
                 base_url: None,
                 model_id: "transcript-model",
                 request_timeout_ms: 5_000,
+                stream_timeout_ms: 120_000,
                 retry_policy: RetryPolicy {
                     max_attempts: 1,
                     initial_backoff_ms: 1,
@@ -647,6 +676,7 @@ fn provider_transcript_fixture_cases() -> Vec<TranscriptProviderCase> {
                 base_url: None,
                 model_id: "transcript-model",
                 request_timeout_ms: 5_000,
+                stream_timeout_ms: 120_000,
                 retry_policy: RetryPolicy {
                     max_attempts: 1,
                     initial_backoff_ms: 1,
@@ -693,6 +723,7 @@ fn provider_transcript_fixture_cases() -> Vec<TranscriptProviderCase> {
                 base_url: None,
                 model_id: "transcript-model",
                 request_timeout_ms: 5_000,
+                stream_timeout_ms: 120_000,
                 retry_policy: RetryPolicy {
                     max_attempts: 1,
                     initial_backoff_ms: 1,
@@ -739,6 +770,7 @@ fn provider_transcript_fixture_cases() -> Vec<TranscriptProviderCase> {
                 base_url: None,
                 model_id: "transcript-model",
                 request_timeout_ms: 5_000,
+                stream_timeout_ms: 120_000,
                 retry_policy: RetryPolicy {
                     max_attempts: 1,
                     initial_backoff_ms: 1,
@@ -788,6 +820,7 @@ async fn provider_fixture_harness_covers_normal_text_and_merged_usage() {
         base_url: None,
         model_id: "claude-test",
         request_timeout_ms: 5_000,
+        stream_timeout_ms: 120_000,
         retry_policy: RetryPolicy {
             max_attempts: 1,
             initial_backoff_ms: 1,
@@ -795,6 +828,7 @@ async fn provider_fixture_harness_covers_normal_text_and_merged_usage() {
         },
         exchanges: vec![MockExchange {
             delay: None,
+            body_delay: None,
             response: MockHttpResponse {
                 status_line: "200 OK",
                 content_type: Some("text/event-stream"),
@@ -868,6 +902,7 @@ async fn provider_fixture_harness_covers_partial_tool_use_payload() {
         base_url: None,
         model_id: "claude-test",
         request_timeout_ms: 5_000,
+        stream_timeout_ms: 120_000,
         retry_policy: RetryPolicy {
             max_attempts: 1,
             initial_backoff_ms: 1,
@@ -875,6 +910,7 @@ async fn provider_fixture_harness_covers_partial_tool_use_payload() {
         },
         exchanges: vec![MockExchange {
             delay: None,
+            body_delay: None,
             response: MockHttpResponse {
                 status_line: "200 OK",
                 content_type: Some("text/event-stream"),
@@ -940,6 +976,7 @@ async fn provider_fixture_harness_covers_tool_use_protocol_failure() {
         base_url: None,
         model_id: "claude-test",
         request_timeout_ms: 5_000,
+        stream_timeout_ms: 120_000,
         retry_policy: RetryPolicy {
             max_attempts: 1,
             initial_backoff_ms: 1,
@@ -947,6 +984,7 @@ async fn provider_fixture_harness_covers_tool_use_protocol_failure() {
         },
         exchanges: vec![MockExchange {
             delay: None,
+            body_delay: None,
             response: MockHttpResponse {
                 status_line: "200 OK",
                 content_type: Some("text/event-stream"),
@@ -1012,6 +1050,7 @@ async fn provider_fixture_harness_covers_retry_then_success() {
         base_url: None,
         model_id: "claude-test",
         request_timeout_ms: 5_000,
+        stream_timeout_ms: 120_000,
         retry_policy: RetryPolicy {
             max_attempts: 2,
             initial_backoff_ms: 1,
@@ -1020,6 +1059,7 @@ async fn provider_fixture_harness_covers_retry_then_success() {
         exchanges: vec![
             MockExchange {
                 delay: None,
+                body_delay: None,
                 response: MockHttpResponse {
                     status_line: "429 Too Many Requests",
                     content_type: Some("application/json"),
@@ -1029,6 +1069,7 @@ async fn provider_fixture_harness_covers_retry_then_success() {
             },
             MockExchange {
                 delay: None,
+                body_delay: None,
                 response: MockHttpResponse {
                     status_line: "200 OK",
                     content_type: Some("text/event-stream"),
@@ -1085,6 +1126,7 @@ async fn provider_fixture_harness_covers_invalid_response_paths() {
                 base_url: None,
                 model_id: "claude-test",
                 request_timeout_ms: 5_000,
+                stream_timeout_ms: 120_000,
                 retry_policy: RetryPolicy {
                     max_attempts: 1,
                     initial_backoff_ms: 1,
@@ -1092,6 +1134,7 @@ async fn provider_fixture_harness_covers_invalid_response_paths() {
                 },
                 exchanges: vec![MockExchange {
                     delay: None,
+                    body_delay: None,
                     response: MockHttpResponse {
                         status_line: "200 OK",
                         content_type: Some("application/json"),
@@ -1136,6 +1179,7 @@ async fn provider_fixture_harness_covers_invalid_response_paths() {
                 base_url: None,
                 model_id: "claude-test",
                 request_timeout_ms: 5_000,
+                stream_timeout_ms: 120_000,
                 retry_policy: RetryPolicy {
                     max_attempts: 1,
                     initial_backoff_ms: 1,
@@ -1143,6 +1187,7 @@ async fn provider_fixture_harness_covers_invalid_response_paths() {
                 },
                 exchanges: vec![MockExchange {
                     delay: None,
+                    body_delay: None,
                     response: MockHttpResponse {
                         status_line: "200 OK",
                         content_type: Some("text/event-stream"),
@@ -1197,6 +1242,7 @@ async fn provider_fixture_harness_covers_unsupported_capability_without_server()
         base_url: Some("http://127.0.0.1:1".into()),
         model_id: "claude-test",
         request_timeout_ms: 5_000,
+        stream_timeout_ms: 120_000,
         retry_policy: RetryPolicy {
             max_attempts: 1,
             initial_backoff_ms: 1,
@@ -1257,6 +1303,7 @@ async fn provider_fixture_harness_covers_openai_compatible_adapter_success_path(
         base_url: None,
         model_id: "openai-test",
         request_timeout_ms: 5_000,
+        stream_timeout_ms: 120_000,
         retry_policy: RetryPolicy {
             max_attempts: 1,
             initial_backoff_ms: 1,
@@ -1313,6 +1360,7 @@ async fn provider_fixture_harness_covers_openai_compatible_partial_tool_call_ass
         base_url: None,
         model_id: "openai-test",
         request_timeout_ms: 5_000,
+        stream_timeout_ms: 120_000,
         retry_policy: RetryPolicy {
             max_attempts: 1,
             initial_backoff_ms: 1,
@@ -1370,6 +1418,7 @@ async fn provider_fixture_harness_covers_openai_compatible_length_stop_mapping()
         base_url: None,
         model_id: "openai-test",
         request_timeout_ms: 5_000,
+        stream_timeout_ms: 120_000,
         retry_policy: RetryPolicy {
             max_attempts: 1,
             initial_backoff_ms: 1,
@@ -1416,6 +1465,7 @@ async fn provider_fixture_harness_covers_openai_compatible_content_filter_as_non
         base_url: None,
         model_id: "openai-test",
         request_timeout_ms: 5_000,
+        stream_timeout_ms: 120_000,
         retry_policy: RetryPolicy {
             max_attempts: 1,
             initial_backoff_ms: 1,
@@ -1466,6 +1516,7 @@ async fn provider_fixture_harness_covers_openai_compatible_429_retry_then_succes
         base_url: None,
         model_id: "openai-test",
         request_timeout_ms: 5_000,
+        stream_timeout_ms: 120_000,
         retry_policy: RetryPolicy {
             max_attempts: 2,
             initial_backoff_ms: 1,
@@ -1474,6 +1525,7 @@ async fn provider_fixture_harness_covers_openai_compatible_429_retry_then_succes
         exchanges: vec![
             MockExchange {
                 delay: None,
+                body_delay: None,
                 response: MockHttpResponse {
                     status_line: "429 Too Many Requests",
                     content_type: Some("application/json"),
@@ -1485,6 +1537,7 @@ async fn provider_fixture_harness_covers_openai_compatible_429_retry_then_succes
             },
             MockExchange {
                 delay: None,
+                body_delay: None,
                 response: MockHttpResponse {
                     status_line: "200 OK",
                     content_type: Some("text/event-stream"),
@@ -1533,6 +1586,7 @@ async fn provider_fixture_harness_covers_gemini_native_as_typed_unsupported() {
         base_url: Some("http://127.0.0.1:1".into()),
         model_id: "gemini-test",
         request_timeout_ms: 5_000,
+        stream_timeout_ms: 120_000,
         retry_policy: RetryPolicy {
             max_attempts: 1,
             initial_backoff_ms: 1,
@@ -1595,6 +1649,7 @@ async fn query_engine_submit_turn_works_through_production_provider_path() {
         model_id: "claude-test".into(),
         timeout: ProviderTimeout {
             request_timeout_ms: 5_000,
+            stream_timeout_ms: 120_000,
         },
         retry_policy: RetryPolicy {
             max_attempts: 1,
@@ -1680,6 +1735,7 @@ async fn production_provider_request_envelope_stays_compatible() {
         model_id: "default-model".into(),
         timeout: ProviderTimeout {
             request_timeout_ms: 5_000,
+            stream_timeout_ms: 120_000,
         },
         retry_policy: RetryPolicy {
             max_attempts: 1,
@@ -1718,6 +1774,7 @@ async fn production_provider_surfaces_unsupported_streaming_as_typed_failure() {
         model_id: "claude-test".into(),
         timeout: ProviderTimeout {
             request_timeout_ms: 5_000,
+            stream_timeout_ms: 120_000,
         },
         retry_policy: RetryPolicy {
             max_attempts: 1,
@@ -1760,6 +1817,7 @@ async fn production_provider_assembles_partial_tool_use_payload_metadata() {
         model_id: "claude-test".into(),
         timeout: ProviderTimeout {
             request_timeout_ms: 5_000,
+            stream_timeout_ms: 120_000,
         },
         retry_policy: RetryPolicy {
             max_attempts: 1,
@@ -1810,6 +1868,7 @@ async fn production_provider_normalizes_stringified_tool_use_alias_payload() {
         model_id: "claude-test".into(),
         timeout: ProviderTimeout {
             request_timeout_ms: 5_000,
+            stream_timeout_ms: 120_000,
         },
         retry_policy: RetryPolicy {
             max_attempts: 1,
@@ -1850,6 +1909,7 @@ async fn production_provider_preserves_terminal_http_compatibility_metadata() {
         model_id: "claude-test".into(),
         timeout: ProviderTimeout {
             request_timeout_ms: 5_000,
+            stream_timeout_ms: 120_000,
         },
         retry_policy: RetryPolicy {
             max_attempts: 1,
@@ -1893,6 +1953,7 @@ async fn production_provider_accepts_top_level_usage_envelope() {
         model_id: "claude-test".into(),
         timeout: ProviderTimeout {
             request_timeout_ms: 5_000,
+            stream_timeout_ms: 120_000,
         },
         retry_policy: RetryPolicy {
             max_attempts: 1,
@@ -1932,6 +1993,7 @@ async fn production_provider_accepts_delta_usage_envelope() {
         model_id: "claude-test".into(),
         timeout: ProviderTimeout {
             request_timeout_ms: 5_000,
+            stream_timeout_ms: 120_000,
         },
         retry_policy: RetryPolicy {
             max_attempts: 1,
@@ -1973,6 +2035,7 @@ async fn production_provider_merges_usage_across_provider_envelopes_without_drif
         model_id: "claude-test".into(),
         timeout: ProviderTimeout {
             request_timeout_ms: 5_000,
+            stream_timeout_ms: 120_000,
         },
         retry_policy: RetryPolicy {
             max_attempts: 1,
@@ -2070,6 +2133,7 @@ async fn production_provider_extracts_nested_http_error_message() {
         model_id: "claude-test".into(),
         timeout: ProviderTimeout {
             request_timeout_ms: 5_000,
+            stream_timeout_ms: 120_000,
         },
         retry_policy: RetryPolicy {
             max_attempts: 1,
@@ -2143,6 +2207,7 @@ async fn production_provider_surfaces_interrupted_stream_metadata() {
         model_id: "claude-test".into(),
         timeout: ProviderTimeout {
             request_timeout_ms: 5_000,
+            stream_timeout_ms: 120_000,
         },
         retry_policy: RetryPolicy {
             max_attempts: 1,
@@ -2187,6 +2252,7 @@ async fn production_provider_surfaces_malformed_stream_as_protocol_failure() {
         model_id: "claude-test".into(),
         timeout: ProviderTimeout {
             request_timeout_ms: 5_000,
+            stream_timeout_ms: 120_000,
         },
         retry_policy: RetryPolicy {
             max_attempts: 1,
@@ -2231,6 +2297,7 @@ async fn production_provider_surfaces_tool_use_protocol_failure() {
         model_id: "claude-test".into(),
         timeout: ProviderTimeout {
             request_timeout_ms: 5_000,
+            stream_timeout_ms: 120_000,
         },
         retry_policy: RetryPolicy {
             max_attempts: 1,
@@ -2275,6 +2342,7 @@ async fn production_provider_surfaces_structured_output_protocol_failure() {
         model_id: "claude-test".into(),
         timeout: ProviderTimeout {
             request_timeout_ms: 5_000,
+            stream_timeout_ms: 120_000,
         },
         retry_policy: RetryPolicy {
             max_attempts: 1,
@@ -2321,6 +2389,7 @@ async fn production_provider_maps_terminal_http_error_to_query_loop_failure_code
         model_id: "claude-test".into(),
         timeout: ProviderTimeout {
             request_timeout_ms: 5_000,
+            stream_timeout_ms: 120_000,
         },
         retry_policy: RetryPolicy {
             max_attempts: 1,
@@ -2405,6 +2474,7 @@ async fn production_provider_rejects_wrong_content_type_as_invalid_response() {
         model_id: "claude-test".into(),
         timeout: ProviderTimeout {
             request_timeout_ms: 5_000,
+            stream_timeout_ms: 120_000,
         },
         retry_policy: RetryPolicy {
             max_attempts: 1,
@@ -2449,6 +2519,7 @@ async fn production_provider_rejects_empty_response_body() {
         model_id: "claude-test".into(),
         timeout: ProviderTimeout {
             request_timeout_ms: 5_000,
+            stream_timeout_ms: 120_000,
         },
         retry_policy: RetryPolicy {
             max_attempts: 1,
@@ -2493,6 +2564,7 @@ async fn production_provider_rejects_truncated_stream_as_protocol_failure() {
         model_id: "claude-test".into(),
         timeout: ProviderTimeout {
             request_timeout_ms: 5_000,
+            stream_timeout_ms: 120_000,
         },
         retry_policy: RetryPolicy {
             max_attempts: 1,
@@ -2520,6 +2592,194 @@ async fn production_provider_rejects_truncated_stream_as_protocol_failure() {
 }
 
 #[tokio::test]
+async fn production_provider_slow_first_byte_hits_request_timeout() {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind mock provider listener");
+    let addr = listener.local_addr().expect("listener addr");
+    let server = tokio::spawn(run_scripted_server(
+        listener,
+        vec![MockExchange {
+            delay: Some(Duration::from_millis(100)),
+            body_delay: None,
+            response: MockHttpResponse {
+                status_line: "200 OK",
+                content_type: Some("text/event-stream"),
+                extra_headers: &[],
+                body: MockBody::Sse(concat!(
+                    "event: message\r\n",
+                    "data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-test\"}}\r\n\r\n",
+                    "event: message\r\n",
+                    "data: {\"type\":\"message_stop\"}\r\n\r\n"
+                )),
+            },
+        }],
+    ));
+
+    let config = ModelProviderConfig {
+        provider_id: "anthropic".into(),
+        protocol: ProviderProtocol::Anthropic,
+        compatibility_profile: ProviderCompatibilityProfileKind::Anthropic,
+        base_url: format!("http://{}", addr),
+        auth_strategy: rust_agent::service::api::client::ProviderAuthStrategy::BearerApiKey,
+        api_key: Some("test-key".into()),
+        model_id: "claude-test".into(),
+        timeout: ProviderTimeout {
+            request_timeout_ms: 25,
+            stream_timeout_ms: 120_000,
+        },
+        retry_policy: RetryPolicy {
+            max_attempts: 1,
+            initial_backoff_ms: 1,
+            max_backoff_ms: 1,
+        },
+        pricing: Default::default(),
+    };
+
+    let events = ModelProviderClient::from_config(config)
+        .stream_message(&Message::user("hello"))
+        .await;
+
+    assert!(matches!(
+        &events[0],
+        StreamEvent::Error(error)
+            if error.kind == "timeout"
+                && error.disposition == ProviderFailureDisposition::PreStreamRetryable
+                && error.message.contains("provider request timed out")
+    ));
+
+    server.await.expect("mock provider server finished");
+}
+
+#[tokio::test]
+async fn production_provider_headers_then_idle_hits_stream_timeout() {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind mock provider listener");
+    let addr = listener.local_addr().expect("listener addr");
+    let server = tokio::spawn(run_scripted_server(
+        listener,
+        vec![MockExchange {
+            delay: None,
+            body_delay: Some(Duration::from_millis(100)),
+            response: MockHttpResponse {
+                status_line: "200 OK",
+                content_type: Some("text/event-stream"),
+                extra_headers: &[],
+                body: MockBody::Sse(concat!(
+                    "event: message\r\n",
+                    "data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-test\"}}\r\n\r\n",
+                    "event: message\r\n",
+                    "data: {\"type\":\"message_stop\"}\r\n\r\n"
+                )),
+            },
+        }],
+    ));
+
+    let config = ModelProviderConfig {
+        provider_id: "anthropic".into(),
+        protocol: ProviderProtocol::Anthropic,
+        compatibility_profile: ProviderCompatibilityProfileKind::Anthropic,
+        base_url: format!("http://{}", addr),
+        auth_strategy: rust_agent::service::api::client::ProviderAuthStrategy::BearerApiKey,
+        api_key: Some("test-key".into()),
+        model_id: "claude-test".into(),
+        timeout: ProviderTimeout {
+            request_timeout_ms: 25,
+            stream_timeout_ms: 50,
+        },
+        retry_policy: RetryPolicy {
+            max_attempts: 1,
+            initial_backoff_ms: 1,
+            max_backoff_ms: 1,
+        },
+        pricing: Default::default(),
+    };
+
+    let events = ModelProviderClient::from_config(config)
+        .stream_message(&Message::user("hello"))
+        .await;
+
+    assert!(matches!(
+        &events[0],
+        StreamEvent::Error(error)
+            if error.kind == "timeout"
+                && error.disposition == ProviderFailureDisposition::PreStreamRetryable
+                && error.message.contains("provider stream timed out while idle reading response")
+    ));
+
+    server.await.expect("mock provider server finished");
+}
+
+#[tokio::test]
+async fn production_provider_short_request_timeout_does_not_truncate_active_stream_read() {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind mock provider listener");
+    let addr = listener.local_addr().expect("listener addr");
+    let server = tokio::spawn(run_scripted_server(
+        listener,
+        vec![MockExchange {
+            delay: None,
+            body_delay: Some(Duration::from_millis(60)),
+            response: MockHttpResponse {
+                status_line: "200 OK",
+                content_type: Some("text/event-stream"),
+                extra_headers: &[],
+                body: MockBody::Sse(concat!(
+                    "event: message\r\n",
+                    "data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-test\"}}\r\n\r\n",
+                    "event: message\r\n",
+                    "data: {\"type\":\"content_block_delta\",\"delta\":{\"text\":\"long stream ok\"}}\r\n\r\n",
+                    "event: message\r\n",
+                    "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\r\n\r\n",
+                    "event: message\r\n",
+                    "data: {\"type\":\"message_stop\"}\r\n\r\n"
+                )),
+            },
+        }],
+    ));
+
+    let config = ModelProviderConfig {
+        provider_id: "anthropic".into(),
+        protocol: ProviderProtocol::Anthropic,
+        compatibility_profile: ProviderCompatibilityProfileKind::Anthropic,
+        base_url: format!("http://{}", addr),
+        auth_strategy: rust_agent::service::api::client::ProviderAuthStrategy::BearerApiKey,
+        api_key: Some("test-key".into()),
+        model_id: "claude-test".into(),
+        timeout: ProviderTimeout {
+            request_timeout_ms: 25,
+            stream_timeout_ms: 200,
+        },
+        retry_policy: RetryPolicy {
+            max_attempts: 1,
+            initial_backoff_ms: 1,
+            max_backoff_ms: 1,
+        },
+        pricing: Default::default(),
+    };
+
+    let events = ModelProviderClient::from_config(config)
+        .stream_message(&Message::user("hello"))
+        .await;
+
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, StreamEvent::TextDelta(text) if text == "long stream ok"))
+    );
+    assert!(events.iter().any(|event| matches!(
+        event,
+        StreamEvent::MessageStop {
+            stop_reason: StopReason::EndTurn
+        }
+    )));
+
+    server.await.expect("mock provider server finished");
+}
+
+#[tokio::test]
 async fn production_provider_maps_timeout_after_retries_exhaust_to_query_loop_failure_code() {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
@@ -2539,6 +2799,7 @@ async fn production_provider_maps_timeout_after_retries_exhaust_to_query_loop_fa
         model_id: "claude-test".into(),
         timeout: ProviderTimeout {
             request_timeout_ms: 25,
+            stream_timeout_ms: 120_000,
         },
         retry_policy: RetryPolicy {
             max_attempts: 2,
@@ -2624,6 +2885,7 @@ async fn production_provider_retries_429_then_succeeds() {
         model_id: "claude-test".into(),
         timeout: ProviderTimeout {
             request_timeout_ms: 5_000,
+            stream_timeout_ms: 120_000,
         },
         retry_policy: RetryPolicy {
             max_attempts: 2,
@@ -2669,6 +2931,7 @@ async fn production_provider_respects_retry_after_header_for_429_retry() {
         model_id: "claude-test".into(),
         timeout: ProviderTimeout {
             request_timeout_ms: 5_000,
+            stream_timeout_ms: 120_000,
         },
         retry_policy: RetryPolicy {
             max_attempts: 2,
@@ -2715,6 +2978,7 @@ async fn production_provider_does_not_retry_terminal_400_errors() {
         model_id: "claude-test".into(),
         timeout: ProviderTimeout {
             request_timeout_ms: 5_000,
+            stream_timeout_ms: 120_000,
         },
         retry_policy: RetryPolicy {
             max_attempts: 3,
@@ -2759,6 +3023,7 @@ async fn production_provider_retries_503_then_surfaces_terminal_protocol_failure
         model_id: "claude-test".into(),
         timeout: ProviderTimeout {
             request_timeout_ms: 5_000,
+            stream_timeout_ms: 120_000,
         },
         retry_policy: RetryPolicy {
             max_attempts: 2,

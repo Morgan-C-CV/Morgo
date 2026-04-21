@@ -990,6 +990,10 @@ impl RuntimeBootstrap {
             .ok()
             .and_then(|value| value.parse::<u64>().ok())
             .unwrap_or(30_000);
+        let stream_timeout_ms = std::env::var("RUST_AGENT_PROVIDER_STREAM_TIMEOUT_MS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(120_000);
         let max_attempts = std::env::var("RUST_AGENT_PROVIDER_RETRY_MAX_ATTEMPTS")
             .ok()
             .and_then(|value| value.parse::<usize>().ok())
@@ -1041,7 +1045,10 @@ impl RuntimeBootstrap {
             auth_strategy,
             api_key,
             model_id,
-            timeout: ProviderTimeout { request_timeout_ms },
+            timeout: ProviderTimeout {
+                request_timeout_ms,
+                stream_timeout_ms,
+            },
             retry_policy: RetryPolicy {
                 max_attempts,
                 initial_backoff_ms,

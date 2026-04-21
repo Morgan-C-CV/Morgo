@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
+use futures_util::StreamExt;
 use reqwest::StatusCode;
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, RETRY_AFTER};
 use serde_json::{Value, json};
@@ -37,6 +38,7 @@ impl Default for ModelPricing {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderTimeout {
     pub request_timeout_ms: u64,
+    pub stream_timeout_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -119,6 +121,7 @@ impl Default for ProviderTimeout {
     fn default() -> Self {
         Self {
             request_timeout_ms: 30_000,
+            stream_timeout_ms: 120_000,
         }
     }
 }
@@ -204,7 +207,6 @@ impl ModelProviderClient {
         observability: ServiceObservabilityTracker,
     ) -> Self {
         let client = reqwest::Client::builder()
-            .timeout(Duration::from_millis(config.timeout.request_timeout_ms))
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
         Self {
@@ -358,13 +360,8 @@ impl ModelProviderClient {
         }
         validate_streaming_response_headers(response.headers(), status)?;
 
-        let body = timeout(
-            Duration::from_millis(config.timeout.request_timeout_ms),
-            response.text(),
-        )
-        .await
-        .map_err(|_| ApiError::timeout("provider stream timed out while reading response"))?
-        .map_err(classify_response_body_error)?;
+        let body = read_response_body_with_idle_timeout(response, config.timeout.stream_timeout_ms)
+            .await?;
 
         if body.trim().is_empty() {
             return Err(ApiError::empty_body(
@@ -374,6 +371,34 @@ impl ModelProviderClient {
 
         parse_stream_response_for_provider(config, &body, &config.model_id)
     }
+}
+
+async fn read_response_body_with_idle_timeout(
+    response: reqwest::Response,
+    stream_timeout_ms: u64,
+) -> Result<String, ApiError> {
+    let mut body = Vec::new();
+    let mut stream = response.bytes_stream();
+
+    loop {
+        let next_chunk = timeout(Duration::from_millis(stream_timeout_ms), stream.next())
+            .await
+            .map_err(|_| {
+                ApiError::timeout("provider stream timed out while idle reading response")
+            })?;
+
+        match next_chunk {
+            Some(Ok(chunk)) => body.extend_from_slice(&chunk),
+            Some(Err(error)) => return Err(classify_response_body_error(error)),
+            None => break,
+        }
+    }
+
+    String::from_utf8(body).map_err(|error| {
+        ApiError::invalid_response(format!(
+            "provider response body was not valid UTF-8: {error}"
+        ))
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

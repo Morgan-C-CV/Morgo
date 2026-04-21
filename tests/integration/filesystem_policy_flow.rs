@@ -53,6 +53,7 @@ fn test_model_provider_config() -> ModelProviderConfig {
         model_id: "test-model".into(),
         timeout: ProviderTimeout {
             request_timeout_ms: 30_000,
+            stream_timeout_ms: 120_000,
         },
         retry_policy: RetryPolicy {
             max_attempts: 1,
