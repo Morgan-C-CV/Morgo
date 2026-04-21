@@ -1,16 +1,18 @@
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use tokio_util::sync::CancellationToken;
 use crate::core::boss_state::{BossStage, BossStatus, BossPlan};
-use crate::core::context::QueryContext;
 
 pub struct BossCoordinator {
     pub status: Arc<RwLock<BossStatus>>,
     /// Placed here so the planner can hold and modify it in memory before flushing
     pub plan: Arc<RwLock<Option<BossPlan>>>,
-    /// Agent A (Designer / Boss): held behind a lock so it's safe to share across tasks
-    pub agent_a_context: Arc<RwLock<Option<QueryContext>>>,
-    /// Agent B (Executor): same
-    pub agent_b_context: Arc<RwLock<Option<QueryContext>>>,
+    
+    // Decoupled lightweight tracking (Prevents QueryContext RwLock Deadlocks):
+    pub agent_a_session_id: Arc<RwLock<Option<String>>>,
+    pub agent_b_session_id: Arc<RwLock<Option<String>>>,
+    pub agent_a_cancel: Arc<RwLock<Option<CancellationToken>>>,
+    pub agent_b_cancel: Arc<RwLock<Option<CancellationToken>>>,
 }
 
 impl BossCoordinator {
@@ -18,8 +20,10 @@ impl BossCoordinator {
         Self {
             status: Arc::new(RwLock::new(BossStatus::default())),
             plan: Arc::new(RwLock::new(None)),
-            agent_a_context: Arc::new(RwLock::new(None)),
-            agent_b_context: Arc::new(RwLock::new(None)),
+            agent_a_session_id: Arc::new(RwLock::new(None)),
+            agent_b_session_id: Arc::new(RwLock::new(None)),
+            agent_a_cancel: Arc::new(RwLock::new(None)),
+            agent_b_cancel: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -73,9 +77,26 @@ impl BossCoordinator {
         self.status.read().await.stage
     }
 
-    pub async fn transition_to(&self, new_stage: BossStage) {
+    /// Enforces a strict DAG state transition to prevent invalid lifecycle jumps.
+    pub async fn transition_to(&self, new_stage: BossStage) -> anyhow::Result<()> {
         let mut status = self.status.write().await;
+        // Verify valid transition
+        let valid = match (status.stage, new_stage) {
+            (BossStage::Documentation, BossStage::WaitingForApproval) => true,
+            (BossStage::WaitingForApproval, BossStage::Execution) => true,
+            (BossStage::WaitingForApproval, BossStage::Documentation) => true, // Rejected by user
+            (BossStage::Execution, BossStage::Completed) => true,
+            (BossStage::Documentation, BossStage::Documentation) => true, // Re-entering valid
+            (BossStage::Execution, BossStage::Documentation) => true, // Fallback/Fatal failure
+            _ => false,
+        };
+
+        if !valid {
+            anyhow::bail!("Invalid BossStage transition from {:?} to {:?}", status.stage, new_stage);
+        }
+
         status.stage = new_stage;
+        Ok(())
     }
 
     /// Returns the default path for the immutable planning cache.
@@ -116,10 +137,10 @@ impl BossCoordinator {
                 }
             }
 
-            self.transition_to(BossStage::Execution).await;
+            self.transition_to(BossStage::Execution).await?;
             Ok(true)
         } else {
-            self.transition_to(BossStage::Documentation).await;
+            self.transition_to(BossStage::Documentation).await?;
             Ok(false)
         }
     }
@@ -131,13 +152,17 @@ impl Default for BossCoordinator {
     }
 }
 
-/// Saves a boss plan to a file (free function, no self needed).
+/// Saves a boss plan to a file using atomic write to prevent corruption.
 pub async fn save_plan(plan: &BossPlan, path: &std::path::Path) -> anyhow::Result<()> {
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
+    
     let content = serde_json::to_string_pretty(plan)?;
-    tokio::fs::write(path, content).await?;
+    let tmp_path = path.with_extension("tmp");
+    tokio::fs::write(&tmp_path, content).await?;
+    tokio::fs::rename(tmp_path, path).await?;
+    
     Ok(())
 }
 
@@ -161,14 +186,14 @@ mod tests {
     #[tokio::test]
     async fn test_state_transition_to_waiting_for_approval() {
         let coordinator = BossCoordinator::new();
-        coordinator.transition_to(BossStage::WaitingForApproval).await;
+        coordinator.transition_to(BossStage::WaitingForApproval).await.unwrap();
         assert_eq!(coordinator.get_stage().await, BossStage::WaitingForApproval);
     }
 
     #[tokio::test]
     async fn test_user_approval_y_transitions_to_execution() {
         let coordinator = BossCoordinator::new();
-        coordinator.transition_to(BossStage::WaitingForApproval).await;
+        coordinator.transition_to(BossStage::WaitingForApproval).await.unwrap();
         // set dummy plan to avoid ignoring boolean conversion
         {
             let mut plan = coordinator.plan.write().await;
@@ -183,7 +208,7 @@ mod tests {
     #[tokio::test]
     async fn test_user_approval_feedback_returns_to_documentation() {
         let coordinator = BossCoordinator::new();
-        coordinator.transition_to(BossStage::WaitingForApproval).await;
+        coordinator.transition_to(BossStage::WaitingForApproval).await.unwrap();
         let rejected = coordinator.handle_user_approval("Wait, this is wrong").await.unwrap();
         assert!(!rejected);
         assert_eq!(coordinator.get_stage().await, BossStage::Documentation);
