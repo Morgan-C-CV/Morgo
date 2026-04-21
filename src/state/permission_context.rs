@@ -462,11 +462,11 @@ mod tests {
     #[test]
     fn test_permission_context_heartbeat() {
         let ts = Arc::new(AtomicU64::new(1000));
-        let ctx = ToolPermissionContext::new(PermissionMode::Default)
-            .with_last_activity_ts(ts.clone());
-        
+        let ctx =
+            ToolPermissionContext::new(PermissionMode::Default).with_last_activity_ts(ts.clone());
+
         ctx.record_activity();
-        
+
         let val = ts.load(Ordering::Acquire);
         assert!(val > 1000, "Heartbeat should have updated the timestamp");
     }

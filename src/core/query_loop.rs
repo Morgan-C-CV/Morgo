@@ -165,7 +165,7 @@ pub async fn run_query_loop_with_params(
 
     loop {
         context.app_state.record_activity();
-        
+
         // Start a keep-alive heartbeat for the duration of this turn
         let turn_token = tokio_util::sync::CancellationToken::new();
         let hb_token = turn_token.clone();
@@ -173,7 +173,7 @@ pub async fn run_query_loop_with_params(
         let hb_handle = tokio::spawn(async move {
             let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
             // First tick is immediate, so we skip it to avoid double-reporting at start
-            interval.tick().await; 
+            interval.tick().await;
             loop {
                 tokio::select! {
                     _ = interval.tick() => app_state.record_activity(),

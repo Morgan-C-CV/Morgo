@@ -83,9 +83,6 @@ pub fn run_hook_with_audit(
         }
         if let Some(additional_context) = &rule.additional_context {
             raw_additional_context.push(additional_context.clone());
-            result
-                .messages
-                .push(Message::assistant(additional_context.clone()));
         }
 
         if let Some(deny_match) = &rule.deny_match {
