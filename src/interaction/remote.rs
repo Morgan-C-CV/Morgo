@@ -535,7 +535,11 @@ fn notification_from_surface_item(
     item: &SurfaceItem,
 ) -> Option<Notification> {
     match item {
-        SurfaceItem::TaskUpdate(_) => None,
+        SurfaceItem::TaskUpdate(task) => Some(notification_from_task_view(
+            &input.session_id,
+            &input.actor.actor_id,
+            task,
+        )),
         SurfaceItem::ApprovalRequired {
             tool_name,
             message,
@@ -639,6 +643,33 @@ pub fn remote_channel_kind_for_notification(
         NotificationType::ApprovalRequired => RemoteChannelEventKind::ApprovalRequired,
         NotificationType::RuntimeNotice => RemoteChannelEventKind::RuntimeNotice,
     }
+}
+
+fn notification_from_task_view(session_id: &str, actor_id: &str, task: &TaskView) -> Notification {
+    let mut notification = Notification::task_update(
+        session_id.to_string(),
+        task.result.clone(),
+        task.summary.clone(),
+        task.task_id.clone(),
+        Some(task.task_type),
+        task.status,
+        task.next_action.clone(),
+        task.worker_role,
+        task.orchestration_group_id.as_deref(),
+        task.phase,
+        task.validation_state,
+        task.output_file.clone(),
+        task.usage.clone(),
+    );
+    notification.target = Some(NotificationTarget::RemoteActor {
+        session_id: session_id.to_string(),
+        actor_id: actor_id.to_string(),
+    });
+    notification.dedupe_key = Some(format!(
+        "task_update:{}:{}:{}",
+        session_id, task.task_id, task.status
+    ));
+    notification
 }
 
 fn notification_from_pending_approval(

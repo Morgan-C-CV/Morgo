@@ -768,6 +768,10 @@ async fn remote_request_drains_async_task_update_notifications() {
         .with_task_manager(Arc::new(TaskManager::default()))
         .with_plan_manager(Arc::new(PlanManager::default()));
     let session_store = Arc::new(InMemorySessionStore::default());
+    let audit_root = unique_temp_path("remote-task-audit");
+    let audit_log = Arc::new(std::sync::Mutex::new(AuditLog::file_backed(
+        audit_root.clone(),
+    )));
     let app_state = AppState {
         surface: InteractionSurface::Remote,
         session_mode: SessionMode::Interactive,
@@ -785,9 +789,7 @@ async fn remote_request_drains_async_task_update_notifications() {
         service_observability_tracker:
             rust_agent::service::observability::ServiceObservabilityTracker::default(),
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
-        audit_log: Arc::new(std::sync::Mutex::new(
-            rust_agent::security::audit::AuditLog::default(),
-        )),
+        audit_log: audit_log.clone(),
         startup_trace: Vec::new(),
         active_session_id: "remote-task-session".into(),
         session_store: Some(session_store),
@@ -830,14 +832,11 @@ async fn remote_request_drains_async_task_update_notifications() {
             if task.task_id == "task-0"
                 && task.task_type == "generic"
                 && task.status == "completed"
+                && task.summary.contains("remote async task")
     )));
 
     let drained = drain_remote_notifications(&app_state, "remote-task-session", Some("task-actor"));
     assert_eq!(drained.len(), 1);
-    assert!(matches!(
-        &drained[0].payload,
-        RemoteEventPayload::TaskUpdate(_)
-    ));
     assert!(matches!(
         &drained[0].payload,
         RemoteEventPayload::TaskUpdate(task)
@@ -846,6 +845,33 @@ async fn remote_request_drains_async_task_update_notifications() {
                 && task.status == "completed"
                 && task.summary.contains("remote async task")
     ));
+
+    let records = audit_log.lock().expect("audit log poisoned").load_records();
+    let queued: Vec<_> = records
+        .iter()
+        .filter(|record| record.event_kind == "remote_notification_queued")
+        .collect();
+    assert_eq!(queued.len(), 1);
+    assert!(queued.iter().all(|record| {
+        record.request_id.as_deref() == Some("remote-task-session")
+            && record.notification_kind.as_deref() == Some("task_update")
+            && record.channel.as_deref() == Some("async_inbox")
+            && record.outcome == "queued"
+    }));
+
+    let dispatched: Vec<_> = records
+        .iter()
+        .filter(|record| record.event_kind == "remote_notification_dispatched")
+        .collect();
+    assert_eq!(dispatched.len(), 1);
+    assert!(dispatched.iter().all(|record| {
+        record.request_id.as_deref() == Some("remote-task-session")
+            && record.notification_kind.as_deref() == Some("task_update")
+            && record.channel.as_deref() == Some("async_inbox")
+            && record.outcome == "dispatched"
+    }));
+
+    let _ = std::fs::remove_dir_all(audit_root);
 }
 
 #[tokio::test]
