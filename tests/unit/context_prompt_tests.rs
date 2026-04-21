@@ -340,6 +340,85 @@ fn context_prompt_renders_only_sanitized_memory_metadata() {
 }
 
 #[test]
+fn external_memory_dedupe_removes_duplicate_entries_after_normalize() {
+    let permissions = ToolPermissionContext::new(PermissionMode::Default)
+        .with_external_memory_entries(vec![
+            "linear:ABC-1 context".into(),
+            "linear:ABC-1 context".into(),
+            "  linear:ABC-1 context  ".into(),
+            "linear:ABC-2 context".into(),
+        ]);
+    let app_state = build_app_state_with_permissions(permissions);
+    let prompt = rust_agent::prompt::context::build_context_prompt(&app_state);
+
+    assert_eq!(
+        prompt.matches("linear:ABC-1 context").count(),
+        1,
+        "duplicate external memory entry should appear exactly once"
+    );
+    assert!(
+        prompt.contains("linear:ABC-2 context"),
+        "distinct entry should be present"
+    );
+}
+
+#[test]
+fn nested_lineage_sanitize_contract_rejects_malformed_and_orphan_markers() {
+    use rust_agent::state::permission_context::{
+        MAX_NESTED_MEMORY_DEPTH, sanitize_nested_memory_lineage,
+    };
+
+    let orphan_only = sanitize_nested_memory_lineage(vec![
+        "agent:orphan:inherit_context=true".into(),
+        "agent:another:inherit_context=false".into(),
+    ]);
+    assert!(
+        orphan_only.is_empty(),
+        "orphan agent markers without a leading session marker must be rejected"
+    );
+
+    let malformed = sanitize_nested_memory_lineage(vec![
+        "session:valid-session".into(),
+        "bad marker".into(),
+        "agent:no-inherit-field".into(),
+        "agent:valid:inherit_context=true".into(),
+    ]);
+    assert_eq!(
+        malformed,
+        vec![
+            "session:valid-session".to_string(),
+            "agent:valid:inherit_context=true".to_string(),
+        ],
+        "malformed markers must be dropped; valid chain must be preserved"
+    );
+
+    let deep: Vec<String> = std::iter::once("session:root".into())
+        .chain(
+            (0..MAX_NESTED_MEMORY_DEPTH + 4)
+                .map(|i| format!("agent:child-{i}:inherit_context=true")),
+        )
+        .collect();
+    let bounded = sanitize_nested_memory_lineage(deep);
+    assert!(
+        bounded.len() <= MAX_NESTED_MEMORY_DEPTH,
+        "lineage must be bounded to MAX_NESTED_MEMORY_DEPTH"
+    );
+}
+
+#[test]
+fn plan_context_appears_exactly_once_in_context_prompt() {
+    let permissions = build_plan_permissions();
+    let app_state = build_app_state_with_permissions(permissions);
+    let prompt = rust_agent::prompt::context::build_context_prompt(&app_state);
+
+    assert_eq!(
+        prompt.matches("Approved plan status:").count(),
+        1,
+        "plan context must appear exactly once in context prompt"
+    );
+}
+
+#[test]
 fn git_context_reports_non_repo_fallback() {
     let dir = unique_temp_dir("context-prompt-non-repo");
     let app_state = build_app_state_with_cwd(dir.to_string_lossy().as_ref());

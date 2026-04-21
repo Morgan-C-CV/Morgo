@@ -120,5 +120,5 @@ fn build_nested_memory_lineage(
     let mut bounded = vec![parent_marker];
     bounded.extend(agent_markers);
     bounded.push(child_marker);
-    sanitize_nested_memory_lineage(bounded)
+    bounded
 }
