@@ -519,6 +519,7 @@ fn app_state_store_notifies_subscribers_after_committed_update() {
         history: None,
         restored_session: None,
         last_activity_ts: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        cancellation_token: tokio_util::sync::CancellationToken::new(),
     };
     let store = AppStateStore::new(app_state);
     let observed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -574,6 +575,7 @@ fn app_state_classifies_runtime_visible_changes() {
         history: None,
         restored_session: None,
         last_activity_ts: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        cancellation_token: tokio_util::sync::CancellationToken::new(),
     };
     let mut current = AppState {
         surface: previous.surface,
@@ -599,6 +601,7 @@ fn app_state_classifies_runtime_visible_changes() {
         history: previous.history.clone(),
         restored_session: previous.restored_session.clone(),
         last_activity_ts: previous.last_activity_ts.clone(),
+        cancellation_token: tokio_util::sync::CancellationToken::new(),
     };
     current.bind_surface_session(
         InteractionSurface::Remote,
@@ -931,6 +934,7 @@ fn augment_prompt_depends_on_input_state_without_mutating_store() {
         history: Some(resolved.history.clone()),
         restored_session: resolved.restored_session.clone(),
         last_activity_ts: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        cancellation_token: tokio_util::sync::CancellationToken::new(),
     };
     let store = AppStateStore::new(app_state.clone());
     let before = store.generation();
@@ -1226,6 +1230,7 @@ fn finalize_runtime_state_is_single_writeback_entrypoint() {
         history: Some(resolved.history.clone()),
         restored_session: resolved.restored_session.clone(),
         last_activity_ts: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        cancellation_token: tokio_util::sync::CancellationToken::new(),
     };
     let prompts = runtime.augment_prompts(&prompt_state, &bundle);
     let finalized = runtime.finalize_runtime_state(

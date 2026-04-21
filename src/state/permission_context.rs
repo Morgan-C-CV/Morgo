@@ -13,6 +13,8 @@ use crate::skills::registry::SkillRegistry;
 use crate::task::list_manager::TaskListManager;
 use crate::task::manager::TaskManager;
 use crate::tool::registry::ToolRegistry;
+use tokio_util::sync::CancellationToken;
+use std::sync::atomic::AtomicU64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PermissionMode {
@@ -60,6 +62,8 @@ pub struct ToolPermissionContext {
     telegram_surface_admission_policy: Arc<RwLock<SurfaceAdmissionPolicy>>,
     pub external_memory_entries: Arc<RwLock<Vec<String>>>,
     pub nested_memory_lineage: Arc<RwLock<Vec<String>>>,
+    pub last_activity_ts: Option<Arc<AtomicU64>>,
+    pub cancellation_token: Option<CancellationToken>,
 }
 
 impl ToolPermissionContext {
@@ -93,6 +97,8 @@ impl ToolPermissionContext {
             )),
             external_memory_entries: Arc::new(RwLock::new(Vec::new())),
             nested_memory_lineage: Arc::new(RwLock::new(Vec::new())),
+            last_activity_ts: None,
+            cancellation_token: None,
         }
     }
 
@@ -316,6 +322,16 @@ impl ToolPermissionContext {
 
     pub fn with_interactive_tools(mut self, include_interactive_tools: bool) -> Self {
         self.include_interactive_tools = include_interactive_tools;
+        self
+    }
+
+    pub fn with_last_activity_ts(mut self, last_activity_ts: Arc<AtomicU64>) -> Self {
+        self.last_activity_ts = Some(last_activity_ts);
+        self
+    }
+
+    pub fn with_cancellation_token(mut self, cancellation_token: CancellationToken) -> Self {
+        self.cancellation_token = Some(cancellation_token);
         self
     }
 }

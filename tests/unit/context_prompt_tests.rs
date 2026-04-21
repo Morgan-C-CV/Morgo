@@ -233,6 +233,7 @@ fn build_app_state_with_permissions(permissions: ToolPermissionContext) -> AppSt
         }),
         restored_session: None,
         last_activity_ts: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        cancellation_token: tokio_util::sync::CancellationToken::new(),
     }
 }
 

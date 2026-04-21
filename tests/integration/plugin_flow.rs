@@ -183,6 +183,8 @@ async fn plugin_runtime_exposes_command_hook_tool_and_diagnostics() {
         history: None,
         restored_session: None,
         last_activity_ts: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        cancellation_token: tokio_util::sync::CancellationToken::new(),
+        cancellation_token: tokio_util::sync::CancellationToken::new(),
     };
 
     let help = HelpCommand

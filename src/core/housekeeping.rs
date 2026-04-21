@@ -94,43 +94,76 @@ impl HousekeepingDaemon {
         let delta = now.saturating_sub(last_active);
 
         if delta > self.config.stale_threshold_secs {
-            warn!(
-                "Session inactivity detected: last active {} seconds ago (threshold: {}s). Potential zombie session.",
+            error!(
+                "CRITICAL: Zombie session detected! Last active {}s ago (threshold: {}s).",
                 delta, self.config.stale_threshold_secs
             );
-            // In Phase 3, we would trigger actual cleanup or session suspension here.
+            self.handle_zombie_session(delta).await;
+        } else if delta > self.config.stale_threshold_secs / 2 {
+            warn!(
+                "Session inactivity warning: last active {}s ago. Session may be suspended soon.",
+                delta
+            );
         }
+    }
+
+    async fn handle_zombie_session(&self, _delta: u64) {
+        // Production-grade hook for Phase 3:
+        // Here we would trigger session state persistence and process suspension.
+        // For now, we ensure visibility in logs and prepare for automated triggers.
+        info!("Housekeeping: Preparing session for automated suspension/hibernation.");
     }
 
     pub async fn perform_gc(&self) {
         if let Some(ref root) = self.session_root {
-            let _ = self.prune_directory(root, self.config.session_retention_days * 86400);
+            let _ = self.prune_directory(root, self.config.session_retention_days * 86400, false);
         }
         if let Some(ref root) = self.task_output_root {
-            let _ = self.prune_directory(root, self.config.task_log_retention_days * 86400);
+            let _ = self.prune_directory(root, self.config.task_log_retention_days * 86400, false);
         }
     }
 
-    pub fn prune_directory(&self, root: &PathBuf, max_age_secs: u64) -> anyhow::Result<()> {
-        if !root.exists() {
+    pub fn prune_directory(&self, path: &PathBuf, max_age_secs: u64, is_nested: bool) -> anyhow::Result<()> {
+        if !path.exists() {
             return Ok(());
         }
 
         let now = SystemTime::now();
-        for entry in std::fs::read_dir(root)? {
+        let mut has_remaining_entries = false;
+
+        for entry in std::fs::read_dir(path)? {
             let entry = entry?;
-            let path = entry.path();
-            if path.is_file() {
+            let entry_path = entry.path();
+            
+            if entry_path.is_dir() {
+                // Recursively prune subdirectories
+                let _ = self.prune_directory(&entry_path, max_age_secs, true);
+                // Check if directory still exists (was not removed by sub-prune)
+                if entry_path.exists() {
+                    has_remaining_entries = true;
+                }
+            } else if entry_path.is_file() {
                 let metadata = entry.metadata()?;
                 let modified = metadata.modified()?;
                 if let Ok(duration) = now.duration_since(modified) {
                     if duration.as_secs() > max_age_secs {
-                        info!("GC: Removing stale artifact: {:?}", path);
-                        let _ = std::fs::remove_file(path);
+                        debug!("GC: Removing stale artifact: {:?}", entry_path);
+                        let _ = std::fs::remove_file(&entry_path);
+                    } else {
+                        has_remaining_entries = true;
                     }
+                } else {
+                    has_remaining_entries = true;
                 }
             }
         }
+
+        // Remove empty directories (only if they are nested subdirectories)
+        if is_nested && !has_remaining_entries {
+            debug!("GC: Removing empty directory: {:?}", path);
+            let _ = std::fs::remove_dir(path);
+        }
+
         Ok(())
     }
 }
@@ -252,10 +285,40 @@ mod tests {
         tokio::time::sleep(tokio::time::Duration::from_millis(1100)).await;
 
         // Test with age 0 (should delete everything)
-        daemon.prune_directory(&temp_dir, 0).unwrap();
+        daemon.prune_directory(&temp_dir, 0, false).unwrap();
         
         assert!(!file_old.exists());
         assert!(!file_new.exists());
+
+        let _ = std::fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn test_housekeeping_recursive_gc() {
+        let temp_dir = std::env::temp_dir().join(format!("rust_agent_recursive_gc_{}", 
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
+        let sub_dir = temp_dir.join("sub").join("nested");
+        std::fs::create_dir_all(&sub_dir).unwrap();
+
+        let file_nested = sub_dir.join("nested.json");
+        std::fs::write(&file_nested, "nested").unwrap();
+
+        let token = CancellationToken::new();
+        let last_active = Arc::new(AtomicU64::new(0));
+        let daemon = HousekeepingDaemon::new(HousekeepingConfig::default(), token, last_active);
+
+        // Wait to ensure age > 0
+        tokio::time::sleep(tokio::time::Duration::from_millis(1100)).await;
+
+        // Prune the root
+        daemon.prune_directory(&temp_dir, 0, false).unwrap();
+
+        // Check if nested file is gone
+        assert!(!file_nested.exists());
+        // Check if empty subdirectories are gone
+        assert!(!sub_dir.exists());
+        assert!(!temp_dir.join("sub").exists());
+        assert!(temp_dir.exists()); // The base root should stay (is_nested=false)
 
         let _ = std::fs::remove_dir_all(temp_dir);
     }

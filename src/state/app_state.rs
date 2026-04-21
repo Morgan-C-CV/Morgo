@@ -13,6 +13,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
+use tokio_util::sync::CancellationToken;
 
 use crate::history::resume::{ResolvedSessionState, RestoredSession};
 use crate::history::session::{SessionHistory, SessionId, SessionSnapshot, SessionStore};
@@ -82,6 +83,7 @@ pub struct AppState {
     pub history: Option<SessionHistory>,
     pub restored_session: Option<RestoredSession>,
     pub last_activity_ts: Arc<AtomicU64>,
+    pub cancellation_token: CancellationToken,
 }
 
 impl AppState {
@@ -103,6 +105,10 @@ impl AppState {
 
     pub fn get_last_activity_ts(&self) -> u64 {
         self.last_activity_ts.load(Ordering::Relaxed)
+    }
+
+    pub fn shutdown(&self) {
+        self.cancellation_token.cancel();
     }
 
     pub fn classify_runtime_changes(previous: &Self, current: &Self) -> AppStateChangeSet {

@@ -374,7 +374,6 @@ impl RuntimeBootstrap {
         let engine = finalized.engine;
 
         // Initialize and spawn background housekeeping daemon
-        let housekeeping_token = CancellationToken::new();
         let session_root = crate::history::session::FileBackedSessionStore::default_root();
         let task_output_root = std::env::current_dir()
             .unwrap_or_else(|_| std::path::PathBuf::from("."))
@@ -383,7 +382,7 @@ impl RuntimeBootstrap {
 
         let housekeeping_daemon = crate::core::housekeeping::HousekeepingDaemon::new(
             crate::core::housekeeping::HousekeepingConfig::default(),
-            housekeeping_token.clone(),
+            app_state.cancellation_token.clone(),
             app_state.last_activity_ts.clone(),
         )
         .with_roots(session_root, task_output_root);
@@ -467,6 +466,7 @@ impl RuntimeBootstrap {
                     if self.cli.tui {
                         self.print_tui_message("Exiting TUI session.");
                     }
+                    app_state.shutdown();
                     break;
                 }
                 let output = handle_cli_input(&router, &engine, &app_state, line).await?;
@@ -643,6 +643,9 @@ impl RuntimeBootstrap {
         if let Some(policy) = filesystem_policy.clone() {
             permission_context = permission_context.with_filesystem_policy(policy);
         }
+        permission_context = permission_context
+            .with_last_activity_ts(app_state.last_activity_ts.clone())
+            .with_cancellation_token(app_state.cancellation_token.clone());
         let app_state = AppState {
             surface: state.surface,
             session_mode: state.session_mode,
@@ -678,6 +681,7 @@ impl RuntimeBootstrap {
                     .unwrap_or_default()
                     .as_secs(),
             )),
+            cancellation_token: CancellationToken::new(),
         };
         let snapshot = build_runtime_plugin_snapshot(&app_state);
         let command_registry = snapshot.command_registry.clone();
@@ -730,6 +734,9 @@ impl RuntimeBootstrap {
         if let Some(policy) = initialize_bundle.filesystem_policy.clone() {
             permission_context = permission_context.with_filesystem_policy(policy);
         }
+        permission_context = permission_context
+            .with_last_activity_ts(initialize_bundle.app_state.last_activity_ts.clone())
+            .with_cancellation_token(initialize_bundle.app_state.cancellation_token.clone());
         let mut app_state = AppState {
             surface: state.surface,
             session_mode: state.session_mode,
@@ -770,6 +777,7 @@ impl RuntimeBootstrap {
                     .unwrap_or_default()
                     .as_secs(),
             )),
+            cancellation_token: initialize_bundle.app_state.cancellation_token.clone(),
         };
         app_state.apply_resolved_session_state(resolved_session);
         app_state

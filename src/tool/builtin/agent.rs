@@ -378,12 +378,18 @@ fn build_parent_query_context(permissions: ToolPermissionContext) -> QueryContex
         session: None,
         history: None,
         restored_session: None,
-        last_activity_ts: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
-        )),
+        last_activity_ts: permissions.last_activity_ts.clone().unwrap_or_else(|| {
+            std::sync::Arc::new(std::sync::atomic::AtomicU64::new(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs(),
+            ))
+        }),
+        cancellation_token: permissions
+            .cancellation_token
+            .clone()
+            .unwrap_or_else(tokio_util::sync::CancellationToken::new),
     };
     let system_prompt = crate::prompt::system::build_system_prompt(&app_state);
     let tools_prompt =
