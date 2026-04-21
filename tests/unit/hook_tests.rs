@@ -318,14 +318,18 @@ fn multiple_additional_context_rules_accumulate_not_overwrite() {
     let result = run_hook(&registry, HookEvent::UserPromptSubmit);
 
     assert_eq!(result.payload.additional_context.len(), 2);
-    assert!(result
-        .payload
-        .additional_context
-        .contains(&"context-from-defaults".to_string()));
-    assert!(result
-        .payload
-        .additional_context
-        .contains(&"context-from-file".to_string()));
+    assert!(
+        result
+            .payload
+            .additional_context
+            .contains(&"context-from-defaults".to_string())
+    );
+    assert!(
+        result
+            .payload
+            .additional_context
+            .contains(&"context-from-file".to_string())
+    );
 }
 
 #[test]
@@ -361,10 +365,7 @@ fn additional_context_deduplicates_after_normalize() {
         1,
         "trimmed duplicates must appear exactly once"
     );
-    assert_eq!(
-        result.payload.additional_context[0],
-        "duplicate context"
-    );
+    assert_eq!(result.payload.additional_context[0], "duplicate context");
 }
 
 #[test]
@@ -396,10 +397,7 @@ fn hook_deny_emits_audit_log_entry() {
     assert!(matches!(result.decision, HookDecision::Deny(_)));
     let log = audit_log.lock().unwrap();
     assert_eq!(log.events().len(), 1);
-    assert!(matches!(
-        log.events()[0],
-        AuditEvent::HookDenied { .. }
-    ));
+    assert!(matches!(log.events()[0], AuditEvent::HookDenied { .. }));
 }
 
 #[test]
@@ -452,16 +450,13 @@ fn hook_allow_without_mutation_emits_allowed_audit_entry() {
 
     let log = audit_log.lock().unwrap();
     assert_eq!(log.events().len(), 1);
-    assert!(matches!(
-        log.events()[0],
-        AuditEvent::HookAllowed { .. }
-    ));
+    assert!(matches!(log.events()[0], AuditEvent::HookAllowed { .. }));
 }
 
 #[test]
 fn ask_permission_result_resolves_to_ask_decision_not_passthrough() {
-    use rust_agent::hook::permission_resolution::resolve_hook_permission_decision;
     use rust_agent::hook::output::HookPermissionResult;
+    use rust_agent::hook::permission_resolution::resolve_hook_permission_decision;
     use rust_agent::tool::definition::{PermissionDecision, PermissionDecisionReason};
 
     let ask_result = HookPermissionResult::Ask {

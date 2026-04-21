@@ -191,7 +191,7 @@ fn test_context_with_turns(
             history: None,
             restored_session: None,
             last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        cancellation_token: tokio_util::sync::CancellationToken::new(),
+            cancellation_token: tokio_util::sync::CancellationToken::new(),
         },
         tool_registry,
         api_client: ModelProviderClient::with_scripted_turns(turns),
@@ -327,13 +327,16 @@ async fn engine_stream_turn_yields_committed_messages() {
 fn test_subagent_context_inherits_activity_tracking() {
     let context = test_context(vec![]);
     let original_ts = 123456789;
-    context.app_state.last_activity_ts.store(original_ts, std::sync::atomic::Ordering::Relaxed);
+    context
+        .app_state
+        .last_activity_ts
+        .store(original_ts, std::sync::atomic::Ordering::Relaxed);
 
     let sub_context = context.create_subagent_context(
         "sub-agent-1",
         vec![],
         SubagentConfig {
-            worker_role: WorkerRole::Researcher,
+            worker_role: WorkerRole::Research,
             inherit_context: true,
             max_turns: None,
             allowed_tools: None,
@@ -341,13 +344,28 @@ fn test_subagent_context_inherits_activity_tracking() {
     );
 
     // Verify same Arc instance or at least same underlying value and atomic shared state
-    assert_eq!(sub_context.app_state.last_activity_ts.load(std::sync::atomic::Ordering::Relaxed), original_ts);
-    
+    assert_eq!(
+        sub_context
+            .app_state
+            .last_activity_ts
+            .load(std::sync::atomic::Ordering::Relaxed),
+        original_ts
+    );
+
     // Verify it's truly shared by updating via sub-context
     let updated_ts = 987654321;
-    sub_context.app_state.last_activity_ts.store(updated_ts, std::sync::atomic::Ordering::Relaxed);
-    assert_eq!(context.app_state.last_activity_ts.load(std::sync::atomic::Ordering::Relaxed), updated_ts);
-    
+    sub_context
+        .app_state
+        .last_activity_ts
+        .store(updated_ts, std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(
+        context
+            .app_state
+            .last_activity_ts
+            .load(std::sync::atomic::Ordering::Relaxed),
+        updated_ts
+    );
+
     // Verify cancellation token is also shared
     assert!(!context.app_state.cancellation_token.is_cancelled());
     sub_context.app_state.cancellation_token.cancel();
@@ -1070,7 +1088,7 @@ async fn query_loop_stop_hook_can_prevent_continuation() {
             history: None,
             restored_session: None,
             last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        cancellation_token: tokio_util::sync::CancellationToken::new(),
+            cancellation_token: tokio_util::sync::CancellationToken::new(),
         },
         tool_registry: ToolRegistry::new(),
         api_client: ModelProviderClient::with_scripted_turns(vec![vec![
@@ -1152,7 +1170,7 @@ async fn query_loop_respects_pre_tool_hook_denial() {
             history: None,
             restored_session: None,
             last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        cancellation_token: tokio_util::sync::CancellationToken::new(),
+            cancellation_token: tokio_util::sync::CancellationToken::new(),
         },
         tool_registry: registry,
         api_client: ModelProviderClient::with_scripted_turns(vec![vec![
@@ -1252,7 +1270,7 @@ async fn query_loop_runs_permission_request_hook_before_tool_execution() {
             history: None,
             restored_session: None,
             last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        cancellation_token: tokio_util::sync::CancellationToken::new(),
+            cancellation_token: tokio_util::sync::CancellationToken::new(),
         },
         tool_registry: registry,
         api_client: ModelProviderClient::with_scripted_turns(vec![vec![
@@ -1344,7 +1362,7 @@ async fn query_loop_stop_hook_blocking_continues_with_follow_up_turn() {
             history: None,
             restored_session: None,
             last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        cancellation_token: tokio_util::sync::CancellationToken::new(),
+            cancellation_token: tokio_util::sync::CancellationToken::new(),
         },
         tool_registry: ToolRegistry::new(),
         api_client: ModelProviderClient::with_scripted_turns(vec![
@@ -1445,7 +1463,7 @@ async fn query_loop_uses_subagent_stop_hook_for_subagent_context() {
             history: None,
             restored_session: None,
             last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        cancellation_token: tokio_util::sync::CancellationToken::new(),
+            cancellation_token: tokio_util::sync::CancellationToken::new(),
         },
         tool_registry: ToolRegistry::new(),
         api_client: ModelProviderClient::with_scripted_turns(vec![vec![
@@ -1593,7 +1611,7 @@ async fn engine_drains_internal_task_events() {
             history: None,
             restored_session: None,
             last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        cancellation_token: tokio_util::sync::CancellationToken::new(),
+            cancellation_token: tokio_util::sync::CancellationToken::new(),
         },
         tool_registry: ToolRegistry::new(),
         api_client: ModelProviderClient::default(),
@@ -1672,7 +1690,7 @@ async fn worker_query_loop_consumes_mailbox_messages() {
             history: None,
             restored_session: None,
             last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        cancellation_token: tokio_util::sync::CancellationToken::new(),
+            cancellation_token: tokio_util::sync::CancellationToken::new(),
         },
         tool_registry: ToolRegistry::new(),
         api_client: ModelProviderClient::with_scripted_turns(vec![
@@ -1770,7 +1788,7 @@ async fn subagent_context_inherits_parent_tools_and_hooks() {
             history: None,
             restored_session: None,
             last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        cancellation_token: tokio_util::sync::CancellationToken::new(),
+            cancellation_token: tokio_util::sync::CancellationToken::new(),
         },
         tool_registry: parent_tool_registry.clone(),
         api_client: ModelProviderClient::default(),
@@ -1885,7 +1903,7 @@ async fn subagent_context_does_not_inherit_session_memory_when_disabled() {
             }),
             restored_session: None,
             last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        cancellation_token: tokio_util::sync::CancellationToken::new(),
+            cancellation_token: tokio_util::sync::CancellationToken::new(),
         },
         tool_registry: ToolRegistry::new(),
         api_client: ModelProviderClient::default(),
@@ -1978,7 +1996,7 @@ async fn subagent_context_reanchors_and_bounds_nested_memory_lineage() {
             history: None,
             restored_session: None,
             last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        cancellation_token: tokio_util::sync::CancellationToken::new(),
+            cancellation_token: tokio_util::sync::CancellationToken::new(),
         },
         tool_registry: ToolRegistry::new(),
         api_client: ModelProviderClient::default(),
@@ -2147,7 +2165,7 @@ async fn coordinator_waits_for_group_barrier_before_synthesis_follow_up() {
             history: None,
             restored_session: None,
             last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        cancellation_token: tokio_util::sync::CancellationToken::new(),
+            cancellation_token: tokio_util::sync::CancellationToken::new(),
         },
         tool_registry: ToolRegistry::new(),
         api_client: ModelProviderClient::with_scripted_turns(vec![
@@ -2273,7 +2291,7 @@ async fn coordinator_gates_finalization_until_verification_finishes() {
             history: None,
             restored_session: None,
             last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        cancellation_token: tokio_util::sync::CancellationToken::new(),
+            cancellation_token: tokio_util::sync::CancellationToken::new(),
         },
         tool_registry: ToolRegistry::new(),
         api_client: ModelProviderClient::with_scripted_turns(vec![
@@ -3161,7 +3179,7 @@ async fn submit_turn_distinguishes_stop_hook_prevented_and_blocking_runtime_even
             history: None,
             restored_session: None,
             last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        cancellation_token: tokio_util::sync::CancellationToken::new(),
+            cancellation_token: tokio_util::sync::CancellationToken::new(),
         },
         tool_registry: ToolRegistry::new(),
         api_client: ModelProviderClient::with_scripted_turns(vec![vec![
@@ -3216,7 +3234,7 @@ async fn submit_turn_distinguishes_stop_hook_prevented_and_blocking_runtime_even
             history: None,
             restored_session: None,
             last_activity_ts: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        cancellation_token: tokio_util::sync::CancellationToken::new(),
+            cancellation_token: tokio_util::sync::CancellationToken::new(),
         },
         tool_registry: ToolRegistry::new(),
         api_client: ModelProviderClient::with_scripted_turns(vec![
