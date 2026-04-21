@@ -8,7 +8,10 @@ use crate::service::observability::ServiceObservabilityTracker;
 use crate::skills::registry::SkillRegistry;
 use crate::tool::definition::{ToolCall, ToolResult};
 use crate::tool::registry::ToolRegistry;
-use std::sync::Arc;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 
 use crate::history::resume::{ResolvedSessionState, RestoredSession};
@@ -16,10 +19,6 @@ use crate::history::session::{SessionHistory, SessionId, SessionSnapshot, Sessio
 use crate::interaction::dispatcher::NotificationDispatcher;
 use crate::security::audit::AuditLog;
 use crate::state::permission_context::ToolPermissionContext;
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppStateRuntimeChange {

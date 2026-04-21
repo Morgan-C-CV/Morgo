@@ -1,5 +1,6 @@
-use std::sync::Arc;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, debug, warn};
@@ -11,6 +12,10 @@ pub struct HousekeepingConfig {
     pub interval: Duration,
     /// Threshold (in seconds) for considering a session as "stale" or "zombie".
     pub stale_threshold_secs: u64,
+    /// Retention period for persistent sessions.
+    pub session_retention_days: u64,
+    /// Retention period for task logs.
+    pub task_log_retention_days: u64,
 }
 
 impl Default for HousekeepingConfig {
@@ -18,6 +23,8 @@ impl Default for HousekeepingConfig {
         Self {
             interval: Duration::from_secs(60),
             stale_threshold_secs: 600, // 10 minutes
+            session_retention_days: 7,
+            task_log_retention_days: 1,
         }
     }
 }
@@ -28,6 +35,8 @@ pub struct HousekeepingDaemon {
     config: HousekeepingConfig,
     cancel_token: CancellationToken,
     last_activity_ts: Arc<AtomicU64>,
+    session_root: Option<PathBuf>,
+    task_output_root: Option<PathBuf>,
 }
 
 impl HousekeepingDaemon {
@@ -41,7 +50,15 @@ impl HousekeepingDaemon {
             config,
             cancel_token,
             last_activity_ts,
+            session_root: None,
+            task_output_root: None,
         }
+    }
+
+    pub fn with_roots(mut self, session_root: PathBuf, task_output_root: PathBuf) -> Self {
+        self.session_root = Some(session_root);
+        self.task_output_root = Some(task_output_root);
+        self
     }
 
     /// Entry point for the housekeeping background task.
@@ -58,6 +75,7 @@ impl HousekeepingDaemon {
                 _ = interval.tick() => {
                     debug!("Housekeeping tick: performing background maintenance...");
                     self.perform_maintenance().await;
+                    self.perform_gc().await;
                 }
                 _ = self.cancel_token.cancelled() => {
                     info!("Housekeeping daemon shutting down gracefully.");
@@ -83,6 +101,38 @@ impl HousekeepingDaemon {
             // In Phase 3, we would trigger actual cleanup or session suspension here.
         }
     }
+
+    pub async fn perform_gc(&self) {
+        if let Some(ref root) = self.session_root {
+            let _ = self.prune_directory(root, self.config.session_retention_days * 86400);
+        }
+        if let Some(ref root) = self.task_output_root {
+            let _ = self.prune_directory(root, self.config.task_log_retention_days * 86400);
+        }
+    }
+
+    pub fn prune_directory(&self, root: &PathBuf, max_age_secs: u64) -> anyhow::Result<()> {
+        if !root.exists() {
+            return Ok(());
+        }
+
+        let now = SystemTime::now();
+        for entry in std::fs::read_dir(root)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_file() {
+                let metadata = entry.metadata()?;
+                let modified = metadata.modified()?;
+                if let Ok(duration) = now.duration_since(modified) {
+                    if duration.as_secs() > max_age_secs {
+                        info!("GC: Removing stale artifact: {:?}", path);
+                        let _ = std::fs::remove_file(path);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -98,6 +148,8 @@ mod tests {
             HousekeepingConfig {
                 interval: Duration::from_millis(10),
                 stale_threshold_secs: 100,
+                session_retention_days: 7,
+                task_log_retention_days: 1,
             },
             token.clone(),
             last_active,
@@ -125,6 +177,8 @@ mod tests {
             HousekeepingConfig {
                 interval: Duration::from_secs(1),
                 stale_threshold_secs: 10,
+                session_retention_days: 7,
+                task_log_retention_days: 1,
             },
             token.clone(),
             last_active,
@@ -149,6 +203,8 @@ mod tests {
         let config = HousekeepingConfig {
             interval: Duration::from_millis(10),
             stale_threshold_secs: 5,
+            session_retention_days: 7,
+            task_log_retention_days: 1,
         };
         
         let daemon = HousekeepingDaemon::new(config.clone(), token.clone(), last_active.clone());
@@ -170,6 +226,38 @@ mod tests {
         
         // The test passes if it completes without panic. 
         // In a real integration test, we'd check tracing output.
+    }
+
+    #[tokio::test]
+    async fn test_housekeeping_gc_logic() {
+        let temp_dir = std::env::temp_dir().join(format!("rust_agent_gc_test_{}", 
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let file_old = temp_dir.join("old.json");
+        let file_new = temp_dir.join("new.json");
+
+        std::fs::write(&file_old, "old").unwrap();
+        std::fs::write(&file_new, "new").unwrap();
+
+        // We can't easily backdate file mtime in std::fs without external crates for tests,
+        // but we can verify the prune_directory logic with a very small max_age.
+        
+        let token = CancellationToken::new();
+        let last_active = Arc::new(AtomicU64::new(0));
+        let daemon = HousekeepingDaemon::new(HousekeepingConfig::default(), token, last_active)
+            .with_roots(temp_dir.clone(), temp_dir.clone());
+
+        // Wait a bit to ensure age > 0
+        tokio::time::sleep(tokio::time::Duration::from_millis(1100)).await;
+
+        // Test with age 0 (should delete everything)
+        daemon.prune_directory(&temp_dir, 0).unwrap();
+        
+        assert!(!file_old.exists());
+        assert!(!file_new.exists());
+
+        let _ = std::fs::remove_dir_all(temp_dir);
     }
 
     async fn timeout<F>(duration: Duration, future: F) -> Result<F::Output, ()>

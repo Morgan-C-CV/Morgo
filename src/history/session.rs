@@ -183,6 +183,10 @@ impl FileBackedSessionStore {
         store
     }
 
+    pub fn root(&self) -> &PathBuf {
+        &self.root
+    }
+
     pub fn default_root() -> PathBuf {
         std::env::current_dir()
             .unwrap_or_else(|_| PathBuf::from("."))

@@ -1,7 +1,6 @@
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::task::types::TaskOutputSlice;
 
@@ -12,12 +11,11 @@ pub struct TaskOutputStore {
 
 impl Default for TaskOutputStore {
     fn default() -> Self {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock should be after unix epoch")
-            .as_nanos();
         Self {
-            root: std::env::temp_dir().join(format!("rust-agent-task-output-{unique}")),
+            root: std::env::current_dir()
+                .unwrap_or_else(|_| PathBuf::from("."))
+                .join(".rust-agent")
+                .join("task-outputs"),
         }
     }
 }

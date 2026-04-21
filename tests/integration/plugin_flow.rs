@@ -155,6 +155,7 @@ async fn plugin_runtime_exposes_command_hook_tool_and_diagnostics() {
         session: None,
         history: None,
         restored_session: None,
+        last_activity_ts: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
     };
 
     let help = HelpCommand

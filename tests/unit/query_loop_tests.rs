@@ -190,6 +190,7 @@ fn test_context_with_turns(
             session: None,
             history: None,
             restored_session: None,
+            last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         },
         tool_registry,
         api_client: ModelProviderClient::with_scripted_turns(turns),
@@ -1036,6 +1037,7 @@ async fn query_loop_stop_hook_can_prevent_continuation() {
             session: None,
             history: None,
             restored_session: None,
+            last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         },
         tool_registry: ToolRegistry::new(),
         api_client: ModelProviderClient::with_scripted_turns(vec![vec![
@@ -1116,6 +1118,7 @@ async fn query_loop_respects_pre_tool_hook_denial() {
             session: None,
             history: None,
             restored_session: None,
+            last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         },
         tool_registry: registry,
         api_client: ModelProviderClient::with_scripted_turns(vec![vec![
@@ -1214,6 +1217,7 @@ async fn query_loop_runs_permission_request_hook_before_tool_execution() {
             session: None,
             history: None,
             restored_session: None,
+            last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         },
         tool_registry: registry,
         api_client: ModelProviderClient::with_scripted_turns(vec![vec![
@@ -1304,6 +1308,7 @@ async fn query_loop_stop_hook_blocking_continues_with_follow_up_turn() {
             session: None,
             history: None,
             restored_session: None,
+            last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         },
         tool_registry: ToolRegistry::new(),
         api_client: ModelProviderClient::with_scripted_turns(vec![
@@ -1403,6 +1408,7 @@ async fn query_loop_uses_subagent_stop_hook_for_subagent_context() {
             session: None,
             history: None,
             restored_session: None,
+            last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         },
         tool_registry: ToolRegistry::new(),
         api_client: ModelProviderClient::with_scripted_turns(vec![vec![
@@ -1549,6 +1555,7 @@ async fn engine_drains_internal_task_events() {
             session: None,
             history: None,
             restored_session: None,
+            last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         },
         tool_registry: ToolRegistry::new(),
         api_client: ModelProviderClient::default(),
@@ -1626,6 +1633,7 @@ async fn worker_query_loop_consumes_mailbox_messages() {
             session: None,
             history: None,
             restored_session: None,
+            last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         },
         tool_registry: ToolRegistry::new(),
         api_client: ModelProviderClient::with_scripted_turns(vec![
@@ -1722,6 +1730,7 @@ async fn subagent_context_inherits_parent_tools_and_hooks() {
             session: None,
             history: None,
             restored_session: None,
+            last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         },
         tool_registry: parent_tool_registry.clone(),
         api_client: ModelProviderClient::default(),
@@ -1835,6 +1844,7 @@ async fn subagent_context_does_not_inherit_session_memory_when_disabled() {
                 }],
             }),
             restored_session: None,
+            last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         },
         tool_registry: ToolRegistry::new(),
         api_client: ModelProviderClient::default(),
@@ -1926,6 +1936,7 @@ async fn subagent_context_reanchors_and_bounds_nested_memory_lineage() {
             session: None,
             history: None,
             restored_session: None,
+            last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         },
         tool_registry: ToolRegistry::new(),
         api_client: ModelProviderClient::default(),
@@ -2093,6 +2104,7 @@ async fn coordinator_waits_for_group_barrier_before_synthesis_follow_up() {
             session: None,
             history: None,
             restored_session: None,
+            last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         },
         tool_registry: ToolRegistry::new(),
         api_client: ModelProviderClient::with_scripted_turns(vec![
@@ -2217,6 +2229,7 @@ async fn coordinator_gates_finalization_until_verification_finishes() {
             session: None,
             history: None,
             restored_session: None,
+            last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         },
         tool_registry: ToolRegistry::new(),
         api_client: ModelProviderClient::with_scripted_turns(vec![
@@ -2352,6 +2365,7 @@ async fn coordinator_surfaces_verification_failure_and_missing_verification_risk
             session: None,
             history: None,
             restored_session: None,
+            last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         },
         tool_registry: ToolRegistry::new(),
         api_client: ModelProviderClient::with_scripted_turns(vec![
@@ -3101,6 +3115,7 @@ async fn submit_turn_distinguishes_stop_hook_prevented_and_blocking_runtime_even
             session: None,
             history: None,
             restored_session: None,
+            last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         },
         tool_registry: ToolRegistry::new(),
         api_client: ModelProviderClient::with_scripted_turns(vec![vec![
@@ -3154,6 +3169,7 @@ async fn submit_turn_distinguishes_stop_hook_prevented_and_blocking_runtime_even
             session: None,
             history: None,
             restored_session: None,
+            last_activity_ts: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         },
         tool_registry: ToolRegistry::new(),
         api_client: ModelProviderClient::with_scripted_turns(vec![

@@ -378,6 +378,12 @@ fn build_parent_query_context(permissions: ToolPermissionContext) -> QueryContex
         session: None,
         history: None,
         restored_session: None,
+        last_activity_ts: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+        )),
     };
     let system_prompt = crate::prompt::system::build_system_prompt(&app_state);
     let tools_prompt =

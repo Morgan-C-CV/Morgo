@@ -375,11 +375,18 @@ impl RuntimeBootstrap {
 
         // Initialize and spawn background housekeeping daemon
         let housekeeping_token = CancellationToken::new();
+        let session_root = crate::history::session::FileBackedSessionStore::default_root();
+        let task_output_root = std::env::current_dir()
+            .unwrap_or_else(|_| std::path::PathBuf::from("."))
+            .join(".rust-agent")
+            .join("task-outputs");
+
         let housekeeping_daemon = crate::core::housekeeping::HousekeepingDaemon::new(
             crate::core::housekeeping::HousekeepingConfig::default(),
             housekeeping_token.clone(),
             app_state.last_activity_ts.clone(),
-        );
+        )
+        .with_roots(session_root, task_output_root);
         tokio::spawn(housekeeping_daemon.run());
 
         if self.cli.trace_startup {
@@ -387,7 +394,8 @@ impl RuntimeBootstrap {
         }
 
         if self.cli.show_tools {
-            for tool in initial_snapshot
+            for tool in finalized
+                .snapshot
                 .tool_registry
                 .visible_tools(&app_state.permission_context)
             {

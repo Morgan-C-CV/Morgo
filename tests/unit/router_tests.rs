@@ -442,6 +442,7 @@ async fn router_route_surfaces_strict_unknown_command_as_denied_result() {
         session: None,
         history: None,
         restored_session: None,
+        last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
     };
     let result = router
         .route(
@@ -750,6 +751,7 @@ async fn prompt_command_with_model_invocation_disabled_never_enters_query_engine
         session: None,
         history: None,
         restored_session: None,
+        last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
     };
 
     let result = router
@@ -800,6 +802,7 @@ async fn router_compact_route_enters_query_engine_with_builtin_prompt() {
         session: None,
         history: None,
         restored_session: None,
+        last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
     };
 
     let result = router
@@ -867,6 +870,7 @@ async fn router_cost_route_returns_local_message_without_entering_query_engine()
         session: None,
         history: None,
         restored_session: None,
+        last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
     };
 
     let result = router
@@ -920,6 +924,7 @@ async fn cli_repl_handles_multiple_inputs_in_sequence() {
         session: None,
         history: None,
         restored_session: None,
+        last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
     };
     let engine =
         rust_agent::core::engine::QueryEngine::new(rust_agent::core::context::QueryContext {
@@ -987,6 +992,7 @@ async fn cli_repl_surfaces_task_events_for_active_session() {
         session: None,
         history: None,
         restored_session: None,
+        last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
     };
     let task = manager.create(
         "queued task",
@@ -1077,6 +1083,7 @@ async fn cli_repl_persists_history_for_local_and_query_turns() {
         session: None,
         history: None,
         restored_session: None,
+        last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
     };
     let engine =
         rust_agent::core::engine::QueryEngine::new(rust_agent::core::context::QueryContext {
@@ -1181,6 +1188,7 @@ async fn remote_handler_preserves_remote_actor_and_session_for_query_flow() {
         session: None,
         history: None,
         restored_session: None,
+        last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
     };
     let runtime_plugin_state = RuntimePluginState::new(build_runtime_plugin_snapshot(&app_state));
     app_state.permission_context = app_state
@@ -1325,6 +1333,7 @@ async fn cli_repl_uses_next_turn_plugin_snapshot_after_reload_updates_manifest_s
         }),
         history: None,
         restored_session: None,
+        last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
     };
 
     let initial_snapshot = build_runtime_plugin_snapshot(&app_state);
@@ -1468,6 +1477,7 @@ async fn cli_repl_uses_next_turn_plugin_snapshot_after_reload_removes_deleted_pl
         }),
         history: None,
         restored_session: None,
+        last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
     };
 
     let initial_snapshot = build_runtime_plugin_snapshot(&app_state);
@@ -1586,6 +1596,7 @@ async fn cli_repl_applies_disable_and_enable_only_on_next_turn_boundaries() {
         }),
         history: None,
         restored_session: None,
+        last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
     };
 
     let initial_snapshot = build_runtime_plugin_snapshot(&app_state);
@@ -1804,6 +1815,7 @@ async fn remote_handler_uses_next_turn_plugin_snapshot_after_reload_removes_dele
         }),
         history: None,
         restored_session: None,
+        last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
     };
 
     let initial_snapshot = build_runtime_plugin_snapshot(&app_state);
@@ -1927,6 +1939,7 @@ async fn cli_repl_persists_denied_turns() {
         session: None,
         history: None,
         restored_session: None,
+        last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
     };
     let engine =
         rust_agent::core::engine::QueryEngine::new(rust_agent::core::context::QueryContext {
@@ -2006,6 +2019,7 @@ async fn router_approves_pending_plan_mode_request() {
         session: None,
         history: None,
         restored_session: None,
+        last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
     };
 
     let result = router
@@ -2071,6 +2085,7 @@ async fn router_denies_pending_request_without_session_approval() {
         session: None,
         history: None,
         restored_session: None,
+        last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
     };
 
     let result = router
@@ -2141,6 +2156,7 @@ async fn approval_replay_uses_runtime_tool_registry() {
         session: None,
         history: None,
         restored_session: None,
+        last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
     };
 
     let result = router
@@ -2207,6 +2223,7 @@ async fn permissions_command_reports_session_permission_state() {
         session: None,
         history: None,
         restored_session: None,
+        last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
     };
 
     let result = router
@@ -2262,6 +2279,7 @@ async fn plan_command_reports_inactive_status() {
         session: None,
         history: None,
         restored_session: None,
+        last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
     };
 
     let result = router
@@ -2315,6 +2333,7 @@ async fn plan_command_enter_requests_approval_before_switching_mode() {
         session: None,
         history: None,
         restored_session: None,
+        last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
     };
 
     let result = router
@@ -2383,6 +2402,7 @@ async fn plan_command_exit_requests_approval_and_approval_exits_mode() {
         session: None,
         history: None,
         restored_session: None,
+        last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
     };
 
     let request = router
@@ -2495,6 +2515,7 @@ async fn plan_command_handles_status_noop_and_denied_exit() {
         session: None,
         history: None,
         restored_session: None,
+        last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
     };
 
     let status = router
@@ -2667,6 +2688,7 @@ async fn plan_command_handles_status_noop_and_denied_exit() {
         session: None,
         history: None,
         restored_session: None,
+        last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
     };
     let denied = router
         .route(
@@ -2716,6 +2738,7 @@ async fn permissions_command_mutates_mode_and_rule_lists() {
         session: None,
         history: None,
         restored_session: None,
+        last_activity_ts: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
     };
 
     let mode_result = router
