@@ -9,6 +9,7 @@ use clap::Parser;
 use crate::bootstrap::setup::SetupContext;
 use crate::bootstrap::{BootstrapPhase, BootstrapState, InteractionSurface, SessionMode};
 use crate::command::registry::CommandRegistry;
+use crate::core::boss::BossCoordinator;
 use crate::core::context::QueryContext;
 use crate::core::engine::QueryEngine;
 use crate::cost::tracker::CostTracker;
@@ -205,6 +206,7 @@ pub struct RuntimeInitializeBundle {
     pub api_client: ModelProviderClient,
     pub compactor: ReactiveCompactor,
     pub subagent_limiter: Arc<SubagentLimiter>,
+    pub boss_coordinator: Option<Arc<BossCoordinator>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -692,6 +694,7 @@ impl RuntimeBootstrap {
             last_activity_ts,
             cancellation_token,
             subagent_limiter: Some(subagent_limiter.clone()),
+            boss_coordinator: None,
         };
         let snapshot = build_runtime_plugin_snapshot(&app_state);
         let command_registry = snapshot.command_registry.clone();
@@ -717,6 +720,7 @@ impl RuntimeBootstrap {
             api_client,
             compactor: ReactiveCompactor,
             subagent_limiter,
+            boss_coordinator: None,
         })
     }
 
@@ -793,6 +797,7 @@ impl RuntimeBootstrap {
             last_activity_ts,
             cancellation_token,
             subagent_limiter: Some(initialize_bundle.subagent_limiter.clone()),
+            boss_coordinator: initialize_bundle.boss_coordinator.clone(),
         };
         app_state.apply_resolved_session_state(resolved_session);
         app_state

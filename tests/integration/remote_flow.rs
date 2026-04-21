@@ -132,6 +132,8 @@ async fn remote_request_runs_minimal_query_chain() {
         restored_session: None,
         last_activity_ts: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         cancellation_token: tokio_util::sync::CancellationToken::new(),
+        subagent_limiter: None,
+        boss_coordinator: None,
     };
     let engine =
         rust_agent::core::engine::QueryEngine::new(rust_agent::core::context::QueryContext {
@@ -280,6 +282,8 @@ async fn remote_request_uses_shared_session_apply_contract() {
         restored_session: None,
         last_activity_ts: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         cancellation_token: tokio_util::sync::CancellationToken::new(),
+        subagent_limiter: None,
+        boss_coordinator: None,
     };
     let engine =
         rust_agent::core::engine::QueryEngine::new(rust_agent::core::context::QueryContext {
@@ -379,6 +383,8 @@ async fn remote_request_records_accept_and_notification_audit_events() {
         restored_session: None,
         last_activity_ts: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         cancellation_token: tokio_util::sync::CancellationToken::new(),
+        subagent_limiter: None,
+        boss_coordinator: None,
     };
     let engine =
         rust_agent::core::engine::QueryEngine::new(rust_agent::core::context::QueryContext {
@@ -573,6 +579,8 @@ async fn remote_request_denies_not_allowlisted_and_records_audit_event() {
         restored_session: None,
         last_activity_ts: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         cancellation_token: tokio_util::sync::CancellationToken::new(),
+        subagent_limiter: None,
+        boss_coordinator: None,
     };
     let engine =
         rust_agent::core::engine::QueryEngine::new(rust_agent::core::context::QueryContext {
@@ -680,6 +688,8 @@ async fn remote_request_drains_async_remote_notifications() {
         restored_session: None,
         last_activity_ts: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         cancellation_token: tokio_util::sync::CancellationToken::new(),
+        subagent_limiter: None,
+        boss_coordinator: None,
     };
 
     let mut actor_notification = Notification::approval_required(
@@ -808,6 +818,8 @@ async fn remote_request_drains_async_task_update_notifications() {
         restored_session: None,
         last_activity_ts: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         cancellation_token: tokio_util::sync::CancellationToken::new(),
+        subagent_limiter: None,
+        boss_coordinator: None,
     };
     let engine =
         rust_agent::core::engine::QueryEngine::new(rust_agent::core::context::QueryContext {
@@ -935,6 +947,8 @@ async fn remote_request_preserves_response_boundary_and_async_inbox_semantics() 
         restored_session: None,
         last_activity_ts: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         cancellation_token: tokio_util::sync::CancellationToken::new(),
+        subagent_limiter: None,
+        boss_coordinator: None,
     };
     app_state.notification_dispatcher.dispatch(
         InteractionSurface::Remote,
@@ -1083,6 +1097,8 @@ async fn remote_request_dual_channel_events_appear_in_response_and_async_inbox()
         restored_session: None,
         last_activity_ts: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         cancellation_token: tokio_util::sync::CancellationToken::new(),
+        subagent_limiter: None,
+        boss_coordinator: None,
     };
     let engine =
         rust_agent::core::engine::QueryEngine::new(rust_agent::core::context::QueryContext {
@@ -1177,6 +1193,8 @@ async fn remote_request_returns_typed_remote_event_envelopes() {
         restored_session: None,
         last_activity_ts: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         cancellation_token: tokio_util::sync::CancellationToken::new(),
+        subagent_limiter: None,
+        boss_coordinator: None,
     };
     let engine =
         rust_agent::core::engine::QueryEngine::new(rust_agent::core::context::QueryContext {
@@ -1319,6 +1337,8 @@ async fn drain_remote_notifications_skips_surface_invisible_notice_and_records_d
         restored_session: None,
         last_activity_ts: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         cancellation_token: tokio_util::sync::CancellationToken::new(),
+        subagent_limiter: None,
+        boss_coordinator: None,
     };
 
     let mut visible_notice = Notification::runtime_notice(

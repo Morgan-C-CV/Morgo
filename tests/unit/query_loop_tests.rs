@@ -193,6 +193,7 @@ fn test_context_with_turns(
             last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             cancellation_token: tokio_util::sync::CancellationToken::new(),
             subagent_limiter: None,
+            boss_coordinator: None,
         },
         tool_registry,
         api_client: ModelProviderClient::with_scripted_turns(turns),
@@ -1091,6 +1092,7 @@ async fn query_loop_stop_hook_can_prevent_continuation() {
             last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             cancellation_token: tokio_util::sync::CancellationToken::new(),
             subagent_limiter: None,
+            boss_coordinator: None,
         },
         tool_registry: ToolRegistry::new(),
         api_client: ModelProviderClient::with_scripted_turns(vec![vec![
@@ -1174,6 +1176,7 @@ async fn query_loop_respects_pre_tool_hook_denial() {
             last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             cancellation_token: tokio_util::sync::CancellationToken::new(),
             subagent_limiter: None,
+            boss_coordinator: None,
         },
         tool_registry: registry,
         api_client: ModelProviderClient::with_scripted_turns(vec![vec![
@@ -1275,6 +1278,7 @@ async fn query_loop_runs_permission_request_hook_before_tool_execution() {
             last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             cancellation_token: tokio_util::sync::CancellationToken::new(),
             subagent_limiter: None,
+            boss_coordinator: None,
         },
         tool_registry: registry,
         api_client: ModelProviderClient::with_scripted_turns(vec![vec![
@@ -1368,6 +1372,7 @@ async fn query_loop_stop_hook_blocking_continues_with_follow_up_turn() {
             last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             cancellation_token: tokio_util::sync::CancellationToken::new(),
             subagent_limiter: None,
+            boss_coordinator: None,
         },
         tool_registry: ToolRegistry::new(),
         api_client: ModelProviderClient::with_scripted_turns(vec![
@@ -1470,6 +1475,7 @@ async fn query_loop_uses_subagent_stop_hook_for_subagent_context() {
             last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             cancellation_token: tokio_util::sync::CancellationToken::new(),
             subagent_limiter: None,
+            boss_coordinator: None,
         },
         tool_registry: ToolRegistry::new(),
         api_client: ModelProviderClient::with_scripted_turns(vec![vec![
@@ -1619,6 +1625,7 @@ async fn engine_drains_internal_task_events() {
             last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             cancellation_token: tokio_util::sync::CancellationToken::new(),
             subagent_limiter: None,
+            boss_coordinator: None,
         },
         tool_registry: ToolRegistry::new(),
         api_client: ModelProviderClient::default(),
@@ -1699,6 +1706,7 @@ async fn worker_query_loop_consumes_mailbox_messages() {
             last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             cancellation_token: tokio_util::sync::CancellationToken::new(),
             subagent_limiter: None,
+            boss_coordinator: None,
         },
         tool_registry: ToolRegistry::new(),
         api_client: ModelProviderClient::with_scripted_turns(vec![
@@ -1798,6 +1806,7 @@ async fn subagent_context_inherits_parent_tools_and_hooks() {
             last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             cancellation_token: tokio_util::sync::CancellationToken::new(),
             subagent_limiter: None,
+            boss_coordinator: None,
         },
         tool_registry: parent_tool_registry.clone(),
         api_client: ModelProviderClient::default(),
@@ -1914,6 +1923,7 @@ async fn subagent_context_does_not_inherit_session_memory_when_disabled() {
             last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             cancellation_token: tokio_util::sync::CancellationToken::new(),
             subagent_limiter: None,
+            boss_coordinator: None,
         },
         tool_registry: ToolRegistry::new(),
         api_client: ModelProviderClient::default(),
@@ -2008,6 +2018,7 @@ async fn subagent_context_reanchors_and_bounds_nested_memory_lineage() {
             last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             cancellation_token: tokio_util::sync::CancellationToken::new(),
             subagent_limiter: None,
+            boss_coordinator: None,
         },
         tool_registry: ToolRegistry::new(),
         api_client: ModelProviderClient::default(),
@@ -2178,6 +2189,7 @@ async fn coordinator_waits_for_group_barrier_before_synthesis_follow_up() {
             last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             cancellation_token: tokio_util::sync::CancellationToken::new(),
             subagent_limiter: None,
+            boss_coordinator: None,
         },
         tool_registry: ToolRegistry::new(),
         api_client: ModelProviderClient::with_scripted_turns(vec![
@@ -2305,6 +2317,7 @@ async fn coordinator_gates_finalization_until_verification_finishes() {
             last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             cancellation_token: tokio_util::sync::CancellationToken::new(),
             subagent_limiter: None,
+            boss_coordinator: None,
         },
         tool_registry: ToolRegistry::new(),
         api_client: ModelProviderClient::with_scripted_turns(vec![
@@ -2443,6 +2456,7 @@ async fn coordinator_surfaces_verification_failure_and_missing_verification_risk
             last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             cancellation_token: tokio_util::sync::CancellationToken::new(),
             subagent_limiter: None,
+            boss_coordinator: None,
         },
         tool_registry: ToolRegistry::new(),
         api_client: ModelProviderClient::with_scripted_turns(vec![
@@ -3195,6 +3209,7 @@ async fn submit_turn_distinguishes_stop_hook_prevented_and_blocking_runtime_even
             last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             cancellation_token: tokio_util::sync::CancellationToken::new(),
             subagent_limiter: None,
+            boss_coordinator: None,
         },
         tool_registry: ToolRegistry::new(),
         api_client: ModelProviderClient::with_scripted_turns(vec![vec![
@@ -3251,6 +3266,7 @@ async fn submit_turn_distinguishes_stop_hook_prevented_and_blocking_runtime_even
             last_activity_ts: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             cancellation_token: tokio_util::sync::CancellationToken::new(),
             subagent_limiter: None,
+            boss_coordinator: None,
         },
         tool_registry: ToolRegistry::new(),
         api_client: ModelProviderClient::with_scripted_turns(vec![

@@ -15,6 +15,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
+use crate::core::boss::BossCoordinator;
 
 use crate::history::resume::{ResolvedSessionState, RestoredSession};
 use crate::history::session::{SessionHistory, SessionId, SessionSnapshot, SessionStore};
@@ -86,6 +87,7 @@ pub struct AppState {
     pub last_activity_ts: Arc<AtomicU64>,
     pub cancellation_token: CancellationToken,
     pub subagent_limiter: Option<Arc<SubagentLimiter>>,
+    pub boss_coordinator: Option<Arc<BossCoordinator>>,
 }
 
 impl AppState {
@@ -307,6 +309,7 @@ impl std::fmt::Debug for AppState {
             .field("session", &self.session)
             .field("history", &self.history)
             .field("restored_session", &self.restored_session)
+            .field("has_boss_coordinator", &self.boss_coordinator.is_some())
             .finish()
     }
 }

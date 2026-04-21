@@ -144,6 +144,44 @@ impl BossCoordinator {
             Ok(false)
         }
     }
+
+    /// Renders a concise Markdown fragment for the system prompt, summarizing the Boss Mode state.
+    pub async fn render_prompt_fragment(&self) -> String {
+        let status = self.status.read().await;
+        let plan_guard = self.plan.read().await;
+        
+        let mut lines = Vec::new();
+        lines.push("## BOSS MODE STATE".to_string());
+        lines.push(format!("- **Stage**: {:?}", status.stage));
+        
+        if let Some(plan) = plan_guard.as_ref() {
+            lines.push(format!("- **Goal**: {}", plan.task_description));
+            
+            if !plan.steps.is_empty() {
+                lines.push("\n### ACTIVE TASK LIST".to_string());
+                for step in &plan.steps {
+                    let checkbox = if step.completed { "[x]" } else { "[ ]" };
+                    let current_marker = if status.current_step == Some(step.id) { " (CURRENT)" } else { "" };
+                    lines.push(format!("  {} **Step {}**: {}{}", checkbox, step.id, step.description, current_marker));
+                }
+            }
+
+            if status.stage == BossStage::Documentation || status.stage == BossStage::WaitingForApproval {
+                if !plan.document_spec.is_empty() {
+                    lines.push("\n### PROPOSED SPEC".to_string());
+                    lines.push(plan.document_spec.clone());
+                }
+                if !plan.pseudo_code.is_empty() {
+                    lines.push("\n### PROPOSED PSEUDO-CODE".to_string());
+                    lines.push(plan.pseudo_code.clone());
+                }
+            }
+        } else {
+            lines.push("- *Planning in progress (Documentation stage)...*".to_string());
+        }
+
+        lines.join("\n")
+    }
 }
 
 impl Default for BossCoordinator {

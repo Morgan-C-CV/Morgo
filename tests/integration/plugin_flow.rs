@@ -184,6 +184,8 @@ async fn plugin_runtime_exposes_command_hook_tool_and_diagnostics() {
         restored_session: None,
         last_activity_ts: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         cancellation_token: tokio_util::sync::CancellationToken::new(),
+        subagent_limiter: None,
+        boss_coordinator: None,
     };
 
     let help = HelpCommand

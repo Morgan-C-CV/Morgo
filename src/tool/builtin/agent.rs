@@ -406,6 +406,7 @@ fn build_parent_query_context(permissions: ToolPermissionContext) -> QueryContex
             .clone()
             .unwrap_or_else(tokio_util::sync::CancellationToken::new),
         subagent_limiter: permissions.subagent_limiter.clone(),
+        boss_coordinator: None,
     };
     let system_prompt = crate::prompt::system::build_system_prompt(&app_state);
     let tools_prompt =

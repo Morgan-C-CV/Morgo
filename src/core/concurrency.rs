@@ -29,9 +29,15 @@ impl SubagentLimiter {
         });
         
         let limiter_clone = limiter.clone();
-        tokio::spawn(async move {
-            limiter_clone.refresh_loop().await;
-        });
+        // Only spawn the refresh loop if we are in an active Tokio runtime context.
+        // This prevents panics in synchronous tests while allowing production usage to work as intended.
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                limiter_clone.refresh_loop().await;
+            });
+        } else {
+            debug!("SubagentLimiter: No tokio reactor found, background refresh loop will not be started (expected in sync tests)");
+        }
         
         limiter
     }

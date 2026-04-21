@@ -56,7 +56,8 @@ async fn cost_command_reports_tracked_usage() {
         restored_session: None,
         last_activity_ts: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         cancellation_token: tokio_util::sync::CancellationToken::new(),
-            subagent_limiter: None,
+        subagent_limiter: None,
+        boss_coordinator: None,
     };
 
     let result = CostCommand
