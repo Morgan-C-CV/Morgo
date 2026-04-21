@@ -3,6 +3,7 @@ use crate::command::registry::CommandRegistry;
 use crate::command::types::CommandResult;
 use crate::cost::tracker::CostTracker;
 use crate::plugins::types::PluginLoadResult;
+use crate::core::concurrency::SubagentLimiter;
 use crate::service::mcp::runtime::McpRuntime;
 use crate::service::observability::ServiceObservabilityTracker;
 use crate::skills::registry::SkillRegistry;
@@ -84,6 +85,7 @@ pub struct AppState {
     pub restored_session: Option<RestoredSession>,
     pub last_activity_ts: Arc<AtomicU64>,
     pub cancellation_token: CancellationToken,
+    pub subagent_limiter: Option<Arc<SubagentLimiter>>,
 }
 
 impl AppState {

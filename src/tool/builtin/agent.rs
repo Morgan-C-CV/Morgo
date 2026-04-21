@@ -15,6 +15,7 @@ use crate::state::permission_context::ToolPermissionContext;
 use crate::task::types::TaskUsageSummary;
 use crate::tool::definition::{Tool, ToolCall, ToolMetadata, ToolResult};
 use crate::tool::registry::ToolRegistry;
+use tracing::info;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum AgentRequest {
@@ -126,6 +127,15 @@ impl Tool for AgentTool {
                     session_id.clone(),
                     owner_surface,
                 );
+                
+                // Concurrency Control: Acquire permit before launching
+                let permit = if let Some(limiter) = &permissions.subagent_limiter {
+                    info!("Acquiring concurrency permit for subagent {}...", task.id);
+                    Some(limiter.acquire().await)
+                } else {
+                    None
+                };
+
                 tasks.set_worker_role(&task.id, request.role);
                 tasks.set_parent_task_id(&task.id, request.parent_task_id.clone());
                 tasks.set_orchestration_group_id(&task.id, request.orchestration_group_id.clone());
@@ -144,6 +154,7 @@ impl Tool for AgentTool {
                     request,
                     permissions,
                     dispatcher,
+                    permit,
                 );
                 Ok(ToolResult::Text(format!(
                     "agent task {} respawned for {} worker: {}",
@@ -170,6 +181,7 @@ fn launch_agent_task(
     request: SpawnAgentRequest,
     permissions: &ToolPermissionContext,
     dispatcher: NotificationDispatcher,
+    permit: Option<tokio::sync::OwnedSemaphorePermit>,
 ) {
     let task_input = request.task.clone();
     let query_context = parent_context.create_subagent_context(
@@ -188,6 +200,9 @@ fn launch_agent_task(
     let tasks_for_run = tasks.clone();
     let launched_task_id = task_id.clone();
     tasks.launch(&launched_task_id.clone(), task_input.clone(), async move {
+        // Hold the permit for the duration of this async block
+        let _permit = permit;
+        
         let mut params = QueryParams::default();
         params.max_turns = request.max_turns;
         let usage_before = query_context.app_state.cost_tracker.snapshot();
@@ -390,6 +405,7 @@ fn build_parent_query_context(permissions: ToolPermissionContext) -> QueryContex
             .cancellation_token
             .clone()
             .unwrap_or_else(tokio_util::sync::CancellationToken::new),
+        subagent_limiter: permissions.subagent_limiter.clone(),
     };
     let system_prompt = crate::prompt::system::build_system_prompt(&app_state);
     let tools_prompt =

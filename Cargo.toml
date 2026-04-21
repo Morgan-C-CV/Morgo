@@ -25,6 +25,7 @@ tokio = { version = "1.45", features = ["fs", "io-util", "macros", "net", "proce
 tokio-util = { version = "0.7", features = ["rt"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+sysinfo = "0.33"
 
 [dev-dependencies]
 assert_matches = "1.5"

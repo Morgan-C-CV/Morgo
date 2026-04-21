@@ -14,6 +14,7 @@ use crate::task::list_manager::TaskListManager;
 use crate::task::manager::TaskManager;
 use crate::tool::registry::ToolRegistry;
 use std::sync::atomic::AtomicU64;
+use crate::core::concurrency::SubagentLimiter;
 use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,6 +65,7 @@ pub struct ToolPermissionContext {
     pub nested_memory_lineage: Arc<RwLock<Vec<String>>>,
     pub last_activity_ts: Option<Arc<AtomicU64>>,
     pub cancellation_token: Option<CancellationToken>,
+    pub subagent_limiter: Option<Arc<SubagentLimiter>>,
 }
 
 impl ToolPermissionContext {
@@ -99,6 +101,7 @@ impl ToolPermissionContext {
             nested_memory_lineage: Arc::new(RwLock::new(Vec::new())),
             last_activity_ts: None,
             cancellation_token: None,
+            subagent_limiter: None,
         }
     }
 
@@ -240,6 +243,16 @@ impl ToolPermissionContext {
 
     pub fn with_runtime_plugin_state(mut self, runtime_plugin_state: RuntimePluginState) -> Self {
         self.runtime_plugin_state = Some(runtime_plugin_state);
+        self
+    }
+
+    pub fn with_cancellation_token(mut self, cancellation_token: CancellationToken) -> Self {
+        self.cancellation_token = Some(cancellation_token);
+        self
+    }
+
+    pub fn with_subagent_limiter(mut self, subagent_limiter: Arc<SubagentLimiter>) -> Self {
+        self.subagent_limiter = Some(subagent_limiter);
         self
     }
 

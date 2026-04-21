@@ -142,6 +142,7 @@ use crate::tool::builtin::{
     todo_write::TodoWriteTool, tool_search::ToolSearchTool, web_fetch::WebFetchTool,
     web_search::WebSearchTool,
 };
+use crate::core::concurrency::SubagentLimiter;
 use crate::tool::registry::{ToolAssemblyContext, ToolRegistry};
 
 pub fn is_tui_exit_input(input: &str) -> bool {
@@ -203,6 +204,7 @@ pub struct RuntimeInitializeBundle {
     pub provider_config: ModelProviderConfig,
     pub api_client: ModelProviderClient,
     pub compactor: ReactiveCompactor,
+    pub subagent_limiter: Arc<SubagentLimiter>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -623,6 +625,10 @@ impl RuntimeBootstrap {
                 panic!("failed to load filesystem policy during bootstrap: {error}")
             })
             .map(Arc::new);
+        
+        // Initialize the global subagent concurrency limiter
+        let subagent_limiter = SubagentLimiter::new();
+
         let mut permission_context =
             ToolAssemblyContext::coordinator(state.surface, state.session_mode)
                 .permission_context(if self.cli.init_only {
@@ -639,7 +645,8 @@ impl RuntimeBootstrap {
                 .with_active_surface(state.surface)
                 .with_notification_dispatcher(notification_dispatcher.clone())
                 .with_inherited_tool_registry(coordinator_tools.clone())
-                .with_inherited_hook_registry(hook_registry.clone());
+                .with_inherited_hook_registry(hook_registry.clone())
+                .with_subagent_limiter(subagent_limiter.clone());
         if let Some(policy) = filesystem_policy.clone() {
             permission_context = permission_context.with_filesystem_policy(policy);
         }
@@ -684,6 +691,7 @@ impl RuntimeBootstrap {
             restored_session: None,
             last_activity_ts,
             cancellation_token,
+            subagent_limiter: Some(subagent_limiter.clone()),
         };
         let snapshot = build_runtime_plugin_snapshot(&app_state);
         let command_registry = snapshot.command_registry.clone();
@@ -708,6 +716,7 @@ impl RuntimeBootstrap {
             provider_config,
             api_client,
             compactor: ReactiveCompactor,
+            subagent_limiter,
         })
     }
 
@@ -732,7 +741,8 @@ impl RuntimeBootstrap {
         .with_deferred_tools(true)
         .with_interactive_tools(true)
         .with_inherited_tool_registry(initialize_bundle.coordinator_tools.clone())
-        .with_inherited_hook_registry(initialize_bundle.hook_registry.clone());
+        .with_inherited_hook_registry(initialize_bundle.hook_registry.clone())
+        .with_subagent_limiter(initialize_bundle.subagent_limiter.clone());
         if let Some(policy) = initialize_bundle.filesystem_policy.clone() {
             permission_context = permission_context.with_filesystem_policy(policy);
         }
@@ -782,6 +792,7 @@ impl RuntimeBootstrap {
             restored_session: None,
             last_activity_ts,
             cancellation_token,
+            subagent_limiter: Some(initialize_bundle.subagent_limiter.clone()),
         };
         app_state.apply_resolved_session_state(resolved_session);
         app_state
