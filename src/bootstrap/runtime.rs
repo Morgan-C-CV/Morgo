@@ -7,6 +7,7 @@ use tokio_util::sync::CancellationToken;
 use clap::Parser;
 
 use crate::bootstrap::config_root::resolve_config_root;
+use crate::bootstrap::model_profiles::load_active_model_profile_from_root;
 use crate::bootstrap::setup::SetupContext;
 use crate::bootstrap::{BootstrapPhase, BootstrapState, InteractionSurface, SessionMode};
 use crate::command::registry::CommandRegistry;
@@ -119,6 +120,32 @@ fn parse_provider_auth_strategy(value: &str) -> anyhow::Result<ProviderAuthStrat
         "none" | "no_auth" | "no-auth" => Ok(ProviderAuthStrategy::NoAuth),
         other => anyhow::bail!("invalid_configuration: unsupported auth strategy {other}"),
     }
+}
+
+fn has_explicit_provider_env_override() -> bool {
+    [
+        "RUST_AGENT_PROVIDER_ID",
+        "RUST_AGENT_PROVIDER_BASE_URL",
+        "RUST_AGENT_PROVIDER_API_KEY",
+        "RUST_AGENT_PROVIDER_CHAT_COMPLETIONS_PATH",
+        "RUST_AGENT_PROVIDER_DEFAULT_MODEL",
+        "RUST_AGENT_PROVIDER_MODEL",
+        "RUST_AGENT_PROVIDER_TIMEOUT_MS",
+        "RUST_AGENT_PROVIDER_STREAM_TIMEOUT_MS",
+        "RUST_AGENT_PROVIDER_RETRY_MAX_ATTEMPTS",
+        "RUST_AGENT_PROVIDER_RETRY_INITIAL_BACKOFF_MS",
+        "RUST_AGENT_PROVIDER_RETRY_MAX_BACKOFF_MS",
+        "RUST_AGENT_PROVIDER_PROTOCOL",
+        "RUST_AGENT_PROVIDER_COMPATIBILITY_PROFILE",
+        "RUST_AGENT_PROVIDER_AUTH_STRATEGY",
+    ]
+    .iter()
+    .any(|key| {
+        std::env::var(key)
+            .ok()
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false)
+    })
 }
 use crate::core::concurrency::SubagentLimiter;
 use crate::service::api::retry::RetryPolicy;
@@ -702,7 +729,7 @@ impl RuntimeBootstrap {
         };
         let snapshot = build_runtime_plugin_snapshot(&app_state);
         let command_registry = snapshot.command_registry.clone();
-        let provider_config = self.build_model_provider_config()?;
+        let provider_config = self.build_model_provider_config(&config_root)?;
         validate_provider_config(&provider_config)
             .map_err(|error| anyhow::anyhow!(error.to_string()))?;
         let api_client = ModelProviderClient::from_config_with_observability(
@@ -993,11 +1020,26 @@ impl RuntimeBootstrap {
         FilesystemPolicy::load_from_path(&path).map(Some)
     }
 
-    fn build_model_provider_config(&self) -> anyhow::Result<ModelProviderConfig> {
+    fn build_model_provider_config(
+        &self,
+        config_root: &std::path::Path,
+    ) -> anyhow::Result<ModelProviderConfig> {
         if let Some(provider_config) = &self.provider_config_override {
             return Ok(provider_config.clone());
         }
 
+        if has_explicit_provider_env_override() {
+            return self.build_model_provider_config_from_env();
+        }
+
+        if let Some(resolved) = load_active_model_profile_from_root(config_root)? {
+            return Ok(resolved.config);
+        }
+
+        self.build_model_provider_config_from_env()
+    }
+
+    fn build_model_provider_config_from_env(&self) -> anyhow::Result<ModelProviderConfig> {
         let provider_id = std::env::var("RUST_AGENT_PROVIDER_ID")
             .ok()
             .filter(|value| !value.trim().is_empty())
@@ -1082,7 +1124,13 @@ impl RuntimeBootstrap {
             .filter(|value| !value.trim().is_empty())
             .map(|value| parse_provider_auth_strategy(&value))
             .transpose()?
-            .unwrap_or(ProviderAuthStrategy::BearerApiKey);
+            .unwrap_or_else(|| {
+                if api_key.is_some() {
+                    ProviderAuthStrategy::BearerApiKey
+                } else {
+                    ProviderAuthStrategy::NoAuth
+                }
+            });
         Ok(ModelProviderConfig {
             provider_id,
             protocol,

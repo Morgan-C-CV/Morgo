@@ -1,3 +1,4 @@
+use std::fs;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -76,7 +77,7 @@ fn bootstrap_env_lock() -> &'static Mutex<()> {
 }
 
 struct BootstrapEnvGuard {
-    keys: [&'static str; 8],
+    keys: [&'static str; 15],
 }
 
 impl BootstrapEnvGuard {
@@ -90,6 +91,13 @@ impl BootstrapEnvGuard {
             "RUST_AGENT_PROVIDER_MODEL",
             "RUST_AGENT_PROVIDER_PROTOCOL",
             "RUST_AGENT_PROVIDER_COMPATIBILITY_PROFILE",
+            "RUST_AGENT_PROVIDER_AUTH_STRATEGY",
+            "RUST_AGENT_PROVIDER_TIMEOUT_MS",
+            "RUST_AGENT_PROVIDER_STREAM_TIMEOUT_MS",
+            "RUST_AGENT_PROVIDER_RETRY_MAX_ATTEMPTS",
+            "RUST_AGENT_PROVIDER_RETRY_INITIAL_BACKOFF_MS",
+            "RUST_AGENT_PROVIDER_RETRY_MAX_BACKOFF_MS",
+            "OPENAI_API_KEY",
         ];
         for key in keys {
             remove_env_var(key);
@@ -217,6 +225,273 @@ fn bootstrap_phase_sequence_includes_all_phases() {
 }
 
 #[test]
+fn bootstrap_uses_models_toml_active_when_no_env_override() {
+    let _env_lock = bootstrap_env_lock().lock().expect("bootstrap env lock");
+    let _guard = BootstrapEnvGuard::new();
+    let root = unique_temp_path("rust-agent-models-active");
+    fs::create_dir_all(root.join(".claude")).expect("create config root");
+    fs::write(
+        root.join(".claude/models.toml"),
+        r#"
+active = "openai-fast"
+
+[profiles.openai-fast]
+provider_id = "openai"
+protocol = "openai_compatible"
+compatibility_profile = "openai_compatible"
+base_url = "https://api.openai.com"
+model = "gpt-4.1-mini"
+api_key_env = "OPENAI_API_KEY"
+"#,
+    )
+    .expect("write models.toml");
+    set_env_var("OPENAI_API_KEY", "models-key");
+
+    let runtime = RuntimeBootstrap::from_cli(BootstrapCli {
+        print: None,
+        interactive: false,
+        init_only: true,
+        continue_session: false,
+        resume: None,
+        trace_startup: false,
+        show_tools: false,
+        tui: false,
+        surface: "cli".into(),
+    });
+    let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::InitOnly, false);
+    state.current_cwd = root;
+
+    let bundle = runtime
+        .initialize_runtime(
+            &state,
+            "provider-models-active".into(),
+            Arc::new(rust_agent::task::manager::TaskManager::default()),
+            Arc::new(rust_agent::task::list_manager::TaskListManager::default()),
+            Arc::new(rust_agent::plan::manager::PlanManager::default()),
+        )
+        .expect("runtime should initialize from models.toml");
+
+    assert_eq!(bundle.provider_config.provider_id, "openai");
+    assert_eq!(bundle.provider_config.model_id, "gpt-4.1-mini");
+    assert_eq!(
+        bundle.provider_config.api_key.as_deref(),
+        Some("models-key")
+    );
+    assert_eq!(
+        bundle.provider_config.chat_completions_path,
+        "/v1/chat/completions"
+    );
+}
+
+#[test]
+fn bootstrap_models_toml_missing_file_falls_back_to_existing_bootstrap_defaults() {
+    let _env_lock = bootstrap_env_lock().lock().expect("bootstrap env lock");
+    let _guard = BootstrapEnvGuard::new();
+    let root = unique_temp_path("rust-agent-models-missing");
+    fs::create_dir_all(root.join(".claude")).expect("create config root");
+
+    let runtime = RuntimeBootstrap::from_cli(BootstrapCli {
+        print: None,
+        interactive: false,
+        init_only: true,
+        continue_session: false,
+        resume: None,
+        trace_startup: false,
+        show_tools: false,
+        tui: false,
+        surface: "cli".into(),
+    });
+    let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::InitOnly, false);
+    state.current_cwd = root;
+
+    let bundle = runtime
+        .initialize_runtime(
+            &state,
+            "provider-models-missing".into(),
+            Arc::new(rust_agent::task::manager::TaskManager::default()),
+            Arc::new(rust_agent::task::list_manager::TaskListManager::default()),
+            Arc::new(rust_agent::plan::manager::PlanManager::default()),
+        )
+        .expect("runtime should keep existing defaults when models.toml is absent");
+
+    assert_eq!(bundle.provider_config.provider_id, "anthropic");
+    assert_eq!(bundle.provider_config.base_url, "http://localhost");
+    assert_eq!(bundle.provider_config.model_id, "default-model");
+}
+
+#[test]
+fn bootstrap_ignores_models_toml_when_explicit_provider_env_exists() {
+    let _env_lock = bootstrap_env_lock().lock().expect("bootstrap env lock");
+    let _guard = BootstrapEnvGuard::new();
+    let root = unique_temp_path("rust-agent-models-env-override");
+    fs::create_dir_all(root.join(".claude")).expect("create config root");
+    fs::write(
+        root.join(".claude/models.toml"),
+        r#"
+active = "openai-fast"
+
+[profiles.openai-fast]
+provider_id = "openai"
+protocol = "openai_compatible"
+compatibility_profile = "openai_compatible"
+base_url = "https://api.openai.com"
+model = "gpt-4.1-mini"
+api_key_env = "OPENAI_API_KEY"
+"#,
+    )
+    .expect("write models.toml");
+    set_env_var("OPENAI_API_KEY", "models-key");
+    set_env_var("RUST_AGENT_PROVIDER_ID", "openai");
+    set_env_var("RUST_AGENT_PROVIDER_BASE_URL", "http://localhost:4010");
+    set_env_var("RUST_AGENT_PROVIDER_API_KEY", "env-key");
+    set_env_var("RUST_AGENT_PROVIDER_DEFAULT_MODEL", "env-model");
+
+    let runtime = RuntimeBootstrap::from_cli(BootstrapCli {
+        print: None,
+        interactive: false,
+        init_only: true,
+        continue_session: false,
+        resume: None,
+        trace_startup: false,
+        show_tools: false,
+        tui: false,
+        surface: "cli".into(),
+    });
+    let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::InitOnly, false);
+    state.current_cwd = root;
+
+    let bundle = runtime
+        .initialize_runtime(
+            &state,
+            "provider-models-env-override".into(),
+            Arc::new(rust_agent::task::manager::TaskManager::default()),
+            Arc::new(rust_agent::task::list_manager::TaskListManager::default()),
+            Arc::new(rust_agent::plan::manager::PlanManager::default()),
+        )
+        .expect("runtime should ignore models.toml when explicit env exists");
+
+    assert_eq!(bundle.provider_config.base_url, "http://localhost:4010");
+    assert_eq!(bundle.provider_config.model_id, "env-model");
+    assert_eq!(bundle.provider_config.api_key.as_deref(), Some("env-key"));
+}
+
+#[test]
+fn bootstrap_api_key_env_resolves_into_api_key() {
+    let _env_lock = bootstrap_env_lock().lock().expect("bootstrap env lock");
+    let _guard = BootstrapEnvGuard::new();
+    let root = unique_temp_path("rust-agent-models-api-key-env");
+    fs::create_dir_all(root.join(".claude")).expect("create config root");
+    fs::write(
+        root.join(".claude/models.toml"),
+        r#"
+active = "openai-fast"
+
+[profiles.openai-fast]
+provider_id = "openai"
+protocol = "openai_compatible"
+compatibility_profile = "openai_compatible"
+base_url = "https://api.openai.com"
+model = "gpt-4.1-mini"
+api_key_env = "OPENAI_API_KEY"
+"#,
+    )
+    .expect("write models.toml");
+    set_env_var("OPENAI_API_KEY", "resolved-secret");
+
+    let runtime = RuntimeBootstrap::from_cli(BootstrapCli {
+        print: None,
+        interactive: false,
+        init_only: true,
+        continue_session: false,
+        resume: None,
+        trace_startup: false,
+        show_tools: false,
+        tui: false,
+        surface: "cli".into(),
+    });
+    let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::InitOnly, false);
+    state.current_cwd = root;
+
+    let bundle = runtime
+        .initialize_runtime(
+            &state,
+            "provider-models-api-key-env".into(),
+            Arc::new(rust_agent::task::manager::TaskManager::default()),
+            Arc::new(rust_agent::task::list_manager::TaskListManager::default()),
+            Arc::new(rust_agent::plan::manager::PlanManager::default()),
+        )
+        .expect("runtime should resolve api_key_env into api_key");
+
+    assert_eq!(
+        bundle.provider_config.api_key.as_deref(),
+        Some("resolved-secret")
+    );
+}
+
+#[test]
+fn bootstrap_gemini_openai_profile_does_not_infer_native_unsupported() {
+    let _env_lock = bootstrap_env_lock().lock().expect("bootstrap env lock");
+    let _guard = BootstrapEnvGuard::new();
+    let root = unique_temp_path("rust-agent-models-gemini-openai");
+    fs::create_dir_all(root.join(".claude")).expect("create config root");
+    fs::write(
+        root.join(".claude/models.toml"),
+        r#"
+active = "gemini-flash"
+
+[profiles.gemini-flash]
+provider_id = "gemini-openai"
+protocol = "openai_compatible"
+compatibility_profile = "openai_compatible"
+base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
+chat_completions_path = "/chat/completions"
+model = "gemini-2.5-flash"
+api_key_env = "OPENAI_API_KEY"
+"#,
+    )
+    .expect("write models.toml");
+    set_env_var("OPENAI_API_KEY", "gemini-key");
+
+    let runtime = RuntimeBootstrap::from_cli(BootstrapCli {
+        print: None,
+        interactive: false,
+        init_only: true,
+        continue_session: false,
+        resume: None,
+        trace_startup: false,
+        show_tools: false,
+        tui: false,
+        surface: "cli".into(),
+    });
+    let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::InitOnly, false);
+    state.current_cwd = root;
+
+    let bundle = runtime
+        .initialize_runtime(
+            &state,
+            "provider-models-gemini-openai".into(),
+            Arc::new(rust_agent::task::manager::TaskManager::default()),
+            Arc::new(rust_agent::task::list_manager::TaskListManager::default()),
+            Arc::new(rust_agent::plan::manager::PlanManager::default()),
+        )
+        .expect("runtime should accept gemini openai-compatible profile");
+
+    assert_eq!(bundle.provider_config.provider_id, "gemini-openai");
+    assert_eq!(
+        bundle.provider_config.protocol,
+        ProviderProtocol::OpenAICompatible
+    );
+    assert_eq!(
+        bundle.provider_config.compatibility_profile,
+        ProviderCompatibilityProfileKind::OpenAICompatible
+    );
+    assert_eq!(
+        bundle.provider_config.chat_completions_path,
+        "/chat/completions"
+    );
+}
+
+#[test]
 fn bootstrap_infers_openai_family_provider_contract_from_env() {
     let _env_lock = bootstrap_env_lock().lock().expect("bootstrap env lock");
     let _guard = BootstrapEnvGuard::new();
@@ -264,6 +539,55 @@ fn bootstrap_infers_openai_family_provider_contract_from_env() {
         bundle.provider_config.auth_strategy,
         ProviderAuthStrategy::BearerApiKey
     );
+}
+
+#[test]
+fn bootstrap_invalid_models_toml_fails_fast() {
+    let _env_lock = bootstrap_env_lock().lock().expect("bootstrap env lock");
+    let _guard = BootstrapEnvGuard::new();
+    let root = unique_temp_path("rust-agent-models-invalid");
+    fs::create_dir_all(root.join(".claude")).expect("create config root");
+    fs::write(
+        root.join(".claude/models.toml"),
+        r#"
+active = "bad"
+
+[profiles.bad]
+provider_id = "custom-local"
+protocol = "anthropic"
+compatibility_profile = "openai_compatible"
+base_url = "http://localhost:8080"
+model = "local-model"
+auth_strategy = "none"
+"#,
+    )
+    .expect("write models.toml");
+
+    let runtime = RuntimeBootstrap::from_cli(BootstrapCli {
+        print: None,
+        interactive: false,
+        init_only: true,
+        continue_session: false,
+        resume: None,
+        trace_startup: false,
+        show_tools: false,
+        tui: false,
+        surface: "cli".into(),
+    });
+    let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::InitOnly, false);
+    state.current_cwd = root;
+
+    let error = runtime
+        .initialize_runtime(
+            &state,
+            "provider-models-invalid".into(),
+            Arc::new(rust_agent::task::manager::TaskManager::default()),
+            Arc::new(rust_agent::task::list_manager::TaskListManager::default()),
+            Arc::new(rust_agent::plan::manager::PlanManager::default()),
+        )
+        .expect_err("invalid models.toml should fail fast");
+
+    assert!(error.to_string().contains("incompatible protocol/profile"));
 }
 
 #[test]

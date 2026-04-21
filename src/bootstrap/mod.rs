@@ -1,4 +1,5 @@
 pub mod config_root;
+pub mod model_profiles;
 mod runtime;
 mod setup;
 mod state;
