@@ -8,7 +8,8 @@ use rust_agent::bootstrap::model_profiles::{
 use rust_agent::bootstrap::{
     BootstrapCli, BootstrapPhase, BootstrapState, InteractionSurface, PromptAugmentationMetadata,
     RuntimeBootstrap, SessionMode, SessionSource, StartupWarning, UserAccessDecision,
-    is_tui_exit_input, tui_clear_screen_prefix,
+    execute_runtime_shutdown_with_deadline, is_tui_exit_input, runtime_shutdown_timeout,
+    tui_clear_screen_prefix,
 };
 use rust_agent::core::message::Message;
 use rust_agent::history::resume::{RestoreRequest, RestoreSource, resolve_session_state};
@@ -26,7 +27,9 @@ use rust_agent::state::app_state::{AppState, AppStateRuntimeChange, RuntimeRole}
 use rust_agent::state::permission_context::{PermissionMode, ToolPermissionContext};
 use rust_agent::state::store::AppStateStore;
 use rust_agent::task::list_types::{TaskListItem, TaskListSnapshot, TaskListStatus};
+use rust_agent::task::manager::TaskManager;
 use rust_agent::tool::registry::ToolAssemblyContext;
+use std::time::Duration;
 
 fn runtime_for_surface(surface: &str, interactive: bool, init_only: bool) -> RuntimeBootstrap {
     RuntimeBootstrap::from_cli(BootstrapCli {
@@ -164,6 +167,115 @@ fn unique_temp_path(prefix: &str) -> std::path::PathBuf {
         .expect("clock should be after unix epoch")
         .as_nanos();
     std::env::temp_dir().join(format!("{prefix}-{nanos}"))
+}
+
+fn shutdown_test_app_state(
+    session_store: Arc<InMemorySessionStore>,
+    task_manager: Arc<TaskManager>,
+) -> AppState {
+    let session_id = SessionId("shutdown-session".into());
+    let snapshot = SessionSnapshot {
+        session_id: session_id.clone(),
+        surface: InteractionSurface::Cli,
+        session_mode: SessionMode::Interactive,
+        cwd: ".".into(),
+        last_turn_at: None,
+        prompt_seed: None,
+    };
+    session_store.save(snapshot.clone(), SessionHistory::default());
+    let permission_context = ToolPermissionContext::new(PermissionMode::Default)
+        .with_task_manager(task_manager)
+        .with_active_session_id(session_id.0.clone())
+        .with_active_surface(InteractionSurface::Cli)
+        .with_notification_dispatcher(
+            rust_agent::interaction::dispatcher::NotificationDispatcher::new(
+                rust_agent::interaction::telegram::gateway::TelegramGateway::default(),
+            ),
+        );
+    AppState {
+        surface: InteractionSurface::Cli,
+        session_mode: SessionMode::Interactive,
+        client_type: rust_agent::bootstrap::ClientType::Cli,
+        session_source: SessionSource::LocalCli,
+        runtime_role: RuntimeRole::Coordinator,
+        worker_role: None,
+        permission_context,
+        command_registry: None,
+        runtime_tool_registry: None,
+        skill_registry: None,
+        mcp_runtime: None,
+        plugin_load_result: None,
+        cost_tracker: rust_agent::cost::tracker::CostTracker::default(),
+        service_observability_tracker:
+            rust_agent::service::observability::ServiceObservabilityTracker::default(),
+        notification_dispatcher: rust_agent::interaction::dispatcher::NotificationDispatcher::new(
+            rust_agent::interaction::telegram::gateway::TelegramGateway::default(),
+        ),
+        audit_log: Arc::new(std::sync::Mutex::new(
+            rust_agent::security::audit::AuditLog::default(),
+        )),
+        startup_trace: Vec::new(),
+        active_model_runtime: None,
+        active_model_profile_name: None,
+        active_model_profile_source:
+            rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
+        active_model_provider_summary: rust_agent::state::app_state::ActiveModelProviderSummary {
+            provider_id: "default-provider".into(),
+            protocol: "Anthropic".into(),
+            compatibility_profile: "Anthropic".into(),
+            base_url_host: "localhost".into(),
+            model: "default-model".into(),
+            auth_status: "none".into(),
+        },
+        active_session_id: session_id.0,
+        session_store: Some(session_store),
+        session: Some(snapshot),
+        history: Some(SessionHistory::default()),
+        restored_session: None,
+        last_activity_ts: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        cancellation_token: tokio_util::sync::CancellationToken::new(),
+        subagent_limiter: None,
+        boss_coordinator: None,
+    }
+}
+
+#[test]
+fn runtime_shutdown_timeout_uses_env_override() {
+    let _guard = bootstrap_env_lock().lock().expect("env lock");
+    let _env = BootstrapEnvGuard::new();
+    set_env_var("RUST_AGENT_RUNTIME_SHUTDOWN_TIMEOUT_MS", "2500");
+    assert_eq!(runtime_shutdown_timeout(), Duration::from_millis(2500));
+}
+
+#[tokio::test]
+async fn execute_runtime_shutdown_forces_hibernation_after_deadline() {
+    let store = Arc::new(InMemorySessionStore::default());
+    let tasks = Arc::new(TaskManager::default());
+    let app_state = shutdown_test_app_state(store.clone(), tasks.clone());
+    let task = tasks.create("shutdown task", "shutdown-session", InteractionSurface::Cli);
+    tasks.launch(&task.id, "work", std::future::pending::<()>());
+
+    execute_runtime_shutdown_with_deadline(
+        app_state.clone(),
+        "test.shutdown_timeout",
+        Duration::from_millis(10),
+    )
+    .await;
+
+    assert!(app_state.cancellation_token.is_cancelled());
+    assert_eq!(
+        tasks.status(&task.id),
+        Some(rust_agent::task::types::TaskStatus::Killed)
+    );
+    assert!(
+        store
+            .load(&SessionRestoreRequest {
+                resume: Some("shutdown-session".into()),
+                continue_session: false,
+            })
+            .is_some(),
+        "shutdown should persist the current session state"
+    );
 }
 
 #[test]

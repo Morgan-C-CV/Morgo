@@ -1,6 +1,6 @@
 use std::io::{self, BufRead};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
@@ -209,6 +209,8 @@ pub fn is_tui_exit_input(input: &str) -> bool {
 pub fn tui_clear_screen_prefix() -> &'static str {
     "\x1B[2J\x1B[H"
 }
+
+const DEFAULT_RUNTIME_SHUTDOWN_TIMEOUT_MS: u64 = 1_500;
 
 #[derive(Debug, Clone, Parser)]
 #[command(name = "rust-agent", about = "Rust agent runtime")]
@@ -536,7 +538,7 @@ impl RuntimeBootstrap {
                     if self.cli.tui {
                         self.print_tui_message("Exiting TUI session.");
                     }
-                    app_state.shutdown();
+                    execute_runtime_shutdown(app_state.clone(), "interactive_exit").await;
                     break;
                 }
                 let output = handle_cli_input(&router, &engine, &app_state, line).await?;
@@ -1278,12 +1280,98 @@ impl RuntimeBootstrap {
 
 fn spawn_runtime_signal_shutdown(app_state: AppState) {
     tokio::spawn(async move {
-        #[allow(unused_imports)]
-        use tokio::signal;
-        if signal::ctrl_c().await.is_ok() {
-            tracing::info!("received ctrl-c; shutting down runtime");
-            app_state.persist_current_session_state();
-            app_state.shutdown();
+        #[cfg(unix)]
+        {
+            use tokio::signal;
+            use tokio::signal::unix::{SignalKind, signal as unix_signal};
+
+            let mut terminate = unix_signal(SignalKind::terminate()).ok();
+            tokio::select! {
+                result = signal::ctrl_c() => {
+                    if result.is_ok() {
+                        execute_runtime_shutdown(app_state.clone(), "signal.ctrl_c").await;
+                    }
+                }
+                _ = async {
+                    match terminate.as_mut() {
+                        Some(stream) => {
+                            stream.recv().await;
+                        }
+                        None => std::future::pending::<()>().await,
+                    }
+                } => {
+                    execute_runtime_shutdown(app_state.clone(), "signal.sigterm").await;
+                }
+            }
+        }
+
+        #[cfg(not(unix))]
+        {
+            use tokio::signal;
+            if signal::ctrl_c().await.is_ok() {
+                execute_runtime_shutdown(app_state.clone(), "signal.ctrl_c").await;
+            }
         }
     });
+}
+
+pub fn runtime_shutdown_timeout() -> Duration {
+    let timeout_ms = std::env::var("RUST_AGENT_RUNTIME_SHUTDOWN_TIMEOUT_MS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_RUNTIME_SHUTDOWN_TIMEOUT_MS);
+    Duration::from_millis(timeout_ms)
+}
+
+pub async fn execute_runtime_shutdown(app_state: AppState, reason: &'static str) {
+    execute_runtime_shutdown_with_deadline(app_state, reason, runtime_shutdown_timeout()).await;
+}
+
+pub async fn execute_runtime_shutdown_with_deadline(
+    app_state: AppState,
+    reason: &'static str,
+    deadline: Duration,
+) {
+    tracing::info!(
+        "runtime shutdown requested: reason={}, deadline_ms={}",
+        reason,
+        deadline.as_millis()
+    );
+    app_state.persist_current_session_state();
+    app_state.shutdown();
+
+    let session_id = app_state.active_session_id.clone();
+    let running_tasks_cleared = async {
+        loop {
+            let has_running = app_state
+                .permission_context
+                .task_manager
+                .as_ref()
+                .map(|manager| manager.has_running_tasks_for_session(&session_id))
+                .unwrap_or(false);
+            if !has_running {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    };
+
+    if tokio::time::timeout(deadline, running_tasks_cleared)
+        .await
+        .is_err()
+    {
+        tracing::warn!(
+            "runtime shutdown deadline exceeded for session {}; forcing task hibernation",
+            session_id
+        );
+        if let Some(task_manager) = app_state.permission_context.task_manager.as_ref() {
+            task_manager.hibernate_owned_running_tasks(
+                &app_state.active_session_id,
+                &app_state.notification_dispatcher,
+            );
+        }
+    }
+
+    app_state.persist_current_session_state();
 }

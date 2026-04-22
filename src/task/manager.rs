@@ -441,6 +441,12 @@ impl TaskManager {
             .clone()
     }
 
+    pub fn has_running_tasks_for_session(&self, session_id: &str) -> bool {
+        self.list()
+            .into_iter()
+            .any(|task| task.owner.session_id == session_id && task.status == TaskStatus::Running)
+    }
+
     pub fn get_output(&self, id: &str, offset: usize) -> Option<TaskOutputSlice> {
         let output_file = self
             .store
