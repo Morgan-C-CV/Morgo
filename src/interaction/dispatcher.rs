@@ -8,6 +8,9 @@ use crate::interaction::notification::{Notification, NotificationTarget, Notific
 use crate::interaction::remote::{RemoteDeliveryMode, remote_delivery_mode_for_notification};
 use crate::interaction::telegram::gateway::TelegramGateway;
 
+const MAX_DELIVERED_NOTIFICATIONS: usize = 512;
+const MAX_INBOX_NOTIFICATIONS: usize = 128;
+
 #[derive(Debug, Clone, Default)]
 pub struct NotificationDispatcher {
     delivered: Arc<RwLock<Vec<Notification>>>,
@@ -88,10 +91,14 @@ impl NotificationDispatcher {
             return;
         };
 
-        self.delivered
+        let mut delivered = self
+            .delivered
             .write()
-            .expect("dispatcher state poisoned")
-            .push(prepared.clone());
+            .expect("dispatcher state poisoned");
+        if delivered.len() >= MAX_DELIVERED_NOTIFICATIONS {
+            delivered.remove(0);
+        }
+        delivered.push(prepared.clone());
 
         if self.should_enqueue_async(surface, &prepared) {
             self.enqueue_async(surface, prepared);
@@ -168,12 +175,15 @@ impl NotificationDispatcher {
             Some(NotificationTarget::Session { session_id }) => session_id.clone(),
             _ => notification.session_id.clone(),
         };
-        self.remote_inboxes
+        let mut inboxes = self
+            .remote_inboxes
             .write()
-            .expect("dispatcher state poisoned")
-            .entry(inbox_key)
-            .or_default()
-            .push(notification);
+            .expect("dispatcher state poisoned");
+        let inbox = inboxes.entry(inbox_key).or_default();
+        if inbox.len() >= MAX_INBOX_NOTIFICATIONS {
+            inbox.remove(0);
+        }
+        inbox.push(notification);
     }
 
     fn enqueue_telegram(&self, notification: Notification) {
@@ -183,12 +193,15 @@ impl NotificationDispatcher {
             | Some(NotificationTarget::RemoteActor { .. }) => notification.session_id.clone(),
             None => notification.session_id.clone(),
         };
-        self.telegram_inboxes
+        let mut inboxes = self
+            .telegram_inboxes
             .write()
-            .expect("dispatcher state poisoned")
-            .entry(inbox_key)
-            .or_default()
-            .push(notification);
+            .expect("dispatcher state poisoned");
+        let inbox = inboxes.entry(inbox_key).or_default();
+        if inbox.len() >= MAX_INBOX_NOTIFICATIONS {
+            inbox.remove(0);
+        }
+        inbox.push(notification);
     }
 
     fn drain_inboxes(

@@ -1346,3 +1346,48 @@ fn task_output_reads_support_offsets() {
     // Cleanup
     let _ = std::fs::remove_dir_all(&temp_root);
 }
+
+#[test]
+fn events_ring_buffer_drops_oldest_when_full() {
+    let manager = TaskManager::default();
+    let dispatcher = NotificationDispatcher::new(TelegramGateway::default());
+
+    // Create and complete 257 tasks — one more than MAX_QUEUED_EVENTS (256).
+    let mut first_task_id = String::new();
+    for i in 0..257 {
+        let task = manager.create(format!("task {i}"), "session-ring", InteractionSurface::Cli);
+        if i == 0 {
+            first_task_id = task.id.clone();
+        }
+        manager.complete(&task.id, &dispatcher);
+    }
+
+    let all_events = manager.drain_events_for_target("session-ring", None);
+    // Must not exceed the cap.
+    assert!(
+        all_events.len() <= 256,
+        "expected at most 256 events, got {}",
+        all_events.len()
+    );
+    // The very first task's event should have been evicted.
+    assert!(
+        !all_events.iter().any(|e| e.task_id == first_task_id),
+        "oldest event should have been dropped"
+    );
+}
+
+#[test]
+fn events_drain_clears_matched_events_regression() {
+    let manager = TaskManager::default();
+    let dispatcher = NotificationDispatcher::new(TelegramGateway::default());
+    let task_a = manager.create("task a", "session-drain", InteractionSurface::Cli);
+    let task_b = manager.create("task b", "session-drain", InteractionSurface::Cli);
+    manager.complete(&task_a.id, &dispatcher);
+    manager.complete(&task_b.id, &dispatcher);
+
+    let drained = manager.drain_events_for_target("session-drain", None);
+    assert_eq!(drained.len(), 2);
+    // Second drain should be empty — events were consumed.
+    let second_drain = manager.drain_events_for_target("session-drain", None);
+    assert_eq!(second_drain.len(), 0);
+}

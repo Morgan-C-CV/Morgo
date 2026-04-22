@@ -36,6 +36,8 @@ struct TaskRuntimeStore {
     events: Vec<TaskEvent>,
 }
 
+const MAX_QUEUED_EVENTS: usize = 256;
+
 #[derive(Debug, Clone, Default)]
 pub struct TaskManager {
     store: Arc<RwLock<TaskStore>>,
@@ -750,11 +752,14 @@ impl TaskManager {
     }
 
     fn enqueue_task_event(&self, event: TaskEvent) {
-        self.runtime_store
+        let mut runtime_store = self
+            .runtime_store
             .write()
-            .expect("task runtime store poisoned")
-            .events
-            .push(event);
+            .expect("task runtime store poisoned");
+        if runtime_store.events.len() >= MAX_QUEUED_EVENTS {
+            runtime_store.events.remove(0);
+        }
+        runtime_store.events.push(event);
     }
 
     fn dispatch_task_notification(

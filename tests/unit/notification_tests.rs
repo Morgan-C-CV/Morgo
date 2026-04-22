@@ -2885,3 +2885,60 @@ fn telegram_dispatch_only_enqueues_wake_up_notifications() {
             .any(|notification| notification.notification_type == NotificationType::RuntimeNotice)
     );
 }
+
+#[test]
+fn delivered_capped_at_max() {
+    let dispatcher = NotificationDispatcher::new(TelegramGateway::default());
+    // Dispatch 513 CLI notifications — one more than MAX_DELIVERED_NOTIFICATIONS (512).
+    for i in 0..513u32 {
+        dispatcher.dispatch(
+            InteractionSurface::Cli,
+            Notification::runtime_notice(
+                "session-cap",
+                "info",
+                format!("notice {i}"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ),
+        );
+    }
+    let delivered = dispatcher.delivered();
+    assert!(
+        delivered.len() <= 512,
+        "expected at most 512 delivered, got {}",
+        delivered.len()
+    );
+}
+
+#[test]
+fn inbox_capped_per_session() {
+    let dispatcher = NotificationDispatcher::new(TelegramGateway::default());
+    // Dispatch 129 Remote RuntimeNotice notifications (DualChannel → enqueued to remote_inboxes).
+    // One more than MAX_INBOX_NOTIFICATIONS (128).
+    for i in 0..129u32 {
+        let n = Notification::runtime_notice(
+            "session-inbox-cap",
+            "info",
+            format!("msg {i}"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        dispatcher.dispatch(InteractionSurface::Remote, n);
+    }
+    let drained = dispatcher.drain_remote_notifications("session-inbox-cap", None);
+    assert!(
+        drained.len() <= 128,
+        "expected at most 128 inbox items, got {}",
+        drained.len()
+    );
+}

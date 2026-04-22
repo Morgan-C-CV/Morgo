@@ -1,8 +1,10 @@
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use crate::task::types::TaskOutputSlice;
+
+const MAX_TASK_OUTPUT_READ_BYTES: usize = 256 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct TaskOutputStore {
@@ -19,12 +21,13 @@ impl Default for TaskOutputStore {
     fn default() -> Self {
         #[cfg(test)]
         {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos();
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static COUNTER: AtomicU64 = AtomicU64::new(0);
+            let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+            let pid = std::process::id();
             Self {
-                root: std::env::temp_dir().join(format!("rust-agent-test-{now}")),
+                root: std::env::temp_dir()
+                    .join(format!("rust-agent-test-{pid}-{id}")),
             }
         }
         #[cfg(not(test))]
@@ -54,11 +57,53 @@ impl TaskOutputStore {
     }
 
     pub fn read_slice(&self, output_file: &str, offset: usize) -> anyhow::Result<TaskOutputSlice> {
-        let content = fs::read_to_string(output_file)?;
-        let safe_offset = clamp_to_char_boundary(&content, offset);
+        let mut file = match OpenOptions::new().read(true).open(output_file) {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(TaskOutputSlice {
+                    content: String::new(),
+                    next_offset: 0,
+                });
+            }
+            Err(e) => return Err(e.into()),
+        };
+        let file_len = file.seek(SeekFrom::End(0))? as usize;
+
+        // If offset is at or past end, nothing to return.
+        if offset >= file_len {
+            return Ok(TaskOutputSlice {
+                content: String::new(),
+                next_offset: file_len,
+            });
+        }
+
+        // Tail-read cap: only read the last MAX_TASK_OUTPUT_READ_BYTES of the file.
+        let cap_start = file_len.saturating_sub(MAX_TASK_OUTPUT_READ_BYTES);
+
+        // If the requested offset falls before the cap window, the caller is asking
+        // for data we no longer serve — return empty with a truncated marker so the
+        // caller knows to advance its offset.
+        if offset < cap_start {
+            let omitted = cap_start;
+            file.seek(SeekFrom::Start(cap_start as u64))?;
+            let mut buf = Vec::with_capacity(file_len - cap_start);
+            file.read_to_end(&mut buf)?;
+            let raw = String::from_utf8_lossy(&buf).into_owned();
+            let content = format!("[truncated: {omitted} bytes omitted]\n{raw}");
+            return Ok(TaskOutputSlice {
+                content,
+                next_offset: file_len,
+            });
+        }
+
+        // Normal path: offset is within the readable window.
+        file.seek(SeekFrom::Start(offset as u64))?;
+        let mut buf = Vec::with_capacity(file_len - offset);
+        file.read_to_end(&mut buf)?;
+        let raw = String::from_utf8_lossy(&buf).into_owned();
         Ok(TaskOutputSlice {
-            content: content[safe_offset..].to_string(),
-            next_offset: content.len(),
+            content: raw,
+            next_offset: file_len,
         })
     }
 
@@ -67,17 +112,3 @@ impl TaskOutputStore {
     }
 }
 
-fn clamp_to_char_boundary(content: &str, offset: usize) -> usize {
-    if offset >= content.len() {
-        return content.len();
-    }
-    if content.is_char_boundary(offset) {
-        return offset;
-    }
-
-    let mut candidate = offset;
-    while candidate > 0 && !content.is_char_boundary(candidate) {
-        candidate -= 1;
-    }
-    candidate
-}
