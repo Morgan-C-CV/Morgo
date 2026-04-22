@@ -1,4 +1,6 @@
-use crate::core::boss_state::{BossPlan, BossStage, BossStatus};
+use crate::core::boss_state::{BossPlan, BossPlanStep, BossPlanStepStatus, BossStage, BossStatus};
+use crate::task::types::{TaskEvent, TaskStatus};
+use serde_json::json;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
@@ -155,30 +157,44 @@ impl BossCoordinator {
         }
     }
 
-    /// Processes a task completion event to update the BossPlan status.
-    pub async fn on_task_event(&self, event: &crate::task::types::TaskEvent) -> anyhow::Result<()> {
-        let step_id = match event.step_id {
-            Some(id) => id,
-            None => return Ok(()),
+    /// Processes a task event to update the BossPlan by structured step identity.
+    pub async fn on_task_event(&self, event: &TaskEvent) -> anyhow::Result<()> {
+        let Some(step_id) = event.step_id else {
+            return Ok(());
         };
 
         let mut plan_guard = self.plan.write().await;
-        let plan = match plan_guard.as_mut() {
-            Some(p) => p,
-            None => return Ok(()),
+        let Some(plan) = plan_guard.as_mut() else {
+            return Ok(());
         };
 
-        if let Some(step) = plan.steps.iter_mut().find(|s| s.id == step_id) {
-            if event.status == crate::task::types::TaskStatus::Completed {
+        let Some(step) = plan.steps.iter_mut().find(|s| s.id == step_id) else {
+            return Ok(());
+        };
+
+        match event.status {
+            TaskStatus::Completed => {
                 step.completed = true;
+                step.status = BossPlanStepStatus::Completed;
                 step.worker_task_id = Some(event.task_id.clone());
                 tracing::info!("BossPlan: Step {} marked as completed", step_id);
-
-                // Update status current_step
-                let mut status = self.status.write().await;
-                status.current_step = plan.steps.iter().find(|s| !s.completed).map(|s| s.id);
             }
+            TaskStatus::Failed | TaskStatus::Killed => {
+                step.completed = false;
+                step.status = BossPlanStepStatus::Failed;
+                step.worker_task_id = Some(event.task_id.clone());
+                tracing::warn!("BossPlan: Step {} marked as failed", step_id);
+            }
+            TaskStatus::Running => {
+                step.status = BossPlanStepStatus::Running;
+                step.worker_task_id = Some(event.task_id.clone());
+            }
+            TaskStatus::Pending => {}
         }
+
+        let next_step = next_unfinished_step_id(plan);
+        drop(plan_guard);
+        self.update_current_step(next_step).await;
 
         Ok(())
     }
@@ -200,27 +216,46 @@ impl BossCoordinator {
         };
 
         let mut plan_guard = self.plan.write().await;
-        let plan = match plan_guard.as_mut() {
-            Some(p) => p,
-            None => return Ok(()),
+        let Some(plan) = plan_guard.as_mut() else {
+            return Ok(());
         };
 
-        if let Some(step) = plan.steps.iter_mut().find(|s| s.id == step_id) {
-            // We consider the step completed only if the status is "Completed" (case-insensitive check)
-            let status = notification.status.as_deref().unwrap_or("");
-            if status.to_lowercase() == "completed" {
+        let Some(step) = plan.steps.iter_mut().find(|s| s.id == step_id) else {
+            return Ok(());
+        };
+
+        match notification.status.as_deref().unwrap_or_default() {
+            status if status.eq_ignore_ascii_case("completed") => {
                 step.completed = true;
+                step.status = BossPlanStepStatus::Completed;
                 step.worker_task_id = notification.task_id.clone();
                 tracing::info!(
                     "BossPlan: Step {} marked as completed via notification",
                     step_id
                 );
-
-                // Update status current_step
-                let mut status_guard = self.status.write().await;
-                status_guard.current_step = plan.steps.iter().find(|s| !s.completed).map(|s| s.id);
             }
+            status
+                if status.eq_ignore_ascii_case("failed")
+                    || status.eq_ignore_ascii_case("killed") =>
+            {
+                step.completed = false;
+                step.status = BossPlanStepStatus::Failed;
+                step.worker_task_id = notification.task_id.clone();
+                tracing::warn!(
+                    "BossPlan: Step {} marked as failed via notification",
+                    step_id
+                );
+            }
+            status if status.eq_ignore_ascii_case("running") => {
+                step.status = BossPlanStepStatus::Running;
+                step.worker_task_id = notification.task_id.clone();
+            }
+            _ => {}
         }
+
+        let next_step = next_unfinished_step_id(plan);
+        drop(plan_guard);
+        self.update_current_step(next_step).await;
 
         Ok(())
     }
@@ -229,63 +264,182 @@ impl BossCoordinator {
     pub async fn get_next_runnable_step(&self) -> Option<usize> {
         let plan_guard = self.plan.read().await;
         let plan = plan_guard.as_ref()?;
-
-        if plan.steps.iter().all(|s| s.completed) {
-            return None;
-        }
-
-        plan.steps.iter().find(|s| !s.completed).map(|s| s.id)
+        next_runnable_step(plan).map(|step| step.id)
     }
 
-    /// Advances the plan by spawning the next worker if applicable.
-    /// This is the core of the Auto-Sequencing engine.
+    pub async fn build_step_spawn_payload(
+        &self,
+        step_id: usize,
+        parent_session_id: &str,
+    ) -> anyhow::Result<String> {
+        let plan_guard = self.plan.read().await;
+        let plan = plan_guard
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("No plan loaded"))?;
+        let step = plan
+            .steps
+            .iter()
+            .find(|step| step.id == step_id)
+            .ok_or_else(|| anyhow::anyhow!("Unknown boss step {step_id}"))?;
+
+        Ok(json!({
+            "task": format!(
+                "Boss mode step {}\nplan_id: {}\nobjective: {}\nacceptance:\n{}",
+                step.id,
+                plan.plan_id,
+                step.objective(),
+                format_acceptance(step),
+            ),
+            "role": "implement",
+            "inherit_context": true,
+            "reuse_strategy": "fresh",
+            "step_id": step.id,
+            "boss_plan_id": plan.plan_id,
+            "step_objective": step.objective(),
+            "step_acceptance": step.acceptance,
+            "parent_session_id": parent_session_id,
+            "parent_runtime_role": "coordinator"
+        })
+        .to_string())
+    }
+
+    /// Advances the plan by selecting the next deterministic action.
     pub async fn advance_plan(
         &self,
         app_state: &Arc<crate::state::app_state::AppState>,
     ) -> anyhow::Result<Option<String>> {
-        let next_step_id = match self.get_next_runnable_step().await {
-            Some(id) => id,
-            None => return Ok(None),
-        };
-
-        let (task_desc, role, orchestration_group_id) = {
-            let plan_guard = self.plan.read().await;
+        let parent_session_id = app_state.active_session_id.clone();
+        let next_action = {
+            let mut plan_guard = self.plan.write().await;
             let plan = plan_guard
-                .as_ref()
+                .as_mut()
                 .ok_or_else(|| anyhow::anyhow!("No plan loaded"))?;
 
             if !plan.auto_sequence {
                 return Ok(None);
             }
 
-            let step = plan.steps.iter().find(|s| s.id == next_step_id).unwrap();
-            let desc = format!(
-                "{} (Boss Mode Auto-Step {})",
-                step.description, next_step_id
-            );
-            // Default to Implement for execution steps if not specified,
-            // but we might want to infer this from the step description in the future.
-            (
-                desc,
-                crate::state::app_state::WorkerRole::Implement,
-                plan.steps[0]
-                    .worker_task_id
-                    .as_deref()
-                    .map(|id| id.to_owned()),
-            )
+            if plan.steps.iter().all(|step| step.completed) {
+                Some(AdvanceOutcome::PlanComplete)
+            } else if plan
+                .steps
+                .iter()
+                .any(|step| step.status.is_terminal_failure())
+            {
+                Some(AdvanceOutcome::TerminalFailure)
+            } else if plan
+                .steps
+                .iter()
+                .any(|step| step.status == BossPlanStepStatus::Running)
+            {
+                None
+            } else if let Some(step_id) = next_runnable_step(plan).map(|step| step.id) {
+                let step = plan
+                    .steps
+                    .iter_mut()
+                    .find(|step| step.id == step_id)
+                    .expect("runnable step must exist");
+                if step.requires_approval {
+                    Some(AdvanceOutcome::ApprovalBarrier(step.id))
+                } else {
+                    step.status = BossPlanStepStatus::Running;
+                    Some(AdvanceOutcome::Dispatch(step_id))
+                }
+            } else {
+                Some(AdvanceOutcome::NoRunnableStep)
+            }
         };
 
-        // We need ToolRegistry to invoke AgentTool.
-        // Or we can just call launch_agent_task directly if we can access it.
-        // For now, let's just mark it as "ready to advance" in the state
-        // until we decide on the best way to trigger the actual tool call.
+        match next_action {
+            Some(AdvanceOutcome::PlanComplete) => {
+                self.update_current_step(None).await;
+                self.transition_to(BossStage::Completed).await?;
+                Ok(Some(
+                    "Boss plan complete; no further steps to dispatch.".into(),
+                ))
+            }
+            Some(AdvanceOutcome::TerminalFailure) => Ok(Some(
+                "Boss plan stopped after a terminal step failure; auto-advance halted.".into(),
+            )),
+            Some(AdvanceOutcome::ApprovalBarrier(step_id)) => {
+                self.update_step_status(step_id, BossPlanStepStatus::WaitingForApproval)
+                    .await?;
+                self.update_current_step(Some(step_id)).await;
+                Ok(Some(format!(
+                    "Boss plan paused before step {} because it requires approval.",
+                    step_id
+                )))
+            }
+            Some(AdvanceOutcome::Dispatch(step_id)) => {
+                self.update_current_step(Some(step_id)).await;
+                let payload = self
+                    .build_step_spawn_payload(step_id, &parent_session_id)
+                    .await?;
+                Ok(Some(payload))
+            }
+            Some(AdvanceOutcome::NoRunnableStep) | None => Ok(None),
+        }
+    }
 
-        tracing::info!("BossPlan: Auto-advancing to step {}", next_step_id);
+    async fn update_current_step(&self, current_step: Option<usize>) {
+        let mut status = self.status.write().await;
+        status.current_step = current_step;
+    }
 
-        Ok(Some(format!(
-            "Next recommended action: Spawn agent for step {}: {}",
-            next_step_id, task_desc
-        )))
+    async fn update_step_status(
+        &self,
+        step_id: usize,
+        next_status: BossPlanStepStatus,
+    ) -> anyhow::Result<()> {
+        let mut plan_guard = self.plan.write().await;
+        let plan = plan_guard
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("No plan loaded"))?;
+        let step = plan
+            .steps
+            .iter_mut()
+            .find(|step| step.id == step_id)
+            .ok_or_else(|| anyhow::anyhow!("Unknown boss step {step_id}"))?;
+        step.status = next_status;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AdvanceOutcome {
+    Dispatch(usize),
+    ApprovalBarrier(usize),
+    TerminalFailure,
+    PlanComplete,
+    NoRunnableStep,
+}
+
+fn next_unfinished_step_id(plan: &BossPlan) -> Option<usize> {
+    plan.steps
+        .iter()
+        .find(|step| !step.completed)
+        .map(|step| step.id)
+}
+
+fn next_runnable_step(plan: &BossPlan) -> Option<&BossPlanStep> {
+    plan.steps.iter().find(|step| {
+        !step.completed
+            && matches!(
+                step.status,
+                BossPlanStepStatus::Pending | BossPlanStepStatus::WaitingForApproval
+            )
+    })
+}
+
+fn format_acceptance(step: &BossPlanStep) -> String {
+    if step.acceptance.is_empty() {
+        "- Complete the step objective.".into()
+    } else {
+        step.acceptance
+            .iter()
+            .map(|item| format!("- {item}"))
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 }
 
@@ -390,6 +544,7 @@ mod tests {
     #[tokio::test]
     async fn test_boss_plan_persistence() {
         let plan = BossPlan {
+            plan_id: "plan-test".into(),
             task_description: "Fix bugs".into(),
             document_spec: "Spec v1".into(),
             pseudo_code: "Code v1".into(),
@@ -442,11 +597,16 @@ mod tests {
 
         // 2. Save a plan that is accepted
         let plan = BossPlan {
+            plan_id: "plan-restore".into(),
             task_description: "task".into(),
             accepted_by_user: true,
             steps: vec![crate::core::boss_state::BossPlanStep {
                 id: 0,
                 description: "".into(),
+                objective: None,
+                acceptance: Vec::new(),
+                requires_approval: false,
+                status: BossPlanStepStatus::Pending,
                 completed: false,
                 result_diff: None,
                 worker_task_id: None,

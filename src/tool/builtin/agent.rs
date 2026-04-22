@@ -38,6 +38,10 @@ struct SpawnAgentRequest {
     orchestration_group_id: Option<String>,
     phase: Option<crate::task::types::WorkerPhase>,
     step_id: Option<usize>,
+    boss_plan_id: Option<String>,
+    step_objective: Option<String>,
+    step_acceptance: Vec<String>,
+    parent_session_id: Option<String>,
     requires_verification: bool,
 }
 
@@ -59,6 +63,10 @@ struct AgentJsonRequest {
     orchestration_group_id: Option<String>,
     phase: Option<String>,
     step_id: Option<usize>,
+    boss_plan_id: Option<String>,
+    step_objective: Option<String>,
+    step_acceptance: Option<Vec<String>>,
+    parent_session_id: Option<String>,
     requires_verification: Option<bool>,
     task_id: Option<String>,
     message: Option<String>,
@@ -189,7 +197,7 @@ fn launch_agent_task(
     dispatcher: NotificationDispatcher,
     permit: Option<tokio::sync::OwnedSemaphorePermit>,
 ) {
-    let task_input = request.task.clone();
+    let task_input = build_worker_task_input(&request);
     let query_context = parent_context.create_subagent_context(
         task_id.clone(),
         permissions
@@ -263,6 +271,10 @@ fn parse_agent_request(input: &str) -> anyhow::Result<AgentRequest> {
                 orchestration_group_id: request.orchestration_group_id,
                 phase: parse_worker_phase(request.phase.as_deref())?,
                 step_id: request.step_id,
+                boss_plan_id: request.boss_plan_id,
+                step_objective: request.step_objective,
+                step_acceptance: request.step_acceptance.unwrap_or_default(),
+                parent_session_id: request.parent_session_id,
                 requires_verification: request.requires_verification.unwrap_or(false),
             }));
         }
@@ -287,8 +299,49 @@ fn parse_agent_request(input: &str) -> anyhow::Result<AgentRequest> {
         orchestration_group_id: None,
         phase: None,
         step_id: None,
+        boss_plan_id: None,
+        step_objective: None,
+        step_acceptance: Vec::new(),
+        parent_session_id: None,
         requires_verification: false,
     }))
+}
+
+fn build_worker_task_input(request: &SpawnAgentRequest) -> String {
+    let mut sections = vec![request.task.clone()];
+
+    if request.boss_plan_id.is_some()
+        || request.step_id.is_some()
+        || request.step_objective.is_some()
+        || !request.step_acceptance.is_empty()
+        || request.parent_session_id.is_some()
+    {
+        sections.push("<boss-step-context>".into());
+        if let Some(plan_id) = request.boss_plan_id.as_deref() {
+            sections.push(format!("plan_id: {plan_id}"));
+        }
+        if let Some(step_id) = request.step_id {
+            sections.push(format!("step_id: {step_id}"));
+        }
+        if let Some(objective) = request.step_objective.as_deref() {
+            sections.push(format!("objective: {objective}"));
+        }
+        if !request.step_acceptance.is_empty() {
+            sections.push("acceptance:".into());
+            sections.extend(
+                request
+                    .step_acceptance
+                    .iter()
+                    .map(|item| format!("- {item}")),
+            );
+        }
+        if let Some(parent_session_id) = request.parent_session_id.as_deref() {
+            sections.push(format!("parent_session_id: {parent_session_id}"));
+        }
+        sections.push("</boss-step-context>".into());
+    }
+
+    sections.join("\n")
 }
 
 fn parse_worker_role(value: Option<&str>) -> anyhow::Result<WorkerRole> {

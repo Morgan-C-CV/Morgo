@@ -1,79 +1,103 @@
 use std::sync::Arc;
+
+use rust_agent::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
 use rust_agent::core::boss::{BossCoordinator, save_plan};
-use rust_agent::core::boss_state::{BossPlan, BossPlanStep, BossStage};
-use rust_agent::state::app_state::{AppState, RuntimeRole, WorkerRole};
-use rust_agent::state::permission_context::{PermissionMode, ToolPermissionContext};
-use rust_agent::task::manager::TaskManager;
-use rust_agent::task::types::{TaskType, TaskStatus, TaskEvent};
+use rust_agent::core::boss_state::{BossPlan, BossPlanStep, BossPlanStepStatus, BossStage};
+use rust_agent::cost::tracker::CostTracker;
 use rust_agent::interaction::dispatcher::NotificationDispatcher;
 use rust_agent::interaction::telegram::gateway::TelegramGateway;
+use rust_agent::state::app_state::{
+    ActiveModelProfileSource, ActiveModelProviderSummary, AppState, RuntimeRole, WorkerRole,
+};
+use rust_agent::state::permission_context::{PermissionMode, ToolPermissionContext};
+use rust_agent::task::types::{TaskEvent, TaskOwner, TaskStatus, TaskType};
+use rust_agent::tool::registry::ToolRegistry;
+use tokio::sync::RwLock;
 
-#[tokio::test]
-async fn test_boss_mode_feedback_loop_and_auto_sequencing() {
-    let temp_dir = std::env::temp_dir();
-    let plan_path = temp_dir.join("test_boss_flow.json");
+fn boss_step(id: usize, description: &str) -> BossPlanStep {
+    BossPlanStep {
+        id,
+        description: description.into(),
+        objective: Some(format!("objective {id}")),
+        acceptance: vec![format!("acceptance {id}")],
+        requires_approval: false,
+        status: BossPlanStepStatus::Pending,
+        completed: false,
+        result_diff: None,
+        worker_task_id: None,
+    }
+}
 
-    // 1. Setup a plan with 2 steps
-    let mut plan = BossPlan {
+fn boss_plan(steps: Vec<BossPlanStep>) -> BossPlan {
+    BossPlan {
+        plan_id: "plan-alpha".into(),
         task_description: "Multi-step task".into(),
-        steps: vec![
-            BossPlanStep {
-                id: 0,
-                description: "Step 1".into(),
-                completed: false,
-                result_diff: None,
-                worker_task_id: None,
-            },
-            BossPlanStep {
-                id: 1,
-                description: "Step 2".into(),
-                completed: false,
-                result_diff: None,
-                worker_task_id: None,
-            },
-        ],
+        steps,
         accepted_by_user: true,
-        auto_sequence: true, // Enable auto-sequencing
+        auto_sequence: true,
         ..Default::default()
-    };
-    save_plan(&plan, &plan_path).await.unwrap();
+    }
+}
 
-    // 2. Initialize BossCoordinator
-    let coordinator = Arc::new(BossCoordinator::restore_or_init(&plan_path).await.unwrap());
-    assert_eq!(coordinator.get_stage().await, BossStage::Execution);
-
-    // 3. Setup AppState and Dispatcher
-    let tasks = Arc::new(TaskManager::default());
-    let dispatcher = NotificationDispatcher::new(TelegramGateway::default())
-        .with_boss_coordinator(coordinator.clone());
-    
-    let permissions = ToolPermissionContext::new(PermissionMode::Default)
-        .with_task_manager(tasks.clone())
-        .with_notification_dispatcher(dispatcher.clone())
-        .with_boss_coordinator(coordinator.clone());
-
-    let app_state = Arc::new(AppState {
+fn app_state(active_session_id: &str) -> Arc<AppState> {
+    let permission_context = ToolPermissionContext::new(PermissionMode::Default);
+    Arc::new(AppState {
+        surface: InteractionSurface::Cli,
+        session_mode: SessionMode::Headless,
+        client_type: ClientType::Cli,
+        session_source: SessionSource::LocalCli,
         runtime_role: RuntimeRole::Coordinator,
-        permission_context: permissions,
-        boss_coordinator: Some(coordinator.clone()),
-        notification_dispatcher: dispatcher.clone(),
-        // ... (other fields dummy)
-        ..Default::default()
-    });
-
-    // 4. Simulate Worker 1 finishing Step 0
-    let event = TaskEvent {
-        task_id: "worker-task-1".into(),
-        task_type: TaskType::LocalAgent,
-        status: TaskStatus::Completed,
-        step_id: Some(0),
-        // ... (other fields dummy)
-        owner: rust_agent::task::types::TaskOwner {
-            session_id: "test-session".into(),
-            surface: rust_agent::bootstrap::InteractionSurface::Cli,
+        worker_role: None,
+        permission_context,
+        command_registry: None,
+        runtime_tool_registry: Some(Arc::new(RwLock::new(ToolRegistry::new()))),
+        skill_registry: None,
+        mcp_runtime: None,
+        plugin_load_result: None,
+        cost_tracker: CostTracker::default(),
+        service_observability_tracker:
+            rust_agent::service::observability::ServiceObservabilityTracker::default(),
+        notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
+        audit_log: Arc::new(std::sync::Mutex::new(
+            rust_agent::security::audit::AuditLog::default(),
+        )),
+        startup_trace: Vec::new(),
+        active_model_runtime: None,
+        active_model_profile_name: None,
+        active_model_profile_source: ActiveModelProfileSource::BootstrapDefault,
+        active_model_provider_summary: ActiveModelProviderSummary {
+            provider_id: "default-provider".into(),
+            protocol: "Anthropic".into(),
+            compatibility_profile: "Anthropic".into(),
+            base_url_host: "localhost".into(),
+            model: "default-model".into(),
+            auth_status: "env:OPENAI_API_KEY(unset)".into(),
         },
-        summary: "Step 1 done".into(),
-        result: "Success".into(),
+        active_session_id: active_session_id.into(),
+        session_store: None,
+        session: None,
+        history: None,
+        restored_session: None,
+        last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        cancellation_token: tokio_util::sync::CancellationToken::new(),
+        subagent_limiter: None,
+        boss_coordinator: None,
+    })
+}
+
+fn task_event(task_id: &str, step_id: usize, status: TaskStatus) -> TaskEvent {
+    TaskEvent {
+        task_id: task_id.into(),
+        task_type: TaskType::LocalAgent,
+        status,
+        step_id: Some(step_id),
+        owner: TaskOwner {
+            session_id: "test-session".into(),
+            surface: InteractionSurface::Cli,
+        },
+        target_task_id: Some(task_id.into()),
+        summary: format!("{task_id} summary"),
+        result: format!("{task_id} result"),
         next_action: "None".into(),
         worker_role: Some(WorkerRole::Implement),
         orchestration_group_id: None,
@@ -81,23 +105,149 @@ async fn test_boss_mode_feedback_loop_and_auto_sequencing() {
         validation_state: None,
         output_file: "".into(),
         usage: None,
-    };
-
-    coordinator.on_task_event(&event).await.unwrap();
-
-    // 5. Verify Step 0 is completed
-    {
-        let plan_guard = coordinator.plan.read().await;
-        let plan = plan_guard.as_ref().unwrap();
-        assert!(plan.steps[0].completed);
-        assert_eq!(plan.steps[0].worker_task_id, Some("worker-task-1".into()));
     }
+}
 
-    // 6. Verify Auto-Sequencing identifies Step 1
-    let next_action = coordinator.advance_plan(&app_state).await.unwrap();
-    assert!(next_action.is_some());
-    assert!(next_action.unwrap().contains("Step 2"));
+async fn coordinator_with_plan(
+    plan: BossPlan,
+    file_name: &str,
+) -> (Arc<BossCoordinator>, std::path::PathBuf) {
+    let plan_path = std::env::temp_dir().join(file_name);
+    save_plan(&plan, &plan_path).await.unwrap();
+    let coordinator = Arc::new(BossCoordinator::restore_or_init(&plan_path).await.unwrap());
+    (coordinator, plan_path)
+}
 
-    // Cleanup
+#[tokio::test]
+async fn boss_auto_advances_to_next_step_after_completion() {
+    let (coordinator, plan_path) = coordinator_with_plan(
+        boss_plan(vec![
+            BossPlanStep {
+                completed: true,
+                status: BossPlanStepStatus::Completed,
+                worker_task_id: Some("worker-task-0".into()),
+                ..boss_step(0, "Step 1")
+            },
+            boss_step(1, "Step 2"),
+        ]),
+        "test_boss_flow_auto_advance.json",
+    )
+    .await;
+
+    assert_eq!(coordinator.get_stage().await, BossStage::Execution);
+    let payload = coordinator
+        .advance_plan(&app_state("parent-session-1"))
+        .await
+        .unwrap()
+        .expect("next step should dispatch");
+
+    assert!(payload.contains("\"boss_plan_id\":\"plan-alpha\""));
+    assert!(payload.contains("\"step_id\":1"));
+    assert!(payload.contains("\"step_objective\":\"objective 1\""));
+    assert!(payload.contains("\"step_acceptance\":[\"acceptance 1\"]"));
+    assert!(payload.contains("\"parent_session_id\":\"parent-session-1\""));
+
+    let plan = coordinator.plan.read().await;
+    let step = &plan.as_ref().unwrap().steps[1];
+    assert_eq!(step.status, BossPlanStepStatus::Running);
+    assert_eq!(coordinator.status.read().await.current_step, Some(1));
+
+    let _ = std::fs::remove_file(plan_path);
+}
+
+#[tokio::test]
+async fn boss_stops_before_approval_barrier() {
+    let mut approval_step = boss_step(1, "Approval-gated step");
+    approval_step.requires_approval = true;
+    let (coordinator, plan_path) = coordinator_with_plan(
+        boss_plan(vec![
+            BossPlanStep {
+                completed: true,
+                status: BossPlanStepStatus::Completed,
+                ..boss_step(0, "Step 1")
+            },
+            approval_step,
+        ]),
+        "test_boss_flow_approval_stop.json",
+    )
+    .await;
+
+    let outcome = coordinator
+        .advance_plan(&app_state("parent-session-2"))
+        .await
+        .unwrap()
+        .expect("approval barrier should be reported");
+
+    assert!(outcome.contains("paused before step 1"));
+    let plan = coordinator.plan.read().await;
+    let step = &plan.as_ref().unwrap().steps[1];
+    assert_eq!(step.status, BossPlanStepStatus::WaitingForApproval);
+    assert!(step.worker_task_id.is_none());
+
+    let _ = std::fs::remove_file(plan_path);
+}
+
+#[tokio::test]
+async fn boss_stops_after_step_failure() {
+    let (coordinator, plan_path) = coordinator_with_plan(
+        boss_plan(vec![boss_step(0, "Step 1"), boss_step(1, "Step 2")]),
+        "test_boss_flow_failure_stop.json",
+    )
+    .await;
+
+    coordinator
+        .on_task_event(&task_event("worker-task-failed", 0, TaskStatus::Failed))
+        .await
+        .unwrap();
+    let outcome = coordinator
+        .advance_plan(&app_state("parent-session-3"))
+        .await
+        .unwrap()
+        .expect("failure should be reported");
+
+    assert!(outcome.contains("terminal step failure"));
+    let plan = coordinator.plan.read().await;
+    assert_eq!(
+        plan.as_ref().unwrap().steps[0].status,
+        BossPlanStepStatus::Failed
+    );
+    assert_eq!(
+        plan.as_ref().unwrap().steps[1].status,
+        BossPlanStepStatus::Pending
+    );
+
+    let _ = std::fs::remove_file(plan_path);
+}
+
+#[tokio::test]
+async fn concurrent_worker_updates_do_not_cross_step_boundaries() {
+    let (coordinator, plan_path) = coordinator_with_plan(
+        boss_plan(vec![boss_step(0, "Step 1"), boss_step(1, "Step 2")]),
+        "test_boss_flow_concurrent_isolation.json",
+    )
+    .await;
+
+    let left = coordinator.clone();
+    let right = coordinator.clone();
+    let left_event = task_event("worker-task-left", 0, TaskStatus::Completed);
+    let right_event = task_event("worker-task-right", 1, TaskStatus::Completed);
+
+    let (left_result, right_result) = tokio::join!(
+        async move { left.on_task_event(&left_event).await },
+        async move { right.on_task_event(&right_event).await }
+    );
+    left_result.unwrap();
+    right_result.unwrap();
+
+    let plan = coordinator.plan.read().await;
+    let steps = &plan.as_ref().unwrap().steps;
+    assert!(steps[0].completed);
+    assert!(steps[1].completed);
+    assert_eq!(steps[0].worker_task_id.as_deref(), Some("worker-task-left"));
+    assert_eq!(
+        steps[1].worker_task_id.as_deref(),
+        Some("worker-task-right")
+    );
+
     let _ = std::fs::remove_file(plan_path);
 }

@@ -1,3 +1,5 @@
+#[path = "integration/boss_flow.rs"]
+mod boss_flow;
 #[path = "integration/cli_smoke.rs"]
 mod cli_smoke;
 #[path = "integration/config_root_override_flow.rs"]
