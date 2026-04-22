@@ -3193,3 +3193,145 @@ async fn startup_warnings_are_present_in_initialize_runtime_bundle() {
         "bundle should have at least one startup warning"
     );
 }
+
+#[test]
+fn migration_success_writes_readable_upgraded_session_record() {
+    let root = unique_temp_path("rust-agent-migration-upgrade");
+    let store = FileBackedSessionStore::new(root.clone());
+    let session_id = SessionId("session-upgrade-write".into());
+
+    // Write a legacy record missing all three new fields.
+    let legacy_json = r#"{
+  "snapshot": {
+    "session_id": "session-upgrade-write",
+    "surface": "Cli",
+    "session_mode": "Interactive",
+    "cwd": "/tmp/upgrade-write",
+    "last_turn_at": null,
+    "prompt_seed": null
+  },
+  "history": { "entries": [] },
+  "task_list": null,
+  "plan_state": null
+}"#;
+    let path = root.join("session-upgrade-write.json");
+    std::fs::write(&path, legacy_json).expect("write legacy record");
+
+    // Load triggers the upgrade write-back.
+    let loaded = store.load(&SessionRestoreRequest {
+        resume: Some("session-upgrade-write".into()),
+        continue_session: false,
+    });
+    assert!(loaded.is_some(), "legacy record must deserialize");
+
+    // The file on disk must now contain the new fields.
+    let upgraded_raw = std::fs::read_to_string(&path).expect("read upgraded file");
+    assert!(
+        upgraded_raw.contains("external_memory_entries"),
+        "upgraded file must contain external_memory_entries"
+    );
+    assert!(
+        upgraded_raw.contains("nested_memory_lineage"),
+        "upgraded file must contain nested_memory_lineage"
+    );
+    assert!(
+        upgraded_raw.contains("lifecycle_status"),
+        "upgraded file must contain lifecycle_status"
+    );
+
+    // A second load must parse cleanly without triggering another write-back.
+    let store2 = FileBackedSessionStore::new(root.clone());
+    let loaded2 = store2.load(&SessionRestoreRequest {
+        resume: Some("session-upgrade-write".into()),
+        continue_session: false,
+    });
+    assert!(loaded2.is_some(), "upgraded record must round-trip");
+
+    std::fs::remove_dir_all(root).expect("cleanup");
+}
+
+#[test]
+fn legacy_record_upgrade_preserves_existing_sections() {
+    let root = unique_temp_path("rust-agent-migration-preserve");
+    let store = FileBackedSessionStore::new(root.clone());
+    let session_id = SessionId("session-upgrade-preserve".into());
+
+    // Legacy record with a non-empty history entry and a task_list.
+    let legacy_json = r#"{
+  "snapshot": {
+    "session_id": "session-upgrade-preserve",
+    "surface": "Cli",
+    "session_mode": "Interactive",
+    "cwd": "/tmp/upgrade-preserve",
+    "last_turn_at": "2026-04-22T09:00:00Z",
+    "prompt_seed": "seed-preserve"
+  },
+  "history": {
+    "entries": [
+      {
+        "message": { "role": "Assistant", "content": "legacy entry" },
+        "timestamp": "2026-04-22T09:00:01Z",
+        "tool_refs": [],
+        "milestone": null
+      }
+    ]
+  },
+  "task_list": null,
+  "plan_state": null
+}"#;
+    let path = root.join("session-upgrade-preserve.json");
+    std::fs::write(&path, legacy_json).expect("write legacy record");
+
+    let loaded = store.load(&SessionRestoreRequest {
+        resume: Some("session-upgrade-preserve".into()),
+        continue_session: false,
+    });
+    let (snapshot, history) = loaded.expect("legacy record must load");
+
+    assert_eq!(snapshot.session_id, session_id);
+    assert_eq!(snapshot.cwd, "/tmp/upgrade-preserve");
+    assert_eq!(snapshot.prompt_seed.as_deref(), Some("seed-preserve"));
+    assert_eq!(history.entries.len(), 1);
+
+    // Upgraded file must still contain the original history entry.
+    let upgraded_raw = std::fs::read_to_string(&path).expect("read upgraded file");
+    assert!(
+        upgraded_raw.contains("legacy entry"),
+        "upgraded file must preserve original history content"
+    );
+    assert!(
+        upgraded_raw.contains("seed-preserve"),
+        "upgraded file must preserve original snapshot fields"
+    );
+
+    std::fs::remove_dir_all(root).expect("cleanup");
+}
+
+#[test]
+fn resume_fallback_does_not_corrupt_old_session_file() {
+    let root = unique_temp_path("rust-agent-corrupt-no-overwrite");
+    std::fs::create_dir_all(&root).expect("create root");
+
+    // Write a corrupt (unparseable) JSON file.
+    let corrupt_json = b"{ this is not valid json !!!";
+    let path = root.join("session-corrupt.json");
+    std::fs::write(&path, corrupt_json).expect("write corrupt file");
+
+    let store = FileBackedSessionStore::new(root.clone());
+
+    // load() must return None — no panic, no overwrite.
+    let loaded = store.load(&SessionRestoreRequest {
+        resume: Some("session-corrupt".into()),
+        continue_session: false,
+    });
+    assert!(loaded.is_none(), "corrupt record must not deserialize");
+
+    // The file on disk must be byte-for-byte identical to what we wrote.
+    let after = std::fs::read(&path).expect("read file after failed load");
+    assert_eq!(
+        after, corrupt_json,
+        "corrupt session file must not be modified by a failed load"
+    );
+
+    std::fs::remove_dir_all(root).expect("cleanup");
+}

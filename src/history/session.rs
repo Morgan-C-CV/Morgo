@@ -508,7 +508,11 @@ impl FileBackedSessionStore {
     fn read_record(&self, session_id: &SessionId) -> Option<PersistedSessionRecord> {
         let path = self.session_path(session_id);
         let raw = std::fs::read_to_string(path).ok()?;
-        serde_json::from_str(&raw).ok()
+        let record: PersistedSessionRecord = serde_json::from_str(&raw).ok()?;
+        if is_legacy_record(&raw) {
+            let _ = self.write_record(session_id, &record);
+        }
+        Some(record)
     }
 
     fn write_record(
@@ -724,6 +728,15 @@ impl SessionStore for FileBackedSessionStore {
             record.lifecycle_status = status;
         })
     }
+}
+
+fn is_legacy_record(raw: &str) -> bool {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return false;
+    };
+    v.get("external_memory_entries").is_none()
+        || v.get("nested_memory_lineage").is_none()
+        || v.get("lifecycle_status").is_none()
 }
 
 fn sanitize_session_id(session_id: &str) -> String {
