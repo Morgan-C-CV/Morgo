@@ -123,17 +123,19 @@ fn parse_provider_auth_strategy(value: &str) -> anyhow::Result<ProviderAuthStrat
 }
 
 pub fn summarize_active_model_provider(config: &ModelProviderConfig) -> ActiveModelProviderSummary {
+    let auth_status = match (config.api_key.is_some(), config.api_key_env.as_deref()) {
+        (true, Some(env_name)) => format!("env:{}(set)", env_name),
+        (false, Some(env_name)) => format!("env:{}(unset)", env_name),
+        (true, None) => "key:set".into(),
+        (false, None) => "none".into(),
+    };
     ActiveModelProviderSummary {
         provider_id: config.provider_id.clone(),
         protocol: format!("{:?}", config.protocol),
         compatibility_profile: format!("{:?}", config.compatibility_profile),
         base_url_host: extract_base_url_host(&config.base_url),
         model: config.model_id.clone(),
-        auth_status: if config.api_key.is_some() {
-            "env:OPENAI_API_KEY(set)".into()
-        } else {
-            "env:OPENAI_API_KEY(unset)".into()
-        },
+        auth_status,
     }
 }
 
@@ -1224,6 +1226,7 @@ impl RuntimeBootstrap {
             chat_completions_path,
             auth_strategy,
             api_key,
+            api_key_env: Some("RUST_AGENT_PROVIDER_API_KEY".into()),
             model_id,
             timeout: ProviderTimeout {
                 request_timeout_ms,

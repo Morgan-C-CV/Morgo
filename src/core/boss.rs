@@ -395,6 +395,7 @@ mod tests {
             pseudo_code: "Code v1".into(),
             steps: vec![],
             accepted_by_user: true,
+            auto_sequence: false,
         };
 
         let temp_dir = std::env::temp_dir();
@@ -448,6 +449,7 @@ mod tests {
                 description: "".into(),
                 completed: false,
                 result_diff: None,
+                worker_task_id: None,
             }],
             ..Default::default()
         };

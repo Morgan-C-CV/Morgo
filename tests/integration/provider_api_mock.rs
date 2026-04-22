@@ -170,6 +170,7 @@ async fn run_provider_case(case: ProviderCase) -> FixtureResult {
         base_url,
         auth_strategy: rust_agent::service::api::client::ProviderAuthStrategy::BearerApiKey,
         api_key: Some("test-key".into()),
+        api_key_env: None,
         chat_completions_path: "/v1/chat/completions".into(),
         model_id: case.model_id.into(),
         timeout: ProviderTimeout {
@@ -1660,6 +1661,7 @@ async fn query_engine_submit_turn_works_through_production_provider_path() {
         base_url: format!("http://{}", addr),
         auth_strategy: rust_agent::service::api::client::ProviderAuthStrategy::BearerApiKey,
         api_key: Some("test-key".into()),
+        api_key_env: None,
         chat_completions_path: "/v1/chat/completions".into(),
         model_id: "claude-test".into(),
         timeout: ProviderTimeout {
@@ -1760,6 +1762,7 @@ async fn production_provider_request_envelope_stays_compatible() {
         base_url: format!("http://{}", addr),
         auth_strategy: rust_agent::service::api::client::ProviderAuthStrategy::BearerApiKey,
         api_key: Some("test-key".into()),
+        api_key_env: None,
         chat_completions_path: "/v1/chat/completions".into(),
         model_id: "default-model".into(),
         timeout: ProviderTimeout {
@@ -1800,6 +1803,7 @@ async fn production_provider_surfaces_unsupported_streaming_as_typed_failure() {
         base_url: "http://127.0.0.1:1".into(),
         auth_strategy: rust_agent::service::api::client::ProviderAuthStrategy::BearerApiKey,
         api_key: Some("test-key".into()),
+        api_key_env: None,
         chat_completions_path: "/v1/chat/completions".into(),
         model_id: "claude-test".into(),
         timeout: ProviderTimeout {
@@ -1844,6 +1848,7 @@ async fn production_provider_assembles_partial_tool_use_payload_metadata() {
         base_url: format!("http://{}", addr),
         auth_strategy: rust_agent::service::api::client::ProviderAuthStrategy::BearerApiKey,
         api_key: Some("test-key".into()),
+        api_key_env: None,
         chat_completions_path: "/v1/chat/completions".into(),
         model_id: "claude-test".into(),
         timeout: ProviderTimeout {
@@ -1896,6 +1901,7 @@ async fn production_provider_normalizes_stringified_tool_use_alias_payload() {
         base_url: format!("http://{}", addr),
         auth_strategy: rust_agent::service::api::client::ProviderAuthStrategy::BearerApiKey,
         api_key: Some("test-key".into()),
+        api_key_env: None,
         chat_completions_path: "/v1/chat/completions".into(),
         model_id: "claude-test".into(),
         timeout: ProviderTimeout {
@@ -1938,6 +1944,7 @@ async fn production_provider_preserves_terminal_http_compatibility_metadata() {
         base_url: format!("http://{}", addr),
         auth_strategy: rust_agent::service::api::client::ProviderAuthStrategy::BearerApiKey,
         api_key: Some("test-key".into()),
+        api_key_env: None,
         chat_completions_path: "/v1/chat/completions".into(),
         model_id: "claude-test".into(),
         timeout: ProviderTimeout {
@@ -1983,6 +1990,7 @@ async fn production_provider_accepts_top_level_usage_envelope() {
         base_url: format!("http://{}", addr),
         auth_strategy: rust_agent::service::api::client::ProviderAuthStrategy::BearerApiKey,
         api_key: Some("test-key".into()),
+        api_key_env: None,
         chat_completions_path: "/v1/chat/completions".into(),
         model_id: "claude-test".into(),
         timeout: ProviderTimeout {
@@ -2024,6 +2032,7 @@ async fn production_provider_accepts_delta_usage_envelope() {
         base_url: format!("http://{}", addr),
         auth_strategy: rust_agent::service::api::client::ProviderAuthStrategy::BearerApiKey,
         api_key: Some("test-key".into()),
+        api_key_env: None,
         chat_completions_path: "/v1/chat/completions".into(),
         model_id: "claude-test".into(),
         timeout: ProviderTimeout {
@@ -2067,6 +2076,7 @@ async fn production_provider_merges_usage_across_provider_envelopes_without_drif
         base_url: format!("http://{}", addr),
         auth_strategy: rust_agent::service::api::client::ProviderAuthStrategy::BearerApiKey,
         api_key: Some("test-key".into()),
+        api_key_env: None,
         chat_completions_path: "/v1/chat/completions".into(),
         model_id: "claude-test".into(),
         timeout: ProviderTimeout {
@@ -2179,6 +2189,7 @@ async fn production_provider_extracts_nested_http_error_message() {
         base_url: format!("http://{}", addr),
         auth_strategy: rust_agent::service::api::client::ProviderAuthStrategy::BearerApiKey,
         api_key: Some("test-key".into()),
+        api_key_env: None,
         chat_completions_path: "/v1/chat/completions".into(),
         model_id: "claude-test".into(),
         timeout: ProviderTimeout {
@@ -2254,6 +2265,7 @@ async fn production_provider_surfaces_interrupted_stream_metadata() {
         base_url: format!("http://{}", addr),
         auth_strategy: rust_agent::service::api::client::ProviderAuthStrategy::BearerApiKey,
         api_key: Some("test-key".into()),
+        api_key_env: None,
         chat_completions_path: "/v1/chat/completions".into(),
         model_id: "claude-test".into(),
         timeout: ProviderTimeout {
@@ -2300,6 +2312,7 @@ async fn production_provider_surfaces_malformed_stream_as_protocol_failure() {
         base_url: format!("http://{}", addr),
         auth_strategy: rust_agent::service::api::client::ProviderAuthStrategy::BearerApiKey,
         api_key: Some("test-key".into()),
+        api_key_env: None,
         chat_completions_path: "/v1/chat/completions".into(),
         model_id: "claude-test".into(),
         timeout: ProviderTimeout {
@@ -2346,6 +2359,7 @@ async fn production_provider_surfaces_tool_use_protocol_failure() {
         base_url: format!("http://{}", addr),
         auth_strategy: rust_agent::service::api::client::ProviderAuthStrategy::BearerApiKey,
         api_key: Some("test-key".into()),
+        api_key_env: None,
         chat_completions_path: "/v1/chat/completions".into(),
         model_id: "claude-test".into(),
         timeout: ProviderTimeout {
@@ -2392,6 +2406,7 @@ async fn production_provider_surfaces_structured_output_protocol_failure() {
         base_url: format!("http://{}", addr),
         auth_strategy: rust_agent::service::api::client::ProviderAuthStrategy::BearerApiKey,
         api_key: Some("test-key".into()),
+        api_key_env: None,
         chat_completions_path: "/v1/chat/completions".into(),
         model_id: "claude-test".into(),
         timeout: ProviderTimeout {
@@ -2440,6 +2455,7 @@ async fn production_provider_maps_terminal_http_error_to_query_loop_failure_code
         base_url: format!("http://{}", addr),
         auth_strategy: rust_agent::service::api::client::ProviderAuthStrategy::BearerApiKey,
         api_key: Some("test-key".into()),
+        api_key_env: None,
         chat_completions_path: "/v1/chat/completions".into(),
         model_id: "claude-test".into(),
         timeout: ProviderTimeout {
@@ -2539,6 +2555,7 @@ async fn production_provider_rejects_wrong_content_type_as_invalid_response() {
         base_url: format!("http://{}", addr),
         auth_strategy: rust_agent::service::api::client::ProviderAuthStrategy::BearerApiKey,
         api_key: Some("test-key".into()),
+        api_key_env: None,
         chat_completions_path: "/v1/chat/completions".into(),
         model_id: "claude-test".into(),
         timeout: ProviderTimeout {
@@ -2585,6 +2602,7 @@ async fn production_provider_rejects_empty_response_body() {
         base_url: format!("http://{}", addr),
         auth_strategy: rust_agent::service::api::client::ProviderAuthStrategy::BearerApiKey,
         api_key: Some("test-key".into()),
+        api_key_env: None,
         chat_completions_path: "/v1/chat/completions".into(),
         model_id: "claude-test".into(),
         timeout: ProviderTimeout {
@@ -2631,6 +2649,7 @@ async fn production_provider_rejects_truncated_stream_as_protocol_failure() {
         base_url: format!("http://{}", addr),
         auth_strategy: rust_agent::service::api::client::ProviderAuthStrategy::BearerApiKey,
         api_key: Some("test-key".into()),
+        api_key_env: None,
         chat_completions_path: "/v1/chat/completions".into(),
         model_id: "claude-test".into(),
         timeout: ProviderTimeout {
@@ -2694,6 +2713,7 @@ async fn production_provider_slow_first_byte_hits_request_timeout() {
         base_url: format!("http://{}", addr),
         auth_strategy: rust_agent::service::api::client::ProviderAuthStrategy::BearerApiKey,
         api_key: Some("test-key".into()),
+        api_key_env: None,
         chat_completions_path: "/v1/chat/completions".into(),
         model_id: "claude-test".into(),
         timeout: ProviderTimeout {
@@ -2755,6 +2775,7 @@ async fn production_provider_headers_then_idle_hits_stream_timeout() {
         base_url: format!("http://{}", addr),
         auth_strategy: rust_agent::service::api::client::ProviderAuthStrategy::BearerApiKey,
         api_key: Some("test-key".into()),
+        api_key_env: None,
         chat_completions_path: "/v1/chat/completions".into(),
         model_id: "claude-test".into(),
         timeout: ProviderTimeout {
@@ -2820,6 +2841,7 @@ async fn production_provider_short_request_timeout_does_not_truncate_active_stre
         base_url: format!("http://{}", addr),
         auth_strategy: rust_agent::service::api::client::ProviderAuthStrategy::BearerApiKey,
         api_key: Some("test-key".into()),
+        api_key_env: None,
         chat_completions_path: "/v1/chat/completions".into(),
         model_id: "claude-test".into(),
         timeout: ProviderTimeout {
@@ -2870,6 +2892,7 @@ async fn production_provider_maps_timeout_after_retries_exhaust_to_query_loop_fa
         base_url: format!("http://{}", addr),
         auth_strategy: rust_agent::service::api::client::ProviderAuthStrategy::BearerApiKey,
         api_key: Some("test-key".into()),
+        api_key_env: None,
         chat_completions_path: "/v1/chat/completions".into(),
         model_id: "claude-test".into(),
         timeout: ProviderTimeout {
@@ -2970,6 +2993,7 @@ async fn production_provider_retries_429_then_succeeds() {
         base_url: format!("http://{}", addr),
         auth_strategy: rust_agent::service::api::client::ProviderAuthStrategy::BearerApiKey,
         api_key: Some("test-key".into()),
+        api_key_env: None,
         chat_completions_path: "/v1/chat/completions".into(),
         model_id: "claude-test".into(),
         timeout: ProviderTimeout {
@@ -3017,6 +3041,7 @@ async fn production_provider_respects_retry_after_header_for_429_retry() {
         base_url: format!("http://{}", addr),
         auth_strategy: rust_agent::service::api::client::ProviderAuthStrategy::BearerApiKey,
         api_key: Some("test-key".into()),
+        api_key_env: None,
         chat_completions_path: "/v1/chat/completions".into(),
         model_id: "claude-test".into(),
         timeout: ProviderTimeout {
@@ -3071,6 +3096,7 @@ async fn production_provider_safety_cap_prevents_oversized_retry_after_sleep() {
         base_url: format!("http://{}", addr),
         auth_strategy: rust_agent::service::api::client::ProviderAuthStrategy::BearerApiKey,
         api_key: Some("test-key".into()),
+        api_key_env: None,
         chat_completions_path: "/v1/chat/completions".into(),
         model_id: "claude-test".into(),
         timeout: ProviderTimeout {
@@ -3120,6 +3146,7 @@ async fn production_provider_429_without_retry_after_uses_exponential_backoff() 
         base_url: format!("http://{}", addr),
         auth_strategy: rust_agent::service::api::client::ProviderAuthStrategy::BearerApiKey,
         api_key: Some("test-key".into()),
+        api_key_env: None,
         chat_completions_path: "/v1/chat/completions".into(),
         model_id: "claude-test".into(),
         timeout: ProviderTimeout {
@@ -3169,6 +3196,7 @@ async fn production_provider_does_not_retry_terminal_400_errors() {
         base_url: format!("http://{}", addr),
         auth_strategy: rust_agent::service::api::client::ProviderAuthStrategy::BearerApiKey,
         api_key: Some("test-key".into()),
+        api_key_env: None,
         chat_completions_path: "/v1/chat/completions".into(),
         model_id: "claude-test".into(),
         timeout: ProviderTimeout {
@@ -3215,6 +3243,7 @@ async fn production_provider_retries_503_then_surfaces_terminal_protocol_failure
         base_url: format!("http://{}", addr),
         auth_strategy: rust_agent::service::api::client::ProviderAuthStrategy::BearerApiKey,
         api_key: Some("test-key".into()),
+        api_key_env: None,
         chat_completions_path: "/v1/chat/completions".into(),
         model_id: "claude-test".into(),
         timeout: ProviderTimeout {

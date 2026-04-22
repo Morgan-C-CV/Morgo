@@ -52,6 +52,7 @@ fn test_model_provider_config() -> ModelProviderConfig {
         chat_completions_path: "/v1/chat/completions".into(),
         auth_strategy: ProviderAuthStrategy::NoAuth,
         api_key: None,
+        api_key_env: None,
         model_id: "test-model".into(),
         timeout: ProviderTimeout {
             request_timeout_ms: 30_000,

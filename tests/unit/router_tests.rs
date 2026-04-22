@@ -67,6 +67,7 @@ fn app_state_with_session_root(root: &std::path::Path) -> AppState {
         chat_completions_path: "/v1/chat/completions".into(),
         auth_strategy: rust_agent::service::api::client::ProviderAuthStrategy::BearerApiKey,
         api_key: Some("resolved-secret".into()),
+        api_key_env: Some("OPENAI_API_KEY".into()),
         model_id: "gpt-4.1-mini".into(),
         timeout: rust_agent::service::api::client::ProviderTimeout::default(),
         retry_policy: rust_agent::service::api::retry::RetryPolicy::default(),

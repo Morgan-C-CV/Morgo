@@ -227,6 +227,11 @@ impl ModelProfileSpec {
             chat_completions_path: self.chat_completions_path.trim().to_string(),
             auth_strategy,
             api_key,
+            api_key_env: self
+                .api_key_env
+                .as_deref()
+                .filter(|v| !v.trim().is_empty())
+                .map(str::to_string),
             model_id: self.model.trim().to_string(),
             timeout: ProviderTimeout {
                 request_timeout_ms: self.request_timeout_ms.unwrap_or(30_000),
