@@ -32,8 +32,7 @@ impl Default for TaskOutputStore {
                 .unwrap_or_default()
                 .subsec_nanos();
             Self {
-                root: std::env::temp_dir()
-                    .join(format!("rust-agent-test-{pid}-{id}-{nonce}")),
+                root: std::env::temp_dir().join(format!("rust-agent-test-{pid}-{id}-{nonce}")),
             }
         }
         #[cfg(not(test))]
@@ -117,4 +116,3 @@ impl TaskOutputStore {
         &self.root
     }
 }
-

@@ -91,10 +91,7 @@ impl NotificationDispatcher {
             return;
         };
 
-        let mut delivered = self
-            .delivered
-            .write()
-            .expect("dispatcher state poisoned");
+        let mut delivered = self.delivered.write().expect("dispatcher state poisoned");
         if delivered.len() >= MAX_DELIVERED_NOTIFICATIONS {
             delivered.remove(0);
         }

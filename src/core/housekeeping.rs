@@ -1,10 +1,10 @@
+use crate::history::session::SessionLifecycleStatus;
+use crate::interaction::notification::Notification;
+use crate::state::app_state::AppState;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use crate::history::session::SessionLifecycleStatus;
-use crate::interaction::notification::Notification;
-use crate::state::app_state::AppState;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
@@ -46,7 +46,10 @@ impl Default for HousekeepingConfig {
             stale_threshold_secs: env_u64("RUST_AGENT_HOUSEKEEPING_STALE_THRESHOLD_SECS", 600),
             session_retention_days: env_u64("RUST_AGENT_HOUSEKEEPING_SESSION_RETENTION_DAYS", 7),
             task_log_retention_days: env_u64("RUST_AGENT_HOUSEKEEPING_TASK_LOG_RETENTION_DAYS", 1),
-            max_gc_entries_per_tick: env_usize("RUST_AGENT_HOUSEKEEPING_MAX_GC_ENTRIES_PER_TICK", 2048),
+            max_gc_entries_per_tick: env_usize(
+                "RUST_AGENT_HOUSEKEEPING_MAX_GC_ENTRIES_PER_TICK",
+                2048,
+            ),
         }
     }
 }
@@ -172,7 +175,8 @@ impl HousekeepingDaemon {
         };
 
         let persisted_session = app_state.persist_current_session_state();
-        let persisted_lifecycle = app_state.persist_session_lifecycle(SessionLifecycleStatus::Hibernating);
+        let persisted_lifecycle =
+            app_state.persist_session_lifecycle(SessionLifecycleStatus::Hibernating);
 
         let suspended_task_ids = app_state
             .permission_context
@@ -287,7 +291,9 @@ impl HousekeepingDaemon {
                 }
 
                 // Recursively prune subdirectories
-                if let Err(e) = self.prune_directory(&entry_path, max_age_secs, true, remaining_budget) {
+                if let Err(e) =
+                    self.prune_directory(&entry_path, max_age_secs, true, remaining_budget)
+                {
                     warn!("GC: Failed to prune subdirectory {:?}: {}", entry_path, e);
                     has_remaining_entries = true;
                 } else if entry_path.exists() {
@@ -346,7 +352,88 @@ impl HousekeepingDaemon {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
+    use crate::cost::tracker::CostTracker;
+    use crate::history::session::{
+        InMemorySessionStore, SessionHistory, SessionId, SessionSnapshot, SessionStore,
+    };
+    use crate::interaction::dispatcher::NotificationDispatcher;
+    use crate::interaction::telegram::gateway::TelegramGateway;
+    use crate::security::audit::AuditLog;
+    use crate::service::api::client::ProviderCompatibilityProfileKind;
+    use crate::state::app_state::{
+        ActiveModelProfileSource, ActiveModelProviderSummary, RuntimeRole,
+    };
+    use crate::state::permission_context::{PermissionMode, ToolPermissionContext};
+    use crate::task::manager::TaskManager;
+    use std::sync::Mutex;
     use tokio::time::{self, advance, pause};
+
+    fn test_app_state(
+        session_store: Arc<InMemorySessionStore>,
+        task_manager: Arc<TaskManager>,
+        last_active: Arc<AtomicU64>,
+        token: CancellationToken,
+    ) -> AppState {
+        let session_id = SessionId("session-housekeeping".into());
+        let snapshot = SessionSnapshot {
+            session_id: session_id.clone(),
+            surface: InteractionSurface::Cli,
+            session_mode: SessionMode::Interactive,
+            cwd: ".".into(),
+            last_turn_at: None,
+            prompt_seed: None,
+        };
+        session_store.save(snapshot.clone(), SessionHistory::default());
+        let dispatcher = NotificationDispatcher::new(TelegramGateway::default());
+        let permission_context = ToolPermissionContext::new(PermissionMode::Default)
+            .with_task_manager(task_manager)
+            .with_active_session_id(session_id.0.clone())
+            .with_active_surface(InteractionSurface::Cli)
+            .with_notification_dispatcher(dispatcher.clone())
+            .with_last_activity_ts(last_active.clone())
+            .with_cancellation_token(token.clone());
+        AppState {
+            surface: InteractionSurface::Cli,
+            session_mode: SessionMode::Interactive,
+            client_type: ClientType::Cli,
+            session_source: SessionSource::LocalCli,
+            runtime_role: RuntimeRole::Coordinator,
+            worker_role: None,
+            permission_context,
+            command_registry: None,
+            runtime_tool_registry: None,
+            skill_registry: None,
+            mcp_runtime: None,
+            plugin_load_result: None,
+            cost_tracker: CostTracker::default(),
+            service_observability_tracker:
+                crate::service::observability::ServiceObservabilityTracker::default(),
+            notification_dispatcher: dispatcher,
+            audit_log: Arc::new(Mutex::new(AuditLog::default())),
+            startup_trace: Vec::new(),
+            active_model_runtime: None,
+            active_model_profile_name: None,
+            active_model_profile_source: ActiveModelProfileSource::BootstrapDefault,
+            active_model_provider_summary: ActiveModelProviderSummary {
+                provider_id: "default-provider".into(),
+                protocol: "Anthropic".into(),
+                compatibility_profile: format!("{:?}", ProviderCompatibilityProfileKind::Anthropic),
+                base_url_host: "localhost".into(),
+                model: "default-model".into(),
+                auth_status: "none".into(),
+            },
+            active_session_id: session_id.0,
+            session_store: Some(session_store),
+            session: Some(snapshot),
+            history: Some(SessionHistory::default()),
+            restored_session: None,
+            last_activity_ts: last_active,
+            cancellation_token: token,
+            subagent_limiter: None,
+            boss_coordinator: None,
+        }
+    }
 
     #[tokio::test]
     async fn test_housekeeping_cancellation() {
@@ -358,6 +445,7 @@ mod tests {
                 stale_threshold_secs: 100,
                 session_retention_days: 7,
                 task_log_retention_days: 1,
+                max_gc_entries_per_tick: 2048,
             },
             token.clone(),
             last_active,
@@ -390,6 +478,7 @@ mod tests {
                 stale_threshold_secs: 10,
                 session_retention_days: 7,
                 task_log_retention_days: 1,
+                max_gc_entries_per_tick: 2048,
             },
             token.clone(),
             last_active,
@@ -416,6 +505,7 @@ mod tests {
             stale_threshold_secs: 5,
             session_retention_days: 7,
             task_log_retention_days: 1,
+            max_gc_entries_per_tick: 2048,
         };
 
         let daemon = HousekeepingDaemon::new(config.clone(), token.clone(), last_active.clone());
@@ -437,6 +527,53 @@ mod tests {
 
         // The test passes if it completes without panic.
         // In a real integration test, we'd check tracing output.
+    }
+
+    #[tokio::test]
+    async fn test_housekeeping_zombie_hibernates_session_and_running_tasks() {
+        let token = CancellationToken::new();
+        let last_active = Arc::new(AtomicU64::new(0));
+        let session_store = Arc::new(InMemorySessionStore::default());
+        let task_manager = Arc::new(TaskManager::default());
+        let app_state = test_app_state(
+            session_store.clone(),
+            task_manager.clone(),
+            last_active.clone(),
+            token.clone(),
+        );
+        let task =
+            task_manager.create("long task", "session-housekeeping", InteractionSurface::Cli);
+        task_manager.start(&task.id);
+
+        let daemon = HousekeepingDaemon::new(HousekeepingConfig::default(), token, last_active)
+            .with_app_state(app_state.clone());
+
+        let outcome = daemon.handle_zombie_session(3600).await;
+        assert_eq!(
+            outcome,
+            ZombieSessionOutcome::PersistedAndSuspended {
+                suspended_task_ids: vec![task.id.clone()]
+            }
+        );
+        assert_eq!(
+            session_store.load_lifecycle_status(&SessionId("session-housekeeping".into())),
+            SessionLifecycleStatus::Hibernating
+        );
+        assert_eq!(
+            task_manager.status(&task.id),
+            Some(crate::task::types::TaskStatus::Killed)
+        );
+        assert!(
+            app_state
+                .notification_dispatcher
+                .delivered()
+                .iter()
+                .any(|notification| notification.notice_kind.as_deref()
+                    == Some("housekeeping.zombie_hibernated"))
+        );
+
+        let repeated = daemon.handle_zombie_session(7200).await;
+        assert_eq!(repeated, ZombieSessionOutcome::AlreadyInactive);
     }
 
     #[tokio::test]
@@ -468,7 +605,10 @@ mod tests {
         tokio::time::sleep(tokio::time::Duration::from_millis(1100)).await;
 
         // Test with age 0 (should delete everything)
-        daemon.prune_directory(&temp_dir, 0, false).unwrap();
+        let mut budget = usize::MAX;
+        daemon
+            .prune_directory(&temp_dir, 0, false, &mut budget)
+            .unwrap();
 
         assert!(!file_old.exists());
         assert!(!file_new.exists());
@@ -499,7 +639,10 @@ mod tests {
         tokio::time::sleep(tokio::time::Duration::from_millis(1100)).await;
 
         // Prune the root
-        daemon.prune_directory(&temp_dir, 0, false).unwrap();
+        let mut budget = usize::MAX;
+        daemon
+            .prune_directory(&temp_dir, 0, false, &mut budget)
+            .unwrap();
 
         // Check if nested file is gone
         assert!(!file_nested.exists());
@@ -542,7 +685,10 @@ mod tests {
         tokio::time::sleep(tokio::time::Duration::from_millis(1100)).await;
 
         // Run GC on the root with age 0
-        daemon.prune_directory(&temp_dir, 0, false).unwrap();
+        let mut budget = usize::MAX;
+        daemon
+            .prune_directory(&temp_dir, 0, false, &mut budget)
+            .unwrap();
 
         // ASSERTIONS:
         // 1. The symlink itself should be deleted (because it's a "file" in the root and its age is 0)
@@ -581,7 +727,8 @@ mod tests {
 
         // Path that doesn't exist shouldn't error but return Ok
         let dummy_path = PathBuf::from("/non/existent/path/for/rust/agent/test");
-        let result = daemon.prune_directory(&dummy_path, 0, false);
+        let mut budget = usize::MAX;
+        let result = daemon.prune_directory(&dummy_path, 0, false, &mut budget);
         assert!(result.is_ok());
     }
 }

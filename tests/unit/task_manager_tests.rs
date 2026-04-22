@@ -21,6 +21,7 @@ use rust_agent::tool::builtin::task_stop::TaskStopTool;
 use rust_agent::tool::builtin::task_update::TaskUpdateTool;
 use rust_agent::tool::definition::{Tool, ToolCall, ToolResult};
 use rust_agent::tool::registry::ToolRegistry;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 struct SafeTool {
     name: &'static str,
@@ -124,6 +125,27 @@ async fn task_manager_tracks_failed_and_killed_states() {
         .expect("killed notification should exist");
     assert_eq!(killed_notification.title, "Task killed");
     assert_eq!(killed_notification.body, "killed task (task-1) — killed");
+}
+
+#[test]
+fn task_manager_updates_activity_tracker_on_runtime_progress() {
+    let manager = TaskManager::default();
+    let tracker = Arc::new(AtomicU64::new(1));
+    manager.set_activity_tracker(tracker.clone());
+    let dispatcher = NotificationDispatcher::new(TelegramGateway::default());
+    let task = manager.create("tracked task", "session-activity", InteractionSurface::Cli);
+
+    manager.start(&task.id);
+    let after_start = tracker.load(Ordering::Acquire);
+    assert!(after_start >= 1);
+
+    tracker.store(1, Ordering::Release);
+    manager.append_output(&task.id, "background progress");
+    assert!(tracker.load(Ordering::Acquire) > 1);
+
+    tracker.store(1, Ordering::Release);
+    manager.complete(&task.id, &dispatcher);
+    assert!(tracker.load(Ordering::Acquire) > 1);
 }
 
 #[test]
