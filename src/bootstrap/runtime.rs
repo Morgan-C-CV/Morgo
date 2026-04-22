@@ -212,6 +212,25 @@ pub fn tui_clear_screen_prefix() -> &'static str {
 
 const DEFAULT_RUNTIME_SHUTDOWN_TIMEOUT_MS: u64 = 1_500;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ShutdownFailure {
+    ForceDrainTimedOut,
+    PersistBeforeShutdown,
+    PersistAfterShutdown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ShutdownOutcome {
+    Completed,
+    Forced {
+        hibernated_task_ids: Vec<String>,
+    },
+    Failed {
+        failure: ShutdownFailure,
+        hibernated_task_ids: Vec<String>,
+    },
+}
+
 #[derive(Debug, Clone, Parser)]
 #[command(name = "rust-agent", about = "Rust agent runtime")]
 pub struct BootstrapCli {
@@ -1324,21 +1343,24 @@ pub fn runtime_shutdown_timeout() -> Duration {
     Duration::from_millis(timeout_ms)
 }
 
-pub async fn execute_runtime_shutdown(app_state: AppState, reason: &'static str) {
-    execute_runtime_shutdown_with_deadline(app_state, reason, runtime_shutdown_timeout()).await;
+pub async fn execute_runtime_shutdown(
+    app_state: AppState,
+    reason: &'static str,
+) -> ShutdownOutcome {
+    execute_runtime_shutdown_with_deadline(app_state, reason, runtime_shutdown_timeout()).await
 }
 
 pub async fn execute_runtime_shutdown_with_deadline(
     app_state: AppState,
     reason: &'static str,
     deadline: Duration,
-) {
+) -> ShutdownOutcome {
     tracing::info!(
         "runtime shutdown requested: reason={}, deadline_ms={}",
         reason,
         deadline.as_millis()
     );
-    app_state.persist_current_session_state();
+    let persisted_before = app_state.persist_current_session_state();
     app_state.shutdown();
 
     let session_id = app_state.active_session_id.clone();
@@ -1357,7 +1379,7 @@ pub async fn execute_runtime_shutdown_with_deadline(
         }
     };
 
-    if tokio::time::timeout(deadline, running_tasks_cleared)
+    let mut outcome = if tokio::time::timeout(deadline, running_tasks_cleared)
         .await
         .is_err()
     {
@@ -1365,13 +1387,58 @@ pub async fn execute_runtime_shutdown_with_deadline(
             "runtime shutdown deadline exceeded for session {}; forcing task hibernation",
             session_id
         );
-        if let Some(task_manager) = app_state.permission_context.task_manager.as_ref() {
-            task_manager.hibernate_owned_running_tasks(
-                &app_state.active_session_id,
-                &app_state.notification_dispatcher,
-            );
+        let hibernated_task_ids =
+            if let Some(task_manager) = app_state.permission_context.task_manager.as_ref() {
+                task_manager.hibernate_owned_running_tasks(
+                    &app_state.active_session_id,
+                    &app_state.notification_dispatcher,
+                )
+            } else {
+                Vec::new()
+            };
+        if hibernated_task_ids.is_empty() {
+            ShutdownOutcome::Failed {
+                failure: ShutdownFailure::ForceDrainTimedOut,
+                hibernated_task_ids,
+            }
+        } else {
+            ShutdownOutcome::Forced {
+                hibernated_task_ids,
+            }
         }
-    }
+    } else {
+        ShutdownOutcome::Completed
+    };
 
-    app_state.persist_current_session_state();
+    let persisted_after = app_state.persist_current_session_state();
+    if !persisted_before {
+        outcome = ShutdownOutcome::Failed {
+            failure: ShutdownFailure::PersistBeforeShutdown,
+            hibernated_task_ids: match outcome {
+                ShutdownOutcome::Forced {
+                    ref hibernated_task_ids,
+                }
+                | ShutdownOutcome::Failed {
+                    ref hibernated_task_ids,
+                    ..
+                } => hibernated_task_ids.clone(),
+                ShutdownOutcome::Completed => Vec::new(),
+            },
+        };
+    } else if !persisted_after {
+        outcome = ShutdownOutcome::Failed {
+            failure: ShutdownFailure::PersistAfterShutdown,
+            hibernated_task_ids: match outcome {
+                ShutdownOutcome::Forced {
+                    ref hibernated_task_ids,
+                }
+                | ShutdownOutcome::Failed {
+                    ref hibernated_task_ids,
+                    ..
+                } => hibernated_task_ids.clone(),
+                ShutdownOutcome::Completed => Vec::new(),
+            },
+        };
+    }
+    outcome
 }

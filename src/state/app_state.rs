@@ -19,7 +19,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::history::resume::{ResolvedSessionState, RestoredSession};
 use crate::history::session::{
-    SessionHistory, SessionId, SessionLifecycleStatus, SessionSnapshot, SessionStore,
+    PersistedSessionRecord, SessionHistory, SessionId, SessionLifecycleStatus, SessionSnapshot,
+    SessionStore,
 };
 use crate::interaction::dispatcher::NotificationDispatcher;
 use crate::security::audit::AuditLog;
@@ -158,16 +159,17 @@ impl AppState {
         let Some(snapshot) = &self.session else {
             return false;
         };
-        let history = self.history.clone().unwrap_or_default();
-        session_store.save(snapshot.clone(), history);
-        session_store.save_external_memory_entries(
-            &snapshot.session_id,
-            self.permission_context.external_memory_entries(),
-        );
-        session_store.save_nested_memory_lineage(
-            &snapshot.session_id,
-            self.permission_context.nested_memory_lineage(),
-        );
+        let session_id = snapshot.session_id.clone();
+        let record = PersistedSessionRecord {
+            snapshot: snapshot.clone(),
+            history: self.history.clone().unwrap_or_default(),
+            task_list: session_store.load_task_list(&session_id),
+            plan_state: session_store.load_plan_state(&session_id),
+            external_memory_entries: Some(self.permission_context.external_memory_entries()),
+            nested_memory_lineage: Some(self.permission_context.nested_memory_lineage()),
+            lifecycle_status: session_store.load_lifecycle_status(&session_id),
+        };
+        session_store.save_full_record(&session_id, record);
         true
     }
 
@@ -264,16 +266,16 @@ impl AppState {
             return;
         };
         let session_id = resolved.snapshot.session_id.clone();
-        session_store.save(resolved.snapshot.clone(), resolved.history.clone());
-        session_store.save_external_memory_entries(
-            &session_id,
-            self.permission_context.external_memory_entries(),
-        );
-        session_store.save_nested_memory_lineage(
-            &session_id,
-            self.permission_context.nested_memory_lineage(),
-        );
-        session_store.save_lifecycle_status(&session_id, SessionLifecycleStatus::Active);
+        let record = PersistedSessionRecord {
+            snapshot: resolved.snapshot.clone(),
+            history: resolved.history.clone(),
+            task_list: session_store.load_task_list(&session_id),
+            plan_state: session_store.load_plan_state(&session_id),
+            external_memory_entries: Some(self.permission_context.external_memory_entries()),
+            nested_memory_lineage: Some(self.permission_context.nested_memory_lineage()),
+            lifecycle_status: SessionLifecycleStatus::Active,
+        };
+        session_store.save_full_record(&session_id, record);
     }
 
     pub fn current_session_id(&self) -> SessionId {

@@ -7,10 +7,10 @@ pub mod warnings;
 
 pub use runtime::{
     BootstrapCli, FinalizedRuntime, PromptAugmentation, PromptAugmentationMetadata,
-    RuntimeBootstrap, RuntimeInitializeBundle, UserAccessDecision, execute_runtime_shutdown,
-    execute_runtime_shutdown_with_deadline, has_explicit_provider_env_override,
-    is_tui_exit_input, runtime_shutdown_timeout, summarize_active_model_provider,
-    tui_clear_screen_prefix,
+    RuntimeBootstrap, RuntimeInitializeBundle, ShutdownFailure, ShutdownOutcome,
+    UserAccessDecision, execute_runtime_shutdown, execute_runtime_shutdown_with_deadline,
+    has_explicit_provider_env_override, is_tui_exit_input, runtime_shutdown_timeout,
+    summarize_active_model_provider, tui_clear_screen_prefix,
 };
 pub use setup::SetupContext;
 pub use state::{

@@ -1,5 +1,7 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::fs::{self, File};
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 use crate::bootstrap::{InteractionSurface, SessionMode};
@@ -70,6 +72,7 @@ impl SessionLifecycleStatus {
 pub trait SessionStore: Send + Sync {
     fn load(&self, request: &SessionRestoreRequest) -> Option<(SessionSnapshot, SessionHistory)>;
     fn save(&self, snapshot: SessionSnapshot, history: SessionHistory);
+    fn save_full_record(&self, session_id: &SessionId, record: PersistedSessionRecord);
     fn append_entry(&self, session_id: &SessionId, entry: SessionHistoryEntry);
     fn load_task_list(&self, session_id: &SessionId) -> Option<TaskListSnapshot>;
     fn save_task_list(&self, session_id: &SessionId, snapshot: TaskListSnapshot);
@@ -102,6 +105,7 @@ impl InMemorySessionStore {
     pub fn insert_task_list(&self, session_id: SessionId, snapshot: TaskListSnapshot) {
         self.save_task_list(&session_id, snapshot);
     }
+
 }
 
 impl SessionStore for InMemorySessionStore {
@@ -124,6 +128,49 @@ impl SessionStore for InMemorySessionStore {
         }
         if let Ok(mut sessions) = self.sessions.write() {
             sessions.insert(snapshot.session_id.clone(), (snapshot, history));
+        }
+    }
+
+    fn save_full_record(&self, session_id: &SessionId, record: PersistedSessionRecord) {
+        if let Ok(mut latest) = self.latest_session.write() {
+            *latest = Some(session_id.clone());
+        }
+        if let Ok(mut sessions) = self.sessions.write() {
+            sessions.insert(
+                session_id.clone(),
+                (record.snapshot.clone(), record.history.clone()),
+            );
+        }
+        if let Ok(mut task_lists) = self.task_lists.write() {
+            if let Some(task_list) = record.task_list {
+                task_lists.insert(session_id.clone(), task_list);
+            } else {
+                task_lists.remove(session_id);
+            }
+        }
+        if let Ok(mut plan_states) = self.plan_states.write() {
+            if let Some(plan_state) = record.plan_state {
+                plan_states.insert(session_id.clone(), plan_state);
+            } else {
+                plan_states.remove(session_id);
+            }
+        }
+        if let Ok(mut external_memory_entries) = self.external_memory_entries.write() {
+            if let Some(entries) = record.external_memory_entries {
+                external_memory_entries.insert(session_id.clone(), entries);
+            } else {
+                external_memory_entries.remove(session_id);
+            }
+        }
+        if let Ok(mut nested_memory_lineage) = self.nested_memory_lineage.write() {
+            if let Some(lineage) = record.nested_memory_lineage {
+                nested_memory_lineage.insert(session_id.clone(), lineage);
+            } else {
+                nested_memory_lineage.remove(session_id);
+            }
+        }
+        if let Ok(mut lifecycle_statuses) = self.lifecycle_statuses.write() {
+            lifecycle_statuses.insert(session_id.clone(), record.lifecycle_status);
         }
     }
 
@@ -204,15 +251,15 @@ pub struct FileBackedSessionStore {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct PersistedSessionRecord {
-    snapshot: SessionSnapshot,
-    history: SessionHistory,
-    task_list: Option<TaskListSnapshot>,
-    plan_state: Option<PlanState>,
-    external_memory_entries: Option<Vec<String>>,
-    nested_memory_lineage: Option<Vec<String>>,
+pub struct PersistedSessionRecord {
+    pub snapshot: SessionSnapshot,
+    pub history: SessionHistory,
+    pub task_list: Option<TaskListSnapshot>,
+    pub plan_state: Option<PlanState>,
+    pub external_memory_entries: Option<Vec<String>>,
+    pub nested_memory_lineage: Option<Vec<String>>,
     #[serde(default)]
-    lifecycle_status: SessionLifecycleStatus,
+    pub lifecycle_status: SessionLifecycleStatus,
 }
 
 impl FileBackedSessionStore {
@@ -220,6 +267,25 @@ impl FileBackedSessionStore {
         let store = Self { root };
         store.ensure_root();
         store
+    }
+
+    fn default_record(session_id: &SessionId) -> PersistedSessionRecord {
+        PersistedSessionRecord {
+            snapshot: SessionSnapshot {
+                session_id: session_id.clone(),
+                surface: InteractionSurface::Cli,
+                session_mode: SessionMode::Headless,
+                cwd: String::new(),
+                last_turn_at: None,
+                prompt_seed: None,
+            },
+            history: SessionHistory::default(),
+            task_list: None,
+            plan_state: None,
+            external_memory_entries: None,
+            nested_memory_lineage: None,
+            lifecycle_status: SessionLifecycleStatus::Active,
+        }
     }
 
     pub fn root(&self) -> &PathBuf {
@@ -257,7 +323,8 @@ impl FileBackedSessionStore {
     }
 
     fn write_latest_session_id(&self, session_id: &SessionId) {
-        let _ = std::fs::write(self.latest_path(), &session_id.0);
+        self.ensure_root();
+        let _ = write_atomic(&self.latest_path(), session_id.0.as_bytes());
     }
 
     fn read_record(&self, session_id: &SessionId) -> Option<PersistedSessionRecord> {
@@ -271,7 +338,7 @@ impl FileBackedSessionStore {
         let path = self.session_path(session_id);
         let raw = serde_json::to_string_pretty(record)
             .expect("session record serialization should succeed");
-        let _ = std::fs::write(path, raw);
+        let _ = write_atomic(&path, raw.as_bytes());
         self.write_latest_session_id(session_id);
     }
 
@@ -282,25 +349,53 @@ impl FileBackedSessionStore {
     ) {
         let mut record = self
             .read_record(session_id)
-            .unwrap_or_else(|| PersistedSessionRecord {
-                snapshot: SessionSnapshot {
-                    session_id: session_id.clone(),
-                    surface: InteractionSurface::Cli,
-                    session_mode: SessionMode::Headless,
-                    cwd: String::new(),
-                    last_turn_at: None,
-                    prompt_seed: None,
-                },
-                history: SessionHistory::default(),
-                task_list: None,
-                plan_state: None,
-                external_memory_entries: None,
-                nested_memory_lineage: None,
-                lifecycle_status: SessionLifecycleStatus::Active,
-            });
+            .unwrap_or_else(|| Self::default_record(session_id));
         update(&mut record);
         self.write_record(session_id, &record);
     }
+}
+
+fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "atomic write target must have a parent directory",
+        )
+    })?;
+    fs::create_dir_all(parent)?;
+
+    let file_name = path.file_name().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "atomic write target must have a file name",
+        )
+    })?;
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let temp_path = parent.join(format!(
+        ".{}.tmp-{}-{}",
+        file_name.to_string_lossy(),
+        std::process::id(),
+        nonce
+    ));
+
+    let write_result = (|| -> std::io::Result<()> {
+        let mut file = File::create(&temp_path)?;
+        file.write_all(bytes)?;
+        file.flush()?;
+        file.sync_all()?;
+        fs::rename(&temp_path, path)?;
+        File::open(parent)?.sync_all()?;
+        Ok(())
+    })();
+
+    if write_result.is_err() {
+        let _ = fs::remove_file(&temp_path);
+    }
+
+    write_result
 }
 
 impl Default for FileBackedSessionStore {
@@ -345,6 +440,10 @@ impl SessionStore for FileBackedSessionStore {
                 lifecycle_status,
             },
         );
+    }
+
+    fn save_full_record(&self, session_id: &SessionId, record: PersistedSessionRecord) {
+        self.write_record(session_id, &record);
     }
 
     fn append_entry(&self, session_id: &SessionId, entry: SessionHistoryEntry) {

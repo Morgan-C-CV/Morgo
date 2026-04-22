@@ -15,6 +15,8 @@ pub struct HousekeepingConfig {
     pub interval: Duration,
     /// Threshold (in seconds) for considering a session as "stale" or "zombie".
     pub stale_threshold_secs: u64,
+    /// Threshold (in seconds) for upgrading an already hibernating session to expired.
+    pub expired_threshold_secs: u64,
     /// Retention period for persistent sessions.
     pub session_retention_days: u64,
     /// Retention period for task logs.
@@ -41,9 +43,15 @@ impl Default for HousekeepingConfig {
                 .unwrap_or(fallback)
         }
 
+        let stale_threshold_secs = env_u64("RUST_AGENT_HOUSEKEEPING_STALE_THRESHOLD_SECS", 600);
+
         Self {
             interval: Duration::from_secs(env_u64("RUST_AGENT_HOUSEKEEPING_INTERVAL_SECS", 60)),
-            stale_threshold_secs: env_u64("RUST_AGENT_HOUSEKEEPING_STALE_THRESHOLD_SECS", 600),
+            stale_threshold_secs,
+            expired_threshold_secs: env_u64(
+                "RUST_AGENT_HOUSEKEEPING_EXPIRED_THRESHOLD_SECS",
+                stale_threshold_secs.saturating_mul(6),
+            ),
             session_retention_days: env_u64("RUST_AGENT_HOUSEKEEPING_SESSION_RETENTION_DAYS", 7),
             task_log_retention_days: env_u64("RUST_AGENT_HOUSEKEEPING_TASK_LOG_RETENTION_DAYS", 1),
             max_gc_entries_per_tick: env_usize(
@@ -55,11 +63,26 @@ impl Default for HousekeepingConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ZombieSessionFailure {
+    MissingAppState,
+    PersistSessionState,
+    PersistLifecycleHibernating,
+    PersistLifecycleExpired,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ZombieSessionOutcome {
     Noop,
     AlreadyInactive,
-    PersistFailed,
-    PersistedAndSuspended { suspended_task_ids: Vec<String> },
+    AlreadyExpired,
+    Hibernated {
+        suspended_task_ids: Vec<String>,
+    },
+    Expired,
+    Failed {
+        failure: ZombieSessionFailure,
+        suspended_task_ids: Vec<String>,
+    },
 }
 
 /// The housekeeping daemon responsible for background maintenance tasks.
@@ -138,8 +161,18 @@ impl HousekeepingDaemon {
             .as_secs();
         let last_active = self.last_activity_ts.load(Ordering::Acquire);
         let delta = now.saturating_sub(last_active);
+        let lifecycle = self
+            .app_state
+            .as_ref()
+            .map(|app_state| app_state.current_session_lifecycle())
+            .unwrap_or(SessionLifecycleStatus::Active);
 
-        if delta > self.config.stale_threshold_secs {
+        if lifecycle == SessionLifecycleStatus::Hibernating
+            && delta > self.config.expired_threshold_secs
+        {
+            let outcome = self.expire_hibernating_session(delta).await;
+            debug!("Housekeeping expired zombie outcome: {:?}", outcome);
+        } else if delta > self.config.stale_threshold_secs {
             warn!(
                 "CRITICAL: Zombie session detected! Last active {}s ago (threshold: {}s).",
                 delta, self.config.stale_threshold_secs
@@ -171,7 +204,10 @@ impl HousekeepingDaemon {
         );
 
         let Some(app_state) = self.app_state.as_ref() else {
-            return ZombieSessionOutcome::Noop;
+            return ZombieSessionOutcome::Failed {
+                failure: ZombieSessionFailure::MissingAppState,
+                suspended_task_ids: Vec::new(),
+            };
         };
 
         let persisted_session = app_state.persist_current_session_state();
@@ -190,8 +226,30 @@ impl HousekeepingDaemon {
             })
             .unwrap_or_default();
 
-        let mut notice = Notification::runtime_notice(
-            app_state.active_session_id.clone(),
+        if !(persisted_session && persisted_lifecycle) {
+            let failure = if !persisted_session {
+                ZombieSessionFailure::PersistSessionState
+            } else {
+                ZombieSessionFailure::PersistLifecycleHibernating
+            };
+            self.dispatch_housekeeping_notice(
+                app_state,
+                "housekeeping.zombie_hibernation_failed",
+                format!(
+                    "Session {} hit zombie threshold after {}s but hibernation failed at stage {:?}.",
+                    app_state.active_session_id, delta, failure
+                ),
+                "housekeeping_zombie_hibernation_failed",
+                true,
+            );
+            return ZombieSessionOutcome::Failed {
+                failure,
+                suspended_task_ids,
+            };
+        }
+
+        self.dispatch_housekeeping_notice(
+            app_state,
             "housekeeping.zombie_hibernated",
             format!(
                 "Session {} was hibernated after {}s of inactivity; suspended {} running task(s).",
@@ -199,28 +257,54 @@ impl HousekeepingDaemon {
                 delta,
                 suspended_task_ids.len()
             ),
-            Some("housekeeping_zombie_hibernated".into()),
-            Some("housekeeping".into()),
-            None,
-            None,
-            None,
-            Some(false),
-            Some(true),
+            "housekeeping_zombie_hibernated",
+            true,
         );
-        notice.wake_up = true;
-        app_state
-            .notification_dispatcher
-            .dispatch(app_state.surface, notice);
-
-        if !(persisted_session && persisted_lifecycle) {
-            return ZombieSessionOutcome::PersistFailed;
-        }
 
         debug!(
             "Housekeeping: Hibernation sequence completed for zombie session {}.",
             app_state.active_session_id
         );
-        ZombieSessionOutcome::PersistedAndSuspended { suspended_task_ids }
+        ZombieSessionOutcome::Hibernated { suspended_task_ids }
+    }
+
+    async fn expire_hibernating_session(&self, delta: u64) -> ZombieSessionOutcome {
+        let Some(app_state) = self.app_state.as_ref() else {
+            return ZombieSessionOutcome::Failed {
+                failure: ZombieSessionFailure::MissingAppState,
+                suspended_task_ids: Vec::new(),
+            };
+        };
+        if app_state.current_session_lifecycle() == SessionLifecycleStatus::Expired {
+            return ZombieSessionOutcome::AlreadyExpired;
+        }
+        if !app_state.persist_session_lifecycle(SessionLifecycleStatus::Expired) {
+            self.dispatch_housekeeping_notice(
+                app_state,
+                "housekeeping.zombie_expire_failed",
+                format!(
+                    "Session {} stayed hibernating for {}s and failed to transition to expired.",
+                    app_state.active_session_id, delta
+                ),
+                "housekeeping_zombie_expire_failed",
+                true,
+            );
+            return ZombieSessionOutcome::Failed {
+                failure: ZombieSessionFailure::PersistLifecycleExpired,
+                suspended_task_ids: Vec::new(),
+            };
+        }
+        self.dispatch_housekeeping_notice(
+            app_state,
+            "housekeeping.zombie_expired",
+            format!(
+                "Session {} remained hibernating for {}s and was upgraded to expired.",
+                app_state.active_session_id, delta
+            ),
+            "housekeeping_zombie_expired",
+            true,
+        );
+        ZombieSessionOutcome::Expired
     }
 
     pub async fn perform_gc(&self) {
@@ -336,6 +420,32 @@ impl HousekeepingDaemon {
         }
     }
 
+    fn dispatch_housekeeping_notice(
+        &self,
+        app_state: &AppState,
+        kind: &str,
+        message: String,
+        code: &str,
+        wake_up: bool,
+    ) {
+        let mut notice = Notification::runtime_notice(
+            app_state.active_session_id.clone(),
+            kind,
+            message,
+            Some(code.into()),
+            Some("housekeeping".into()),
+            None,
+            None,
+            None,
+            Some(false),
+            Some(true),
+        );
+        notice.wake_up = wake_up;
+        app_state
+            .notification_dispatcher
+            .dispatch(app_state.surface, notice);
+    }
+
     fn session_id_for_logs(&self) -> String {
         self.app_state
             .as_ref()
@@ -443,6 +553,7 @@ mod tests {
             HousekeepingConfig {
                 interval: Duration::from_millis(10),
                 stale_threshold_secs: 100,
+                expired_threshold_secs: 600,
                 session_retention_days: 7,
                 task_log_retention_days: 1,
                 max_gc_entries_per_tick: 2048,
@@ -476,6 +587,7 @@ mod tests {
             HousekeepingConfig {
                 interval: Duration::from_secs(1),
                 stale_threshold_secs: 10,
+                expired_threshold_secs: 60,
                 session_retention_days: 7,
                 task_log_retention_days: 1,
                 max_gc_entries_per_tick: 2048,
@@ -503,6 +615,7 @@ mod tests {
         let config = HousekeepingConfig {
             interval: Duration::from_millis(10),
             stale_threshold_secs: 5,
+            expired_threshold_secs: 30,
             session_retention_days: 7,
             task_log_retention_days: 1,
             max_gc_entries_per_tick: 2048,
@@ -551,7 +664,7 @@ mod tests {
         let outcome = daemon.handle_zombie_session(3600).await;
         assert_eq!(
             outcome,
-            ZombieSessionOutcome::PersistedAndSuspended {
+            ZombieSessionOutcome::Hibernated {
                 suspended_task_ids: vec![task.id.clone()]
             }
         );
@@ -574,6 +687,57 @@ mod tests {
 
         let repeated = daemon.handle_zombie_session(7200).await;
         assert_eq!(repeated, ZombieSessionOutcome::AlreadyInactive);
+    }
+
+    #[tokio::test]
+    async fn test_housekeeping_hibernating_session_upgrades_to_expired() {
+        let token = CancellationToken::new();
+        let last_active = Arc::new(AtomicU64::new(0));
+        let session_store = Arc::new(InMemorySessionStore::default());
+        let task_manager = Arc::new(TaskManager::default());
+        let app_state = test_app_state(
+            session_store.clone(),
+            task_manager,
+            last_active.clone(),
+            token.clone(),
+        );
+        session_store.save_lifecycle_status(
+            &SessionId("session-housekeeping".into()),
+            SessionLifecycleStatus::Hibernating,
+        );
+        let daemon = HousekeepingDaemon::new(
+            HousekeepingConfig {
+                interval: Duration::from_secs(1),
+                stale_threshold_secs: 5,
+                expired_threshold_secs: 10,
+                session_retention_days: 7,
+                task_log_retention_days: 1,
+                max_gc_entries_per_tick: 2048,
+            },
+            token,
+            last_active.clone(),
+        )
+        .with_app_state(app_state.clone());
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        last_active.store(now - 30, Ordering::Relaxed);
+        daemon.perform_maintenance().await;
+
+        assert_eq!(
+            session_store.load_lifecycle_status(&SessionId("session-housekeeping".into())),
+            SessionLifecycleStatus::Expired
+        );
+        assert!(
+            app_state
+                .notification_dispatcher
+                .delivered()
+                .iter()
+                .any(|notification| notification.notice_kind.as_deref()
+                    == Some("housekeeping.zombie_expired"))
+        );
     }
 
     #[tokio::test]
@@ -668,7 +832,13 @@ mod tests {
         std::fs::create_dir_all(&temp_dir).unwrap();
 
         // Create a real file OUTSIDE the root that should be PROTECTED
-        let protected_dir = temp_dir.parent().unwrap().join("protected_dir_gc_test");
+        let protected_dir = temp_dir.parent().unwrap().join(format!(
+            "protected_dir_gc_test_{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         std::fs::create_dir_all(&protected_dir).ok();
         let protected_file = protected_dir.join("should_not_be_deleted.txt");
         std::fs::write(&protected_file, "stay alive").unwrap();

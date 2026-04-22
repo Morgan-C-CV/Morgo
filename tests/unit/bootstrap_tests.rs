@@ -7,15 +7,16 @@ use rust_agent::bootstrap::model_profiles::{
 };
 use rust_agent::bootstrap::{
     BootstrapCli, BootstrapPhase, BootstrapState, InteractionSurface, PromptAugmentationMetadata,
-    RuntimeBootstrap, SessionMode, SessionSource, StartupWarning, UserAccessDecision,
-    execute_runtime_shutdown_with_deadline, is_tui_exit_input, runtime_shutdown_timeout,
-    tui_clear_screen_prefix,
+    RuntimeBootstrap, SessionMode, SessionSource, ShutdownOutcome, StartupWarning,
+    UserAccessDecision, execute_runtime_shutdown_with_deadline, is_tui_exit_input,
+    runtime_shutdown_timeout, tui_clear_screen_prefix,
 };
 use rust_agent::core::message::Message;
 use rust_agent::history::resume::{RestoreRequest, RestoreSource, resolve_session_state};
 use rust_agent::history::session::{
-    FileBackedSessionStore, InMemorySessionStore, SessionHistory, SessionHistoryEntry, SessionId,
-    SessionRestoreRequest, SessionSnapshot, SessionStore,
+    FileBackedSessionStore, InMemorySessionStore, PersistedSessionRecord, SessionHistory,
+    SessionHistoryEntry, SessionId, SessionLifecycleStatus, SessionRestoreRequest,
+    SessionSnapshot, SessionStore,
 };
 use rust_agent::hook::registry::{HookConfigSource, HookEvent, load_hook_registry};
 use rust_agent::service::api::client::{
@@ -255,12 +256,19 @@ async fn execute_runtime_shutdown_forces_hibernation_after_deadline() {
     let task = tasks.create("shutdown task", "shutdown-session", InteractionSurface::Cli);
     tasks.launch(&task.id, "work", std::future::pending::<()>());
 
-    execute_runtime_shutdown_with_deadline(
+    let outcome = execute_runtime_shutdown_with_deadline(
         app_state.clone(),
         "test.shutdown_timeout",
         Duration::from_millis(10),
     )
     .await;
+
+    assert_eq!(
+        outcome,
+        ShutdownOutcome::Forced {
+            hibernated_task_ids: vec![task.id.clone()]
+        }
+    );
 
     assert!(app_state.cancellation_token.is_cancelled());
     assert_eq!(
