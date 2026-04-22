@@ -1,5 +1,6 @@
 use crate::core::boss_state::{BossPlan, BossPlanStep, BossPlanStepStatus, BossStage, BossStatus};
 use crate::task::types::{TaskEvent, TaskStatus};
+use crate::tool::definition::{Tool, ToolCall};
 use serde_json::json;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -16,6 +17,7 @@ pub struct BossCoordinator {
     pub agent_b_session_id: Arc<RwLock<Option<String>>>,
     pub agent_a_cancel: Arc<RwLock<Option<CancellationToken>>>,
     pub agent_b_cancel: Arc<RwLock<Option<CancellationToken>>>,
+    auto_advance_app_state: Arc<RwLock<Option<Arc<crate::state::app_state::AppState>>>>,
 }
 
 impl BossCoordinator {
@@ -27,6 +29,7 @@ impl BossCoordinator {
             agent_b_session_id: Arc::new(RwLock::new(None)),
             agent_a_cancel: Arc::new(RwLock::new(None)),
             agent_b_cancel: Arc::new(RwLock::new(None)),
+            auto_advance_app_state: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -172,29 +175,36 @@ impl BossCoordinator {
             return Ok(());
         };
 
-        match event.status {
+        let should_auto_advance = match event.status {
             TaskStatus::Completed => {
+                let was_completed = step.completed || step.status == BossPlanStepStatus::Completed;
                 step.completed = true;
                 step.status = BossPlanStepStatus::Completed;
                 step.worker_task_id = Some(event.task_id.clone());
                 tracing::info!("BossPlan: Step {} marked as completed", step_id);
+                !was_completed
             }
             TaskStatus::Failed | TaskStatus::Killed => {
                 step.completed = false;
                 step.status = BossPlanStepStatus::Failed;
                 step.worker_task_id = Some(event.task_id.clone());
                 tracing::warn!("BossPlan: Step {} marked as failed", step_id);
+                false
             }
             TaskStatus::Running => {
                 step.status = BossPlanStepStatus::Running;
                 step.worker_task_id = Some(event.task_id.clone());
+                false
             }
-            TaskStatus::Pending => {}
-        }
+            TaskStatus::Pending => false,
+        };
 
         let next_step = next_unfinished_step_id(plan);
         drop(plan_guard);
         self.update_current_step(next_step).await;
+        if should_auto_advance {
+            self.maybe_auto_advance_after_completion().await?;
+        }
 
         Ok(())
     }
@@ -224,8 +234,9 @@ impl BossCoordinator {
             return Ok(());
         };
 
-        match notification.status.as_deref().unwrap_or_default() {
+        let should_auto_advance = match notification.status.as_deref().unwrap_or_default() {
             status if status.eq_ignore_ascii_case("completed") => {
+                let was_completed = step.completed || step.status == BossPlanStepStatus::Completed;
                 step.completed = true;
                 step.status = BossPlanStepStatus::Completed;
                 step.worker_task_id = notification.task_id.clone();
@@ -233,6 +244,7 @@ impl BossCoordinator {
                     "BossPlan: Step {} marked as completed via notification",
                     step_id
                 );
+                !was_completed
             }
             status
                 if status.eq_ignore_ascii_case("failed")
@@ -245,18 +257,32 @@ impl BossCoordinator {
                     "BossPlan: Step {} marked as failed via notification",
                     step_id
                 );
+                false
             }
             status if status.eq_ignore_ascii_case("running") => {
                 step.status = BossPlanStepStatus::Running;
                 step.worker_task_id = notification.task_id.clone();
+                false
             }
-            _ => {}
-        }
+            _ => false,
+        };
 
         let next_step = next_unfinished_step_id(plan);
         drop(plan_guard);
         self.update_current_step(next_step).await;
+        if should_auto_advance {
+            self.maybe_auto_advance_after_completion().await?;
+        }
 
+        Ok(())
+    }
+
+    async fn maybe_auto_advance_after_completion(&self) -> anyhow::Result<()> {
+        let app_state = self.auto_advance_app_state.read().await.clone();
+        let Some(app_state) = app_state else {
+            return Ok(());
+        };
+        let _ = self.advance_plan(&app_state).await?;
         Ok(())
     }
 
@@ -308,6 +334,12 @@ impl BossCoordinator {
         &self,
         app_state: &Arc<crate::state::app_state::AppState>,
     ) -> anyhow::Result<Option<String>> {
+        {
+            let mut auto_advance_app_state = self.auto_advance_app_state.write().await;
+            if auto_advance_app_state.is_none() {
+                *auto_advance_app_state = Some(app_state.clone());
+            }
+        }
         let parent_session_id = app_state.active_session_id.clone();
         let next_action = {
             let mut plan_guard = self.plan.write().await;
@@ -375,9 +407,45 @@ impl BossCoordinator {
                 let payload = self
                     .build_step_spawn_payload(step_id, &parent_session_id)
                     .await?;
+                self.spawn_worker_from_payload(app_state, &payload).await?;
                 Ok(Some(payload))
             }
             Some(AdvanceOutcome::NoRunnableStep) | None => Ok(None),
+        }
+    }
+
+    async fn spawn_worker_from_payload(
+        &self,
+        app_state: &Arc<crate::state::app_state::AppState>,
+        payload: &str,
+    ) -> anyhow::Result<()> {
+        let agent_tool = crate::tool::builtin::agent::AgentTool;
+        let result = agent_tool
+            .invoke(
+                &ToolCall::new("Agent", payload),
+                &app_state.permission_context,
+            )
+            .await?;
+
+        match result {
+            crate::tool::definition::ToolResult::Text(_) => Ok(()),
+            crate::tool::definition::ToolResult::Denied(reason) => {
+                anyhow::bail!("boss worker dispatch denied: {reason}")
+            }
+            crate::tool::definition::ToolResult::PendingApproval { message, .. } => {
+                anyhow::bail!("boss worker dispatch requires approval: {message}")
+            }
+            crate::tool::definition::ToolResult::Interrupted(reason) => {
+                anyhow::bail!("boss worker dispatch interrupted: {reason}")
+            }
+            crate::tool::definition::ToolResult::Progress(message) => {
+                anyhow::bail!(
+                    "boss worker dispatch returned progress instead of spawn result: {message}"
+                )
+            }
+            crate::tool::definition::ToolResult::ResultTooLarge(reason) => {
+                anyhow::bail!("boss worker dispatch returned oversized result: {reason}")
+            }
         }
     }
 

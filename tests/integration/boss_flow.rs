@@ -10,6 +10,7 @@ use rust_agent::state::app_state::{
     ActiveModelProfileSource, ActiveModelProviderSummary, AppState, RuntimeRole, WorkerRole,
 };
 use rust_agent::state::permission_context::{PermissionMode, ToolPermissionContext};
+use rust_agent::task::manager::TaskManager;
 use rust_agent::task::types::{TaskEvent, TaskOwner, TaskStatus, TaskType};
 use rust_agent::tool::registry::ToolRegistry;
 use tokio::sync::RwLock;
@@ -40,7 +41,14 @@ fn boss_plan(steps: Vec<BossPlanStep>) -> BossPlan {
 }
 
 fn app_state(active_session_id: &str) -> Arc<AppState> {
-    let permission_context = ToolPermissionContext::new(PermissionMode::Default);
+    app_state_with_tasks(active_session_id, Arc::new(TaskManager::default()))
+}
+
+fn app_state_with_tasks(active_session_id: &str, task_manager: Arc<TaskManager>) -> Arc<AppState> {
+    let permission_context = ToolPermissionContext::new(PermissionMode::Default)
+        .with_task_manager(task_manager)
+        .with_active_session_id(active_session_id)
+        .with_active_surface(InteractionSurface::Cli);
     Arc::new(AppState {
         surface: InteractionSurface::Cli,
         session_mode: SessionMode::Headless,
@@ -220,6 +228,44 @@ async fn boss_stops_after_step_failure() {
 }
 
 #[tokio::test]
+async fn boss_advance_plan_actually_spawns_worker() {
+    let task_manager = Arc::new(TaskManager::default());
+    let app_state = app_state_with_tasks("parent-session-dispatch", task_manager.clone());
+    let (coordinator, plan_path) = coordinator_with_plan(
+        boss_plan(vec![
+            BossPlanStep {
+                completed: true,
+                status: BossPlanStepStatus::Completed,
+                ..boss_step(0, "Step 1")
+            },
+            boss_step(1, "Step 2"),
+        ]),
+        "test_boss_flow_real_dispatch.json",
+    )
+    .await;
+
+    let payload = coordinator
+        .advance_plan(&app_state)
+        .await
+        .unwrap()
+        .expect("worker dispatch payload should be returned");
+
+    assert!(payload.contains("\"step_id\":1"));
+    let tasks = task_manager.list();
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks[0].task_type, TaskType::LocalAgent);
+    assert_eq!(tasks[0].worker_role, Some(WorkerRole::Implement));
+    assert_eq!(tasks[0].step_id, Some(1));
+    assert_eq!(tasks[0].owner.session_id, "parent-session-dispatch");
+    assert!(matches!(
+        tasks[0].status,
+        TaskStatus::Running | TaskStatus::Completed
+    ));
+
+    let _ = std::fs::remove_file(plan_path);
+}
+
+#[tokio::test]
 async fn concurrent_worker_updates_do_not_cross_step_boundaries() {
     let (coordinator, plan_path) = coordinator_with_plan(
         boss_plan(vec![boss_step(0, "Step 1"), boss_step(1, "Step 2")]),
@@ -248,6 +294,53 @@ async fn concurrent_worker_updates_do_not_cross_step_boundaries() {
         steps[1].worker_task_id.as_deref(),
         Some("worker-task-right")
     );
+
+    let _ = std::fs::remove_file(plan_path);
+}
+
+#[tokio::test]
+async fn boss_step_complete_auto_dispatches_next() {
+    let task_manager = Arc::new(TaskManager::default());
+    let app_state = app_state_with_tasks("parent-session-auto-chain", task_manager.clone());
+
+    let (coordinator, plan_path) = coordinator_with_plan(
+        boss_plan(vec![
+            BossPlanStep {
+                status: BossPlanStepStatus::Running,
+                worker_task_id: Some("worker-task-step0".into()),
+                ..boss_step(0, "Step 1")
+            },
+            boss_step(1, "Step 2"),
+        ]),
+        "test_boss_flow_auto_chain.json",
+    )
+    .await;
+
+    // Seed the auto-advance app_state by calling advance_plan once.
+    // With step 0 Running, advance_plan returns None (already running) but stores app_state.
+    let _ = coordinator.advance_plan(&app_state).await.unwrap();
+
+    // Fire the completion event for step 0 — should auto-trigger advance_plan for step 1.
+    coordinator
+        .on_task_event(&task_event("worker-task-step0", 0, TaskStatus::Completed))
+        .await
+        .unwrap();
+
+    let plan = coordinator.plan.read().await;
+    let steps = &plan.as_ref().unwrap().steps;
+    assert_eq!(steps[0].status, BossPlanStepStatus::Completed);
+    assert!(steps[0].completed);
+    assert_eq!(steps[1].status, BossPlanStepStatus::Running);
+    drop(plan);
+
+    let tasks = task_manager.list();
+    assert_eq!(
+        tasks.len(),
+        1,
+        "one worker should have been spawned for step 1"
+    );
+    assert_eq!(tasks[0].step_id, Some(1));
+    assert_eq!(tasks[0].owner.session_id, "parent-session-auto-chain");
 
     let _ = std::fs::remove_file(plan_path);
 }
