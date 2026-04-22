@@ -326,6 +326,14 @@ impl TaskManager {
     }
 
     pub fn append_output(&self, id: &str, chunk: impl AsRef<str>) {
+        self.append_output_with_activity(id, chunk, true);
+    }
+
+    fn append_output_without_activity(&self, id: &str, chunk: impl AsRef<str>) {
+        self.append_output_with_activity(id, chunk, false);
+    }
+
+    fn append_output_with_activity(&self, id: &str, chunk: impl AsRef<str>, record_activity: bool) {
         if let Some(task) = self
             .store
             .write()
@@ -339,7 +347,9 @@ impl TaskManager {
                 .append(&task.output_file, chunk.as_ref())
                 .expect("task output should append");
             task.output_offset += appended;
-            self.record_activity();
+            if record_activity {
+                self.record_activity();
+            }
         }
     }
 
@@ -405,7 +415,7 @@ impl TaskManager {
             .map(|task| task.id)
             .collect::<Vec<_>>();
         for task_id in &task_ids {
-            self.append_output(
+            self.append_output_without_activity(
                 task_id,
                 "housekeeping: task hibernated because the owning session became zombie\n",
             );
@@ -418,7 +428,7 @@ impl TaskManager {
             {
                 handle.abort();
             }
-            self.finish(task_id, TaskStatus::Killed, dispatcher, None);
+            self.finish_with_activity(task_id, TaskStatus::Killed, dispatcher, None, false);
         }
         task_ids
     }
@@ -602,6 +612,17 @@ impl TaskManager {
         dispatcher: &NotificationDispatcher,
         usage: Option<TaskUsageSummary>,
     ) {
+        self.finish_with_activity(id, status, dispatcher, usage, true);
+    }
+
+    fn finish_with_activity(
+        &self,
+        id: &str,
+        status: TaskStatus,
+        dispatcher: &NotificationDispatcher,
+        usage: Option<TaskUsageSummary>,
+        record_activity: bool,
+    ) {
         self.clear_running_handle(id);
         let mut barrier_candidate = None;
         if let Some(task) = self
@@ -705,7 +726,9 @@ impl TaskManager {
             }
         }
         self.propagate_verification_to_parent(id);
-        self.record_activity();
+        if record_activity {
+            self.record_activity();
+        }
     }
 
     fn record_activity(&self) {

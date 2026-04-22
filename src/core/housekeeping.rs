@@ -205,6 +205,7 @@ impl HousekeepingDaemon {
         );
 
         let Some(app_state) = self.app_state.as_ref() else {
+            self.zombie_handled.store(false, Ordering::Release);
             return ZombieSessionOutcome::Failed {
                 failure: ZombieSessionFailure::MissingAppState,
                 suspended_task_ids: Vec::new(),
@@ -215,20 +216,9 @@ impl HousekeepingDaemon {
         let persisted_lifecycle =
             app_state.persist_session_lifecycle(SessionLifecycleStatus::Hibernating);
 
-        let suspended_task_ids = app_state
-            .permission_context
-            .task_manager
-            .as_ref()
-            .map(|tasks| {
-                tasks.hibernate_owned_running_tasks(
-                    &app_state.active_session_id,
-                    &app_state.notification_dispatcher,
-                )
-            })
-            .unwrap_or_default();
-
         if let Err(error) = persisted_session {
             let failure = ZombieSessionFailure::PersistSessionState(error);
+            self.zombie_handled.store(false, Ordering::Release);
             self.record_lifecycle_failure_observability(
                 app_state,
                 "housekeeping.zombie.persist_session_state",
@@ -247,11 +237,12 @@ impl HousekeepingDaemon {
             );
             return ZombieSessionOutcome::Failed {
                 failure,
-                suspended_task_ids,
+                suspended_task_ids: Vec::new(),
             };
         }
         if let Err(error) = persisted_lifecycle {
             let failure = ZombieSessionFailure::PersistLifecycleHibernating(error);
+            self.zombie_handled.store(false, Ordering::Release);
             self.record_lifecycle_failure_observability(
                 app_state,
                 "housekeeping.zombie.persist_lifecycle_hibernating",
@@ -270,9 +261,21 @@ impl HousekeepingDaemon {
             );
             return ZombieSessionOutcome::Failed {
                 failure,
-                suspended_task_ids,
+                suspended_task_ids: Vec::new(),
             };
         }
+
+        let suspended_task_ids = app_state
+            .permission_context
+            .task_manager
+            .as_ref()
+            .map(|tasks| {
+                tasks.hibernate_owned_running_tasks(
+                    &app_state.active_session_id,
+                    &app_state.notification_dispatcher,
+                )
+            })
+            .unwrap_or_default();
 
         self.dispatch_housekeeping_notice(
             app_state,
@@ -342,7 +345,7 @@ impl HousekeepingDaemon {
 
     pub async fn perform_gc(&self) {
         let daemon = self.clone();
-        let _ = tokio::task::spawn_blocking(move || {
+        let budget_exhausted = tokio::task::spawn_blocking(move || {
             let mut budget = daemon.config.max_gc_entries_per_tick;
             if let Some(ref root) = daemon.session_root {
                 if let Err(e) = daemon.prune_directory(
@@ -367,8 +370,29 @@ impl HousekeepingDaemon {
                     );
                 }
             }
+            budget == 0
         })
-        .await;
+        .await
+        .unwrap_or(false);
+
+        if budget_exhausted {
+            warn!(
+                "GC: housekeeping prune budget exhausted before completing this tick; max_gc_entries_per_tick={}",
+                self.config.max_gc_entries_per_tick
+            );
+            if let Some(app_state) = self.app_state.as_ref() {
+                self.dispatch_housekeeping_notice(
+                    app_state,
+                    "housekeeping.gc_budget_exhausted",
+                    format!(
+                        "Housekeeping GC exhausted its per-tick budget of {} entries; remaining stale artifacts will be retried on a later tick.",
+                        self.config.max_gc_entries_per_tick
+                    ),
+                    "housekeeping_gc_budget_exhausted",
+                    false,
+                );
+            }
+        }
     }
 
     pub fn prune_directory(
@@ -537,22 +561,149 @@ mod tests {
     use crate::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
     use crate::cost::tracker::CostTracker;
     use crate::history::session::{
-        InMemorySessionStore, SessionHistory, SessionId, SessionSnapshot, SessionStore,
+        InMemorySessionStore, PersistedSessionRecord, SessionHistory, SessionHistoryEntry,
+        SessionId, SessionSnapshot, SessionStore, SessionStoreWriteError,
+        SessionStoreWriteErrorKind,
     };
     use crate::interaction::dispatcher::NotificationDispatcher;
     use crate::interaction::telegram::gateway::TelegramGateway;
+    use crate::plan::types::PlanState;
     use crate::security::audit::AuditLog;
     use crate::service::api::client::ProviderCompatibilityProfileKind;
     use crate::state::app_state::{
         ActiveModelProfileSource, ActiveModelProviderSummary, RuntimeRole,
     };
     use crate::state::permission_context::{PermissionMode, ToolPermissionContext};
+    use crate::task::list_types::TaskListSnapshot;
     use crate::task::manager::TaskManager;
     use std::sync::Mutex;
+    use std::sync::atomic::AtomicUsize;
     use tokio::time::{self, advance, pause};
 
+    #[derive(Debug)]
+    struct LifecycleFailingSessionStore {
+        inner: InMemorySessionStore,
+        fail_status: SessionLifecycleStatus,
+        lifecycle_attempts: AtomicUsize,
+    }
+
+    impl LifecycleFailingSessionStore {
+        fn new(fail_status: SessionLifecycleStatus) -> Self {
+            Self {
+                inner: InMemorySessionStore::default(),
+                fail_status,
+                lifecycle_attempts: AtomicUsize::new(0),
+            }
+        }
+
+        fn lifecycle_attempts(&self) -> usize {
+            self.lifecycle_attempts.load(Ordering::SeqCst)
+        }
+    }
+
+    impl SessionStore for LifecycleFailingSessionStore {
+        fn load(
+            &self,
+            request: &crate::history::session::SessionRestoreRequest,
+        ) -> Option<(SessionSnapshot, SessionHistory)> {
+            self.inner.load(request)
+        }
+
+        fn save(
+            &self,
+            snapshot: SessionSnapshot,
+            history: SessionHistory,
+        ) -> Result<(), SessionStoreWriteError> {
+            self.inner.save(snapshot, history)
+        }
+
+        fn save_full_record(
+            &self,
+            session_id: &SessionId,
+            record: PersistedSessionRecord,
+        ) -> Result<(), SessionStoreWriteError> {
+            self.inner.save_full_record(session_id, record)
+        }
+
+        fn append_entry(
+            &self,
+            session_id: &SessionId,
+            entry: SessionHistoryEntry,
+        ) -> Result<(), SessionStoreWriteError> {
+            self.inner.append_entry(session_id, entry)
+        }
+
+        fn load_task_list(&self, session_id: &SessionId) -> Option<TaskListSnapshot> {
+            self.inner.load_task_list(session_id)
+        }
+
+        fn save_task_list(
+            &self,
+            session_id: &SessionId,
+            snapshot: TaskListSnapshot,
+        ) -> Result<(), SessionStoreWriteError> {
+            self.inner.save_task_list(session_id, snapshot)
+        }
+
+        fn load_plan_state(&self, session_id: &SessionId) -> Option<PlanState> {
+            self.inner.load_plan_state(session_id)
+        }
+
+        fn save_plan_state(
+            &self,
+            session_id: &SessionId,
+            state: PlanState,
+        ) -> Result<(), SessionStoreWriteError> {
+            self.inner.save_plan_state(session_id, state)
+        }
+
+        fn load_external_memory_entries(&self, session_id: &SessionId) -> Vec<String> {
+            self.inner.load_external_memory_entries(session_id)
+        }
+
+        fn save_external_memory_entries(
+            &self,
+            session_id: &SessionId,
+            entries: Vec<String>,
+        ) -> Result<(), SessionStoreWriteError> {
+            self.inner.save_external_memory_entries(session_id, entries)
+        }
+
+        fn load_nested_memory_lineage(&self, session_id: &SessionId) -> Vec<String> {
+            self.inner.load_nested_memory_lineage(session_id)
+        }
+
+        fn save_nested_memory_lineage(
+            &self,
+            session_id: &SessionId,
+            lineage: Vec<String>,
+        ) -> Result<(), SessionStoreWriteError> {
+            self.inner.save_nested_memory_lineage(session_id, lineage)
+        }
+
+        fn load_lifecycle_status(&self, session_id: &SessionId) -> SessionLifecycleStatus {
+            self.inner.load_lifecycle_status(session_id)
+        }
+
+        fn save_lifecycle_status(
+            &self,
+            session_id: &SessionId,
+            status: SessionLifecycleStatus,
+        ) -> Result<(), SessionStoreWriteError> {
+            self.lifecycle_attempts.fetch_add(1, Ordering::SeqCst);
+            if status == self.fail_status {
+                return Err(SessionStoreWriteError {
+                    operation: "save_lifecycle_status",
+                    kind: SessionStoreWriteErrorKind::IoPermanent,
+                    detail: "simulated lifecycle write failure".into(),
+                });
+            }
+            self.inner.save_lifecycle_status(session_id, status)
+        }
+    }
+
     fn test_app_state(
-        session_store: Arc<InMemorySessionStore>,
+        session_store: Arc<dyn SessionStore>,
         task_manager: Arc<TaskManager>,
         last_active: Arc<AtomicU64>,
         token: CancellationToken,
@@ -729,10 +880,19 @@ mod tests {
         let task =
             task_manager.create("long task", "session-housekeeping", InteractionSurface::Cli);
         task_manager.start(&task.id);
+        task_manager.set_activity_tracker(last_active.clone());
 
         let daemon = HousekeepingDaemon::new(HousekeepingConfig::default(), token, last_active)
             .with_app_state(app_state.clone());
 
+        let old_activity_ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+            - 3600;
+        app_state
+            .last_activity_ts
+            .store(old_activity_ts, Ordering::Relaxed);
         let outcome = daemon.handle_zombie_session(3600).await;
         assert_eq!(
             outcome,
@@ -747,6 +907,10 @@ mod tests {
         assert_eq!(
             task_manager.status(&task.id),
             Some(crate::task::types::TaskStatus::Killed)
+        );
+        assert_eq!(
+            app_state.last_activity_ts.load(Ordering::Acquire),
+            old_activity_ts
         );
         assert!(
             app_state
@@ -818,9 +982,12 @@ mod tests {
         let last_active = Arc::new(AtomicU64::new(0));
         let session_store = Arc::new(InMemorySessionStore::default());
         let task_manager = Arc::new(TaskManager::default());
+        let task =
+            task_manager.create("long task", "session-housekeeping", InteractionSurface::Cli);
+        task_manager.start(&task.id);
         let mut app_state = test_app_state(
             session_store,
-            task_manager,
+            task_manager.clone(),
             last_active.clone(),
             token.clone(),
         );
@@ -838,18 +1005,131 @@ mod tests {
                 suspended_task_ids: Vec::new(),
             }
         );
+        assert_eq!(
+            task_manager.status(&task.id),
+            Some(crate::task::types::TaskStatus::Running)
+        );
+
+        let repeated = daemon.handle_zombie_session(7200).await;
+        assert_eq!(
+            repeated,
+            ZombieSessionOutcome::Failed {
+                failure: ZombieSessionFailure::PersistSessionState(
+                    SessionPersistFailure::MissingSessionStore
+                ),
+                suspended_task_ids: Vec::new(),
+            }
+        );
 
         let snapshot = app_state.service_observability_tracker.snapshot();
         assert_eq!(
             snapshot
                 .runtime_lifecycle_failures_by_phase
                 .get("housekeeping.zombie.persist_session_state"),
-            Some(&1)
+            Some(&2)
         );
         assert_eq!(
             snapshot
                 .runtime_lifecycle_failures_by_reason
                 .get("persist_session_state:missing_session_store"),
+            Some(&2)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_housekeeping_lifecycle_hibernating_failure_does_not_hibernate_tasks() {
+        let token = CancellationToken::new();
+        let last_active = Arc::new(AtomicU64::new(0));
+        let session_store = Arc::new(LifecycleFailingSessionStore::new(
+            SessionLifecycleStatus::Hibernating,
+        ));
+        let task_manager = Arc::new(TaskManager::default());
+        let task =
+            task_manager.create("long task", "session-housekeeping", InteractionSurface::Cli);
+        task_manager.start(&task.id);
+        let app_state = test_app_state(
+            session_store.clone(),
+            task_manager.clone(),
+            last_active.clone(),
+            token.clone(),
+        );
+        let daemon = HousekeepingDaemon::new(HousekeepingConfig::default(), token, last_active)
+            .with_app_state(app_state.clone());
+
+        let outcome = daemon.handle_zombie_session(3600).await;
+
+        match outcome {
+            ZombieSessionOutcome::Failed {
+                failure:
+                    ZombieSessionFailure::PersistLifecycleHibernating(
+                        SessionPersistFailure::StoreWrite(error),
+                    ),
+                suspended_task_ids,
+            } => {
+                assert_eq!(error.kind, SessionStoreWriteErrorKind::IoPermanent);
+                assert!(suspended_task_ids.is_empty());
+            }
+            other => panic!("unexpected zombie outcome: {other:?}"),
+        }
+        assert_eq!(
+            task_manager.status(&task.id),
+            Some(crate::task::types::TaskStatus::Running)
+        );
+        assert_eq!(session_store.lifecycle_attempts(), 1);
+        let snapshot = app_state.service_observability_tracker.snapshot();
+        assert_eq!(
+            snapshot
+                .runtime_lifecycle_failures_by_phase
+                .get("housekeeping.zombie.persist_lifecycle_hibernating"),
+            Some(&1)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_housekeeping_records_expired_lifecycle_failure() {
+        let token = CancellationToken::new();
+        let last_active = Arc::new(AtomicU64::new(0));
+        let session_store = Arc::new(LifecycleFailingSessionStore::new(
+            SessionLifecycleStatus::Expired,
+        ));
+        let task_manager = Arc::new(TaskManager::default());
+        let app_state = test_app_state(
+            session_store.clone(),
+            task_manager,
+            last_active.clone(),
+            token.clone(),
+        );
+        let _ = session_store.save_lifecycle_status(
+            &SessionId("session-housekeeping".into()),
+            SessionLifecycleStatus::Hibernating,
+        );
+        let daemon = HousekeepingDaemon::new(HousekeepingConfig::default(), token, last_active)
+            .with_app_state(app_state.clone());
+
+        let outcome = daemon.expire_hibernating_session(3600).await;
+
+        match outcome {
+            ZombieSessionOutcome::Failed {
+                failure:
+                    ZombieSessionFailure::PersistLifecycleExpired(SessionPersistFailure::StoreWrite(
+                        error,
+                    )),
+                suspended_task_ids,
+            } => {
+                assert_eq!(error.kind, SessionStoreWriteErrorKind::IoPermanent);
+                assert!(suspended_task_ids.is_empty());
+            }
+            other => panic!("unexpected expired outcome: {other:?}"),
+        }
+        assert_eq!(
+            session_store.load_lifecycle_status(&SessionId("session-housekeeping".into())),
+            SessionLifecycleStatus::Hibernating
+        );
+        let snapshot = app_state.service_observability_tracker.snapshot();
+        assert_eq!(
+            snapshot
+                .runtime_lifecycle_failures_by_phase
+                .get("housekeeping.zombie.persist_lifecycle_expired"),
             Some(&1)
         );
     }
@@ -1075,6 +1355,58 @@ mod tests {
         handle.await;
 
         // Verify it doesn't crash
+    }
+
+    #[tokio::test]
+    async fn test_housekeeping_gc_budget_exhaustion_dispatches_notice() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "rust_agent_gc_budget_exhausted_{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        std::fs::write(temp_dir.join("a.json"), "a").unwrap();
+        std::fs::write(temp_dir.join("b.json"), "b").unwrap();
+
+        let token = CancellationToken::new();
+        let last_active = Arc::new(AtomicU64::new(0));
+        let session_store = Arc::new(InMemorySessionStore::default());
+        let task_manager = Arc::new(TaskManager::default());
+        let app_state = test_app_state(
+            session_store,
+            task_manager,
+            last_active.clone(),
+            token.clone(),
+        );
+        let daemon = HousekeepingDaemon::new(
+            HousekeepingConfig {
+                interval: Duration::from_secs(1),
+                stale_threshold_secs: 10,
+                expired_threshold_secs: 60,
+                session_retention_days: 7,
+                task_log_retention_days: 7,
+                max_gc_entries_per_tick: 1,
+            },
+            token,
+            last_active,
+        )
+        .with_app_state(app_state.clone())
+        .with_roots(temp_dir.clone(), temp_dir.clone());
+
+        daemon.perform_gc().await;
+
+        assert!(
+            app_state
+                .notification_dispatcher
+                .delivered()
+                .iter()
+                .any(|notification| notification.notice_kind.as_deref()
+                    == Some("housekeeping.gc_budget_exhausted"))
+        );
+
+        let _ = std::fs::remove_dir_all(temp_dir);
     }
 
     #[tokio::test]

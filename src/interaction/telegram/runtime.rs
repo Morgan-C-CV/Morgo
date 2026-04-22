@@ -60,7 +60,21 @@ fn bind_telegram_engine(
     let mut telegram_app_state = engine.context.app_state.clone();
     let resolved = resolve_telegram_session_state(app_state, input);
     telegram_app_state.apply_resolved_session_state(&resolved);
-    telegram_app_state.persist_resolved_session_state(&resolved);
+    if let Err(error) = telegram_app_state.persist_resolved_session_state(&resolved) {
+        telegram_app_state
+            .service_observability_tracker
+            .record_runtime_lifecycle_failure(
+                "surface.telegram.persist_resolved_session_state",
+                &error.reason(),
+                &telegram_app_state.active_session_id,
+                1,
+            );
+        tracing::warn!(
+            "failed to persist resolved telegram session state: session_id={} reason={}",
+            telegram_app_state.active_session_id,
+            error.reason()
+        );
+    }
 
     let active_model_snapshot = telegram_app_state
         .active_model_runtime

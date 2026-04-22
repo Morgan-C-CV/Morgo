@@ -299,9 +299,12 @@ impl AppState {
             .set_nested_memory_lineage(resolved.nested_memory_lineage.clone());
     }
 
-    pub fn persist_resolved_session_state(&self, resolved: &ResolvedSessionState) {
+    pub fn persist_resolved_session_state(
+        &self,
+        resolved: &ResolvedSessionState,
+    ) -> Result<(), SessionPersistFailure> {
         let Some(session_store) = &self.session_store else {
-            return;
+            return Err(SessionPersistFailure::MissingSessionStore);
         };
         let session_id = resolved.snapshot.session_id.clone();
         let record = PersistedSessionRecord {
@@ -313,7 +316,9 @@ impl AppState {
             nested_memory_lineage: Some(self.permission_context.nested_memory_lineage()),
             lifecycle_status: SessionLifecycleStatus::Active,
         };
-        let _ = session_store.save_full_record(&session_id, record);
+        persist_store_write_with_retry("persist_resolved_session_state", || {
+            session_store.save_full_record(&session_id, record.clone())
+        })
     }
 
     pub fn current_session_id(&self) -> SessionId {

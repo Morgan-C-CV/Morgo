@@ -482,6 +482,38 @@ fn persist_current_session_state_retries_transient_store_write_failures() {
 }
 
 #[test]
+fn persist_resolved_session_state_retries_transient_store_write_failures() {
+    let store = Arc::new(InMemorySessionStore::default());
+    let tasks = Arc::new(TaskManager::default());
+    let mut app_state = shutdown_test_app_state(store, tasks);
+    let flaky_store = Arc::new(FlakySessionStore::new(2));
+    app_state.session_store = Some(flaky_store.clone());
+    let snapshot = app_state.session.clone().expect("test session snapshot");
+    let history = app_state.history.clone().unwrap_or_default();
+    let resolved = rust_agent::history::resume::ResolvedSessionState {
+        snapshot,
+        history,
+        restored_session: None,
+        client_type: rust_agent::bootstrap::ClientType::Cli,
+        session_source: SessionSource::LocalCli,
+        external_memory_entries: Vec::new(),
+        nested_memory_lineage: Vec::new(),
+    };
+
+    assert_eq!(app_state.persist_resolved_session_state(&resolved), Ok(()));
+    assert_eq!(flaky_store.full_record_attempts(), 3);
+    assert!(
+        flaky_store
+            .load(&SessionRestoreRequest {
+                resume: Some("shutdown-session".into()),
+                continue_session: false,
+            })
+            .is_some(),
+        "final retry should persist the resolved session after transient failures"
+    );
+}
+
+#[test]
 fn bootstrap_state_records_phase_order() {
     let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::Headless, true);
     state.record_phase(BootstrapPhase::DetectSurface);
@@ -2324,7 +2356,7 @@ fn persist_resolved_session_state_commits_all_fields_in_one_record_write() {
         nested_memory_lineage: vec!["session:resolved".into()],
     };
 
-    app_state.persist_resolved_session_state(&resolved);
+    assert_eq!(app_state.persist_resolved_session_state(&resolved), Ok(()));
 
     let store_b = FileBackedSessionStore::new(root.clone());
     let loaded = store_b

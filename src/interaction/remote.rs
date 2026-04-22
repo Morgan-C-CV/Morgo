@@ -852,7 +852,21 @@ fn bind_remote_engine(
     let mut remote_app_state = engine.context.app_state.clone();
     let resolved = resolve_remote_session_state(app_state, input);
     remote_app_state.apply_resolved_session_state(&resolved);
-    remote_app_state.persist_resolved_session_state(&resolved);
+    if let Err(error) = remote_app_state.persist_resolved_session_state(&resolved) {
+        remote_app_state
+            .service_observability_tracker
+            .record_runtime_lifecycle_failure(
+                "surface.remote.persist_resolved_session_state",
+                &error.reason(),
+                &remote_app_state.active_session_id,
+                1,
+            );
+        tracing::warn!(
+            "failed to persist resolved remote session state: session_id={} reason={}",
+            remote_app_state.active_session_id,
+            error.reason()
+        );
+    }
 
     let active_model_snapshot = remote_app_state
         .active_model_runtime
