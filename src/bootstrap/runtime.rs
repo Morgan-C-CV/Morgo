@@ -1,6 +1,8 @@
 use std::io::{self, BufRead};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
+#[cfg(unix)]
+use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
@@ -437,6 +439,11 @@ impl RuntimeBootstrap {
         let router = finalized.router;
         let engine = finalized.engine;
 
+        if let Some(task_manager) = app_state.permission_context.task_manager.as_ref() {
+            task_manager.set_activity_tracker(app_state.last_activity_ts.clone());
+        }
+        spawn_runtime_signal_shutdown(app_state.clone());
+
         // Initialize and spawn background housekeeping daemon
         let session_root = crate::history::session::FileBackedSessionStore::default_root();
         let task_output_root = std::env::current_dir()
@@ -449,6 +456,7 @@ impl RuntimeBootstrap {
             app_state.cancellation_token.clone(),
             app_state.last_activity_ts.clone(),
         )
+        .with_app_state(app_state.clone())
         .with_roots(session_root, task_output_root);
         tokio::spawn(housekeeping_daemon.run());
 
@@ -1268,4 +1276,32 @@ impl RuntimeBootstrap {
             &state.current_cwd,
         )
     }
+}
+
+fn spawn_runtime_signal_shutdown(app_state: AppState) {
+    tokio::spawn(async move {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                tracing::info!("received ctrl-c; shutting down runtime");
+                app_state.persist_current_session_state();
+                app_state.shutdown();
+            }
+            #[cfg(unix)]
+            result = async {
+                match signal(SignalKind::terminate()) {
+                    Ok(mut stream) => {
+                        stream.recv().await;
+                        Some(())
+                    }
+                    Err(_) => None,
+                }
+            } => {
+                if result.is_some() {
+                    tracing::info!("received SIGTERM; shutting down runtime");
+                    app_state.persist_current_session_state();
+                    app_state.shutdown();
+                }
+            }
+        }
+    });
 }

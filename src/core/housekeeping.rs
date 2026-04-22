@@ -1,7 +1,10 @@
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use crate::history::session::SessionLifecycleStatus;
+use crate::interaction::notification::Notification;
+use crate::state::app_state::AppState;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
@@ -16,17 +19,44 @@ pub struct HousekeepingConfig {
     pub session_retention_days: u64,
     /// Retention period for task logs.
     pub task_log_retention_days: u64,
+    /// Maximum number of filesystem entries to process per GC tick.
+    pub max_gc_entries_per_tick: usize,
 }
 
 impl Default for HousekeepingConfig {
     fn default() -> Self {
+        fn env_u64(key: &str, fallback: u64) -> u64 {
+            std::env::var(key)
+                .ok()
+                .and_then(|value| value.trim().parse::<u64>().ok())
+                .filter(|value| *value > 0)
+                .unwrap_or(fallback)
+        }
+
+        fn env_usize(key: &str, fallback: usize) -> usize {
+            std::env::var(key)
+                .ok()
+                .and_then(|value| value.trim().parse::<usize>().ok())
+                .filter(|value| *value > 0)
+                .unwrap_or(fallback)
+        }
+
         Self {
-            interval: Duration::from_secs(60),
-            stale_threshold_secs: 600, // 10 minutes
-            session_retention_days: 7,
-            task_log_retention_days: 1,
+            interval: Duration::from_secs(env_u64("RUST_AGENT_HOUSEKEEPING_INTERVAL_SECS", 60)),
+            stale_threshold_secs: env_u64("RUST_AGENT_HOUSEKEEPING_STALE_THRESHOLD_SECS", 600),
+            session_retention_days: env_u64("RUST_AGENT_HOUSEKEEPING_SESSION_RETENTION_DAYS", 7),
+            task_log_retention_days: env_u64("RUST_AGENT_HOUSEKEEPING_TASK_LOG_RETENTION_DAYS", 1),
+            max_gc_entries_per_tick: env_usize("RUST_AGENT_HOUSEKEEPING_MAX_GC_ENTRIES_PER_TICK", 2048),
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ZombieSessionOutcome {
+    Noop,
+    AlreadyInactive,
+    PersistFailed,
+    PersistedAndSuspended { suspended_task_ids: Vec<String> },
 }
 
 /// The housekeeping daemon responsible for background maintenance tasks.
@@ -36,8 +66,10 @@ pub struct HousekeepingDaemon {
     config: HousekeepingConfig,
     cancel_token: CancellationToken,
     last_activity_ts: Arc<AtomicU64>,
+    app_state: Option<AppState>,
     session_root: Option<PathBuf>,
     task_output_root: Option<PathBuf>,
+    zombie_handled: Arc<AtomicBool>,
 }
 
 impl HousekeepingDaemon {
@@ -51,9 +83,16 @@ impl HousekeepingDaemon {
             config,
             cancel_token,
             last_activity_ts,
+            app_state: None,
             session_root: None,
             task_output_root: None,
+            zombie_handled: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    pub fn with_app_state(mut self, app_state: AppState) -> Self {
+        self.app_state = Some(app_state);
+        self
     }
 
     pub fn with_roots(mut self, session_root: PathBuf, task_output_root: PathBuf) -> Self {
@@ -102,42 +141,94 @@ impl HousekeepingDaemon {
                 "CRITICAL: Zombie session detected! Last active {}s ago (threshold: {}s).",
                 delta, self.config.stale_threshold_secs
             );
-            self.handle_zombie_session(delta).await;
+            let outcome = self.handle_zombie_session(delta).await;
+            debug!("Housekeeping zombie outcome: {:?}", outcome);
         } else if delta > self.config.stale_threshold_secs / 2 {
+            self.zombie_handled.store(false, Ordering::Release);
+            self.mark_session_lifecycle(SessionLifecycleStatus::Stale);
             warn!(
                 "Session inactivity warning: last active {}s ago. Session may be suspended soon.",
                 delta
             );
+        } else {
+            self.zombie_handled.store(false, Ordering::Release);
+            self.mark_session_lifecycle(SessionLifecycleStatus::Active);
         }
     }
 
-    async fn handle_zombie_session(&self, delta: u64) {
-        // Production-grade hook for Phase 3:
-        // Here we trigger session state persistence and prepare for process suspension.
+    async fn handle_zombie_session(&self, delta: u64) -> ZombieSessionOutcome {
+        if self.zombie_handled.swap(true, Ordering::AcqRel) {
+            return ZombieSessionOutcome::AlreadyInactive;
+        }
+
         warn!(
             "Housekeeping: Session (id={}) has been inactive for {}s. Initiating automated hibernation sequence.",
-            self.session_root
-                .as_ref()
-                .map(|r| r.to_string_lossy().to_string())
-                .unwrap_or_else(|| "unknown".into()),
+            self.session_id_for_logs(),
             delta
         );
 
-        // In a real scenario, we might call:
-        // self.app_state.persist_state().await;
-        // self.process_manager.suspend_all().await;
+        let Some(app_state) = self.app_state.as_ref() else {
+            return ZombieSessionOutcome::Noop;
+        };
 
-        debug!("Housekeeping: Hibernation sequence completed for zombie session.");
+        let persisted_session = app_state.persist_current_session_state();
+        let persisted_lifecycle = app_state.persist_session_lifecycle(SessionLifecycleStatus::Hibernating);
+
+        let suspended_task_ids = app_state
+            .permission_context
+            .task_manager
+            .as_ref()
+            .map(|tasks| {
+                tasks.hibernate_owned_running_tasks(
+                    &app_state.active_session_id,
+                    &app_state.notification_dispatcher,
+                )
+            })
+            .unwrap_or_default();
+
+        let mut notice = Notification::runtime_notice(
+            app_state.active_session_id.clone(),
+            "housekeeping.zombie_hibernated",
+            format!(
+                "Session {} was hibernated after {}s of inactivity; suspended {} running task(s).",
+                app_state.active_session_id,
+                delta,
+                suspended_task_ids.len()
+            ),
+            Some("housekeeping_zombie_hibernated".into()),
+            Some("housekeeping".into()),
+            None,
+            None,
+            None,
+            Some(false),
+            Some(true),
+        );
+        notice.wake_up = true;
+        app_state
+            .notification_dispatcher
+            .dispatch(app_state.surface, notice);
+
+        if !(persisted_session && persisted_lifecycle) {
+            return ZombieSessionOutcome::PersistFailed;
+        }
+
+        debug!(
+            "Housekeeping: Hibernation sequence completed for zombie session {}.",
+            app_state.active_session_id
+        );
+        ZombieSessionOutcome::PersistedAndSuspended { suspended_task_ids }
     }
 
     pub async fn perform_gc(&self) {
         let daemon = self.clone();
         let _ = tokio::task::spawn_blocking(move || {
+            let mut budget = daemon.config.max_gc_entries_per_tick;
             if let Some(ref root) = daemon.session_root {
                 if let Err(e) = daemon.prune_directory(
                     root,
                     daemon.config.session_retention_days * 86400,
                     false,
+                    &mut budget,
                 ) {
                     warn!("GC: Failed to prune session directory {:?}: {}", root, e);
                 }
@@ -147,6 +238,7 @@ impl HousekeepingDaemon {
                     root,
                     daemon.config.task_log_retention_days * 86400,
                     false,
+                    &mut budget,
                 ) {
                     warn!(
                         "GC: Failed to prune task output directory {:?}: {}",
@@ -163,8 +255,12 @@ impl HousekeepingDaemon {
         path: &PathBuf,
         max_age_secs: u64,
         is_nested: bool,
+        remaining_budget: &mut usize,
     ) -> anyhow::Result<()> {
         if !path.exists() {
+            return Ok(());
+        }
+        if *remaining_budget == 0 {
             return Ok(());
         }
 
@@ -172,6 +268,10 @@ impl HousekeepingDaemon {
         let mut has_remaining_entries = false;
 
         for entry in std::fs::read_dir(path)? {
+            if *remaining_budget == 0 {
+                break;
+            }
+            *remaining_budget = remaining_budget.saturating_sub(1);
             let entry = entry?;
             let entry_path = entry.path();
 
@@ -187,7 +287,7 @@ impl HousekeepingDaemon {
                 }
 
                 // Recursively prune subdirectories
-                if let Err(e) = self.prune_directory(&entry_path, max_age_secs, true) {
+                if let Err(e) = self.prune_directory(&entry_path, max_age_secs, true, remaining_budget) {
                     warn!("GC: Failed to prune subdirectory {:?}: {}", entry_path, e);
                     has_remaining_entries = true;
                 } else if entry_path.exists() {
@@ -222,6 +322,24 @@ impl HousekeepingDaemon {
         }
 
         Ok(())
+    }
+
+    fn mark_session_lifecycle(&self, status: SessionLifecycleStatus) {
+        if let Some(app_state) = self.app_state.as_ref() {
+            let _ = app_state.persist_session_lifecycle(status);
+        }
+    }
+
+    fn session_id_for_logs(&self) -> String {
+        self.app_state
+            .as_ref()
+            .map(|app_state| app_state.active_session_id.clone())
+            .or_else(|| {
+                self.session_root
+                    .as_ref()
+                    .map(|r| r.to_string_lossy().to_string())
+            })
+            .unwrap_or_else(|| "unknown".into())
     }
 }
 
