@@ -481,6 +481,14 @@ impl FileBackedSessionStore {
         self.root.join("latest_session")
     }
 
+    fn lock_path(target: &Path) -> PathBuf {
+        let name = target
+            .file_name()
+            .map(|n| format!("{}.lock", n.to_string_lossy()))
+            .unwrap_or_else(|| "unnamed.lock".into());
+        target.parent().unwrap_or(target).join(name)
+    }
+
     fn session_path(&self, session_id: &SessionId) -> PathBuf {
         self.root
             .join(format!("{}.json", sanitize_session_id(&session_id.0)))
@@ -501,8 +509,11 @@ impl FileBackedSessionStore {
         session_id: &SessionId,
     ) -> Result<(), SessionStoreWriteError> {
         self.ensure_root()?;
-        write_atomic(&self.latest_path(), session_id.0.as_bytes())
-            .map_err(|error| SessionStoreWriteError::from_io("write_latest_session_id", error))
+        let path = self.latest_path();
+        with_file_lock(&Self::lock_path(&path), || {
+            write_atomic(&path, session_id.0.as_bytes())
+        })
+        .map_err(|error| SessionStoreWriteError::from_io("write_latest_session_id", error))
     }
 
     fn read_record(&self, session_id: &SessionId) -> Option<PersistedSessionRecord> {
@@ -528,9 +539,10 @@ impl FileBackedSessionStore {
         let raw = serde_json::to_string_pretty(record).map_err(|error| {
             SessionStoreWriteError::serialize("write_record_file_only.serialize", error)
         })?;
-        write_atomic(&path, raw.as_bytes()).map_err(|error| {
-            SessionStoreWriteError::from_io("write_record_file_only.atomic", error)
+        with_file_lock(&Self::lock_path(&path), || {
+            write_atomic(&path, raw.as_bytes())
         })
+        .map_err(|error| SessionStoreWriteError::from_io("write_record_file_only.atomic", error))
     }
 
     fn write_record(
@@ -553,6 +565,36 @@ impl FileBackedSessionStore {
         update(&mut record);
         self.write_record(session_id, &record)
     }
+}
+
+/// Acquires an exclusive OS advisory lock on `lock_path`, runs `f`, then releases the lock.
+/// The lock file is created if it does not exist and is never removed — it is a stable sentinel.
+fn with_file_lock(lock_path: &Path, f: impl FnOnce() -> std::io::Result<()>) -> std::io::Result<()> {
+    if let Some(parent) = lock_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let lock_file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(lock_path)?;
+    fs4_lock_exclusive(&lock_file)?;
+    let result = f();
+    fs4_unlock(&lock_file);
+    result
+}
+
+#[allow(unstable_name_collisions)]
+fn fs4_lock_exclusive(file: &fs::File) -> std::io::Result<()> {
+    use fs4::FileExt;
+    file.lock_exclusive()
+}
+
+#[allow(unstable_name_collisions)]
+fn fs4_unlock(file: &fs::File) {
+    use fs4::FileExt;
+    let _ = file.unlock();
 }
 
 fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
