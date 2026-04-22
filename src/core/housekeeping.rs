@@ -1,6 +1,7 @@
 use crate::history::session::SessionLifecycleStatus;
 use crate::interaction::notification::Notification;
 use crate::state::app_state::AppState;
+use crate::state::app_state::SessionPersistFailure;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -65,9 +66,9 @@ impl Default for HousekeepingConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ZombieSessionFailure {
     MissingAppState,
-    PersistSessionState,
-    PersistLifecycleHibernating,
-    PersistLifecycleExpired,
+    PersistSessionState(SessionPersistFailure),
+    PersistLifecycleHibernating(SessionPersistFailure),
+    PersistLifecycleExpired(SessionPersistFailure),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -226,12 +227,37 @@ impl HousekeepingDaemon {
             })
             .unwrap_or_default();
 
-        if !(persisted_session && persisted_lifecycle) {
-            let failure = if !persisted_session {
-                ZombieSessionFailure::PersistSessionState
-            } else {
-                ZombieSessionFailure::PersistLifecycleHibernating
+        if let Err(error) = persisted_session {
+            let failure = ZombieSessionFailure::PersistSessionState(error);
+            self.record_lifecycle_failure_observability(
+                app_state,
+                "housekeeping.zombie.persist_session_state",
+                &failure,
+                1,
+            );
+            self.dispatch_housekeeping_notice(
+                app_state,
+                "housekeeping.zombie_hibernation_failed",
+                format!(
+                    "Session {} hit zombie threshold after {}s but hibernation failed at stage {:?}.",
+                    app_state.active_session_id, delta, failure
+                ),
+                "housekeeping_zombie_hibernation_failed",
+                true,
+            );
+            return ZombieSessionOutcome::Failed {
+                failure,
+                suspended_task_ids,
             };
+        }
+        if let Err(error) = persisted_lifecycle {
+            let failure = ZombieSessionFailure::PersistLifecycleHibernating(error);
+            self.record_lifecycle_failure_observability(
+                app_state,
+                "housekeeping.zombie.persist_lifecycle_hibernating",
+                &failure,
+                1,
+            );
             self.dispatch_housekeeping_notice(
                 app_state,
                 "housekeeping.zombie_hibernation_failed",
@@ -278,7 +304,14 @@ impl HousekeepingDaemon {
         if app_state.current_session_lifecycle() == SessionLifecycleStatus::Expired {
             return ZombieSessionOutcome::AlreadyExpired;
         }
-        if !app_state.persist_session_lifecycle(SessionLifecycleStatus::Expired) {
+        if let Err(error) = app_state.persist_session_lifecycle(SessionLifecycleStatus::Expired) {
+            let failure = ZombieSessionFailure::PersistLifecycleExpired(error);
+            self.record_lifecycle_failure_observability(
+                app_state,
+                "housekeeping.zombie.persist_lifecycle_expired",
+                &failure,
+                1,
+            );
             self.dispatch_housekeeping_notice(
                 app_state,
                 "housekeeping.zombie_expire_failed",
@@ -290,7 +323,7 @@ impl HousekeepingDaemon {
                 true,
             );
             return ZombieSessionOutcome::Failed {
-                failure: ZombieSessionFailure::PersistLifecycleExpired,
+                failure,
                 suspended_task_ids: Vec::new(),
             };
         }
@@ -420,6 +453,30 @@ impl HousekeepingDaemon {
         }
     }
 
+    fn record_lifecycle_failure_observability(
+        &self,
+        app_state: &AppState,
+        phase: &str,
+        failure: &ZombieSessionFailure,
+        attempt: usize,
+    ) {
+        app_state
+            .service_observability_tracker
+            .record_runtime_lifecycle_failure(
+                phase,
+                &zombie_failure_reason(failure),
+                &app_state.active_session_id,
+                attempt,
+            );
+        warn!(
+            "runtime lifecycle failure: phase={} session_id={} attempt={} reason={}",
+            phase,
+            app_state.active_session_id,
+            attempt,
+            zombie_failure_reason(failure)
+        );
+    }
+
     fn dispatch_housekeeping_notice(
         &self,
         app_state: &AppState,
@@ -456,6 +513,21 @@ impl HousekeepingDaemon {
                     .map(|r| r.to_string_lossy().to_string())
             })
             .unwrap_or_else(|| "unknown".into())
+    }
+}
+
+fn zombie_failure_reason(failure: &ZombieSessionFailure) -> String {
+    match failure {
+        ZombieSessionFailure::MissingAppState => "missing_app_state".into(),
+        ZombieSessionFailure::PersistSessionState(inner) => {
+            format!("persist_session_state:{}", inner.as_str())
+        }
+        ZombieSessionFailure::PersistLifecycleHibernating(inner) => {
+            format!("persist_lifecycle_hibernating:{}", inner.as_str())
+        }
+        ZombieSessionFailure::PersistLifecycleExpired(inner) => {
+            format!("persist_lifecycle_expired:{}", inner.as_str())
+        }
     }
 }
 
@@ -737,6 +809,48 @@ mod tests {
                 .iter()
                 .any(|notification| notification.notice_kind.as_deref()
                     == Some("housekeeping.zombie_expired"))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_housekeeping_records_observability_for_zombie_persist_failures() {
+        let token = CancellationToken::new();
+        let last_active = Arc::new(AtomicU64::new(0));
+        let session_store = Arc::new(InMemorySessionStore::default());
+        let task_manager = Arc::new(TaskManager::default());
+        let mut app_state = test_app_state(
+            session_store,
+            task_manager,
+            last_active.clone(),
+            token.clone(),
+        );
+        app_state.session_store = None;
+        let daemon = HousekeepingDaemon::new(HousekeepingConfig::default(), token, last_active)
+            .with_app_state(app_state.clone());
+
+        let outcome = daemon.handle_zombie_session(3600).await;
+        assert_eq!(
+            outcome,
+            ZombieSessionOutcome::Failed {
+                failure: ZombieSessionFailure::PersistSessionState(
+                    SessionPersistFailure::MissingSessionStore
+                ),
+                suspended_task_ids: Vec::new(),
+            }
+        );
+
+        let snapshot = app_state.service_observability_tracker.snapshot();
+        assert_eq!(
+            snapshot
+                .runtime_lifecycle_failures_by_phase
+                .get("housekeeping.zombie.persist_session_state"),
+            Some(&1)
+        );
+        assert_eq!(
+            snapshot
+                .runtime_lifecycle_failures_by_reason
+                .get("persist_session_state:missing_session_store"),
+            Some(&1)
         );
     }
 

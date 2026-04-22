@@ -28,6 +28,21 @@ use crate::state::active_model_runtime::ActiveModelRuntime;
 use crate::state::permission_context::ToolPermissionContext;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionPersistFailure {
+    MissingSessionStore,
+    MissingSessionSnapshot,
+}
+
+impl SessionPersistFailure {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::MissingSessionStore => "missing_session_store",
+            Self::MissingSessionSnapshot => "missing_session_snapshot",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppStateRuntimeChange {
     PermissionChanged,
     SurfaceBindingChanged,
@@ -152,12 +167,12 @@ impl AppState {
         self.cancellation_token.cancel();
     }
 
-    pub fn persist_current_session_state(&self) -> bool {
+    pub fn persist_current_session_state(&self) -> Result<(), SessionPersistFailure> {
         let Some(session_store) = &self.session_store else {
-            return false;
+            return Err(SessionPersistFailure::MissingSessionStore);
         };
         let Some(snapshot) = &self.session else {
-            return false;
+            return Err(SessionPersistFailure::MissingSessionSnapshot);
         };
         let session_id = snapshot.session_id.clone();
         let record = PersistedSessionRecord {
@@ -170,16 +185,19 @@ impl AppState {
             lifecycle_status: session_store.load_lifecycle_status(&session_id),
         };
         session_store.save_full_record(&session_id, record);
-        true
+        Ok(())
     }
 
-    pub fn persist_session_lifecycle(&self, status: SessionLifecycleStatus) -> bool {
+    pub fn persist_session_lifecycle(
+        &self,
+        status: SessionLifecycleStatus,
+    ) -> Result<(), SessionPersistFailure> {
         let Some(session_store) = &self.session_store else {
-            return false;
+            return Err(SessionPersistFailure::MissingSessionStore);
         };
         let session_id = self.current_session_id();
         session_store.save_lifecycle_status(&session_id, status);
-        true
+        Ok(())
     }
 
     pub fn current_session_lifecycle(&self) -> SessionLifecycleStatus {

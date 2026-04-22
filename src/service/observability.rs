@@ -25,6 +25,8 @@ pub struct ServiceObservabilitySnapshot {
     pub api_errors_by_status: BTreeMap<String, usize>,
     pub mcp_failures_by_kind: BTreeMap<String, usize>,
     pub mcp_failures_by_server: BTreeMap<String, usize>,
+    pub runtime_lifecycle_failures_by_phase: BTreeMap<String, usize>,
+    pub runtime_lifecycle_failures_by_reason: BTreeMap<String, usize>,
     pub recent_events: Vec<ServiceObservabilityEventRecord>,
 }
 
@@ -60,6 +62,12 @@ enum ObservabilityEvent {
         server: String,
         kind: String,
     },
+    RuntimeLifecycleFailure {
+        phase: String,
+        reason: String,
+        session_id: String,
+        attempt: usize,
+    },
 }
 
 #[derive(Debug, Default)]
@@ -75,6 +83,8 @@ struct ServiceObservabilityState {
     api_errors_by_status: BTreeMap<String, usize>,
     mcp_failures_by_kind: BTreeMap<String, usize>,
     mcp_failures_by_server: BTreeMap<String, usize>,
+    runtime_lifecycle_failures_by_phase: BTreeMap<String, usize>,
+    runtime_lifecycle_failures_by_reason: BTreeMap<String, usize>,
     recent_events: Vec<ServiceObservabilityEventRecord>,
 }
 
@@ -92,6 +102,16 @@ impl ServiceObservabilitySnapshot {
         export_bucket_group(sink, "api_errors_by_status", &self.api_errors_by_status);
         export_bucket_group(sink, "mcp_failures_by_kind", &self.mcp_failures_by_kind);
         export_bucket_group(sink, "mcp_failures_by_server", &self.mcp_failures_by_server);
+        export_bucket_group(
+            sink,
+            "runtime_lifecycle_failures_by_phase",
+            &self.runtime_lifecycle_failures_by_phase,
+        );
+        export_bucket_group(
+            sink,
+            "runtime_lifecycle_failures_by_reason",
+            &self.runtime_lifecycle_failures_by_reason,
+        );
 
         for event in &self.recent_events {
             sink.record_recent_event(event);
@@ -133,6 +153,21 @@ impl ServiceObservabilityTracker {
         });
     }
 
+    pub fn record_runtime_lifecycle_failure(
+        &self,
+        phase: &str,
+        reason: &str,
+        session_id: &str,
+        attempt: usize,
+    ) {
+        self.record_event(ObservabilityEvent::RuntimeLifecycleFailure {
+            phase: phase.to_string(),
+            reason: reason.to_string(),
+            session_id: session_id.to_string(),
+            attempt,
+        });
+    }
+
     pub fn snapshot(&self) -> ServiceObservabilitySnapshot {
         let state = self
             .inner
@@ -150,6 +185,10 @@ impl ServiceObservabilityTracker {
             api_errors_by_status: state.api_errors_by_status.clone(),
             mcp_failures_by_kind: state.mcp_failures_by_kind.clone(),
             mcp_failures_by_server: state.mcp_failures_by_server.clone(),
+            runtime_lifecycle_failures_by_phase: state.runtime_lifecycle_failures_by_phase.clone(),
+            runtime_lifecycle_failures_by_reason: state
+                .runtime_lifecycle_failures_by_reason
+                .clone(),
             recent_events: state.recent_events.clone(),
         }
     }
@@ -213,6 +252,16 @@ impl ServiceObservabilityTracker {
                     .entry(server.clone())
                     .or_default() += 1;
             }
+            ObservabilityEvent::RuntimeLifecycleFailure { phase, reason, .. } => {
+                *state
+                    .runtime_lifecycle_failures_by_phase
+                    .entry(phase.clone())
+                    .or_default() += 1;
+                *state
+                    .runtime_lifecycle_failures_by_reason
+                    .entry(reason.clone())
+                    .or_default() += 1;
+            }
         }
         push_recent_event(&mut state.recent_events, event);
     }
@@ -265,6 +314,16 @@ fn push_recent_event(events: &mut Vec<ServiceObservabilityEventRecord>, event: O
             category: "mcp_server_failure",
             key: kind,
             detail: format!("server={server}"),
+        },
+        ObservabilityEvent::RuntimeLifecycleFailure {
+            phase,
+            reason,
+            session_id,
+            attempt,
+        } => ServiceObservabilityEventRecord {
+            category: "runtime_lifecycle_failure",
+            key: phase,
+            detail: format!("reason={reason} session={session_id} attempt={attempt}"),
         },
     };
     events.push(record);
@@ -332,6 +391,15 @@ mod tests {
             api_errors_by_status: [("503".to_string(), 1)].into_iter().collect(),
             mcp_failures_by_kind: [("list_tools".to_string(), 1)].into_iter().collect(),
             mcp_failures_by_server: [("filesystem".to_string(), 1)].into_iter().collect(),
+            runtime_lifecycle_failures_by_phase: [("shutdown.persist_before".to_string(), 1)]
+                .into_iter()
+                .collect(),
+            runtime_lifecycle_failures_by_reason: [(
+                "persist_before_shutdown:missing_session_store".to_string(),
+                1,
+            )]
+            .into_iter()
+            .collect(),
             recent_events: vec![
                 ServiceObservabilityEventRecord {
                     category: "service_failure",
@@ -369,6 +437,16 @@ mod tests {
                 ("api_errors_by_status", "503".into(), 1),
                 ("mcp_failures_by_kind", "list_tools".into(), 1),
                 ("mcp_failures_by_server", "filesystem".into(), 1),
+                (
+                    "runtime_lifecycle_failures_by_phase",
+                    "shutdown.persist_before".into(),
+                    1,
+                ),
+                (
+                    "runtime_lifecycle_failures_by_reason",
+                    "persist_before_shutdown:missing_session_store".into(),
+                    1,
+                ),
             ]
         );
         assert_eq!(sink.recent_events, snapshot.recent_events);
@@ -390,6 +468,12 @@ mod tests {
             &ApiError::http_status(503, "provider request failed with status 503"),
         );
         tracker.record_mcp_server_failure("filesystem", "list_tools");
+        tracker.record_runtime_lifecycle_failure(
+            "shutdown.persist_before",
+            "persist_before_shutdown:missing_session_store",
+            "session-123",
+            1,
+        );
 
         let snapshot = tracker.snapshot();
         let mut sink = CapturedExport::default();
@@ -437,6 +521,26 @@ mod tests {
                     .mcp_failures_by_server
                     .get("filesystem")
                     .expect("mcp server failure should export")
+            ))
+        );
+        assert!(
+            sink.buckets.contains(&(
+                "runtime_lifecycle_failures_by_phase",
+                "shutdown.persist_before".into(),
+                *snapshot
+                    .runtime_lifecycle_failures_by_phase
+                    .get("shutdown.persist_before")
+                    .expect("runtime lifecycle phase should export")
+            ))
+        );
+        assert!(
+            sink.buckets.contains(&(
+                "runtime_lifecycle_failures_by_reason",
+                "persist_before_shutdown:missing_session_store".into(),
+                *snapshot
+                    .runtime_lifecycle_failures_by_reason
+                    .get("persist_before_shutdown:missing_session_store")
+                    .expect("runtime lifecycle reason should export")
             ))
         );
         assert_eq!(sink.recent_events, snapshot.recent_events);

@@ -185,6 +185,7 @@ use crate::skills::registry::SkillRegistry;
 use crate::state::active_model_runtime::{ActiveModelRuntime, ActiveModelRuntimeSnapshot};
 use crate::state::app_state::{
     ActiveModelProfileSource, ActiveModelProviderSummary, AppState, RuntimeRole,
+    SessionPersistFailure,
 };
 use crate::state::permission_context::{PermissionMode, ToolPermissionContext};
 use crate::state::store::AppStateStore;
@@ -215,8 +216,8 @@ const DEFAULT_RUNTIME_SHUTDOWN_TIMEOUT_MS: u64 = 1_500;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ShutdownFailure {
     ForceDrainTimedOut,
-    PersistBeforeShutdown,
-    PersistAfterShutdown,
+    PersistBeforeShutdown(SessionPersistFailure),
+    PersistAfterShutdown(SessionPersistFailure),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1397,6 +1398,12 @@ pub async fn execute_runtime_shutdown_with_deadline(
                 Vec::new()
             };
         if hibernated_task_ids.is_empty() {
+            record_shutdown_lifecycle_failure(
+                &app_state,
+                "shutdown.force_drain",
+                &ShutdownFailure::ForceDrainTimedOut,
+                1,
+            );
             ShutdownOutcome::Failed {
                 failure: ShutdownFailure::ForceDrainTimedOut,
                 hibernated_task_ids,
@@ -1411,9 +1418,15 @@ pub async fn execute_runtime_shutdown_with_deadline(
     };
 
     let persisted_after = app_state.persist_current_session_state();
-    if !persisted_before {
+    if let Err(error) = persisted_before {
+        record_shutdown_lifecycle_failure(
+            &app_state,
+            "shutdown.persist_before",
+            &ShutdownFailure::PersistBeforeShutdown(error.clone()),
+            1,
+        );
         outcome = ShutdownOutcome::Failed {
-            failure: ShutdownFailure::PersistBeforeShutdown,
+            failure: ShutdownFailure::PersistBeforeShutdown(error),
             hibernated_task_ids: match outcome {
                 ShutdownOutcome::Forced {
                     ref hibernated_task_ids,
@@ -1425,9 +1438,15 @@ pub async fn execute_runtime_shutdown_with_deadline(
                 ShutdownOutcome::Completed => Vec::new(),
             },
         };
-    } else if !persisted_after {
+    } else if let Err(error) = persisted_after {
+        record_shutdown_lifecycle_failure(
+            &app_state,
+            "shutdown.persist_after",
+            &ShutdownFailure::PersistAfterShutdown(error.clone()),
+            1,
+        );
         outcome = ShutdownOutcome::Failed {
-            failure: ShutdownFailure::PersistAfterShutdown,
+            failure: ShutdownFailure::PersistAfterShutdown(error),
             hibernated_task_ids: match outcome {
                 ShutdownOutcome::Forced {
                     ref hibernated_task_ids,
@@ -1441,4 +1460,35 @@ pub async fn execute_runtime_shutdown_with_deadline(
         };
     }
     outcome
+}
+
+fn record_shutdown_lifecycle_failure(
+    app_state: &AppState,
+    phase: &str,
+    failure: &ShutdownFailure,
+    attempt: usize,
+) {
+    let reason = shutdown_failure_reason(failure);
+    app_state
+        .service_observability_tracker
+        .record_runtime_lifecycle_failure(phase, &reason, &app_state.active_session_id, attempt);
+    tracing::warn!(
+        "runtime lifecycle failure: phase={} session_id={} attempt={} reason={}",
+        phase,
+        app_state.active_session_id,
+        attempt,
+        reason
+    );
+}
+
+fn shutdown_failure_reason(failure: &ShutdownFailure) -> String {
+    match failure {
+        ShutdownFailure::ForceDrainTimedOut => "force_drain_timed_out".into(),
+        ShutdownFailure::PersistBeforeShutdown(inner) => {
+            format!("persist_before_shutdown:{}", inner.as_str())
+        }
+        ShutdownFailure::PersistAfterShutdown(inner) => {
+            format!("persist_after_shutdown:{}", inner.as_str())
+        }
+    }
 }

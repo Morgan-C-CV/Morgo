@@ -7,7 +7,7 @@ use rust_agent::bootstrap::model_profiles::{
 };
 use rust_agent::bootstrap::{
     BootstrapCli, BootstrapPhase, BootstrapState, InteractionSurface, PromptAugmentationMetadata,
-    RuntimeBootstrap, SessionMode, SessionSource, ShutdownOutcome, StartupWarning,
+    RuntimeBootstrap, SessionMode, SessionSource, ShutdownFailure, ShutdownOutcome, StartupWarning,
     UserAccessDecision, execute_runtime_shutdown_with_deadline, is_tui_exit_input,
     runtime_shutdown_timeout, tui_clear_screen_prefix,
 };
@@ -24,7 +24,9 @@ use rust_agent::service::api::client::{
     ProviderProtocol, ProviderTimeout,
 };
 use rust_agent::service::api::retry::RetryPolicy;
-use rust_agent::state::app_state::{AppState, AppStateRuntimeChange, RuntimeRole};
+use rust_agent::state::app_state::{
+    AppState, AppStateRuntimeChange, RuntimeRole, SessionPersistFailure,
+};
 use rust_agent::state::permission_context::{PermissionMode, ToolPermissionContext};
 use rust_agent::state::store::AppStateStore;
 use rust_agent::task::list_types::{TaskListItem, TaskListSnapshot, TaskListStatus};
@@ -283,6 +285,45 @@ async fn execute_runtime_shutdown_forces_hibernation_after_deadline() {
             })
             .is_some(),
         "shutdown should persist the current session state"
+    );
+}
+
+#[tokio::test]
+async fn execute_runtime_shutdown_records_observability_for_persist_failures() {
+    let store = Arc::new(InMemorySessionStore::default());
+    let tasks = Arc::new(TaskManager::default());
+    let mut app_state = shutdown_test_app_state(store, tasks);
+    app_state.session_store = None;
+
+    let outcome = execute_runtime_shutdown_with_deadline(
+        app_state.clone(),
+        "test.shutdown_persist_failure",
+        Duration::from_millis(10),
+    )
+    .await;
+
+    assert_eq!(
+        outcome,
+        ShutdownOutcome::Failed {
+            failure: ShutdownFailure::PersistBeforeShutdown(
+                SessionPersistFailure::MissingSessionStore
+            ),
+            hibernated_task_ids: Vec::new(),
+        }
+    );
+
+    let snapshot = app_state.service_observability_tracker.snapshot();
+    assert_eq!(
+        snapshot
+            .runtime_lifecycle_failures_by_phase
+            .get("shutdown.persist_before"),
+        Some(&1)
+    );
+    assert_eq!(
+        snapshot
+            .runtime_lifecycle_failures_by_reason
+            .get("persist_before_shutdown:missing_session_store"),
+        Some(&1)
     );
 }
 
@@ -2009,7 +2050,7 @@ fn persist_current_session_state_commits_all_fields_in_one_record_write() {
         boss_coordinator: None,
     };
 
-    assert!(app_state.persist_current_session_state());
+    assert_eq!(app_state.persist_current_session_state(), Ok(()));
 
     let store_b = FileBackedSessionStore::new(root.clone());
     let loaded = store_b
