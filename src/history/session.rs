@@ -47,6 +47,26 @@ pub struct SessionRecord {
     pub title: String,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SessionLifecycleStatus {
+    #[default]
+    Active,
+    Stale,
+    Hibernating,
+    Expired,
+}
+
+impl SessionLifecycleStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Stale => "stale",
+            Self::Hibernating => "hibernating",
+            Self::Expired => "expired",
+        }
+    }
+}
+
 pub trait SessionStore: Send + Sync {
     fn load(&self, request: &SessionRestoreRequest) -> Option<(SessionSnapshot, SessionHistory)>;
     fn save(&self, snapshot: SessionSnapshot, history: SessionHistory);
@@ -59,6 +79,8 @@ pub trait SessionStore: Send + Sync {
     fn save_external_memory_entries(&self, session_id: &SessionId, entries: Vec<String>);
     fn load_nested_memory_lineage(&self, session_id: &SessionId) -> Vec<String>;
     fn save_nested_memory_lineage(&self, session_id: &SessionId, lineage: Vec<String>);
+    fn load_lifecycle_status(&self, session_id: &SessionId) -> SessionLifecycleStatus;
+    fn save_lifecycle_status(&self, session_id: &SessionId, status: SessionLifecycleStatus);
 }
 
 #[derive(Debug, Clone, Default)]
@@ -68,6 +90,7 @@ pub struct InMemorySessionStore {
     plan_states: Arc<RwLock<HashMap<SessionId, PlanState>>>,
     external_memory_entries: Arc<RwLock<HashMap<SessionId, Vec<String>>>>,
     nested_memory_lineage: Arc<RwLock<HashMap<SessionId, Vec<String>>>>,
+    lifecycle_statuses: Arc<RwLock<HashMap<SessionId, SessionLifecycleStatus>>>,
     latest_session: Arc<RwLock<Option<SessionId>>>,
 }
 
@@ -159,6 +182,20 @@ impl SessionStore for InMemorySessionStore {
             nested_memory_lineage.insert(session_id.clone(), lineage);
         }
     }
+
+    fn load_lifecycle_status(&self, session_id: &SessionId) -> SessionLifecycleStatus {
+        self.lifecycle_statuses
+            .read()
+            .ok()
+            .and_then(|statuses| statuses.get(session_id).copied())
+            .unwrap_or_default()
+    }
+
+    fn save_lifecycle_status(&self, session_id: &SessionId, status: SessionLifecycleStatus) {
+        if let Ok(mut lifecycle_statuses) = self.lifecycle_statuses.write() {
+            lifecycle_statuses.insert(session_id.clone(), status);
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -174,6 +211,8 @@ struct PersistedSessionRecord {
     plan_state: Option<PlanState>,
     external_memory_entries: Option<Vec<String>>,
     nested_memory_lineage: Option<Vec<String>>,
+    #[serde(default)]
+    lifecycle_status: SessionLifecycleStatus,
 }
 
 impl FileBackedSessionStore {
@@ -257,6 +296,7 @@ impl FileBackedSessionStore {
                 plan_state: None,
                 external_memory_entries: None,
                 nested_memory_lineage: None,
+                lifecycle_status: SessionLifecycleStatus::Active,
             });
         update(&mut record);
         self.write_record(session_id, &record);
@@ -292,6 +332,7 @@ impl SessionStore for FileBackedSessionStore {
             .as_ref()
             .and_then(|record| record.external_memory_entries.clone());
         let nested_memory_lineage = record.and_then(|record| record.nested_memory_lineage);
+        let lifecycle_status = self.load_lifecycle_status(&session_id);
         self.write_record(
             &session_id,
             &PersistedSessionRecord {
@@ -301,6 +342,7 @@ impl SessionStore for FileBackedSessionStore {
                 plan_state,
                 external_memory_entries,
                 nested_memory_lineage,
+                lifecycle_status,
             },
         );
     }
@@ -354,6 +396,18 @@ impl SessionStore for FileBackedSessionStore {
     fn save_nested_memory_lineage(&self, session_id: &SessionId, lineage: Vec<String>) {
         self.update_record(session_id, |record| {
             record.nested_memory_lineage = Some(lineage);
+        });
+    }
+
+    fn load_lifecycle_status(&self, session_id: &SessionId) -> SessionLifecycleStatus {
+        self.read_record(session_id)
+            .map(|record| record.lifecycle_status)
+            .unwrap_or_default()
+    }
+
+    fn save_lifecycle_status(&self, session_id: &SessionId, status: SessionLifecycleStatus) {
+        self.update_record(session_id, |record| {
+            record.lifecycle_status = status;
         });
     }
 }

@@ -25,9 +25,15 @@ impl Default for TaskOutputStore {
             static COUNTER: AtomicU64 = AtomicU64::new(0);
             let id = COUNTER.fetch_add(1, Ordering::Relaxed);
             let pid = std::process::id();
+            // Include a per-call nonce so spawned child processes (which reset the
+            // counter to 0) cannot collide with the parent's store directories.
+            let nonce = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .subsec_nanos();
             Self {
                 root: std::env::temp_dir()
-                    .join(format!("rust-agent-test-{pid}-{id}")),
+                    .join(format!("rust-agent-test-{pid}-{id}-{nonce}")),
             }
         }
         #[cfg(not(test))]

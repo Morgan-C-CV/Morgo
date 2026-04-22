@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::future::Future;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use tokio::sync::Notify;
 use tokio::task::AbortHandle;
@@ -43,6 +45,7 @@ pub struct TaskManager {
     store: Arc<RwLock<TaskStore>>,
     runtime_store: Arc<RwLock<TaskRuntimeStore>>,
     output_store: TaskOutputStore,
+    activity_tracker: Arc<RwLock<Option<Arc<AtomicU64>>>>,
 }
 
 impl TaskManager {
@@ -51,6 +54,13 @@ impl TaskManager {
             store: Arc::new(RwLock::new(TaskStore::default())),
             runtime_store: Arc::new(RwLock::new(TaskRuntimeStore::default())),
             output_store: TaskOutputStore::new(root),
+            activity_tracker: Arc::new(RwLock::new(None)),
+        }
+    }
+
+    pub fn set_activity_tracker(&self, tracker: Arc<AtomicU64>) {
+        if let Ok(mut guard) = self.activity_tracker.write() {
+            *guard = Some(tracker);
         }
     }
 }
@@ -289,6 +299,7 @@ impl TaskManager {
     where
         F: Future<Output = ()> + Send + 'static,
     {
+        self.record_activity();
         self.start(id);
         let manager = self.clone();
         let task_id = id.to_string();
@@ -328,6 +339,7 @@ impl TaskManager {
                 .append(&task.output_file, chunk.as_ref())
                 .expect("task output should append");
             task.output_offset += appended;
+            self.record_activity();
         }
     }
 
@@ -377,6 +389,38 @@ impl TaskManager {
         }
         self.finish(id, TaskStatus::Killed, dispatcher, None);
         true
+    }
+
+    pub fn hibernate_owned_running_tasks(
+        &self,
+        owner_session_id: &str,
+        dispatcher: &NotificationDispatcher,
+    ) -> Vec<String> {
+        let task_ids = self
+            .list()
+            .into_iter()
+            .filter(|task| {
+                task.owner.session_id == owner_session_id && task.status == TaskStatus::Running
+            })
+            .map(|task| task.id)
+            .collect::<Vec<_>>();
+        for task_id in &task_ids {
+            self.append_output(
+                task_id,
+                "housekeeping: task hibernated because the owning session became zombie\n",
+            );
+            if let Some(handle) = self
+                .runtime_store
+                .write()
+                .expect("task runtime store poisoned")
+                .abort_handles
+                .remove(task_id)
+            {
+                handle.abort();
+            }
+            self.finish(task_id, TaskStatus::Killed, dispatcher, None);
+        }
+        task_ids
     }
 
     pub fn get(&self, id: &str) -> Option<TaskRecord> {
@@ -531,6 +575,7 @@ impl TaskManager {
         {
             task.status = status;
         }
+        self.record_activity();
     }
 
     fn clear_running_handle(&self, id: &str) {
@@ -654,6 +699,23 @@ impl TaskManager {
             }
         }
         self.propagate_verification_to_parent(id);
+        self.record_activity();
+    }
+
+    fn record_activity(&self) {
+        let Some(tracker) = self
+            .activity_tracker
+            .read()
+            .ok()
+            .and_then(|tracker| tracker.clone())
+        else {
+            return;
+        };
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        tracker.store(now, Ordering::Release);
     }
 
     fn propagate_verification_to_parent(&self, id: &str) {

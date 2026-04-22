@@ -18,7 +18,9 @@ use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
 use crate::history::resume::{ResolvedSessionState, RestoredSession};
-use crate::history::session::{SessionHistory, SessionId, SessionSnapshot, SessionStore};
+use crate::history::session::{
+    SessionHistory, SessionId, SessionLifecycleStatus, SessionSnapshot, SessionStore,
+};
 use crate::interaction::dispatcher::NotificationDispatcher;
 use crate::security::audit::AuditLog;
 use crate::state::active_model_runtime::ActiveModelRuntime;
@@ -149,6 +151,42 @@ impl AppState {
         self.cancellation_token.cancel();
     }
 
+    pub fn persist_current_session_state(&self) -> bool {
+        let Some(session_store) = &self.session_store else {
+            return false;
+        };
+        let Some(snapshot) = &self.session else {
+            return false;
+        };
+        let history = self.history.clone().unwrap_or_default();
+        session_store.save(snapshot.clone(), history);
+        session_store.save_external_memory_entries(
+            &snapshot.session_id,
+            self.permission_context.external_memory_entries(),
+        );
+        session_store.save_nested_memory_lineage(
+            &snapshot.session_id,
+            self.permission_context.nested_memory_lineage(),
+        );
+        true
+    }
+
+    pub fn persist_session_lifecycle(&self, status: SessionLifecycleStatus) -> bool {
+        let Some(session_store) = &self.session_store else {
+            return false;
+        };
+        let session_id = self.current_session_id();
+        session_store.save_lifecycle_status(&session_id, status);
+        true
+    }
+
+    pub fn current_session_lifecycle(&self) -> SessionLifecycleStatus {
+        self.session_store
+            .as_ref()
+            .map(|store| store.load_lifecycle_status(&self.current_session_id()))
+            .unwrap_or_default()
+    }
+
     pub fn classify_runtime_changes(previous: &Self, current: &Self) -> AppStateChangeSet {
         let mut changes = Vec::new();
         if previous.permission_context.mode() != current.permission_context.mode() {
@@ -235,6 +273,7 @@ impl AppState {
             &session_id,
             self.permission_context.nested_memory_lineage(),
         );
+        session_store.save_lifecycle_status(&session_id, SessionLifecycleStatus::Active);
     }
 
     pub fn current_session_id(&self) -> SessionId {
