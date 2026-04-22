@@ -569,7 +569,10 @@ impl FileBackedSessionStore {
 
 /// Acquires an exclusive OS advisory lock on `lock_path`, runs `f`, then releases the lock.
 /// The lock file is created if it does not exist and is never removed — it is a stable sentinel.
-fn with_file_lock(lock_path: &Path, f: impl FnOnce() -> std::io::Result<()>) -> std::io::Result<()> {
+fn with_file_lock(
+    lock_path: &Path,
+    f: impl FnOnce() -> std::io::Result<()>,
+) -> std::io::Result<()> {
     if let Some(parent) = lock_path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -579,22 +582,20 @@ fn with_file_lock(lock_path: &Path, f: impl FnOnce() -> std::io::Result<()>) -> 
         .create(true)
         .truncate(false)
         .open(lock_path)?;
-    fs4_lock_exclusive(&lock_file)?;
+    fs4_lock(&lock_file)?;
     let result = f();
     fs4_unlock(&lock_file);
     result
 }
 
-#[allow(unstable_name_collisions)]
-fn fs4_lock_exclusive(file: &fs::File) -> std::io::Result<()> {
-    use fs4::FileExt;
-    file.lock_exclusive()
+// fs4 1.0 renamed lock_exclusive() → lock(). Use UFCS to avoid Rust 2024 unstable name collision
+// with the stdlib's own unstable File::lock() / File::unlock() methods.
+fn fs4_lock(file: &fs::File) -> std::io::Result<()> {
+    <fs::File as fs4::FileExt>::lock(file)
 }
 
-#[allow(unstable_name_collisions)]
 fn fs4_unlock(file: &fs::File) {
-    use fs4::FileExt;
-    let _ = file.unlock();
+    let _ = <fs::File as fs4::FileExt>::unlock(file);
 }
 
 fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {

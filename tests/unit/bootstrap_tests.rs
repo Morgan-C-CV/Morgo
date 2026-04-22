@@ -3437,3 +3437,112 @@ fn legacy_upgrade_does_not_change_latest_session() {
 
     std::fs::remove_dir_all(root).expect("cleanup");
 }
+
+// ── T18.1.B: advisory lock tests ─────────────────────────────────────────────
+
+#[test]
+fn atomic_write_uses_file_lock_for_session_record() {
+    // Verify that writing a session record creates a sibling .lock file.
+    let root = unique_temp_path("rust-agent-lock-session-record");
+    let store = FileBackedSessionStore::new(root.clone());
+    let session_id = SessionId("session-lock-record".into());
+    let record = minimal_persisted_record(&session_id);
+
+    store
+        .save_full_record(&session_id, record)
+        .expect("save_full_record must succeed");
+
+    let lock_path = root.join("session-lock-record.json.lock");
+    assert!(
+        lock_path.exists(),
+        "advisory lock sentinel file must exist after write: {:?}",
+        lock_path
+    );
+
+    std::fs::remove_dir_all(root).expect("cleanup");
+}
+
+#[test]
+fn atomic_write_uses_file_lock_for_latest_session() {
+    // Verify that writing latest_session creates a sibling .lock file.
+    let root = unique_temp_path("rust-agent-lock-latest");
+    let store = FileBackedSessionStore::new(root.clone());
+    let session_id = SessionId("session-lock-latest".into());
+    let record = minimal_persisted_record(&session_id);
+
+    store
+        .save_full_record(&session_id, record)
+        .expect("save_full_record must succeed");
+
+    let lock_path = root.join("latest_session.lock");
+    assert!(
+        lock_path.exists(),
+        "advisory lock sentinel file must exist for latest_session: {:?}",
+        lock_path
+    );
+
+    std::fs::remove_dir_all(root).expect("cleanup");
+}
+
+#[test]
+fn concurrent_session_writes_do_not_leave_partial_json() {
+    use std::sync::Arc;
+    use std::thread;
+
+    let root = Arc::new(unique_temp_path("rust-agent-concurrent-writes"));
+    let session_id = SessionId("session-concurrent".into());
+
+    // Spawn 8 threads, each writing a distinct record to the same session file.
+    let handles: Vec<_> = (0u32..8)
+        .map(|i| {
+            let root = Arc::clone(&root);
+            let session_id = session_id.clone();
+            thread::spawn(move || {
+                let store = FileBackedSessionStore::new((*root).clone());
+                let mut record = minimal_persisted_record(&session_id);
+                record.snapshot.cwd = format!("/tmp/concurrent/{i}");
+                store
+                    .save_full_record(&session_id, record)
+                    .expect("concurrent write must not fail");
+            })
+        })
+        .collect();
+
+    for h in handles {
+        h.join().expect("thread must not panic");
+    }
+
+    // The file on disk must be valid JSON — no partial writes.
+    let path = root.join("session-concurrent.json");
+    let raw = std::fs::read_to_string(&path).expect("session file must exist");
+    let parsed: serde_json::Value = serde_json::from_str(&raw)
+        .expect("session file must be valid JSON after concurrent writes");
+    assert!(
+        parsed.get("snapshot").is_some(),
+        "parsed record must have a snapshot field"
+    );
+
+    std::fs::remove_dir_all((*root).clone()).expect("cleanup");
+}
+
+fn minimal_persisted_record(session_id: &SessionId) -> PersistedSessionRecord {
+    use rust_agent::bootstrap::{InteractionSurface, SessionMode};
+    use rust_agent::history::session::{SessionLifecycleStatus, SessionSnapshot};
+
+    PersistedSessionRecord {
+        snapshot: SessionSnapshot {
+            session_id: session_id.clone(),
+            surface: InteractionSurface::Cli,
+            session_mode: SessionMode::Interactive,
+            cwd: "/tmp/minimal".into(),
+            last_turn_at: None,
+            prompt_seed: None,
+        },
+        history: Default::default(),
+        task_list: None,
+        plan_state: None,
+        external_memory_entries: None,
+        nested_memory_lineage: None,
+        lifecycle_status: SessionLifecycleStatus::Active,
+    }
+}
