@@ -510,9 +510,27 @@ impl FileBackedSessionStore {
         let raw = std::fs::read_to_string(path).ok()?;
         let record: PersistedSessionRecord = serde_json::from_str(&raw).ok()?;
         if is_legacy_record(&raw) {
-            let _ = self.write_record(session_id, &record);
+            // Upgrade the record file only — do not update latest_session.
+            // read_record() is called from metadata accessors (load_task_list, etc.)
+            // and must not have latest_session as a side effect.
+            let _ = self.write_record_file_only(session_id, &record);
         }
         Some(record)
+    }
+
+    fn write_record_file_only(
+        &self,
+        session_id: &SessionId,
+        record: &PersistedSessionRecord,
+    ) -> Result<(), SessionStoreWriteError> {
+        self.ensure_root()?;
+        let path = self.session_path(session_id);
+        let raw = serde_json::to_string_pretty(record).map_err(|error| {
+            SessionStoreWriteError::serialize("write_record_file_only.serialize", error)
+        })?;
+        write_atomic(&path, raw.as_bytes()).map_err(|error| {
+            SessionStoreWriteError::from_io("write_record_file_only.atomic", error)
+        })
     }
 
     fn write_record(
@@ -520,12 +538,7 @@ impl FileBackedSessionStore {
         session_id: &SessionId,
         record: &PersistedSessionRecord,
     ) -> Result<(), SessionStoreWriteError> {
-        self.ensure_root()?;
-        let path = self.session_path(session_id);
-        let raw = serde_json::to_string_pretty(record)
-            .map_err(|error| SessionStoreWriteError::serialize("write_record.serialize", error))?;
-        write_atomic(&path, raw.as_bytes())
-            .map_err(|error| SessionStoreWriteError::from_io("write_record.atomic", error))?;
+        self.write_record_file_only(session_id, record)?;
         self.write_latest_session_id(session_id)
     }
 

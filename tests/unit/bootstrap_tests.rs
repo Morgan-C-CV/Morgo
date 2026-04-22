@@ -3256,7 +3256,7 @@ fn legacy_record_upgrade_preserves_existing_sections() {
     let store = FileBackedSessionStore::new(root.clone());
     let session_id = SessionId("session-upgrade-preserve".into());
 
-    // Legacy record with a non-empty history entry and a task_list.
+    // Legacy record with a non-empty history entry and a non-null task_list.
     let legacy_json = r#"{
   "snapshot": {
     "session_id": "session-upgrade-preserve",
@@ -3276,7 +3276,22 @@ fn legacy_record_upgrade_preserves_existing_sections() {
       }
     ]
   },
-  "task_list": null,
+  "task_list": {
+    "next_id": 3,
+    "tasks": [
+      {
+        "id": "task-legacy-0",
+        "subject": "legacy task",
+        "description": "must survive upgrade",
+        "active_form": null,
+        "status": "Pending",
+        "owner": null,
+        "plan_step_id": null,
+        "blocks": [],
+        "blocked_by": []
+      }
+    ]
+  },
   "plan_state": null
 }"#;
     let path = root.join("session-upgrade-preserve.json");
@@ -3293,7 +3308,15 @@ fn legacy_record_upgrade_preserves_existing_sections() {
     assert_eq!(snapshot.prompt_seed.as_deref(), Some("seed-preserve"));
     assert_eq!(history.entries.len(), 1);
 
-    // Upgraded file must still contain the original history entry.
+    // task_list must survive the upgrade write-back.
+    let task_list = store.load_task_list(&session_id);
+    assert!(task_list.is_some(), "task_list must survive upgrade");
+    let tasks = task_list.unwrap();
+    assert_eq!(tasks.next_id, 3);
+    assert_eq!(tasks.tasks.len(), 1);
+    assert_eq!(tasks.tasks[0].id, "task-legacy-0");
+
+    // Upgraded file must still contain the original content.
     let upgraded_raw = std::fs::read_to_string(&path).expect("read upgraded file");
     assert!(
         upgraded_raw.contains("legacy entry"),
@@ -3302,6 +3325,10 @@ fn legacy_record_upgrade_preserves_existing_sections() {
     assert!(
         upgraded_raw.contains("seed-preserve"),
         "upgraded file must preserve original snapshot fields"
+    );
+    assert!(
+        upgraded_raw.contains("task-legacy-0"),
+        "upgraded file must preserve original task_list"
     );
 
     std::fs::remove_dir_all(root).expect("cleanup");
@@ -3331,6 +3358,49 @@ fn resume_fallback_does_not_corrupt_old_session_file() {
     assert_eq!(
         after, corrupt_json,
         "corrupt session file must not be modified by a failed load"
+    );
+
+    std::fs::remove_dir_all(root).expect("cleanup");
+}
+
+#[test]
+fn legacy_upgrade_does_not_change_latest_session() {
+    let root = unique_temp_path("rust-agent-upgrade-no-latest");
+    std::fs::create_dir_all(&root).expect("create root");
+
+    // Seed latest_session pointing to a different session.
+    let latest_path = root.join("latest_session");
+    std::fs::write(&latest_path, "session-other").expect("write latest_session");
+
+    // Write a legacy record for a different session.
+    let legacy_json = r#"{
+  "snapshot": {
+    "session_id": "session-legacy-notouch",
+    "surface": "Cli",
+    "session_mode": "Interactive",
+    "cwd": "/tmp/notouch",
+    "last_turn_at": null,
+    "prompt_seed": null
+  },
+  "history": { "entries": [] },
+  "task_list": null,
+  "plan_state": null
+}"#;
+    let session_path = root.join("session-legacy-notouch.json");
+    std::fs::write(&session_path, legacy_json).expect("write legacy record");
+
+    let store = FileBackedSessionStore::new(root.clone());
+    let loaded = store.load(&SessionRestoreRequest {
+        resume: Some("session-legacy-notouch".into()),
+        continue_session: false,
+    });
+    assert!(loaded.is_some(), "legacy record must load");
+
+    // latest_session must still point to the original value — upgrade must not overwrite it.
+    let latest_after = std::fs::read_to_string(&latest_path).expect("read latest_session");
+    assert_eq!(
+        latest_after, "session-other",
+        "legacy schema upgrade must not update latest_session"
     );
 
     std::fs::remove_dir_all(root).expect("cleanup");
