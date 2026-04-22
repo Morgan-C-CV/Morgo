@@ -1,3 +1,5 @@
+#![allow(unused_must_use)]
+
 #[path = "integration/boss_flow.rs"]
 mod boss_flow;
 #[path = "integration/cli_smoke.rs"]

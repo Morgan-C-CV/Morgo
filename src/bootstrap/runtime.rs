@@ -380,7 +380,7 @@ impl RuntimeBootstrap {
         let restore_request = self.restore_request();
         let resolved_session =
             self.resolve_bootstrap_session_state(&state, restore_request.as_ref());
-        self.session_store.save(
+        let _ = self.session_store.save(
             resolved_session.snapshot.clone(),
             resolved_session.history.clone(),
         );
@@ -1485,10 +1485,10 @@ fn shutdown_failure_reason(failure: &ShutdownFailure) -> String {
     match failure {
         ShutdownFailure::ForceDrainTimedOut => "force_drain_timed_out".into(),
         ShutdownFailure::PersistBeforeShutdown(inner) => {
-            format!("persist_before_shutdown:{}", inner.as_str())
+            format!("persist_before_shutdown:{}", inner.reason())
         }
         ShutdownFailure::PersistAfterShutdown(inner) => {
-            format!("persist_after_shutdown:{}", inner.as_str())
+            format!("persist_after_shutdown:{}", inner.reason())
         }
     }
 }

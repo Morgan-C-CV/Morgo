@@ -520,13 +520,13 @@ fn zombie_failure_reason(failure: &ZombieSessionFailure) -> String {
     match failure {
         ZombieSessionFailure::MissingAppState => "missing_app_state".into(),
         ZombieSessionFailure::PersistSessionState(inner) => {
-            format!("persist_session_state:{}", inner.as_str())
+            format!("persist_session_state:{}", inner.reason())
         }
         ZombieSessionFailure::PersistLifecycleHibernating(inner) => {
-            format!("persist_lifecycle_hibernating:{}", inner.as_str())
+            format!("persist_lifecycle_hibernating:{}", inner.reason())
         }
         ZombieSessionFailure::PersistLifecycleExpired(inner) => {
-            format!("persist_lifecycle_expired:{}", inner.as_str())
+            format!("persist_lifecycle_expired:{}", inner.reason())
         }
     }
 }
@@ -566,7 +566,7 @@ mod tests {
             last_turn_at: None,
             prompt_seed: None,
         };
-        session_store.save(snapshot.clone(), SessionHistory::default());
+        let _ = session_store.save(snapshot.clone(), SessionHistory::default());
         let dispatcher = NotificationDispatcher::new(TelegramGateway::default());
         let permission_context = ToolPermissionContext::new(PermissionMode::Default)
             .with_task_manager(task_manager)
@@ -773,7 +773,7 @@ mod tests {
             last_active.clone(),
             token.clone(),
         );
-        session_store.save_lifecycle_status(
+        let _ = session_store.save_lifecycle_status(
             &SessionId("session-housekeeping".into()),
             SessionLifecycleStatus::Hibernating,
         );

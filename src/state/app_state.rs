@@ -13,24 +13,27 @@ use crate::tool::registry::ToolRegistry;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
 use crate::history::resume::{ResolvedSessionState, RestoredSession};
 use crate::history::session::{
     PersistedSessionRecord, SessionHistory, SessionId, SessionLifecycleStatus, SessionSnapshot,
-    SessionStore,
+    SessionStore, SessionStoreWriteError,
 };
 use crate::interaction::dispatcher::NotificationDispatcher;
 use crate::security::audit::AuditLog;
 use crate::state::active_model_runtime::ActiveModelRuntime;
 use crate::state::permission_context::ToolPermissionContext;
 
+const SESSION_PERSIST_MAX_ATTEMPTS: usize = 3;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionPersistFailure {
     MissingSessionStore,
     MissingSessionSnapshot,
+    StoreWrite(SessionStoreWriteError),
 }
 
 impl SessionPersistFailure {
@@ -38,7 +41,22 @@ impl SessionPersistFailure {
         match self {
             Self::MissingSessionStore => "missing_session_store",
             Self::MissingSessionSnapshot => "missing_session_snapshot",
+            Self::StoreWrite(error) => error.as_str(),
         }
+    }
+
+    pub fn reason(&self) -> String {
+        match self {
+            Self::MissingSessionStore => "missing_session_store".into(),
+            Self::MissingSessionSnapshot => "missing_session_snapshot".into(),
+            Self::StoreWrite(error) => {
+                format!("store_write:{}:{}", error.operation, error.kind.as_str())
+            }
+        }
+    }
+
+    pub fn is_transient(&self) -> bool {
+        matches!(self, Self::StoreWrite(error) if error.is_transient())
     }
 }
 
@@ -184,8 +202,9 @@ impl AppState {
             nested_memory_lineage: Some(self.permission_context.nested_memory_lineage()),
             lifecycle_status: session_store.load_lifecycle_status(&session_id),
         };
-        session_store.save_full_record(&session_id, record);
-        Ok(())
+        persist_store_write_with_retry("persist_current_session_state", || {
+            session_store.save_full_record(&session_id, record.clone())
+        })
     }
 
     pub fn persist_session_lifecycle(
@@ -196,8 +215,9 @@ impl AppState {
             return Err(SessionPersistFailure::MissingSessionStore);
         };
         let session_id = self.current_session_id();
-        session_store.save_lifecycle_status(&session_id, status);
-        Ok(())
+        persist_store_write_with_retry("persist_session_lifecycle", || {
+            session_store.save_lifecycle_status(&session_id, status)
+        })
     }
 
     pub fn current_session_lifecycle(&self) -> SessionLifecycleStatus {
@@ -293,7 +313,7 @@ impl AppState {
             nested_memory_lineage: Some(self.permission_context.nested_memory_lineage()),
             lifecycle_status: SessionLifecycleStatus::Active,
         };
-        session_store.save_full_record(&session_id, record);
+        let _ = session_store.save_full_record(&session_id, record);
     }
 
     pub fn current_session_id(&self) -> SessionId {
@@ -367,6 +387,37 @@ impl AppState {
                 }
             }
         }
+    }
+}
+
+fn persist_store_write_with_retry(
+    operation: &'static str,
+    mut write: impl FnMut() -> Result<(), SessionStoreWriteError>,
+) -> Result<(), SessionPersistFailure> {
+    let mut attempt = 1;
+    loop {
+        match write() {
+            Ok(()) => return Ok(()),
+            Err(error) if error.is_transient() && attempt < SESSION_PERSIST_MAX_ATTEMPTS => {
+                tracing::warn!(
+                    "session persist transient write failure: operation={} store_operation={} attempt={} detail={}",
+                    operation,
+                    error.operation,
+                    attempt,
+                    error.detail
+                );
+                std::thread::sleep(persist_retry_delay(attempt));
+                attempt += 1;
+            }
+            Err(error) => return Err(SessionPersistFailure::StoreWrite(error)),
+        }
+    }
+}
+
+fn persist_retry_delay(attempt: usize) -> Duration {
+    match attempt {
+        1 => Duration::from_millis(10),
+        _ => Duration::from_millis(25),
     }
 }
 

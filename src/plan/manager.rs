@@ -315,7 +315,7 @@ impl PlanManager {
             return;
         };
         if let Some(state) = self.state() {
-            persistence
+            let _ = persistence
                 .session_store
                 .save_plan_state(&persistence.session_id, state);
         }

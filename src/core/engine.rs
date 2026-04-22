@@ -74,7 +74,7 @@ impl QueryEngine {
             return;
         };
         let session_id = SessionId(self.context.app_state.active_session_id.clone());
-        session_store.append_entry(
+        let _ = session_store.append_entry(
             &session_id,
             SessionHistoryEntry {
                 message: input,
@@ -84,7 +84,7 @@ impl QueryEngine {
             },
         );
         for message in messages {
-            session_store.append_entry(
+            let _ = session_store.append_entry(
                 &session_id,
                 SessionHistoryEntry {
                     message: message.clone(),
@@ -103,7 +103,7 @@ impl QueryEngine {
         let compact_plan_code = compact_plan_code_from_events(&events);
 
         if let Some(session_store) = session_store {
-            session_store.append_entry(
+            let _ = session_store.append_entry(
                 &session_id,
                 SessionHistoryEntry {
                     message: input,
@@ -121,7 +121,7 @@ impl QueryEngine {
             match &event {
                 EngineEvent::MessageCommitted(message) => {
                     if let Some(session_store) = session_store {
-                        session_store.append_entry(
+                        let _ = session_store.append_entry(
                             &session_id,
                             SessionHistoryEntry {
                                 message: message.clone(),
@@ -147,7 +147,7 @@ impl QueryEngine {
                     report_modifier,
                 } => {
                     if let Some(session_store) = session_store {
-                        session_store.append_entry(
+                        let _ = session_store.append_entry(
                             &session_id,
                             SessionHistoryEntry {
                                 message: Message::assistant(format!(

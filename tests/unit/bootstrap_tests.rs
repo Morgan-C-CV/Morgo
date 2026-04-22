@@ -1,4 +1,5 @@
 use std::fs;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -16,7 +17,7 @@ use rust_agent::history::resume::{RestoreRequest, RestoreSource, resolve_session
 use rust_agent::history::session::{
     FileBackedSessionStore, InMemorySessionStore, PersistedSessionRecord, SessionHistory,
     SessionHistoryEntry, SessionId, SessionLifecycleStatus, SessionRestoreRequest, SessionSnapshot,
-    SessionStore,
+    SessionStore, SessionStoreWriteError, SessionStoreWriteErrorKind,
 };
 use rust_agent::hook::registry::{HookConfigSource, HookEvent, load_hook_registry};
 use rust_agent::service::api::client::{
@@ -242,6 +243,138 @@ fn shutdown_test_app_state(
     }
 }
 
+#[derive(Debug)]
+struct FlakySessionStore {
+    inner: InMemorySessionStore,
+    transient_full_record_failures: AtomicUsize,
+    full_record_attempts: AtomicUsize,
+}
+
+impl FlakySessionStore {
+    fn new(transient_full_record_failures: usize) -> Self {
+        Self {
+            inner: InMemorySessionStore::default(),
+            transient_full_record_failures: AtomicUsize::new(transient_full_record_failures),
+            full_record_attempts: AtomicUsize::new(0),
+        }
+    }
+
+    fn transient_error(operation: &'static str) -> SessionStoreWriteError {
+        SessionStoreWriteError {
+            operation,
+            kind: SessionStoreWriteErrorKind::IoTransient,
+            detail: "simulated transient write failure".into(),
+        }
+    }
+
+    fn full_record_attempts(&self) -> usize {
+        self.full_record_attempts.load(Ordering::SeqCst)
+    }
+}
+
+impl SessionStore for FlakySessionStore {
+    fn load(&self, request: &SessionRestoreRequest) -> Option<(SessionSnapshot, SessionHistory)> {
+        self.inner.load(request)
+    }
+
+    fn save(
+        &self,
+        snapshot: SessionSnapshot,
+        history: SessionHistory,
+    ) -> Result<(), SessionStoreWriteError> {
+        self.inner.save(snapshot, history)
+    }
+
+    fn save_full_record(
+        &self,
+        session_id: &SessionId,
+        record: PersistedSessionRecord,
+    ) -> Result<(), SessionStoreWriteError> {
+        self.full_record_attempts.fetch_add(1, Ordering::SeqCst);
+        let previous = self
+            .transient_full_record_failures
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |value| {
+                if value > 0 { Some(value - 1) } else { None }
+            })
+            .unwrap_or(0);
+        if previous > 0 {
+            return Err(Self::transient_error("save_full_record"));
+        }
+        self.inner.save_full_record(session_id, record)
+    }
+
+    fn append_entry(
+        &self,
+        session_id: &SessionId,
+        entry: SessionHistoryEntry,
+    ) -> Result<(), SessionStoreWriteError> {
+        self.inner.append_entry(session_id, entry)
+    }
+
+    fn load_task_list(&self, session_id: &SessionId) -> Option<TaskListSnapshot> {
+        self.inner.load_task_list(session_id)
+    }
+
+    fn save_task_list(
+        &self,
+        session_id: &SessionId,
+        snapshot: TaskListSnapshot,
+    ) -> Result<(), SessionStoreWriteError> {
+        self.inner.save_task_list(session_id, snapshot)
+    }
+
+    fn load_plan_state(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<rust_agent::plan::types::PlanState> {
+        self.inner.load_plan_state(session_id)
+    }
+
+    fn save_plan_state(
+        &self,
+        session_id: &SessionId,
+        state: rust_agent::plan::types::PlanState,
+    ) -> Result<(), SessionStoreWriteError> {
+        self.inner.save_plan_state(session_id, state)
+    }
+
+    fn load_external_memory_entries(&self, session_id: &SessionId) -> Vec<String> {
+        self.inner.load_external_memory_entries(session_id)
+    }
+
+    fn save_external_memory_entries(
+        &self,
+        session_id: &SessionId,
+        entries: Vec<String>,
+    ) -> Result<(), SessionStoreWriteError> {
+        self.inner.save_external_memory_entries(session_id, entries)
+    }
+
+    fn load_nested_memory_lineage(&self, session_id: &SessionId) -> Vec<String> {
+        self.inner.load_nested_memory_lineage(session_id)
+    }
+
+    fn save_nested_memory_lineage(
+        &self,
+        session_id: &SessionId,
+        lineage: Vec<String>,
+    ) -> Result<(), SessionStoreWriteError> {
+        self.inner.save_nested_memory_lineage(session_id, lineage)
+    }
+
+    fn load_lifecycle_status(&self, session_id: &SessionId) -> SessionLifecycleStatus {
+        self.inner.load_lifecycle_status(session_id)
+    }
+
+    fn save_lifecycle_status(
+        &self,
+        session_id: &SessionId,
+        status: SessionLifecycleStatus,
+    ) -> Result<(), SessionStoreWriteError> {
+        self.inner.save_lifecycle_status(session_id, status)
+    }
+}
+
 #[test]
 fn runtime_shutdown_timeout_uses_env_override() {
     let _guard = bootstrap_env_lock().lock().expect("env lock");
@@ -324,6 +457,27 @@ async fn execute_runtime_shutdown_records_observability_for_persist_failures() {
             .runtime_lifecycle_failures_by_reason
             .get("persist_before_shutdown:missing_session_store"),
         Some(&1)
+    );
+}
+
+#[test]
+fn persist_current_session_state_retries_transient_store_write_failures() {
+    let store = Arc::new(InMemorySessionStore::default());
+    let tasks = Arc::new(TaskManager::default());
+    let mut app_state = shutdown_test_app_state(store, tasks);
+    let flaky_store = Arc::new(FlakySessionStore::new(2));
+    app_state.session_store = Some(flaky_store.clone());
+
+    assert_eq!(app_state.persist_current_session_state(), Ok(()));
+    assert_eq!(flaky_store.full_record_attempts(), 3);
+    assert!(
+        flaky_store
+            .load(&SessionRestoreRequest {
+                resume: Some("shutdown-session".into()),
+                continue_session: false,
+            })
+            .is_some(),
+        "final retry should persist the session after transient failures"
     );
 }
 

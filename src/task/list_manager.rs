@@ -382,7 +382,7 @@ impl TaskListManager {
         let Some(persistence) = &self.persistence else {
             return;
         };
-        persistence
+        let _ = persistence
             .session_store
             .save_task_list(&persistence.session_id, self.snapshot());
     }

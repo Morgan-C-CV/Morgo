@@ -69,21 +69,120 @@ impl SessionLifecycleStatus {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionStoreWriteErrorKind {
+    LockPoisoned,
+    Serialize,
+    IoTransient,
+    IoPermanent,
+}
+
+impl SessionStoreWriteErrorKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::LockPoisoned => "lock_poisoned",
+            Self::Serialize => "serialize",
+            Self::IoTransient => "io_transient",
+            Self::IoPermanent => "io_permanent",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionStoreWriteError {
+    pub operation: &'static str,
+    pub kind: SessionStoreWriteErrorKind,
+    pub detail: String,
+}
+
+impl SessionStoreWriteError {
+    pub fn is_transient(&self) -> bool {
+        self.kind == SessionStoreWriteErrorKind::IoTransient
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        self.kind.as_str()
+    }
+
+    fn lock_poisoned(operation: &'static str) -> Self {
+        Self {
+            operation,
+            kind: SessionStoreWriteErrorKind::LockPoisoned,
+            detail: "session store lock poisoned".into(),
+        }
+    }
+
+    fn serialize(operation: &'static str, error: serde_json::Error) -> Self {
+        Self {
+            operation,
+            kind: SessionStoreWriteErrorKind::Serialize,
+            detail: error.to_string(),
+        }
+    }
+
+    fn from_io(operation: &'static str, error: std::io::Error) -> Self {
+        let kind = match error.kind() {
+            std::io::ErrorKind::Interrupted
+            | std::io::ErrorKind::WouldBlock
+            | std::io::ErrorKind::TimedOut
+            | std::io::ErrorKind::WriteZero => SessionStoreWriteErrorKind::IoTransient,
+            _ => SessionStoreWriteErrorKind::IoPermanent,
+        };
+        Self {
+            operation,
+            kind,
+            detail: error.to_string(),
+        }
+    }
+}
+
 pub trait SessionStore: Send + Sync {
     fn load(&self, request: &SessionRestoreRequest) -> Option<(SessionSnapshot, SessionHistory)>;
-    fn save(&self, snapshot: SessionSnapshot, history: SessionHistory);
-    fn save_full_record(&self, session_id: &SessionId, record: PersistedSessionRecord);
-    fn append_entry(&self, session_id: &SessionId, entry: SessionHistoryEntry);
+    fn save(
+        &self,
+        snapshot: SessionSnapshot,
+        history: SessionHistory,
+    ) -> Result<(), SessionStoreWriteError>;
+    fn save_full_record(
+        &self,
+        session_id: &SessionId,
+        record: PersistedSessionRecord,
+    ) -> Result<(), SessionStoreWriteError>;
+    fn append_entry(
+        &self,
+        session_id: &SessionId,
+        entry: SessionHistoryEntry,
+    ) -> Result<(), SessionStoreWriteError>;
     fn load_task_list(&self, session_id: &SessionId) -> Option<TaskListSnapshot>;
-    fn save_task_list(&self, session_id: &SessionId, snapshot: TaskListSnapshot);
+    fn save_task_list(
+        &self,
+        session_id: &SessionId,
+        snapshot: TaskListSnapshot,
+    ) -> Result<(), SessionStoreWriteError>;
     fn load_plan_state(&self, session_id: &SessionId) -> Option<PlanState>;
-    fn save_plan_state(&self, session_id: &SessionId, state: PlanState);
+    fn save_plan_state(
+        &self,
+        session_id: &SessionId,
+        state: PlanState,
+    ) -> Result<(), SessionStoreWriteError>;
     fn load_external_memory_entries(&self, session_id: &SessionId) -> Vec<String>;
-    fn save_external_memory_entries(&self, session_id: &SessionId, entries: Vec<String>);
+    fn save_external_memory_entries(
+        &self,
+        session_id: &SessionId,
+        entries: Vec<String>,
+    ) -> Result<(), SessionStoreWriteError>;
     fn load_nested_memory_lineage(&self, session_id: &SessionId) -> Vec<String>;
-    fn save_nested_memory_lineage(&self, session_id: &SessionId, lineage: Vec<String>);
+    fn save_nested_memory_lineage(
+        &self,
+        session_id: &SessionId,
+        lineage: Vec<String>,
+    ) -> Result<(), SessionStoreWriteError>;
     fn load_lifecycle_status(&self, session_id: &SessionId) -> SessionLifecycleStatus;
-    fn save_lifecycle_status(&self, session_id: &SessionId, status: SessionLifecycleStatus);
+    fn save_lifecycle_status(
+        &self,
+        session_id: &SessionId,
+        status: SessionLifecycleStatus,
+    ) -> Result<(), SessionStoreWriteError>;
 }
 
 #[derive(Debug, Clone, Default)]
@@ -99,11 +198,13 @@ pub struct InMemorySessionStore {
 
 impl InMemorySessionStore {
     pub fn insert(&self, snapshot: SessionSnapshot, history: SessionHistory) {
-        self.save(snapshot, history);
+        self.save(snapshot, history)
+            .expect("in-memory session save should not fail");
     }
 
     pub fn insert_task_list(&self, session_id: SessionId, snapshot: TaskListSnapshot) {
-        self.save_task_list(&session_id, snapshot);
+        self.save_task_list(&session_id, snapshot)
+            .expect("in-memory task-list save should not fail");
     }
 }
 
@@ -121,84 +222,139 @@ impl SessionStore for InMemorySessionStore {
         self.sessions.read().ok()?.get(&target).cloned()
     }
 
-    fn save(&self, snapshot: SessionSnapshot, history: SessionHistory) {
-        if let Ok(mut latest) = self.latest_session.write() {
-            *latest = Some(snapshot.session_id.clone());
-        }
-        if let Ok(mut sessions) = self.sessions.write() {
-            sessions.insert(snapshot.session_id.clone(), (snapshot, history));
-        }
+    fn save(
+        &self,
+        snapshot: SessionSnapshot,
+        history: SessionHistory,
+    ) -> Result<(), SessionStoreWriteError> {
+        let mut latest = self
+            .latest_session
+            .write()
+            .map_err(|_| SessionStoreWriteError::lock_poisoned("save.latest_session"))?;
+        *latest = Some(snapshot.session_id.clone());
+        let mut sessions = self
+            .sessions
+            .write()
+            .map_err(|_| SessionStoreWriteError::lock_poisoned("save.sessions"))?;
+        sessions.insert(snapshot.session_id.clone(), (snapshot, history));
+        Ok(())
     }
 
-    fn save_full_record(&self, session_id: &SessionId, record: PersistedSessionRecord) {
-        if let Ok(mut latest) = self.latest_session.write() {
-            *latest = Some(session_id.clone());
+    fn save_full_record(
+        &self,
+        session_id: &SessionId,
+        record: PersistedSessionRecord,
+    ) -> Result<(), SessionStoreWriteError> {
+        let mut latest = self.latest_session.write().map_err(|_| {
+            SessionStoreWriteError::lock_poisoned("save_full_record.latest_session")
+        })?;
+        *latest = Some(session_id.clone());
+        let mut sessions = self
+            .sessions
+            .write()
+            .map_err(|_| SessionStoreWriteError::lock_poisoned("save_full_record.sessions"))?;
+        sessions.insert(
+            session_id.clone(),
+            (record.snapshot.clone(), record.history.clone()),
+        );
+        drop(sessions);
+
+        let mut task_lists = self
+            .task_lists
+            .write()
+            .map_err(|_| SessionStoreWriteError::lock_poisoned("save_full_record.task_lists"))?;
+        if let Some(task_list) = record.task_list {
+            task_lists.insert(session_id.clone(), task_list);
+        } else {
+            task_lists.remove(session_id);
         }
-        if let Ok(mut sessions) = self.sessions.write() {
-            sessions.insert(
-                session_id.clone(),
-                (record.snapshot.clone(), record.history.clone()),
-            );
+        drop(task_lists);
+
+        let mut plan_states = self
+            .plan_states
+            .write()
+            .map_err(|_| SessionStoreWriteError::lock_poisoned("save_full_record.plan_states"))?;
+        if let Some(plan_state) = record.plan_state {
+            plan_states.insert(session_id.clone(), plan_state);
+        } else {
+            plan_states.remove(session_id);
         }
-        if let Ok(mut task_lists) = self.task_lists.write() {
-            if let Some(task_list) = record.task_list {
-                task_lists.insert(session_id.clone(), task_list);
-            } else {
-                task_lists.remove(session_id);
-            }
+        drop(plan_states);
+
+        let mut external_memory_entries = self.external_memory_entries.write().map_err(|_| {
+            SessionStoreWriteError::lock_poisoned("save_full_record.external_memory_entries")
+        })?;
+        if let Some(entries) = record.external_memory_entries {
+            external_memory_entries.insert(session_id.clone(), entries);
+        } else {
+            external_memory_entries.remove(session_id);
         }
-        if let Ok(mut plan_states) = self.plan_states.write() {
-            if let Some(plan_state) = record.plan_state {
-                plan_states.insert(session_id.clone(), plan_state);
-            } else {
-                plan_states.remove(session_id);
-            }
+        drop(external_memory_entries);
+
+        let mut nested_memory_lineage = self.nested_memory_lineage.write().map_err(|_| {
+            SessionStoreWriteError::lock_poisoned("save_full_record.nested_memory_lineage")
+        })?;
+        if let Some(lineage) = record.nested_memory_lineage {
+            nested_memory_lineage.insert(session_id.clone(), lineage);
+        } else {
+            nested_memory_lineage.remove(session_id);
         }
-        if let Ok(mut external_memory_entries) = self.external_memory_entries.write() {
-            if let Some(entries) = record.external_memory_entries {
-                external_memory_entries.insert(session_id.clone(), entries);
-            } else {
-                external_memory_entries.remove(session_id);
-            }
-        }
-        if let Ok(mut nested_memory_lineage) = self.nested_memory_lineage.write() {
-            if let Some(lineage) = record.nested_memory_lineage {
-                nested_memory_lineage.insert(session_id.clone(), lineage);
-            } else {
-                nested_memory_lineage.remove(session_id);
-            }
-        }
-        if let Ok(mut lifecycle_statuses) = self.lifecycle_statuses.write() {
-            lifecycle_statuses.insert(session_id.clone(), record.lifecycle_status);
-        }
+        drop(nested_memory_lineage);
+
+        let mut lifecycle_statuses = self.lifecycle_statuses.write().map_err(|_| {
+            SessionStoreWriteError::lock_poisoned("save_full_record.lifecycle_statuses")
+        })?;
+        lifecycle_statuses.insert(session_id.clone(), record.lifecycle_status);
+        Ok(())
     }
 
-    fn append_entry(&self, session_id: &SessionId, entry: SessionHistoryEntry) {
-        if let Ok(mut sessions) = self.sessions.write() {
-            if let Some((_, history)) = sessions.get_mut(session_id) {
-                history.entries.push(entry);
-            }
+    fn append_entry(
+        &self,
+        session_id: &SessionId,
+        entry: SessionHistoryEntry,
+    ) -> Result<(), SessionStoreWriteError> {
+        let mut sessions = self
+            .sessions
+            .write()
+            .map_err(|_| SessionStoreWriteError::lock_poisoned("append_entry.sessions"))?;
+        if let Some((_, history)) = sessions.get_mut(session_id) {
+            history.entries.push(entry);
         }
+        Ok(())
     }
 
     fn load_task_list(&self, session_id: &SessionId) -> Option<TaskListSnapshot> {
         self.task_lists.read().ok()?.get(session_id).cloned()
     }
 
-    fn save_task_list(&self, session_id: &SessionId, snapshot: TaskListSnapshot) {
-        if let Ok(mut task_lists) = self.task_lists.write() {
-            task_lists.insert(session_id.clone(), snapshot);
-        }
+    fn save_task_list(
+        &self,
+        session_id: &SessionId,
+        snapshot: TaskListSnapshot,
+    ) -> Result<(), SessionStoreWriteError> {
+        let mut task_lists = self
+            .task_lists
+            .write()
+            .map_err(|_| SessionStoreWriteError::lock_poisoned("save_task_list.task_lists"))?;
+        task_lists.insert(session_id.clone(), snapshot);
+        Ok(())
     }
 
     fn load_plan_state(&self, session_id: &SessionId) -> Option<PlanState> {
         self.plan_states.read().ok()?.get(session_id).cloned()
     }
 
-    fn save_plan_state(&self, session_id: &SessionId, state: PlanState) {
-        if let Ok(mut plan_states) = self.plan_states.write() {
-            plan_states.insert(session_id.clone(), state);
-        }
+    fn save_plan_state(
+        &self,
+        session_id: &SessionId,
+        state: PlanState,
+    ) -> Result<(), SessionStoreWriteError> {
+        let mut plan_states = self
+            .plan_states
+            .write()
+            .map_err(|_| SessionStoreWriteError::lock_poisoned("save_plan_state.plan_states"))?;
+        plan_states.insert(session_id.clone(), state);
+        Ok(())
     }
 
     fn load_external_memory_entries(&self, session_id: &SessionId) -> Vec<String> {
@@ -209,10 +365,16 @@ impl SessionStore for InMemorySessionStore {
             .unwrap_or_default()
     }
 
-    fn save_external_memory_entries(&self, session_id: &SessionId, entries: Vec<String>) {
-        if let Ok(mut external_memory_entries) = self.external_memory_entries.write() {
-            external_memory_entries.insert(session_id.clone(), entries);
-        }
+    fn save_external_memory_entries(
+        &self,
+        session_id: &SessionId,
+        entries: Vec<String>,
+    ) -> Result<(), SessionStoreWriteError> {
+        let mut external_memory_entries = self.external_memory_entries.write().map_err(|_| {
+            SessionStoreWriteError::lock_poisoned("save_external_memory_entries.entries")
+        })?;
+        external_memory_entries.insert(session_id.clone(), entries);
+        Ok(())
     }
 
     fn load_nested_memory_lineage(&self, session_id: &SessionId) -> Vec<String> {
@@ -223,10 +385,16 @@ impl SessionStore for InMemorySessionStore {
             .unwrap_or_default()
     }
 
-    fn save_nested_memory_lineage(&self, session_id: &SessionId, lineage: Vec<String>) {
-        if let Ok(mut nested_memory_lineage) = self.nested_memory_lineage.write() {
-            nested_memory_lineage.insert(session_id.clone(), lineage);
-        }
+    fn save_nested_memory_lineage(
+        &self,
+        session_id: &SessionId,
+        lineage: Vec<String>,
+    ) -> Result<(), SessionStoreWriteError> {
+        let mut nested_memory_lineage = self.nested_memory_lineage.write().map_err(|_| {
+            SessionStoreWriteError::lock_poisoned("save_nested_memory_lineage.lineage")
+        })?;
+        nested_memory_lineage.insert(session_id.clone(), lineage);
+        Ok(())
     }
 
     fn load_lifecycle_status(&self, session_id: &SessionId) -> SessionLifecycleStatus {
@@ -237,10 +405,16 @@ impl SessionStore for InMemorySessionStore {
             .unwrap_or_default()
     }
 
-    fn save_lifecycle_status(&self, session_id: &SessionId, status: SessionLifecycleStatus) {
-        if let Ok(mut lifecycle_statuses) = self.lifecycle_statuses.write() {
-            lifecycle_statuses.insert(session_id.clone(), status);
-        }
+    fn save_lifecycle_status(
+        &self,
+        session_id: &SessionId,
+        status: SessionLifecycleStatus,
+    ) -> Result<(), SessionStoreWriteError> {
+        let mut lifecycle_statuses = self.lifecycle_statuses.write().map_err(|_| {
+            SessionStoreWriteError::lock_poisoned("save_lifecycle_status.lifecycle_statuses")
+        })?;
+        lifecycle_statuses.insert(session_id.clone(), status);
+        Ok(())
     }
 }
 
@@ -264,7 +438,7 @@ pub struct PersistedSessionRecord {
 impl FileBackedSessionStore {
     pub fn new(root: PathBuf) -> Self {
         let store = Self { root };
-        store.ensure_root();
+        let _ = store.ensure_root();
         store
     }
 
@@ -298,8 +472,9 @@ impl FileBackedSessionStore {
             .join("sessions")
     }
 
-    fn ensure_root(&self) {
-        let _ = std::fs::create_dir_all(&self.root);
+    fn ensure_root(&self) -> Result<(), SessionStoreWriteError> {
+        std::fs::create_dir_all(&self.root)
+            .map_err(|error| SessionStoreWriteError::from_io("ensure_root", error))
     }
 
     fn latest_path(&self) -> PathBuf {
@@ -321,9 +496,13 @@ impl FileBackedSessionStore {
         }
     }
 
-    fn write_latest_session_id(&self, session_id: &SessionId) {
-        self.ensure_root();
-        let _ = write_atomic(&self.latest_path(), session_id.0.as_bytes());
+    fn write_latest_session_id(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), SessionStoreWriteError> {
+        self.ensure_root()?;
+        write_atomic(&self.latest_path(), session_id.0.as_bytes())
+            .map_err(|error| SessionStoreWriteError::from_io("write_latest_session_id", error))
     }
 
     fn read_record(&self, session_id: &SessionId) -> Option<PersistedSessionRecord> {
@@ -332,25 +511,30 @@ impl FileBackedSessionStore {
         serde_json::from_str(&raw).ok()
     }
 
-    fn write_record(&self, session_id: &SessionId, record: &PersistedSessionRecord) {
-        self.ensure_root();
+    fn write_record(
+        &self,
+        session_id: &SessionId,
+        record: &PersistedSessionRecord,
+    ) -> Result<(), SessionStoreWriteError> {
+        self.ensure_root()?;
         let path = self.session_path(session_id);
         let raw = serde_json::to_string_pretty(record)
-            .expect("session record serialization should succeed");
-        let _ = write_atomic(&path, raw.as_bytes());
-        self.write_latest_session_id(session_id);
+            .map_err(|error| SessionStoreWriteError::serialize("write_record.serialize", error))?;
+        write_atomic(&path, raw.as_bytes())
+            .map_err(|error| SessionStoreWriteError::from_io("write_record.atomic", error))?;
+        self.write_latest_session_id(session_id)
     }
 
     fn update_record(
         &self,
         session_id: &SessionId,
         update: impl FnOnce(&mut PersistedSessionRecord),
-    ) {
+    ) -> Result<(), SessionStoreWriteError> {
         let mut record = self
             .read_record(session_id)
             .unwrap_or_else(|| Self::default_record(session_id));
         update(&mut record);
-        self.write_record(session_id, &record);
+        self.write_record(session_id, &record)
     }
 }
 
@@ -417,7 +601,11 @@ impl SessionStore for FileBackedSessionStore {
         Some((record.snapshot, record.history))
     }
 
-    fn save(&self, snapshot: SessionSnapshot, history: SessionHistory) {
+    fn save(
+        &self,
+        snapshot: SessionSnapshot,
+        history: SessionHistory,
+    ) -> Result<(), SessionStoreWriteError> {
         let session_id = snapshot.session_id.clone();
         let record = self.read_record(&session_id);
         let task_list = record.as_ref().and_then(|record| record.task_list.clone());
@@ -438,17 +626,25 @@ impl SessionStore for FileBackedSessionStore {
                 nested_memory_lineage,
                 lifecycle_status,
             },
-        );
+        )
     }
 
-    fn save_full_record(&self, session_id: &SessionId, record: PersistedSessionRecord) {
-        self.write_record(session_id, &record);
+    fn save_full_record(
+        &self,
+        session_id: &SessionId,
+        record: PersistedSessionRecord,
+    ) -> Result<(), SessionStoreWriteError> {
+        self.write_record(session_id, &record)
     }
 
-    fn append_entry(&self, session_id: &SessionId, entry: SessionHistoryEntry) {
+    fn append_entry(
+        &self,
+        session_id: &SessionId,
+        entry: SessionHistoryEntry,
+    ) -> Result<(), SessionStoreWriteError> {
         self.update_record(session_id, |record| {
             record.history.entries.push(entry);
-        });
+        })
     }
 
     fn load_task_list(&self, session_id: &SessionId) -> Option<TaskListSnapshot> {
@@ -456,10 +652,14 @@ impl SessionStore for FileBackedSessionStore {
             .and_then(|record| record.task_list)
     }
 
-    fn save_task_list(&self, session_id: &SessionId, snapshot: TaskListSnapshot) {
+    fn save_task_list(
+        &self,
+        session_id: &SessionId,
+        snapshot: TaskListSnapshot,
+    ) -> Result<(), SessionStoreWriteError> {
         self.update_record(session_id, |record| {
             record.task_list = Some(snapshot);
-        });
+        })
     }
 
     fn load_plan_state(&self, session_id: &SessionId) -> Option<PlanState> {
@@ -467,10 +667,14 @@ impl SessionStore for FileBackedSessionStore {
             .and_then(|record| record.plan_state)
     }
 
-    fn save_plan_state(&self, session_id: &SessionId, state: PlanState) {
+    fn save_plan_state(
+        &self,
+        session_id: &SessionId,
+        state: PlanState,
+    ) -> Result<(), SessionStoreWriteError> {
         self.update_record(session_id, |record| {
             record.plan_state = Some(state);
-        });
+        })
     }
 
     fn load_external_memory_entries(&self, session_id: &SessionId) -> Vec<String> {
@@ -479,10 +683,14 @@ impl SessionStore for FileBackedSessionStore {
             .unwrap_or_default()
     }
 
-    fn save_external_memory_entries(&self, session_id: &SessionId, entries: Vec<String>) {
+    fn save_external_memory_entries(
+        &self,
+        session_id: &SessionId,
+        entries: Vec<String>,
+    ) -> Result<(), SessionStoreWriteError> {
         self.update_record(session_id, |record| {
             record.external_memory_entries = Some(entries);
-        });
+        })
     }
 
     fn load_nested_memory_lineage(&self, session_id: &SessionId) -> Vec<String> {
@@ -491,10 +699,14 @@ impl SessionStore for FileBackedSessionStore {
             .unwrap_or_default()
     }
 
-    fn save_nested_memory_lineage(&self, session_id: &SessionId, lineage: Vec<String>) {
+    fn save_nested_memory_lineage(
+        &self,
+        session_id: &SessionId,
+        lineage: Vec<String>,
+    ) -> Result<(), SessionStoreWriteError> {
         self.update_record(session_id, |record| {
             record.nested_memory_lineage = Some(lineage);
-        });
+        })
     }
 
     fn load_lifecycle_status(&self, session_id: &SessionId) -> SessionLifecycleStatus {
@@ -503,10 +715,14 @@ impl SessionStore for FileBackedSessionStore {
             .unwrap_or_default()
     }
 
-    fn save_lifecycle_status(&self, session_id: &SessionId, status: SessionLifecycleStatus) {
+    fn save_lifecycle_status(
+        &self,
+        session_id: &SessionId,
+        status: SessionLifecycleStatus,
+    ) -> Result<(), SessionStoreWriteError> {
         self.update_record(session_id, |record| {
             record.lifecycle_status = status;
-        });
+        })
     }
 }
 

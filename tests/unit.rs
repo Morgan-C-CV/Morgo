@@ -1,3 +1,5 @@
+#![allow(unused_must_use)]
+
 #[path = "unit/acceptance_loop1_tests.rs"]
 mod acceptance_loop1_tests;
 #[path = "unit/bootstrap_tests.rs"]
