@@ -741,6 +741,80 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_housekeeping_worker_progress_keeps_parent_session_alive_across_ticks() {
+        let token = CancellationToken::new();
+        let last_active = Arc::new(AtomicU64::new(0));
+        let session_store = Arc::new(InMemorySessionStore::default());
+        let task_manager = Arc::new(TaskManager::default());
+        task_manager.set_activity_tracker(last_active.clone());
+        let app_state = test_app_state(
+            session_store.clone(),
+            task_manager.clone(),
+            last_active.clone(),
+            token.clone(),
+        );
+        let task = task_manager.create(
+            "long-running worker",
+            "session-housekeeping",
+            InteractionSurface::Cli,
+        );
+        task_manager.start(&task.id);
+
+        let daemon = HousekeepingDaemon::new(
+            HousekeepingConfig {
+                interval: Duration::from_millis(200),
+                stale_threshold_secs: 2,
+                expired_threshold_secs: 10,
+                session_retention_days: 7,
+                task_log_retention_days: 1,
+                max_gc_entries_per_tick: 2048,
+            },
+            token.clone(),
+            last_active.clone(),
+        )
+        .with_app_state(app_state.clone());
+
+        let daemon_handle = tokio::spawn(daemon.run());
+        let worker_task_manager = task_manager.clone();
+        let worker_task_id = task.id.clone();
+        let progress_handle = tokio::spawn(async move {
+            for _ in 0..5 {
+                worker_task_manager.append_output(&worker_task_id, "worker progress heartbeat\n");
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+        });
+
+        progress_handle.await.unwrap();
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        token.cancel();
+        daemon_handle.await.unwrap();
+
+        assert!(matches!(
+            session_store.load_lifecycle_status(&SessionId("session-housekeeping".into())),
+            SessionLifecycleStatus::Active | SessionLifecycleStatus::Stale
+        ));
+        assert_eq!(
+            task_manager.status(&task.id),
+            Some(crate::task::types::TaskStatus::Running)
+        );
+        assert!(
+            !app_state
+                .notification_dispatcher
+                .delivered()
+                .iter()
+                .any(|notification| {
+                    matches!(
+                        notification.notice_kind.as_deref(),
+                        Some("housekeeping.zombie_hibernated")
+                            | Some("housekeeping.zombie_hibernation_failed")
+                            | Some("housekeeping.zombie_expired")
+                            | Some("housekeeping.zombie_expire_failed")
+                    )
+                })
+        );
+    }
+
+    #[tokio::test]
     async fn test_housekeeping_gc_logic() {
         let temp_dir = std::env::temp_dir().join(format!(
             "rust_agent_gc_test_{}",

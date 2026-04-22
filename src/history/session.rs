@@ -105,7 +105,6 @@ impl InMemorySessionStore {
     pub fn insert_task_list(&self, session_id: SessionId, snapshot: TaskListSnapshot) {
         self.save_task_list(&session_id, snapshot);
     }
-
 }
 
 impl SessionStore for InMemorySessionStore {

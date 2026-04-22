@@ -15,8 +15,8 @@ use rust_agent::core::message::Message;
 use rust_agent::history::resume::{RestoreRequest, RestoreSource, resolve_session_state};
 use rust_agent::history::session::{
     FileBackedSessionStore, InMemorySessionStore, PersistedSessionRecord, SessionHistory,
-    SessionHistoryEntry, SessionId, SessionLifecycleStatus, SessionRestoreRequest,
-    SessionSnapshot, SessionStore,
+    SessionHistoryEntry, SessionId, SessionLifecycleStatus, SessionRestoreRequest, SessionSnapshot,
+    SessionStore,
 };
 use rust_agent::hook::registry::{HookConfigSource, HookEvent, load_hook_registry};
 use rust_agent::service::api::client::{
@@ -1918,6 +1918,355 @@ fn file_backed_session_store_loads_legacy_records_without_memory_fields() {
     assert!(store.load_nested_memory_lineage(&session_id).is_empty());
 
     std::fs::remove_dir_all(root).expect("cleanup legacy file-backed session store");
+}
+
+#[test]
+fn persist_current_session_state_commits_all_fields_in_one_record_write() {
+    let root = unique_temp_path("rust-agent-persist-current-state");
+    let store = Arc::new(FileBackedSessionStore::new(root.clone()));
+    let session_id = SessionId("session-current-aggregate".into());
+    let snapshot = SessionSnapshot {
+        session_id: session_id.clone(),
+        surface: InteractionSurface::Cli,
+        session_mode: SessionMode::Interactive,
+        cwd: "/tmp/current-aggregate".into(),
+        last_turn_at: Some("2026-04-22T10:00:00Z".into()),
+        prompt_seed: Some("seed-current".into()),
+    };
+    let history = SessionHistory {
+        entries: vec![SessionHistoryEntry {
+            message: Message::assistant("persist current state"),
+            timestamp: Some("2026-04-22T10:00:01Z".into()),
+            tool_refs: vec!["TaskCreate".into()],
+            milestone: None,
+        }],
+    };
+    let task_list = TaskListSnapshot {
+        next_id: 2,
+        tasks: vec![TaskListItem {
+            id: "task-0".into(),
+            subject: "persisted task list".into(),
+            description: "kept across aggregate write".into(),
+            active_form: Some("Persisting".into()),
+            status: TaskListStatus::Pending,
+            owner: Some(session_id.0.clone()),
+            plan_step_id: None,
+            blocks: vec![],
+            blocked_by: vec![],
+        }],
+    };
+    store.save(snapshot.clone(), history.clone());
+    store.save_task_list(&session_id, task_list.clone());
+    store.save_plan_state(&session_id, rust_agent::plan::types::PlanState::default());
+
+    let app_state = AppState {
+        surface: InteractionSurface::Cli,
+        session_mode: SessionMode::Interactive,
+        client_type: rust_agent::bootstrap::ClientType::Cli,
+        session_source: SessionSource::LocalCli,
+        runtime_role: RuntimeRole::Coordinator,
+        worker_role: None,
+        permission_context: ToolPermissionContext::new(PermissionMode::Default)
+            .with_active_session_id(session_id.0.clone())
+            .with_active_surface(InteractionSurface::Cli)
+            .with_external_memory_entries(vec!["linear:ABC-1".into(), "slack:#ops".into()])
+            .with_nested_memory_lineage(vec!["session:root".into(), "agent:child".into()]),
+        command_registry: None,
+        runtime_tool_registry: None,
+        skill_registry: None,
+        mcp_runtime: None,
+        plugin_load_result: None,
+        cost_tracker: rust_agent::cost::tracker::CostTracker::default(),
+        service_observability_tracker:
+            rust_agent::service::observability::ServiceObservabilityTracker::default(),
+        notification_dispatcher: rust_agent::interaction::dispatcher::NotificationDispatcher::new(
+            rust_agent::interaction::telegram::gateway::TelegramGateway::default(),
+        ),
+        audit_log: Arc::new(std::sync::Mutex::new(
+            rust_agent::security::audit::AuditLog::default(),
+        )),
+        startup_trace: Vec::new(),
+        active_model_runtime: None,
+        active_model_profile_name: None,
+        active_model_profile_source:
+            rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
+        active_model_provider_summary: rust_agent::state::app_state::ActiveModelProviderSummary {
+            provider_id: "default-provider".into(),
+            protocol: "Anthropic".into(),
+            compatibility_profile: "Anthropic".into(),
+            base_url_host: "localhost".into(),
+            model: "default-model".into(),
+            auth_status: "none".into(),
+        },
+        active_session_id: session_id.0.clone(),
+        session_store: Some(store.clone()),
+        session: Some(snapshot.clone()),
+        history: Some(history.clone()),
+        restored_session: None,
+        last_activity_ts: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        cancellation_token: tokio_util::sync::CancellationToken::new(),
+        subagent_limiter: None,
+        boss_coordinator: None,
+    };
+
+    assert!(app_state.persist_current_session_state());
+
+    let store_b = FileBackedSessionStore::new(root.clone());
+    let loaded = store_b
+        .load(&SessionRestoreRequest {
+            resume: Some("session-current-aggregate".into()),
+            continue_session: false,
+        })
+        .expect("session record should exist");
+    assert_eq!(loaded, (snapshot, history));
+    assert_eq!(store_b.load_task_list(&session_id), Some(task_list));
+    assert_eq!(
+        store_b.load_external_memory_entries(&session_id),
+        vec!["linear:ABC-1".to_string(), "slack:#ops".to_string()]
+    );
+    assert_eq!(
+        store_b.load_nested_memory_lineage(&session_id),
+        app_state.permission_context.nested_memory_lineage()
+    );
+
+    std::fs::remove_dir_all(root).expect("cleanup current aggregate test store");
+}
+
+#[test]
+fn persist_resolved_session_state_commits_all_fields_in_one_record_write() {
+    let root = unique_temp_path("rust-agent-persist-resolved-state");
+    let store = Arc::new(FileBackedSessionStore::new(root.clone()));
+    let session_id = SessionId("session-resolved-aggregate".into());
+    let snapshot = SessionSnapshot {
+        session_id: session_id.clone(),
+        surface: InteractionSurface::Remote,
+        session_mode: SessionMode::Interactive,
+        cwd: "/tmp/resolved-aggregate".into(),
+        last_turn_at: Some("2026-04-22T11:00:00Z".into()),
+        prompt_seed: Some("seed-resolved".into()),
+    };
+    let history = SessionHistory {
+        entries: vec![SessionHistoryEntry {
+            message: Message::user("resume me"),
+            timestamp: Some("2026-04-22T11:00:01Z".into()),
+            tool_refs: vec![],
+            milestone: None,
+        }],
+    };
+    let task_list = TaskListSnapshot {
+        next_id: 3,
+        tasks: vec![TaskListItem {
+            id: "task-1".into(),
+            subject: "restored task".into(),
+            description: "kept across resolved aggregate write".into(),
+            active_form: Some("Restoring".into()),
+            status: TaskListStatus::Pending,
+            owner: Some(session_id.0.clone()),
+            plan_step_id: None,
+            blocks: vec![],
+            blocked_by: vec![],
+        }],
+    };
+    store.save_task_list(&session_id, task_list.clone());
+
+    let app_state = AppState {
+        surface: InteractionSurface::Remote,
+        session_mode: SessionMode::Interactive,
+        client_type: rust_agent::bootstrap::ClientType::RemoteControl,
+        session_source: SessionSource::RemoteControl,
+        runtime_role: RuntimeRole::Coordinator,
+        worker_role: None,
+        permission_context: ToolPermissionContext::new(PermissionMode::Default)
+            .with_active_session_id(session_id.0.clone())
+            .with_active_surface(InteractionSurface::Remote)
+            .with_external_memory_entries(vec!["linear:XYZ-9".into()])
+            .with_nested_memory_lineage(vec!["session:resolved".into()]),
+        command_registry: None,
+        runtime_tool_registry: None,
+        skill_registry: None,
+        mcp_runtime: None,
+        plugin_load_result: None,
+        cost_tracker: rust_agent::cost::tracker::CostTracker::default(),
+        service_observability_tracker:
+            rust_agent::service::observability::ServiceObservabilityTracker::default(),
+        notification_dispatcher: rust_agent::interaction::dispatcher::NotificationDispatcher::new(
+            rust_agent::interaction::telegram::gateway::TelegramGateway::default(),
+        ),
+        audit_log: Arc::new(std::sync::Mutex::new(
+            rust_agent::security::audit::AuditLog::default(),
+        )),
+        startup_trace: Vec::new(),
+        active_model_runtime: None,
+        active_model_profile_name: None,
+        active_model_profile_source:
+            rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
+        active_model_provider_summary: rust_agent::state::app_state::ActiveModelProviderSummary {
+            provider_id: "default-provider".into(),
+            protocol: "Anthropic".into(),
+            compatibility_profile: "Anthropic".into(),
+            base_url_host: "localhost".into(),
+            model: "default-model".into(),
+            auth_status: "none".into(),
+        },
+        active_session_id: session_id.0.clone(),
+        session_store: Some(store.clone()),
+        session: Some(snapshot.clone()),
+        history: Some(history.clone()),
+        restored_session: None,
+        last_activity_ts: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        cancellation_token: tokio_util::sync::CancellationToken::new(),
+        subagent_limiter: None,
+        boss_coordinator: None,
+    };
+
+    let resolved = rust_agent::history::resume::ResolvedSessionState {
+        snapshot: snapshot.clone(),
+        history: history.clone(),
+        restored_session: None,
+        client_type: rust_agent::bootstrap::ClientType::RemoteControl,
+        session_source: SessionSource::RemoteControl,
+        external_memory_entries: vec!["linear:XYZ-9".into()],
+        nested_memory_lineage: vec!["session:resolved".into()],
+    };
+
+    app_state.persist_resolved_session_state(&resolved);
+
+    let store_b = FileBackedSessionStore::new(root.clone());
+    let loaded = store_b
+        .load(&SessionRestoreRequest {
+            resume: Some("session-resolved-aggregate".into()),
+            continue_session: false,
+        })
+        .expect("resolved session record should exist");
+    assert_eq!(loaded, (snapshot, history));
+    assert_eq!(store_b.load_task_list(&session_id), Some(task_list));
+    assert_eq!(
+        store_b.load_external_memory_entries(&session_id),
+        vec!["linear:XYZ-9".to_string()]
+    );
+    assert_eq!(
+        store_b.load_nested_memory_lineage(&session_id),
+        vec!["session:resolved".to_string()]
+    );
+    assert_eq!(
+        store_b.load_lifecycle_status(&session_id),
+        SessionLifecycleStatus::Active
+    );
+
+    std::fs::remove_dir_all(root).expect("cleanup resolved aggregate test store");
+}
+
+#[test]
+fn save_lifecycle_status_preserves_existing_snapshot_and_history() {
+    let root = unique_temp_path("rust-agent-session-lifecycle-preserve");
+    let store = FileBackedSessionStore::new(root.clone());
+    let session_id = SessionId("session-lifecycle-preserve".into());
+    let snapshot = SessionSnapshot {
+        session_id: session_id.clone(),
+        surface: InteractionSurface::Cli,
+        session_mode: SessionMode::Interactive,
+        cwd: "/tmp/lifecycle-preserve".into(),
+        last_turn_at: Some("2026-04-22T12:00:00Z".into()),
+        prompt_seed: Some("seed-lifecycle".into()),
+    };
+    let history = SessionHistory {
+        entries: vec![SessionHistoryEntry {
+            message: Message::assistant("keep me"),
+            timestamp: Some("2026-04-22T12:00:01Z".into()),
+            tool_refs: vec![],
+            milestone: None,
+        }],
+    };
+    store.save(snapshot.clone(), history.clone());
+    store.save_lifecycle_status(&session_id, SessionLifecycleStatus::Hibernating);
+
+    let loaded = store
+        .load(&SessionRestoreRequest {
+            resume: Some("session-lifecycle-preserve".into()),
+            continue_session: false,
+        })
+        .expect("session should still load after lifecycle update");
+    assert_eq!(loaded, (snapshot, history));
+    assert_eq!(
+        store.load_lifecycle_status(&session_id),
+        SessionLifecycleStatus::Hibernating
+    );
+
+    std::fs::remove_dir_all(root).expect("cleanup lifecycle preserve test store");
+}
+
+#[test]
+fn update_record_preserves_existing_fields_when_mutating_one_section() {
+    let root = unique_temp_path("rust-agent-session-update-preserve");
+    let store = FileBackedSessionStore::new(root.clone());
+    let session_id = SessionId("session-update-preserve".into());
+    let snapshot = SessionSnapshot {
+        session_id: session_id.clone(),
+        surface: InteractionSurface::Cli,
+        session_mode: SessionMode::Interactive,
+        cwd: "/tmp/update-preserve".into(),
+        last_turn_at: Some("2026-04-22T13:00:00Z".into()),
+        prompt_seed: Some("seed-update".into()),
+    };
+    let history = SessionHistory {
+        entries: vec![SessionHistoryEntry {
+            message: Message::user("preserve everything else"),
+            timestamp: Some("2026-04-22T13:00:01Z".into()),
+            tool_refs: vec!["TaskGet".into()],
+            milestone: None,
+        }],
+    };
+    let task_list = TaskListSnapshot {
+        next_id: 2,
+        tasks: vec![TaskListItem {
+            id: "task-0".into(),
+            subject: "persist me".into(),
+            description: "must survive section update".into(),
+            active_form: Some("Persisting".into()),
+            status: TaskListStatus::Pending,
+            owner: Some(session_id.0.clone()),
+            plan_step_id: None,
+            blocks: vec![],
+            blocked_by: vec![],
+        }],
+    };
+    store.save_full_record(
+        &session_id,
+        PersistedSessionRecord {
+            snapshot: snapshot.clone(),
+            history: history.clone(),
+            task_list: Some(task_list.clone()),
+            plan_state: Some(rust_agent::plan::types::PlanState::default()),
+            external_memory_entries: Some(vec!["linear:KEEP-1".into()]),
+            nested_memory_lineage: Some(vec!["session:update-preserve".into()]),
+            lifecycle_status: SessionLifecycleStatus::Active,
+        },
+    );
+
+    store.save_external_memory_entries(&session_id, vec!["linear:KEEP-2".into()]);
+
+    let loaded = store
+        .load(&SessionRestoreRequest {
+            resume: Some("session-update-preserve".into()),
+            continue_session: false,
+        })
+        .expect("session should still load after partial update");
+    assert_eq!(loaded, (snapshot, history));
+    assert_eq!(store.load_task_list(&session_id), Some(task_list));
+    assert_eq!(
+        store.load_external_memory_entries(&session_id),
+        vec!["linear:KEEP-2".to_string()]
+    );
+    assert_eq!(
+        store.load_nested_memory_lineage(&session_id),
+        vec!["session:update-preserve".to_string()]
+    );
+    assert_eq!(
+        store.load_lifecycle_status(&session_id),
+        SessionLifecycleStatus::Active
+    );
+
+    std::fs::remove_dir_all(root).expect("cleanup update preserve test store");
 }
 
 #[test]

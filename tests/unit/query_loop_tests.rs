@@ -2531,6 +2531,66 @@ async fn subagent_context_reanchors_and_bounds_nested_memory_lineage() {
 }
 
 #[tokio::test]
+async fn subagent_context_shares_activity_tracker_and_cancellation_with_parent() {
+    let mut parent = test_context(vec![
+        StreamEvent::MessageStart,
+        StreamEvent::TextDelta("parent".into()),
+        StreamEvent::MessageStop {
+            stop_reason: StopReason::EndTurn,
+        },
+    ]);
+    let shared_activity = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    parent.app_state.last_activity_ts = shared_activity.clone();
+    parent.app_state.permission_context = parent
+        .app_state
+        .permission_context
+        .clone()
+        .with_last_activity_ts(shared_activity.clone())
+        .with_cancellation_token(parent.app_state.cancellation_token.clone());
+    shared_activity.store(1, std::sync::atomic::Ordering::Release);
+
+    let child = parent.create_subagent_context(
+        "agent-shared-heartbeat",
+        vec![vec![
+            StreamEvent::MessageStart,
+            StreamEvent::TextDelta("child heartbeat".into()),
+            StreamEvent::MessageStop {
+                stop_reason: StopReason::EndTurn,
+            },
+        ]],
+        SubagentConfig {
+            worker_role: rust_agent::state::app_state::WorkerRole::Research,
+            inherit_context: true,
+            max_turns: None,
+            allowed_tools: None,
+        },
+    );
+
+    assert!(Arc::ptr_eq(
+        &parent.app_state.last_activity_ts,
+        &child.app_state.last_activity_ts
+    ));
+
+    let result = QueryEngine::new(child.clone())
+        .submit_turn(Message::user("run child heartbeat"))
+        .await;
+    assert!(
+        result
+            .messages
+            .iter()
+            .any(|message| *message == Message::assistant("child heartbeat")),
+        "child turn should complete with the scripted response"
+    );
+    assert!(
+        shared_activity.load(std::sync::atomic::Ordering::Acquire) > 1,
+        "child query-loop activity should refresh the parent session heartbeat"
+    );
+
+    parent.app_state.cancellation_token.cancel();
+    assert!(child.app_state.cancellation_token.is_cancelled());
+}
+
+#[tokio::test]
 async fn query_loop_respects_max_turns_terminal() {
     let context = test_context_with_turns(
         vec![vec![
