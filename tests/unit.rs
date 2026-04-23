@@ -2,6 +2,8 @@
 
 #[path = "unit/acceptance_loop1_tests.rs"]
 mod acceptance_loop1_tests;
+#[path = "unit/attachment_tests.rs"]
+mod attachment_tests;
 #[path = "unit/bootstrap_tests.rs"]
 mod bootstrap_tests;
 #[path = "unit/context_prompt_tests.rs"]

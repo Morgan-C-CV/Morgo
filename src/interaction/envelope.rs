@@ -114,4 +114,9 @@ impl NormalizedInput {
             }
         }
     }
+
+    pub fn with_attachments(mut self, attachments: Vec<String>) -> Self {
+        self.attachments = attachments;
+        self
+    }
 }

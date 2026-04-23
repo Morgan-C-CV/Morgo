@@ -1,3 +1,4 @@
+pub mod attachment;
 pub mod boss;
 pub mod boss_state;
 pub mod concurrency;

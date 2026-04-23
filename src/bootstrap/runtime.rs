@@ -25,7 +25,7 @@ use crate::interaction::cli::renderer::{
     build_tui_screen, render_document_output, render_document_tui_output, render_output,
     render_tui_screen_output, render_turn_document,
 };
-use crate::interaction::cli::repl::{CliTurnOutput, handle_cli_input};
+use crate::interaction::cli::repl::{CliTurnOutput, handle_cli_input, handle_normalized_input};
 use crate::interaction::dispatcher::NotificationDispatcher;
 use crate::interaction::envelope::NormalizedInput;
 use crate::interaction::remote::{
@@ -253,6 +253,25 @@ pub struct BootstrapCli {
     pub tui: bool,
     #[arg(long, default_value = "cli")]
     pub surface: String,
+    #[arg(long = "attach", value_name = "PATH")]
+    pub attachments: Vec<String>,
+}
+
+impl Default for BootstrapCli {
+    fn default() -> Self {
+        Self {
+            print: None,
+            interactive: false,
+            init_only: false,
+            continue_session: false,
+            resume: None,
+            trace_startup: false,
+            show_tools: false,
+            tui: false,
+            surface: "cli".into(),
+            attachments: Vec::new(),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -523,7 +542,14 @@ impl RuntimeBootstrap {
                     render_output(&render_remote_response_debug(&response))
                 );
             } else {
-                let output = handle_cli_input(&router, &engine, &app_state, prompt.clone()).await?;
+                let input = NormalizedInput::from_session_raw(
+                    app_state.surface,
+                    app_state.active_session_id.clone(),
+                    prompt.clone(),
+                )
+                .with_attachments(self.cli.attachments.clone());
+                let output =
+                    handle_normalized_input(&router, &engine, &app_state, input).await?;
                 self.print_cli_turn_output(&output);
             }
             return Ok(());

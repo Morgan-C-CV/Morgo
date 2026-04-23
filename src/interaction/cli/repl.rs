@@ -1,7 +1,8 @@
 use crate::command::types::CommandResult;
+use crate::core::attachment::load_attachment;
 use crate::core::engine::QueryEngine;
 use crate::core::events::{EngineEvent, ServiceFailureCode, ServiceFailureNotice};
-use crate::core::message::Message;
+use crate::core::message::{ContentBlock, Message};
 use crate::interaction::envelope::NormalizedInput;
 use crate::interaction::router::{CommandRouter, RouteExecution};
 use crate::plugins::runtime_state::{build_turn_engine, build_turn_router};
@@ -88,6 +89,28 @@ pub enum CliDisplayEvent {
     RuntimeEvent(CliRuntimeEvent),
 }
 
+/// Build a user Message from NormalizedInput: text block first, then any
+/// successfully loaded image blocks from attachments. Attachment errors are
+/// logged but do not abort the turn.
+fn build_user_message(input: &NormalizedInput) -> Message {
+    let mut blocks = vec![ContentBlock::Text {
+        text: input.raw.clone(),
+    }];
+    for path in &input.attachments {
+        match load_attachment(path) {
+            Ok(block) => blocks.push(block),
+            Err(e) => {
+                tracing::warn!("attachment skipped: {e}");
+            }
+        }
+    }
+    Message {
+        role: crate::core::message::Role::User,
+        content: input.raw.clone(),
+        blocks,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CliTurnOutput {
     pub primary_text: String,
@@ -137,7 +160,7 @@ pub async fn handle_normalized_input(
             CommandResult::Prompt(prompt) => (vec![Message::assistant(prompt)], Vec::new(), false),
             CommandResult::ContinueToQuery => {
                 let (messages, events) =
-                    collect_stream_messages(engine, Message::user(input.raw.clone())).await;
+                    collect_stream_messages(engine, build_user_message(&input)).await;
                 (messages, events, true)
             }
             CommandResult::Denied(reason) => (
@@ -164,7 +187,7 @@ pub async fn handle_normalized_input(
     };
     if !engine_persisted {
         engine.persist_messages(
-            Message::user(input.raw.clone()),
+            build_user_message(&input),
             &persisted_messages,
             crate::core::events::SessionMilestone::AssistantMessageCommitted,
         );
