@@ -194,6 +194,7 @@ pub struct PluginDefinition {
     pub description: String,
     pub manifest_path: PathBuf,
     pub capabilities: Vec<PluginCapability>,
+    pub runtime: Option<PluginRuntimeSpec>,
     pub diagnostics_metadata: Option<PluginDiagnosticsMetadata>,
     pub commands: Vec<PluginCommandDefinition>,
     pub tools: Vec<PluginToolDefinition>,
@@ -410,6 +411,8 @@ pub struct PluginManifest {
     #[serde(default)]
     pub capabilities: Vec<String>,
     #[serde(default)]
+    pub runtime: Option<PluginRuntimeSpec>,
+    #[serde(default)]
     pub diagnostics: Option<PluginDiagnosticsManifest>,
     #[serde(default)]
     pub commands: Vec<PluginCommandManifest>,
@@ -417,6 +420,74 @@ pub struct PluginManifest {
     pub tools: Vec<PluginToolManifest>,
     #[serde(default)]
     pub hooks: Vec<PluginHookManifest>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct PluginRuntimeSpec {
+    pub kind: PluginRuntimeKind,
+    #[serde(default)]
+    pub artifact: Option<String>,
+    #[serde(default)]
+    pub entry: Option<String>,
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+    #[serde(default)]
+    pub output_cap_bytes: Option<u64>,
+    #[serde(default)]
+    pub capabilities: Option<PluginRuntimeCapabilities>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginRuntimeKind {
+    Prompt,
+    Wasm,
+    Deno,
+}
+
+impl PluginRuntimeKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Prompt => "prompt",
+            Self::Wasm => "wasm",
+            Self::Deno => "deno",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginRuntimeCapabilities {
+    #[serde(default)]
+    pub filesystem: Option<PluginFilesystemCapability>,
+    #[serde(default)]
+    pub network: Option<PluginNetworkCapability>,
+    #[serde(default)]
+    pub env: Option<PluginEnvCapability>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginFilesystemCapability {
+    #[serde(default)]
+    pub read_roots: Vec<String>,
+    #[serde(default)]
+    pub write_roots: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginNetworkCapability {
+    #[serde(default)]
+    pub allow_hosts: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginEnvCapability {
+    #[serde(default)]
+    pub allow_names: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

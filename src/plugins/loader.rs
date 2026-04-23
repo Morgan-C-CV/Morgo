@@ -9,7 +9,7 @@ use crate::plugins::types::{
     PluginActivationSummary, PluginApplyStatus, PluginCapability, PluginConfigSource,
     PluginDefinition, PluginDiagnostic, PluginDiagnosticSeverity, PluginDiagnosticsMetadata,
     PluginGovernanceState, PluginHookDefinition, PluginHookManifest, PluginLifecycleState,
-    PluginLoadResult, PluginManifest, PluginToolDefinition,
+    PluginLoadResult, PluginManifest, PluginRuntimeKind, PluginRuntimeSpec, PluginToolDefinition,
 };
 
 pub fn load_plugins(cwd: &Path) -> PluginLoadResult {
@@ -139,6 +139,13 @@ fn load_plugin_manifest(
         .get(&manifest.name)
         .cloned()
         .unwrap_or_default();
+    let runtime = validate_runtime_spec(
+        &manifest.name,
+        path,
+        manifest_dir,
+        manifest.runtime.as_ref(),
+        &mut diagnostics,
+    );
 
     for capability in &manifest.capabilities {
         match parse_plugin_capability(capability) {
@@ -314,6 +321,7 @@ fn load_plugin_manifest(
         description: manifest.description,
         manifest_path: path.clone(),
         capabilities,
+        runtime,
         diagnostics_metadata,
         commands,
         tools,
@@ -404,6 +412,132 @@ fn parse_plugin_capability(value: &str) -> Option<PluginCapability> {
         "hooks" => Some(PluginCapability::Hooks),
         _ => None,
     }
+}
+
+fn validate_runtime_spec(
+    plugin_name: &str,
+    manifest_path: &Path,
+    manifest_dir: &Path,
+    runtime: Option<&PluginRuntimeSpec>,
+    diagnostics: &mut Vec<PluginDiagnostic>,
+) -> Option<PluginRuntimeSpec> {
+    let Some(runtime) = runtime.cloned() else {
+        return None;
+    };
+
+    if let Some(timeout_ms) = runtime.timeout_ms {
+        if timeout_ms == 0 {
+            diagnostics.push(plugin_diagnostic(
+                Some(plugin_name),
+                Some(manifest_path),
+                PluginDiagnosticSeverity::Error,
+                "plugin-runtime-timeout-invalid",
+                "runtime.timeout_ms must be > 0".into(),
+            ));
+        }
+    }
+
+    if let Some(output_cap_bytes) = runtime.output_cap_bytes {
+        if output_cap_bytes == 0 {
+            diagnostics.push(plugin_diagnostic(
+                Some(plugin_name),
+                Some(manifest_path),
+                PluginDiagnosticSeverity::Error,
+                "plugin-runtime-output-cap-invalid",
+                "runtime.output_cap_bytes must be > 0".into(),
+            ));
+        }
+    }
+
+    match runtime.kind {
+        PluginRuntimeKind::Prompt => {
+            if let Some(artifact) = runtime.artifact.as_deref() {
+                validate_runtime_artifact(
+                    plugin_name,
+                    manifest_path,
+                    manifest_dir,
+                    artifact,
+                    false,
+                )
+                .map_err(|diagnostic| diagnostics.push(diagnostic))
+                .ok();
+            }
+        }
+        PluginRuntimeKind::Wasm | PluginRuntimeKind::Deno => {
+            let Some(artifact) = runtime.artifact.as_deref() else {
+                diagnostics.push(plugin_diagnostic(
+                    Some(plugin_name),
+                    Some(manifest_path),
+                    PluginDiagnosticSeverity::Error,
+                    "plugin-runtime-artifact-missing",
+                    format!(
+                        "runtime.kind={} requires runtime.artifact",
+                        runtime.kind.as_str()
+                    ),
+                ));
+                return Some(runtime);
+            };
+            validate_runtime_artifact(plugin_name, manifest_path, manifest_dir, artifact, true)
+                .map_err(|diagnostic| diagnostics.push(diagnostic))
+                .ok();
+        }
+    }
+
+    Some(runtime)
+}
+
+fn validate_runtime_artifact(
+    plugin_name: &str,
+    manifest_path: &Path,
+    manifest_dir: &Path,
+    artifact: &str,
+    must_exist: bool,
+) -> Result<(), PluginDiagnostic> {
+    let artifact_path = Path::new(artifact);
+    if artifact_path.is_absolute() {
+        return Err(plugin_diagnostic(
+            Some(plugin_name),
+            Some(manifest_path),
+            PluginDiagnosticSeverity::Error,
+            "plugin-runtime-artifact-path-invalid",
+            format!("runtime.artifact must be relative: {artifact}"),
+        ));
+    }
+    if artifact_path
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err(plugin_diagnostic(
+            Some(plugin_name),
+            Some(manifest_path),
+            PluginDiagnosticSeverity::Error,
+            "plugin-runtime-artifact-path-traversal",
+            format!("runtime.artifact must stay within plugin root: {artifact}"),
+        ));
+    }
+
+    let resolved = manifest_dir.join(artifact_path);
+    if !resolved.starts_with(manifest_dir) {
+        return Err(plugin_diagnostic(
+            Some(plugin_name),
+            Some(manifest_path),
+            PluginDiagnosticSeverity::Error,
+            "plugin-runtime-artifact-path-traversal",
+            format!("runtime.artifact must stay within plugin root: {artifact}"),
+        ));
+    }
+
+    if must_exist && !resolved.is_file() {
+        return Err(plugin_diagnostic(
+            Some(plugin_name),
+            Some(manifest_path),
+            PluginDiagnosticSeverity::Error,
+            "plugin-runtime-artifact-missing",
+            format!("runtime.artifact not found: {}", resolved.display()),
+        ));
+    }
+
+    Ok(())
 }
 
 fn plugin_diagnostic(

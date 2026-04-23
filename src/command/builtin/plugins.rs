@@ -302,7 +302,7 @@ fn render_plugin_list(plugin_load_result: &crate::plugins::types::PluginLoadResu
                     .join(",")
             };
             lines.push(format!(
-                "  - {} v{} — state={}, applied={}, enabled={}, active(commands={}, hooks={}, tools={}), discovered(commands={}, hooks={}, tools={}), capabilities={}",
+                "  - {} v{} — state={}, applied={}, enabled={}, active(commands={}, hooks={}, tools={}), discovered(commands={}, hooks={}, tools={}), capabilities={}, runtime={}",
                 plugin.name,
                 plugin.version.as_deref().unwrap_or("unknown"),
                 plugin.lifecycle_state.as_str(),
@@ -315,6 +315,11 @@ fn render_plugin_list(plugin_load_result: &crate::plugins::types::PluginLoadResu
                 plugin.hooks.len(),
                 plugin.tools.len(),
                 capabilities,
+                plugin
+                    .runtime
+                    .as_ref()
+                    .map(|runtime| runtime.kind.as_str())
+                    .unwrap_or("prompt"),
             ));
         }
     }
@@ -381,6 +386,44 @@ fn render_plugin_show(
         ),
     ];
 
+    if let Some(runtime) = plugin.runtime.as_ref() {
+        lines.push(format!("- runtime_kind: {}", runtime.kind.as_str()));
+        lines.push(format!(
+            "- runtime_artifact: {}",
+            runtime.artifact.as_deref().unwrap_or("none")
+        ));
+        lines.push(format!(
+            "- runtime_entry: {}",
+            runtime.entry.as_deref().unwrap_or("none")
+        ));
+        lines.push(format!(
+            "- runtime_timeout_ms: {}",
+            runtime
+                .timeout_ms
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "none".into())
+        ));
+        lines.push(format!(
+            "- runtime_output_cap_bytes: {}",
+            runtime
+                .output_cap_bytes
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "none".into())
+        ));
+        let capability_lines = render_runtime_capabilities(runtime);
+        lines.push(format!("- runtime_capabilities: {}", capability_lines[0]));
+        for line in capability_lines.into_iter().skip(1) {
+            lines.push(line);
+        }
+    } else {
+        lines.push("- runtime_kind: prompt".to_string());
+        lines.push("- runtime_artifact: none".to_string());
+        lines.push("- runtime_entry: none".to_string());
+        lines.push("- runtime_timeout_ms: none".to_string());
+        lines.push("- runtime_output_cap_bytes: none".to_string());
+        lines.push("- runtime_capabilities: none".to_string());
+    }
+
     if let Some(metadata) = plugin.diagnostics_metadata.as_ref() {
         lines.push("- diagnostics_metadata:".to_string());
         if let Some(homepage) = metadata.homepage.as_deref() {
@@ -414,6 +457,55 @@ fn render_plugin_show(
     }
 
     lines.join("\n")
+}
+
+fn render_runtime_capabilities(runtime: &crate::plugins::types::PluginRuntimeSpec) -> Vec<String> {
+    let Some(capabilities) = runtime.capabilities.as_ref() else {
+        return vec!["none".to_string()];
+    };
+
+    let mut parts = Vec::new();
+    if let Some(filesystem) = capabilities.filesystem.as_ref() {
+        parts.push(format!(
+            "filesystem(read_roots=[{}], write_roots=[{}])",
+            if filesystem.read_roots.is_empty() {
+                String::new()
+            } else {
+                filesystem.read_roots.join(",")
+            },
+            if filesystem.write_roots.is_empty() {
+                String::new()
+            } else {
+                filesystem.write_roots.join(",")
+            }
+        ));
+    }
+    if let Some(network) = capabilities.network.as_ref() {
+        parts.push(format!(
+            "network(allow_hosts=[{}])",
+            if network.allow_hosts.is_empty() {
+                String::new()
+            } else {
+                network.allow_hosts.join(",")
+            }
+        ));
+    }
+    if let Some(env) = capabilities.env.as_ref() {
+        parts.push(format!(
+            "env(allow_names=[{}])",
+            if env.allow_names.is_empty() {
+                String::new()
+            } else {
+                env.allow_names.join(",")
+            }
+        ));
+    }
+
+    if parts.is_empty() {
+        vec!["none".to_string()]
+    } else {
+        vec![parts.join("; ")]
+    }
 }
 
 fn render_diagnostics(

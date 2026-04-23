@@ -29,8 +29,10 @@ use rust_agent::plugins::runtime_state::{
 use rust_agent::plugins::types::{
     PluginActivationSummary, PluginApplyStatus, PluginCapability, PluginCommandDefinition,
     PluginConfigSource, PluginDefinition, PluginDiagnostic, PluginDiagnosticSeverity,
-    PluginDiagnosticsMetadata, PluginGovernanceSource, PluginGovernanceState, PluginHookDefinition,
-    PluginLifecycleState, PluginLoadResult, PluginToolDefinition,
+    PluginDiagnosticsMetadata, PluginEnvCapability, PluginFilesystemCapability,
+    PluginGovernanceSource, PluginGovernanceState, PluginHookDefinition, PluginLifecycleState,
+    PluginLoadResult, PluginNetworkCapability, PluginRuntimeApplyOutcome,
+    PluginRuntimeCapabilities, PluginRuntimeKind, PluginRuntimeSpec, PluginToolDefinition,
 };
 use rust_agent::skills::registry::SkillRegistry;
 use rust_agent::skills::types::{
@@ -196,6 +198,28 @@ fn metadata_rich_plugin_command(name: &str) -> PluginCommandDefinition {
     }
 }
 
+fn sample_runtime_spec() -> PluginRuntimeSpec {
+    PluginRuntimeSpec {
+        kind: PluginRuntimeKind::Wasm,
+        artifact: Some("dist/plugin.wasm".into()),
+        entry: Some("run".into()),
+        timeout_ms: Some(30_000),
+        output_cap_bytes: Some(65_536),
+        capabilities: Some(PluginRuntimeCapabilities {
+            filesystem: Some(PluginFilesystemCapability {
+                read_roots: vec!["docs".into()],
+                write_roots: vec![],
+            }),
+            network: Some(PluginNetworkCapability {
+                allow_hosts: vec!["api.example.com".into()],
+            }),
+            env: Some(PluginEnvCapability {
+                allow_names: vec!["EXAMPLE_TOKEN".into()],
+            }),
+        }),
+    }
+}
+
 #[tokio::test]
 async fn help_command_renders_source_counts_and_execution_kinds() {
     let registry = Arc::new(
@@ -335,6 +359,7 @@ async fn status_command_reports_plugin_discovery_summary() {
                     PluginCapability::Hooks,
                     PluginCapability::Tools,
                 ],
+                runtime: None,
                 diagnostics_metadata: Some(PluginDiagnosticsMetadata {
                     homepage: None,
                     docs: Some("https://example.com/docs".into()),
@@ -378,6 +403,7 @@ async fn status_command_reports_plugin_discovery_summary() {
                 PluginCapability::Hooks,
                 PluginCapability::Tools,
             ],
+            runtime: None,
             diagnostics_metadata: Some(PluginDiagnosticsMetadata {
                 homepage: None,
                 docs: Some("https://example.com/docs".into()),
@@ -500,6 +526,7 @@ async fn plugins_command_lists_show_details_and_persists_governance_state() {
             PluginCapability::Tools,
             PluginCapability::Hooks,
         ],
+        runtime: None,
         diagnostics_metadata: Some(PluginDiagnosticsMetadata {
             homepage: Some("https://example.com/home".into()),
             docs: Some("https://example.com/docs".into()),
@@ -560,6 +587,7 @@ async fn plugins_command_lists_show_details_and_persists_governance_state() {
     assert!(list_text.contains("Plugins:"));
     assert!(list_text.contains("- inventory: discovered=1, enabled=1, disabled=0, error=0"));
     assert!(list_text.contains("demo-plugin v0.1.0 — state=enabled, applied=applied, enabled=yes"));
+    assert!(list_text.contains("runtime=prompt"));
 
     let show_result = PluginsCommand
         .execute(
@@ -573,6 +601,9 @@ async fn plugins_command_lists_show_details_and_persists_governance_state() {
     };
     assert!(show_text.contains("Plugin: demo-plugin"));
     assert!(show_text.contains("- manifest:"));
+    assert!(show_text.contains("- runtime_kind: prompt"));
+    assert!(show_text.contains("- runtime_artifact: none"));
+    assert!(show_text.contains("- runtime_capabilities: none"));
     assert!(show_text.contains("- diagnostics_metadata:"));
     assert!(show_text.contains("https://example.com/docs"));
     assert!(show_text.contains("- runtime_apply:"));
@@ -797,6 +828,462 @@ async fn runtime_plugin_rebuild_retains_previous_snapshot_on_apply_failure() {
     fs::remove_dir_all(root).expect("retained snapshot temp dir should be cleaned up");
 }
 
+#[test]
+fn plugin_loader_accepts_legacy_prompt_plugin_without_runtime() {
+    let root = unique_temp_path("rust-agent-plugin-runtime-legacy");
+    let plugin_dir = root.join(".claude").join("plugins").join("legacy");
+    fs::create_dir_all(&plugin_dir).expect("plugin dir should exist");
+    fs::write(
+        plugin_dir.join("plugin.json"),
+        r#"{
+  "name": "legacy-plugin",
+  "version": "0.1.0",
+  "description": "Legacy prompt plugin",
+  "capabilities": ["commands"],
+  "commands": [
+    {
+      "name": "legacy-cmd",
+      "description": "Legacy command",
+      "prompt": "Run the legacy prompt"
+    }
+  ]
+}"#,
+    )
+    .expect("legacy plugin manifest should be written");
+
+    let result = load_plugins(&root);
+    assert_eq!(result.plugins.len(), 1);
+    assert_eq!(result.plugins[0].name, "legacy-plugin");
+    assert_eq!(result.plugins[0].runtime, None);
+    assert_eq!(
+        result.plugins[0].lifecycle_state,
+        PluginLifecycleState::Enabled
+    );
+    assert!(result.plugins[0].activation.commands == 1);
+    assert!(
+        !result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code.starts_with("plugin-runtime-"))
+    );
+
+    fs::remove_dir_all(root).expect("legacy runtime temp dir should be cleaned up");
+}
+
+#[tokio::test]
+async fn plugins_command_renders_wasm_runtime_metadata() {
+    let root = unique_temp_path("rust-agent-plugin-runtime-show");
+    let plugin_manifest_path = root
+        .join(".claude")
+        .join("plugins")
+        .join("demo")
+        .join("plugin.json");
+    fs::create_dir_all(
+        plugin_manifest_path
+            .parent()
+            .expect("plugin parent should exist"),
+    )
+    .expect("plugin dir should exist");
+    fs::write(&plugin_manifest_path, "{}").expect("plugin manifest placeholder should be written");
+
+    let plugin = PluginDefinition {
+        name: "demo-plugin".into(),
+        version: Some("0.1.0".into()),
+        description: "demo plugin".into(),
+        manifest_path: plugin_manifest_path,
+        capabilities: vec![PluginCapability::Commands, PluginCapability::Tools],
+        runtime: Some(sample_runtime_spec()),
+        diagnostics_metadata: None,
+        commands: vec![sample_plugin_command("plugin-cmd")],
+        tools: vec![sample_plugin_tool("demo_tool")],
+        hooks: vec![],
+        governance: PluginGovernanceState::default(),
+        lifecycle_state: PluginLifecycleState::Enabled,
+        apply_status: PluginApplyStatus::Applied,
+        activation: PluginActivationSummary {
+            commands: 1,
+            tools: 1,
+            hooks: 0,
+        },
+    };
+    let plugin_load_result = Arc::new(PluginLoadResult {
+        root: root.join(".claude").join("plugins"),
+        source: PluginConfigSource::Directory,
+        plugins: vec![plugin],
+        diagnostics: vec![],
+        orphaned_governance_entries: vec![],
+    });
+    let registry = Arc::new(CommandRegistry::new().register(Arc::new(PluginsCommand)));
+    let mut app_state = test_app_state(Some(registry), None, Some(plugin_load_result), None);
+    app_state.session = Some(SessionSnapshot {
+        session_id: SessionId("plugin-runtime-session".into()),
+        surface: InteractionSurface::Cli,
+        session_mode: SessionMode::Interactive,
+        cwd: root.display().to_string(),
+        last_turn_at: None,
+        prompt_seed: None,
+    });
+    let runtime_plugin_state = RuntimePluginState::new(build_runtime_plugin_snapshot(&app_state));
+    app_state.permission_context = app_state
+        .permission_context
+        .clone()
+        .with_runtime_plugin_state(runtime_plugin_state);
+
+    let list_result = PluginsCommand
+        .execute(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/plugins"),
+            &app_state,
+        )
+        .await
+        .expect("plugins list should render");
+    let CommandResult::Message(list_text) = list_result else {
+        panic!("expected plugins list message");
+    };
+    assert!(list_text.contains("runtime=wasm"));
+
+    let show_result = PluginsCommand
+        .execute(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/plugins show demo-plugin"),
+            &app_state,
+        )
+        .await
+        .expect("plugins show should render");
+    let CommandResult::Message(show_text) = show_result else {
+        panic!("expected plugins show message");
+    };
+    assert!(show_text.contains("- runtime_kind: wasm"));
+    assert!(show_text.contains("- runtime_artifact: dist/plugin.wasm"));
+    assert!(show_text.contains("- runtime_entry: run"));
+    assert!(show_text.contains("- runtime_timeout_ms: 30000"));
+    assert!(show_text.contains("- runtime_output_cap_bytes: 65536"));
+    assert!(show_text.contains("filesystem(read_roots=[docs], write_roots=[]); network(allow_hosts=[api.example.com]); env(allow_names=[EXAMPLE_TOKEN])"));
+
+    fs::remove_dir_all(root).expect("runtime metadata temp dir should be cleaned up");
+}
+
+#[test]
+fn plugin_loader_parses_deno_runtime_without_executing_it() {
+    let root = unique_temp_path("rust-agent-plugin-runtime-deno");
+    let plugin_dir = root.join(".claude").join("plugins").join("deno-demo");
+    fs::create_dir_all(plugin_dir.join("dist")).expect("plugin dir should exist");
+    fs::write(
+        plugin_dir.join("dist").join("plugin.js"),
+        "export default {};",
+    )
+    .expect("artifact should be written");
+    fs::write(
+        plugin_dir.join("plugin.json"),
+        r#"{
+  "name": "deno-plugin",
+  "version": "0.1.0",
+  "description": "Deno plugin",
+  "capabilities": ["commands"],
+  "runtime": {
+    "kind": "deno",
+    "artifact": "dist/plugin.js",
+    "entry": "main",
+    "timeout_ms": 1000,
+    "output_cap_bytes": 4096,
+    "capabilities": {
+      "network": { "allow_hosts": ["example.com"] }
+    }
+  },
+  "commands": [
+    {
+      "name": "deno-cmd",
+      "description": "Deno command",
+      "prompt": "Still prompt-backed in T18.2.B"
+    }
+  ]
+}"#,
+    )
+    .expect("deno plugin manifest should be written");
+
+    let result = load_plugins(&root);
+    assert_eq!(result.plugins.len(), 1);
+    let plugin = &result.plugins[0];
+    assert_eq!(
+        plugin.runtime.as_ref().map(|runtime| runtime.kind),
+        Some(PluginRuntimeKind::Deno)
+    );
+    assert_eq!(plugin.lifecycle_state, PluginLifecycleState::Enabled);
+    assert_eq!(plugin.apply_status, PluginApplyStatus::Applied);
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.code != "plugin-runtime-artifact-missing")
+    );
+
+    fs::remove_dir_all(root).expect("deno runtime temp dir should be cleaned up");
+}
+
+#[test]
+fn plugin_loader_rejects_runtime_artifact_traversal() {
+    let root = unique_temp_path("rust-agent-plugin-runtime-traversal");
+    let plugin_dir = root.join(".claude").join("plugins").join("bad");
+    fs::create_dir_all(&plugin_dir).expect("plugin dir should exist");
+    fs::write(
+        plugin_dir.join("plugin.json"),
+        r#"{
+  "name": "bad-plugin",
+  "version": "0.1.0",
+  "description": "Bad plugin",
+  "capabilities": ["commands"],
+  "runtime": {
+    "kind": "wasm",
+    "artifact": "../escape.wasm"
+  },
+  "commands": [
+    {
+      "name": "bad-cmd",
+      "description": "Bad command",
+      "prompt": "prompt"
+    }
+  ]
+}"#,
+    )
+    .expect("bad plugin manifest should be written");
+
+    let result = load_plugins(&root);
+    assert_eq!(result.plugins.len(), 1);
+    assert_eq!(
+        result.plugins[0].lifecycle_state,
+        PluginLifecycleState::Error
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "plugin-runtime-artifact-path-traversal")
+    );
+
+    fs::remove_dir_all(root).expect("runtime traversal temp dir should be cleaned up");
+}
+
+#[test]
+fn plugin_loader_marks_missing_runtime_artifact_as_error() {
+    let root = unique_temp_path("rust-agent-plugin-runtime-missing-artifact");
+    let plugin_dir = root.join(".claude").join("plugins").join("bad");
+    fs::create_dir_all(&plugin_dir).expect("plugin dir should exist");
+    fs::write(
+        plugin_dir.join("plugin.json"),
+        r#"{
+  "name": "bad-plugin",
+  "version": "0.1.0",
+  "description": "Bad plugin",
+  "capabilities": ["commands"],
+  "runtime": {
+    "kind": "wasm",
+    "artifact": "dist/missing.wasm"
+  },
+  "commands": [
+    {
+      "name": "bad-cmd",
+      "description": "Bad command",
+      "prompt": "prompt"
+    }
+  ]
+}"#,
+    )
+    .expect("bad plugin manifest should be written");
+
+    let result = load_plugins(&root);
+    assert_eq!(result.plugins.len(), 1);
+    assert_eq!(
+        result.plugins[0].lifecycle_state,
+        PluginLifecycleState::Error
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "plugin-runtime-artifact-missing")
+    );
+
+    fs::remove_dir_all(root).expect("runtime missing artifact temp dir should be cleaned up");
+}
+
+#[test]
+fn plugin_loader_rejects_unknown_runtime_kind() {
+    let root = unique_temp_path("rust-agent-plugin-runtime-kind");
+    let plugin_dir = root.join(".claude").join("plugins").join("bad");
+    fs::create_dir_all(&plugin_dir).expect("plugin dir should exist");
+    fs::write(
+        plugin_dir.join("plugin.json"),
+        r#"{
+  "name": "bad-plugin",
+  "version": "0.1.0",
+  "description": "Bad plugin",
+  "capabilities": ["commands"],
+  "runtime": {
+    "kind": "node"
+  },
+  "commands": [
+    {
+      "name": "bad-cmd",
+      "description": "Bad command",
+      "prompt": "prompt"
+    }
+  ]
+}"#,
+    )
+    .expect("bad plugin manifest should be written");
+
+    let result = load_plugins(&root);
+    assert!(result.plugins.is_empty());
+    assert!(result.diagnostics.iter().any(|diagnostic| diagnostic.code
+        == "plugin-manifest-load-failed"
+        && diagnostic.message.contains("unknown variant `node`")));
+
+    fs::remove_dir_all(root).expect("runtime kind temp dir should be cleaned up");
+}
+
+#[test]
+fn plugin_loader_rejects_unknown_runtime_capability() {
+    let root = unique_temp_path("rust-agent-plugin-runtime-capability");
+    let plugin_dir = root.join(".claude").join("plugins").join("bad");
+    fs::create_dir_all(&plugin_dir).expect("plugin dir should exist");
+    fs::write(
+        plugin_dir.join("plugin.json"),
+        r#"{
+  "name": "bad-plugin",
+  "version": "0.1.0",
+  "description": "Bad plugin",
+  "capabilities": ["commands"],
+  "runtime": {
+    "kind": "prompt",
+    "capabilities": {
+      "process": { "allow": ["sh"] }
+    }
+  },
+  "commands": [
+    {
+      "name": "bad-cmd",
+      "description": "Bad command",
+      "prompt": "prompt"
+    }
+  ]
+}"#,
+    )
+    .expect("bad plugin manifest should be written");
+
+    let result = load_plugins(&root);
+    assert!(result.plugins.is_empty());
+    assert!(result.diagnostics.iter().any(|diagnostic| diagnostic.code
+        == "plugin-manifest-load-failed"
+        && diagnostic.message.contains("unknown field `process`")));
+
+    fs::remove_dir_all(root).expect("runtime capability temp dir should be cleaned up");
+}
+
+#[tokio::test]
+async fn runtime_plugin_rebuild_retains_previous_snapshot_on_bad_runtime_manifest_reload() {
+    let root = unique_temp_path("rust-agent-plugin-runtime-retained-snapshot");
+    let plugin_dir = root.join(".claude").join("plugins").join("demo");
+    let manifest_path = plugin_dir.join("plugin.json");
+    let artifact_path = plugin_dir.join("dist").join("plugin.wasm");
+    fs::create_dir_all(
+        artifact_path
+            .parent()
+            .expect("artifact parent should exist"),
+    )
+    .expect("plugin dir should exist");
+    fs::write(&artifact_path, "wasm-binary-placeholder").expect("artifact should be written");
+    fs::write(
+        &manifest_path,
+        r#"{
+  "name": "demo-plugin",
+  "version": "0.1.0",
+  "description": "Demo plugin",
+  "capabilities": ["commands"],
+  "runtime": {
+    "kind": "wasm",
+    "artifact": "dist/plugin.wasm"
+  },
+  "commands": [
+    {
+      "name": "plugin-cmd",
+      "description": "Plugin command",
+      "prompt": "Do plugin command work"
+    }
+  ]
+}"#,
+    )
+    .expect("good plugin manifest should be written");
+
+    let mut app_state = test_app_state(None, Some(Arc::new(TaskManager::default())), None, None);
+    app_state.session = Some(SessionSnapshot {
+        session_id: SessionId("plugin-runtime-retained-session".into()),
+        surface: InteractionSurface::Cli,
+        session_mode: SessionMode::Interactive,
+        cwd: root.display().to_string(),
+        last_turn_at: None,
+        prompt_seed: None,
+    });
+    let runtime_plugin_state = RuntimePluginState::new(build_runtime_plugin_snapshot(&app_state));
+    let initial_snapshot = runtime_plugin_state.snapshot().await;
+    hydrate_app_state_from_snapshot(&mut app_state, &initial_snapshot);
+    app_state.permission_context = app_state
+        .permission_context
+        .clone()
+        .with_runtime_plugin_state(runtime_plugin_state.clone());
+
+    fs::write(
+        &manifest_path,
+        r#"{
+  "name": "demo-plugin",
+  "version": "0.2.0",
+  "description": "Broken demo plugin",
+  "capabilities": ["commands"],
+  "runtime": {
+    "kind": "wasm",
+    "artifact": "../escape.wasm"
+  },
+  "commands": [
+    {
+      "name": "plugin-cmd",
+      "description": "Plugin command",
+      "prompt": "Do plugin command work"
+    }
+  ]
+}"#,
+    )
+    .expect("broken runtime plugin manifest should be written");
+
+    let report = rebuild_runtime_plugin_state(&app_state)
+        .await
+        .expect("plugin rebuild should produce retained report");
+    assert_eq!(
+        report.outcome,
+        PluginRuntimeApplyOutcome::RetainedPreviousSnapshot
+    );
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "plugin-runtime-artifact-path-traversal")
+    );
+
+    let retained_snapshot = runtime_plugin_state.snapshot().await;
+    assert_eq!(
+        retained_snapshot.plugin_load_result.plugins[0]
+            .version
+            .as_deref(),
+        Some("0.1.0")
+    );
+    assert_eq!(
+        retained_snapshot.plugin_load_result.plugins[0]
+            .runtime
+            .as_ref()
+            .and_then(|runtime| runtime.artifact.as_deref()),
+        Some("dist/plugin.wasm")
+    );
+    assert_eq!(runtime_plugin_state.generation().await, 0);
+
+    fs::remove_dir_all(root).expect("runtime retained snapshot temp dir should be cleaned up");
+}
+
 #[tokio::test]
 async fn tasks_command_groups_orchestration_tasks_and_hints() {
     let manager = Arc::new(TaskManager::default());
@@ -998,6 +1485,7 @@ fn plugin_runtime_augments_hook_and_tool_registries() {
                 PluginCapability::Hooks,
                 PluginCapability::Tools,
             ],
+            runtime: None,
             diagnostics_metadata: None,
             commands: vec![sample_plugin_command("plugin-cmd")],
             tools: vec![sample_plugin_tool("demo_tool")],
@@ -1061,6 +1549,7 @@ fn plugin_prompt_tool_maps_read_only_into_search_or_read_metadata() {
             description: "demo".into(),
             manifest_path: PathBuf::from("/tmp/project/.claude/plugins/demo/plugin.json"),
             capabilities: vec![PluginCapability::Tools],
+            runtime: None,
             diagnostics_metadata: Some(PluginDiagnosticsMetadata {
                 homepage: None,
                 docs: Some("https://example.com/docs".into()),
