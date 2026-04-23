@@ -270,7 +270,7 @@ impl ModelProviderClient {
                 client,
                 observability,
             } => {
-                if input.content.trim().is_empty() {
+                if input.text().trim().is_empty() {
                     return Vec::new();
                 }
                 match self
@@ -536,7 +536,7 @@ fn normalized_request_message(input: &Message) -> Value {
         "content": [
             {
                 "type": "text",
-                "text": input.content,
+                "text": input.text(),
             }
         ],
     })
@@ -699,7 +699,7 @@ impl ProviderAdapter for OpenAICompatibleAdapter {
             "model": normalized_request_model(config),
             "messages": [{
                 "role": "user",
-                "content": input.content,
+                "content": input.text(),
             }],
             "stream": normalized_request_stream_flag(&profile)?,
             "max_tokens": options.max_tokens,

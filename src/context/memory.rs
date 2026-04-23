@@ -23,7 +23,7 @@ pub fn describe_memory_context(app_state: &AppState) -> String {
                 format!(
                     "{}: {}",
                     format_role(&entry.message.role),
-                    truncate(&entry.message.content, 60)
+                    truncate(&entry.message.text(), 60)
                 )
             })
             .collect::<Vec<_>>();

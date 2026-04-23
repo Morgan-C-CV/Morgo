@@ -22,6 +22,8 @@ mod hook_tests;
 mod mcp_protocol_tests;
 #[path = "unit/mcp_runtime_surface_tests.rs"]
 mod mcp_runtime_surface_tests;
+#[path = "unit/message_content_block_tests.rs"]
+mod message_content_block_tests;
 #[path = "unit/notification_tests.rs"]
 mod notification_tests;
 #[path = "unit/output_store_tests.rs"]

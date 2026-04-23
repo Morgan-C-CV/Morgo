@@ -238,7 +238,7 @@ fn launch_agent_task(
             tasks_for_run.append_output(&launched_task_id, "subagent produced no output");
         } else {
             for message in &result.messages {
-                tasks_for_run.append_output(&launched_task_id, format!("{}\n", message.content));
+                tasks_for_run.append_output(&launched_task_id, format!("{}\n", message.text()));
             }
         }
 

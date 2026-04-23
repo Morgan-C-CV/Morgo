@@ -357,7 +357,7 @@ fn service_failure_code_string(service_failure: Option<&ServiceFailureNotice>) -
 fn collect_message_content(messages: Vec<Message>) -> String {
     messages
         .into_iter()
-        .map(|message| message.content)
+        .map(|message| message.text())
         .collect::<Vec<_>>()
         .join("\n")
 }
