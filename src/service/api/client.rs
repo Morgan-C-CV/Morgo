@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
+use base64::Engine as _;
 use futures_util::StreamExt;
 use reqwest::StatusCode;
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, RETRY_AFTER};
@@ -531,15 +532,26 @@ fn normalized_request_model(config: &ModelProviderConfig) -> &str {
 }
 
 fn normalized_request_message(input: &Message) -> Value {
-    json!({
-        "role": "user",
-        "content": [
-            {
-                "type": "text",
-                "text": input.text(),
+    use crate::core::message::ContentBlock;
+    let content_blocks: Vec<Value> = input
+        .blocks
+        .iter()
+        .map(|block| match block {
+            ContentBlock::Text { text } => json!({"type": "text", "text": text}),
+            ContentBlock::Image { media_type, data } => {
+                let encoded = base64::engine::general_purpose::STANDARD.encode(data);
+                json!({
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": media_type,
+                        "data": encoded,
+                    }
+                })
             }
-        ],
-    })
+        })
+        .collect();
+    json!({"role": "user", "content": content_blocks})
 }
 
 struct AnthropicAdapter;
@@ -693,14 +705,33 @@ impl ProviderAdapter for OpenAICompatibleAdapter {
         input: &Message,
         request_options: RequestOptions,
     ) -> Result<Value, ApiError> {
+        use crate::core::message::ContentBlock;
         let profile = profile_for_provider(config)?;
         let options = normalize_request_options(&profile, &request_options)?;
+        let message_content: Value = if input.is_text_only() {
+            json!(input.text())
+        } else {
+            let blocks: Vec<Value> = input
+                .blocks
+                .iter()
+                .map(|block| match block {
+                    ContentBlock::Text { text } => json!({"type": "text", "text": text}),
+                    ContentBlock::Image { media_type, data } => {
+                        let encoded = base64::engine::general_purpose::STANDARD.encode(data);
+                        json!({
+                            "type": "image_url",
+                            "image_url": {
+                                "url": format!("data:{media_type};base64,{encoded}"),
+                            }
+                        })
+                    }
+                })
+                .collect();
+            json!(blocks)
+        };
         let mut payload = json!({
             "model": normalized_request_model(config),
-            "messages": [{
-                "role": "user",
-                "content": input.text(),
-            }],
+            "messages": [{"role": "user", "content": message_content}],
             "stream": normalized_request_stream_flag(&profile)?,
             "max_tokens": options.max_tokens,
         });
@@ -1925,6 +1956,117 @@ mod tests {
     use reqwest::StatusCode;
     use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderValue, RETRY_AFTER};
     use serde_json::Value;
+
+    fn test_provider(
+        protocol: ProviderProtocol,
+        profile: ProviderCompatibilityProfileKind,
+    ) -> ModelProviderConfig {
+        ModelProviderConfig {
+            provider_id: "test".into(),
+            protocol,
+            compatibility_profile: profile,
+            base_url: "http://localhost".into(),
+            chat_completions_path: "/v1/messages".into(),
+            auth_strategy: ProviderAuthStrategy::NoAuth,
+            api_key: None,
+            api_key_env: None,
+            model_id: "test-model".into(),
+            timeout: ProviderTimeout {
+                request_timeout_ms: 5000,
+                stream_timeout_ms: 10000,
+            },
+            retry_policy: crate::service::api::retry::RetryPolicy {
+                max_attempts: 1,
+                initial_backoff_ms: 0,
+                max_backoff_ms: 0,
+            },
+            pricing: crate::service::api::client::ModelPricing::default(),
+        }
+    }
+
+    #[test]
+    fn anthropic_adapter_text_only_message_serializes_as_text_block() {
+        use crate::core::message::Message;
+        let config = test_provider(
+            ProviderProtocol::Anthropic,
+            ProviderCompatibilityProfileKind::Anthropic,
+        );
+        let msg = Message::user("hello");
+        let payload = build_request_payload_for_provider(&config, &msg).unwrap();
+        let content = &payload["messages"][0]["content"];
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[0]["text"], "hello");
+    }
+
+    #[test]
+    fn anthropic_adapter_image_block_serializes_as_base64_source() {
+        use crate::core::message::{ContentBlock, Message};
+        let config = test_provider(
+            ProviderProtocol::Anthropic,
+            ProviderCompatibilityProfileKind::Anthropic,
+        );
+        let msg = Message {
+            role: crate::core::message::Role::User,
+            content: String::new(),
+            blocks: vec![
+                ContentBlock::Text {
+                    text: "describe this".into(),
+                },
+                ContentBlock::Image {
+                    media_type: "image/png".into(),
+                    data: vec![1, 2, 3],
+                },
+            ],
+        };
+        let payload = build_request_payload_for_provider(&config, &msg).unwrap();
+        let content = &payload["messages"][0]["content"];
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[1]["type"], "image");
+        assert_eq!(content[1]["source"]["type"], "base64");
+        assert_eq!(content[1]["source"]["media_type"], "image/png");
+        assert!(content[1]["source"]["data"].as_str().unwrap().len() > 0);
+    }
+
+    #[test]
+    fn openai_adapter_text_only_message_serializes_as_string_content() {
+        use crate::core::message::Message;
+        let config = test_provider(
+            ProviderProtocol::OpenAICompatible,
+            ProviderCompatibilityProfileKind::OpenAICompatible,
+        );
+        let msg = Message::user("hello");
+        let payload = build_request_payload_for_provider(&config, &msg).unwrap();
+        assert_eq!(payload["messages"][0]["content"], "hello");
+    }
+
+    #[test]
+    fn openai_adapter_image_block_serializes_as_array_with_image_url() {
+        use crate::core::message::{ContentBlock, Message};
+        let config = test_provider(
+            ProviderProtocol::OpenAICompatible,
+            ProviderCompatibilityProfileKind::OpenAICompatible,
+        );
+        let msg = Message {
+            role: crate::core::message::Role::User,
+            content: String::new(),
+            blocks: vec![
+                ContentBlock::Text {
+                    text: "describe this".into(),
+                },
+                ContentBlock::Image {
+                    media_type: "image/png".into(),
+                    data: vec![1, 2, 3],
+                },
+            ],
+        };
+        let payload = build_request_payload_for_provider(&config, &msg).unwrap();
+        let content = &payload["messages"][0]["content"];
+        assert!(content.is_array());
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[1]["type"], "image_url");
+        let url = content[1]["image_url"]["url"].as_str().unwrap();
+        assert!(url.starts_with("data:image/png;base64,"));
+    }
 
     #[test]
     fn stop_reason_mapping_matches_expected_values() {

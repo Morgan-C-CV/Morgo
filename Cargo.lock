@@ -1300,6 +1300,7 @@ dependencies = [
  "anyhow",
  "assert_matches",
  "async-trait",
+ "base64",
  "clap",
  "fs4",
  "futures-util",

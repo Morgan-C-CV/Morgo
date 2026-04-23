@@ -15,6 +15,7 @@ pub enum Role {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlock {
     Text { text: String },
+    Image { media_type: String, data: Vec<u8> },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,12 +46,13 @@ impl Message {
         }
     }
 
-    /// Returns all Text block content concatenated.
+    /// Returns all Text block content concatenated. Image blocks are skipped.
     pub fn text(&self) -> String {
         self.blocks
             .iter()
             .filter_map(|b| match b {
                 ContentBlock::Text { text } => Some(text.as_str()),
+                ContentBlock::Image { .. } => None,
             })
             .collect::<Vec<_>>()
             .join("")
@@ -127,6 +129,7 @@ impl<'de> Deserialize<'de> for Message {
                     .iter()
                     .filter_map(|b| match b {
                         ContentBlock::Text { text } => Some(text.as_str()),
+                        ContentBlock::Image { .. } => None,
                     })
                     .collect::<Vec<_>>()
                     .join("");
