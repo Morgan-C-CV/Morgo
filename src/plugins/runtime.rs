@@ -22,7 +22,7 @@ use crate::tool::registry::ToolRegistry;
 const DEFAULT_RUNTIME_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_RUNTIME_OUTPUT_CAP_BYTES: u64 = 65_536;
 const DEFAULT_RUNTIME_ENTRY: &str = "run_tool";
-const INPUT_BUFFER_OFFSET: usize = 0;
+const ALLOC_INPUT_EXPORT: &str = "alloc_input";
 
 pub fn augment_hook_registry_with_plugins(
     mut registry: HookRegistry,
@@ -99,6 +99,7 @@ struct PluginRuntimeInvocationMetadata {
     tool_name: String,
     runtime_kind: PluginRuntimeKind,
     artifact_summary: String,
+    entry: String,
     timeout_ms: u64,
     output_cap_bytes: u64,
     capability_summary: String,
@@ -171,6 +172,7 @@ impl PluginRuntimeToolMetadata {
             tool_name: self.tool_name.clone(),
             runtime_kind: self.runtime_kind,
             artifact_summary: self.artifact_summary.clone(),
+            entry: self.entry.clone(),
             timeout_ms: self.timeout_ms,
             output_cap_bytes: self.output_cap_bytes,
             capability_summary: self.capability_summary.clone(),
@@ -278,7 +280,7 @@ fn render_runtime_message(
         metadata.tool_name,
         metadata.runtime_kind.as_str(),
         metadata.artifact_summary,
-        DEFAULT_RUNTIME_ENTRY,
+        metadata.entry,
         metadata.timeout_ms,
         metadata.output_cap_bytes,
         metadata.capability_summary,
@@ -387,6 +389,13 @@ impl Tool for PluginRuntimeTool {
                     Some(&error.to_string()),
                 ))
             }
+            Ok(Err(error)) if is_missing_alloc_input_error(&error) => {
+                ToolResult::Denied(render_runtime_message(
+                    "plugin runtime alloc_input export is required",
+                    &invocation,
+                    Some(&error.to_string()),
+                ))
+            }
             Ok(Err(error)) if is_missing_import_error(&error) => {
                 ToolResult::Denied(render_runtime_message(
                     "plugin runtime host imports are not available",
@@ -413,11 +422,7 @@ impl Tool for PluginRuntimeTool {
         finalize_invocation_metadata(&mut invocation, started_at, &tool_result);
         Ok(match tool_result {
             ToolResult::Text(output) => ToolResult::Text(output),
-            ToolResult::Denied(_) => ToolResult::Denied(render_runtime_message(
-                "plugin runtime host imports are not available",
-                &invocation,
-                None,
-            )),
+            ToolResult::Denied(message) => ToolResult::Denied(message),
             ToolResult::Interrupted(_) => ToolResult::Interrupted(render_runtime_message(
                 "plugin runtime execution interrupted",
                 &invocation,
@@ -459,16 +464,26 @@ fn execute_wasm_tool_call(
     let memory = instance
         .get_memory(&mut store, "memory")
         .ok_or_else(|| anyhow::anyhow!("wasm module must export memory"))?;
+    let alloc_input: TypedFunc<i32, i32> = instance
+        .get_typed_func(&mut store, ALLOC_INPUT_EXPORT)
+        .with_context(|| format!("failed to resolve wasm export {ALLOC_INPUT_EXPORT}"))?;
     let run_tool: TypedFunc<(i32, i32), i64> = instance
         .get_typed_func(&mut store, entry)
         .with_context(|| format!("failed to resolve wasm export {entry}"))?;
 
+    let input_ptr = alloc_input
+        .call(&mut store, input.len() as i32)
+        .context("wasm input allocation failed")?;
+    if input_ptr < 0 {
+        anyhow::bail!("wasm alloc_input returned negative pointer: {input_ptr}");
+    }
+
     memory
-        .write(&mut store, INPUT_BUFFER_OFFSET, input)
+        .write(&mut store, input_ptr as usize, input)
         .context("failed to write tool input into wasm memory")?;
 
     let packed = run_tool
-        .call(&mut store, (INPUT_BUFFER_OFFSET as i32, input.len() as i32))
+        .call(&mut store, (input_ptr, input.len() as i32))
         .context("wasm tool execution failed")?;
     let output_ptr = (packed & 0xffff_ffff) as usize;
     let output_len = ((packed >> 32) & 0xffff_ffff) as usize;
@@ -501,6 +516,12 @@ fn is_output_cap_error(error: &anyhow::Error) -> bool {
     error
         .to_string()
         .contains("plugin runtime output exceeded cap")
+}
+
+fn is_missing_alloc_input_error(error: &anyhow::Error) -> bool {
+    error
+        .to_string()
+        .contains("failed to resolve wasm export alloc_input")
 }
 
 fn is_missing_import_error(error: &anyhow::Error) -> bool {

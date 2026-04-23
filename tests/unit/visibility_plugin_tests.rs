@@ -1660,6 +1660,7 @@ async fn wasm_runtime_tool_timeout_maps_to_interrupted() {
     };
     assert!(message.contains("plugin runtime execution interrupted"));
     assert!(message.contains("Runtime: wasm"));
+    assert!(message.contains("Entry: run_tool"));
     assert!(message.contains("Timeout hit: yes"));
     assert!(message.contains("Result: interrupted"));
 
@@ -1721,8 +1722,125 @@ async fn wasm_runtime_tool_output_cap_maps_to_result_too_large() {
     assert!(message.contains("plugin runtime result exceeded output cap"));
     assert!(message.contains("Output cap hit: yes"));
     assert!(message.contains("Result: result_too_large"));
+    assert!(message.contains("Entry: run_tool"));
 
     fs::remove_dir_all(root).expect("runtime output cap temp dir should be cleaned up");
+}
+
+#[tokio::test]
+async fn wasm_runtime_tool_with_static_data_segment_still_executes() {
+    let root = unique_temp_path("rust-agent-runtime-static-data");
+    let plugin_dir = root.join(".claude").join("plugins").join("demo");
+    let manifest_path = plugin_dir.join("plugin.json");
+    fs::create_dir_all(plugin_dir.join("dist")).expect("plugin dir should exist");
+    write_wasm_fixture(
+        &plugin_dir.join("dist").join("plugin.wasm"),
+        "plugin_runtime_static_data.wat",
+    );
+
+    let load_result = PluginLoadResult {
+        root: root.join(".claude").join("plugins"),
+        source: PluginConfigSource::Directory,
+        plugins: vec![PluginDefinition {
+            name: "demo-plugin".into(),
+            version: Some("0.1.0".into()),
+            description: "demo".into(),
+            manifest_path: manifest_path.clone(),
+            capabilities: vec![PluginCapability::Tools],
+            runtime: Some(sample_runtime_spec()),
+            diagnostics_metadata: None,
+            commands: vec![],
+            tools: vec![sample_runtime_tool("runtime-tool", manifest_path.clone())],
+            hooks: vec![],
+            governance: PluginGovernanceState::default(),
+            lifecycle_state: PluginLifecycleState::Enabled,
+            apply_status: PluginApplyStatus::Applied,
+            activation: PluginActivationSummary {
+                commands: 0,
+                tools: 1,
+                hooks: 0,
+            },
+        }],
+        diagnostics: vec![],
+        orphaned_governance_entries: vec![],
+    };
+
+    let (registry, diagnostics) =
+        augment_tool_registry_with_plugins(ToolRegistry::new(), &load_result);
+    assert!(diagnostics.is_empty());
+
+    let result = registry
+        .invoke(
+            &ToolCall::new("plugin.demo-plugin.runtime-tool", "{\"input\":\"ok\"}"),
+            &ToolPermissionContext::new(PermissionMode::Default),
+        )
+        .await
+        .expect("runtime invoke with static data should succeed");
+    let ToolResult::Text(message) = result else {
+        panic!("expected text result");
+    };
+    assert_eq!(message, "static:{\"input\":\"ok\"}");
+
+    fs::remove_dir_all(root).expect("runtime static data temp dir should be cleaned up");
+}
+
+#[tokio::test]
+async fn wasm_runtime_tool_missing_alloc_input_export_returns_clear_error() {
+    let root = unique_temp_path("rust-agent-runtime-missing-alloc");
+    let plugin_dir = root.join(".claude").join("plugins").join("demo");
+    let manifest_path = plugin_dir.join("plugin.json");
+    fs::create_dir_all(plugin_dir.join("dist")).expect("plugin dir should exist");
+    write_wasm_fixture(
+        &plugin_dir.join("dist").join("plugin.wasm"),
+        "plugin_runtime_missing_alloc.wat",
+    );
+
+    let load_result = PluginLoadResult {
+        root: root.join(".claude").join("plugins"),
+        source: PluginConfigSource::Directory,
+        plugins: vec![PluginDefinition {
+            name: "demo-plugin".into(),
+            version: Some("0.1.0".into()),
+            description: "demo".into(),
+            manifest_path: manifest_path.clone(),
+            capabilities: vec![PluginCapability::Tools],
+            runtime: Some(sample_runtime_spec()),
+            diagnostics_metadata: None,
+            commands: vec![],
+            tools: vec![sample_runtime_tool("runtime-tool", manifest_path.clone())],
+            hooks: vec![],
+            governance: PluginGovernanceState::default(),
+            lifecycle_state: PluginLifecycleState::Enabled,
+            apply_status: PluginApplyStatus::Applied,
+            activation: PluginActivationSummary {
+                commands: 0,
+                tools: 1,
+                hooks: 0,
+            },
+        }],
+        diagnostics: vec![],
+        orphaned_governance_entries: vec![],
+    };
+
+    let (registry, diagnostics) =
+        augment_tool_registry_with_plugins(ToolRegistry::new(), &load_result);
+    assert!(diagnostics.is_empty());
+
+    let result = registry
+        .invoke(
+            &ToolCall::new("plugin.demo-plugin.runtime-tool", "{\"input\":\"x\"}"),
+            &ToolPermissionContext::new(PermissionMode::Default),
+        )
+        .await
+        .expect("runtime invoke should map missing alloc_input");
+    let ToolResult::Denied(message) = result else {
+        panic!("expected denied result");
+    };
+    assert!(message.contains("plugin runtime alloc_input export is required"));
+    assert!(message.contains("failed to resolve wasm export alloc_input"));
+    assert!(message.contains("Entry: run_tool"));
+
+    fs::remove_dir_all(root).expect("runtime missing alloc temp dir should be cleaned up");
 }
 
 #[test]
