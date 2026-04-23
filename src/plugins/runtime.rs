@@ -1,7 +1,13 @@
-use std::path::Path;
+use std::future::pending;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
+use anyhow::Context;
 use async_trait::async_trait;
+use tokio::time::sleep;
+use wasmtime::{Config, Engine, Instance, Module, Store, TypedFunc};
 
 use crate::hook::registry::HookRegistry;
 use crate::plugins::loader::validate_runtime_artifact_canonicalized;
@@ -12,6 +18,11 @@ use crate::plugins::types::{
 use crate::state::permission_context::ToolPermissionContext;
 use crate::tool::definition::{Tool, ToolCall, ToolMetadata, ToolResult};
 use crate::tool::registry::ToolRegistry;
+
+const DEFAULT_RUNTIME_TIMEOUT_MS: u64 = 30_000;
+const DEFAULT_RUNTIME_OUTPUT_CAP_BYTES: u64 = 65_536;
+const DEFAULT_RUNTIME_ENTRY: &str = "run_tool";
+const INPUT_BUFFER_OFFSET: usize = 0;
 
 pub fn augment_hook_registry_with_plugins(
     mut registry: HookRegistry,
@@ -37,7 +48,7 @@ pub fn augment_tool_registry_with_plugins(
         let runtime = plugin.runtime.as_ref();
         for tool in plugin.active_tools() {
             let registration = match runtime.map(|runtime| runtime.kind) {
-                Some(PluginRuntimeKind::Wasm) => PluginRuntimeToolPlaceholder::new(
+                Some(PluginRuntimeKind::Wasm) => PluginRuntimeTool::new(
                     tool.clone(),
                     runtime.expect("runtime.kind=wasm implies runtime exists"),
                 )
@@ -75,13 +86,29 @@ struct PluginRuntimeToolMetadata {
     plugin_name: String,
     tool_name: String,
     runtime_kind: PluginRuntimeKind,
+    artifact_path: PathBuf,
     artifact_summary: String,
-    timeout_ms: Option<u64>,
-    output_cap_bytes: Option<u64>,
+    entry: String,
+    timeout_ms: u64,
+    output_cap_bytes: u64,
     capability_summary: String,
 }
 
-struct PluginRuntimeToolPlaceholder {
+struct PluginRuntimeInvocationMetadata {
+    plugin_name: String,
+    tool_name: String,
+    runtime_kind: PluginRuntimeKind,
+    artifact_summary: String,
+    timeout_ms: u64,
+    output_cap_bytes: u64,
+    capability_summary: String,
+    duration_ms: u128,
+    timeout_hit: bool,
+    output_cap_hit: bool,
+    final_result_kind: &'static str,
+}
+
+struct PluginRuntimeTool {
     metadata: ToolMetadata,
     runtime_metadata: PluginRuntimeToolMetadata,
 }
@@ -98,7 +125,7 @@ impl PluginPromptTool {
     }
 }
 
-impl PluginRuntimeToolPlaceholder {
+impl PluginRuntimeTool {
     fn new(definition: PluginToolDefinition, runtime: &PluginRuntimeSpec) -> anyhow::Result<Self> {
         let artifact = runtime
             .artifact
@@ -122,11 +149,36 @@ impl PluginRuntimeToolPlaceholder {
                 tool_name: definition.name,
                 runtime_kind: runtime.kind,
                 artifact_summary: canonical_artifact.display().to_string(),
-                timeout_ms: runtime.timeout_ms,
-                output_cap_bytes: runtime.output_cap_bytes,
+                artifact_path: canonical_artifact,
+                entry: runtime
+                    .entry
+                    .clone()
+                    .unwrap_or_else(|| DEFAULT_RUNTIME_ENTRY.into()),
+                timeout_ms: runtime.timeout_ms.unwrap_or(DEFAULT_RUNTIME_TIMEOUT_MS),
+                output_cap_bytes: runtime
+                    .output_cap_bytes
+                    .unwrap_or(DEFAULT_RUNTIME_OUTPUT_CAP_BYTES),
                 capability_summary: render_runtime_capability_summary(runtime),
             },
         })
+    }
+}
+
+impl PluginRuntimeToolMetadata {
+    fn begin_invocation(&self) -> PluginRuntimeInvocationMetadata {
+        PluginRuntimeInvocationMetadata {
+            plugin_name: self.plugin_name.clone(),
+            tool_name: self.tool_name.clone(),
+            runtime_kind: self.runtime_kind,
+            artifact_summary: self.artifact_summary.clone(),
+            timeout_ms: self.timeout_ms,
+            output_cap_bytes: self.output_cap_bytes,
+            capability_summary: self.capability_summary.clone(),
+            duration_ms: 0,
+            timeout_hit: false,
+            output_cap_hit: false,
+            final_result_kind: "unknown",
+        }
     }
 }
 
@@ -193,6 +245,55 @@ fn render_runtime_capability_summary(runtime: &PluginRuntimeSpec) -> String {
     }
 }
 
+fn finalize_invocation_metadata(
+    metadata: &mut PluginRuntimeInvocationMetadata,
+    started_at: Instant,
+    result: &ToolResult,
+) {
+    metadata.duration_ms = started_at.elapsed().as_millis();
+    match result {
+        ToolResult::Text(_) => metadata.final_result_kind = "text",
+        ToolResult::Denied(_) => metadata.final_result_kind = "denied",
+        ToolResult::PendingApproval { .. } => metadata.final_result_kind = "pending_approval",
+        ToolResult::Interrupted(_) => {
+            metadata.final_result_kind = "interrupted";
+            metadata.timeout_hit = true;
+        }
+        ToolResult::Progress(_) => metadata.final_result_kind = "progress",
+        ToolResult::ResultTooLarge(_) => {
+            metadata.final_result_kind = "result_too_large";
+            metadata.output_cap_hit = true;
+        }
+    }
+}
+
+fn render_runtime_message(
+    header: &str,
+    metadata: &PluginRuntimeInvocationMetadata,
+    detail: Option<&str>,
+) -> String {
+    let mut message = format!(
+        "{header}\nPlugin: {}\nTool: {}\nRuntime: {}\nArtifact: {}\nEntry: {}\nTimeout ms: {}\nOutput cap bytes: {}\nCapabilities: {}\nDuration ms: {}\nTimeout hit: {}\nOutput cap hit: {}\nResult: {}",
+        metadata.plugin_name,
+        metadata.tool_name,
+        metadata.runtime_kind.as_str(),
+        metadata.artifact_summary,
+        DEFAULT_RUNTIME_ENTRY,
+        metadata.timeout_ms,
+        metadata.output_cap_bytes,
+        metadata.capability_summary,
+        metadata.duration_ms,
+        if metadata.timeout_hit { "yes" } else { "no" },
+        if metadata.output_cap_hit { "yes" } else { "no" },
+        metadata.final_result_kind,
+    );
+    if let Some(detail) = detail {
+        message.push('\n');
+        message.push_str(detail);
+    }
+    message
+}
+
 #[async_trait]
 impl Tool for PluginPromptTool {
     fn metadata(&self) -> ToolMetadata {
@@ -218,31 +319,190 @@ impl Tool for PluginPromptTool {
 }
 
 #[async_trait]
-impl Tool for PluginRuntimeToolPlaceholder {
+impl Tool for PluginRuntimeTool {
     fn metadata(&self) -> ToolMetadata {
         self.metadata.clone()
     }
 
     async fn invoke(
         &self,
-        _call: &ToolCall,
-        _permissions: &ToolPermissionContext,
+        call: &ToolCall,
+        permissions: &ToolPermissionContext,
     ) -> anyhow::Result<ToolResult> {
-        Ok(ToolResult::Denied(format!(
-            "plugin runtime execution is not enabled\nPlugin: {}\nTool: {}\nRuntime: {}\nArtifact: {}\nTimeout ms: {}\nOutput cap bytes: {}\nCapabilities: {}",
-            self.runtime_metadata.plugin_name,
-            self.runtime_metadata.tool_name,
-            self.runtime_metadata.runtime_kind.as_str(),
-            self.runtime_metadata.artifact_summary,
-            self.runtime_metadata
-                .timeout_ms
-                .map(|value| value.to_string())
-                .unwrap_or_else(|| "none".into()),
-            self.runtime_metadata
-                .output_cap_bytes
-                .map(|value| value.to_string())
-                .unwrap_or_else(|| "none".into()),
-            self.runtime_metadata.capability_summary,
-        )))
+        let started_at = Instant::now();
+        let mut invocation = self.runtime_metadata.begin_invocation();
+        let timeout_hit = Arc::new(AtomicBool::new(false));
+        let cancellation_hit = Arc::new(AtomicBool::new(false));
+        let engine = build_wasm_engine()?;
+        let engine_for_interrupt = engine.clone();
+        let timeout_hit_for_interrupt = timeout_hit.clone();
+        let cancellation_hit_for_interrupt = cancellation_hit.clone();
+        let cancellation_token = permissions.cancellation_token.clone();
+        let timeout_ms = self.runtime_metadata.timeout_ms;
+        let interrupt_task = tokio::spawn(async move {
+            tokio::select! {
+                _ = sleep(Duration::from_millis(timeout_ms)) => {
+                    timeout_hit_for_interrupt.store(true, Ordering::Release);
+                    engine_for_interrupt.increment_epoch();
+                }
+                _ = async {
+                    if let Some(token) = cancellation_token {
+                        token.cancelled().await;
+                    } else {
+                        pending::<()>().await;
+                    }
+                } => {
+                    cancellation_hit_for_interrupt.store(true, Ordering::Release);
+                    engine_for_interrupt.increment_epoch();
+                }
+            }
+        });
+
+        let artifact_path = self.runtime_metadata.artifact_path.clone();
+        let entry = self.runtime_metadata.entry.clone();
+        let output_cap_bytes = self.runtime_metadata.output_cap_bytes;
+        let input = call.raw_input().as_bytes().to_vec();
+        let execution = tokio::task::spawn_blocking(move || {
+            execute_wasm_tool_call(&engine, &artifact_path, &entry, &input, output_cap_bytes)
+        })
+        .await;
+
+        interrupt_task.abort();
+
+        let tool_result = match execution {
+            Ok(Ok(output)) => ToolResult::Text(output),
+            Ok(Err(error)) if is_epoch_interruption(&error) => {
+                invocation.timeout_hit =
+                    timeout_hit.load(Ordering::Acquire) || cancellation_hit.load(Ordering::Acquire);
+                ToolResult::Interrupted(render_runtime_message(
+                    "plugin runtime execution interrupted",
+                    &invocation,
+                    Some(&error.to_string()),
+                ))
+            }
+            Ok(Err(error)) if is_output_cap_error(&error) => {
+                ToolResult::ResultTooLarge(render_runtime_message(
+                    "plugin runtime result exceeded output cap",
+                    &invocation,
+                    Some(&error.to_string()),
+                ))
+            }
+            Ok(Err(error)) if is_missing_import_error(&error) => {
+                ToolResult::Denied(render_runtime_message(
+                    "plugin runtime host imports are not available",
+                    &invocation,
+                    Some(&error.to_string()),
+                ))
+            }
+            Ok(Err(error)) => return Err(error),
+            Err(error) => {
+                if is_epoch_join_error(&error) {
+                    invocation.timeout_hit = timeout_hit.load(Ordering::Acquire)
+                        || cancellation_hit.load(Ordering::Acquire);
+                    ToolResult::Interrupted(render_runtime_message(
+                        "plugin runtime execution interrupted",
+                        &invocation,
+                        Some(&error.to_string()),
+                    ))
+                } else {
+                    return Err(anyhow::Error::new(error).context("plugin runtime task failed"));
+                }
+            }
+        };
+
+        finalize_invocation_metadata(&mut invocation, started_at, &tool_result);
+        Ok(match tool_result {
+            ToolResult::Text(output) => ToolResult::Text(output),
+            ToolResult::Denied(_) => ToolResult::Denied(render_runtime_message(
+                "plugin runtime host imports are not available",
+                &invocation,
+                None,
+            )),
+            ToolResult::Interrupted(_) => ToolResult::Interrupted(render_runtime_message(
+                "plugin runtime execution interrupted",
+                &invocation,
+                None,
+            )),
+            ToolResult::ResultTooLarge(_) => ToolResult::ResultTooLarge(render_runtime_message(
+                "plugin runtime result exceeded output cap",
+                &invocation,
+                None,
+            )),
+            other => other,
+        })
     }
+}
+
+fn build_wasm_engine() -> anyhow::Result<Engine> {
+    let mut config = Config::new();
+    config.epoch_interruption(true);
+    Engine::new(&config).context("failed to create wasmtime engine")
+}
+
+fn execute_wasm_tool_call(
+    engine: &Engine,
+    artifact_path: &Path,
+    entry: &str,
+    input: &[u8],
+    output_cap_bytes: u64,
+) -> anyhow::Result<String> {
+    let module = Module::from_file(engine, artifact_path)
+        .with_context(|| format!("failed to load wasm module {}", artifact_path.display()))?;
+    let mut store = Store::new(engine, ());
+    store.set_epoch_deadline(1);
+    let instance = Instance::new(&mut store, &module, &[]).with_context(|| {
+        format!(
+            "failed to instantiate wasm module {}",
+            artifact_path.display()
+        )
+    })?;
+    let memory = instance
+        .get_memory(&mut store, "memory")
+        .ok_or_else(|| anyhow::anyhow!("wasm module must export memory"))?;
+    let run_tool: TypedFunc<(i32, i32), i64> = instance
+        .get_typed_func(&mut store, entry)
+        .with_context(|| format!("failed to resolve wasm export {entry}"))?;
+
+    memory
+        .write(&mut store, INPUT_BUFFER_OFFSET, input)
+        .context("failed to write tool input into wasm memory")?;
+
+    let packed = run_tool
+        .call(&mut store, (INPUT_BUFFER_OFFSET as i32, input.len() as i32))
+        .context("wasm tool execution failed")?;
+    let output_ptr = (packed & 0xffff_ffff) as usize;
+    let output_len = ((packed >> 32) & 0xffff_ffff) as usize;
+
+    if output_len as u64 > output_cap_bytes {
+        anyhow::bail!("plugin runtime output exceeded cap: {output_len} > {output_cap_bytes}");
+    }
+
+    let mut output = vec![0; output_len];
+    memory
+        .read(&store, output_ptr, &mut output)
+        .context("failed to read wasm output from memory")?;
+    String::from_utf8(output).context("wasm output must be valid utf-8")
+}
+
+fn is_epoch_interruption(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        let message = cause.to_string();
+        message.contains("interrupt")
+            || message.contains("epoch deadline")
+            || message.contains("wasm trap: interrupt")
+    })
+}
+
+fn is_epoch_join_error(error: &tokio::task::JoinError) -> bool {
+    error.is_panic() && error.to_string().contains("wasm trap: interrupt")
+}
+
+fn is_output_cap_error(error: &anyhow::Error) -> bool {
+    error
+        .to_string()
+        .contains("plugin runtime output exceeded cap")
+}
+
+fn is_missing_import_error(error: &anyhow::Error) -> bool {
+    error.to_string().contains("expected import") || error.to_string().contains("unknown import")
 }

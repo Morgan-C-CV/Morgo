@@ -39,6 +39,18 @@ fn unique_temp_path(prefix: &str) -> PathBuf {
     std::env::temp_dir().join(format!("{prefix}-{nanos}"))
 }
 
+fn fixture_path(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join(name)
+}
+
+fn write_wasm_fixture(destination: &PathBuf, fixture_name: &str) {
+    let bytes = wat::parse_file(fixture_path(fixture_name)).expect("fixture wat should parse");
+    fs::write(destination, bytes).expect("fixture wasm should be written");
+}
+
 fn test_model_provider_config() -> ModelProviderConfig {
     ModelProviderConfig {
         provider_id: "anthropic".into(),
@@ -264,12 +276,14 @@ async fn plugin_runtime_exposes_command_hook_tool_and_diagnostics() {
 }
 
 #[tokio::test]
-async fn wasm_plugin_tool_flows_to_placeholder_without_vm_execution() {
-    let root = unique_temp_path("rust-agent-plugin-runtime-placeholder-flow");
+async fn wasm_plugin_tool_executes_happy_path() {
+    let root = unique_temp_path("rust-agent-plugin-runtime-executor-flow");
     let plugin_dir = root.join(".claude").join("plugins").join("demo");
     fs::create_dir_all(plugin_dir.join("dist")).expect("plugin dir should exist");
-    fs::write(plugin_dir.join("dist").join("plugin.wasm"), "wasm")
-        .expect("artifact should be written");
+    write_wasm_fixture(
+        &plugin_dir.join("dist").join("plugin.wasm"),
+        "plugin_runtime_echo.wat",
+    );
     fs::write(
         plugin_dir.join("plugin.json"),
         r#"{
@@ -280,6 +294,7 @@ async fn wasm_plugin_tool_flows_to_placeholder_without_vm_execution() {
   "runtime": {
     "kind": "wasm",
     "artifact": "dist/plugin.wasm",
+    "entry": "run_tool",
     "timeout_ms": 1000,
     "output_cap_bytes": 4096
   },
@@ -287,7 +302,7 @@ async fn wasm_plugin_tool_flows_to_placeholder_without_vm_execution() {
     {
       "name": "demo_tool",
       "description": "Demo plugin tool",
-      "prompt": "ignored by placeholder",
+      "prompt": "ignored by executor",
       "read_only": true,
       "search_hint": "plugin demo tool"
     }
@@ -300,12 +315,6 @@ async fn wasm_plugin_tool_flows_to_placeholder_without_vm_execution() {
     let (tool_registry, diagnostics) =
         augment_tool_registry_with_plugins(ToolRegistry::new(), plugin_load_result.as_ref());
     assert!(diagnostics.is_empty());
-    assert!(
-        tool_registry
-            .all_metadata()
-            .iter()
-            .any(|metadata| metadata.name == "plugin.demo-plugin.demo_tool")
-    );
 
     let result = tool_registry
         .invoke(
@@ -313,12 +322,11 @@ async fn wasm_plugin_tool_flows_to_placeholder_without_vm_execution() {
             &ToolPermissionContext::new(PermissionMode::Default),
         )
         .await
-        .expect("placeholder invoke should succeed");
-    let ToolResult::Denied(message) = result else {
-        panic!("expected denied result");
+        .expect("executor invoke should succeed");
+    let ToolResult::Text(message) = result else {
+        panic!("expected text result");
     };
-    assert!(message.contains("plugin runtime execution is not enabled"));
-    assert!(message.contains("Runtime: wasm"));
+    assert_eq!(message, "echo:{\"query\":\"hello\"}");
 
     fs::remove_dir_all(root).expect("temp plugin root should be removed");
 }

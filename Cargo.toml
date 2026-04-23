@@ -29,7 +29,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 sysinfo = "0.33"
 futures-util = "0.3"
 fs4 = { version = "1.0", features = ["sync"] }
+wasmtime = { version = "30.0", default-features = false, features = ["cranelift", "runtime"] }
 
 [dev-dependencies]
 assert_matches = "1.5"
 tokio = { version = "1.45", features = ["macros", "rt-multi-thread", "signal", "sync", "time", "test-util"] }
+wat = "1.240"

@@ -53,6 +53,18 @@ fn unique_temp_path(prefix: &str) -> PathBuf {
     std::env::temp_dir().join(format!("{prefix}-{nanos}"))
 }
 
+fn fixture_path(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join(name)
+}
+
+fn write_wasm_fixture(destination: &Path, fixture_name: &str) {
+    let bytes = wat::parse_file(fixture_path(fixture_name)).expect("fixture wat should parse");
+    fs::write(destination, bytes).expect("fixture wasm should be written");
+}
+
 fn test_app_state(
     command_registry: Option<Arc<CommandRegistry>>,
     task_manager: Option<Arc<TaskManager>>,
@@ -200,12 +212,16 @@ fn metadata_rich_plugin_command(name: &str) -> PluginCommandDefinition {
 }
 
 fn sample_runtime_spec() -> PluginRuntimeSpec {
+    sample_runtime_spec_with_limits(30_000, 65_536)
+}
+
+fn sample_runtime_spec_with_limits(timeout_ms: u64, output_cap_bytes: u64) -> PluginRuntimeSpec {
     PluginRuntimeSpec {
         kind: PluginRuntimeKind::Wasm,
         artifact: Some("dist/plugin.wasm".into()),
-        entry: Some("run".into()),
-        timeout_ms: Some(30_000),
-        output_cap_bytes: Some(65_536),
+        entry: Some("run_tool".into()),
+        timeout_ms: Some(timeout_ms),
+        output_cap_bytes: Some(output_cap_bytes),
         capabilities: Some(PluginRuntimeCapabilities {
             filesystem: Some(PluginFilesystemCapability {
                 read_roots: vec!["docs".into()],
@@ -1534,13 +1550,15 @@ fn plugin_runtime_augments_hook_and_tool_registries() {
 }
 
 #[tokio::test]
-async fn wasm_runtime_tool_registers_as_placeholder_and_returns_not_enabled() {
-    let root = unique_temp_path("rust-agent-runtime-placeholder");
+async fn wasm_runtime_tool_executes_happy_path() {
+    let root = unique_temp_path("rust-agent-runtime-executor");
     let plugin_dir = root.join(".claude").join("plugins").join("demo");
     let manifest_path = plugin_dir.join("plugin.json");
     fs::create_dir_all(plugin_dir.join("dist")).expect("plugin dir should exist");
-    fs::write(plugin_dir.join("dist").join("plugin.wasm"), "wasm")
-        .expect("artifact should be written");
+    write_wasm_fixture(
+        &plugin_dir.join("dist").join("plugin.wasm"),
+        "plugin_runtime_echo.wat",
+    );
 
     let load_result = PluginLoadResult {
         root: root.join(".claude").join("plugins"),
@@ -1572,12 +1590,6 @@ async fn wasm_runtime_tool_registers_as_placeholder_and_returns_not_enabled() {
     let (registry, diagnostics) =
         augment_tool_registry_with_plugins(ToolRegistry::new(), &load_result);
     assert!(diagnostics.is_empty());
-    let metadata = registry
-        .all_metadata()
-        .into_iter()
-        .find(|metadata| metadata.name == "plugin.demo-plugin.runtime-tool")
-        .expect("placeholder tool metadata should exist");
-    assert_eq!(metadata.name, "plugin.demo-plugin.runtime-tool");
 
     let result = registry
         .invoke(
@@ -1585,17 +1597,132 @@ async fn wasm_runtime_tool_registers_as_placeholder_and_returns_not_enabled() {
             &ToolPermissionContext::new(PermissionMode::Default),
         )
         .await
-        .expect("placeholder invoke should succeed");
-    let ToolResult::Denied(message) = result else {
-        panic!("expected denied result");
+        .expect("runtime invoke should succeed");
+    let ToolResult::Text(message) = result else {
+        panic!("expected text result");
     };
-    assert!(message.contains("plugin runtime execution is not enabled"));
-    assert!(message.contains("Plugin: demo-plugin"));
-    assert!(message.contains("Tool: runtime-tool"));
-    assert!(message.contains("Runtime: wasm"));
-    assert!(message.contains("Capabilities: filesystem(read_roots=[docs], write_roots=[]); network(allow_hosts=[api.example.com]); env(allow_names=[EXAMPLE_TOKEN])"));
+    assert_eq!(message, "echo:{\"input\":\"x\"}");
 
-    fs::remove_dir_all(root).expect("runtime placeholder temp dir should be cleaned up");
+    fs::remove_dir_all(root).expect("runtime executor temp dir should be cleaned up");
+}
+
+#[tokio::test]
+async fn wasm_runtime_tool_timeout_maps_to_interrupted() {
+    let root = unique_temp_path("rust-agent-runtime-timeout");
+    let plugin_dir = root.join(".claude").join("plugins").join("demo");
+    let manifest_path = plugin_dir.join("plugin.json");
+    fs::create_dir_all(plugin_dir.join("dist")).expect("plugin dir should exist");
+    write_wasm_fixture(
+        &plugin_dir.join("dist").join("plugin.wasm"),
+        "plugin_runtime_loop.wat",
+    );
+
+    let load_result = PluginLoadResult {
+        root: root.join(".claude").join("plugins"),
+        source: PluginConfigSource::Directory,
+        plugins: vec![PluginDefinition {
+            name: "demo-plugin".into(),
+            version: Some("0.1.0".into()),
+            description: "demo".into(),
+            manifest_path: manifest_path.clone(),
+            capabilities: vec![PluginCapability::Tools],
+            runtime: Some(sample_runtime_spec_with_limits(10, 65_536)),
+            diagnostics_metadata: None,
+            commands: vec![],
+            tools: vec![sample_runtime_tool("runtime-tool", manifest_path.clone())],
+            hooks: vec![],
+            governance: PluginGovernanceState::default(),
+            lifecycle_state: PluginLifecycleState::Enabled,
+            apply_status: PluginApplyStatus::Applied,
+            activation: PluginActivationSummary {
+                commands: 0,
+                tools: 1,
+                hooks: 0,
+            },
+        }],
+        diagnostics: vec![],
+        orphaned_governance_entries: vec![],
+    };
+
+    let (registry, diagnostics) =
+        augment_tool_registry_with_plugins(ToolRegistry::new(), &load_result);
+    assert!(diagnostics.is_empty());
+
+    let result = registry
+        .invoke(
+            &ToolCall::new("plugin.demo-plugin.runtime-tool", "{\"input\":\"x\"}"),
+            &ToolPermissionContext::new(PermissionMode::Default),
+        )
+        .await
+        .expect("runtime invoke should map timeout");
+    let ToolResult::Interrupted(message) = result else {
+        panic!("expected interrupted result");
+    };
+    assert!(message.contains("plugin runtime execution interrupted"));
+    assert!(message.contains("Runtime: wasm"));
+    assert!(message.contains("Timeout hit: yes"));
+    assert!(message.contains("Result: interrupted"));
+
+    fs::remove_dir_all(root).expect("runtime timeout temp dir should be cleaned up");
+}
+
+#[tokio::test]
+async fn wasm_runtime_tool_output_cap_maps_to_result_too_large() {
+    let root = unique_temp_path("rust-agent-runtime-output-cap");
+    let plugin_dir = root.join(".claude").join("plugins").join("demo");
+    let manifest_path = plugin_dir.join("plugin.json");
+    fs::create_dir_all(plugin_dir.join("dist")).expect("plugin dir should exist");
+    write_wasm_fixture(
+        &plugin_dir.join("dist").join("plugin.wasm"),
+        "plugin_runtime_large_output.wat",
+    );
+
+    let load_result = PluginLoadResult {
+        root: root.join(".claude").join("plugins"),
+        source: PluginConfigSource::Directory,
+        plugins: vec![PluginDefinition {
+            name: "demo-plugin".into(),
+            version: Some("0.1.0".into()),
+            description: "demo".into(),
+            manifest_path: manifest_path.clone(),
+            capabilities: vec![PluginCapability::Tools],
+            runtime: Some(sample_runtime_spec_with_limits(30_000, 64)),
+            diagnostics_metadata: None,
+            commands: vec![],
+            tools: vec![sample_runtime_tool("runtime-tool", manifest_path.clone())],
+            hooks: vec![],
+            governance: PluginGovernanceState::default(),
+            lifecycle_state: PluginLifecycleState::Enabled,
+            apply_status: PluginApplyStatus::Applied,
+            activation: PluginActivationSummary {
+                commands: 0,
+                tools: 1,
+                hooks: 0,
+            },
+        }],
+        diagnostics: vec![],
+        orphaned_governance_entries: vec![],
+    };
+
+    let (registry, diagnostics) =
+        augment_tool_registry_with_plugins(ToolRegistry::new(), &load_result);
+    assert!(diagnostics.is_empty());
+
+    let result = registry
+        .invoke(
+            &ToolCall::new("plugin.demo-plugin.runtime-tool", "{\"input\":\"x\"}"),
+            &ToolPermissionContext::new(PermissionMode::Default),
+        )
+        .await
+        .expect("runtime invoke should map output cap");
+    let ToolResult::ResultTooLarge(message) = result else {
+        panic!("expected result too large");
+    };
+    assert!(message.contains("plugin runtime result exceeded output cap"));
+    assert!(message.contains("Output cap hit: yes"));
+    assert!(message.contains("Result: result_too_large"));
+
+    fs::remove_dir_all(root).expect("runtime output cap temp dir should be cleaned up");
 }
 
 #[test]
