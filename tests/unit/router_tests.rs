@@ -3573,53 +3573,31 @@ async fn permissions_command_mutates_mode_and_rule_lists() {
 // ── T18.1.C /swarm status ────────────────────────────────────────────────────
 
 fn swarm_app_state(manager: Arc<TaskManager>) -> AppState {
-    use rust_agent::state::app_state::{
-        ActiveModelProfileSource, ActiveModelProviderSummary, RuntimeRole,
-    };
-    let permission_context =
-        ToolPermissionContext::new(PermissionMode::Default).with_task_manager(manager);
-    AppState {
-        surface: InteractionSurface::Cli,
-        session_mode: SessionMode::Interactive,
-        client_type: ClientType::Cli,
-        session_source: SessionSource::LocalCli,
-        runtime_role: RuntimeRole::Coordinator,
-        worker_role: None,
-        permission_context,
-        command_registry: None,
-        runtime_tool_registry: Some(Arc::new(RwLock::new(ToolRegistry::new()))),
-        skill_registry: None,
-        mcp_runtime: None,
-        plugin_load_result: None,
-        cost_tracker: CostTracker::default(),
-        service_observability_tracker:
-            rust_agent::service::observability::ServiceObservabilityTracker::default(),
-        notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
-        audit_log: Arc::new(std::sync::Mutex::new(
-            rust_agent::security::audit::AuditLog::default(),
-        )),
-        startup_trace: Vec::new(),
-        active_model_runtime: None,
-        active_model_profile_name: None,
-        active_model_profile_source: ActiveModelProfileSource::BootstrapDefault,
-        active_model_provider_summary: ActiveModelProviderSummary {
-            provider_id: "test".into(),
-            protocol: "Anthropic".into(),
-            compatibility_profile: "Anthropic".into(),
-            base_url_host: "localhost".into(),
-            model: "test-model".into(),
-            auth_status: "none".into(),
-        },
-        active_session_id: "swarm-test-session".into(),
-        session_store: None,
-        session: None,
-        history: None,
-        restored_session: None,
-        last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        cancellation_token: tokio_util::sync::CancellationToken::new(),
-        subagent_limiter: None,
-        boss_coordinator: None,
-    }
+    let root = unique_temp_path("rust-agent-swarm-app-state");
+    fs::create_dir_all(&root).expect("create root");
+    swarm_app_state_with_root_and_permission_context(
+        &root,
+        ToolPermissionContext::new(PermissionMode::Default).with_task_manager(manager),
+    )
+}
+
+fn swarm_app_state_with_root_and_permission_context(
+    root: &std::path::Path,
+    permission_context: ToolPermissionContext,
+) -> AppState {
+    let mut app_state = app_state_with_session_root(root);
+    app_state.permission_context = permission_context
+        .with_active_session_id(app_state.active_session_id.clone())
+        .with_active_surface(app_state.surface)
+        .with_notification_dispatcher(app_state.notification_dispatcher.clone())
+        .with_inherited_active_model_snapshot(
+            app_state
+                .active_model_runtime
+                .as_ref()
+                .expect("active model runtime")
+                .snapshot_blocking(),
+        );
+    app_state
 }
 
 #[tokio::test]
@@ -3721,7 +3699,7 @@ async fn swarm_unknown_subcommand_returns_usage_message() {
 
     let result = router
         .route(
-            &NormalizedInput::from_raw(InteractionSurface::Cli, "/swarm spawn"),
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/swarm nope"),
             &app_state,
         )
         .await
@@ -3730,12 +3708,11 @@ async fn swarm_unknown_subcommand_returns_usage_message() {
     let RouteExecution::CommandResult(CommandResult::Message(text)) = result else {
         panic!("expected message result, got {result:?}");
     };
+    assert!(text.contains("Unknown subcommand 'nope'"), "got: {text}");
     assert!(
-        text.contains("Unknown subcommand") && text.contains("spawn"),
-        "got: {text}"
-    );
-    assert!(
-        text.contains("/swarm status") && text.contains("/swarm teammates"),
+        text.contains("/swarm status")
+            && text.contains("/swarm teammates")
+            && text.contains("/swarm spawn"),
         "got: {text}"
     );
 }
@@ -3910,4 +3887,403 @@ async fn swarm_teammates_invalid_registry_returns_command_error() {
             .contains("invalid_configuration: invalid agents.json")
     );
     assert!(error.to_string().contains("duplicate teammate id 'dup'"));
+}
+
+#[tokio::test]
+async fn swarm_spawn_launches_via_agent_tool() {
+    use rust_agent::service::api::streaming::{StopReason, StreamEvent};
+
+    let registry = Arc::new(CommandRegistry::new().register(Arc::new(SwarmCommand)));
+    let router = CommandRouter::new(registry, Box::new(DefaultSurfaceAuthorizer::default()));
+    let manager = Arc::new(TaskManager::default());
+    let root = unique_temp_path("rust-agent-router-swarm-spawn-launch");
+    fs::create_dir_all(root.join(".claude/buddies")).expect("create buddies dir");
+    fs::write(
+        root.join(".claude/buddies/agents.json"),
+        r#"{
+  "profiles": [
+    {
+      "id": "impl-1",
+      "name": "Implementer",
+      "description": "Builds code changes",
+      "role": "implement",
+      "default_model_profile": "openai-fast",
+      "allowed_tools": ["Read", "Edit"],
+      "max_turns": 4
+    }
+  ]
+}"#,
+    )
+    .expect("write registry");
+    let permission_context = ToolPermissionContext::new(PermissionMode::Default)
+        .with_task_manager(manager.clone())
+        .with_subagent_scripted_turns(vec![vec![
+            StreamEvent::MessageStart,
+            StreamEvent::TextDelta("spawned via teammate".into()),
+            StreamEvent::MessageStop {
+                stop_reason: StopReason::EndTurn,
+            },
+        ]]);
+    let app_state = swarm_app_state_with_root_and_permission_context(&root, permission_context);
+
+    let result = router
+        .route(
+            &NormalizedInput::from_raw(
+                InteractionSurface::Cli,
+                "/swarm spawn impl-1 implement the feature",
+            ),
+            &app_state,
+        )
+        .await
+        .expect("spawn route should succeed");
+
+    let RouteExecution::CommandResult(CommandResult::Message(text)) = result else {
+        panic!("expected message result, got {result:?}");
+    };
+    assert!(text.contains("agent task task-0 respawned"), "got: {text}");
+
+    tokio::time::timeout(std::time::Duration::from_secs(4), async {
+        loop {
+            let created = manager.get("task-0").expect("task should be created");
+            if matches!(
+                created.status,
+                rust_agent::task::types::TaskStatus::Completed
+            ) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("spawned worker should finish");
+
+    let created = manager.get("task-0").expect("task should be created");
+    assert_eq!(created.worker_role, Some(WorkerRole::Implement));
+    let output = manager
+        .get_output("task-0", 0)
+        .expect("task output should exist");
+    assert!(output.content.contains("spawned via teammate"));
+}
+#[tokio::test]
+async fn swarm_spawn_unknown_teammate_id_returns_available_ids() {
+    let registry = Arc::new(CommandRegistry::new().register(Arc::new(SwarmCommand)));
+    let router = CommandRouter::new(registry, Box::new(DefaultSurfaceAuthorizer::default()));
+    let manager = Arc::new(TaskManager::default());
+    let root = unique_temp_path("rust-agent-router-swarm-spawn-unknown");
+    fs::create_dir_all(root.join(".claude/buddies")).expect("create buddies dir");
+    fs::write(
+        root.join(".claude/buddies/agents.json"),
+        r#"{
+  "profiles": [
+    {
+      "id": "impl-1",
+      "name": "Implementer",
+      "description": "Builds code changes",
+      "role": "implement",
+      "default_model_profile": null,
+      "allowed_tools": [],
+      "max_turns": 2
+    }
+  ]
+}"#,
+    )
+    .expect("write registry");
+    let app_state = swarm_app_state_with_root_and_permission_context(
+        &root,
+        ToolPermissionContext::new(PermissionMode::Default).with_task_manager(manager),
+    );
+
+    let result = router
+        .route(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/swarm spawn missing do work"),
+            &app_state,
+        )
+        .await
+        .expect("spawn route should succeed");
+
+    let RouteExecution::CommandResult(CommandResult::Message(text)) = result else {
+        panic!("expected message result, got {result:?}");
+    };
+    assert!(
+        text.contains("Unknown teammate id 'missing'"),
+        "got: {text}"
+    );
+    assert!(text.contains("impl-1"), "got: {text}");
+}
+
+#[tokio::test]
+async fn swarm_spawn_unsupported_role_rejected() {
+    let registry = Arc::new(CommandRegistry::new().register(Arc::new(SwarmCommand)));
+    let router = CommandRouter::new(registry, Box::new(DefaultSurfaceAuthorizer::default()));
+    let manager = Arc::new(TaskManager::default());
+    let root = unique_temp_path("rust-agent-router-swarm-spawn-bad-role");
+    fs::create_dir_all(root.join(".claude/buddies")).expect("create buddies dir");
+    fs::write(
+        root.join(".claude/buddies/agents.json"),
+        r#"{
+  "profiles": [
+    {
+      "id": "bad-1",
+      "name": "Bad",
+      "description": "Bad role",
+      "role": "planner",
+      "default_model_profile": null,
+      "allowed_tools": [],
+      "max_turns": 1
+    }
+  ]
+}"#,
+    )
+    .expect("write registry");
+    let app_state = swarm_app_state_with_root_and_permission_context(
+        &root,
+        ToolPermissionContext::new(PermissionMode::Default).with_task_manager(manager),
+    );
+
+    let error = router
+        .route(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/swarm spawn bad-1 do work"),
+            &app_state,
+        )
+        .await
+        .expect_err("unsupported role should fail");
+
+    assert!(error.to_string().contains("unsupported role 'planner'"));
+}
+
+#[tokio::test]
+async fn swarm_spawn_missing_task_description_rejected() {
+    let registry = Arc::new(CommandRegistry::new().register(Arc::new(SwarmCommand)));
+    let router = CommandRouter::new(registry, Box::new(DefaultSurfaceAuthorizer::default()));
+    let manager = Arc::new(TaskManager::default());
+    let app_state = swarm_app_state(manager);
+
+    let result = router
+        .route(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/swarm spawn impl-1"),
+            &app_state,
+        )
+        .await
+        .expect("spawn route should succeed");
+
+    let RouteExecution::CommandResult(CommandResult::Message(text)) = result else {
+        panic!("expected message result, got {result:?}");
+    };
+    assert!(text.contains("Missing task description"), "got: {text}");
+}
+
+#[tokio::test]
+async fn swarm_spawn_allowed_tools_and_max_turns_passed_through() {
+    use rust_agent::service::api::streaming::{StopReason, StreamEvent};
+    use rust_agent::tool::builtin::{agent::AgentTool, bash::BashTool, file_read::FileReadTool};
+
+    let registry = Arc::new(CommandRegistry::new().register(Arc::new(SwarmCommand)));
+    let router = CommandRouter::new(registry, Box::new(DefaultSurfaceAuthorizer::default()));
+    let manager = Arc::new(TaskManager::default());
+    let root = unique_temp_path("rust-agent-router-swarm-spawn-passthrough");
+    fs::create_dir_all(root.join(".claude/buddies")).expect("create buddies dir");
+    fs::write(
+        root.join(".claude/buddies/agents.json"),
+        r#"{
+  "profiles": [
+    {
+      "id": "verify-1",
+      "name": "Verifier",
+      "description": "Checks work",
+      "role": "verify",
+      "default_model_profile": null,
+      "allowed_tools": ["Read", "Bash"],
+      "max_turns": 1
+    }
+  ]
+}"#,
+    )
+    .expect("write registry");
+    let inherited_tools = ToolRegistry::new()
+        .register(Arc::new(AgentTool))
+        .register(Arc::new(FileReadTool))
+        .register(Arc::new(BashTool));
+    let permission_context = ToolPermissionContext::new(PermissionMode::Default)
+        .with_task_manager(manager.clone())
+        .with_inherited_tool_registry(inherited_tools.clone())
+        .with_subagent_scripted_turns(vec![
+            vec![
+                StreamEvent::MessageStart,
+                StreamEvent::TextDelta("first bounded answer".into()),
+                StreamEvent::MessageStop {
+                    stop_reason: StopReason::MaxTokens,
+                },
+            ],
+            vec![
+                StreamEvent::MessageStart,
+                StreamEvent::TextDelta("second bounded answer".into()),
+                StreamEvent::MessageStop {
+                    stop_reason: StopReason::EndTurn,
+                },
+            ],
+        ]);
+    let app_state =
+        swarm_app_state_with_root_and_permission_context(&root, permission_context.clone());
+
+    let _ = router
+        .route(
+            &NormalizedInput::from_raw(
+                InteractionSurface::Cli,
+                "/swarm spawn verify-1 validate the patch",
+            ),
+            &app_state,
+        )
+        .await
+        .expect("spawn route should succeed");
+
+    tokio::time::timeout(std::time::Duration::from_secs(4), async {
+        loop {
+            let created = manager.get("task-0").expect("task should be created");
+            if matches!(created.status, rust_agent::task::types::TaskStatus::Failed) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("bounded worker should finish");
+
+    let task = manager.get("task-0").expect("task should exist");
+    assert_eq!(task.worker_role, Some(WorkerRole::Verify));
+    let output = manager
+        .get_output("task-0", 0)
+        .expect("task output should exist");
+    assert!(output.content.contains("first bounded answer"));
+    assert!(!output.content.contains("second bounded answer"));
+    let worker_tools = inherited_tools
+        .assemble_worker_registry(Some(&["Read".to_string(), "Bash".to_string()]))
+        .visible_tools(&permission_context)
+        .into_iter()
+        .map(|tool| tool.name)
+        .collect::<Vec<_>>();
+    assert_eq!(worker_tools, vec!["Read"]);
+}
+
+#[tokio::test]
+async fn swarm_spawn_orchestration_group_id_starts_with_swarm_prefix() {
+    use rust_agent::service::api::streaming::StreamEvent;
+
+    let registry = Arc::new(CommandRegistry::new().register(Arc::new(SwarmCommand)));
+    let router = CommandRouter::new(registry, Box::new(DefaultSurfaceAuthorizer::default()));
+    let manager = Arc::new(TaskManager::default());
+    let root = unique_temp_path("rust-agent-router-swarm-spawn-group");
+    fs::create_dir_all(root.join(".claude/buddies")).expect("create buddies dir");
+    fs::write(
+        root.join(".claude/buddies/agents.json"),
+        r#"{
+  "profiles": [
+    {
+      "id": "research-1",
+      "name": "Researcher",
+      "description": "Researches",
+      "role": "research",
+      "default_model_profile": null,
+      "allowed_tools": [],
+      "max_turns": 1
+    }
+  ]
+}"#,
+    )
+    .expect("write registry");
+    let permission_context = ToolPermissionContext::new(PermissionMode::Default)
+        .with_task_manager(manager.clone())
+        .with_subagent_scripted_turns(vec![vec![StreamEvent::TextDelta("research turn".into())]]);
+    let app_state = swarm_app_state_with_root_and_permission_context(&root, permission_context);
+
+    let _ = router
+        .route(
+            &NormalizedInput::from_raw(
+                InteractionSurface::Cli,
+                "/swarm spawn research-1 gather requirements",
+            ),
+            &app_state,
+        )
+        .await
+        .expect("spawn route should succeed");
+
+    let task = manager.get("task-0").expect("task should exist");
+    assert!(
+        task.orchestration_group_id
+            .as_deref()
+            .is_some_and(|value| value.starts_with("swarm:research-1:")),
+        "got: {:?}",
+        task.orchestration_group_id
+    );
+}
+
+#[tokio::test]
+async fn swarm_spawn_default_model_profile_appears_in_prompt_without_switching_runtime_model() {
+    use rust_agent::service::api::streaming::{StopReason, StreamEvent};
+
+    let registry = Arc::new(CommandRegistry::new().register(Arc::new(SwarmCommand)));
+    let router = CommandRouter::new(registry, Box::new(DefaultSurfaceAuthorizer::default()));
+    let manager = Arc::new(TaskManager::default());
+    let root = unique_temp_path("rust-agent-router-swarm-spawn-model-context");
+    fs::create_dir_all(root.join(".claude/buddies")).expect("create buddies dir");
+    fs::write(
+        root.join(".claude/buddies/agents.json"),
+        r#"{
+  "profiles": [
+    {
+      "id": "impl-2",
+      "name": "Implementer",
+      "description": "Builds code changes",
+      "role": "implement",
+      "default_model_profile": "custom-fast",
+      "allowed_tools": [],
+      "max_turns": 1
+    }
+  ]
+}"#,
+    )
+    .expect("write registry");
+    let permission_context = ToolPermissionContext::new(PermissionMode::Default)
+        .with_task_manager(manager.clone())
+        .with_subagent_scripted_turns(vec![vec![
+            StreamEvent::MessageStart,
+            StreamEvent::TextDelta("model context turn".into()),
+            StreamEvent::MessageStop {
+                stop_reason: StopReason::EndTurn,
+            },
+        ]]);
+    let app_state = swarm_app_state_with_root_and_permission_context(&root, permission_context);
+    let original_model = app_state.active_model_profile_name.clone();
+
+    let _ = router
+        .route(
+            &NormalizedInput::from_raw(
+                InteractionSurface::Cli,
+                "/swarm spawn impl-2 ship the change",
+            ),
+            &app_state,
+        )
+        .await
+        .expect("spawn route should succeed");
+
+    tokio::time::timeout(std::time::Duration::from_secs(4), async {
+        loop {
+            let created = manager.get("task-0").expect("task should be created");
+            if matches!(
+                created.status,
+                rust_agent::task::types::TaskStatus::Completed
+            ) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("spawned worker should finish");
+
+    let task = manager.get("task-0").expect("task should exist");
+    assert!(
+        task.description
+            .contains("default_model_profile: custom-fast")
+    );
+    assert_eq!(app_state.active_model_profile_name, original_model);
 }
