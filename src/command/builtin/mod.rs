@@ -13,6 +13,7 @@ pub mod resume;
 pub mod session;
 pub mod skills;
 pub mod status;
+pub mod swarm;
 pub mod tasks;
 
 use crate::command::registry::CommandRegistry;
@@ -33,6 +34,7 @@ use resume::ResumeCommand;
 use session::SessionCommand;
 use skills::SkillsCommand;
 use status::StatusCommand;
+use swarm::SwarmCommand;
 use tasks::TasksCommand;
 
 pub fn register_builtin_commands(registry: CommandRegistry) -> CommandRegistry {
@@ -51,6 +53,7 @@ pub fn register_builtin_commands(registry: CommandRegistry) -> CommandRegistry {
         .register(Arc::new(SessionCommand))
         .register(Arc::new(SkillsCommand))
         .register(Arc::new(StatusCommand))
+        .register(Arc::new(SwarmCommand))
         .register(Arc::new(TasksCommand))
 }
 

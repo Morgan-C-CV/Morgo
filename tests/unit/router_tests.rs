@@ -14,6 +14,7 @@ use rust_agent::command::builtin::permissions::PermissionsCommand;
 use rust_agent::command::builtin::plan::PlanCommand;
 use rust_agent::command::builtin::plugins::PluginsCommand;
 use rust_agent::command::builtin::status::StatusCommand;
+use rust_agent::command::builtin::swarm::SwarmCommand;
 use rust_agent::command::registry::CommandRegistry;
 use rust_agent::command::types::{
     Command, CommandAvailability, CommandMetadata, CommandResult, CommandSource, CommandType,
@@ -3567,4 +3568,171 @@ async fn permissions_command_mutates_mode_and_rule_lists() {
         permission_context.always_deny_rules(),
         vec!["Edit".to_string()]
     );
+}
+
+// ── T18.1.C /swarm status ────────────────────────────────────────────────────
+
+fn swarm_app_state(manager: Arc<TaskManager>) -> AppState {
+    use rust_agent::state::app_state::{
+        ActiveModelProfileSource, ActiveModelProviderSummary, RuntimeRole,
+    };
+    let permission_context =
+        ToolPermissionContext::new(PermissionMode::Default).with_task_manager(manager);
+    AppState {
+        surface: InteractionSurface::Cli,
+        session_mode: SessionMode::Interactive,
+        client_type: ClientType::Cli,
+        session_source: SessionSource::LocalCli,
+        runtime_role: RuntimeRole::Coordinator,
+        worker_role: None,
+        permission_context,
+        command_registry: None,
+        runtime_tool_registry: Some(Arc::new(RwLock::new(ToolRegistry::new()))),
+        skill_registry: None,
+        mcp_runtime: None,
+        plugin_load_result: None,
+        cost_tracker: CostTracker::default(),
+        service_observability_tracker:
+            rust_agent::service::observability::ServiceObservabilityTracker::default(),
+        notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
+        audit_log: Arc::new(std::sync::Mutex::new(
+            rust_agent::security::audit::AuditLog::default(),
+        )),
+        startup_trace: Vec::new(),
+        active_model_runtime: None,
+        active_model_profile_name: None,
+        active_model_profile_source: ActiveModelProfileSource::BootstrapDefault,
+        active_model_provider_summary: ActiveModelProviderSummary {
+            provider_id: "test".into(),
+            protocol: "Anthropic".into(),
+            compatibility_profile: "Anthropic".into(),
+            base_url_host: "localhost".into(),
+            model: "test-model".into(),
+            auth_status: "none".into(),
+        },
+        active_session_id: "swarm-test-session".into(),
+        session_store: None,
+        session: None,
+        history: None,
+        restored_session: None,
+        last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        cancellation_token: tokio_util::sync::CancellationToken::new(),
+        subagent_limiter: None,
+        boss_coordinator: None,
+    }
+}
+
+#[tokio::test]
+async fn swarm_status_routes_via_command_registry() {
+    let registry = Arc::new(CommandRegistry::new().register(Arc::new(SwarmCommand)));
+    let router = CommandRouter::new(registry, Box::new(DefaultSurfaceAuthorizer::default()));
+    let decision = router
+        .decide(&NormalizedInput::from_raw(
+            InteractionSurface::Cli,
+            "/swarm status",
+        ))
+        .await;
+    assert!(
+        matches!(decision, RouteDecision::ExecuteCommand(ref c) if c.name == "swarm"),
+        "expected swarm command route, got {decision:?}"
+    );
+}
+
+#[tokio::test]
+async fn swarm_status_returns_empty_when_no_tasks() {
+    let registry = Arc::new(CommandRegistry::new().register(Arc::new(SwarmCommand)));
+    let router = CommandRouter::new(registry, Box::new(DefaultSurfaceAuthorizer::default()));
+    let manager = Arc::new(TaskManager::default());
+    let app_state = swarm_app_state(manager);
+
+    let result = router
+        .route(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/swarm status"),
+            &app_state,
+        )
+        .await
+        .expect("swarm route should succeed");
+
+    let RouteExecution::CommandResult(CommandResult::Message(text)) = result else {
+        panic!("expected message result, got {result:?}");
+    };
+    assert!(text.contains("Active tasks: 0"), "got: {text}");
+}
+
+#[tokio::test]
+async fn swarm_status_shows_topology_fields_for_grouped_tasks() {
+    use rust_agent::state::app_state::WorkerRole;
+    use rust_agent::task::types::TaskType;
+
+    let registry = Arc::new(CommandRegistry::new().register(Arc::new(SwarmCommand)));
+    let router = CommandRouter::new(registry, Box::new(DefaultSurfaceAuthorizer::default()));
+    let manager = Arc::new(TaskManager::default());
+
+    // Parent task.
+    let parent = manager.create_with_type(
+        "implement feature",
+        TaskType::LocalAgent,
+        "swarm-test-session",
+        InteractionSurface::Cli,
+    );
+    manager.set_orchestration_group_id(&parent.id, Some("group-alpha".into()));
+    manager.set_worker_role(&parent.id, WorkerRole::Implement);
+    manager.set_step_id(&parent.id, Some(1));
+    manager.start(&parent.id);
+
+    // Child task.
+    let child = manager.create_with_type(
+        "validate output",
+        TaskType::LocalBash,
+        "swarm-test-session",
+        InteractionSurface::Cli,
+    );
+    manager.set_orchestration_group_id(&child.id, Some("group-alpha".into()));
+    manager.set_parent_task_id(&child.id, Some(parent.id.clone()));
+    manager.set_worker_role(&child.id, WorkerRole::Verify);
+
+    let app_state = swarm_app_state(manager);
+    let result = router
+        .route(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/swarm status"),
+            &app_state,
+        )
+        .await
+        .expect("swarm route should succeed");
+
+    let RouteExecution::CommandResult(CommandResult::Message(text)) = result else {
+        panic!("expected message result, got {result:?}");
+    };
+    assert!(text.contains("Active tasks: 2"), "got: {text}");
+    assert!(text.contains("group-alpha"), "got: {text}");
+    assert!(text.contains("role=implement"), "got: {text}");
+    assert!(text.contains("step=1"), "got: {text}");
+    assert!(text.contains("role=verify"), "got: {text}");
+    assert!(text.contains(&parent.id), "got: {text}");
+    assert!(text.contains(&child.id), "got: {text}");
+}
+
+#[tokio::test]
+async fn swarm_unknown_subcommand_returns_usage_message() {
+    let registry = Arc::new(CommandRegistry::new().register(Arc::new(SwarmCommand)));
+    let router = CommandRouter::new(registry, Box::new(DefaultSurfaceAuthorizer::default()));
+    let manager = Arc::new(TaskManager::default());
+    let app_state = swarm_app_state(manager);
+
+    let result = router
+        .route(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/swarm spawn"),
+            &app_state,
+        )
+        .await
+        .expect("swarm route should succeed");
+
+    let RouteExecution::CommandResult(CommandResult::Message(text)) = result else {
+        panic!("expected message result, got {result:?}");
+    };
+    assert!(
+        text.contains("Unknown subcommand") && text.contains("spawn"),
+        "got: {text}"
+    );
+    assert!(text.contains("/swarm status"), "got: {text}");
 }
