@@ -3,6 +3,7 @@ pub mod model_profiles;
 mod runtime;
 mod setup;
 mod state;
+pub mod teammate_registry;
 pub mod warnings;
 
 pub use runtime::{

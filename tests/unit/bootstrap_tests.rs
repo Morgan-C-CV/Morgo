@@ -6,6 +6,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rust_agent::bootstrap::model_profiles::{
     build_model_profile_display_view, load_model_profiles_registry_from_root,
 };
+use rust_agent::bootstrap::teammate_registry::{
+    load_teammate_registry_from_root, parse_teammate_registry,
+};
 use rust_agent::bootstrap::{
     BootstrapCli, BootstrapPhase, BootstrapState, InteractionSurface, PromptAugmentationMetadata,
     RuntimeBootstrap, SessionMode, SessionSource, ShutdownFailure, ShutdownOutcome, StartupWarning,
@@ -3545,4 +3548,141 @@ fn minimal_persisted_record(session_id: &SessionId) -> PersistedSessionRecord {
         nested_memory_lineage: None,
         lifecycle_status: SessionLifecycleStatus::Active,
     }
+}
+
+// ── T18.1.D: teammate registry tests ─────────────────────────────────────────
+
+#[test]
+fn teammate_registry_loader_returns_none_when_missing() {
+    let root = unique_temp_path("rust-agent-missing-teammate-registry");
+    std::fs::create_dir_all(&root).expect("create temp root");
+
+    let registry = load_teammate_registry_from_root(&root).expect("loader should succeed");
+    assert!(registry.is_none(), "missing registry should return None");
+
+    std::fs::remove_dir_all(root).expect("cleanup");
+}
+
+#[test]
+fn teammate_registry_parser_accepts_valid_registry() {
+    let registry = parse_teammate_registry(
+        r#"{
+  "profiles": [
+    {
+      "id": "impl-1",
+      "name": "Implementer",
+      "description": "Builds code changes",
+      "role": "implement",
+      "default_model_profile": "openai-fast",
+      "allowed_tools": ["Read", "Edit"],
+      "max_turns": 4
+    }
+  ]
+}"#,
+    )
+    .expect("valid registry should parse");
+
+    assert_eq!(registry.profiles.len(), 1);
+    assert_eq!(registry.profiles[0].id, "impl-1");
+    assert_eq!(registry.profiles[0].allowed_tools, vec!["Read", "Edit"]);
+    assert_eq!(registry.profiles[0].max_turns, 4);
+}
+
+#[test]
+fn teammate_registry_rejects_duplicate_id() {
+    let error = parse_teammate_registry(
+        r#"{
+  "profiles": [
+    {
+      "id": "dup",
+      "name": "One",
+      "description": "First",
+      "role": "implement",
+      "default_model_profile": null,
+      "allowed_tools": [],
+      "max_turns": 1
+    },
+    {
+      "id": "dup",
+      "name": "Two",
+      "description": "Second",
+      "role": "verify",
+      "default_model_profile": null,
+      "allowed_tools": [],
+      "max_turns": 1
+    }
+  ]
+}"#,
+    )
+    .expect_err("duplicate id should fail");
+
+    assert!(error.to_string().contains("duplicate teammate id 'dup'"));
+}
+
+#[test]
+fn teammate_registry_rejects_empty_required_field() {
+    let error = parse_teammate_registry(
+        r#"{
+  "profiles": [
+    {
+      "id": "impl-1",
+      "name": "",
+      "description": "Builds code changes",
+      "role": "implement",
+      "default_model_profile": null,
+      "allowed_tools": [],
+      "max_turns": 1
+    }
+  ]
+}"#,
+    )
+    .expect_err("empty required field should fail");
+
+    assert!(error.to_string().contains("teammate 'impl-1' missing name"));
+}
+
+#[test]
+fn teammate_registry_rejects_zero_max_turns() {
+    let error = parse_teammate_registry(
+        r#"{
+  "profiles": [
+    {
+      "id": "impl-1",
+      "name": "Implementer",
+      "description": "Builds code changes",
+      "role": "implement",
+      "default_model_profile": null,
+      "allowed_tools": [],
+      "max_turns": 0
+    }
+  ]
+}"#,
+    )
+    .expect_err("zero max_turns should fail");
+
+    assert!(error.to_string().contains("max_turns must be > 0"));
+}
+
+#[test]
+fn teammate_registry_rejects_unknown_field() {
+    let error = parse_teammate_registry(
+        r#"{
+  "profiles": [
+    {
+      "id": "impl-1",
+      "name": "Implementer",
+      "description": "Builds code changes",
+      "role": "implement",
+      "default_model_profile": null,
+      "allowed_tools": [],
+      "max_turns": 1,
+      "extra": true
+    }
+  ]
+}"#,
+    )
+    .expect_err("unknown field should fail");
+
+    assert!(error.to_string().contains("invalid agents.json"));
+    assert!(error.to_string().contains("unknown field"));
 }

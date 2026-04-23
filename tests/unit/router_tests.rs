@@ -3734,5 +3734,180 @@ async fn swarm_unknown_subcommand_returns_usage_message() {
         text.contains("Unknown subcommand") && text.contains("spawn"),
         "got: {text}"
     );
-    assert!(text.contains("/swarm status"), "got: {text}");
+    assert!(
+        text.contains("/swarm status") && text.contains("/swarm teammates"),
+        "got: {text}"
+    );
+}
+
+#[tokio::test]
+async fn swarm_teammates_missing_registry_returns_friendly_empty_state() {
+    let registry = Arc::new(CommandRegistry::new().register(Arc::new(SwarmCommand)));
+    let router = CommandRouter::new(registry, Box::new(DefaultSurfaceAuthorizer::default()));
+    let root = unique_temp_path("rust-agent-router-swarm-teammates-missing");
+    fs::create_dir_all(&root).expect("create root");
+    let app_state = app_state_with_session_root(&root);
+
+    let result = router
+        .route(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/swarm teammates"),
+            &app_state,
+        )
+        .await
+        .expect("swarm route should succeed");
+
+    let RouteExecution::CommandResult(CommandResult::Message(text)) = result else {
+        panic!("expected message result, got {result:?}");
+    };
+    assert!(
+        text.contains("No teammate registry found at"),
+        "got: {text}"
+    );
+}
+
+#[tokio::test]
+async fn swarm_teammates_lists_valid_registry() {
+    let registry = Arc::new(CommandRegistry::new().register(Arc::new(SwarmCommand)));
+    let router = CommandRouter::new(registry, Box::new(DefaultSurfaceAuthorizer::default()));
+    let root = unique_temp_path("rust-agent-router-swarm-teammates-valid");
+    fs::create_dir_all(root.join(".claude/buddies")).expect("create buddies dir");
+    fs::write(
+        root.join(".claude/buddies/agents.json"),
+        r#"{
+  "profiles": [
+    {
+      "id": "impl-1",
+      "name": "Implementer",
+      "description": "Builds code changes",
+      "role": "implement",
+      "default_model_profile": "openai-fast",
+      "allowed_tools": ["Read", "Edit"],
+      "max_turns": 4
+    }
+  ]
+}"#,
+    )
+    .expect("write registry");
+    let app_state = app_state_with_session_root(&root);
+
+    let result = router
+        .route(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/swarm teammates"),
+            &app_state,
+        )
+        .await
+        .expect("swarm route should succeed");
+
+    let RouteExecution::CommandResult(CommandResult::Message(text)) = result else {
+        panic!("expected message result, got {result:?}");
+    };
+    assert!(text.contains("Swarm teammates"), "got: {text}");
+    assert!(text.contains("impl-1 (Implementer)"), "got: {text}");
+    assert!(text.contains("role: implement"), "got: {text}");
+    assert!(
+        text.contains("default_model_profile: openai-fast"),
+        "got: {text}"
+    );
+    assert!(text.contains("allowed_tools: Read, Edit"), "got: {text}");
+    assert!(text.contains("max_turns: 4"), "got: {text}");
+}
+
+#[tokio::test]
+async fn swarm_list_aliases_teammates() {
+    let registry = Arc::new(CommandRegistry::new().register(Arc::new(SwarmCommand)));
+    let router = CommandRouter::new(registry, Box::new(DefaultSurfaceAuthorizer::default()));
+    let root = unique_temp_path("rust-agent-router-swarm-list-alias");
+    fs::create_dir_all(root.join(".claude/buddies")).expect("create buddies dir");
+    fs::write(
+        root.join(".claude/buddies/agents.json"),
+        r#"{
+  "profiles": [
+    {
+      "id": "verify-1",
+      "name": "Verifier",
+      "description": "Checks results",
+      "role": "verify",
+      "default_model_profile": null,
+      "allowed_tools": [],
+      "max_turns": 2
+    }
+  ]
+}"#,
+    )
+    .expect("write registry");
+    let app_state = app_state_with_session_root(&root);
+
+    let teammates_result = router
+        .route(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/swarm teammates"),
+            &app_state,
+        )
+        .await
+        .expect("teammates route should succeed");
+    let list_result = router
+        .route(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/swarm list"),
+            &app_state,
+        )
+        .await
+        .expect("list route should succeed");
+
+    let RouteExecution::CommandResult(CommandResult::Message(teammates_text)) = teammates_result
+    else {
+        panic!("expected teammates message result");
+    };
+    let RouteExecution::CommandResult(CommandResult::Message(list_text)) = list_result else {
+        panic!("expected list message result");
+    };
+    assert_eq!(teammates_text, list_text);
+}
+
+#[tokio::test]
+async fn swarm_teammates_invalid_registry_returns_command_error() {
+    let registry = Arc::new(CommandRegistry::new().register(Arc::new(SwarmCommand)));
+    let router = CommandRouter::new(registry, Box::new(DefaultSurfaceAuthorizer::default()));
+    let root = unique_temp_path("rust-agent-router-swarm-teammates-invalid");
+    fs::create_dir_all(root.join(".claude/buddies")).expect("create buddies dir");
+    fs::write(
+        root.join(".claude/buddies/agents.json"),
+        r#"{
+  "profiles": [
+    {
+      "id": "dup",
+      "name": "One",
+      "description": "First",
+      "role": "implement",
+      "default_model_profile": null,
+      "allowed_tools": [],
+      "max_turns": 1
+    },
+    {
+      "id": "dup",
+      "name": "Two",
+      "description": "Second",
+      "role": "verify",
+      "default_model_profile": null,
+      "allowed_tools": [],
+      "max_turns": 1
+    }
+  ]
+}"#,
+    )
+    .expect("write invalid registry");
+    let app_state = app_state_with_session_root(&root);
+
+    let error = router
+        .route(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/swarm teammates"),
+            &app_state,
+        )
+        .await
+        .expect_err("invalid registry should return error");
+
+    assert!(
+        error
+            .to_string()
+            .contains("invalid_configuration: invalid agents.json")
+    );
+    assert!(error.to_string().contains("duplicate teammate id 'dup'"));
 }
