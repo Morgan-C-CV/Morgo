@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::PathBuf;
 
+use base64::Engine as _;
 use rust_agent::core::attachment::{AttachmentError, load_attachment};
 use rust_agent::core::message::ContentBlock;
 

@@ -131,6 +131,7 @@ async fn plugin_runtime_exposes_command_hook_tool_and_diagnostics() {
         trace_startup: false,
         show_tools: false,
         tui: false,
+        attachments: Vec::new(),
         surface: "cli".into(),
     })
     .with_session_store(session_store)

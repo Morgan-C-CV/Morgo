@@ -1,8 +1,8 @@
 use std::path::Path;
 
 use base64::Engine as _;
-use image::imageops::FilterType;
 use image::ImageReader;
+use image::imageops::FilterType;
 
 use crate::core::message::ContentBlock;
 
@@ -34,13 +34,10 @@ pub fn load_attachment(path: &str) -> Result<ContentBlock, AttachmentError> {
         return Err(AttachmentError::NotFound(path.to_string()));
     }
 
-    let raw = std::fs::read(p)
-        .map_err(|e| AttachmentError::ReadError(format!("{path}: {e}")))?;
+    let raw = std::fs::read(p).map_err(|e| AttachmentError::ReadError(format!("{path}: {e}")))?;
 
     let kind = infer::get(&raw);
-    let mime_type = kind
-        .map(|k| k.mime_type())
-        .unwrap_or("");
+    let mime_type = kind.map(|k| k.mime_type()).unwrap_or("");
 
     if !SUPPORTED_MIME.contains(&mime_type) {
         return Err(AttachmentError::UnsupportedType(format!(
@@ -113,18 +110,24 @@ fn encode_resized(
             .write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
             .map_err(|e| AttachmentError::DecodeFailed(format!("{path}: encode png: {e}")))?,
         "image/jpeg" => resized
-            .write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Jpeg)
+            .write_to(
+                &mut std::io::Cursor::new(&mut buf),
+                image::ImageFormat::Jpeg,
+            )
             .map_err(|e| AttachmentError::DecodeFailed(format!("{path}: encode jpeg: {e}")))?,
         "image/gif" => resized
             .write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Gif)
             .map_err(|e| AttachmentError::DecodeFailed(format!("{path}: encode gif: {e}")))?,
         "image/webp" => resized
-            .write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::WebP)
+            .write_to(
+                &mut std::io::Cursor::new(&mut buf),
+                image::ImageFormat::WebP,
+            )
             .map_err(|e| AttachmentError::DecodeFailed(format!("{path}: encode webp: {e}")))?,
         _ => {
             return Err(AttachmentError::UnsupportedType(format!(
                 "{path}: {mime_type}"
-            )))
+            )));
         }
     }
     Ok(buf)

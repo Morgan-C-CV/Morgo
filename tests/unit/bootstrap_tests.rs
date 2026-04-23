@@ -48,6 +48,7 @@ fn runtime_for_surface(surface: &str, interactive: bool, init_only: bool) -> Run
         trace_startup: false,
         show_tools: false,
         tui: false,
+        attachments: Vec::new(),
         surface: surface.into(),
     })
     .with_provider_config(test_model_provider_config())
@@ -610,6 +611,7 @@ api_key_env = "OPENAI_API_KEY"
         trace_startup: false,
         show_tools: false,
         tui: false,
+        attachments: Vec::new(),
         surface: "cli".into(),
     });
     let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::InitOnly, false);
@@ -661,6 +663,7 @@ fn bootstrap_models_toml_missing_file_falls_back_to_existing_bootstrap_defaults(
         trace_startup: false,
         show_tools: false,
         tui: false,
+        attachments: Vec::new(),
         surface: "cli".into(),
     });
     let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::InitOnly, false);
@@ -722,6 +725,7 @@ api_key_env = "OPENAI_API_KEY"
         trace_startup: false,
         show_tools: false,
         tui: false,
+        attachments: Vec::new(),
         surface: "cli".into(),
     });
     let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::InitOnly, false);
@@ -779,6 +783,7 @@ api_key_env = "OPENAI_API_KEY"
         trace_startup: false,
         show_tools: false,
         tui: false,
+        attachments: Vec::new(),
         surface: "cli".into(),
     });
     let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::InitOnly, false);
@@ -932,6 +937,7 @@ api_key_env = "OPENAI_API_KEY"
         trace_startup: false,
         show_tools: false,
         tui: false,
+        attachments: Vec::new(),
         surface: "cli".into(),
     });
     let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::InitOnly, false);
@@ -980,6 +986,7 @@ fn bootstrap_infers_openai_family_provider_contract_from_env() {
         trace_startup: false,
         show_tools: false,
         tui: false,
+        attachments: Vec::new(),
         surface: "cli".into(),
     });
     let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::InitOnly, false);
@@ -1043,6 +1050,7 @@ auth_strategy = "none"
         trace_startup: false,
         show_tools: false,
         tui: false,
+        attachments: Vec::new(),
         surface: "cli".into(),
     });
     let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::InitOnly, false);
@@ -1079,6 +1087,7 @@ fn bootstrap_rejects_unknown_provider_without_explicit_contract() {
         trace_startup: false,
         show_tools: false,
         tui: false,
+        attachments: Vec::new(),
         surface: "cli".into(),
     });
     let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::InitOnly, false);
@@ -1119,6 +1128,7 @@ fn bootstrap_uses_default_chat_completions_path_when_env_unset() {
         trace_startup: false,
         show_tools: false,
         tui: false,
+        attachments: Vec::new(),
         surface: "cli".into(),
     });
     let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::InitOnly, false);
@@ -1170,6 +1180,7 @@ fn bootstrap_accepts_custom_chat_completions_path_for_custom_provider() {
         trace_startup: false,
         show_tools: false,
         tui: false,
+        attachments: Vec::new(),
         surface: "cli".into(),
     });
     let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::InitOnly, false);
@@ -1222,6 +1233,7 @@ fn bootstrap_rejects_invalid_chat_completions_path_env() {
         trace_startup: false,
         show_tools: false,
         tui: false,
+        attachments: Vec::new(),
         surface: "cli".into(),
     });
     let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::InitOnly, false);
@@ -1263,6 +1275,7 @@ fn bootstrap_provider_alias_matrix(
         trace_startup: false,
         show_tools: false,
         tui: false,
+        attachments: Vec::new(),
         surface: "cli".into(),
     });
     let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::InitOnly, false);
@@ -1861,6 +1874,7 @@ fn augment_prompt_depends_on_input_state_without_mutating_store() {
         trace_startup: false,
         show_tools: false,
         tui: false,
+        attachments: Vec::new(),
         surface: "cli".into(),
     })
     .with_provider_config(test_model_provider_config());
@@ -1999,6 +2013,7 @@ fn gate_user_access_matches_cli_remote_and_telegram_expectations() {
         trace_startup: false,
         show_tools: false,
         tui: false,
+        attachments: Vec::new(),
         surface: "cli".into(),
     })
     .with_provider_config(test_model_provider_config());
@@ -2510,6 +2525,7 @@ fn finalize_runtime_state_is_single_writeback_entrypoint() {
         trace_startup: false,
         show_tools: false,
         tui: false,
+        attachments: Vec::new(),
         surface: "cli".into(),
     })
     .with_provider_config(test_model_provider_config());
@@ -2646,6 +2662,7 @@ async fn runtime_continue_session_uses_restored_snapshot() {
         trace_startup: false,
         show_tools: false,
         tui: false,
+        attachments: Vec::new(),
         surface: "cli".into(),
     })
     .with_provider_config(test_model_provider_config())
@@ -2678,6 +2695,7 @@ async fn runtime_resume_prefers_restored_surface_and_mode() {
         trace_startup: false,
         show_tools: false,
         tui: false,
+        attachments: Vec::new(),
         surface: "cli".into(),
     })
     .with_provider_config(test_model_provider_config())
@@ -2700,6 +2718,7 @@ fn initialize_runtime_tracks_surface_mode_visibility_matrix() {
         trace_startup: false,
         show_tools: false,
         tui: false,
+        attachments: Vec::new(),
         surface: "cli".into(),
     })
     .with_provider_config(test_model_provider_config());
@@ -2792,6 +2811,7 @@ async fn runtime_resume_keeps_restored_surface_visibility_contract() {
         trace_startup: false,
         show_tools: false,
         tui: false,
+        attachments: Vec::new(),
         surface: "cli".into(),
     })
     .with_provider_config(test_model_provider_config())
@@ -2881,6 +2901,7 @@ async fn runtime_restores_persisted_task_list_for_resumed_session() {
         trace_startup: false,
         show_tools: false,
         tui: false,
+        attachments: Vec::new(),
         surface: "cli".into(),
     })
     .with_provider_config(test_model_provider_config())
@@ -2943,6 +2964,7 @@ async fn runtime_continue_restores_from_file_backed_store_across_instances() {
         trace_startup: false,
         show_tools: false,
         tui: false,
+        attachments: Vec::new(),
         surface: "cli".into(),
     })
     .with_provider_config(test_model_provider_config())
@@ -2969,6 +2991,7 @@ async fn runtime_initializes_fresh_session_record_in_store() {
         trace_startup: false,
         show_tools: false,
         tui: false,
+        attachments: Vec::new(),
         surface: "cli".into(),
     })
     .with_provider_config(test_model_provider_config())

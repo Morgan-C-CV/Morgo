@@ -548,8 +548,7 @@ impl RuntimeBootstrap {
                     prompt.clone(),
                 )
                 .with_attachments(self.cli.attachments.clone());
-                let output =
-                    handle_normalized_input(&router, &engine, &app_state, input).await?;
+                let output = handle_normalized_input(&router, &engine, &app_state, input).await?;
                 self.print_cli_turn_output(&output);
             }
             return Ok(());

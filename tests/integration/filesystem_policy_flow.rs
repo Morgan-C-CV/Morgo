@@ -109,6 +109,8 @@ async fn bootstrap_env_policy_is_attached_and_enforced_by_file_tools() {
         trace_startup: false,
         show_tools: false,
         tui: false,
+
+        attachments: vec![],
         surface: "cli".into(),
     })
     .with_provider_config(test_model_provider_config());
