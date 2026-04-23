@@ -27,6 +27,7 @@ use rust_agent::service::api::retry::RetryPolicy;
 use rust_agent::state::app_state::{AppState, RuntimeRole};
 use rust_agent::state::permission_context::{PermissionMode, ToolPermissionContext};
 use rust_agent::task::manager::TaskManager;
+use rust_agent::tool::definition::{ToolCall, ToolResult};
 use rust_agent::tool::registry::ToolRegistry;
 use tokio::sync::RwLock;
 
@@ -259,5 +260,65 @@ async fn plugin_runtime_exposes_command_hook_tool_and_diagnostics() {
     );
 
     std::env::set_current_dir(previous_cwd).expect("should restore cwd");
+    fs::remove_dir_all(root).expect("temp plugin root should be removed");
+}
+
+#[tokio::test]
+async fn wasm_plugin_tool_flows_to_placeholder_without_vm_execution() {
+    let root = unique_temp_path("rust-agent-plugin-runtime-placeholder-flow");
+    let plugin_dir = root.join(".claude").join("plugins").join("demo");
+    fs::create_dir_all(plugin_dir.join("dist")).expect("plugin dir should exist");
+    fs::write(plugin_dir.join("dist").join("plugin.wasm"), "wasm")
+        .expect("artifact should be written");
+    fs::write(
+        plugin_dir.join("plugin.json"),
+        r#"{
+  "name": "demo-plugin",
+  "version": "0.1.0",
+  "description": "Demo plugin",
+  "capabilities": ["tools"],
+  "runtime": {
+    "kind": "wasm",
+    "artifact": "dist/plugin.wasm",
+    "timeout_ms": 1000,
+    "output_cap_bytes": 4096
+  },
+  "tools": [
+    {
+      "name": "demo_tool",
+      "description": "Demo plugin tool",
+      "prompt": "ignored by placeholder",
+      "read_only": true,
+      "search_hint": "plugin demo tool"
+    }
+  ]
+}"#,
+    )
+    .expect("plugin manifest should be written");
+
+    let plugin_load_result = Arc::new(load_plugins(&root));
+    let (tool_registry, diagnostics) =
+        augment_tool_registry_with_plugins(ToolRegistry::new(), plugin_load_result.as_ref());
+    assert!(diagnostics.is_empty());
+    assert!(
+        tool_registry
+            .all_metadata()
+            .iter()
+            .any(|metadata| metadata.name == "plugin.demo-plugin.demo_tool")
+    );
+
+    let result = tool_registry
+        .invoke(
+            &ToolCall::new("plugin.demo-plugin.demo_tool", "{\"query\":\"hello\"}"),
+            &ToolPermissionContext::new(PermissionMode::Default),
+        )
+        .await
+        .expect("placeholder invoke should succeed");
+    let ToolResult::Denied(message) = result else {
+        panic!("expected denied result");
+    };
+    assert!(message.contains("plugin runtime execution is not enabled"));
+    assert!(message.contains("Runtime: wasm"));
+
     fs::remove_dir_all(root).expect("temp plugin root should be removed");
 }

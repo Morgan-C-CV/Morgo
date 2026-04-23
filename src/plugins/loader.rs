@@ -540,6 +540,55 @@ fn validate_runtime_artifact(
     Ok(())
 }
 
+pub fn validate_runtime_artifact_canonicalized(
+    plugin_name: &str,
+    manifest_path: &Path,
+    manifest_dir: &Path,
+    artifact: &str,
+) -> Result<std::path::PathBuf, PluginDiagnostic> {
+    validate_runtime_artifact(plugin_name, manifest_path, manifest_dir, artifact, true)?;
+
+    let canonical_plugin_root = manifest_dir.canonicalize().map_err(|error| {
+        plugin_diagnostic(
+            Some(plugin_name),
+            Some(manifest_path),
+            PluginDiagnosticSeverity::Error,
+            "plugin-runtime-plugin-root-canonicalize-failed",
+            format!(
+                "failed to canonicalize plugin root {}: {error}",
+                manifest_dir.display()
+            ),
+        )
+    })?;
+    let canonical_artifact = manifest_dir
+        .join(artifact)
+        .canonicalize()
+        .map_err(|error| {
+            plugin_diagnostic(
+                Some(plugin_name),
+                Some(manifest_path),
+                PluginDiagnosticSeverity::Error,
+                "plugin-runtime-artifact-canonicalize-failed",
+                format!("failed to canonicalize runtime.artifact {artifact}: {error}"),
+            )
+        })?;
+
+    if !canonical_artifact.starts_with(&canonical_plugin_root) {
+        return Err(plugin_diagnostic(
+            Some(plugin_name),
+            Some(manifest_path),
+            PluginDiagnosticSeverity::Error,
+            "plugin-runtime-artifact-symlink-escape",
+            format!(
+                "runtime.artifact resolves outside plugin root: {}",
+                canonical_artifact.display()
+            ),
+        ));
+    }
+
+    Ok(canonical_artifact)
+}
+
 fn plugin_diagnostic(
     plugin_name: Option<&str>,
     manifest_path: Option<&Path>,

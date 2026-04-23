@@ -18,7 +18,7 @@ use rust_agent::interaction::cli::repl::CliTurnOutput;
 use rust_agent::interaction::dispatcher::NotificationDispatcher;
 use rust_agent::interaction::envelope::NormalizedInput;
 use rust_agent::interaction::telegram::gateway::TelegramGateway;
-use rust_agent::plugins::loader::load_plugins;
+use rust_agent::plugins::loader::{load_plugins, validate_runtime_artifact_canonicalized};
 use rust_agent::plugins::runtime::{
     augment_hook_registry_with_plugins, augment_tool_registry_with_plugins,
 };
@@ -41,6 +41,7 @@ use rust_agent::skills::types::{
 use rust_agent::state::app_state::{AppState, RuntimeRole, WorkerRole};
 use rust_agent::state::permission_context::{PermissionMode, ToolPermissionContext};
 use rust_agent::task::manager::TaskManager;
+use rust_agent::tool::definition::{ToolCall, ToolResult};
 use rust_agent::tool::registry::ToolRegistry;
 use tokio::sync::RwLock;
 
@@ -217,6 +218,22 @@ fn sample_runtime_spec() -> PluginRuntimeSpec {
                 allow_names: vec!["EXAMPLE_TOKEN".into()],
             }),
         }),
+    }
+}
+
+fn sample_runtime_tool(name: &str, manifest_path: PathBuf) -> PluginToolDefinition {
+    PluginToolDefinition {
+        plugin_name: "demo-plugin".into(),
+        name: name.into(),
+        description: "Runtime plugin tool description".into(),
+        aliases: vec![format!("{name}-alias")],
+        prompt: "Ignored by runtime placeholder".into(),
+        search_hint: Some("plugin runtime tool".into()),
+        read_only: true,
+        destructive: false,
+        requires_auth: false,
+        requires_user_interaction: false,
+        manifest_path,
     }
 }
 
@@ -1514,6 +1531,128 @@ fn plugin_runtime_augments_hook_and_tool_registries() {
     assert_eq!(tool_registry.all_metadata().len(), 1);
     assert!(tool_registry.all_metadata()[0].name.starts_with("plugin."));
     assert!(diagnostics.is_empty());
+}
+
+#[tokio::test]
+async fn wasm_runtime_tool_registers_as_placeholder_and_returns_not_enabled() {
+    let root = unique_temp_path("rust-agent-runtime-placeholder");
+    let plugin_dir = root.join(".claude").join("plugins").join("demo");
+    let manifest_path = plugin_dir.join("plugin.json");
+    fs::create_dir_all(plugin_dir.join("dist")).expect("plugin dir should exist");
+    fs::write(plugin_dir.join("dist").join("plugin.wasm"), "wasm")
+        .expect("artifact should be written");
+
+    let load_result = PluginLoadResult {
+        root: root.join(".claude").join("plugins"),
+        source: PluginConfigSource::Directory,
+        plugins: vec![PluginDefinition {
+            name: "demo-plugin".into(),
+            version: Some("0.1.0".into()),
+            description: "demo".into(),
+            manifest_path: manifest_path.clone(),
+            capabilities: vec![PluginCapability::Tools],
+            runtime: Some(sample_runtime_spec()),
+            diagnostics_metadata: None,
+            commands: vec![],
+            tools: vec![sample_runtime_tool("runtime-tool", manifest_path.clone())],
+            hooks: vec![],
+            governance: PluginGovernanceState::default(),
+            lifecycle_state: PluginLifecycleState::Enabled,
+            apply_status: PluginApplyStatus::Applied,
+            activation: PluginActivationSummary {
+                commands: 0,
+                tools: 1,
+                hooks: 0,
+            },
+        }],
+        diagnostics: vec![],
+        orphaned_governance_entries: vec![],
+    };
+
+    let (registry, diagnostics) =
+        augment_tool_registry_with_plugins(ToolRegistry::new(), &load_result);
+    assert!(diagnostics.is_empty());
+    let metadata = registry
+        .all_metadata()
+        .into_iter()
+        .find(|metadata| metadata.name == "plugin.demo-plugin.runtime-tool")
+        .expect("placeholder tool metadata should exist");
+    assert_eq!(metadata.name, "plugin.demo-plugin.runtime-tool");
+
+    let result = registry
+        .invoke(
+            &ToolCall::new("plugin.demo-plugin.runtime-tool", "{\"input\":\"x\"}"),
+            &ToolPermissionContext::new(PermissionMode::Default),
+        )
+        .await
+        .expect("placeholder invoke should succeed");
+    let ToolResult::Denied(message) = result else {
+        panic!("expected denied result");
+    };
+    assert!(message.contains("plugin runtime execution is not enabled"));
+    assert!(message.contains("Plugin: demo-plugin"));
+    assert!(message.contains("Tool: runtime-tool"));
+    assert!(message.contains("Runtime: wasm"));
+    assert!(message.contains("Capabilities: filesystem(read_roots=[docs], write_roots=[]); network(allow_hosts=[api.example.com]); env(allow_names=[EXAMPLE_TOKEN])"));
+
+    fs::remove_dir_all(root).expect("runtime placeholder temp dir should be cleaned up");
+}
+
+#[test]
+fn canonical_runtime_artifact_inside_root_is_accepted() {
+    let root = unique_temp_path("rust-agent-canonical-runtime-artifact");
+    let plugin_dir = root.join(".claude").join("plugins").join("demo");
+    let manifest_path = plugin_dir.join("plugin.json");
+    let artifact_path = plugin_dir.join("dist").join("plugin.wasm");
+    fs::create_dir_all(
+        artifact_path
+            .parent()
+            .expect("artifact parent should exist"),
+    )
+    .expect("plugin dir should exist");
+    fs::write(&manifest_path, "{}").expect("manifest should be written");
+    fs::write(&artifact_path, "wasm").expect("artifact should be written");
+
+    let canonical = validate_runtime_artifact_canonicalized(
+        "demo-plugin",
+        &manifest_path,
+        &plugin_dir,
+        "dist/plugin.wasm",
+    )
+    .expect("artifact inside root should be accepted");
+    assert!(canonical.ends_with("plugin.wasm"));
+
+    fs::remove_dir_all(root).expect("canonical artifact temp dir should be cleaned up");
+}
+
+#[cfg(unix)]
+#[test]
+fn symlink_escape_runtime_artifact_is_rejected() {
+    use std::os::unix::fs::symlink;
+
+    let root = unique_temp_path("rust-agent-runtime-symlink-escape");
+    let plugin_dir = root.join(".claude").join("plugins").join("demo");
+    let manifest_path = plugin_dir.join("plugin.json");
+    let outside_dir = root.join("outside");
+    let outside_artifact = outside_dir.join("escape.wasm");
+    let symlink_path = plugin_dir.join("dist").join("plugin.wasm");
+    fs::create_dir_all(symlink_path.parent().expect("artifact parent should exist"))
+        .expect("plugin dir should exist");
+    fs::create_dir_all(&outside_dir).expect("outside dir should exist");
+    fs::write(&manifest_path, "{}").expect("manifest should be written");
+    fs::write(&outside_artifact, "wasm").expect("outside artifact should be written");
+    symlink(&outside_artifact, &symlink_path).expect("symlink should be created");
+
+    let error = validate_runtime_artifact_canonicalized(
+        "demo-plugin",
+        &manifest_path,
+        &plugin_dir,
+        "dist/plugin.wasm",
+    )
+    .expect_err("symlink escape should be rejected");
+    assert_eq!(error.code, "plugin-runtime-artifact-symlink-escape");
+
+    fs::remove_dir_all(root).expect("symlink escape temp dir should be cleaned up");
 }
 
 #[tokio::test]
