@@ -4390,3 +4390,95 @@ async fn computer_command_is_cli_only_and_sensitive() {
     assert_eq!(meta.availability, CommandAvailability::CliOnly);
     assert!(meta.is_sensitive);
 }
+
+#[tokio::test]
+async fn computer_click_routes_on_cli() {
+    let router = computer_router();
+    let input = cli_input("/computer click 100 200");
+    let decision = router.decide(&input).await;
+    assert!(
+        matches!(decision, RouteDecision::ExecuteCommand(ref c) if c.name == "computer"),
+        "expected ExecuteCommand(computer), got {decision:?}"
+    );
+}
+
+#[tokio::test]
+async fn computer_move_routes_on_cli() {
+    let router = computer_router();
+    let input = cli_input("/computer move 300 400");
+    let decision = router.decide(&input).await;
+    assert!(
+        matches!(decision, RouteDecision::ExecuteCommand(ref c) if c.name == "computer"),
+        "expected ExecuteCommand(computer), got {decision:?}"
+    );
+}
+
+#[tokio::test]
+async fn computer_click_denied_on_remote() {
+    let router = computer_router();
+    let input = remote_input("/computer click 100 200");
+    let decision = router.decide(&input).await;
+    assert!(
+        matches!(decision, RouteDecision::Deny(_)),
+        "expected Deny on remote surface, got {decision:?}"
+    );
+}
+
+#[tokio::test]
+async fn computer_click_denied_on_telegram() {
+    let router = computer_router();
+    let input = telegram_input("/computer click 100 200");
+    let decision = router.decide(&input).await;
+    assert!(
+        matches!(decision, RouteDecision::Deny(_)),
+        "expected Deny on telegram surface, got {decision:?}"
+    );
+}
+
+#[tokio::test]
+async fn computer_click_missing_args_returns_usage() {
+    let root = unique_temp_path("computer-click-usage");
+    std::fs::create_dir_all(&root).unwrap();
+    let app_state = app_state_with_session_root(&root);
+    let registry = Arc::new(CommandRegistry::new().register(Arc::new(ComputerCommand)));
+    let router = CommandRouter::new(registry, Box::new(AllowAuthorizer));
+    let input = cli_input("/computer click");
+    let output = router.route(&input, &app_state).await.unwrap();
+    if let RouteExecution::CommandResult(CommandResult::Message(msg)) = output {
+        assert!(msg.contains("usage:"), "expected usage string, got {msg}");
+    } else {
+        panic!("expected Message result, got {output:?}");
+    }
+}
+
+#[tokio::test]
+async fn computer_click_bad_coords_returns_usage() {
+    let root = unique_temp_path("computer-click-bad-coords");
+    std::fs::create_dir_all(&root).unwrap();
+    let app_state = app_state_with_session_root(&root);
+    let registry = Arc::new(CommandRegistry::new().register(Arc::new(ComputerCommand)));
+    let router = CommandRouter::new(registry, Box::new(AllowAuthorizer));
+    let input = cli_input("/computer click abc 200");
+    let output = router.route(&input, &app_state).await.unwrap();
+    if let RouteExecution::CommandResult(CommandResult::Message(msg)) = output {
+        assert!(msg.contains("usage:"), "expected usage string, got {msg}");
+    } else {
+        panic!("expected Message result, got {output:?}");
+    }
+}
+
+#[tokio::test]
+async fn computer_move_missing_args_returns_usage() {
+    let root = unique_temp_path("computer-move-usage");
+    std::fs::create_dir_all(&root).unwrap();
+    let app_state = app_state_with_session_root(&root);
+    let registry = Arc::new(CommandRegistry::new().register(Arc::new(ComputerCommand)));
+    let router = CommandRouter::new(registry, Box::new(AllowAuthorizer));
+    let input = cli_input("/computer move");
+    let output = router.route(&input, &app_state).await.unwrap();
+    if let RouteExecution::CommandResult(CommandResult::Message(msg)) = output {
+        assert!(msg.contains("usage:"), "expected usage string, got {msg}");
+    } else {
+        panic!("expected Message result, got {output:?}");
+    }
+}
