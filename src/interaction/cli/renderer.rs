@@ -1,3 +1,4 @@
+use crate::core::output::{OutputBlock, blocks_to_plain_text};
 use crate::interaction::cli::repl::CliTurnOutput;
 use crate::interaction::view::{SurfaceItem, SurfaceView, TaskView, build_surface_view};
 
@@ -44,6 +45,10 @@ pub enum PanelKind {
 
 pub fn render_output(output: &str) -> String {
     output.to_string()
+}
+
+pub fn render_output_blocks(blocks: &[OutputBlock]) -> String {
+    blocks_to_plain_text(blocks)
 }
 
 pub fn render_turn_output(turn: &CliTurnOutput) -> String {

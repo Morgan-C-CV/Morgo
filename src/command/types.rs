@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 
+use crate::core::output::OutputBlock;
 use crate::interaction::envelope::NormalizedInput;
 use crate::state::app_state::AppState;
 
@@ -90,11 +91,24 @@ pub enum SystemTrapAction {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommandResult {
     Message(String),
+    Blocks(Vec<OutputBlock>),
     ContinueToQuery,
     Prompt(String),
     Denied(String),
     UpdateConfig { key: String, value: String },
     SystemTrap(SystemTrapAction),
+}
+
+impl CommandResult {
+    pub fn to_plain_text(&self) -> Option<String> {
+        match self {
+            CommandResult::Message(s) => Some(s.clone()),
+            CommandResult::Blocks(blocks) => {
+                Some(crate::core::output::blocks_to_plain_text(blocks))
+            }
+            _ => None,
+        }
+    }
 }
 
 #[async_trait]

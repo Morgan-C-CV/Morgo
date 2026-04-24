@@ -3,6 +3,7 @@ use async_trait::async_trait;
 use crate::command::types::{
     Command, CommandAvailability, CommandMetadata, CommandResult, CommandSource, CommandType,
 };
+use crate::core::output::OutputBlock;
 use crate::interaction::envelope::NormalizedInput;
 use crate::state::app_state::AppState;
 
@@ -120,151 +121,178 @@ impl Command for StatusCommand {
             .filter(|command| command.disable_model_invocation)
             .count();
 
-        let mut lines = vec!["Status".to_string(), String::new(), "Runtime:".to_string()];
-        lines.push(format!("- session_id: {}", app_state.active_session_id));
-        lines.push(format!("- surface: {:?}", app_state.surface));
-        lines.push(format!("- runtime_role: {:?}", app_state.runtime_role));
-        lines.push(format!(
-            "- worker_role: {}",
-            app_state
-                .worker_role
-                .map(|role| role.as_str())
-                .unwrap_or("none")
-        ));
-        lines.push(format!(
-            "- cost: {}",
-            app_state.cost_tracker.format_report()
-        ));
-        lines.push(format!(
-            "- active_model_profile: {}",
-            app_state
-                .active_model_profile_name
-                .as_deref()
-                .unwrap_or("default")
-        ));
-        lines.push(format!(
-            "- active_model_source: {}",
-            app_state.active_model_profile_source.as_str()
-        ));
-        lines.push(format!(
-            "- active_model_summary: provider_id={}, protocol={}, compatibility_profile={}, base_url_host={}, model={}, auth_status={}",
-            app_state.active_model_provider_summary.provider_id,
-            app_state.active_model_provider_summary.protocol,
-            app_state.active_model_provider_summary.compatibility_profile,
-            app_state.active_model_provider_summary.base_url_host,
-            app_state.active_model_provider_summary.model,
-            app_state.active_model_provider_summary.auth_status,
-        ));
+        // Runtime section
+        let runtime_items = vec![
+            OutputBlock::kv("session_id", &app_state.active_session_id),
+            OutputBlock::kv("surface", format!("{:?}", app_state.surface)),
+            OutputBlock::kv("runtime_role", format!("{:?}", app_state.runtime_role)),
+            OutputBlock::kv(
+                "worker_role",
+                app_state
+                    .worker_role
+                    .map(|role| role.as_str())
+                    .unwrap_or("none"),
+            ),
+            OutputBlock::kv("cost", app_state.cost_tracker.format_report()),
+            OutputBlock::kv(
+                "active_model_profile",
+                app_state
+                    .active_model_profile_name
+                    .as_deref()
+                    .unwrap_or("default"),
+            ),
+            OutputBlock::kv(
+                "active_model_source",
+                app_state.active_model_profile_source.as_str(),
+            ),
+            OutputBlock::kv(
+                "active_model_summary",
+                format!(
+                    "provider_id={}, protocol={}, compatibility_profile={}, base_url_host={}, model={}, auth_status={}",
+                    app_state.active_model_provider_summary.provider_id,
+                    app_state.active_model_provider_summary.protocol,
+                    app_state
+                        .active_model_provider_summary
+                        .compatibility_profile,
+                    app_state.active_model_provider_summary.base_url_host,
+                    app_state.active_model_provider_summary.model,
+                    app_state.active_model_provider_summary.auth_status,
+                ),
+            ),
+        ];
 
+        // Observability section
         let observability = app_state.service_observability_tracker.snapshot();
-        lines.push(String::new());
-        lines.push("Observability:".to_string());
-        lines.push(format!(
-            "- retryable_count: {}",
-            observability.retryable_count
-        ));
-        lines.push(format!(
-            "- terminal_count: {}",
-            observability.terminal_count
-        ));
+        let mut obs_items = vec![
+            OutputBlock::kv("retryable_count", observability.retryable_count.to_string()),
+            OutputBlock::kv("terminal_count", observability.terminal_count.to_string()),
+        ];
         if observability.by_failure_code.is_empty() {
-            lines.push("- by_failure_code: none".to_string());
+            obs_items.push(OutputBlock::kv("by_failure_code", "none"));
         } else {
-            lines.push("- by_failure_code:".to_string());
-            for (code, count) in observability.by_failure_code {
-                lines.push(format!("  - {}: {}", code, count));
-            }
+            obs_items.push(OutputBlock::section(
+                "by_failure_code",
+                observability
+                    .by_failure_code
+                    .iter()
+                    .map(|(code, count)| OutputBlock::kv(code.as_str(), count.to_string()))
+                    .collect(),
+            ));
         }
         if observability.by_provider_kind.is_empty() {
-            lines.push("- by_provider_kind: none".to_string());
+            obs_items.push(OutputBlock::kv("by_provider_kind", "none"));
         } else {
-            lines.push("- by_provider_kind:".to_string());
-            for (provider_kind, count) in observability.by_provider_kind {
-                lines.push(format!("  - {}: {}", provider_kind, count));
-            }
+            obs_items.push(OutputBlock::section(
+                "by_provider_kind",
+                observability
+                    .by_provider_kind
+                    .iter()
+                    .map(|(kind, count)| OutputBlock::kv(kind.as_str(), count.to_string()))
+                    .collect(),
+            ));
         }
         if observability.compact_recovery_hits.is_empty() {
-            lines.push("- compact_recovery_hits: none".to_string());
+            obs_items.push(OutputBlock::kv("compact_recovery_hits", "none"));
         } else {
-            lines.push("- compact_recovery_hits:".to_string());
-            for (kind, count) in observability.compact_recovery_hits {
-                lines.push(format!("  - {}: {}", kind, count));
-            }
+            obs_items.push(OutputBlock::section(
+                "compact_recovery_hits",
+                observability
+                    .compact_recovery_hits
+                    .iter()
+                    .map(|(kind, count)| OutputBlock::kv(kind.as_str(), count.to_string()))
+                    .collect(),
+            ));
         }
-        lines.push(
-            "- note: buckets count normalized runtime failure signals, not unique error instances"
-                .to_string(),
-        );
+        obs_items.push(OutputBlock::kv(
+            "note",
+            "buckets count normalized runtime failure signals, not unique error instances",
+        ));
 
-        lines.push(String::new());
-        lines.push("Commands:".to_string());
-        lines.push(format!("- total: {}", registry_total));
+        // Commands section
+        let mut cmd_items = vec![OutputBlock::kv("total", registry_total.to_string())];
         if command_source_counts.is_empty() {
-            lines.push("- by_source: none".to_string());
+            cmd_items.push(OutputBlock::kv("by_source", "none"));
         } else {
-            for (source, count) in command_source_counts {
-                lines.push(format!("- source {}: {}", source.as_str(), count));
+            for (source, count) in &command_source_counts {
+                cmd_items.push(OutputBlock::kv(
+                    format!("source {}", source.as_str()),
+                    count.to_string(),
+                ));
             }
         }
         if command_type_counts.is_empty() {
-            lines.push("- by_type: none".to_string());
+            cmd_items.push(OutputBlock::kv("by_type", "none"));
         } else {
-            for (command_type, count) in command_type_counts {
-                lines.push(format!("- type {}: {}", command_type.as_str(), count));
+            for (command_type, count) in &command_type_counts {
+                cmd_items.push(OutputBlock::kv(
+                    format!("type {}", command_type.as_str()),
+                    count.to_string(),
+                ));
             }
         }
-        lines.push(format!(
-            "- contract: prompt={}, immediate={}, sensitive={}, model_invocation_disabled={}",
-            prompt_command_count,
-            immediate_command_count,
-            sensitive_command_count,
-            model_invocation_disabled_count
+        cmd_items.push(OutputBlock::kv(
+            "contract",
+            format!(
+                "prompt={}, immediate={}, sensitive={}, model_invocation_disabled={}",
+                prompt_command_count,
+                immediate_command_count,
+                sensitive_command_count,
+                model_invocation_disabled_count
+            ),
         ));
 
-        lines.push(String::new());
-        lines.push("Orchestration:".to_string());
-        lines.push(format!(
-            "- pending_orchestration: {}",
-            if pending_orchestration { "yes" } else { "no" }
-        ));
-        lines.push(format!(
-            "- tasks: total={}, running={}, completed={}, failed={}, killed={}",
-            tasks.len(),
-            running_count,
-            completed_count,
-            failed_count,
-            killed_count
-        ));
-        lines.push(format!(
-            "- pending_verification: {}",
-            pending_verification_count
-        ));
-        lines.push(format!("- orchestration_groups: {}", group_count));
+        // Orchestration section
+        let orch_items = vec![
+            OutputBlock::kv(
+                "pending_orchestration",
+                if pending_orchestration { "yes" } else { "no" },
+            ),
+            OutputBlock::kv(
+                "tasks",
+                format!(
+                    "total={}, running={}, completed={}, failed={}, killed={}",
+                    tasks.len(),
+                    running_count,
+                    completed_count,
+                    failed_count,
+                    killed_count
+                ),
+            ),
+            OutputBlock::kv(
+                "pending_verification",
+                pending_verification_count.to_string(),
+            ),
+            OutputBlock::kv("orchestration_groups", group_count.to_string()),
+        ];
 
-        lines.push(String::new());
-        lines.push("Integrations:".to_string());
-        lines.push(format!(
-            "- skills_registry: {} (user_invocable={})",
-            if app_state.skill_registry.is_some() {
-                "available"
-            } else {
-                "unavailable"
-            },
-            skill_count
-        ));
+        // Integrations section
+        let mut integ_items = vec![OutputBlock::kv(
+            "skills_registry",
+            format!(
+                "{} (user_invocable={})",
+                if app_state.skill_registry.is_some() {
+                    "available"
+                } else {
+                    "unavailable"
+                },
+                skill_count
+            ),
+        )];
         if let Some(config) = mcp_config {
-            lines.push(format!(
-                "- mcp_runtime: available (source={}, path={}, diagnostics={})",
-                config.source.as_str(),
-                config.path.display(),
-                config.diagnostics.len()
+            integ_items.push(OutputBlock::kv(
+                "mcp_runtime",
+                format!(
+                    "available (source={}, path={}, diagnostics={})",
+                    config.source.as_str(),
+                    config.path.display(),
+                    config.diagnostics.len()
+                ),
             ));
         } else {
-            lines.push("- mcp_runtime: unavailable".to_string());
+            integ_items.push(OutputBlock::kv("mcp_runtime", "unavailable"));
         }
 
-        lines.push(String::new());
-        lines.push("Plugins:".to_string());
+        // Plugins section
         let last_apply_report = if let Some(runtime_plugin_state) =
             app_state.permission_context.runtime_plugin_state.as_ref()
         {
@@ -272,6 +300,7 @@ impl Command for StatusCommand {
         } else {
             None
         };
+        let mut plugin_items: Vec<OutputBlock> = Vec::new();
         if let Some(plugin_load_result) = app_state.plugin_load_result.as_ref() {
             let registered_plugin_commands = app_state
                 .command_registry
@@ -311,132 +340,163 @@ impl Command for StatusCommand {
             let info_count = plugin_load_result.diagnostic_count_for_severity(
                 crate::plugins::types::PluginDiagnosticSeverity::Info,
             );
-            lines.push(format!(
-                "- plugin_discovery: {} (root={})",
-                plugin_load_result.source.as_str(),
-                plugin_load_result.root.display()
+            plugin_items.push(OutputBlock::kv(
+                "plugin_discovery",
+                format!(
+                    "{} (root={})",
+                    plugin_load_result.source.as_str(),
+                    plugin_load_result.root.display()
+                ),
             ));
-            lines.push(format!(
-                "- discovered_plugins: {}",
-                plugin_load_result.plugins.len()
+            plugin_items.push(OutputBlock::kv(
+                "discovered_plugins",
+                plugin_load_result.plugins.len().to_string(),
             ));
-            lines.push(format!(
-                "- orphaned_governance_entries: {}",
-                plugin_load_result.orphaned_governance_entries.len()
+            plugin_items.push(OutputBlock::kv(
+                "orphaned_governance_entries",
+                plugin_load_result
+                    .orphaned_governance_entries
+                    .len()
+                    .to_string(),
             ));
-            lines.push(format!("- enabled_plugins: {}", enabled_plugins));
-            lines.push(format!("- disabled_plugins: {}", disabled_plugins));
-            lines.push(format!("- error_plugins: {}", error_plugins));
-            lines.push(format!(
-                "- discovered_plugin_commands: {}",
-                discovered_plugin_commands
+            plugin_items.push(OutputBlock::kv(
+                "enabled_plugins",
+                enabled_plugins.to_string(),
             ));
-            lines.push(format!(
-                "- discovered_plugin_tools: {}",
-                discovered_plugin_tools
+            plugin_items.push(OutputBlock::kv(
+                "disabled_plugins",
+                disabled_plugins.to_string(),
             ));
-            lines.push(format!(
-                "- discovered_plugin_hooks: {}",
-                discovered_plugin_hooks
+            plugin_items.push(OutputBlock::kv("error_plugins", error_plugins.to_string()));
+            plugin_items.push(OutputBlock::kv(
+                "discovered_plugin_commands",
+                discovered_plugin_commands.to_string(),
             ));
-            lines.push(format!(
-                "- active_plugin_commands: {}",
-                plugin_load_result.active_command_count()
+            plugin_items.push(OutputBlock::kv(
+                "discovered_plugin_tools",
+                discovered_plugin_tools.to_string(),
             ));
-            lines.push(format!(
-                "- active_plugin_tools: {}",
-                plugin_load_result.active_tool_count()
+            plugin_items.push(OutputBlock::kv(
+                "discovered_plugin_hooks",
+                discovered_plugin_hooks.to_string(),
             ));
-            lines.push(format!(
-                "- active_plugin_hooks: {}",
-                plugin_load_result.active_hook_count()
+            plugin_items.push(OutputBlock::kv(
+                "active_plugin_commands",
+                plugin_load_result.active_command_count().to_string(),
             ));
-            lines.push(format!(
-                "- registered_plugin_commands: {}",
-                registered_plugin_commands
+            plugin_items.push(OutputBlock::kv(
+                "active_plugin_tools",
+                plugin_load_result.active_tool_count().to_string(),
             ));
-            lines.push(format!(
-                "- registered_plugin_tools: {}",
-                registered_plugin_tools
+            plugin_items.push(OutputBlock::kv(
+                "active_plugin_hooks",
+                plugin_load_result.active_hook_count().to_string(),
             ));
-            lines.push(format!(
-                "- diagnostics: total={}, info={}, warnings={}, errors={}",
-                plugin_load_result.diagnostics.len(),
-                info_count,
-                warning_count,
-                error_count
+            plugin_items.push(OutputBlock::kv(
+                "registered_plugin_commands",
+                registered_plugin_commands.to_string(),
+            ));
+            plugin_items.push(OutputBlock::kv(
+                "registered_plugin_tools",
+                registered_plugin_tools.to_string(),
+            ));
+            plugin_items.push(OutputBlock::kv(
+                "diagnostics",
+                format!(
+                    "total={}, info={}, warnings={}, errors={}",
+                    plugin_load_result.diagnostics.len(),
+                    info_count,
+                    warning_count,
+                    error_count
+                ),
             ));
             if let Some(report) = last_apply_report.as_ref() {
-                lines.push(format!(
-                    "- runtime_apply: outcome={}, generation={}",
-                    report.outcome.as_str(),
-                    report.generation
+                plugin_items.push(OutputBlock::kv(
+                    "runtime_apply",
+                    format!(
+                        "outcome={}, generation={}",
+                        report.outcome.as_str(),
+                        report.generation
+                    ),
                 ));
-                lines.push(format!("- runtime_apply_summary: {}", report.message));
+                plugin_items.push(OutputBlock::kv("runtime_apply_summary", &report.message));
             }
             if !plugin_load_result.plugins.is_empty() {
-                lines.push("- plugin_inventory:".to_string());
-                for plugin in &plugin_load_result.plugins {
-                    let version = plugin.version.as_deref().unwrap_or("unknown");
-                    let capabilities = if plugin.capabilities.is_empty() {
-                        "none".to_string()
-                    } else {
-                        plugin
-                            .capabilities
-                            .iter()
-                            .map(|capability| capability.as_str())
-                            .collect::<Vec<_>>()
-                            .join(",")
-                    };
-                    let disable_reason = plugin
-                        .governance
-                        .disable_reason
-                        .as_deref()
-                        .unwrap_or("none");
-                    lines.push(format!(
-                        "  - {} v{} — state={}, applied={}, enabled={}, active(commands={}, hooks={}, tools={}), discovered(commands={}, hooks={}, tools={}), capabilities={}, governance_source={}, disable_reason={} (manifest={})",
-                        plugin.name,
-                        version,
-                        plugin.lifecycle_state.as_str(),
-                        plugin.apply_status.as_str(),
-                        if plugin.governance.enabled { "yes" } else { "no" },
-                        plugin.activation.commands,
-                        plugin.activation.hooks,
-                        plugin.activation.tools,
-                        plugin.commands.len(),
-                        plugin.hooks.len(),
-                        plugin.tools.len(),
-                        capabilities,
-                        plugin.governance.source.as_str(),
-                        disable_reason,
-                        plugin.manifest_path.display()
-                    ));
-                }
+                let inventory: Vec<OutputBlock> = plugin_load_result
+                    .plugins
+                    .iter()
+                    .map(|plugin| {
+                        let version = plugin.version.as_deref().unwrap_or("unknown");
+                        let capabilities = if plugin.capabilities.is_empty() {
+                            "none".to_string()
+                        } else {
+                            plugin
+                                .capabilities
+                                .iter()
+                                .map(|capability| capability.as_str())
+                                .collect::<Vec<_>>()
+                                .join(",")
+                        };
+                        let disable_reason =
+                            plugin.governance.disable_reason.as_deref().unwrap_or("none");
+                        OutputBlock::text(format!(
+                            "{} v{} — state={}, applied={}, enabled={}, active(commands={}, hooks={}, tools={}), discovered(commands={}, hooks={}, tools={}), capabilities={}, governance_source={}, disable_reason={} (manifest={})",
+                            plugin.name,
+                            version,
+                            plugin.lifecycle_state.as_str(),
+                            plugin.apply_status.as_str(),
+                            if plugin.governance.enabled { "yes" } else { "no" },
+                            plugin.activation.commands,
+                            plugin.activation.hooks,
+                            plugin.activation.tools,
+                            plugin.commands.len(),
+                            plugin.hooks.len(),
+                            plugin.tools.len(),
+                            capabilities,
+                            plugin.governance.source.as_str(),
+                            disable_reason,
+                            plugin.manifest_path.display()
+                        ))
+                    })
+                    .collect();
+                plugin_items.push(OutputBlock::section("plugin_inventory", inventory));
             }
             if !plugin_load_result.diagnostics.is_empty() {
-                lines.push("- diagnostic_preview:".to_string());
-                for diagnostic in plugin_load_result.diagnostics.iter().take(3) {
-                    lines.push(format!("  - {}", diagnostic.render_line()));
-                }
+                let preview: Vec<OutputBlock> = plugin_load_result
+                    .diagnostics
+                    .iter()
+                    .take(3)
+                    .map(|d| OutputBlock::text(d.render_line()))
+                    .collect();
+                plugin_items.push(OutputBlock::section("diagnostic_preview", preview));
             }
             if !plugin_load_result.orphaned_governance_entries.is_empty() {
-                lines.push("- orphaned_governance_preview:".to_string());
-                for entry in plugin_load_result
+                let preview: Vec<OutputBlock> = plugin_load_result
                     .orphaned_governance_entries
                     .iter()
                     .take(3)
-                {
-                    lines.push(format!("  - {}", entry));
-                }
+                    .map(|entry| OutputBlock::text(entry.to_string()))
+                    .collect();
+                plugin_items.push(OutputBlock::section("orphaned_governance_preview", preview));
             }
         } else {
-            lines.push("- plugin_discovery: unavailable".to_string());
-            lines.push("- discovered_plugins: 0".to_string());
-            lines.push("- discovered_plugin_commands: 0".to_string());
-            lines.push("- registered_plugin_commands: 0".to_string());
-            lines.push("- diagnostics: 0".to_string());
+            plugin_items.push(OutputBlock::kv("plugin_discovery", "unavailable"));
+            plugin_items.push(OutputBlock::kv("discovered_plugins", "0"));
+            plugin_items.push(OutputBlock::kv("discovered_plugin_commands", "0"));
+            plugin_items.push(OutputBlock::kv("registered_plugin_commands", "0"));
+            plugin_items.push(OutputBlock::kv("diagnostics", "0"));
         }
 
-        Ok(CommandResult::Message(lines.join("\n")))
+        let blocks = vec![
+            OutputBlock::text("Status"),
+            OutputBlock::section("Runtime", runtime_items),
+            OutputBlock::section("Observability", obs_items),
+            OutputBlock::section("Commands", cmd_items),
+            OutputBlock::section("Orchestration", orch_items),
+            OutputBlock::section("Integrations", integ_items),
+            OutputBlock::section("Plugins", plugin_items),
+        ];
+
+        Ok(CommandResult::Blocks(blocks))
     }
 }

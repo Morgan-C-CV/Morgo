@@ -28,6 +28,8 @@ mod mcp_runtime_surface_tests;
 mod message_content_block_tests;
 #[path = "unit/notification_tests.rs"]
 mod notification_tests;
+#[path = "unit/output_block_tests.rs"]
+mod output_block_tests;
 #[path = "unit/output_store_tests.rs"]
 mod output_store_tests;
 #[path = "unit/plan_manager_tests.rs"]

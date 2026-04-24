@@ -157,6 +157,14 @@ pub async fn handle_normalized_input(
             CommandResult::Message(message) => {
                 (vec![Message::assistant(message)], Vec::new(), false)
             }
+            CommandResult::Blocks(blocks) => {
+                use crate::core::output::blocks_to_plain_text;
+                (
+                    vec![Message::assistant(blocks_to_plain_text(&blocks))],
+                    Vec::new(),
+                    false,
+                )
+            }
             CommandResult::Prompt(prompt) => (vec![Message::assistant(prompt)], Vec::new(), false),
             CommandResult::ContinueToQuery => {
                 let (messages, events) =
