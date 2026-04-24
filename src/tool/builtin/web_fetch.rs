@@ -21,6 +21,23 @@ fn parse_url_input(call: &ToolCall) -> anyhow::Result<String> {
     Ok(call.input.trim().to_string())
 }
 
+fn build_web_fetch_client() -> reqwest::Client {
+    let mut builder = reqwest::Client::builder();
+    if let Ok(proxy_url) = std::env::var("RUST_AGENT_PROXY_URL") {
+        if !proxy_url.trim().is_empty() {
+            if let Ok(mut proxy) = reqwest::Proxy::all(&proxy_url) {
+                if let Ok(no_proxy) = std::env::var("RUST_AGENT_NO_PROXY") {
+                    if !no_proxy.trim().is_empty() {
+                        proxy = proxy.no_proxy(reqwest::NoProxy::from_string(&no_proxy));
+                    }
+                }
+                builder = builder.proxy(proxy);
+            }
+        }
+    }
+    builder.build().unwrap_or_else(|_| reqwest::Client::new())
+}
+
 pub async fn fetch_text_with<F, Fut>(raw_url: &str, fetcher: F) -> anyhow::Result<String>
 where
     F: FnOnce(Url) -> Fut,
@@ -35,8 +52,11 @@ where
 }
 
 async fn fetch_text(raw_url: &str) -> anyhow::Result<String> {
+    let client = build_web_fetch_client();
     fetch_text_with(raw_url, |url| async move {
-        let response = reqwest::get(url.clone())
+        let response = client
+            .get(url.clone())
+            .send()
             .await
             .map_err(|error| anyhow::anyhow!("failed to fetch {url}: {error}"))?;
         let status = response.status().as_u16();

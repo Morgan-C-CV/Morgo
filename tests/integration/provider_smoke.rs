@@ -136,6 +136,9 @@ async fn smoke_openai_direct() {
             max_backoff_ms: 0,
         },
         pricing: ModelPricing::default(),
+        proxy_url: None,
+        no_proxy: None,
+        ca_bundle_path: None,
     };
 
     run_smoke(config, "smoke_openai_direct").await;
@@ -174,6 +177,9 @@ async fn smoke_gemini_openai_compatible() {
             max_backoff_ms: 0,
         },
         pricing: ModelPricing::default(),
+        proxy_url: None,
+        no_proxy: None,
+        ca_bundle_path: None,
     };
 
     run_smoke(config, "smoke_gemini_openai_compatible").await;

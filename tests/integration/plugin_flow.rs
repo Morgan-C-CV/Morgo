@@ -72,6 +72,9 @@ fn test_model_provider_config() -> ModelProviderConfig {
             max_backoff_ms: 0,
         },
         pricing: ModelPricing::default(),
+        proxy_url: None,
+        no_proxy: None,
+        ca_bundle_path: None,
     }
 }
 

@@ -75,6 +75,9 @@ fn test_model_provider_config() -> ModelProviderConfig {
             max_backoff_ms: 0,
         },
         pricing: ModelPricing::default(),
+        proxy_url: None,
+        no_proxy: None,
+        ca_bundle_path: None,
     }
 }
 
@@ -92,7 +95,7 @@ fn bootstrap_env_lock() -> &'static Mutex<()> {
 }
 
 struct BootstrapEnvGuard {
-    keys: [&'static str; 15],
+    keys: [&'static str; 18],
 }
 
 impl BootstrapEnvGuard {
@@ -113,6 +116,9 @@ impl BootstrapEnvGuard {
             "RUST_AGENT_PROVIDER_RETRY_INITIAL_BACKOFF_MS",
             "RUST_AGENT_PROVIDER_RETRY_MAX_BACKOFF_MS",
             "OPENAI_API_KEY",
+            "RUST_AGENT_PROXY_URL",
+            "RUST_AGENT_NO_PROXY",
+            "RUST_AGENT_CA_BUNDLE",
         ];
         for key in keys {
             remove_env_var(key);
@@ -3708,4 +3714,217 @@ fn teammate_registry_rejects_unknown_field() {
 
     assert!(error.to_string().contains("invalid agents.json"));
     assert!(error.to_string().contains("unknown field"));
+}
+
+// ── T19.3.B proxy config tests ────────────────────────────────────────────────
+
+#[test]
+fn proxy_env_var_is_read_into_config() {
+    let _guard = BootstrapEnvGuard::new();
+    set_env_var("RUST_AGENT_PROVIDER_BASE_URL", "https://api.anthropic.com");
+    set_env_var("RUST_AGENT_PROVIDER_API_KEY", "test-key");
+    set_env_var("RUST_AGENT_PROXY_URL", "http://proxy.corp.example:3128");
+
+    let runtime = RuntimeBootstrap::from_cli(BootstrapCli {
+        print: None,
+        interactive: false,
+        init_only: true,
+        continue_session: false,
+        resume: None,
+        trace_startup: false,
+        show_tools: false,
+        tui: false,
+        attachments: Vec::new(),
+        surface: "cli".into(),
+    });
+    let config = runtime
+        .build_model_provider_config_from_env_for_test()
+        .expect("config should build");
+    assert_eq!(
+        config.proxy_url.as_deref(),
+        Some("http://proxy.corp.example:3128")
+    );
+}
+
+#[test]
+fn no_proxy_env_var_is_read_into_config() {
+    let _guard = BootstrapEnvGuard::new();
+    set_env_var("RUST_AGENT_PROVIDER_BASE_URL", "https://api.anthropic.com");
+    set_env_var("RUST_AGENT_PROVIDER_API_KEY", "test-key");
+    set_env_var("RUST_AGENT_NO_PROXY", "localhost,127.0.0.1");
+
+    let runtime = RuntimeBootstrap::from_cli(BootstrapCli {
+        print: None,
+        interactive: false,
+        init_only: true,
+        continue_session: false,
+        resume: None,
+        trace_startup: false,
+        show_tools: false,
+        tui: false,
+        attachments: Vec::new(),
+        surface: "cli".into(),
+    });
+    let config = runtime
+        .build_model_provider_config_from_env_for_test()
+        .expect("config should build");
+    assert_eq!(config.no_proxy.as_deref(), Some("localhost,127.0.0.1"));
+}
+
+#[test]
+fn ca_bundle_env_var_is_read_into_config() {
+    let _guard = BootstrapEnvGuard::new();
+    set_env_var("RUST_AGENT_PROVIDER_BASE_URL", "https://api.anthropic.com");
+    set_env_var("RUST_AGENT_PROVIDER_API_KEY", "test-key");
+    set_env_var("RUST_AGENT_CA_BUNDLE", "/etc/ssl/certs/corp-ca.pem");
+
+    let runtime = RuntimeBootstrap::from_cli(BootstrapCli {
+        print: None,
+        interactive: false,
+        init_only: true,
+        continue_session: false,
+        resume: None,
+        trace_startup: false,
+        show_tools: false,
+        tui: false,
+        attachments: Vec::new(),
+        surface: "cli".into(),
+    });
+    let config = runtime
+        .build_model_provider_config_from_env_for_test()
+        .expect("config should build");
+    assert_eq!(
+        config.ca_bundle_path.as_deref(),
+        Some("/etc/ssl/certs/corp-ca.pem")
+    );
+}
+
+#[test]
+fn no_proxy_env_unset_leaves_field_none() {
+    let _guard = BootstrapEnvGuard::new();
+    set_env_var("RUST_AGENT_PROVIDER_BASE_URL", "https://api.anthropic.com");
+    set_env_var("RUST_AGENT_PROVIDER_API_KEY", "test-key");
+
+    let runtime = RuntimeBootstrap::from_cli(BootstrapCli {
+        print: None,
+        interactive: false,
+        init_only: true,
+        continue_session: false,
+        resume: None,
+        trace_startup: false,
+        show_tools: false,
+        tui: false,
+        attachments: Vec::new(),
+        surface: "cli".into(),
+    });
+    let config = runtime
+        .build_model_provider_config_from_env_for_test()
+        .expect("config should build");
+    assert!(config.proxy_url.is_none());
+    assert!(config.no_proxy.is_none());
+    assert!(config.ca_bundle_path.is_none());
+}
+
+#[test]
+fn startup_warning_invalid_proxy_url_fires_for_bad_url() {
+    let _guard = BootstrapEnvGuard::new();
+    set_env_var("RUST_AGENT_PROXY_URL", "not-a-valid-proxy-url");
+
+    let warnings = rust_agent::bootstrap::warnings::collect_startup_warnings(
+        "https://api.anthropic.com",
+        &[],
+        std::path::Path::new("/some/.claude"),
+        false,
+        "anthropic",
+        false,
+    );
+    assert!(
+        warnings.has(|w| matches!(w, StartupWarning::InvalidProxyUrl { .. })),
+        "expected InvalidProxyUrl warning for malformed proxy URL"
+    );
+}
+
+#[test]
+fn startup_warning_invalid_proxy_url_does_not_fire_for_valid_url() {
+    let _guard = BootstrapEnvGuard::new();
+    set_env_var("RUST_AGENT_PROXY_URL", "http://proxy.corp.example:3128");
+
+    let warnings = rust_agent::bootstrap::warnings::collect_startup_warnings(
+        "https://api.anthropic.com",
+        &[],
+        std::path::Path::new("/some/.claude"),
+        false,
+        "anthropic",
+        false,
+    );
+    assert!(
+        !warnings.has(|w| matches!(w, StartupWarning::InvalidProxyUrl { .. })),
+        "should not warn for valid proxy URL"
+    );
+}
+
+#[test]
+fn startup_warning_invalid_proxy_url_does_not_fire_when_unset() {
+    let _guard = BootstrapEnvGuard::new();
+
+    let warnings = rust_agent::bootstrap::warnings::collect_startup_warnings(
+        "https://api.anthropic.com",
+        &[],
+        std::path::Path::new("/some/.claude"),
+        false,
+        "anthropic",
+        false,
+    );
+    assert!(
+        !warnings.has(|w| matches!(w, StartupWarning::InvalidProxyUrl { .. })),
+        "should not warn when RUST_AGENT_PROXY_URL is unset"
+    );
+}
+
+#[test]
+fn redact_proxy_url_strips_password() {
+    let redacted =
+        rust_agent::service::api::client::redact_proxy_url("http://user:secret@proxy.corp:3128");
+    assert!(
+        !redacted.contains("secret"),
+        "password should be redacted: {redacted}"
+    );
+    assert!(
+        redacted.contains("user"),
+        "username should be preserved: {redacted}"
+    );
+    assert!(
+        redacted.contains("***"),
+        "redacted marker should be present: {redacted}"
+    );
+}
+
+#[test]
+fn redact_proxy_url_no_op_when_no_userinfo() {
+    let url = "http://proxy.corp.example:3128";
+    let redacted = rust_agent::service::api::client::redact_proxy_url(url);
+    assert_eq!(redacted.trim_end_matches('/'), url.trim_end_matches('/'));
+}
+
+#[test]
+fn redact_proxy_url_no_op_for_invalid_url() {
+    let url = "not-a-url";
+    let redacted = rust_agent::service::api::client::redact_proxy_url(url);
+    assert_eq!(redacted, url);
+}
+
+#[test]
+fn startup_warning_invalid_proxy_url_message_redacts_userinfo() {
+    let warning = StartupWarning::InvalidProxyUrl {
+        redacted_url: "http://user:***@proxy.corp:3128".into(),
+    };
+    let msg = warning.message();
+    assert!(
+        !msg.contains("secret"),
+        "warning message must not contain raw password"
+    );
+    assert!(
+        msg.contains("***"),
+        "warning message should contain redacted marker"
+    );
 }

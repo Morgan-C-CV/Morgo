@@ -1,5 +1,7 @@
 use std::path::Path;
 
+use crate::service::api::client::redact_proxy_url;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StartupWarning {
     /// RUST_AGENT_PROVIDER_BASE_URL is unset; using http://localhost which will fail in production.
@@ -12,6 +14,8 @@ pub enum StartupWarning {
     FilesystemPolicyMissing,
     /// Provider pricing is default (all zeros); cost tracking will show $0.00.
     ProviderPricingIsDefault { provider_id: String },
+    /// RUST_AGENT_PROXY_URL is set but not a valid proxy URL; proxy will be ignored.
+    InvalidProxyUrl { redacted_url: String },
 }
 
 impl StartupWarning {
@@ -43,6 +47,12 @@ impl StartupWarning {
                 format!(
                     "Provider '{provider_id}' has no pricing configured; \
                      cost tracking will show $0.00"
+                )
+            }
+            StartupWarning::InvalidProxyUrl { redacted_url } => {
+                format!(
+                    "RUST_AGENT_PROXY_URL '{redacted_url}' is not a valid proxy URL — \
+                     proxy will be ignored"
                 )
             }
         }
@@ -115,5 +125,20 @@ pub fn collect_startup_warnings(
         });
     }
 
+    if let Ok(proxy_url) = std::env::var("RUST_AGENT_PROXY_URL") {
+        if !proxy_url.trim().is_empty() && !is_valid_proxy_url(&proxy_url) {
+            warnings.push(StartupWarning::InvalidProxyUrl {
+                redacted_url: redact_proxy_url(&proxy_url),
+            });
+        }
+    }
+
     warnings
+}
+
+fn is_valid_proxy_url(url: &str) -> bool {
+    match reqwest::Url::parse(url) {
+        Ok(parsed) => matches!(parsed.scheme(), "http" | "https" | "socks5"),
+        Err(_) => false,
+    }
 }

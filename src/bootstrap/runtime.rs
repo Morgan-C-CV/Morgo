@@ -1291,6 +1291,15 @@ impl RuntimeBootstrap {
                 max_backoff_ms,
             },
             pricing: ModelPricing::default(),
+            proxy_url: std::env::var("RUST_AGENT_PROXY_URL")
+                .ok()
+                .filter(|v| !v.trim().is_empty()),
+            no_proxy: std::env::var("RUST_AGENT_NO_PROXY")
+                .ok()
+                .filter(|v| !v.trim().is_empty()),
+            ca_bundle_path: std::env::var("RUST_AGENT_CA_BUNDLE")
+                .ok()
+                .filter(|v| !v.trim().is_empty()),
         })
     }
 
@@ -1321,8 +1330,13 @@ impl RuntimeBootstrap {
             &state.current_cwd,
         )
     }
-}
 
+    pub fn build_model_provider_config_from_env_for_test(
+        &self,
+    ) -> anyhow::Result<ModelProviderConfig> {
+        self.build_model_provider_config_from_env()
+    }
+}
 fn spawn_runtime_signal_shutdown(app_state: AppState) {
     tokio::spawn(async move {
         #[cfg(unix)]

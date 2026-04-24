@@ -144,6 +144,22 @@ pub struct ModelProviderConfig {
     pub timeout: ProviderTimeout,
     pub retry_policy: RetryPolicy,
     pub pricing: ModelPricing,
+    pub proxy_url: Option<String>,
+    pub no_proxy: Option<String>,
+    pub ca_bundle_path: Option<String>,
+}
+
+/// Redact userinfo (password) from a proxy URL for safe display in logs/warnings.
+pub fn redact_proxy_url(url: &str) -> String {
+    match reqwest::Url::parse(url) {
+        Ok(mut parsed) => {
+            if parsed.password().is_some() {
+                let _ = parsed.set_password(Some("***"));
+            }
+            parsed.to_string()
+        }
+        Err(_) => url.to_string(),
+    }
 }
 
 impl ModelProviderConfig {
@@ -178,6 +194,9 @@ impl Default for ModelProviderConfig {
             timeout: ProviderTimeout::default(),
             retry_policy: RetryPolicy::default(),
             pricing: ModelPricing::default(),
+            proxy_url: None,
+            no_proxy: None,
+            ca_bundle_path: None,
         }
     }
 }
@@ -214,9 +233,7 @@ impl ModelProviderClient {
         config: ModelProviderConfig,
         observability: ServiceObservabilityTracker,
     ) -> Self {
-        let client = reqwest::Client::builder()
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
+        let client = build_reqwest_client(&config);
         Self {
             transport: ProviderTransport::Production {
                 config,
@@ -501,6 +518,19 @@ fn validate_streaming_response_headers(
         )));
     }
     Ok(())
+}
+
+fn build_reqwest_client(config: &ModelProviderConfig) -> reqwest::Client {
+    let mut builder = reqwest::Client::builder();
+    if let Some(proxy_url) = &config.proxy_url {
+        if let Ok(mut proxy) = reqwest::Proxy::all(proxy_url) {
+            if let Some(no_proxy) = &config.no_proxy {
+                proxy = proxy.no_proxy(reqwest::NoProxy::from_string(no_proxy));
+            }
+            builder = builder.proxy(proxy);
+        }
+    }
+    builder.build().unwrap_or_else(|_| reqwest::Client::new())
 }
 
 fn build_messages_url_for_provider(config: &ModelProviderConfig) -> Result<String, ApiError> {
@@ -1981,6 +2011,9 @@ mod tests {
                 max_backoff_ms: 0,
             },
             pricing: crate::service::api::client::ModelPricing::default(),
+            proxy_url: None,
+            no_proxy: None,
+            ca_bundle_path: None,
         }
     }
 

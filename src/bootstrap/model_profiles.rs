@@ -34,6 +34,9 @@ pub struct ModelProfileSpec {
     pub retry_max_attempts: Option<usize>,
     pub retry_initial_backoff_ms: Option<u64>,
     pub retry_max_backoff_ms: Option<u64>,
+    pub proxy_url: Option<String>,
+    pub no_proxy: Option<String>,
+    pub ca_bundle_path: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -243,6 +246,9 @@ impl ModelProfileSpec {
                 max_backoff_ms: self.retry_max_backoff_ms.unwrap_or(1_000),
             },
             pricing: ModelPricing::default(),
+            proxy_url: self.proxy_url.clone(),
+            no_proxy: self.no_proxy.clone(),
+            ca_bundle_path: self.ca_bundle_path.clone(),
         };
         Ok(config)
     }

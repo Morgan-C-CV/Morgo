@@ -179,6 +179,9 @@ async fn run_provider_case(case: ProviderCase) -> FixtureResult {
         },
         retry_policy: case.retry_policy,
         pricing: Default::default(),
+        proxy_url: None,
+        no_proxy: None,
+        ca_bundle_path: None,
     };
     let _ = &case.expected;
 
@@ -1674,6 +1677,9 @@ async fn query_engine_submit_turn_works_through_production_provider_path() {
             max_backoff_ms: 1,
         },
         pricing: Default::default(),
+        proxy_url: None,
+        no_proxy: None,
+        ca_bundle_path: None,
     };
     let cost_tracker =
         CostTracker::with_default_pricing(config.model_id.clone(), config.pricing.clone());
@@ -1775,6 +1781,9 @@ async fn production_provider_request_envelope_stays_compatible() {
             max_backoff_ms: 1,
         },
         pricing: Default::default(),
+        proxy_url: None,
+        no_proxy: None,
+        ca_bundle_path: None,
     };
 
     let events = ModelProviderClient::from_config(config)
@@ -1816,6 +1825,9 @@ async fn production_provider_surfaces_unsupported_streaming_as_typed_failure() {
             max_backoff_ms: 1,
         },
         pricing: Default::default(),
+        proxy_url: None,
+        no_proxy: None,
+        ca_bundle_path: None,
     };
 
     let events = ModelProviderClient::from_config(config)
@@ -1861,6 +1873,9 @@ async fn production_provider_assembles_partial_tool_use_payload_metadata() {
             max_backoff_ms: 1,
         },
         pricing: Default::default(),
+        proxy_url: None,
+        no_proxy: None,
+        ca_bundle_path: None,
     };
 
     let events = ModelProviderClient::from_config(config)
@@ -1914,6 +1929,9 @@ async fn production_provider_normalizes_stringified_tool_use_alias_payload() {
             max_backoff_ms: 1,
         },
         pricing: Default::default(),
+        proxy_url: None,
+        no_proxy: None,
+        ca_bundle_path: None,
     };
 
     let events = ModelProviderClient::from_config(config)
@@ -1957,6 +1975,9 @@ async fn production_provider_preserves_terminal_http_compatibility_metadata() {
             max_backoff_ms: 1,
         },
         pricing: Default::default(),
+        proxy_url: None,
+        no_proxy: None,
+        ca_bundle_path: None,
     };
 
     let events = ModelProviderClient::from_config(config)
@@ -2003,6 +2024,9 @@ async fn production_provider_accepts_top_level_usage_envelope() {
             max_backoff_ms: 1,
         },
         pricing: Default::default(),
+        proxy_url: None,
+        no_proxy: None,
+        ca_bundle_path: None,
     };
 
     let events = ModelProviderClient::from_config(config)
@@ -2045,6 +2069,9 @@ async fn production_provider_accepts_delta_usage_envelope() {
             max_backoff_ms: 1,
         },
         pricing: Default::default(),
+        proxy_url: None,
+        no_proxy: None,
+        ca_bundle_path: None,
     };
 
     let events = ModelProviderClient::from_config(config)
@@ -2089,6 +2116,9 @@ async fn production_provider_merges_usage_across_provider_envelopes_without_drif
             max_backoff_ms: 1,
         },
         pricing: Default::default(),
+        proxy_url: None,
+        no_proxy: None,
+        ca_bundle_path: None,
     };
     let cost_tracker =
         CostTracker::with_default_pricing(config.model_id.clone(), config.pricing.clone());
@@ -2202,6 +2232,9 @@ async fn production_provider_extracts_nested_http_error_message() {
             max_backoff_ms: 1,
         },
         pricing: Default::default(),
+        proxy_url: None,
+        no_proxy: None,
+        ca_bundle_path: None,
     };
 
     let events = ModelProviderClient::from_config(config)
@@ -2278,6 +2311,9 @@ async fn production_provider_surfaces_interrupted_stream_metadata() {
             max_backoff_ms: 1,
         },
         pricing: Default::default(),
+        proxy_url: None,
+        no_proxy: None,
+        ca_bundle_path: None,
     };
 
     let events = ModelProviderClient::from_config(config)
@@ -2325,6 +2361,9 @@ async fn production_provider_surfaces_malformed_stream_as_protocol_failure() {
             max_backoff_ms: 1,
         },
         pricing: Default::default(),
+        proxy_url: None,
+        no_proxy: None,
+        ca_bundle_path: None,
     };
 
     let events = ModelProviderClient::from_config(config)
@@ -2372,6 +2411,9 @@ async fn production_provider_surfaces_tool_use_protocol_failure() {
             max_backoff_ms: 1,
         },
         pricing: Default::default(),
+        proxy_url: None,
+        no_proxy: None,
+        ca_bundle_path: None,
     };
 
     let events = ModelProviderClient::from_config(config)
@@ -2419,6 +2461,9 @@ async fn production_provider_surfaces_structured_output_protocol_failure() {
             max_backoff_ms: 1,
         },
         pricing: Default::default(),
+        proxy_url: None,
+        no_proxy: None,
+        ca_bundle_path: None,
     };
 
     let events = ModelProviderClient::from_config(config)
@@ -2468,6 +2513,9 @@ async fn production_provider_maps_terminal_http_error_to_query_loop_failure_code
             max_backoff_ms: 1,
         },
         pricing: Default::default(),
+        proxy_url: None,
+        no_proxy: None,
+        ca_bundle_path: None,
     };
 
     let context = QueryContext {
@@ -2568,6 +2616,9 @@ async fn production_provider_rejects_wrong_content_type_as_invalid_response() {
             max_backoff_ms: 1,
         },
         pricing: Default::default(),
+        proxy_url: None,
+        no_proxy: None,
+        ca_bundle_path: None,
     };
 
     let events = ModelProviderClient::from_config(config)
@@ -2615,6 +2666,9 @@ async fn production_provider_rejects_empty_response_body() {
             max_backoff_ms: 1,
         },
         pricing: Default::default(),
+        proxy_url: None,
+        no_proxy: None,
+        ca_bundle_path: None,
     };
 
     let events = ModelProviderClient::from_config(config)
@@ -2662,6 +2716,9 @@ async fn production_provider_rejects_truncated_stream_as_protocol_failure() {
             max_backoff_ms: 1,
         },
         pricing: Default::default(),
+        proxy_url: None,
+        no_proxy: None,
+        ca_bundle_path: None,
     };
 
     let events = ModelProviderClient::from_config(config)
@@ -2726,6 +2783,9 @@ async fn production_provider_slow_first_byte_hits_request_timeout() {
             max_backoff_ms: 1,
         },
         pricing: Default::default(),
+        proxy_url: None,
+        no_proxy: None,
+        ca_bundle_path: None,
     };
 
     let events = ModelProviderClient::from_config(config)
@@ -2788,6 +2848,9 @@ async fn production_provider_headers_then_idle_hits_stream_timeout() {
             max_backoff_ms: 1,
         },
         pricing: Default::default(),
+        proxy_url: None,
+        no_proxy: None,
+        ca_bundle_path: None,
     };
 
     let events = ModelProviderClient::from_config(config)
@@ -2854,6 +2917,9 @@ async fn production_provider_short_request_timeout_does_not_truncate_active_stre
             max_backoff_ms: 1,
         },
         pricing: Default::default(),
+        proxy_url: None,
+        no_proxy: None,
+        ca_bundle_path: None,
     };
 
     let events = ModelProviderClient::from_config(config)
@@ -2905,6 +2971,9 @@ async fn production_provider_maps_timeout_after_retries_exhaust_to_query_loop_fa
             max_backoff_ms: 1,
         },
         pricing: Default::default(),
+        proxy_url: None,
+        no_proxy: None,
+        ca_bundle_path: None,
     };
 
     let context = QueryContext {
@@ -3006,6 +3075,9 @@ async fn production_provider_retries_429_then_succeeds() {
             max_backoff_ms: 1,
         },
         pricing: Default::default(),
+        proxy_url: None,
+        no_proxy: None,
+        ca_bundle_path: None,
     };
 
     let events = ModelProviderClient::from_config(config)
@@ -3054,6 +3126,9 @@ async fn production_provider_respects_retry_after_header_for_429_retry() {
             max_backoff_ms: 1,
         },
         pricing: Default::default(),
+        proxy_url: None,
+        no_proxy: None,
+        ca_bundle_path: None,
     };
 
     let started = Instant::now();
@@ -3109,6 +3184,9 @@ async fn production_provider_safety_cap_prevents_oversized_retry_after_sleep() {
             max_backoff_ms: 1,
         },
         pricing: Default::default(),
+        proxy_url: None,
+        no_proxy: None,
+        ca_bundle_path: None,
     };
 
     let started = Instant::now();
@@ -3159,6 +3237,9 @@ async fn production_provider_429_without_retry_after_uses_exponential_backoff() 
             max_backoff_ms: 1,
         },
         pricing: Default::default(),
+        proxy_url: None,
+        no_proxy: None,
+        ca_bundle_path: None,
     };
 
     let started = Instant::now();
@@ -3209,6 +3290,9 @@ async fn production_provider_does_not_retry_terminal_400_errors() {
             max_backoff_ms: 1,
         },
         pricing: Default::default(),
+        proxy_url: None,
+        no_proxy: None,
+        ca_bundle_path: None,
     };
 
     let events = ModelProviderClient::from_config(config)
@@ -3256,6 +3340,9 @@ async fn production_provider_retries_503_then_surfaces_terminal_protocol_failure
             max_backoff_ms: 1,
         },
         pricing: Default::default(),
+        proxy_url: None,
+        no_proxy: None,
+        ca_bundle_path: None,
     };
 
     let events = ModelProviderClient::from_config(config)

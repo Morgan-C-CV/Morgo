@@ -73,6 +73,9 @@ fn app_state_with_session_root(root: &std::path::Path) -> AppState {
         timeout: rust_agent::service::api::client::ProviderTimeout::default(),
         retry_policy: rust_agent::service::api::retry::RetryPolicy::default(),
         pricing: rust_agent::service::api::client::ModelPricing::default(),
+        proxy_url: None,
+        no_proxy: None,
+        ca_bundle_path: None,
     };
     let runtime_snapshot = ActiveModelRuntimeSnapshot {
         config: config.clone(),
