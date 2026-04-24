@@ -1,5 +1,6 @@
 pub mod clear;
 pub mod compact;
+pub mod computer;
 pub mod config;
 pub mod cost;
 pub mod doctor;
@@ -21,6 +22,7 @@ use std::sync::Arc;
 
 use clear::ClearCommand;
 use compact::CompactCommand;
+use computer::ComputerCommand;
 use config::ConfigCommand;
 use cost::CostCommand;
 use doctor::DoctorCommand;
@@ -43,6 +45,7 @@ pub fn register_builtin_commands(registry: CommandRegistry) -> CommandRegistry {
         .register(Arc::new(CostCommand))
         .register(Arc::new(CompactCommand))
         .register(Arc::new(ClearCommand))
+        .register(Arc::new(ComputerCommand))
         .register(Arc::new(ConfigCommand))
         .register(Arc::new(DoctorCommand))
         .register(Arc::new(ModelCommand))

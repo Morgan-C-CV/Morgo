@@ -4287,3 +4287,106 @@ async fn swarm_spawn_default_model_profile_appears_in_prompt_without_switching_r
     );
     assert_eq!(app_state.active_model_profile_name, original_model);
 }
+
+// ── /computer command tests ──────────────────────────────────────────────────
+
+use rust_agent::command::builtin::computer::ComputerCommand;
+
+struct AllowAuthorizer;
+impl SurfaceAuthorizer for AllowAuthorizer {
+    fn authorize(&self, _input: &NormalizedInput) -> AuthDecision {
+        AuthDecision::Allow
+    }
+}
+
+fn computer_router() -> CommandRouter {
+    let registry = CommandRegistry::new().register(Arc::new(ComputerCommand));
+    CommandRouter::new(Arc::new(registry), Box::new(AllowAuthorizer))
+}
+
+fn cli_input(raw: &str) -> NormalizedInput {
+    NormalizedInput::from_session_raw(InteractionSurface::Cli, "test-session", raw)
+}
+
+fn remote_input(raw: &str) -> NormalizedInput {
+    NormalizedInput::from_remote_raw("test-session", "user", true, true, raw)
+}
+
+fn telegram_input(raw: &str) -> NormalizedInput {
+    NormalizedInput::from_telegram_raw("test-session", "user", true, raw)
+}
+
+#[tokio::test]
+async fn computer_screenshot_routes_on_cli() {
+    let router = computer_router();
+    let input = cli_input("/computer screenshot");
+    let decision = router.decide(&input).await;
+    assert!(
+        matches!(decision, RouteDecision::ExecuteCommand(ref c) if c.name == "computer"),
+        "expected ExecuteCommand(computer), got {decision:?}"
+    );
+}
+
+#[tokio::test]
+async fn computer_screenshot_denied_on_remote_sensitive() {
+    let router = computer_router();
+    let input = remote_input("/computer screenshot");
+    let decision = router.decide(&input).await;
+    assert!(
+        matches!(decision, RouteDecision::Deny(_)),
+        "expected Deny on remote surface, got {decision:?}"
+    );
+}
+
+#[tokio::test]
+async fn computer_screenshot_denied_on_telegram() {
+    let router = computer_router();
+    let input = telegram_input("/computer screenshot");
+    let decision = router.decide(&input).await;
+    assert!(
+        matches!(decision, RouteDecision::Deny(_)),
+        "expected Deny on telegram surface, got {decision:?}"
+    );
+}
+
+#[tokio::test]
+async fn computer_stop_returns_stub_message() {
+    let root = unique_temp_path("computer-stop");
+    std::fs::create_dir_all(&root).unwrap();
+    let app_state = app_state_with_session_root(&root);
+    let registry = Arc::new(CommandRegistry::new().register(Arc::new(ComputerCommand)));
+    let router = CommandRouter::new(registry, Box::new(AllowAuthorizer));
+    let input = cli_input("/computer stop");
+    let output = router.route(&input, &app_state).await.unwrap();
+    if let RouteExecution::CommandResult(CommandResult::Message(msg)) = output {
+        assert!(
+            msg.contains("no active computer-use session"),
+            "unexpected stop message: {msg}"
+        );
+    } else {
+        panic!("expected Message result, got {output:?}");
+    }
+}
+
+#[tokio::test]
+async fn computer_unknown_subcommand_returns_usage() {
+    let root = unique_temp_path("computer-usage");
+    std::fs::create_dir_all(&root).unwrap();
+    let app_state = app_state_with_session_root(&root);
+    let registry = Arc::new(CommandRegistry::new().register(Arc::new(ComputerCommand)));
+    let router = CommandRouter::new(registry, Box::new(AllowAuthorizer));
+    let input = cli_input("/computer foobar");
+    let output = router.route(&input, &app_state).await.unwrap();
+    if let RouteExecution::CommandResult(CommandResult::Message(msg)) = output {
+        assert!(msg.contains("usage:"), "expected usage string, got {msg}");
+    } else {
+        panic!("expected Message result, got {output:?}");
+    }
+}
+
+#[tokio::test]
+async fn computer_command_is_cli_only_and_sensitive() {
+    let meta = ComputerCommand.metadata();
+    assert_eq!(meta.availability, CommandAvailability::CliOnly);
+    assert!(meta.is_sensitive);
+}
