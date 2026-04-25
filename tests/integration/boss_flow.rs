@@ -33,6 +33,11 @@ fn boss_step(id: usize, description: &str) -> BossPlanStep {
         completed: false,
         result_diff: None,
         worker_task_id: None,
+        attempt_count: 0,
+        retry_budget: 3,
+        last_review_summary: None,
+        last_correction: None,
+        review_task_id: None,
     }
 }
 
@@ -917,15 +922,69 @@ async fn boss_b_fans_out_children_and_fans_in_summary() {
 
     coordinator.on_task_event(&fan_in_event).await.unwrap();
 
-    // Step 0 must now be marked Completed by the fan-in handler.
+    // T16.6.D: fan-in now transitions to Reviewing (not Completed directly).
+    // A's review gate must accept before the step is Completed.
     let plan = coordinator.plan.read().await;
     let step = &plan.as_ref().unwrap().steps[0];
     assert_eq!(
         step.status,
-        BossPlanStepStatus::Completed,
-        "fan-in event must mark the step as Completed"
+        BossPlanStepStatus::Reviewing,
+        "fan-in event must mark the step as Reviewing (pending A's review)"
     );
-    assert!(step.completed, "step.completed must be true after fan-in");
+    assert!(!step.completed, "step.completed must be false until A accepts");
+
+    let _ = std::fs::remove_file(plan_path);
+}
+
+#[tokio::test]
+async fn boss_child_event_cannot_complete_step_before_group_fan_in() {
+    let (coordinator, plan_path) = coordinator_with_plan(
+        boss_plan(vec![boss_step(0, "Child must not complete directly")]),
+        "test_boss_flow_child_no_direct_complete.json",
+    )
+    .await;
+
+    {
+        let mut plan_guard = coordinator.plan.write().await;
+        let plan = plan_guard.as_mut().unwrap();
+        plan.steps[0].worker_task_id = Some("b-task-child-guard".into());
+        plan.steps[0].status = BossPlanStepStatus::Running;
+    }
+
+    let child_event = TaskEvent {
+        task_id: "child-impl-direct".into(),
+        task_type: rust_agent::task::types::TaskType::LocalAgent,
+        status: TaskStatus::Completed,
+        step_id: Some(0),
+        owner: rust_agent::task::types::TaskOwner {
+            session_id: "parent-session-child-guard".into(),
+            surface: InteractionSurface::Cli,
+        },
+        target_task_id: Some("child-impl-direct".into()),
+        summary: "child completed".into(),
+        result: "child result".into(),
+        next_action: "wait for group fan-in".into(),
+        worker_role: Some(WorkerRole::Implement),
+        orchestration_group_id: Some("b-task-child-guard".into()),
+        phase: None,
+        validation_state: None,
+        output_file: "".into(),
+        usage: None,
+    };
+
+    coordinator.on_task_event(&child_event).await.unwrap();
+
+    let plan = coordinator.plan.read().await;
+    let step = &plan.as_ref().unwrap().steps[0];
+    assert_eq!(
+        step.status,
+        BossPlanStepStatus::Running,
+        "child event with orchestration_group_id must not complete the step directly"
+    );
+    assert!(
+        !step.completed,
+        "step must wait for group fan-in and A review"
+    );
 
     let _ = std::fs::remove_file(plan_path);
 }
@@ -993,4 +1052,199 @@ fn boss_spawn_payload_contains_executor_b_role_fields() {
     assert_eq!(payload["boss_actor_role"], "executor_b");
     assert_eq!(payload["boss_lineage_depth"], 0);
     assert_eq!(payload["orchestration_group_id"], "boss-plan-alpha-b");
+}
+
+// --- T16.6.D: A review gate ---
+
+fn fan_in_event(b_task_id: &str) -> TaskEvent {
+    TaskEvent {
+        task_id: format!("group-{}", b_task_id),
+        task_type: TaskType::LocalAgent,
+        status: TaskStatus::Completed,
+        step_id: None,
+        owner: TaskOwner {
+            session_id: "test-session".into(),
+            surface: InteractionSurface::Cli,
+        },
+        target_task_id: Some(b_task_id.into()),
+        summary: "grouped research tasks completed".into(),
+        result: "Agent task completed".into(),
+        next_action: "synthesize grouped findings".into(),
+        worker_role: None,
+        orchestration_group_id: Some(b_task_id.into()),
+        phase: None,
+        validation_state: None,
+        output_file: "".into(),
+        usage: None,
+    }
+}
+
+#[tokio::test]
+async fn boss_a_review_accepts_diff_before_step_completion() {
+    let (coordinator, plan_path) = coordinator_with_plan(
+        boss_plan(vec![boss_step(0, "Step to review")]),
+        "test_boss_review_accept.json",
+    )
+    .await;
+
+    // Seed B's task id in the step so fan-in lookup works.
+    {
+        let mut guard = coordinator.plan.write().await;
+        let plan = guard.as_mut().unwrap();
+        plan.steps[0].worker_task_id = Some("b-task-review".into());
+        plan.steps[0].status = BossPlanStepStatus::Running;
+    }
+
+    // Fan-in fires — step must enter Reviewing, not Completed.
+    coordinator
+        .on_task_event(&fan_in_event("b-task-review"))
+        .await
+        .unwrap();
+
+    {
+        let guard = coordinator.plan.read().await;
+        let step = &guard.as_ref().unwrap().steps[0];
+        assert_eq!(step.status, BossPlanStepStatus::Reviewing, "fan-in must enter Reviewing");
+        assert!(!step.completed, "step must not be completed before A accepts");
+    }
+
+    // A accepts — step must move to Completed.
+    coordinator
+        .on_review_event(0, true, "LGTM, all acceptance criteria met", None)
+        .await
+        .unwrap();
+
+    let guard = coordinator.plan.read().await;
+    let step = &guard.as_ref().unwrap().steps[0];
+    assert_eq!(step.status, BossPlanStepStatus::Completed, "A accept must complete the step");
+    assert!(step.completed, "step.completed must be true after A accepts");
+    assert_eq!(step.last_review_summary.as_deref(), Some("LGTM, all acceptance criteria met"));
+
+    let _ = std::fs::remove_file(plan_path);
+}
+
+#[tokio::test]
+async fn boss_a_review_rejects_and_sends_correction_to_b() {
+    let (coordinator, plan_path) = coordinator_with_plan(
+        boss_plan(vec![boss_step(0, "Step to reject")]),
+        "test_boss_review_reject.json",
+    )
+    .await;
+
+    {
+        let mut guard = coordinator.plan.write().await;
+        let plan = guard.as_mut().unwrap();
+        plan.steps[0].worker_task_id = Some("b-task-reject".into());
+        plan.steps[0].status = BossPlanStepStatus::Running;
+    }
+
+    coordinator
+        .on_task_event(&fan_in_event("b-task-reject"))
+        .await
+        .unwrap();
+
+    // A rejects with a correction.
+    coordinator
+        .on_review_event(
+            0,
+            false,
+            "Missing error handling in step output",
+            Some("Add error handling for the edge case in section 3"),
+        )
+        .await
+        .unwrap();
+
+    let guard = coordinator.plan.read().await;
+    let step = &guard.as_ref().unwrap().steps[0];
+    assert_eq!(step.status, BossPlanStepStatus::Rejected, "A reject must set Rejected status");
+    assert!(!step.completed, "step must not be completed after rejection");
+    assert_eq!(step.attempt_count, 1, "attempt_count must increment on rejection");
+    assert_eq!(
+        step.last_correction.as_deref(),
+        Some("Add error handling for the edge case in section 3")
+    );
+    assert_eq!(
+        step.last_review_summary.as_deref(),
+        Some("Missing error handling in step output")
+    );
+
+    // Rejected step must be runnable — advance_plan should re-dispatch B.
+    drop(guard);
+    let task_manager = Arc::new(TaskManager::default());
+    let app_state = app_state_with_tasks("parent-session-reject", task_manager.clone());
+    let payload = coordinator
+        .advance_plan(&app_state)
+        .await
+        .unwrap()
+        .expect("rejected step must be re-dispatched");
+
+    // Spawn payload must embed the correction.
+    assert!(
+        payload.contains("correction from review"),
+        "retry payload must embed the correction"
+    );
+    assert!(
+        payload.contains("Add error handling for the edge case in section 3"),
+        "retry payload must contain the correction text"
+    );
+
+    let _ = std::fs::remove_file(plan_path);
+}
+
+#[tokio::test]
+async fn boss_step_fails_only_after_retry_budget_exhausted() {
+    let (coordinator, plan_path) = coordinator_with_plan(
+        boss_plan(vec![BossPlanStep {
+            retry_budget: 2,
+            ..boss_step(0, "Budget-limited step")
+        }]),
+        "test_boss_retry_budget.json",
+    )
+    .await;
+
+    {
+        let mut guard = coordinator.plan.write().await;
+        let plan = guard.as_mut().unwrap();
+        plan.steps[0].worker_task_id = Some("b-task-budget".into());
+        plan.steps[0].status = BossPlanStepStatus::Running;
+    }
+
+    // First rejection — attempt_count = 1, still under budget (2).
+    coordinator.on_task_event(&fan_in_event("b-task-budget")).await.unwrap();
+    coordinator
+        .on_review_event(0, false, "Not good enough", Some("Fix it"))
+        .await
+        .unwrap();
+
+    {
+        let guard = coordinator.plan.read().await;
+        let step = &guard.as_ref().unwrap().steps[0];
+        assert_eq!(step.status, BossPlanStepStatus::Rejected, "first rejection must be Rejected");
+        assert_eq!(step.attempt_count, 1);
+    }
+
+    // Reset to Reviewing for second rejection.
+    {
+        let mut guard = coordinator.plan.write().await;
+        let plan = guard.as_mut().unwrap();
+        plan.steps[0].status = BossPlanStepStatus::Reviewing;
+    }
+
+    // Second rejection — attempt_count = 2, hits budget → Failed.
+    coordinator
+        .on_review_event(0, false, "Still not good enough", Some("Fix it again"))
+        .await
+        .unwrap();
+
+    let guard = coordinator.plan.read().await;
+    let step = &guard.as_ref().unwrap().steps[0];
+    assert_eq!(
+        step.status,
+        BossPlanStepStatus::Failed,
+        "step must be Failed after retry budget exhausted"
+    );
+    assert_eq!(step.attempt_count, 2, "attempt_count must equal retry_budget");
+    assert!(!step.completed, "failed step must not be marked completed");
+
+    let _ = std::fs::remove_file(plan_path);
 }

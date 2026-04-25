@@ -40,6 +40,10 @@ pub enum BossPlanStepStatus {
     Pending,
     Running,
     WaitingForApproval,
+    /// B's fan-in completed; waiting for A's review verdict.
+    Reviewing,
+    /// A rejected the step output; B will retry with a correction.
+    Rejected,
     Completed,
     Failed,
 }
@@ -65,6 +69,25 @@ pub struct BossPlanStep {
     pub completed: bool,
     pub result_diff: Option<String>,
     pub worker_task_id: Option<String>,
+    /// How many times B has attempted this step (incremented on each dispatch).
+    #[serde(default)]
+    pub attempt_count: u32,
+    /// Maximum number of B attempts before the step is marked Failed.
+    #[serde(default = "default_retry_budget")]
+    pub retry_budget: u32,
+    /// Summary from A's last review (populated on accept or reject).
+    #[serde(default)]
+    pub last_review_summary: Option<String>,
+    /// Correction message from A sent back to B on rejection.
+    #[serde(default)]
+    pub last_correction: Option<String>,
+    /// Task id of the A review agent currently reviewing this step.
+    #[serde(default)]
+    pub review_task_id: Option<String>,
+}
+
+fn default_retry_budget() -> u32 {
+    3
 }
 
 impl BossPlanStep {

@@ -216,12 +216,12 @@ impl BossCoordinator {
                 });
                 if let Some(step) = step {
                     let step_id = step.id;
-                    let was_completed = step.completed;
                     match event.status {
                         TaskStatus::Completed => {
-                            step.completed = true;
-                            step.status = BossPlanStepStatus::Completed;
-                            tracing::info!("BossPlan: Step {} fan-in completed via group {}", step_id, group_id);
+                            // Fan-in complete — enter Reviewing, not Completed.
+                            // A review gate must accept before the step advances.
+                            step.status = BossPlanStepStatus::Reviewing;
+                            tracing::info!("BossPlan: Step {} fan-in complete, entering Reviewing", step_id);
                         }
                         TaskStatus::Failed | TaskStatus::Killed => {
                             step.status = BossPlanStepStatus::Failed;
@@ -229,15 +229,20 @@ impl BossCoordinator {
                         }
                         _ => {}
                     }
-                    let next_step = next_unfinished_step_id(plan);
                     drop(plan_guard);
-                    self.update_current_step(next_step).await;
-                    if event.status == TaskStatus::Completed && !was_completed {
-                        self.maybe_auto_advance_after_completion().await?;
-                    }
+                    // No auto-advance here — A review must call on_review_event to proceed.
                     return Ok(());
                 }
             }
+        }
+
+        if event.orchestration_group_id.is_some() {
+            tracing::debug!(
+                "BossPlan: ignoring non-group child event {} with orchestration group {:?}",
+                event.task_id,
+                event.orchestration_group_id
+            );
+            return Ok(());
         }
 
         let Some(step_id) = event.step_id else {
@@ -281,6 +286,67 @@ impl BossCoordinator {
         drop(plan_guard);
         self.update_current_step(next_step).await;
         if should_auto_advance {
+            self.maybe_auto_advance_after_completion().await?;
+        }
+
+        Ok(())
+    }
+
+    /// Called by A's review agent when it has a verdict on a step.
+    ///
+    /// `accepted = true` → step moves to Completed and auto-advance fires.
+    /// `accepted = false` → step moves to Rejected; if under retry budget, correction is stored
+    ///   and the step is reset to Pending so the next `advance_plan` re-dispatches B.
+    ///   If over budget, step is marked Failed.
+    pub async fn on_review_event(
+        &self,
+        step_id: usize,
+        accepted: bool,
+        review_summary: &str,
+        correction: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let should_auto_advance = {
+            let mut plan_guard = self.plan.write().await;
+            let Some(plan) = plan_guard.as_mut() else {
+                return Ok(());
+            };
+            let Some(step) = plan.steps.iter_mut().find(|s| s.id == step_id) else {
+                return Ok(());
+            };
+
+            step.last_review_summary = Some(review_summary.to_string());
+
+            if accepted {
+                step.completed = true;
+                step.status = BossPlanStepStatus::Completed;
+                step.last_correction = None;
+                tracing::info!("BossPlan: Step {} accepted by A review", step_id);
+                true
+            } else {
+                step.attempt_count += 1;
+                if step.attempt_count >= step.retry_budget {
+                    step.status = BossPlanStepStatus::Failed;
+                    tracing::warn!(
+                        "BossPlan: Step {} rejected by A review, retry budget exhausted ({}/{})",
+                        step_id, step.attempt_count, step.retry_budget
+                    );
+                } else {
+                    step.status = BossPlanStepStatus::Rejected;
+                    step.last_correction = correction.map(str::to_string);
+                    tracing::info!(
+                        "BossPlan: Step {} rejected by A review, attempt {}/{}, queuing retry",
+                        step_id, step.attempt_count, step.retry_budget
+                    );
+                }
+                false
+            }
+        };
+
+        if should_auto_advance {
+            let plan_guard = self.plan.read().await;
+            let next_step = plan_guard.as_ref().and_then(|p| next_unfinished_step_id(p));
+            drop(plan_guard);
+            self.update_current_step(next_step).await;
             self.maybe_auto_advance_after_completion().await?;
         }
 
@@ -444,11 +510,14 @@ impl BossCoordinator {
 
         Ok(json!({
             "task": format!(
-                "Boss mode step {}\nplan_id: {}\nobjective: {}\nacceptance:\n{}",
+                "Boss mode step {}\nplan_id: {}\nobjective: {}\nacceptance:\n{}{}",
                 step.id,
                 plan.plan_id,
                 step.objective(),
                 format_acceptance(step),
+                step.last_correction.as_deref()
+                    .map(|c| format!("\ncorrection from review:\n{c}"))
+                    .unwrap_or_default(),
             ),
             "role": "implement",
             "inherit_context": true,
@@ -668,7 +737,9 @@ fn next_runnable_step(plan: &BossPlan) -> Option<&BossPlanStep> {
         !step.completed
             && matches!(
                 step.status,
-                BossPlanStepStatus::Pending | BossPlanStepStatus::WaitingForApproval
+                BossPlanStepStatus::Pending
+                    | BossPlanStepStatus::WaitingForApproval
+                    | BossPlanStepStatus::Rejected
             )
     })
 }
@@ -852,6 +923,11 @@ mod tests {
                 completed: false,
                 result_diff: None,
                 worker_task_id: None,
+                attempt_count: 0,
+                retry_budget: 3,
+                last_review_summary: None,
+                last_correction: None,
+                review_task_id: None,
             }],
             ..Default::default()
         };
