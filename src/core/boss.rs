@@ -28,7 +28,7 @@ pub struct BossCoordinator {
     /// Live actor runtimes for A and B — bootstrapped on restore/init.
     pub actor_registry: Arc<RwLock<Option<BossActorRegistry>>>,
 
-    auto_advance_app_state: Arc<RwLock<Option<Arc<crate::state::app_state::AppState>>>>,
+    pub auto_advance_app_state: Arc<RwLock<Option<Arc<crate::state::app_state::AppState>>>>,
     runtime_key: Arc<RwLock<Option<String>>>,
     runtime_owner: Arc<BossRuntimeOwner>,
 }
@@ -300,6 +300,94 @@ impl BossCoordinator {
         }
     }
 
+    /// Ensure A's callbacks are wired using the stored auto_advance_app_state.
+    /// No-op if already wired or if no app_state is available.
+    pub async fn ensure_actor_registry_with_a_callbacks_auto(&self) {
+        let app_state = self.auto_advance_app_state.read().await.clone();
+        if let Some(app) = app_state {
+            self.ensure_actor_registry_with_a_callbacks(&app).await;
+        } else {
+            self.ensure_actor_registry().await;
+        }
+    }
+
+    /// Ensure A's review and documentation callbacks are wired.
+    /// If already wired, this is a no-op. Replaces the registry with one that has A callbacks.
+    pub async fn ensure_actor_registry_with_a_callbacks(
+        &self,
+        app_state: &Arc<crate::state::app_state::AppState>,
+    ) {
+        let needs_wire = {
+            let guard = self.actor_registry.read().await;
+            guard.as_ref().map(|r| !r.has_a_callbacks).unwrap_or(true)
+        };
+        if !needs_wire {
+            return;
+        }
+        // Build review callback — captures coordinator clone + app_state.
+        let c_review = self.clone_for_runtime();
+        let app_review = app_state.clone();
+        let review_fn: crate::core::boss_actor_runtime::ReviewFn =
+            Arc::new(move |step_id, accepted, summary, correction| {
+                let c = c_review.clone_for_runtime();
+                let _app = app_review.clone();
+                Box::pin(async move {
+                    c.apply_review_verdict(step_id, accepted, &summary, correction.as_deref())
+                        .await
+                })
+            });
+        // Build documentation callback — captures coordinator clone.
+        let c_doc = self.clone_for_runtime();
+        let app_doc = app_state.clone();
+        let doc_fn: crate::core::boss_actor_runtime::DocumentationFn =
+            Arc::new(move |signal: String| {
+                let c = c_doc.clone_for_runtime();
+                let app = app_doc.clone();
+                Box::pin(async move { c.apply_documentation_signal(&app, &signal).await })
+            });
+        // Preserve B's executor if already wired.
+        let exec_fn_opt = {
+            let guard = self.actor_registry.read().await;
+            guard.as_ref().map(|r| r.has_executor)
+        };
+        let registry = if exec_fn_opt.unwrap_or(false) {
+            // Re-wire B's callback too so we don't lose it.
+            let c_exec = self.clone_for_runtime();
+            let app_exec = app_state.clone();
+            let exec_fn: crate::core::boss_actor_runtime::ExecutionFn =
+                Arc::new(move |payload: String| {
+                    let c = c_exec.clone_for_runtime();
+                    let app = app_exec.clone();
+                    Box::pin(async move {
+                        {
+                            let mut guard = c.status.write().await;
+                            guard.last_b_dispatch_payload = Some(payload.clone());
+                        }
+                        c.invoke_agent_tool(&app, &payload).await.map(|_| payload)
+                    })
+                });
+            crate::core::boss_actor_runtime::bootstrap_with_all_callbacks(
+                exec_fn, review_fn, doc_fn,
+            )
+        } else {
+            let mut r = crate::core::boss_actor_runtime::BossActorRegistry::bootstrap();
+            // Replace A with callback-wired version.
+            r.designer_a.shutdown();
+            r.designer_a =
+                crate::core::boss_actor_runtime::DesignerARuntime::spawn_with_callbacks(
+                    Some(review_fn),
+                    Some(doc_fn),
+                );
+            r.has_a_callbacks = true;
+            r
+        };
+        let mut guard = self.actor_registry.write().await;
+        if let Some(old) = guard.take() {
+            old.shutdown_all();
+        }
+        *guard = Some(registry);
+    }
+
     /// Returns a point-in-time snapshot of all tracked actor handles (A, B, and children).
     pub async fn actor_registry_snapshot(&self) -> Vec<BossActorHandle> {
         let guard = self.session.read().await;
@@ -373,6 +461,7 @@ impl BossCoordinator {
         final_document_spec: &str,
         final_pseudo_code: &str,
     ) -> anyhow::Result<()> {
+        // Mutate plan state first (coordinator owns the data).
         {
             let mut plan_guard = self.plan.write().await;
             let plan = plan_guard
@@ -395,7 +484,20 @@ impl BossCoordinator {
             }
         }
 
-        self.transition_to(BossStage::WaitingForApproval).await?;
+        // Send FinalizeDocumentation to A mailbox — A's handler drives the stage transition.
+        self.ensure_actor_registry().await;
+        if let Some(registry) = self.actor_registry.read().await.as_ref() {
+            let _ = registry.a_mailbox().request(DesignerACommand::FinalizeDocumentation {
+                signal: "finalize".to_string(),
+            }).await;
+        }
+
+        // Fallback: if A's callback is not wired, coordinator transitions directly.
+        let has_a_callbacks = self.actor_registry.read().await
+            .as_ref().map(|r| r.has_a_callbacks).unwrap_or(false);
+        if !has_a_callbacks {
+            self.transition_to(BossStage::WaitingForApproval).await?;
+        }
         Ok(())
     }
 
@@ -446,8 +548,9 @@ impl BossCoordinator {
             status.planning_file.clone()
         };
 
-        if user_input.trim().to_uppercase() == "Y" || user_input.trim().is_empty() {
-            // Update in-memory plan flag
+        let approved = user_input.trim().to_uppercase() == "Y" || user_input.trim().is_empty();
+
+        if approved {
             {
                 let mut plan_guard = self.plan.write().await;
                 if let Some(plan) = plan_guard.as_mut() {
@@ -460,21 +563,39 @@ impl BossCoordinator {
                     plan.accepted_by_user = true;
                 }
             }
-
-            // Always flush to disk if path is provided
             if let Some(path_str) = path_to_save {
                 let path = std::path::PathBuf::from(path_str);
                 if let Some(plan) = self.plan.read().await.as_ref() {
                     save_plan(plan, &path).await?;
                 }
             }
-
-            self.transition_to(BossStage::Execution).await?;
-            Ok(true)
-        } else {
-            self.record_documentation_feedback(user_input).await?;
-            Ok(false)
         }
+
+        // Send UserApproval to A mailbox — A's handler drives the stage transition.
+        self.ensure_actor_registry().await;
+        let a_approved = if let Some(registry) = self.actor_registry.read().await.as_ref() {
+            match registry.a_mailbox().request(DesignerACommand::UserApproval {
+                input: user_input.to_string(),
+            }).await {
+                Ok(BossActorEvent::ApprovalHandled { approved: a }) => a,
+                _ => approved,
+            }
+        } else {
+            approved
+        };
+
+        // Fallback: if A's callback is not wired, coordinator transitions directly.
+        let has_a_callbacks = self.actor_registry.read().await
+            .as_ref().map(|r| r.has_a_callbacks).unwrap_or(false);
+        if !has_a_callbacks {
+            if a_approved {
+                self.transition_to(BossStage::Execution).await?;
+            } else {
+                self.record_documentation_feedback(user_input).await?;
+            }
+        }
+
+        Ok(a_approved)
     }
 
     pub async fn handle_control_request(
@@ -746,13 +867,20 @@ impl BossCoordinator {
         review_summary: &str,
         correction: Option<&str>,
     ) -> anyhow::Result<()> {
-        // 1. Send Review to A's mailbox first — await ReviewComplete before mutating plan state.
-        self.ensure_actor_registry().await;
+        // Wire A's callbacks lazily — review side effect is owned by A's runtime handler.
+        self.ensure_actor_registry_with_a_callbacks_auto().await;
+
+        let has_a_callbacks = self.actor_registry.read().await
+            .as_ref().map(|r| r.has_a_callbacks).unwrap_or(false);
+
+        // Send Review to A's mailbox first — A's handler calls the callback (if wired)
+        // which mutates plan state and fires auto-advance before returning ReviewComplete.
         let effective_accepted = if let Some(registry) = self.actor_registry.read().await.as_ref() {
             match registry.a_mailbox().request(DesignerACommand::Review {
                 step_id,
                 accepted,
                 summary: review_summary.to_string(),
+                correction: correction.map(str::to_string),
             }).await {
                 Ok(BossActorEvent::ReviewComplete { accepted: a_accepted, .. }) => a_accepted,
                 _ => accepted,
@@ -761,52 +889,108 @@ impl BossCoordinator {
             accepted
         };
 
-        // 2. Mutate plan state based on the verdict from A's mailbox.
+        // Inline mutation is the fallback for state-only mode (no A callbacks wired).
+        if !has_a_callbacks {
+            let should_auto_advance = {
+                let mut plan_guard = self.plan.write().await;
+                let Some(plan) = plan_guard.as_mut() else { return Ok(()); };
+                let Some(step) = plan.steps.iter_mut().find(|s| s.id == step_id) else { return Ok(()); };
+                step.last_review_summary = Some(review_summary.to_string());
+                if effective_accepted {
+                    step.completed = true;
+                    step.status = BossPlanStepStatus::Completed;
+                    step.last_correction = None;
+                    tracing::info!("BossPlan: Step {} accepted by A review", step_id);
+                    true
+                } else {
+                    step.attempt_count += 1;
+                    if step.attempt_count >= step.retry_budget {
+                        step.status = BossPlanStepStatus::Failed;
+                        tracing::warn!(
+                            "BossPlan: Step {} rejected by A review, retry budget exhausted ({}/{})",
+                            step_id, step.attempt_count, step.retry_budget
+                        );
+                    } else {
+                        step.status = BossPlanStepStatus::Rejected;
+                        step.last_correction = correction.map(str::to_string);
+                        tracing::info!(
+                            "BossPlan: Step {} rejected by A review, attempt {}/{}, queuing retry",
+                            step_id, step.attempt_count, step.retry_budget
+                        );
+                    }
+                    false
+                }
+            };
+            if should_auto_advance {
+                let plan_guard = self.plan.read().await;
+                let next_step = plan_guard.as_ref().and_then(|p| next_unfinished_step_id(p));
+                drop(plan_guard);
+                self.update_current_step(next_step).await;
+                self.maybe_auto_advance_after_completion().await?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Inner side-effect for A's review callback — called from DesignerARuntime handler.
+    /// Mutates plan state and fires auto-advance if accepted.
+    pub(crate) async fn apply_review_verdict(
+        &self,
+        step_id: usize,
+        accepted: bool,
+        review_summary: &str,
+        correction: Option<&str>,
+    ) -> anyhow::Result<()> {
         let should_auto_advance = {
             let mut plan_guard = self.plan.write().await;
-            let Some(plan) = plan_guard.as_mut() else {
-                return Ok(());
-            };
-            let Some(step) = plan.steps.iter_mut().find(|s| s.id == step_id) else {
-                return Ok(());
-            };
-
+            let Some(plan) = plan_guard.as_mut() else { return Ok(()); };
+            let Some(step) = plan.steps.iter_mut().find(|s| s.id == step_id) else { return Ok(()); };
             step.last_review_summary = Some(review_summary.to_string());
-
-            if effective_accepted {
+            if accepted {
                 step.completed = true;
                 step.status = BossPlanStepStatus::Completed;
                 step.last_correction = None;
-                tracing::info!("BossPlan: Step {} accepted by A review", step_id);
                 true
             } else {
                 step.attempt_count += 1;
                 if step.attempt_count >= step.retry_budget {
                     step.status = BossPlanStepStatus::Failed;
-                    tracing::warn!(
-                        "BossPlan: Step {} rejected by A review, retry budget exhausted ({}/{})",
-                        step_id, step.attempt_count, step.retry_budget
-                    );
                 } else {
                     step.status = BossPlanStepStatus::Rejected;
                     step.last_correction = correction.map(str::to_string);
-                    tracing::info!(
-                        "BossPlan: Step {} rejected by A review, attempt {}/{}, queuing retry",
-                        step_id, step.attempt_count, step.retry_budget
-                    );
                 }
                 false
             }
         };
-
         if should_auto_advance {
-            let plan_guard = self.plan.read().await;
-            let next_step = plan_guard.as_ref().and_then(|p| next_unfinished_step_id(p));
-            drop(plan_guard);
+            let next_step = self.plan.read().await.as_ref().and_then(|p| next_unfinished_step_id(p));
             self.update_current_step(next_step).await;
             self.maybe_auto_advance_after_completion().await?;
         }
+        Ok(())
+    }
 
+    /// Inner side-effect for A's documentation callback — called from DesignerARuntime handler.
+    /// Signal is the raw user input for approval, or "finalize" for documentation loop completion.
+    pub(crate) async fn apply_documentation_signal(
+        &self,
+        app_state: &Arc<crate::state::app_state::AppState>,
+        signal: &str,
+    ) -> anyhow::Result<()> {
+        // "finalize" signal: transition to WaitingForApproval (plan already mutated by caller).
+        // Approval signal: "Y"/empty → Execution; anything else → Documentation feedback.
+        let stage = self.status.read().await.stage;
+        if signal == "finalize" {
+            self.transition_to(BossStage::WaitingForApproval).await?;
+        } else if stage == BossStage::WaitingForApproval {
+            if signal.trim().to_uppercase() == "Y" || signal.trim().is_empty() {
+                self.transition_to(BossStage::Execution).await?;
+                let _ = self.advance_plan(app_state).await;
+            } else {
+                self.record_documentation_feedback(signal).await?;
+            }
+        }
         Ok(())
     }
 

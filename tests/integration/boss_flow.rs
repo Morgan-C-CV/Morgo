@@ -2464,3 +2464,141 @@ async fn b_runtime_callback_fires_for_continue_step_as_well() {
     let _ = std::fs::remove_file(&plan_path);
 }
 
+// ---------------------------------------------------------------------------
+// T16.6.H.3 — A-side orchestration owned by DesignerARuntime
+// ---------------------------------------------------------------------------
+
+/// on_review_event() side effect (plan mutation + auto-advance) is triggered from
+/// A's runtime handler, not inline in the coordinator.
+#[tokio::test]
+async fn on_review_event_side_effect_triggered_from_a_runtime_handler() {
+    let plan_path = std::env::temp_dir().join("boss_h3_review_side_effect.json");
+    let plan = BossPlan {
+        plan_id: "plan-h3-review".into(),
+        accepted_by_user: true,
+        auto_sequence: true,
+        steps: vec![boss_step(0, "step zero")],
+        ..Default::default()
+    };
+    save_plan(&plan, &plan_path).await.unwrap();
+
+    let coordinator = BossCoordinator::restore_or_init(&plan_path).await.unwrap();
+    let task_manager = Arc::new(TaskManager::default());
+    let app_state = app_state_with_tasks("session-h3-review", task_manager.clone());
+
+    // Advance to get step 0 running.
+    coordinator.advance_plan(&app_state).await.unwrap();
+    tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+
+    // Wire A's callbacks via the auto path (uses auto_advance_app_state).
+    {
+        let mut guard = coordinator.auto_advance_app_state.write().await;
+        *guard = Some(app_state.clone());
+    }
+
+    // Call on_review_event — A's callback should mutate the plan.
+    coordinator
+        .on_review_event(0, true, "looks good", None)
+        .await
+        .unwrap();
+    tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+
+    // Plan step 0 must be Completed — set by A's callback, not coordinator inline.
+    let plan_guard = coordinator.plan.read().await;
+    let plan = plan_guard.as_ref().unwrap();
+    assert_eq!(
+        plan.steps[0].status,
+        BossPlanStepStatus::Completed,
+        "A runtime callback must mark step Completed"
+    );
+    assert_eq!(
+        plan.steps[0].last_review_summary.as_deref(),
+        Some("looks good"),
+        "A runtime callback must record review summary"
+    );
+
+    let _ = std::fs::remove_file(&plan_path);
+}
+
+/// finalize_documentation_loop() sends FinalizeDocumentation to A mailbox first;
+/// A's handler drives the WaitingForApproval stage transition.
+#[tokio::test]
+async fn finalize_documentation_loop_routes_through_a_mailbox() {
+    let plan_path = std::env::temp_dir().join("boss_h3_finalize_doc.json");
+    let plan = BossPlan {
+        plan_id: "plan-h3-finalize".into(),
+        accepted_by_user: false,
+        auto_sequence: false,
+        steps: vec![boss_step(0, "step zero")],
+        ..Default::default()
+    };
+    save_plan(&plan, &plan_path).await.unwrap();
+
+    let coordinator = BossCoordinator::restore_or_init(&plan_path).await.unwrap();
+
+    coordinator
+        .finalize_documentation_loop("draft", "feedback", "notes", "final spec", "pseudo")
+        .await
+        .unwrap();
+
+    // A's mailbox handler must have updated A's internal stage to WaitingForApproval.
+    let a_stage = {
+        let guard = coordinator.actor_registry.read().await;
+        if let Some(r) = guard.as_ref() {
+            Some(r.designer_a.state.read().await.stage)
+        } else {
+            None
+        }
+    };
+    assert_eq!(
+        a_stage,
+        Some(BossStage::WaitingForApproval),
+        "A runtime handler must set stage to WaitingForApproval after FinalizeDocumentation"
+    );
+
+    let _ = std::fs::remove_file(&plan_path);
+}
+
+/// handle_user_approval() sends UserApproval to A mailbox first;
+/// A's handler drives the Execution stage transition.
+#[tokio::test]
+async fn handle_user_approval_routes_through_a_mailbox_and_a_drives_stage_transition() {
+    let plan_path = std::env::temp_dir().join("boss_h3_user_approval.json");
+    let plan = BossPlan {
+        plan_id: "plan-h3-approval".into(),
+        accepted_by_user: false,
+        auto_sequence: false,
+        steps: vec![boss_step(0, "step zero")],
+        ..Default::default()
+    };
+    save_plan(&plan, &plan_path).await.unwrap();
+
+    let coordinator = BossCoordinator::restore_or_init(&plan_path).await.unwrap();
+
+    // Finalize first so approval is valid.
+    coordinator
+        .finalize_documentation_loop("draft", "feedback", "notes", "final spec", "pseudo")
+        .await
+        .unwrap();
+
+    let approved = coordinator.handle_user_approval("Y").await.unwrap();
+    assert!(approved, "Y input must return approved=true");
+
+    // A's mailbox handler must have updated A's internal stage to Execution.
+    let a_stage = {
+        let guard = coordinator.actor_registry.read().await;
+        if let Some(r) = guard.as_ref() {
+            Some(r.designer_a.state.read().await.stage)
+        } else {
+            None
+        }
+    };
+    assert_eq!(
+        a_stage,
+        Some(BossStage::Execution),
+        "A runtime handler must set stage to Execution after UserApproval with Y"
+    );
+
+    let _ = std::fs::remove_file(&plan_path);
+}
+

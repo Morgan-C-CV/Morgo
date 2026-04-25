@@ -12,6 +12,19 @@ use crate::core::boss_state::{BossActorRole, BossActorStatus, BossStage};
 pub type ExecutionFn =
     Arc<dyn Fn(String) -> Pin<Box<dyn Future<Output = anyhow::Result<String>> + Send>> + Send + Sync>;
 
+/// Callback type for A's review side effect.
+/// Takes (step_id, accepted, summary, correction) — drives plan mutation + auto-advance.
+pub type ReviewFn = Arc<
+    dyn Fn(usize, bool, String, Option<String>) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send>>
+        + Send
+        + Sync,
+>;
+
+/// Callback type for A's documentation/approval side effect.
+/// Takes a stage-transition signal string — drives finalize or approval transitions.
+pub type DocumentationFn =
+    Arc<dyn Fn(String) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send>> + Send + Sync>;
+
 // ---------------------------------------------------------------------------
 // Commands
 // ---------------------------------------------------------------------------
@@ -22,7 +35,11 @@ pub enum DesignerACommand {
     /// Deliver a plan document for A to review.
     Plan { plan_id: String, document_spec: String },
     /// Ask A to review a completed step output.
-    Review { step_id: usize, accepted: bool, summary: String },
+    Review { step_id: usize, accepted: bool, summary: String, correction: Option<String> },
+    /// Finalize the documentation loop — A drives the transition to WaitingForApproval.
+    FinalizeDocumentation { signal: String },
+    /// User approval input — A drives the stage transition to Execution (or back to Documentation).
+    UserApproval { input: String },
     /// Notify A that the user approved the plan.
     Approve,
     /// Stop A's runtime.
@@ -49,6 +66,8 @@ pub enum BossActorEvent {
     StatusChanged { role: BossActorRole, status: BossActorStatus },
     StepDispatched { step_id: usize, task_id: String },
     ReviewComplete { step_id: usize, accepted: bool, summary: String },
+    DocumentationAdvanced { signal: String },
+    ApprovalHandled { approved: bool },
     Stopped { role: BossActorRole },
 }
 
@@ -162,6 +181,15 @@ pub struct ExecutorBRuntime {
 
 impl DesignerARuntime {
     pub fn spawn() -> Self {
+        Self::spawn_with_callbacks(None, None)
+    }
+
+    /// Spawn with optional review and documentation callbacks.
+    /// A's handler calls them to drive plan mutation and stage transitions.
+    pub fn spawn_with_callbacks(
+        review_fn: Option<ReviewFn>,
+        doc_fn: Option<DocumentationFn>,
+    ) -> Self {
         let (tx, mut rx) = mpsc::channel::<DesignerAEnvelope>(16);
         let closed = Arc::new(AtomicBool::new(false));
         let state = Arc::new(RwLock::new(BossActorState::default()));
@@ -170,7 +198,13 @@ impl DesignerARuntime {
 
         let join = tokio::spawn(async move {
             while let Some(envelope) = rx.recv().await {
-                let event = handle_designer_a_command(envelope.command, &state_loop).await;
+                let event = handle_designer_a_command(
+                    envelope.command,
+                    &state_loop,
+                    review_fn.as_ref(),
+                    doc_fn.as_ref(),
+                )
+                .await;
                 if let Some(respond_to) = envelope.respond_to {
                     let _ = respond_to.send(event.clone());
                 }
@@ -251,6 +285,8 @@ impl ExecutorBRuntime {
 async fn handle_designer_a_command(
     command: DesignerACommand,
     state: &Arc<RwLock<BossActorState>>,
+    review_fn: Option<&ReviewFn>,
+    doc_fn: Option<&DocumentationFn>,
 ) -> BossActorEvent {
     match command {
         DesignerACommand::Plan { .. } => {
@@ -262,15 +298,39 @@ async fn handle_designer_a_command(
                 status: BossActorStatus::Active,
             }
         }
-        DesignerACommand::Review { step_id, accepted, summary } => {
-            let mut s = state.write().await;
-            s.status = BossActorStatus::Active;
-            s.current_step = Some(step_id);
-            BossActorEvent::ReviewComplete {
-                step_id,
-                accepted,
-                summary,
+        DesignerACommand::Review { step_id, accepted, summary, correction } => {
+            {
+                let mut s = state.write().await;
+                s.status = BossActorStatus::Active;
+                s.current_step = Some(step_id);
             }
+            // A's handler owns the review side effect — plan mutation + auto-advance.
+            if let Some(f) = review_fn {
+                let _ = f(step_id, accepted, summary.clone(), correction).await;
+            }
+            BossActorEvent::ReviewComplete { step_id, accepted, summary }
+        }
+        DesignerACommand::FinalizeDocumentation { signal } => {
+            {
+                let mut s = state.write().await;
+                s.status = BossActorStatus::Active;
+                s.stage = BossStage::WaitingForApproval;
+            }
+            if let Some(f) = doc_fn {
+                let _ = f(signal.clone()).await;
+            }
+            BossActorEvent::DocumentationAdvanced { signal }
+        }
+        DesignerACommand::UserApproval { input } => {
+            let approved = input.trim().to_uppercase() == "Y" || input.trim().is_empty();
+            {
+                let mut s = state.write().await;
+                s.stage = if approved { BossStage::Execution } else { BossStage::Documentation };
+            }
+            if let Some(f) = doc_fn {
+                let _ = f(input).await;
+            }
+            BossActorEvent::ApprovalHandled { approved }
         }
         DesignerACommand::Approve => {
             let mut s = state.write().await;
@@ -338,6 +398,8 @@ pub struct BossActorRegistry {
     pub executor_b: ExecutorBRuntime,
     /// True when B was spawned with a real execution callback.
     pub has_executor: bool,
+    /// True when A was spawned with real review/documentation callbacks.
+    pub has_a_callbacks: bool,
 }
 
 impl BossActorRegistry {
@@ -346,6 +408,7 @@ impl BossActorRegistry {
             designer_a: DesignerARuntime::spawn(),
             executor_b: ExecutorBRuntime::spawn(),
             has_executor: false,
+            has_a_callbacks: false,
         }
     }
 
@@ -369,5 +432,20 @@ pub fn bootstrap_with_executor(exec_fn: ExecutionFn) -> BossActorRegistry {
         designer_a: DesignerARuntime::spawn(),
         executor_b: ExecutorBRuntime::spawn_with_executor(Some(exec_fn)),
         has_executor: true,
+        has_a_callbacks: false,
+    }
+}
+
+/// Convenience constructor for wiring both B's execution callback and A's review/doc callbacks.
+pub fn bootstrap_with_all_callbacks(
+    exec_fn: ExecutionFn,
+    review_fn: ReviewFn,
+    doc_fn: DocumentationFn,
+) -> BossActorRegistry {
+    BossActorRegistry {
+        designer_a: DesignerARuntime::spawn_with_callbacks(Some(review_fn), Some(doc_fn)),
+        executor_b: ExecutorBRuntime::spawn_with_executor(Some(exec_fn)),
+        has_executor: true,
+        has_a_callbacks: true,
     }
 }
