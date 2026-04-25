@@ -3234,11 +3234,12 @@ async fn h10_host_restore_or_init_coordinator_uses_host_owner() {
 
     let coordinator = host.restore_or_init_coordinator(&plan_path, &app_state).await.unwrap();
 
-    // The coordinator must be full-mode — owner identity is verified indirectly via full-mode check.
-    let guard = coordinator.actor_registry.read().await;
-    let registry = guard.as_ref().unwrap();
-    assert!(registry.has_executor && registry.has_a_callbacks,
-        "h10: coordinator from host must be full-mode (owner wired correctly)");
+    // Direct owner identity assertion: coordinator must hold the same BossRuntimeOwner Arc as host.
+    assert_eq!(
+        host.owner_ptr(),
+        coordinator.runtime_owner_ptr(),
+        "h10: coordinator from restore_or_init_coordinator must hold host's BossRuntimeOwner"
+    );
 }
 
 /// The host API triad (build / bootstrap / restore_or_init) all produce full-mode coordinators.
@@ -3273,4 +3274,46 @@ async fn h10_host_api_triad_all_produce_full_mode() {
     let g3 = c3.actor_registry.read().await;
     let r3 = g3.as_ref().unwrap();
     assert!(r3.has_executor && r3.has_a_callbacks, "h10: restore_or_init_coordinator must be full-mode");
+}
+
+// ---------------------------------------------------------------------------
+// T16.6.H.10.1 — Direct owner identity assertion for host API triad
+// ---------------------------------------------------------------------------
+
+/// build_coordinator: coordinator holds the host's BossRuntimeOwner (direct identity check).
+#[tokio::test]
+async fn h10_1_build_coordinator_uses_host_owner() {
+    use rust_agent::core::boss_runtime::BossRuntimeHost;
+    let host = BossRuntimeHost::new();
+    let task_manager = Arc::new(TaskManager::default());
+    let app_state = app_state_with_tasks("session-h10-1-build", task_manager);
+
+    let coordinator = host.build_coordinator(&app_state).await;
+
+    assert_eq!(
+        host.owner_ptr(),
+        coordinator.runtime_owner_ptr(),
+        "h10.1: coordinator from build_coordinator must hold host's BossRuntimeOwner"
+    );
+}
+
+/// restore_or_init_coordinator: coordinator holds the host's BossRuntimeOwner (direct identity check).
+/// This replaces the indirect smoke test from H.10.
+#[tokio::test]
+async fn h10_1_restore_or_init_coordinator_uses_host_owner_direct() {
+    use rust_agent::core::boss_runtime::BossRuntimeHost;
+    let host = BossRuntimeHost::new();
+    let plan_path = std::env::temp_dir().join("h10_1_owner_direct_plan.json");
+    let _ = std::fs::remove_file(&plan_path);
+
+    let task_manager = Arc::new(TaskManager::default());
+    let app_state = app_state_with_tasks("session-h10-1-restore", task_manager);
+
+    let coordinator = host.restore_or_init_coordinator(&plan_path, &app_state).await.unwrap();
+
+    assert_eq!(
+        host.owner_ptr(),
+        coordinator.runtime_owner_ptr(),
+        "h10.1: coordinator from restore_or_init_coordinator must hold host's BossRuntimeOwner"
+    );
 }

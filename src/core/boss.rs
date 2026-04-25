@@ -54,6 +54,13 @@ impl BossCoordinator {
         }
     }
 
+    /// Returns the raw pointer address of the coordinator's `BossRuntimeOwner` Arc.
+    /// Test-only seam for verifying owner identity without exposing the Arc itself.
+    #[doc(hidden)]
+    pub fn runtime_owner_ptr(&self) -> usize {
+        Arc::as_ptr(&self.runtime_owner) as usize
+    }
+
     /// Full-mode constructor — wires A+B callbacks immediately.
     /// Prefer `BossRuntimeHost::build_coordinator` in production so the host's
     /// `BossRuntimeOwner` is used. This method is the building block used by the host.

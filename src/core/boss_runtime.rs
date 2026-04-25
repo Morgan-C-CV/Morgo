@@ -124,6 +124,13 @@ impl BossRuntimeHost {
         self.owner.clone()
     }
 
+    /// Returns the raw pointer address of this host's `BossRuntimeOwner` Arc.
+    /// Test-only seam for verifying owner identity.
+    #[doc(hidden)]
+    pub fn owner_ptr(&self) -> usize {
+        Arc::as_ptr(&self.owner) as usize
+    }
+
     /// Full-mode factory — creates a coordinator and immediately bootstraps A+B callbacks.
     /// This is the preferred production entry point; callers do not need to call
     /// `bootstrap_actor_registry_with_app_state` separately.
