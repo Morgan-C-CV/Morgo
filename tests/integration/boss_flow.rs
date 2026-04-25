@@ -422,4 +422,41 @@ async fn boss_actor_registry_tracks_a_b_and_children() {
         .find(|h| h.role == BossActorRole::ExecutorB)
         .unwrap();
     assert_eq!(b.status, BossActorStatus::Pending);
+
+    // Inject one of each child role and verify the registry distinguishes them.
+    {
+        use rust_agent::core::boss_state::BossActorHandle;
+        let mut guard = coordinator.session.write().await;
+        let session = guard.as_mut().unwrap();
+        session.active_children.push(BossActorHandle::new(
+            "child-review-1",
+            "child-review-1",
+            BossActorRole::ReviewChild,
+        ));
+        session.active_children.push(BossActorHandle::new(
+            "child-impl-1",
+            "child-impl-1",
+            BossActorRole::ImplementChild,
+        ));
+        session.active_children.push(BossActorHandle::new(
+            "child-verify-1",
+            "child-verify-1",
+            BossActorRole::VerifyChild,
+        ));
+    }
+
+    let snapshot4 = coordinator.actor_registry_snapshot().await;
+    assert_eq!(snapshot4.len(), 5, "A + B + 3 children");
+    assert!(snapshot4.iter().any(|h| h.role == BossActorRole::ReviewChild));
+    assert!(snapshot4.iter().any(|h| h.role == BossActorRole::ImplementChild));
+    assert!(snapshot4.iter().any(|h| h.role == BossActorRole::VerifyChild));
+
+    // All three child roles must report is_child() == true.
+    let children: Vec<_> = snapshot4.iter().filter(|h| h.role.is_child()).collect();
+    assert_eq!(children.len(), 3);
+    assert!(children.iter().all(|h| h.role.is_child()));
+
+    // A and B must NOT be classified as children.
+    assert!(!BossActorRole::DesignerA.is_child());
+    assert!(!BossActorRole::ExecutorB.is_child());
 }

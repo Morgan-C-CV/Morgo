@@ -89,7 +89,12 @@ impl Default for BossStatus {
 pub enum BossActorRole {
     DesignerA,
     ExecutorB,
-    Child,
+    /// Child spawned to review a completed step.
+    ReviewChild,
+    /// Child spawned to implement a plan step.
+    ImplementChild,
+    /// Child spawned to verify acceptance criteria.
+    VerifyChild,
 }
 
 impl BossActorRole {
@@ -97,8 +102,17 @@ impl BossActorRole {
         match self {
             BossActorRole::DesignerA => "designer_a",
             BossActorRole::ExecutorB => "executor_b",
-            BossActorRole::Child => "child",
+            BossActorRole::ReviewChild => "review_child",
+            BossActorRole::ImplementChild => "implement_child",
+            BossActorRole::VerifyChild => "verify_child",
         }
+    }
+
+    pub fn is_child(&self) -> bool {
+        matches!(
+            self,
+            BossActorRole::ReviewChild | BossActorRole::ImplementChild | BossActorRole::VerifyChild
+        )
     }
 }
 
@@ -140,6 +154,10 @@ pub struct BossActorHandle {
     pub last_snapshot: Option<SystemTime>,
     /// How many levels deep from the root boss session (0 = direct child).
     pub lineage_depth: u32,
+    /// Logical mailbox address for future message-passing (not a live channel).
+    pub mailbox_id: Option<String>,
+    /// Opaque token id used to cancel this actor's work; resolved at runtime.
+    pub cancel_id: Option<String>,
 }
 
 impl BossActorHandle {
@@ -152,6 +170,8 @@ impl BossActorHandle {
             task_id: None,
             last_snapshot: None,
             lineage_depth: 0,
+            mailbox_id: None,
+            cancel_id: None,
         }
     }
 }
