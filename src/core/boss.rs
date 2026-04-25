@@ -485,7 +485,8 @@ impl BossCoordinator {
         }
 
         // Send FinalizeDocumentation to A mailbox — A's handler drives the stage transition.
-        self.ensure_actor_registry().await;
+        // Wire A's callbacks via auto path (uses stored auto_advance_app_state).
+        self.ensure_actor_registry_with_a_callbacks_auto().await;
         if let Some(registry) = self.actor_registry.read().await.as_ref() {
             let _ = registry.a_mailbox().request(DesignerACommand::FinalizeDocumentation {
                 signal: "finalize".to_string(),
@@ -572,7 +573,8 @@ impl BossCoordinator {
         }
 
         // Send UserApproval to A mailbox — A's handler drives the stage transition.
-        self.ensure_actor_registry().await;
+        // Wire A's callbacks via auto path (uses stored auto_advance_app_state).
+        self.ensure_actor_registry_with_a_callbacks_auto().await;
         let a_approved = if let Some(registry) = self.actor_registry.read().await.as_ref() {
             match registry.a_mailbox().request(DesignerACommand::UserApproval {
                 input: user_input.to_string(),

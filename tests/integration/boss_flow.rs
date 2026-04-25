@@ -2520,8 +2520,8 @@ async fn on_review_event_side_effect_triggered_from_a_runtime_handler() {
     let _ = std::fs::remove_file(&plan_path);
 }
 
-/// finalize_documentation_loop() sends FinalizeDocumentation to A mailbox first;
-/// A's handler drives the WaitingForApproval stage transition.
+/// finalize_documentation_loop() wires A callbacks and sends FinalizeDocumentation to A mailbox;
+/// has_a_callbacks must be true and A's handler drives the WaitingForApproval stage transition.
 #[tokio::test]
 async fn finalize_documentation_loop_routes_through_a_mailbox() {
     let plan_path = std::env::temp_dir().join("boss_h3_finalize_doc.json");
@@ -2535,11 +2535,24 @@ async fn finalize_documentation_loop_routes_through_a_mailbox() {
     save_plan(&plan, &plan_path).await.unwrap();
 
     let coordinator = BossCoordinator::restore_or_init(&plan_path).await.unwrap();
+    let task_manager = Arc::new(TaskManager::default());
+    let app_state = app_state_with_tasks("session-h3-finalize", task_manager.clone());
+
+    // Set auto_advance_app_state so ensure_actor_registry_with_a_callbacks_auto can wire callbacks.
+    {
+        let mut guard = coordinator.auto_advance_app_state.write().await;
+        *guard = Some(app_state.clone());
+    }
 
     coordinator
         .finalize_documentation_loop("draft", "feedback", "notes", "final spec", "pseudo")
         .await
         .unwrap();
+
+    // has_a_callbacks must be true — A callbacks were wired, not the coordinator fallback.
+    let has_a_callbacks = coordinator.actor_registry.read().await
+        .as_ref().map(|r| r.has_a_callbacks).unwrap_or(false);
+    assert!(has_a_callbacks, "finalize_documentation_loop must wire A callbacks (has_a_callbacks == true)");
 
     // A's mailbox handler must have updated A's internal stage to WaitingForApproval.
     let a_stage = {
@@ -2553,14 +2566,14 @@ async fn finalize_documentation_loop_routes_through_a_mailbox() {
     assert_eq!(
         a_stage,
         Some(BossStage::WaitingForApproval),
-        "A runtime handler must set stage to WaitingForApproval after FinalizeDocumentation"
+        "A runtime handler must set stage to WaitingForApproval — not coordinator fallback"
     );
 
     let _ = std::fs::remove_file(&plan_path);
 }
 
-/// handle_user_approval() sends UserApproval to A mailbox first;
-/// A's handler drives the Execution stage transition.
+/// handle_user_approval() wires A callbacks and sends UserApproval to A mailbox;
+/// has_a_callbacks must be true and A's handler drives the Execution stage transition.
 #[tokio::test]
 async fn handle_user_approval_routes_through_a_mailbox_and_a_drives_stage_transition() {
     let plan_path = std::env::temp_dir().join("boss_h3_user_approval.json");
@@ -2574,6 +2587,14 @@ async fn handle_user_approval_routes_through_a_mailbox_and_a_drives_stage_transi
     save_plan(&plan, &plan_path).await.unwrap();
 
     let coordinator = BossCoordinator::restore_or_init(&plan_path).await.unwrap();
+    let task_manager = Arc::new(TaskManager::default());
+    let app_state = app_state_with_tasks("session-h3-approval", task_manager.clone());
+
+    // Set auto_advance_app_state so ensure_actor_registry_with_a_callbacks_auto can wire callbacks.
+    {
+        let mut guard = coordinator.auto_advance_app_state.write().await;
+        *guard = Some(app_state.clone());
+    }
 
     // Finalize first so approval is valid.
     coordinator
@@ -2583,6 +2604,11 @@ async fn handle_user_approval_routes_through_a_mailbox_and_a_drives_stage_transi
 
     let approved = coordinator.handle_user_approval("Y").await.unwrap();
     assert!(approved, "Y input must return approved=true");
+
+    // has_a_callbacks must be true — A callbacks were wired, not the coordinator fallback.
+    let has_a_callbacks = coordinator.actor_registry.read().await
+        .as_ref().map(|r| r.has_a_callbacks).unwrap_or(false);
+    assert!(has_a_callbacks, "handle_user_approval must wire A callbacks (has_a_callbacks == true)");
 
     // A's mailbox handler must have updated A's internal stage to Execution.
     let a_stage = {
@@ -2596,7 +2622,7 @@ async fn handle_user_approval_routes_through_a_mailbox_and_a_drives_stage_transi
     assert_eq!(
         a_stage,
         Some(BossStage::Execution),
-        "A runtime handler must set stage to Execution after UserApproval with Y"
+        "A runtime handler must set stage to Execution — not coordinator fallback"
     );
 
     let _ = std::fs::remove_file(&plan_path);
