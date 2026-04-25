@@ -43,6 +43,8 @@ struct SpawnAgentRequest {
     step_acceptance: Vec<String>,
     parent_session_id: Option<String>,
     requires_verification: bool,
+    /// When set, the spawned subagent runtime is assembled with this boss actor policy.
+    boss_actor_policy: Option<crate::state::permission_context::BossActorPolicy>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,6 +72,8 @@ struct AgentJsonRequest {
     requires_verification: Option<bool>,
     task_id: Option<String>,
     message: Option<String>,
+    boss_actor_role: Option<String>,
+    boss_lineage_depth: Option<u32>,
 }
 
 pub struct AgentTool;
@@ -233,6 +237,7 @@ fn launch_agent_task(
             inherit_context: request.inherit_context,
             max_turns: request.max_turns,
             allowed_tools: request.allowed_tools.clone(),
+            boss_actor_policy: request.boss_actor_policy,
         },
     );
     let tasks_for_run = tasks.clone();
@@ -284,6 +289,8 @@ fn parse_agent_request(input: &str) -> anyhow::Result<AgentRequest> {
         }
         if let Some(task) = request.task {
             let role = parse_worker_role(request.role.as_deref())?;
+            let boss_actor_policy =
+                parse_boss_actor_policy(request.boss_actor_role.as_deref(), request.boss_lineage_depth)?;
             return Ok(AgentRequest::Spawn(SpawnAgentRequest {
                 task,
                 role,
@@ -300,6 +307,7 @@ fn parse_agent_request(input: &str) -> anyhow::Result<AgentRequest> {
                 step_acceptance: request.step_acceptance.unwrap_or_default(),
                 parent_session_id: request.parent_session_id,
                 requires_verification: request.requires_verification.unwrap_or(false),
+                boss_actor_policy,
             }));
         }
         anyhow::bail!("agent JSON input must include either task or task_id/message")
@@ -328,6 +336,7 @@ fn parse_agent_request(input: &str) -> anyhow::Result<AgentRequest> {
         step_acceptance: Vec::new(),
         parent_session_id: None,
         requires_verification: false,
+        boss_actor_policy: None,
     }))
 }
 
@@ -389,8 +398,7 @@ fn parse_worker_phase(
     }
 }
 
-fn parse_reuse_strategy(value: Option<&str>, role: WorkerRole) -> anyhow::Result<ReuseStrategy> {
-    match value {
+fn parse_reuse_strategy(value: Option<&str>, role: WorkerRole) -> anyhow::Result<ReuseStrategy> {    match value {
         Some("running_only") => Ok(ReuseStrategy::RunningOnly),
         Some("fresh") => Ok(ReuseStrategy::Fresh),
         Some(other) => anyhow::bail!("unknown reuse strategy: {other}"),
@@ -399,6 +407,30 @@ fn parse_reuse_strategy(value: Option<&str>, role: WorkerRole) -> anyhow::Result
             WorkerRole::Implement | WorkerRole::Verify => ReuseStrategy::Fresh,
         }),
     }
+}
+
+fn parse_boss_actor_policy(
+    role: Option<&str>,
+    depth: Option<u32>,
+) -> anyhow::Result<Option<crate::state::permission_context::BossActorPolicy>> {
+    let Some(role_str) = role else {
+        return Ok(None);
+    };
+    use crate::core::boss_state::{BossActorRole, BossStage};
+    use crate::state::permission_context::BossActorPolicy;
+    let actor_role = match role_str {
+        "executor_b" => BossActorRole::ExecutorB,
+        "designer_a" => BossActorRole::DesignerA,
+        "review_child" => BossActorRole::ReviewChild,
+        "implement_child" => BossActorRole::ImplementChild,
+        "verify_child" => BossActorRole::VerifyChild,
+        other => anyhow::bail!("unknown boss_actor_role: {other}"),
+    };
+    Ok(Some(BossActorPolicy {
+        actor_role,
+        lineage_depth: depth.unwrap_or(0),
+        phase: BossStage::Execution,
+    }))
 }
 
 fn maybe_reuse_running_task(

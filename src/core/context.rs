@@ -7,7 +7,9 @@ use crate::service::api::streaming::StreamEvent;
 use crate::service::compact::ReactiveCompactor;
 use crate::state::active_model_runtime::ActiveModelRuntime;
 use crate::state::app_state::{AppState, RuntimeRole, WorkerRole};
-use crate::state::permission_context::{MAX_NESTED_MEMORY_DEPTH, sanitize_nested_memory_lineage};
+use crate::state::permission_context::{
+    BossActorPolicy, MAX_NESTED_MEMORY_DEPTH, sanitize_nested_memory_lineage,
+};
 use crate::tool::registry::ToolRegistry;
 
 #[derive(Debug, Clone)]
@@ -16,6 +18,8 @@ pub struct SubagentConfig {
     pub inherit_context: bool,
     pub max_turns: Option<usize>,
     pub allowed_tools: Option<Vec<String>>,
+    /// When set, the subagent runtime is assembled with ExecutorB policy and sees Agent tool.
+    pub boss_actor_policy: Option<BossActorPolicy>,
 }
 
 #[derive(Debug, Clone)]
@@ -91,11 +95,24 @@ impl QueryContext {
             permission_context =
                 permission_context.with_inherited_active_model_snapshot(active_model_snapshot);
         }
+        if let Some(policy) = config.boss_actor_policy {
+            permission_context = permission_context.with_boss_actor_policy(policy);
+        }
         let lineage = build_nested_memory_lineage(self, &child_agent_id, config.inherit_context);
         permission_context.set_nested_memory_lineage(lineage);
-        let tool_registry = self
-            .tool_registry
-            .assemble_worker_registry(config.allowed_tools.as_deref());
+        let tool_registry = if permission_context.boss_actor_policy.is_some() {
+            use crate::bootstrap::InteractionSurface;
+            use crate::bootstrap::SessionMode;
+            self.tool_registry.assemble(
+                crate::tool::registry::ToolAssemblyContext::executor_b(
+                    InteractionSurface::Cli,
+                    SessionMode::Headless,
+                ),
+            )
+        } else {
+            self.tool_registry
+                .assemble_worker_registry(config.allowed_tools.as_deref())
+        };
         permission_context.inherited_tool_registry = Some(tool_registry.clone());
         app_state.permission_context = permission_context;
 

@@ -80,6 +80,7 @@ impl ToolAssemblyContext {
     pub fn executor_b(surface: InteractionSurface, session_mode: SessionMode) -> Self {
         Self {
             boss_actor_policy: Some(BossActorPolicy::executor_b(BossStage::Execution)),
+            include_interactive_tools: true,
             ..Self::worker(surface, session_mode)
         }
     }

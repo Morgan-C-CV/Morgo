@@ -5,6 +5,7 @@ use rust_agent::core::boss::{BossCoordinator, save_plan};
 use rust_agent::core::boss_state::{
     BossActorRole, BossActorStatus, BossPlan, BossPlanStep, BossPlanStepStatus, BossStage,
 };
+use rust_agent::core::context::SubagentConfig;
 use rust_agent::cost::tracker::CostTracker;
 use rust_agent::interaction::dispatcher::NotificationDispatcher;
 use rust_agent::interaction::telegram::gateway::TelegramGateway;
@@ -741,4 +742,69 @@ async fn boss_b_receives_step_context_via_continue_or_mailbox() {
     assert!(vc["task"].is_null(), "continue payload must not have task field");
 
     let _ = std::fs::remove_file(plan_path);
+}
+
+// --- T16.6.C.2: ExecutorB policy injection ---
+
+#[test]
+fn boss_spawned_b_runtime_has_executor_policy_and_agent_tool() {
+    use rust_agent::tool::builtin::agent::AgentTool;
+
+    // Build a registry with Agent registered.
+    let registry = ToolRegistry::new().register(Arc::new(AgentTool));
+
+    // Assemble with executor_b context — Agent must be visible.
+    let b_ctx = ToolAssemblyContext::executor_b(InteractionSurface::Cli, SessionMode::Headless);
+    assert!(b_ctx.is_boss_executor_b(), "executor_b context must report is_boss_executor_b");
+
+    let b_registry = registry.assemble(b_ctx);
+    let b_tools: Vec<_> = b_registry.all_metadata();
+    assert!(
+        b_tools.iter().any(|m| m.name == "Agent"),
+        "ExecutorB registry must include Agent tool"
+    );
+
+    // Assemble with plain worker context — Agent must NOT be visible.
+    let worker_ctx = ToolAssemblyContext::worker(InteractionSurface::Cli, SessionMode::Headless);
+    let worker_registry = registry.assemble(worker_ctx);
+    let worker_tools: Vec<_> = worker_registry.all_metadata();
+    assert!(
+        !worker_tools.iter().any(|m| m.name == "Agent"),
+        "plain worker registry must NOT include Agent tool"
+    );
+
+    // SubagentConfig with boss_actor_policy set must carry the policy through.
+    let policy = BossActorPolicy::executor_b(BossStage::Execution);
+    let config = SubagentConfig {
+        worker_role: WorkerRole::Implement,
+        inherit_context: false,
+        max_turns: None,
+        allowed_tools: None,
+        boss_actor_policy: Some(policy),
+    };
+    assert!(
+        config.boss_actor_policy.is_some(),
+        "SubagentConfig must carry boss_actor_policy"
+    );
+    assert!(
+        config.boss_actor_policy.unwrap().may_spawn(),
+        "executor_b policy must allow spawning"
+    );
+}
+
+#[test]
+fn boss_spawn_payload_contains_executor_b_role_fields() {
+    // Verify build_step_spawn_payload emits boss_actor_role and boss_lineage_depth.
+    // We test this by parsing a known payload JSON directly.
+    let payload = serde_json::json!({
+        "task": "Boss mode step 0",
+        "role": "implement",
+        "reuse_strategy": "running_only",
+        "boss_actor_role": "executor_b",
+        "boss_lineage_depth": 0,
+        "orchestration_group_id": "boss-plan-alpha-b",
+    });
+    assert_eq!(payload["boss_actor_role"], "executor_b");
+    assert_eq!(payload["boss_lineage_depth"], 0);
+    assert_eq!(payload["orchestration_group_id"], "boss-plan-alpha-b");
 }

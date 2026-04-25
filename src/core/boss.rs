@@ -423,6 +423,8 @@ impl BossCoordinator {
             "parent_session_id": parent_session_id,
             "parent_runtime_role": "coordinator",
             "orchestration_group_id": b_actor_id,
+            "boss_actor_role": "executor_b",
+            "boss_lineage_depth": 0,
         })
         .to_string())
     }
