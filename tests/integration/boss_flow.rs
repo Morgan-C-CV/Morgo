@@ -3075,3 +3075,57 @@ async fn h7_production_assembly_is_full_mode_and_idempotent() {
     let registry = guard.as_ref().unwrap();
     assert!(registry.has_executor && registry.has_a_callbacks, "h7: production assembly must be full mode");
 }
+
+// ---------------------------------------------------------------------------
+// T16.6.H.8 — new_with_app_state is the first-class full-mode constructor
+// ---------------------------------------------------------------------------
+
+/// new_with_app_state produces a full-mode registry immediately — no separate bootstrap call needed.
+#[tokio::test]
+async fn h8_new_with_app_state_is_full_mode() {
+    use rust_agent::core::boss_runtime::BossRuntimeOwner;
+    let runtime_owner = Arc::new(BossRuntimeOwner::default());
+    let task_manager = Arc::new(TaskManager::default());
+    let app_state = app_state_with_tasks("session-h8-new", task_manager);
+
+    let coordinator = BossCoordinator::new_with_app_state(runtime_owner, &app_state).await;
+
+    let guard = coordinator.actor_registry.read().await;
+    let registry = guard.as_ref().unwrap();
+    assert!(registry.has_executor, "h8: new_with_app_state must set has_executor");
+    assert!(registry.has_a_callbacks, "h8: new_with_app_state must set has_a_callbacks");
+}
+
+/// restore_or_init_with_app_state produces a full-mode registry immediately.
+/// Symmetric with new_with_app_state for the restore path.
+#[tokio::test]
+async fn h8_restore_or_init_with_app_state_is_full_mode() {
+    let plan_path = std::env::temp_dir().join("h8_restore_test_plan.json");
+    let _ = std::fs::remove_file(&plan_path);
+
+    let task_manager = Arc::new(TaskManager::default());
+    let app_state = app_state_with_tasks("session-h8-restore", task_manager);
+
+    // No file — falls back to fresh coordinator.
+    let coordinator =
+        BossCoordinator::restore_or_init_with_app_state(&plan_path, &app_state).await.unwrap();
+
+    let guard = coordinator.actor_registry.read().await;
+    let registry = guard.as_ref().unwrap();
+    assert!(registry.has_executor, "h8: restore_or_init_with_app_state must set has_executor");
+    assert!(registry.has_a_callbacks, "h8: restore_or_init_with_app_state must set has_a_callbacks");
+}
+
+/// new_with_app_state and restore_or_init_with_app_state are the only paths that produce
+/// has_executor && has_a_callbacks == true without a separate bootstrap call.
+/// new_with_runtime_owner alone must NOT produce a full-mode registry.
+#[tokio::test]
+async fn h8_new_with_runtime_owner_alone_is_not_full_mode() {
+    use rust_agent::core::boss_runtime::BossRuntimeOwner;
+    let runtime_owner = Arc::new(BossRuntimeOwner::default());
+    let coordinator = BossCoordinator::new_with_runtime_owner(runtime_owner);
+
+    // No bootstrap call — registry must be absent.
+    let has_registry = coordinator.actor_registry.read().await.is_some();
+    assert!(!has_registry, "h8: new_with_runtime_owner alone must not produce a registry");
+}

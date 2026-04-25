@@ -54,6 +54,17 @@ impl BossCoordinator {
         }
     }
 
+    /// Full-mode constructor — wires A+B callbacks immediately.
+    /// This is the preferred production entry point when `AppState` is available at construction time.
+    pub async fn new_with_app_state(
+        runtime_owner: Arc<BossRuntimeOwner>,
+        app_state: &Arc<crate::state::app_state::AppState>,
+    ) -> Self {
+        let coordinator = Self::new_with_runtime_owner(runtime_owner);
+        coordinator.bootstrap_actor_registry_with_app_state(app_state).await;
+        coordinator
+    }
+
     pub async fn attach_app_state_for_report_testing(
         &self,
         app_state: Arc<crate::state::app_state::AppState>,

@@ -480,7 +480,9 @@ impl RuntimeBootstrap {
         let engine = finalized.engine;
 
         // Bootstrap actor runtimes with full A+B callbacks now that AppState is available.
-        // This eliminates the state-only phase and prevents lazy mode upgrades on first entry.
+        // BossCoordinator must be constructed before AppState (it is a field of AppState),
+        // so new_with_app_state() cannot be used here. This explicit call is the equivalent
+        // two-step: new_with_runtime_owner (sync, above) + bootstrap_actor_registry_with_app_state.
         if let Some(boss) = app_state.boss_coordinator.as_ref() {
             let app_arc = Arc::new(app_state.clone());
             boss.bootstrap_actor_registry_with_app_state(&app_arc).await;
