@@ -3,6 +3,7 @@ use std::sync::{Arc, RwLock};
 
 use crate::bootstrap::InteractionSurface;
 use crate::core::boss::BossCoordinator;
+use crate::core::boss_state::{BossActorRole, BossStage};
 use crate::core::concurrency::SubagentLimiter;
 use crate::hook::registry::HookRegistry;
 use crate::interaction::dispatcher::NotificationDispatcher;
@@ -18,6 +19,39 @@ use crate::task::manager::TaskManager;
 use crate::tool::registry::ToolRegistry;
 use std::sync::atomic::AtomicU64;
 use tokio_util::sync::CancellationToken;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BossActorPolicy {
+    pub actor_role: BossActorRole,
+    pub lineage_depth: u32,
+    pub phase: BossStage,
+}
+
+impl BossActorPolicy {
+    pub fn executor_b(phase: BossStage) -> Self {
+        Self {
+            actor_role: BossActorRole::ExecutorB,
+            lineage_depth: 0,
+            phase,
+        }
+    }
+
+    pub fn child(role: BossActorRole, lineage_depth: u32, phase: BossStage) -> Self {
+        Self {
+            actor_role: role,
+            lineage_depth,
+            phase,
+        }
+    }
+
+    /// True when this actor is allowed to spawn child agents.
+    /// Only ExecutorB in Execution phase may spawn; children never may.
+    pub fn may_spawn(&self) -> bool {
+        self.actor_role == BossActorRole::ExecutorB
+            && self.phase == BossStage::Execution
+            && !self.actor_role.is_child()
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PermissionMode {
@@ -70,6 +104,7 @@ pub struct ToolPermissionContext {
     pub cancellation_token: Option<CancellationToken>,
     pub subagent_limiter: Option<Arc<SubagentLimiter>>,
     pub boss_coordinator: Option<Arc<BossCoordinator>>,
+    pub boss_actor_policy: Option<BossActorPolicy>,
 }
 
 impl ToolPermissionContext {
@@ -108,6 +143,7 @@ impl ToolPermissionContext {
             cancellation_token: None,
             subagent_limiter: None,
             boss_coordinator: None,
+            boss_actor_policy: None,
         }
     }
 
@@ -267,6 +303,11 @@ impl ToolPermissionContext {
 
     pub fn with_boss_coordinator(mut self, boss_coordinator: Arc<BossCoordinator>) -> Self {
         self.boss_coordinator = Some(boss_coordinator);
+        self
+    }
+
+    pub fn with_boss_actor_policy(mut self, policy: BossActorPolicy) -> Self {
+        self.boss_actor_policy = Some(policy);
         self
     }
 

@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use serde::Deserialize;
 
 use crate::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
+use crate::core::boss_state::BossActorRole;
 use crate::core::context::{QueryContext, SubagentConfig};
 use crate::core::message::Message;
 use crate::core::query_loop::{QueryParams, run_query_loop_with_params};
@@ -107,7 +108,20 @@ impl Tool for AgentTool {
             .active_session_id
             .clone()
             .unwrap_or_else(|| "local-session".into());
+
+        // Boss spawn policy: children may never spawn grandchildren.
+        if let Some(policy) = &permissions.boss_actor_policy {
+            if policy.actor_role.is_child() {
+                anyhow::bail!(
+                    "boss spawn policy: {} actors (lineage_depth={}) may not spawn child agents",
+                    policy.actor_role.as_str(),
+                    policy.lineage_depth
+                );
+            }
+        }
+
         let request = parse_agent_request(&call.input)?;
+
         let parent_context = build_parent_query_context(permissions.clone());
         let dispatcher = parent_context.app_state.notification_dispatcher.clone();
 
@@ -154,6 +168,16 @@ impl Tool for AgentTool {
                 tasks.set_orchestration_group_id(&task.id, request.orchestration_group_id.clone());
                 tasks.set_phase(&task.id, request.phase);
                 tasks.set_step_id(&task.id, request.step_id);
+                if let Some(policy) = &permissions.boss_actor_policy {
+                    tasks.set_boss_actor_id(
+                        &task.id,
+                        Some(format!(
+                            "{}:depth={}",
+                            policy.actor_role.as_str(),
+                            policy.lineage_depth
+                        )),
+                    );
+                }
                 if request.requires_verification {
                     tasks.set_validation_state(
                         &task.id,

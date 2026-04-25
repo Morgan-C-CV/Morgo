@@ -3,7 +3,8 @@ use std::sync::Arc;
 use rust_agent::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
 use rust_agent::core::boss::{BossCoordinator, save_plan};
 use rust_agent::core::boss_state::{
-    BossActorRole, BossActorStatus, BossPlan, BossPlanStep, BossPlanStepStatus, BossStage,
+    BossActorRole, BossActorStatus, BossActorHandle, BossPlan, BossPlanStep, BossPlanStepStatus,
+    BossStage,
 };
 use rust_agent::cost::tracker::CostTracker;
 use rust_agent::interaction::dispatcher::NotificationDispatcher;
@@ -11,10 +12,14 @@ use rust_agent::interaction::telegram::gateway::TelegramGateway;
 use rust_agent::state::app_state::{
     ActiveModelProfileSource, ActiveModelProviderSummary, AppState, RuntimeRole, WorkerRole,
 };
-use rust_agent::state::permission_context::{PermissionMode, ToolPermissionContext};
+use rust_agent::state::permission_context::{
+    BossActorPolicy, PermissionMode, ToolPermissionContext,
+};
 use rust_agent::task::manager::TaskManager;
 use rust_agent::task::types::{TaskEvent, TaskOwner, TaskStatus, TaskType};
-use rust_agent::tool::registry::ToolRegistry;
+use rust_agent::tool::builtin::agent::AgentTool;
+use rust_agent::tool::definition::{Tool, ToolCall};
+use rust_agent::tool::registry::{ToolAssemblyContext, ToolRegistry};
 use tokio::sync::RwLock;
 
 fn boss_step(id: usize, description: &str) -> BossPlanStep {
@@ -459,4 +464,68 @@ async fn boss_actor_registry_tracks_a_b_and_children() {
     // A and B must NOT be classified as children.
     assert!(!BossActorRole::DesignerA.is_child());
     assert!(!BossActorRole::ExecutorB.is_child());
+}
+
+// --- T16.6.B: Boss-aware spawn policy ---
+
+#[test]
+fn boss_b_executor_b_context_is_boss_executor_b() {
+    let ctx = ToolAssemblyContext::executor_b(InteractionSurface::Cli, SessionMode::Headless);
+    assert!(ctx.is_boss_executor_b(), "executor_b context must report is_boss_executor_b");
+}
+
+#[test]
+fn boss_worker_context_is_not_boss_executor_b() {
+    let ctx = ToolAssemblyContext::worker(InteractionSurface::Cli, SessionMode::Headless);
+    assert!(!ctx.is_boss_executor_b(), "plain worker must not report is_boss_executor_b");
+}
+
+#[test]
+fn boss_spawn_policy_denies_out_of_phase_child_spawn() {
+    // A policy with phase != Execution must not allow spawning.
+    let policy = BossActorPolicy {
+        actor_role: BossActorRole::ExecutorB,
+        lineage_depth: 0,
+        phase: BossStage::Documentation,
+    };
+    assert!(
+        !policy.may_spawn(),
+        "ExecutorB outside Execution phase must not be allowed to spawn"
+    );
+}
+
+#[tokio::test]
+async fn boss_child_cannot_spawn_grandchild_agent() {
+    // Build a ToolPermissionContext that looks like a ReviewChild.
+    let tasks = Arc::new(TaskManager::default());
+    let permissions = ToolPermissionContext::new(PermissionMode::Default)
+        .with_task_manager(tasks)
+        .with_boss_actor_policy(BossActorPolicy::child(
+            BossActorRole::ReviewChild,
+            1,
+            BossStage::Execution,
+        ));
+
+    let call = ToolCall::new(
+        "Agent",
+        serde_json::json!({
+            "prompt": "do something",
+            "session_id": "child-session"
+        })
+        .to_string(),
+    );
+
+    let err = AgentTool
+        .invoke(&call, &permissions)
+        .await
+        .expect_err("child actor must not be allowed to spawn a grandchild");
+
+    assert!(
+        err.to_string().contains("boss spawn policy"),
+        "error must mention boss spawn policy, got: {err}"
+    );
+    assert!(
+        err.to_string().contains("review_child"),
+        "error must name the role, got: {err}"
+    );
 }

@@ -250,6 +250,8 @@ pub struct TaskRecord {
     pub output_file: String,
     pub output_offset: usize,
     pub delivery: TaskDeliveryState,
+    /// Actor id of the boss actor that spawned this task, if any.
+    pub boss_actor_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

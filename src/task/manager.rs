@@ -115,6 +115,7 @@ impl TaskManager {
                 notified: false,
                 notification: None,
             },
+            boss_actor_id: None,
         };
         store.tasks.push(task.clone());
         task
@@ -204,6 +205,19 @@ impl TaskManager {
             .find(|task| task.id == id)
         {
             task.step_id = step_id;
+        }
+    }
+
+    pub fn set_boss_actor_id(&self, id: &str, boss_actor_id: Option<String>) {
+        if let Some(task) = self
+            .store
+            .write()
+            .expect("task store poisoned")
+            .tasks
+            .iter_mut()
+            .find(|task| task.id == id)
+        {
+            task.boss_actor_id = boss_actor_id;
         }
     }
 

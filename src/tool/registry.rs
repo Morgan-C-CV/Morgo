@@ -1,8 +1,9 @@
 use std::sync::Arc;
 
 use crate::bootstrap::{InteractionSurface, SessionMode};
+use crate::core::boss_state::BossStage;
 use crate::state::app_state::RuntimeRole;
-use crate::state::permission_context::ToolPermissionContext;
+use crate::state::permission_context::{BossActorPolicy, ToolPermissionContext};
 use crate::tool::definition::{
     InterruptBehavior, ObservableInput, Tool, ToolCall, ToolMetadata, ToolResult,
 };
@@ -36,6 +37,8 @@ pub struct ToolAssemblyContext {
     pub include_deferred_tools: bool,
     pub include_interactive_tools: bool,
     pub include_open_world_tools: bool,
+    /// When set, the Agent tool visibility is governed by boss spawn policy.
+    pub boss_actor_policy: Option<BossActorPolicy>,
 }
 
 impl ToolAssemblyContext {
@@ -56,6 +59,7 @@ impl ToolAssemblyContext {
             include_deferred_tools: true,
             include_interactive_tools: true,
             include_open_world_tools,
+            boss_actor_policy: None,
         }
     }
 
@@ -68,7 +72,23 @@ impl ToolAssemblyContext {
             include_deferred_tools: false,
             include_interactive_tools: false,
             include_open_world_tools: false,
+            boss_actor_policy: None,
         }
+    }
+
+    /// Worker context for ExecutorB in Execution phase — may see a restricted Agent tool.
+    pub fn executor_b(surface: InteractionSurface, session_mode: SessionMode) -> Self {
+        Self {
+            boss_actor_policy: Some(BossActorPolicy::executor_b(BossStage::Execution)),
+            ..Self::worker(surface, session_mode)
+        }
+    }
+
+    /// Returns true when this context represents ExecutorB in Execution phase.
+    pub fn is_boss_executor_b(&self) -> bool {
+        self.boss_actor_policy
+            .map(|p| p.may_spawn())
+            .unwrap_or(false)
     }
 
     pub fn permission_context(
@@ -146,7 +166,12 @@ impl ToolRegistry {
                 match context.runtime_role {
                     RuntimeRole::Coordinator => is_tool_allowed(&metadata, &permissions),
                     RuntimeRole::Worker => {
-                        metadata.name != "Agent" && is_tool_allowed(&metadata, &permissions)
+                        if metadata.name == "Agent" || metadata.aliases.contains(&"Agent") {
+                            // Only ExecutorB in Execution phase may see Agent.
+                            return context.is_boss_executor_b()
+                                && is_tool_allowed(&metadata, &permissions);
+                        }
+                        is_tool_allowed(&metadata, &permissions)
                     }
                 }
             })
