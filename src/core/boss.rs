@@ -1,10 +1,12 @@
-use crate::core::boss_state::{BossPlan, BossPlanStep, BossPlanStepStatus, BossStage, BossStatus};
+use crate::core::boss_state::{
+    BossActorHandle, BossActorStatus, BossPlan, BossPlanStep, BossPlanStepStatus, BossSession,
+    BossStage, BossStatus,
+};
 use crate::task::types::{TaskEvent, TaskStatus};
 use crate::tool::definition::{Tool, ToolCall};
 use serde_json::json;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tokio_util::sync::CancellationToken;
 
 #[derive(Debug)]
 pub struct BossCoordinator {
@@ -12,11 +14,9 @@ pub struct BossCoordinator {
     /// Placed here so the planner can hold and modify it in memory before flushing
     pub plan: Arc<RwLock<Option<BossPlan>>>,
 
-    // Decoupled lightweight tracking (Prevents QueryContext RwLock Deadlocks):
-    pub agent_a_session_id: Arc<RwLock<Option<String>>>,
-    pub agent_b_session_id: Arc<RwLock<Option<String>>>,
-    pub agent_a_cancel: Arc<RwLock<Option<CancellationToken>>>,
-    pub agent_b_cancel: Arc<RwLock<Option<CancellationToken>>>,
+    /// Structured actor topology — replaces the former loose a/b session_id/cancel fields.
+    pub session: Arc<RwLock<Option<BossSession>>>,
+
     auto_advance_app_state: Arc<RwLock<Option<Arc<crate::state::app_state::AppState>>>>,
 }
 
@@ -25,10 +25,7 @@ impl BossCoordinator {
         Self {
             status: Arc::new(RwLock::new(BossStatus::default())),
             plan: Arc::new(RwLock::new(None)),
-            agent_a_session_id: Arc::new(RwLock::new(None)),
-            agent_b_session_id: Arc::new(RwLock::new(None)),
-            agent_a_cancel: Arc::new(RwLock::new(None)),
-            agent_b_cancel: Arc::new(RwLock::new(None)),
+            session: Arc::new(RwLock::new(None)),
             auto_advance_app_state: Arc::new(RwLock::new(None)),
         }
     }
@@ -74,7 +71,13 @@ impl BossCoordinator {
 
             {
                 let mut plan_guard = coordinator.plan.write().await;
-                *plan_guard = Some(loaded_plan);
+                *plan_guard = Some(loaded_plan.clone());
+            }
+
+            // Init actor session from plan — deterministic A/B ids, no real spawn yet.
+            {
+                let mut session_guard = coordinator.session.write().await;
+                *session_guard = Some(BossSession::from_plan_id(&loaded_plan.plan_id, stage));
             }
         } else {
             let mut status = coordinator.status.write().await;
@@ -86,6 +89,44 @@ impl BossCoordinator {
 
     pub async fn get_stage(&self) -> BossStage {
         self.status.read().await.stage
+    }
+
+    /// Ensures a BossSession exists for the given plan_id, creating one if absent.
+    /// Idempotent: if a session already exists for the same plan_id it is returned unchanged.
+    pub async fn ensure_actor_session(&self, plan_id: &str, stage: BossStage) {
+        let mut guard = self.session.write().await;
+        if guard.as_ref().map(|s| s.plan_id.as_str()) != Some(plan_id) {
+            *guard = Some(BossSession::from_plan_id(plan_id, stage));
+        }
+    }
+
+    /// Returns a point-in-time snapshot of all tracked actor handles (A, B, and children).
+    pub async fn actor_registry_snapshot(&self) -> Vec<BossActorHandle> {
+        let guard = self.session.read().await;
+        let Some(session) = guard.as_ref() else {
+            return Vec::new();
+        };
+        let mut handles = vec![session.designer_a.clone(), session.executor_b.clone()];
+        handles.extend(session.active_children.iter().cloned());
+        handles
+    }
+
+    /// Updates the status of a tracked actor by actor_id.
+    pub async fn update_actor_status(&self, actor_id: &str, status: BossActorStatus) {
+        let mut guard = self.session.write().await;
+        let Some(session) = guard.as_mut() else {
+            return;
+        };
+        for handle in std::iter::once(&mut session.designer_a)
+            .chain(std::iter::once(&mut session.executor_b))
+            .chain(session.active_children.iter_mut())
+        {
+            if handle.actor_id == actor_id {
+                handle.status = status;
+                handle.last_snapshot = Some(std::time::SystemTime::now());
+                return;
+            }
+        }
     }
 
     /// Enforces a strict DAG state transition to prevent invalid lifecycle jumps.

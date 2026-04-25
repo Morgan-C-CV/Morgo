@@ -2,7 +2,9 @@ use std::sync::Arc;
 
 use rust_agent::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
 use rust_agent::core::boss::{BossCoordinator, save_plan};
-use rust_agent::core::boss_state::{BossPlan, BossPlanStep, BossPlanStepStatus, BossStage};
+use rust_agent::core::boss_state::{
+    BossActorRole, BossActorStatus, BossPlan, BossPlanStep, BossPlanStepStatus, BossStage,
+};
 use rust_agent::cost::tracker::CostTracker;
 use rust_agent::interaction::dispatcher::NotificationDispatcher;
 use rust_agent::interaction::telegram::gateway::TelegramGateway;
@@ -343,4 +345,81 @@ async fn boss_step_complete_auto_dispatches_next() {
     assert_eq!(tasks[0].owner.session_id, "parent-session-auto-chain");
 
     let _ = std::fs::remove_file(plan_path);
+}
+
+#[tokio::test]
+async fn boss_starts_two_global_agents_and_restores_handles() {
+    let plan = BossPlan {
+        plan_id: "restore-test".into(),
+        task_description: "restore test".into(),
+        steps: vec![boss_step(0, "step 0")],
+        accepted_by_user: true,
+        auto_sequence: false,
+        ..Default::default()
+    };
+
+    let dir = std::env::temp_dir().join("boss_restore_handles_test");
+    std::fs::create_dir_all(&dir).unwrap();
+    let plan_path = dir.join("planning.json");
+    save_plan(&plan, &plan_path).await.unwrap();
+
+    let coordinator = BossCoordinator::restore_or_init(&plan_path)
+        .await
+        .expect("restore should succeed");
+
+    let session_guard = coordinator.session.read().await;
+    let session = session_guard
+        .as_ref()
+        .expect("session should be populated after restore");
+
+    assert_eq!(session.plan_id, "restore-test");
+    assert_eq!(session.designer_a.actor_id, "boss-restore-test-a");
+    assert_eq!(session.executor_b.actor_id, "boss-restore-test-b");
+    assert_eq!(session.designer_a.role, BossActorRole::DesignerA);
+    assert_eq!(session.executor_b.role, BossActorRole::ExecutorB);
+    assert_eq!(session.designer_a.status, BossActorStatus::Pending);
+    assert_eq!(session.executor_b.status, BossActorStatus::Pending);
+    assert!(session.active_children.is_empty());
+
+    let _ = std::fs::remove_file(&plan_path);
+    let _ = std::fs::remove_dir(dir);
+}
+
+#[tokio::test]
+async fn boss_actor_registry_tracks_a_b_and_children() {
+    let coordinator = BossCoordinator::new();
+
+    let empty = coordinator.actor_registry_snapshot().await;
+    assert!(empty.is_empty(), "no session means empty registry");
+
+    coordinator
+        .ensure_actor_session("plan-beta", BossStage::Execution)
+        .await;
+
+    let snapshot = coordinator.actor_registry_snapshot().await;
+    assert_eq!(snapshot.len(), 2, "A and B should be present");
+    assert!(snapshot.iter().any(|h| h.role == BossActorRole::DesignerA));
+    assert!(snapshot.iter().any(|h| h.role == BossActorRole::ExecutorB));
+
+    // Idempotent: same plan_id must not duplicate handles.
+    coordinator
+        .ensure_actor_session("plan-beta", BossStage::Execution)
+        .await;
+    let snapshot2 = coordinator.actor_registry_snapshot().await;
+    assert_eq!(snapshot2.len(), 2);
+
+    coordinator
+        .update_actor_status("boss-plan-beta-a", BossActorStatus::Active)
+        .await;
+    let snapshot3 = coordinator.actor_registry_snapshot().await;
+    let a = snapshot3
+        .iter()
+        .find(|h| h.role == BossActorRole::DesignerA)
+        .unwrap();
+    assert_eq!(a.status, BossActorStatus::Active);
+    let b = snapshot3
+        .iter()
+        .find(|h| h.role == BossActorRole::ExecutorB)
+        .unwrap();
+    assert_eq!(b.status, BossActorStatus::Pending);
 }
