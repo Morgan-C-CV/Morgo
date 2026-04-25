@@ -7,7 +7,7 @@ use crate::interaction::dispatcher::NotificationDispatcher;
 use crate::task::manager::TaskManager;
 use crate::task::types::{TaskEvent, TaskStatus};
 use crate::tool::definition::{Tool, ToolCall};
-use crate::core::boss_runtime::{BossControlRuntime, BossRuntimeRegistry};
+use crate::core::boss_runtime::{BossControlRuntime, BossRuntimeOwner};
 use crate::history::session::SessionHistory;
 use serde_json::json;
 use std::sync::Arc;
@@ -24,6 +24,7 @@ pub struct BossCoordinator {
 
     auto_advance_app_state: Arc<RwLock<Option<Arc<crate::state::app_state::AppState>>>>,
     runtime_key: Arc<RwLock<Option<String>>>,
+    runtime_owner: Arc<BossRuntimeOwner>,
 }
 
 impl BossCoordinator {
@@ -34,6 +35,7 @@ impl BossCoordinator {
             session: Arc::new(RwLock::new(None)),
             auto_advance_app_state: Arc::new(RwLock::new(None)),
             runtime_key: Arc::new(RwLock::new(None)),
+            runtime_owner: BossRuntimeOwner::global(),
         }
     }
 
@@ -50,10 +52,14 @@ impl BossCoordinator {
     }
 
     pub async fn runtime_is_closed_for_testing(&self, key: &str) -> bool {
-        BossRuntimeRegistry::global()
-            .get(key)
+        self.runtime_owner
+            .get_runtime(key)
             .map(|runtime| runtime.is_closed())
             .unwrap_or(true)
+    }
+
+    pub fn shutdown_runtime_owner(&self) {
+        self.runtime_owner.shutdown_all();
     }
 
     pub async fn has_control_runtime(&self) -> bool {
@@ -61,7 +67,7 @@ impl BossCoordinator {
             .read()
             .await
             .as_ref()
-            .and_then(|key| BossRuntimeRegistry::global().get(key))
+            .and_then(|key| self.runtime_owner.get_runtime(key))
             .is_some()
     }
 
@@ -69,7 +75,7 @@ impl BossCoordinator {
         let mut runtime_key = self.runtime_key.write().await;
         if runtime_key
             .as_ref()
-            .and_then(|key| BossRuntimeRegistry::global().get(key))
+            .and_then(|key| self.runtime_owner.get_runtime(key))
             .is_some()
         {
             return;
@@ -81,18 +87,16 @@ impl BossCoordinator {
             .as_ref()
             .map(|plan| plan.plan_id.clone())
             .unwrap_or_else(|| "boss-default".into());
-        let key = BossRuntimeRegistry::fresh_runtime_key(&plan_id);
+        let key = self.runtime_owner.fresh_runtime_key(&plan_id);
         let runtime = BossControlRuntime::spawn(self.clone_for_runtime());
-        BossRuntimeRegistry::global().bind(key.clone(), runtime);
+        self.runtime_owner.bind_runtime(key.clone(), runtime);
         *runtime_key = Some(key);
     }
 
     pub async fn rebind_control_runtime(&self) {
         let mut runtime_key = self.runtime_key.write().await;
         if let Some(key) = runtime_key.as_ref() {
-            if let Some(runtime) = BossRuntimeRegistry::global().unbind(key) {
-                runtime.shutdown();
-            }
+            let _ = self.runtime_owner.shutdown_runtime(key);
         }
         let plan_id = self
             .plan
@@ -101,9 +105,9 @@ impl BossCoordinator {
             .as_ref()
             .map(|plan| plan.plan_id.clone())
             .unwrap_or_else(|| "boss-default".into());
-        let key = BossRuntimeRegistry::fresh_runtime_key(&plan_id);
+        let key = self.runtime_owner.fresh_runtime_key(&plan_id);
         let runtime = BossControlRuntime::spawn(self.clone_for_runtime());
-        BossRuntimeRegistry::global().bind(key.clone(), runtime);
+        self.runtime_owner.bind_runtime(key.clone(), runtime);
         *runtime_key = Some(key);
     }
 
@@ -120,8 +124,8 @@ impl BossCoordinator {
             .await
             .clone()
             .ok_or_else(|| anyhow::anyhow!("boss control runtime key unavailable"))?;
-        let runtime = BossRuntimeRegistry::global()
-            .get(&key)
+        let runtime = self.runtime_owner
+            .get_runtime(&key)
             .ok_or_else(|| anyhow::anyhow!("boss control runtime unavailable"))?;
         runtime.request(request, tasks, dispatcher).await
     }
@@ -133,6 +137,7 @@ impl BossCoordinator {
             session: self.session.clone(),
             auto_advance_app_state: self.auto_advance_app_state.clone(),
             runtime_key: self.runtime_key.clone(),
+            runtime_owner: self.runtime_owner.clone(),
         }
     }
 

@@ -568,20 +568,47 @@ async fn old_runtime_is_shutdown_and_unavailable_after_rebind() {
 
     coordinator.ensure_control_runtime().await;
     let old_key = coordinator.current_runtime_key().await.unwrap();
-    let old_runtime = rust_agent::core::boss_runtime::BossRuntimeRegistry::global()
-        .get(&old_key)
-        .expect("old runtime must exist before rebind");
 
     coordinator.rebind_control_runtime().await;
     let new_key = coordinator.current_runtime_key().await.unwrap();
     assert_ne!(old_key, new_key);
-    assert!(old_runtime.is_closed(), "old runtime must be explicitly shut down");
     assert!(
-        old_runtime
-            .request(BossControlRequest::Report, task_manager.clone(), dispatcher.clone())
+        coordinator.runtime_is_closed_for_testing(&old_key).await,
+        "old runtime must be explicitly shut down"
+    );
+    assert!(coordinator.has_control_runtime().await);
+    let response = coordinator
+        .handle_control_request(BossControlRequest::Report, &task_manager, &dispatcher)
+        .await;
+    assert!(response.is_ok(), "new runtime must accept requests after rebind");
+
+    let _ = std::fs::remove_file(plan_path);
+}
+
+#[tokio::test]
+async fn runtime_owner_shutdown_makes_runtime_unaddressable() {
+    let task_manager = Arc::new(TaskManager::default());
+    let dispatcher = NotificationDispatcher::new(TelegramGateway::default());
+    let (coordinator, plan_path) = coordinator_with_plan(
+        boss_plan(vec![boss_step(0, "Owner shutdown step")]),
+        "test_boss_runtime_owner_shutdown.json",
+    )
+    .await;
+
+    coordinator.ensure_control_runtime().await;
+    let runtime_key = coordinator.current_runtime_key().await.unwrap();
+    assert!(coordinator.has_control_runtime().await);
+
+    coordinator.shutdown_runtime_owner();
+
+    assert!(coordinator.runtime_is_closed_for_testing(&runtime_key).await);
+    assert!(!coordinator.has_control_runtime().await);
+    assert!(
+        coordinator
+            .handle_control_request(BossControlRequest::Report, &task_manager, &dispatcher)
             .await
-            .is_err(),
-        "old runtime must reject requests after shutdown"
+            .is_ok(),
+        "owner may bootstrap a fresh runtime on demand after shutdown"
     );
 
     let _ = std::fs::remove_file(plan_path);

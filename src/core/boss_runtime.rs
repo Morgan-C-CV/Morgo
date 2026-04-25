@@ -25,39 +25,67 @@ struct ControlEnvelope {
 }
 
 #[derive(Debug, Default)]
-pub struct BossRuntimeRegistry {
+struct BossRuntimeRegistry {
     runtimes: StdRwLock<HashMap<String, Arc<BossControlRuntime>>>,
 }
 
-impl BossRuntimeRegistry {
-    pub fn global() -> &'static Self {
-        static REGISTRY: OnceLock<BossRuntimeRegistry> = OnceLock::new();
-        REGISTRY.get_or_init(BossRuntimeRegistry::default)
+#[derive(Debug, Default)]
+pub struct BossRuntimeOwner {
+    registry: BossRuntimeRegistry,
+}
+
+impl BossRuntimeOwner {
+    pub fn global() -> Arc<Self> {
+        static OWNER: OnceLock<Arc<BossRuntimeOwner>> = OnceLock::new();
+        OWNER.get_or_init(|| Arc::new(BossRuntimeOwner::default()))
+            .clone()
     }
 
-    pub fn bind(&self, key: String, runtime: Arc<BossControlRuntime>) {
-        self.runtimes
+    pub fn bind_runtime(&self, key: String, runtime: Arc<BossControlRuntime>) {
+        self.registry
+            .runtimes
             .write()
             .expect("boss runtime registry poisoned")
             .insert(key, runtime);
     }
 
-    pub fn get(&self, key: &str) -> Option<Arc<BossControlRuntime>> {
-        self.runtimes
+    pub fn get_runtime(&self, key: &str) -> Option<Arc<BossControlRuntime>> {
+        self.registry
+            .runtimes
             .read()
             .expect("boss runtime registry poisoned")
             .get(key)
             .cloned()
     }
 
-    pub fn unbind(&self, key: &str) -> Option<Arc<BossControlRuntime>> {
-        self.runtimes
+    pub fn shutdown_runtime(&self, key: &str) -> Option<Arc<BossControlRuntime>> {
+        let runtime = self
+            .registry
+            .runtimes
             .write()
             .expect("boss runtime registry poisoned")
-            .remove(key)
+            .remove(key);
+        if let Some(runtime) = &runtime {
+            runtime.shutdown();
+        }
+        runtime
     }
 
-    pub fn fresh_runtime_key(plan_id: &str) -> String {
+    pub fn shutdown_all(&self) {
+        let runtimes = self
+            .registry
+            .runtimes
+            .write()
+            .expect("boss runtime registry poisoned")
+            .drain()
+            .map(|(_, runtime)| runtime)
+            .collect::<Vec<_>>();
+        for runtime in runtimes {
+            runtime.shutdown();
+        }
+    }
+
+    pub fn fresh_runtime_key(&self, plan_id: &str) -> String {
         static NEXT_RUNTIME_ID: AtomicU64 = AtomicU64::new(1);
         format!("{plan_id}::runtime-{}", NEXT_RUNTIME_ID.fetch_add(1, Ordering::SeqCst))
     }
