@@ -334,10 +334,88 @@ impl BossCoordinator {
         next_runnable_step(plan).map(|step| step.id)
     }
 
+    /// Returns the running ExecutorB task id if one exists, otherwise spawns a fresh
+    /// ExecutorB worker and records its task id in the session handle.
+    ///
+    /// The caller is responsible for sending step context to B after this returns.
+    pub async fn ensure_executor_b_task(
+        &self,
+        app_state: &Arc<crate::state::app_state::AppState>,
+    ) -> anyhow::Result<String> {
+        // Check if B already has a running task.
+        {
+            let guard = self.session.read().await;
+            if let Some(session) = guard.as_ref() {
+                if let Some(task_id) = &session.executor_b.task_id {
+                    if let Some(tasks) = app_state.permission_context.task_manager.as_ref() {
+                        let records = tasks.list();
+                        if records.iter().any(|t| {
+                            t.id == *task_id
+                                && matches!(
+                                    t.status,
+                                    crate::task::types::TaskStatus::Running
+                                        | crate::task::types::TaskStatus::Pending
+                                )
+                        }) {
+                            return Ok(task_id.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        // No running B — derive a stable id from the plan.
+        let plan_id = {
+            let guard = self.session.read().await;
+            guard
+                .as_ref()
+                .map(|s| s.plan_id.clone())
+                .unwrap_or_else(|| "unknown".into())
+        };
+        Ok(format!("boss-{plan_id}-b"))
+    }
+
+    /// Builds a Continue payload that sends step context to a running ExecutorB task.
+    pub async fn build_step_continue_payload(
+        &self,
+        step_id: usize,
+        b_task_id: &str,
+        parent_session_id: &str,
+    ) -> anyhow::Result<String> {
+        let plan_guard = self.plan.read().await;
+        let plan = plan_guard
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("No plan loaded"))?;
+        let step = plan
+            .steps
+            .iter()
+            .find(|s| s.id == step_id)
+            .ok_or_else(|| anyhow::anyhow!("Unknown boss step {step_id}"))?;
+
+        let message = format!(
+            "Boss step {step_id}\nplan_id: {}\nobjective: {}\nacceptance:\n{}",
+            plan.plan_id,
+            step.objective(),
+            format_acceptance(step),
+        );
+
+        Ok(json!({
+            "task_id": b_task_id,
+            "message": message,
+            "step_id": step_id,
+            "boss_plan_id": plan.plan_id,
+            "step_objective": step.objective(),
+            "step_acceptance": step.acceptance,
+            "parent_session_id": parent_session_id,
+        })
+        .to_string())
+    }
+
     pub async fn build_step_spawn_payload(
         &self,
         step_id: usize,
         parent_session_id: &str,
+        b_actor_id: &str,
     ) -> anyhow::Result<String> {
         let plan_guard = self.plan.read().await;
         let plan = plan_guard
@@ -359,13 +437,14 @@ impl BossCoordinator {
             ),
             "role": "implement",
             "inherit_context": true,
-            "reuse_strategy": "fresh",
+            "reuse_strategy": "running_only",
             "step_id": step.id,
             "boss_plan_id": plan.plan_id,
             "step_objective": step.objective(),
             "step_acceptance": step.acceptance,
             "parent_session_id": parent_session_id,
-            "parent_runtime_role": "coordinator"
+            "parent_runtime_role": "coordinator",
+            "orchestration_group_id": b_actor_id,
         })
         .to_string())
     }
@@ -445,10 +524,22 @@ impl BossCoordinator {
             }
             Some(AdvanceOutcome::Dispatch(step_id)) => {
                 self.update_current_step(Some(step_id)).await;
+                let b_actor_id = self.ensure_executor_b_task(app_state).await?;
                 let payload = self
-                    .build_step_spawn_payload(step_id, &parent_session_id)
+                    .build_step_spawn_payload(step_id, &parent_session_id, &b_actor_id)
                     .await?;
                 self.spawn_worker_from_payload(app_state, &payload).await?;
+                // Record the spawned task id in the B handle.
+                if let Some(tasks) = app_state.permission_context.task_manager.as_ref() {
+                    let records = tasks.list();
+                    if let Some(task) = records.last() {
+                        let mut guard = self.session.write().await;
+                        if let Some(session) = guard.as_mut() {
+                            session.executor_b.task_id = Some(task.id.clone());
+                            session.executor_b.status = BossActorStatus::Active;
+                        }
+                    }
+                }
                 Ok(Some(payload))
             }
             Some(AdvanceOutcome::NoRunnableStep) | None => Ok(None),

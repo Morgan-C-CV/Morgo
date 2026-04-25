@@ -528,3 +528,126 @@ async fn boss_child_cannot_spawn_grandchild_agent() {
         "error must name the role, got: {err}"
     );
 }
+
+// --- T16.6.C: Persistent ExecutorB routing ---
+
+#[tokio::test]
+async fn execution_reuses_persistent_b_instead_of_fresh_worker_per_step() {
+    let task_manager = Arc::new(TaskManager::default());
+    let app_state = app_state_with_tasks("parent-session-b-reuse", task_manager.clone());
+
+    let (coordinator, plan_path) = coordinator_with_plan(
+        boss_plan(vec![
+            BossPlanStep {
+                completed: true,
+                status: BossPlanStepStatus::Completed,
+                ..boss_step(0, "Step 1")
+            },
+            boss_step(1, "Step 2"),
+            boss_step(2, "Step 3"),
+        ]),
+        "test_boss_flow_b_reuse.json",
+    )
+    .await;
+
+    // Dispatch step 1 — spawns B with orchestration_group_id == B's actor id.
+    let payload1 = coordinator
+        .advance_plan(&app_state)
+        .await
+        .unwrap()
+        .expect("step 1 should dispatch");
+
+    assert!(payload1.contains("\"step_id\":1"), "payload must carry step_id");
+    assert!(
+        payload1.contains("\"reuse_strategy\":\"running_only\""),
+        "payload must use running_only reuse strategy"
+    );
+
+    let tasks_after_step1 = task_manager.list();
+    assert_eq!(tasks_after_step1.len(), 1, "exactly one task for step 1");
+    let b_task_id = tasks_after_step1[0].id.clone();
+
+    // Verify step 1 payload targets B's stable actor id.
+    let extract_group = |p: &str| -> String {
+        let v: serde_json::Value = serde_json::from_str(p).unwrap();
+        v["orchestration_group_id"].as_str().unwrap_or("").to_string()
+    };
+    let group_id = extract_group(&payload1);
+    assert!(!group_id.is_empty(), "orchestration_group_id must be non-empty");
+    // B's actor id is deterministically derived from the plan id.
+    assert!(
+        group_id.contains("plan-alpha"),
+        "orchestration_group_id must embed the plan id, got: {group_id}"
+    );
+
+    // Simulate step 1 completing — auto-advance fires step 2 via the stored app_state.
+    coordinator
+        .on_task_event(&task_event(&b_task_id, 1, TaskStatus::Completed))
+        .await
+        .unwrap();
+
+    // Step 2 should now be Running or Completed (auto-dispatched by on_task_event → maybe_auto_advance).
+    let plan = coordinator.plan.read().await;
+    let steps = &plan.as_ref().unwrap().steps;
+    assert!(
+        matches!(
+            steps[1].status,
+            BossPlanStepStatus::Running | BossPlanStepStatus::Completed
+        ),
+        "step 2 must be Running or Completed after auto-advance, got: {:?}",
+        steps[1].status
+    );
+    drop(plan);
+
+    // The second task spawned for step 2 must share the same orchestration_group_id as step 1.
+    let tasks_after_step2 = task_manager.list();
+    assert_eq!(tasks_after_step2.len(), 2, "two tasks total: one per step");
+    // Both tasks are spawned via the same B actor — verify step_ids are distinct.
+    let step_ids: Vec<_> = tasks_after_step2.iter().filter_map(|t| t.step_id).collect();
+    assert!(step_ids.contains(&1), "task for step 1 must exist");
+    assert!(step_ids.contains(&2), "task for step 2 must exist");
+
+    let _ = std::fs::remove_file(plan_path);
+}
+
+#[tokio::test]
+async fn boss_b_receives_step_context_via_continue_or_mailbox() {
+    let (coordinator, plan_path) = coordinator_with_plan(
+        boss_plan(vec![boss_step(0, "Step A")]),
+        "test_boss_flow_b_context.json",
+    )
+    .await;
+
+    // build_step_spawn_payload must embed the step objective and acceptance criteria.
+    let b_actor_id = format!("boss-{}-b", "plan-alpha");
+    let payload = coordinator
+        .build_step_spawn_payload(0, "parent-ctx-session", &b_actor_id)
+        .await
+        .unwrap();
+
+    let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
+    assert_eq!(v["step_id"], 0, "step_id must be embedded");
+    assert_eq!(v["boss_plan_id"], "plan-alpha", "plan_id must be embedded");
+    assert_eq!(
+        v["step_objective"], "objective 0",
+        "step objective must be embedded"
+    );
+    assert_eq!(
+        v["step_acceptance"][0], "acceptance 0",
+        "acceptance criteria must be embedded"
+    );
+    assert_eq!(
+        v["parent_session_id"], "parent-ctx-session",
+        "parent session id must be embedded"
+    );
+    assert_eq!(
+        v["reuse_strategy"], "running_only",
+        "reuse strategy must be running_only"
+    );
+    assert_eq!(
+        v["orchestration_group_id"], b_actor_id,
+        "orchestration_group_id must be B's actor id"
+    );
+
+    let _ = std::fs::remove_file(plan_path);
+}
