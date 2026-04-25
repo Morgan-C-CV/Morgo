@@ -3678,3 +3678,200 @@ async fn t22_1b_review_fn_uses_a_verdict_when_a_responds_reject() {
 
     let _ = std::fs::remove_file(plan_path);
 }
+
+// ---------------------------------------------------------------------------
+// T22.2 — Executor B becomes a real LLM agent session
+// ---------------------------------------------------------------------------
+
+/// After the first DispatchStep fires exec_fn, executor_b.session_id must be
+/// a real task id (not the deterministic placeholder "boss-{plan_id}-b").
+#[tokio::test]
+async fn t22_2_b_session_id_is_non_placeholder_after_first_dispatch() {
+    let plan_id = "t22-2-first-dispatch";
+    let plan_path = std::env::temp_dir().join("t22_2_first_dispatch.json");
+    let plan = BossPlan {
+        plan_id: plan_id.into(),
+        accepted_by_user: true,
+        auto_sequence: true,
+        steps: vec![boss_step(0, "step zero")],
+        ..Default::default()
+    };
+    save_plan(&plan, &plan_path).await.unwrap();
+
+    let coordinator = BossCoordinator::restore_or_init(&plan_path).await.unwrap();
+    let task_manager = Arc::new(TaskManager::default());
+    let app_state = app_state_with_tasks("session-t22-2-first", task_manager.clone());
+
+    let placeholder = format!("boss-{plan_id}-b");
+    assert_eq!(coordinator.b_session_id().await, placeholder, "session_id must start as placeholder");
+
+    coordinator.advance_plan(&app_state).await.unwrap();
+    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+    let session_id_after = coordinator.b_session_id().await;
+    assert_ne!(session_id_after, placeholder, "session_id must be non-placeholder after first dispatch");
+    assert!(!session_id_after.is_empty(), "session_id must not be empty after first dispatch");
+
+    let _ = std::fs::remove_file(&plan_path);
+}
+
+/// Two consecutive DispatchStep/ContinueStep calls must reuse the same B session id
+/// when B's task is still running between dispatches.
+#[tokio::test]
+async fn t22_2_two_dispatches_reuse_same_b_session_id() {
+    let plan_id = "t22-2-reuse-session";
+    let plan_path = std::env::temp_dir().join("t22_2_reuse_session.json");
+    let plan = BossPlan {
+        plan_id: plan_id.into(),
+        accepted_by_user: true,
+        auto_sequence: true,
+        steps: vec![boss_step(0, "step zero"), boss_step(1, "step one")],
+        ..Default::default()
+    };
+    save_plan(&plan, &plan_path).await.unwrap();
+
+    let coordinator = BossCoordinator::restore_or_init(&plan_path).await.unwrap();
+    let task_manager = Arc::new(TaskManager::default());
+    let app_state = app_state_with_tasks("session-t22-2-reuse", task_manager.clone());
+
+    // Create a fake B task that stays Running (simulates a live B session).
+    let fake_b_task = task_manager.create_with_type(
+        "fake executor B",
+        TaskType::LocalAgent,
+        "session-t22-2-reuse",
+        InteractionSurface::Cli,
+    );
+    task_manager.launch(&fake_b_task.id, "", async move {
+        // Keep running until test ends.
+        tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
+    });
+    let b_task_id = fake_b_task.id.clone();
+
+    // Pre-seed B's session with the running task id.
+    coordinator.record_b_session_id_pub(&b_task_id).await;
+
+    // First dispatch — B is already running, so ContinueStep fires.
+    coordinator.advance_plan(&app_state).await.unwrap();
+    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+    let session_id_after_first = coordinator.b_session_id().await;
+    assert_eq!(session_id_after_first, b_task_id, "first dispatch must keep the pre-seeded B session id");
+
+    // Advance plan state so step 0 is complete.
+    {
+        let mut guard = coordinator.plan.write().await;
+        if let Some(p) = guard.as_mut() {
+            p.steps[0].completed = true;
+            p.steps[0].status = BossPlanStepStatus::Completed;
+        }
+    }
+
+    // Second dispatch — B is still running, must reuse same session.
+    coordinator.advance_plan(&app_state).await.unwrap();
+    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+    let session_id_after_second = coordinator.b_session_id().await;
+    assert_eq!(
+        session_id_after_first, session_id_after_second,
+        "second dispatch must reuse the same B session id when B is still running"
+    );
+
+    let _ = std::fs::remove_file(&plan_path);
+}
+
+/// record_b_session_id_pub writes task_id to executor_b.session_id and task_id fields.
+#[tokio::test]
+async fn t22_2_record_b_session_id_writes_back_to_session() {
+    let plan_path = std::env::temp_dir().join("t22_2_record_b.json");
+    let plan = BossPlan {
+        plan_id: "t22-2-record".into(),
+        accepted_by_user: true,
+        auto_sequence: true,
+        steps: vec![boss_step(0, "step zero")],
+        ..Default::default()
+    };
+    save_plan(&plan, &plan_path).await.unwrap();
+
+    let coordinator = BossCoordinator::restore_or_init(&plan_path).await.unwrap();
+
+    coordinator.record_b_session_id_pub("real-task-abc123").await;
+
+    assert_eq!(coordinator.b_session_id().await, "real-task-abc123");
+    assert_eq!(coordinator.b_task_id().await.as_deref(), Some("real-task-abc123"));
+
+    let _ = std::fs::remove_file(&plan_path);
+}
+
+/// When task_manager is absent, advance_plan must not panic.
+#[tokio::test]
+async fn t22_2_b_session_fallback_when_task_manager_absent() {
+    let plan_id = "t22-2-no-tm";
+    let plan_path = std::env::temp_dir().join("t22_2_no_tm.json");
+    let plan = BossPlan {
+        plan_id: plan_id.into(),
+        accepted_by_user: true,
+        auto_sequence: true,
+        steps: vec![boss_step(0, "step zero")],
+        ..Default::default()
+    };
+    save_plan(&plan, &plan_path).await.unwrap();
+
+    let coordinator = BossCoordinator::restore_or_init(&plan_path).await.unwrap();
+
+    let permission_context = rust_agent::state::permission_context::ToolPermissionContext::new(
+        rust_agent::state::permission_context::PermissionMode::Default,
+    )
+    .with_active_session_id("session-t22-2-no-tm")
+    .with_active_surface(InteractionSurface::Cli);
+    let app_state = Arc::new(AppState {
+        surface: InteractionSurface::Cli,
+        session_mode: rust_agent::bootstrap::SessionMode::Headless,
+        client_type: rust_agent::bootstrap::ClientType::Cli,
+        session_source: rust_agent::bootstrap::SessionSource::LocalCli,
+        runtime_role: RuntimeRole::Coordinator,
+        worker_role: None,
+        permission_context,
+        command_registry: None,
+        runtime_tool_registry: Some(Arc::new(RwLock::new(rust_agent::tool::registry::ToolRegistry::new()))),
+        skill_registry: None,
+        mcp_runtime: None,
+        plugin_load_result: None,
+        cost_tracker: rust_agent::cost::tracker::CostTracker::default(),
+        service_observability_tracker: rust_agent::service::observability::ServiceObservabilityTracker::default(),
+        notification_dispatcher: rust_agent::interaction::dispatcher::NotificationDispatcher::new(
+            rust_agent::interaction::telegram::gateway::TelegramGateway::default(),
+        ),
+        audit_log: Arc::new(std::sync::Mutex::new(rust_agent::security::audit::AuditLog::default())),
+        startup_trace: Vec::new(),
+        active_model_runtime: None,
+        active_model_profile_name: None,
+        active_model_profile_source: rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
+        active_model_provider_summary: rust_agent::state::app_state::ActiveModelProviderSummary {
+            provider_id: "default-provider".into(),
+            protocol: "Anthropic".into(),
+            compatibility_profile: "Anthropic".into(),
+            base_url_host: "localhost".into(),
+            model: "default-model".into(),
+            auth_status: "env:OPENAI_API_KEY(unset)".into(),
+        },
+        active_session_id: "session-t22-2-no-tm".into(),
+        session_store: None,
+        session: None,
+        history: None,
+        restored_session: None,
+        last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        cancellation_token: tokio_util::sync::CancellationToken::new(),
+        subagent_limiter: None,
+        boss_coordinator: None,
+    });
+
+    let result = coordinator.advance_plan(&app_state).await;
+    // advance_plan requires a task_manager to dispatch B — it returns a clear error when absent.
+    let err = result.expect_err("advance_plan must fail when task_manager is absent");
+    assert!(
+        err.to_string().contains("task manager not configured"),
+        "error must name the missing task manager: {err}"
+    );
+
+    let _ = std::fs::remove_file(&plan_path);
+}

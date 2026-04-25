@@ -73,6 +73,26 @@ impl BossCoordinator {
         Self::build_review_fn(self)
     }
 
+    /// Test-only seam: exposes `record_b_session_id` for direct state mutation in tests.
+    #[doc(hidden)]
+    pub async fn record_b_session_id_pub(&self, task_id: &str) {
+        self.record_b_session_id(task_id).await;
+    }
+
+    /// Test-only seam: reads `executor_b.session_id` for assertion in tests.
+    #[doc(hidden)]
+    pub async fn b_session_id(&self) -> String {
+        let guard = self.session.read().await;
+        guard.as_ref().map(|s| s.executor_b.session_id.clone()).unwrap_or_default()
+    }
+
+    /// Test-only seam: reads `executor_b.task_id` for assertion in tests.
+    #[doc(hidden)]
+    pub async fn b_task_id(&self) -> Option<String> {
+        let guard = self.session.read().await;
+        guard.as_ref().and_then(|s| s.executor_b.task_id.clone())
+    }
+
     /// Full-mode constructor — wires A+B callbacks immediately.
     /// Prefer `BossRuntimeHost::build_coordinator` in production so the host's
     /// `BossRuntimeOwner` is used. This method is the building block used by the host.
@@ -357,9 +377,67 @@ impl BossCoordinator {
                     let mut guard = c.status.write().await;
                     guard.last_b_dispatch_payload = Some(payload.clone());
                 }
-                c.invoke_agent_tool(&app, &payload).await.map(|_| payload)
+                // Invoke AgentTool (Spawn or Continue — payload already encodes which).
+                // Write the returned task_id back to executor_b so subsequent dispatches
+                // can reuse the same B session via Continue.
+                match c.invoke_agent_tool_with_task_id(&app, &payload).await {
+                    Ok(task_id) => {
+                        c.record_b_session_id(&task_id).await;
+                        Ok(payload)
+                    }
+                    Err(e) => Err(e),
+                }
             })
         })
+    }
+
+    /// Write a real B task id back to BossSession.executor_b after a successful spawn/continue.
+    async fn record_b_session_id(&self, task_id: &str) {
+        let mut guard = self.session.write().await;
+        if let Some(session) = guard.as_mut() {
+            session.executor_b.session_id = task_id.to_string();
+            session.executor_b.task_id = Some(task_id.to_string());
+            session.executor_b.status = crate::core::boss_state::BossActorStatus::Active;
+        }
+    }
+
+    /// Ensure Executor B has a real LLM session. On first call, spawns a B session via
+    /// AgentTool and writes the task id back to BossSession.executor_b.session_id.
+    /// Subsequent calls are no-ops if the session id is already a real task id.
+    async fn ensure_b_session(
+        &self,
+        app_state: &Arc<crate::state::app_state::AppState>,
+        step_id: usize,
+    ) {
+        if app_state.permission_context.task_manager.is_none() {
+            return;
+        }
+        let is_placeholder = {
+            let guard = self.session.read().await;
+            guard.as_ref().map(|s| {
+                let placeholder = format!("boss-{}-b", s.plan_id);
+                s.executor_b.session_id == placeholder || s.executor_b.session_id.is_empty()
+            }).unwrap_or(true)
+        };
+        if !is_placeholder {
+            return;
+        }
+
+        let parent_session_id = app_state.active_session_id.clone();
+        let b_actor_id = {
+            let guard = self.session.read().await;
+            guard.as_ref()
+                .map(|s| s.executor_b.actor_id.clone())
+                .unwrap_or_else(|| "boss-unknown-b".into())
+        };
+        let payload = match self.build_step_spawn_payload(step_id, &parent_session_id, &b_actor_id).await {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+
+        if let Ok(task_id) = self.invoke_agent_tool_with_task_id(app_state, &payload).await {
+            self.record_b_session_id(&task_id).await;
+        }
     }
 
     fn build_review_fn(coordinator: &Self) -> crate::core::boss_actor_runtime::ReviewFn {
