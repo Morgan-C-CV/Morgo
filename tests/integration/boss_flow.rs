@@ -2628,3 +2628,119 @@ async fn handle_user_approval_routes_through_a_mailbox_and_a_drives_stage_transi
     let _ = std::fs::remove_file(&plan_path);
 }
 
+// ---------------------------------------------------------------------------
+// T16.6.H.4 — Unified actor runtime bootstrap, no lazy rewiring
+// ---------------------------------------------------------------------------
+
+/// After bootstrap_actor_registry_with_app_state, the registry has both
+/// has_executor and has_a_callbacks set — no subsequent call replaces it.
+#[tokio::test]
+async fn bootstrap_with_app_state_produces_full_registry_in_one_shot() {
+    let plan_path = std::env::temp_dir().join("boss_h4_one_shot.json");
+    let plan = BossPlan {
+        plan_id: "plan-h4-oneshot".into(),
+        accepted_by_user: true,
+        auto_sequence: true,
+        steps: vec![boss_step(0, "step zero")],
+        ..Default::default()
+    };
+    save_plan(&plan, &plan_path).await.unwrap();
+
+    let coordinator = BossCoordinator::restore_or_init(&plan_path).await.unwrap();
+    let task_manager = Arc::new(TaskManager::default());
+    let app_state = app_state_with_tasks("session-h4-oneshot", task_manager.clone());
+
+    coordinator.bootstrap_actor_registry_with_app_state(&app_state).await;
+
+    let (has_exec, has_a) = {
+        let guard = coordinator.actor_registry.read().await;
+        let r = guard.as_ref().unwrap();
+        (r.has_executor, r.has_a_callbacks)
+    };
+    assert!(has_exec, "bootstrap_actor_registry_with_app_state must set has_executor");
+    assert!(has_a, "bootstrap_actor_registry_with_app_state must set has_a_callbacks");
+
+    let _ = std::fs::remove_file(&plan_path);
+}
+
+/// Registry identity is stable across multiple advance_plan calls — no rewiring replaces it.
+#[tokio::test]
+async fn registry_identity_stable_across_multiple_advance_plan_calls() {
+    let plan_path = std::env::temp_dir().join("boss_h4_identity.json");
+    let plan = BossPlan {
+        plan_id: "plan-h4-identity".into(),
+        accepted_by_user: true,
+        auto_sequence: false,
+        steps: vec![boss_step(0, "step zero"), boss_step(1, "step one")],
+        ..Default::default()
+    };
+    save_plan(&plan, &plan_path).await.unwrap();
+
+    let coordinator = BossCoordinator::restore_or_init(&plan_path).await.unwrap();
+    let task_manager = Arc::new(TaskManager::default());
+    let app_state = app_state_with_tasks("session-h4-identity", task_manager.clone());
+
+    coordinator.advance_plan(&app_state).await.unwrap();
+    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+
+    let b_ptr_first = {
+        let guard = coordinator.actor_registry.read().await;
+        Arc::as_ptr(&guard.as_ref().unwrap().executor_b.state) as usize
+    };
+
+    coordinator.advance_plan(&app_state).await.unwrap();
+    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+
+    let b_ptr_second = {
+        let guard = coordinator.actor_registry.read().await;
+        Arc::as_ptr(&guard.as_ref().unwrap().executor_b.state) as usize
+    };
+
+    assert_eq!(
+        b_ptr_first, b_ptr_second,
+        "B mailbox identity must be stable — registry must not be replaced on second advance_plan"
+    );
+
+    let _ = std::fs::remove_file(&plan_path);
+}
+
+/// After restore_or_init + bootstrap_actor_registry_with_app_state, advance_plan
+/// does not replace the registry (already fully bootstrapped).
+#[tokio::test]
+async fn restore_then_bootstrap_with_app_state_is_immediately_ready() {
+    let plan_path = std::env::temp_dir().join("boss_h4_restore_ready.json");
+    let plan = BossPlan {
+        plan_id: "plan-h4-restore".into(),
+        accepted_by_user: true,
+        auto_sequence: true,
+        steps: vec![boss_step(0, "step zero")],
+        ..Default::default()
+    };
+    save_plan(&plan, &plan_path).await.unwrap();
+
+    let coordinator = BossCoordinator::restore_or_init(&plan_path).await.unwrap();
+    let task_manager = Arc::new(TaskManager::default());
+    let app_state = app_state_with_tasks("session-h4-restore", task_manager.clone());
+
+    coordinator.bootstrap_actor_registry_with_app_state(&app_state).await;
+
+    let b_ptr_before = {
+        let guard = coordinator.actor_registry.read().await;
+        Arc::as_ptr(&guard.as_ref().unwrap().executor_b.state) as usize
+    };
+
+    coordinator.advance_plan(&app_state).await.unwrap();
+    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+
+    let b_ptr_after = {
+        let guard = coordinator.actor_registry.read().await;
+        Arc::as_ptr(&guard.as_ref().unwrap().executor_b.state) as usize
+    };
+
+    assert_eq!(
+        b_ptr_before, b_ptr_after,
+        "advance_plan must not replace a fully-bootstrapped registry"
+    );
+
+    let _ = std::fs::remove_file(&plan_path);
+}

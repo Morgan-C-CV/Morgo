@@ -256,40 +256,88 @@ impl BossCoordinator {
         *guard = Some(registry);
     }
 
+    /// Bootstrap A and B with all callbacks wired in one shot.
+    /// No-op if the registry already has both executor and A callbacks.
+    /// This is the preferred production path — call once when AppState is available.
+    pub async fn bootstrap_actor_registry_with_app_state(
+        &self,
+        app_state: &Arc<crate::state::app_state::AppState>,
+    ) {
+        let already_full = {
+            let guard = self.actor_registry.read().await;
+            guard.as_ref().map(|r| r.has_executor && r.has_a_callbacks).unwrap_or(false)
+        };
+        if already_full {
+            return;
+        }
+        // Store app_state for auto path (finalize/approval may call it without app_state param).
+        {
+            let mut guard = self.auto_advance_app_state.write().await;
+            *guard = Some(app_state.clone());
+        }
+        let exec_fn = Self::build_exec_fn(self, app_state);
+        let review_fn = Self::build_review_fn(self);
+        let doc_fn = Self::build_doc_fn(self, app_state);
+        let registry = crate::core::boss_actor_runtime::bootstrap_with_all_callbacks(
+            exec_fn, review_fn, doc_fn,
+        );
+        let mut guard = self.actor_registry.write().await;
+        if let Some(old) = guard.take() {
+            old.shutdown_all();
+        }
+        *guard = Some(registry);
+    }
+
+    fn build_exec_fn(
+        coordinator: &Self,
+        app_state: &Arc<crate::state::app_state::AppState>,
+    ) -> crate::core::boss_actor_runtime::ExecutionFn {
+        let c = coordinator.clone_for_runtime();
+        let app = app_state.clone();
+        Arc::new(move |payload: String| {
+            let c = c.clone_for_runtime();
+            let app = app.clone();
+            Box::pin(async move {
+                {
+                    let mut guard = c.status.write().await;
+                    guard.last_b_dispatch_payload = Some(payload.clone());
+                }
+                c.invoke_agent_tool(&app, &payload).await.map(|_| payload)
+            })
+        })
+    }
+
+    fn build_review_fn(coordinator: &Self) -> crate::core::boss_actor_runtime::ReviewFn {
+        let c = coordinator.clone_for_runtime();
+        Arc::new(move |step_id, accepted, summary: String, correction: Option<String>| {
+            let c = c.clone_for_runtime();
+            Box::pin(async move {
+                c.apply_review_verdict(step_id, accepted, &summary, correction.as_deref()).await
+            })
+        })
+    }
+
+    fn build_doc_fn(
+        coordinator: &Self,
+        app_state: &Arc<crate::state::app_state::AppState>,
+    ) -> crate::core::boss_actor_runtime::DocumentationFn {
+        let c = coordinator.clone_for_runtime();
+        let app = app_state.clone();
+        Arc::new(move |signal: String| {
+            let c = c.clone_for_runtime();
+            let app = app.clone();
+            Box::pin(async move { c.apply_documentation_signal(&app, &signal).await })
+        })
+    }
+
     /// Ensure actor runtimes exist with a real execution callback wired to B.
     /// If the registry already has an executor, this is a no-op.
     pub async fn ensure_actor_registry_with_executor(
         &self,
         app_state: &Arc<crate::state::app_state::AppState>,
     ) {
-        let needs_wire = {
-            let guard = self.actor_registry.read().await;
-            guard.as_ref().map(|r| !r.has_executor).unwrap_or(true)
-        };
-        if !needs_wire {
-            return;
-        }
-        let coordinator = self.clone_for_runtime();
-        let app_state = app_state.clone();
-        let exec_fn: crate::core::boss_actor_runtime::ExecutionFn =
-            Arc::new(move |payload: String| {
-                let c = coordinator.clone_for_runtime();
-                let app = app_state.clone();
-                Box::pin(async move {
-                    // Record the payload for observability before calling the tool.
-                    {
-                        let mut guard = c.status.write().await;
-                        guard.last_b_dispatch_payload = Some(payload.clone());
-                    }
-                    c.invoke_agent_tool(&app, &payload).await.map(|_| payload)
-                })
-            });
-        let registry = crate::core::boss_actor_runtime::bootstrap_with_executor(exec_fn);
-        let mut guard = self.actor_registry.write().await;
-        if let Some(old) = guard.take() {
-            old.shutdown_all();
-        }
-        *guard = Some(registry);
+        // Prefer the full bootstrap — wires A and B in one shot.
+        self.bootstrap_actor_registry_with_app_state(app_state).await;
     }
 
     /// Ensure actor runtimes exist; bootstrap if not yet initialized.
@@ -301,91 +349,23 @@ impl BossCoordinator {
     }
 
     /// Ensure A's callbacks are wired using the stored auto_advance_app_state.
-    /// No-op if already wired or if no app_state is available.
+    /// No-op if already fully bootstrapped or if no app_state is available.
     pub async fn ensure_actor_registry_with_a_callbacks_auto(&self) {
         let app_state = self.auto_advance_app_state.read().await.clone();
         if let Some(app) = app_state {
-            self.ensure_actor_registry_with_a_callbacks(&app).await;
+            self.bootstrap_actor_registry_with_app_state(&app).await;
         } else {
             self.ensure_actor_registry().await;
         }
     }
 
     /// Ensure A's review and documentation callbacks are wired.
-    /// If already wired, this is a no-op. Replaces the registry with one that has A callbacks.
+    /// Delegates to bootstrap_actor_registry_with_app_state — no-op if already fully bootstrapped.
     pub async fn ensure_actor_registry_with_a_callbacks(
         &self,
         app_state: &Arc<crate::state::app_state::AppState>,
     ) {
-        let needs_wire = {
-            let guard = self.actor_registry.read().await;
-            guard.as_ref().map(|r| !r.has_a_callbacks).unwrap_or(true)
-        };
-        if !needs_wire {
-            return;
-        }
-        // Build review callback — captures coordinator clone + app_state.
-        let c_review = self.clone_for_runtime();
-        let app_review = app_state.clone();
-        let review_fn: crate::core::boss_actor_runtime::ReviewFn =
-            Arc::new(move |step_id, accepted, summary, correction| {
-                let c = c_review.clone_for_runtime();
-                let _app = app_review.clone();
-                Box::pin(async move {
-                    c.apply_review_verdict(step_id, accepted, &summary, correction.as_deref())
-                        .await
-                })
-            });
-        // Build documentation callback — captures coordinator clone.
-        let c_doc = self.clone_for_runtime();
-        let app_doc = app_state.clone();
-        let doc_fn: crate::core::boss_actor_runtime::DocumentationFn =
-            Arc::new(move |signal: String| {
-                let c = c_doc.clone_for_runtime();
-                let app = app_doc.clone();
-                Box::pin(async move { c.apply_documentation_signal(&app, &signal).await })
-            });
-        // Preserve B's executor if already wired.
-        let exec_fn_opt = {
-            let guard = self.actor_registry.read().await;
-            guard.as_ref().map(|r| r.has_executor)
-        };
-        let registry = if exec_fn_opt.unwrap_or(false) {
-            // Re-wire B's callback too so we don't lose it.
-            let c_exec = self.clone_for_runtime();
-            let app_exec = app_state.clone();
-            let exec_fn: crate::core::boss_actor_runtime::ExecutionFn =
-                Arc::new(move |payload: String| {
-                    let c = c_exec.clone_for_runtime();
-                    let app = app_exec.clone();
-                    Box::pin(async move {
-                        {
-                            let mut guard = c.status.write().await;
-                            guard.last_b_dispatch_payload = Some(payload.clone());
-                        }
-                        c.invoke_agent_tool(&app, &payload).await.map(|_| payload)
-                    })
-                });
-            crate::core::boss_actor_runtime::bootstrap_with_all_callbacks(
-                exec_fn, review_fn, doc_fn,
-            )
-        } else {
-            let mut r = crate::core::boss_actor_runtime::BossActorRegistry::bootstrap();
-            // Replace A with callback-wired version.
-            r.designer_a.shutdown();
-            r.designer_a =
-                crate::core::boss_actor_runtime::DesignerARuntime::spawn_with_callbacks(
-                    Some(review_fn),
-                    Some(doc_fn),
-                );
-            r.has_a_callbacks = true;
-            r
-        };
-        let mut guard = self.actor_registry.write().await;
-        if let Some(old) = guard.take() {
-            old.shutdown_all();
-        }
-        *guard = Some(registry);
+        self.bootstrap_actor_registry_with_app_state(app_state).await;
     }
 
     /// Returns a point-in-time snapshot of all tracked actor handles (A, B, and children).
