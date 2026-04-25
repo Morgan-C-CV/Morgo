@@ -2,6 +2,8 @@ use crate::core::boss_state::{
     BossActorHandle, BossActorStatus, BossPlan, BossPlanStep, BossPlanStepStatus, BossSession,
     BossStage, BossStatus,
 };
+use crate::interaction::dispatcher::NotificationDispatcher;
+use crate::task::manager::TaskManager;
 use crate::task::types::{TaskEvent, TaskStatus};
 use crate::tool::definition::{Tool, ToolCall};
 use serde_json::json;
@@ -275,6 +277,106 @@ impl BossCoordinator {
             self.record_documentation_feedback(user_input).await?;
             Ok(false)
         }
+    }
+
+    pub async fn report_progress(&self, tasks: &TaskManager) -> anyhow::Result<String> {
+        let status = self.status.read().await.clone();
+        let session = self.session.read().await.clone();
+        let plan = self.plan.read().await.clone();
+
+        let mut lines = vec![format!(
+            "Boss report: stage={:?}, current_step={:?}, total_steps={:?}",
+            status.stage, status.current_step, status.total_steps
+        )];
+
+        if let Some(session) = session {
+            let actor_lines = [session.designer_a, session.executor_b]
+                .into_iter()
+                .map(|actor| {
+                    let task_status = actor
+                        .task_id
+                        .as_deref()
+                        .and_then(|task_id| tasks.get(task_id))
+                        .map(|task| format!("{}:{:?}", task.id, task.status))
+                        .unwrap_or_else(|| "none".into());
+                    format!(
+                        "actor {} role={} status={} task={}",
+                        actor.actor_id,
+                        actor.role.as_str(),
+                        actor.status.as_str(),
+                        task_status
+                    )
+                })
+                .collect::<Vec<_>>();
+            lines.extend(actor_lines);
+        }
+
+        if let Some(plan) = plan {
+            let step_lines = plan
+                .steps
+                .iter()
+                .map(|step| {
+                    format!(
+                        "step {} status={:?} completed={} worker_task_id={}",
+                        step.id,
+                        step.status,
+                        step.completed,
+                        step.worker_task_id.as_deref().unwrap_or("none")
+                    )
+                })
+                .collect::<Vec<_>>();
+            lines.extend(step_lines);
+        }
+
+        Ok(lines.join("\n"))
+    }
+
+    pub async fn stop(
+        &self,
+        tasks: &TaskManager,
+        requester_session_id: &str,
+        dispatcher: &NotificationDispatcher,
+    ) -> anyhow::Result<Vec<String>> {
+        let mut killed = Vec::new();
+        let tracked_task_ids = {
+            let session = self.session.read().await;
+            session
+                .as_ref()
+                .map(|snapshot| {
+                    tasks.list()
+                        .into_iter()
+                        .filter(|task| {
+                            task.owner.session_id == requester_session_id
+                                && task.boss_actor_id.is_some()
+                                && (snapshot.executor_b.task_id.as_deref() == Some(task.id.as_str())
+                                    || snapshot.designer_a.task_id.as_deref() == Some(task.id.as_str())
+                                    || task
+                                        .boss_actor_id
+                                        .as_deref()
+                                        .is_some_and(|actor| actor.contains("child")))
+                        })
+                        .map(|task| task.id)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        };
+
+        for task_id in tracked_task_ids {
+            if tasks.kill(&task_id, requester_session_id, dispatcher) {
+                killed.push(task_id);
+            }
+        }
+
+        {
+            let mut session = self.session.write().await;
+            if let Some(snapshot) = session.as_mut() {
+                snapshot.designer_a.status = BossActorStatus::Suspended;
+                snapshot.executor_b.status = BossActorStatus::Suspended;
+                snapshot.active_children.clear();
+            }
+        }
+
+        Ok(killed)
     }
 
     /// Processes a task event to update the BossPlan by structured step identity.
