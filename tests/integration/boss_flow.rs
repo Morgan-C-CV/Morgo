@@ -3,8 +3,7 @@ use std::sync::Arc;
 use rust_agent::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
 use rust_agent::core::boss::{BossCoordinator, save_plan};
 use rust_agent::core::boss_state::{
-    BossActorRole, BossActorStatus, BossActorHandle, BossPlan, BossPlanStep, BossPlanStepStatus,
-    BossStage,
+    BossActorRole, BossActorStatus, BossPlan, BossPlanStep, BossPlanStepStatus, BossStage,
 };
 use rust_agent::cost::tracker::CostTracker;
 use rust_agent::interaction::dispatcher::NotificationDispatcher;

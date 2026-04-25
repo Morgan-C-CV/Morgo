@@ -2,7 +2,6 @@ use async_trait::async_trait;
 use serde::Deserialize;
 
 use crate::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
-use crate::core::boss_state::BossActorRole;
 use crate::core::context::{QueryContext, SubagentConfig};
 use crate::core::message::Message;
 use crate::core::query_loop::{QueryParams, run_query_loop_with_params};
@@ -109,13 +108,14 @@ impl Tool for AgentTool {
             .clone()
             .unwrap_or_else(|| "local-session".into());
 
-        // Boss spawn policy: children may never spawn grandchildren.
+        // Boss spawn policy: only ExecutorB in Execution may spawn child agents.
         if let Some(policy) = &permissions.boss_actor_policy {
-            if policy.actor_role.is_child() {
+            if !policy.may_spawn() {
                 anyhow::bail!(
-                    "boss spawn policy: {} actors (lineage_depth={}) may not spawn child agents",
+                    "boss spawn policy: {} actors (lineage_depth={}, phase={:?}) may not spawn child agents",
                     policy.actor_role.as_str(),
-                    policy.lineage_depth
+                    policy.lineage_depth,
+                    policy.phase
                 );
             }
         }
