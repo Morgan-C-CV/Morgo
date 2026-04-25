@@ -105,6 +105,32 @@ impl BossRuntimeOwner {
     }
 }
 
+/// Explicit assembly-layer owner for the boss control runtime.
+/// Bootstrap creates one of these and passes its owner to `BossCoordinator::new_with_runtime_owner()`.
+/// This replaces the implicit `BossRuntimeOwner::global()` call in the default constructor.
+#[derive(Debug, Clone)]
+pub struct BossRuntimeHost {
+    owner: Arc<BossRuntimeOwner>,
+}
+
+impl BossRuntimeHost {
+    pub fn new() -> Self {
+        Self {
+            owner: Arc::new(BossRuntimeOwner::default()),
+        }
+    }
+
+    pub fn owner(&self) -> Arc<BossRuntimeOwner> {
+        self.owner.clone()
+    }
+}
+
+impl Default for BossRuntimeHost {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BossControlRuntime {
     pub fn spawn(coordinator: BossCoordinator) -> Arc<Self> {
         let (tx, mut rx) = mpsc::channel::<ControlEnvelope>(16);

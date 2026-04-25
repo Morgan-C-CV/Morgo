@@ -12,6 +12,7 @@ use crate::bootstrap::setup::SetupContext;
 use crate::bootstrap::{BootstrapPhase, BootstrapState, InteractionSurface, SessionMode};
 use crate::command::registry::CommandRegistry;
 use crate::core::boss::BossCoordinator;
+use crate::core::boss_runtime::BossRuntimeHost;
 use crate::core::context::QueryContext;
 use crate::core::engine::QueryEngine;
 use crate::cost::tracker::CostTracker;
@@ -735,7 +736,8 @@ impl RuntimeBootstrap {
         ));
         let runtime_tool_registry = Arc::new(RwLock::new(coordinator_tools.clone()));
 
-        let boss_coordinator = Arc::new(BossCoordinator::new());
+        let boss_runtime_host = BossRuntimeHost::new();
+        let boss_coordinator = Arc::new(BossCoordinator::new_with_runtime_owner(boss_runtime_host.owner()));
 
         let notification_dispatcher = NotificationDispatcher::new(self.build_telegram_gateway())
             .with_hook_registry(hook_registry.clone())

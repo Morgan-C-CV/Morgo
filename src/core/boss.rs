@@ -29,7 +29,7 @@ pub struct BossCoordinator {
 
 impl BossCoordinator {
     pub fn new() -> Self {
-        Self::new_with_runtime_owner(BossRuntimeOwner::global())
+        Self::new_with_runtime_owner(Arc::new(BossRuntimeOwner::default()))
     }
 
     pub fn new_with_runtime_owner(runtime_owner: Arc<BossRuntimeOwner>) -> Self {
@@ -161,7 +161,7 @@ impl BossCoordinator {
 
     /// If the file doesn't exist, it falls back to a fresh coordinator.
     pub async fn restore_or_init(path: &std::path::Path) -> anyhow::Result<Self> {
-        Self::restore_or_init_with_owner(path, BossRuntimeOwner::global()).await
+        Self::restore_or_init_with_owner(path, Arc::new(BossRuntimeOwner::default())).await
     }
 
     pub async fn restore_or_init_with_owner(

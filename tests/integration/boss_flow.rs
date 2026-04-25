@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use rust_agent::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
 use rust_agent::core::boss::{BossCoordinator, save_plan};
+use rust_agent::core::boss_runtime::BossRuntimeHost;
 use rust_agent::core::boss_state::{
     BossActorRole, BossActorStatus, BossControlRequest, BossControlResponse, BossPlan,
     BossPlanStep, BossPlanStepStatus, BossStage, BossStopStage,
@@ -2023,4 +2024,68 @@ async fn boss_step_fails_only_after_retry_budget_exhausted() {
     assert!(!step.completed, "failed step must not be marked completed");
 
     let _ = std::fs::remove_file(plan_path);
+}
+
+// --- T16.6.G.5: BossRuntimeHost assembly layer ---
+
+#[tokio::test]
+async fn production_assembly_uses_explicit_runtime_host_not_global_singleton() {
+    let host_a = BossRuntimeHost::new();
+    let host_b = BossRuntimeHost::new();
+
+    assert!(
+        !Arc::ptr_eq(&host_a.owner(), &host_b.owner()),
+        "each BossRuntimeHost must produce an independent owner"
+    );
+
+    let coordinator_a = BossCoordinator::new_with_runtime_owner(host_a.owner());
+    let coordinator_b = BossCoordinator::new_with_runtime_owner(host_b.owner());
+
+    let task_manager = Arc::new(TaskManager::default());
+    let dispatcher = NotificationDispatcher::new(TelegramGateway::default());
+
+    coordinator_a.shutdown_runtime_owner();
+    assert!(
+        coordinator_a
+            .handle_control_request(BossControlRequest::Report, &task_manager, &dispatcher)
+            .await
+            .is_err(),
+        "coordinator_a must be blocked after its host owner shuts down"
+    );
+
+    let response = coordinator_b
+        .handle_control_request(BossControlRequest::Report, &task_manager, &dispatcher)
+        .await;
+    assert!(
+        response.is_ok(),
+        "coordinator_b must remain usable after an unrelated host shuts down"
+    );
+}
+
+#[tokio::test]
+async fn runtime_host_owner_survives_rebind_and_restart() {
+    let host = BossRuntimeHost::new();
+    let task_manager = Arc::new(TaskManager::default());
+    let dispatcher = NotificationDispatcher::new(TelegramGateway::default());
+
+    let coordinator = BossCoordinator::new_with_runtime_owner(host.owner());
+
+    coordinator.ensure_control_runtime().await;
+    let key_before = coordinator.current_runtime_key().await.unwrap();
+    coordinator.rebind_control_runtime().await;
+    let key_after = coordinator.current_runtime_key().await.unwrap();
+    assert_ne!(key_before, key_after, "rebind must produce a new key");
+
+    let response = coordinator
+        .handle_control_request(BossControlRequest::Report, &task_manager, &dispatcher)
+        .await;
+    assert!(response.is_ok(), "control request must succeed after rebind via host");
+
+    coordinator.shutdown_runtime_owner();
+    coordinator.restart_runtime_owner();
+
+    let response2 = coordinator
+        .handle_control_request(BossControlRequest::Report, &task_manager, &dispatcher)
+        .await;
+    assert!(response2.is_ok(), "control request must succeed after owner restart via host");
 }
