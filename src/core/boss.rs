@@ -55,7 +55,8 @@ impl BossCoordinator {
     }
 
     /// Full-mode constructor — wires A+B callbacks immediately.
-    /// This is the preferred production entry point when `AppState` is available at construction time.
+    /// Prefer `BossRuntimeHost::build_coordinator` in production so the host's
+    /// `BossRuntimeOwner` is used. This method is the building block used by the host.
     pub async fn new_with_app_state(
         runtime_owner: Arc<BossRuntimeOwner>,
         app_state: &Arc<crate::state::app_state::AppState>,
@@ -191,6 +192,10 @@ impl BossCoordinator {
 
     /// Restore (or init) and immediately bootstrap with full A+B callbacks.
     /// After this call the registry is in full mode — no lazy upgrade on first production entry.
+    /// Full-mode restore — restores from file (or creates fresh) and bootstraps A+B callbacks.
+    /// Prefer `BossRuntimeHost::restore_or_init_coordinator` in production so the host's
+    /// `BossRuntimeOwner` is used. This static helper creates a throwaway owner.
+    #[doc(hidden)]
     pub async fn restore_or_init_with_app_state(
         path: &std::path::Path,
         app_state: &Arc<crate::state::app_state::AppState>,

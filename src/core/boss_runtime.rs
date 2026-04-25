@@ -145,6 +145,20 @@ impl BossRuntimeHost {
     ) {
         coordinator.bootstrap_actor_registry_with_app_state(app_state).await;
     }
+
+    /// Restore a coordinator from a persisted plan file, or create a fresh one if the file
+    /// does not exist. Immediately bootstraps A+B callbacks — returns a full-mode coordinator.
+    /// Uses this host's `BossRuntimeOwner` so the coordinator is properly owned.
+    pub async fn restore_or_init_coordinator(
+        &self,
+        path: &std::path::Path,
+        app_state: &Arc<crate::state::app_state::AppState>,
+    ) -> anyhow::Result<Arc<BossCoordinator>> {
+        let coordinator =
+            BossCoordinator::restore_or_init_with_owner(path, self.owner.clone()).await?;
+        coordinator.bootstrap_actor_registry_with_app_state(app_state).await;
+        Ok(Arc::new(coordinator))
+    }
 }
 
 impl Default for BossRuntimeHost {
