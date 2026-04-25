@@ -3364,6 +3364,13 @@ async fn t22_1_review_fn_initializes_a_session_id() {
     };
     assert_ne!(after, placeholder, "t22.1: ReviewFn must update designer_a.session_id from placeholder");
     assert!(!after.is_empty(), "t22.1: designer_a.session_id must be non-empty after ReviewFn");
+
+    // Verify send_to_a_session was called with a review message.
+    let dispatch_msg = coordinator.status.read().await.last_a_dispatch_message.clone();
+    assert!(dispatch_msg.is_some(), "t22.1: last_a_dispatch_message must be set after ReviewFn");
+    let msg = dispatch_msg.unwrap();
+    assert!(msg.contains("step 0"), "t22.1: dispatch message must reference step id");
+    assert!(msg.contains("accepted"), "t22.1: dispatch message must contain verdict");
 }
 
 /// After DocumentationFn fires, designer_a.session_id must no longer be the deterministic placeholder.
@@ -3403,6 +3410,12 @@ async fn t22_1_doc_fn_initializes_a_session_id() {
     };
     assert_ne!(after, placeholder, "t22.1: DocumentationFn must update designer_a.session_id from placeholder");
     assert!(!after.is_empty(), "t22.1: designer_a.session_id must be non-empty after DocumentationFn");
+
+    // Verify send_to_a_session was called with a documentation signal message.
+    let dispatch_msg = coordinator.status.read().await.last_a_dispatch_message.clone();
+    assert!(dispatch_msg.is_some(), "t22.1: last_a_dispatch_message must be set after DocumentationFn");
+    let msg = dispatch_msg.unwrap();
+    assert!(msg.contains("finalize"), "t22.1: dispatch message must contain the documentation signal");
 }
 
 /// ensure_a_session is idempotent: second call must not change the session_id.
@@ -3437,4 +3450,7 @@ async fn t22_1_ensure_a_session_is_idempotent() {
     };
     // The session_id must be a real task id (not the placeholder) and stable.
     assert!(!session_id.starts_with("boss-"), "t22.1: session_id must be a real task id after idempotent calls");
+    // The last dispatch message must be set (second call still sends to A session).
+    let dispatch_msg = coordinator.status.read().await.last_a_dispatch_message.clone();
+    assert!(dispatch_msg.is_some(), "t22.1: last_a_dispatch_message must be set after idempotent calls");
 }

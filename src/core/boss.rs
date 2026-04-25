@@ -355,9 +355,16 @@ impl BossCoordinator {
         Arc::new(move |step_id, accepted, summary: String, correction: Option<String>| {
             let c = c.clone_for_runtime();
             Box::pin(async move {
-                // Ensure A has a real LLM session before executing the review side effect.
                 if let Some(app) = c.auto_advance_app_state.read().await.clone() {
                     c.ensure_a_session(&app).await;
+                    let verdict = if accepted { "accepted" } else { "rejected" };
+                    let msg = match correction.as_deref() {
+                        Some(corr) => format!(
+                            "Review step {step_id}: {verdict}. Summary: {summary}. Correction: {corr}"
+                        ),
+                        None => format!("Review step {step_id}: {verdict}. Summary: {summary}"),
+                    };
+                    c.send_to_a_session(&app, msg).await;
                 }
                 c.apply_review_verdict(step_id, accepted, &summary, correction.as_deref()).await
             })
@@ -374,8 +381,8 @@ impl BossCoordinator {
             let c = c.clone_for_runtime();
             let app = app.clone();
             Box::pin(async move {
-                // Ensure A has a real LLM session before executing the documentation side effect.
                 c.ensure_a_session(&app).await;
+                c.send_to_a_session(&app, format!("Documentation signal: {signal}")).await;
                 c.apply_documentation_signal(&app, &signal).await
             })
         })
@@ -1435,6 +1442,25 @@ impl BossCoordinator {
                 session.designer_a.status = crate::core::boss_state::BossActorStatus::Active;
             }
         }
+    }
+
+    /// Send a message to A's running LLM session via AgentTool Continue.
+    /// Requires `ensure_a_session` to have been called first so `designer_a.session_id` is real.
+    /// Fire-and-forget: enqueues the message into A's mailbox; does not wait for A's reply.
+    async fn send_to_a_session(&self, app_state: &Arc<crate::state::app_state::AppState>, message: String) {
+        let task_id = {
+            let guard = self.session.read().await;
+            guard.as_ref().map(|s| s.designer_a.session_id.clone()).unwrap_or_default()
+        };
+        if task_id.is_empty() {
+            return;
+        }
+        {
+            let mut guard = self.status.write().await;
+            guard.last_a_dispatch_message = Some(message.clone());
+        }
+        let payload = json!({ "task_id": task_id, "message": message }).to_string();
+        let _ = self.invoke_agent_tool(app_state, &payload).await;
     }
 
     /// Build the JSON payload for spawning Designer A's LLM session.
