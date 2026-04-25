@@ -2,6 +2,9 @@ use std::sync::Arc;
 
 use rust_agent::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
 use rust_agent::core::boss::{BossCoordinator, save_plan};
+use rust_agent::core::boss_actor_runtime::{
+    BossActorRegistry, DesignerARuntime, ExecutionFn, ExecutorBRuntime, SpecReviewFn,
+};
 use rust_agent::core::boss_runtime::BossRuntimeHost;
 use rust_agent::core::boss_state::{
     BossActorRole, BossActorStatus, BossControlRequest, BossControlResponse, BossPlan,
@@ -3874,4 +3877,152 @@ async fn t22_2_b_session_fallback_when_task_manager_absent() {
     );
 
     let _ = std::fs::remove_file(&plan_path);
+}
+
+// ---------------------------------------------------------------------------
+// T22.3 — Documentation B reviewer + Execution B self-organizes sub-agents
+// ---------------------------------------------------------------------------
+
+/// T22.3.1: B reviewer receives ReviewSpec and returns real feedback via spec_review_fn.
+#[tokio::test]
+async fn t22_3_documentation_b_reviewer_returns_feedback() {
+    use rust_agent::core::boss_actor_runtime::{BossActorEvent, ExecutorBCommand};
+
+    let spec_review_fn: SpecReviewFn = Arc::new(|spec: String| {
+        Box::pin(async move {
+            Ok(format!("FEEDBACK: spec '{}' is missing error handling", spec))
+        })
+    });
+
+    let runtime = ExecutorBRuntime::spawn_with_callbacks(None, Some(spec_review_fn));
+    let event = runtime
+        .mailbox
+        .request(ExecutorBCommand::ReviewSpec {
+            spec: "implement login flow".to_string(),
+        })
+        .await
+        .expect("ReviewSpec must succeed");
+
+    match event {
+        BossActorEvent::SpecReviewed { feedback } => {
+            assert!(feedback.contains("FEEDBACK:"), "B must return FEEDBACK: prefix, got: {feedback}");
+            assert!(feedback.contains("missing error handling"), "B must include spec content, got: {feedback}");
+        }
+        other => panic!("expected SpecReviewed, got {other:?}"),
+    }
+}
+
+/// T22.3.1: finalize_documentation_loop uses B's ReviewSpec feedback when review_feedback is empty.
+#[tokio::test]
+async fn t22_3_finalize_documentation_loop_uses_b_reviewer_feedback() {
+    let plan_path = std::env::temp_dir().join("t22_3_doc_b_feedback.json");
+    let plan = BossPlan {
+        plan_id: "t22-3-doc-b".into(),
+        accepted_by_user: false,
+        auto_sequence: false,
+        steps: vec![boss_step(0, "step zero")],
+        ..Default::default()
+    };
+    save_plan(&plan, &plan_path).await.unwrap();
+
+    let coordinator = BossCoordinator::restore_or_init(&plan_path).await.unwrap();
+
+    let spec_review_fn: SpecReviewFn = Arc::new(|_spec: String| {
+        Box::pin(async move { Ok("FEEDBACK: needs more detail on auth flow".to_string()) })
+    });
+    let exec_fn: ExecutionFn = Arc::new(|payload: String| {
+        Box::pin(async move { Ok(payload) })
+    });
+    let registry = BossActorRegistry {
+        designer_a: DesignerARuntime::spawn(),
+        executor_b: ExecutorBRuntime::spawn_with_callbacks(Some(exec_fn), Some(spec_review_fn)),
+        has_executor: true,
+        has_a_callbacks: false,
+    };
+    {
+        let mut guard = coordinator.actor_registry.write().await;
+        *guard = Some(registry);
+    }
+
+    coordinator
+        .finalize_documentation_loop(
+            "draft spec: implement login",
+            "",
+            "revised based on B feedback",
+            "final spec",
+            "pseudo code",
+        )
+        .await
+        .unwrap();
+
+    let plan_guard = coordinator.plan.read().await;
+    let plan = plan_guard.as_ref().unwrap();
+    assert_eq!(
+        plan.review_feedback.as_deref(),
+        Some("FEEDBACK: needs more detail on auth flow"),
+        "B's feedback must be stored as review_feedback"
+    );
+
+    let _ = std::fs::remove_file(&plan_path);
+}
+
+/// T22.3.2: Execution B's task (spawned with ExecutorB policy, depth 0) can spawn a child agent.
+#[tokio::test]
+async fn t22_3_execution_b_session_can_spawn_child_agent() {
+    let tasks = Arc::new(TaskManager::default());
+    let permissions = ToolPermissionContext::new(PermissionMode::Default)
+        .with_task_manager(tasks)
+        .with_boss_actor_policy(BossActorPolicy {
+            actor_role: BossActorRole::ExecutorB,
+            lineage_depth: 0,
+            phase: BossStage::Execution,
+        });
+
+    let call = ToolCall::new(
+        "Agent",
+        serde_json::json!({
+            "task": "implement step 0",
+            "session_id": "b-child-session"
+        })
+        .to_string(),
+    );
+
+    let result = AgentTool.invoke(&call, &permissions).await;
+    assert!(
+        result.is_ok(),
+        "ExecutorB at depth 0 must be allowed to spawn a child agent: {:?}",
+        result
+    );
+}
+
+/// T22.3.2: B's child (ImplementChild, depth 1) cannot spawn a grandchild — policy holds.
+#[tokio::test]
+async fn t22_3_b_child_cannot_spawn_grandchild_agent() {
+    let tasks = Arc::new(TaskManager::default());
+    let permissions = ToolPermissionContext::new(PermissionMode::Default)
+        .with_task_manager(tasks)
+        .with_boss_actor_policy(BossActorPolicy {
+            actor_role: BossActorRole::ImplementChild,
+            lineage_depth: 1,
+            phase: BossStage::Execution,
+        });
+
+    let call = ToolCall::new(
+        "Agent",
+        serde_json::json!({
+            "prompt": "do something",
+            "session_id": "grandchild-session"
+        })
+        .to_string(),
+    );
+
+    let err = AgentTool
+        .invoke(&call, &permissions)
+        .await
+        .expect_err("ImplementChild at depth 1 must not spawn grandchild");
+
+    assert!(
+        err.to_string().contains("boss spawn policy"),
+        "error must mention boss spawn policy, got: {err}"
+    );
 }

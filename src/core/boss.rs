@@ -351,10 +351,11 @@ impl BossCoordinator {
             *guard = Some(app_state.clone());
         }
         let exec_fn = Self::build_exec_fn(self, app_state);
+        let spec_review_fn = Self::build_spec_review_fn(self, app_state);
         let review_fn = Self::build_review_fn(self);
         let doc_fn = Self::build_doc_fn(self, app_state);
         let registry = crate::core::boss_actor_runtime::bootstrap_with_all_callbacks(
-            exec_fn, review_fn, doc_fn,
+            exec_fn, spec_review_fn, review_fn, doc_fn,
         );
         let mut guard = self.actor_registry.write().await;
         if let Some(old) = guard.take() {
@@ -386,6 +387,31 @@ impl BossCoordinator {
                         Ok(payload)
                     }
                     Err(e) => Err(e),
+                }
+            })
+        })
+    }
+
+    /// Build B's spec-review callback for the Documentation stage.
+    /// B receives the spec, calls its LLM session, and returns review feedback.
+    fn build_spec_review_fn(
+        coordinator: &Self,
+        app_state: &Arc<crate::state::app_state::AppState>,
+    ) -> crate::core::boss_actor_runtime::SpecReviewFn {
+        let c = coordinator.clone_for_runtime();
+        let app = app_state.clone();
+        Arc::new(move |spec: String| {
+            let c = c.clone_for_runtime();
+            let app = app.clone();
+            Box::pin(async move {
+                c.ensure_b_session(&app, 0).await;
+                let msg = format!(
+                    "Please review the following spec for feasibility, risk, and testability. \
+                     Respond with LGTM if acceptable, or FEEDBACK: <your feedback> if changes are needed.\n\n{spec}"
+                );
+                match c.ask_b_session(&app, msg).await {
+                    Ok(response) => Ok(response),
+                    Err(_) => Ok("LGTM".to_string()),
                 }
             })
         })
@@ -623,6 +649,35 @@ impl BossCoordinator {
         final_document_spec: &str,
         final_pseudo_code: &str,
     ) -> anyhow::Result<()> {
+        // Ask B to review the draft spec before finalizing.
+        // B's feedback is stored alongside A's revision notes.
+        self.ensure_actor_registry_with_a_callbacks_auto().await;
+        let b_feedback = {
+            let registry_guard = self.actor_registry.read().await;
+            if let Some(registry) = registry_guard.as_ref() {
+                let mailbox = registry.b_mailbox().clone();
+                drop(registry_guard);
+                match mailbox.request(crate::core::boss_actor_runtime::ExecutorBCommand::ReviewSpec {
+                    spec: draft_spec.to_string(),
+                }).await {
+                    Ok(crate::core::boss_actor_runtime::BossActorEvent::SpecReviewed { feedback }) => {
+                        Some(feedback)
+                    }
+                    _ => None,
+                }
+            } else {
+                drop(registry_guard);
+                None
+            }
+        };
+
+        // Use B's feedback if caller didn't supply one, otherwise keep caller's value.
+        let effective_review_feedback = if review_feedback.is_empty() {
+            b_feedback.as_deref().unwrap_or("LGTM")
+        } else {
+            review_feedback
+        };
+
         // Mutate plan state first (coordinator owns the data).
         {
             let mut plan_guard = self.plan.write().await;
@@ -630,7 +685,7 @@ impl BossCoordinator {
                 .as_mut()
                 .ok_or_else(|| anyhow::anyhow!("No plan loaded"))?;
             plan.draft_spec = Some(draft_spec.to_string());
-            plan.review_feedback = Some(review_feedback.to_string());
+            plan.review_feedback = Some(effective_review_feedback.to_string());
             plan.revision_notes = Some(revision_notes.to_string());
             plan.document_spec = final_document_spec.to_string();
             plan.pseudo_code = final_pseudo_code.to_string();
@@ -647,8 +702,6 @@ impl BossCoordinator {
         }
 
         // Send FinalizeDocumentation to A mailbox — A's handler drives the stage transition.
-        // Wire A's callbacks via auto path (uses stored auto_advance_app_state).
-        self.ensure_actor_registry_with_a_callbacks_auto().await;
         if let Some(registry) = self.actor_registry.read().await.as_ref() {
             let _ = registry.a_mailbox().request(DesignerACommand::FinalizeDocumentation {
                 signal: "finalize".to_string(),
@@ -1680,6 +1733,75 @@ impl BossCoordinator {
             None
         };
         (accepted, correction)
+    }
+
+    /// Send a message to B's running LLM session and wait for B's response.
+    /// Mirrors `ask_a_session` but reads from `executor_b.session_id`.
+    async fn ask_b_session(
+        &self,
+        app_state: &Arc<crate::state::app_state::AppState>,
+        message: String,
+    ) -> anyhow::Result<String> {
+        let task_id = {
+            let guard = self.session.read().await;
+            guard.as_ref().map(|s| s.executor_b.session_id.clone()).unwrap_or_default()
+        };
+        if task_id.is_empty() {
+            anyhow::bail!("B session not initialized");
+        }
+
+        let tasks = app_state
+            .permission_context
+            .task_manager
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("task manager not configured"))?;
+        let session_id = app_state
+            .permission_context
+            .active_session_id
+            .as_deref()
+            .unwrap_or("")
+            .to_string();
+
+        let offset_before = tasks.get_output(&task_id, 0).map(|s| s.next_offset).unwrap_or(0);
+
+        let tasks_clone = tasks.clone();
+        let task_id_clone = task_id.clone();
+        let message_clone = message.clone();
+        let sent = tokio::task::spawn_blocking(move || {
+            tasks_clone.send_message(&task_id_clone, &session_id, message_clone)
+        })
+        .await
+        .unwrap_or(false);
+        if !sent {
+            anyhow::bail!("B session task {task_id} is not running");
+        }
+
+        let timeout_secs = 30u64;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+        loop {
+            if std::time::Instant::now() >= deadline {
+                anyhow::bail!("B session response timed out after 30s");
+            }
+            if let Some(slice) = tasks.get_output(&task_id, offset_before) {
+                if !slice.content.is_empty() {
+                    return Ok(slice.content);
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+    }
+
+    /// Fire-and-forget: send a message to B's running LLM session without waiting for a reply.
+    async fn send_to_b_session(&self, app_state: &Arc<crate::state::app_state::AppState>, message: String) {
+        let task_id = {
+            let guard = self.session.read().await;
+            guard.as_ref().map(|s| s.executor_b.session_id.clone()).unwrap_or_default()
+        };
+        if task_id.is_empty() {
+            return;
+        }
+        let payload = json!({ "task_id": task_id, "message": message }).to_string();
+        let _ = self.invoke_agent_tool(app_state, &payload).await;
     }
 
     /// Build the JSON payload for spawning Designer A's LLM session.

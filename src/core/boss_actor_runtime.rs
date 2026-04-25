@@ -12,6 +12,11 @@ use crate::core::boss_state::{BossActorRole, BossActorStatus, BossStage};
 pub type ExecutionFn =
     Arc<dyn Fn(String) -> Pin<Box<dyn Future<Output = anyhow::Result<String>> + Send>> + Send + Sync>;
 
+/// Callback type for B's spec review side effect (Documentation stage).
+/// Takes the spec string, returns B's review feedback.
+pub type SpecReviewFn =
+    Arc<dyn Fn(String) -> Pin<Box<dyn Future<Output = anyhow::Result<String>> + Send>> + Send + Sync>;
+
 /// Callback type for A's review side effect.
 /// Takes (step_id, accepted, summary, correction) — drives plan mutation + auto-advance.
 pub type ReviewFn = Arc<
@@ -53,6 +58,8 @@ pub enum ExecutorBCommand {
     DispatchStep { step_id: usize, payload: String },
     /// Continue an in-progress step with updated context.
     ContinueStep { step_id: usize, task_id: String, payload: String },
+    /// Ask B to review a spec document (Documentation stage).
+    ReviewSpec { spec: String },
     /// Stop B's runtime.
     Stop,
 }
@@ -68,6 +75,7 @@ pub enum BossActorEvent {
     ReviewComplete { step_id: usize, accepted: bool, summary: String },
     DocumentationAdvanced { signal: String },
     ApprovalHandled { approved: bool },
+    SpecReviewed { feedback: String },
     Stopped { role: BossActorRole },
 }
 
@@ -235,11 +243,19 @@ impl DesignerARuntime {
 impl ExecutorBRuntime {
     /// Spawn with no execution side effect (state-only).
     pub fn spawn() -> Self {
-        Self::spawn_with_executor(None)
+        Self::spawn_with_callbacks(None, None)
     }
 
     /// Spawn with an execution callback — B's handler calls it for DispatchStep/ContinueStep.
     pub fn spawn_with_executor(exec_fn: Option<ExecutionFn>) -> Self {
+        Self::spawn_with_callbacks(exec_fn, None)
+    }
+
+    /// Spawn with both execution and spec-review callbacks.
+    pub fn spawn_with_callbacks(
+        exec_fn: Option<ExecutionFn>,
+        spec_review_fn: Option<SpecReviewFn>,
+    ) -> Self {
         let (tx, mut rx) = mpsc::channel::<ExecutorBEnvelope>(16);
         let closed = Arc::new(AtomicBool::new(false));
         let state = Arc::new(RwLock::new(BossActorState::default()));
@@ -249,7 +265,7 @@ impl ExecutorBRuntime {
         let join = tokio::spawn(async move {
             while let Some(envelope) = rx.recv().await {
                 let event =
-                    handle_executor_b_command(envelope.command, &state_loop, exec_fn.as_ref())
+                    handle_executor_b_command(envelope.command, &state_loop, exec_fn.as_ref(), spec_review_fn.as_ref())
                         .await;
                 if let Some(respond_to) = envelope.respond_to {
                     let _ = respond_to.send(event.clone());
@@ -355,6 +371,7 @@ async fn handle_executor_b_command(
     command: ExecutorBCommand,
     state: &Arc<RwLock<BossActorState>>,
     exec_fn: Option<&ExecutionFn>,
+    spec_review_fn: Option<&SpecReviewFn>,
 ) -> BossActorEvent {
     match command {
         ExecutorBCommand::DispatchStep { step_id, payload } => {
@@ -381,6 +398,18 @@ async fn handle_executor_b_command(
                 let _ = f(payload).await;
             }
             BossActorEvent::StepDispatched { step_id, task_id }
+        }
+        ExecutorBCommand::ReviewSpec { spec } => {
+            {
+                let mut s = state.write().await;
+                s.status = BossActorStatus::Active;
+            }
+            let feedback = if let Some(f) = spec_review_fn {
+                f(spec).await.unwrap_or_else(|_| "LGTM".to_string())
+            } else {
+                "LGTM".to_string()
+            };
+            BossActorEvent::SpecReviewed { feedback }
         }
         ExecutorBCommand::Stop => {
             let mut s = state.write().await;
@@ -429,7 +458,7 @@ impl BossActorRegistry {
     }
 }
 
-/// Convenience constructor for wiring an execution callback at bootstrap time.
+/// Convenience constructor for wiring B's execution callback and A's review/doc callbacks.
 pub fn bootstrap_with_executor(exec_fn: ExecutionFn) -> BossActorRegistry {
     BossActorRegistry {
         designer_a: DesignerARuntime::spawn(),
@@ -439,15 +468,16 @@ pub fn bootstrap_with_executor(exec_fn: ExecutionFn) -> BossActorRegistry {
     }
 }
 
-/// Convenience constructor for wiring both B's execution callback and A's review/doc callbacks.
+/// Convenience constructor for wiring all callbacks: B's execution + spec-review, A's review/doc.
 pub fn bootstrap_with_all_callbacks(
     exec_fn: ExecutionFn,
+    spec_review_fn: SpecReviewFn,
     review_fn: ReviewFn,
     doc_fn: DocumentationFn,
 ) -> BossActorRegistry {
     BossActorRegistry {
         designer_a: DesignerARuntime::spawn_with_callbacks(Some(review_fn), Some(doc_fn)),
-        executor_b: ExecutorBRuntime::spawn_with_executor(Some(exec_fn)),
+        executor_b: ExecutorBRuntime::spawn_with_callbacks(Some(exec_fn), Some(spec_review_fn)),
         has_executor: true,
         has_a_callbacks: true,
     }
