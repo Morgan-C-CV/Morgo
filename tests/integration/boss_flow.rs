@@ -4368,3 +4368,205 @@ async fn t22_4_stop_aborts_both_a_and_b_sessions() {
 
     let _ = std::fs::remove_file(&plan_path);
 }
+
+// ---------------------------------------------------------------------------
+// T23: A spec 起草真实化
+// ---------------------------------------------------------------------------
+
+/// T23.1: draft_spec="" triggers draft_spec_with_a; A's response is written to plan.draft_spec.
+#[tokio::test]
+async fn t23_draft_spec_empty_triggers_a_draft() {
+    let plan_id = "t23-draft-empty";
+    let plan_path = std::env::temp_dir().join("t23_draft_empty.json");
+    let plan = BossPlan {
+        plan_id: plan_id.into(),
+        task_description: "implement OAuth login".into(),
+        accepted_by_user: false,
+        auto_sequence: false,
+        steps: vec![boss_step(0, "step zero")],
+        ..Default::default()
+    };
+    save_plan(&plan, &plan_path).await.unwrap();
+
+    let coordinator = BossCoordinator::restore_or_init(&plan_path).await.unwrap();
+    let unique_dir = std::env::temp_dir().join("t23_draft_empty_output");
+    let task_manager = Arc::new(TaskManager::new_with_output_root(unique_dir));
+    let app_state = app_state_with_tasks("session-t23-draft-empty", task_manager.clone());
+
+    let fake_a = task_manager.create_with_type(
+        "fake A session",
+        TaskType::LocalAgent,
+        "session-t23-draft-empty",
+        InteractionSurface::Cli,
+    );
+    let a_task_id = fake_a.id.clone();
+    let tm_for_a = task_manager.clone();
+    let a_id_for_loop = a_task_id.clone();
+    task_manager.launch(&a_task_id, "", async move {
+        loop {
+            let messages = tm_for_a.drain_mailbox(&a_id_for_loop);
+            for _msg in messages {
+                tm_for_a.append_output(
+                    &a_id_for_loop,
+                    "Spec: OAuth login using PKCE flow. Objectives: secure token exchange. Acceptance: token stored in keychain.",
+                );
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        }
+    });
+
+    coordinator.record_a_session_id_pub(&a_task_id).await;
+    {
+        let mut guard = coordinator.auto_advance_app_state.write().await;
+        *guard = Some(app_state.clone());
+    }
+    coordinator.bootstrap_actor_registry_with_app_state(&app_state).await;
+
+    coordinator
+        .finalize_documentation_loop("", "", "no revision needed", "final spec", "pseudo code")
+        .await
+        .unwrap();
+
+    let plan_guard = coordinator.plan.read().await;
+    let stored_draft = plan_guard.as_ref().unwrap().draft_spec.clone().unwrap_or_default();
+    assert!(
+        !stored_draft.is_empty(),
+        "plan.draft_spec must be non-empty after A drafts it"
+    );
+    assert!(
+        stored_draft.contains("Spec:") || stored_draft.contains("OAuth"),
+        "plan.draft_spec must contain A's response, got: {stored_draft}"
+    );
+
+    let _ = std::fs::remove_file(&plan_path);
+}
+
+/// T23.2: draft_spec non-empty skips draft_spec_with_a; existing value is preserved.
+#[tokio::test]
+async fn t23_draft_spec_nonempty_skips_a_draft() {
+    let plan_path = std::env::temp_dir().join("t23_draft_nonempty.json");
+    let plan = BossPlan {
+        plan_id: "t23-draft-nonempty".into(),
+        task_description: "implement OAuth login".into(),
+        accepted_by_user: false,
+        auto_sequence: false,
+        steps: vec![boss_step(0, "step zero")],
+        ..Default::default()
+    };
+    save_plan(&plan, &plan_path).await.unwrap();
+
+    let coordinator = BossCoordinator::restore_or_init(&plan_path).await.unwrap();
+
+    // No app_state wired — if A were called it would fail.
+    coordinator
+        .finalize_documentation_loop(
+            "pre-existing spec content",
+            "LGTM",
+            "no revision",
+            "final spec",
+            "pseudo code",
+        )
+        .await
+        .unwrap();
+
+    let plan_guard = coordinator.plan.read().await;
+    let stored_draft = plan_guard.as_ref().unwrap().draft_spec.clone().unwrap_or_default();
+    assert_eq!(
+        stored_draft, "pre-existing spec content",
+        "plan.draft_spec must preserve the caller-supplied value"
+    );
+
+    let _ = std::fs::remove_file(&plan_path);
+}
+
+/// T23.3: draft_spec="" with no app_state returns Err (explicit error contract).
+#[tokio::test]
+async fn t23_draft_spec_with_a_unavailable_returns_error() {
+    let plan_path = std::env::temp_dir().join("t23_draft_no_app.json");
+    let plan = BossPlan {
+        plan_id: "t23-draft-no-app".into(),
+        task_description: "implement OAuth login".into(),
+        accepted_by_user: false,
+        auto_sequence: false,
+        steps: vec![boss_step(0, "step zero")],
+        ..Default::default()
+    };
+    save_plan(&plan, &plan_path).await.unwrap();
+
+    let coordinator = BossCoordinator::restore_or_init(&plan_path).await.unwrap();
+    // auto_advance_app_state is None (default).
+
+    let result = coordinator
+        .finalize_documentation_loop("", "", "no revision", "final spec", "pseudo code")
+        .await;
+
+    assert!(
+        result.is_err(),
+        "finalize_documentation_loop must return Err when draft_spec is empty and no app_state"
+    );
+    let msg = result.unwrap_err().to_string();
+    assert!(
+        msg.contains("app_state") || msg.contains("A session"),
+        "error message must mention app_state or A session, got: {msg}"
+    );
+
+    let _ = std::fs::remove_file(&plan_path);
+}
+
+/// T23.4 production path: draft_spec_with_a walks ensure_a_session (pre-seeded) → ask_a_session.
+#[tokio::test]
+async fn t23_production_path_a_draft_via_ask_a_session() {
+    let plan_path = std::env::temp_dir().join("t23_prod_draft.json");
+    let plan = BossPlan {
+        plan_id: "t23-prod-draft".into(),
+        task_description: "build a REST API for user management".into(),
+        accepted_by_user: false,
+        auto_sequence: false,
+        steps: vec![boss_step(0, "step zero")],
+        ..Default::default()
+    };
+    save_plan(&plan, &plan_path).await.unwrap();
+
+    let coordinator = BossCoordinator::restore_or_init(&plan_path).await.unwrap();
+    let unique_dir = std::env::temp_dir().join("t23_prod_draft_output");
+    let task_manager = Arc::new(TaskManager::new_with_output_root(unique_dir));
+    let app_state = app_state_with_tasks("session-t23-prod-draft", task_manager.clone());
+
+    let fake_a = task_manager.create_with_type(
+        "fake A LLM session",
+        TaskType::LocalAgent,
+        "session-t23-prod-draft",
+        InteractionSurface::Cli,
+    );
+    let a_task_id = fake_a.id.clone();
+    let tm_for_a = task_manager.clone();
+    let a_id_for_loop = a_task_id.clone();
+    task_manager.launch(&a_task_id, "", async move {
+        loop {
+            let messages = tm_for_a.drain_mailbox(&a_id_for_loop);
+            for _msg in messages {
+                tm_for_a.append_output(
+                    &a_id_for_loop,
+                    "REST API spec: CRUD endpoints for /users. Auth via JWT. Acceptance: all endpoints return 200 on valid input.",
+                );
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        }
+    });
+
+    coordinator.record_a_session_id_pub(&a_task_id).await;
+
+    let draft = coordinator
+        .draft_spec_with_a(&app_state, "build a REST API for user management")
+        .await
+        .unwrap();
+
+    assert!(!draft.is_empty(), "draft_spec_with_a must return non-empty spec");
+    assert!(
+        draft.contains("REST API") || draft.contains("spec"),
+        "draft must contain A's response, got: {draft}"
+    );
+
+    let _ = std::fs::remove_file(&plan_path);
+}
+

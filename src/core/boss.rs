@@ -79,6 +79,17 @@ impl BossCoordinator {
         self.record_b_session_id(task_id).await;
     }
 
+    /// Test-only seam: pre-seeds designer_a.session_id so ensure_a_session skips spawning.
+    #[doc(hidden)]
+    pub async fn record_a_session_id_pub(&self, task_id: &str) {
+        let mut guard = self.session.write().await;
+        if let Some(session) = guard.as_mut() {
+            session.designer_a.session_id = task_id.to_string();
+            session.designer_a.task_id = Some(task_id.to_string());
+            session.designer_a.status = crate::core::boss_state::BossActorStatus::Active;
+        }
+    }
+
     /// Test-only seam: reads `executor_b.session_id` for assertion in tests.
     #[doc(hidden)]
     pub async fn b_session_id(&self) -> String {
@@ -417,6 +428,23 @@ impl BossCoordinator {
         })
     }
 
+    /// Ask A to draft a technical spec from `task_description`.
+    /// Calls `ensure_a_session` then `ask_a_session`; returns A's response as the draft spec.
+    /// Returns `Err` if A's session is unavailable or times out.
+    pub async fn draft_spec_with_a(
+        &self,
+        app_state: &Arc<crate::state::app_state::AppState>,
+        task_description: &str,
+    ) -> anyhow::Result<String> {
+        self.ensure_a_session(app_state).await;
+        let msg = format!(
+            "Draft a technical specification for the following task. \
+             Include objectives, acceptance criteria, and a high-level approach. \
+             Task: {task_description}"
+        );
+        self.ask_a_session(app_state, msg).await
+    }
+
     /// Write a real B task id back to BossSession.executor_b after a successful spawn/continue.
     async fn record_b_session_id(&self, task_id: &str) {
         let mut guard = self.session.write().await;
@@ -649,6 +677,24 @@ impl BossCoordinator {
         final_document_spec: &str,
         final_pseudo_code: &str,
     ) -> anyhow::Result<()> {
+        // If no draft_spec was supplied, ask A to generate one from the plan's task_description.
+        let effective_draft_spec: String;
+        let draft_spec = if draft_spec.is_empty() {
+            let task_description = {
+                let guard = self.plan.read().await;
+                guard.as_ref().map(|p| p.task_description.clone()).unwrap_or_default()
+            };
+            let app_state = self.auto_advance_app_state.read().await.clone();
+            effective_draft_spec = if let Some(app) = app_state {
+                self.draft_spec_with_a(&app, &task_description).await?
+            } else {
+                anyhow::bail!("draft_spec is empty and no app_state available for A session");
+            };
+            effective_draft_spec.as_str()
+        } else {
+            draft_spec
+        };
+
         // Ask B to review the draft spec before finalizing.
         // B's feedback is stored alongside A's revision notes.
         self.ensure_actor_registry_with_a_callbacks_auto().await;
