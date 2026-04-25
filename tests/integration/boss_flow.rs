@@ -5,6 +5,9 @@ use rust_agent::core::boss::{BossCoordinator, save_plan};
 use rust_agent::core::boss_state::{
     BossActorRole, BossActorStatus, BossPlan, BossPlanStep, BossPlanStepStatus, BossStage,
 };
+use rust_agent::core::concurrency::{
+    BossBudgetDecision, MemoryPressureLevel, evaluate_boss_budget,
+};
 use rust_agent::core::context::SubagentConfig;
 use rust_agent::cost::tracker::CostTracker;
 use rust_agent::interaction::dispatcher::NotificationDispatcher;
@@ -483,6 +486,114 @@ fn boss_b_executor_b_context_is_boss_executor_b() {
 fn boss_worker_context_is_not_boss_executor_b() {
     let ctx = ToolAssemblyContext::worker(InteractionSurface::Cli, SessionMode::Headless);
     assert!(!ctx.is_boss_executor_b(), "plain worker must not report is_boss_executor_b");
+}
+
+#[test]
+fn subagent_limiter_enforces_total_and_role_caps_under_memory_pressure() {
+    let tasks = TaskManager::default();
+
+    for index in 0..2 {
+        let task = tasks.create_with_type(
+            format!("research-{index}"),
+            TaskType::LocalAgent,
+            "boss-session",
+            InteractionSurface::Cli,
+        );
+        tasks.set_worker_role(&task.id, WorkerRole::Research);
+        tasks.set_boss_actor_id(&task.id, Some(format!("review_child:depth={index}")));
+    }
+
+    assert!(matches!(
+        evaluate_boss_budget(&tasks, WorkerRole::Research, 1, MemoryPressureLevel::Normal),
+        BossBudgetDecision::Queue { .. }
+    ));
+
+    for index in 0..4 {
+        let task = tasks.create_with_type(
+            format!("implement-{index}"),
+            TaskType::LocalAgent,
+            "boss-session",
+            InteractionSurface::Cli,
+        );
+        tasks.set_worker_role(&task.id, WorkerRole::Implement);
+        tasks.set_boss_actor_id(&task.id, Some(format!("implement_child:depth={index}")));
+    }
+
+    assert!(matches!(
+        evaluate_boss_budget(&tasks, WorkerRole::Implement, 1, MemoryPressureLevel::Normal),
+        BossBudgetDecision::Queue { .. }
+    ));
+}
+
+#[tokio::test]
+async fn boss_budget_blocks_low_priority_children_when_pressure_is_critical() {
+    let tasks = Arc::new(TaskManager::default());
+    let permissions = ToolPermissionContext::new(PermissionMode::Default)
+        .with_task_manager(tasks)
+        .with_boss_actor_policy(BossActorPolicy::executor_b(BossStage::Execution));
+
+    let decision = evaluate_boss_budget(
+        permissions.task_manager.as_ref().unwrap(),
+        WorkerRole::Research,
+        1,
+        MemoryPressureLevel::Critical,
+    );
+    assert!(matches!(decision, BossBudgetDecision::Deny { .. }));
+
+    let decision = evaluate_boss_budget(
+        permissions.task_manager.as_ref().unwrap(),
+        WorkerRole::Verify,
+        1,
+        MemoryPressureLevel::Critical,
+    );
+    assert!(matches!(decision, BossBudgetDecision::Queue { .. }));
+
+    let decision = evaluate_boss_budget(
+        permissions.task_manager.as_ref().unwrap(),
+        WorkerRole::Implement,
+        1,
+        MemoryPressureLevel::Critical,
+    );
+    assert_eq!(decision, BossBudgetDecision::Allow);
+}
+
+#[tokio::test]
+async fn boss_agent_spawn_gate_surfaces_budget_queue_reason() {
+    let tasks = Arc::new(TaskManager::default());
+    for index in 0..6 {
+        let task = tasks.create_with_type(
+            format!("active-boss-{index}"),
+            TaskType::LocalAgent,
+            "boss-session",
+            InteractionSurface::Cli,
+        );
+        tasks.set_worker_role(&task.id, WorkerRole::Implement);
+        tasks.set_boss_actor_id(&task.id, Some(format!("implement_child:depth={index}")));
+    }
+
+    let permissions = ToolPermissionContext::new(PermissionMode::Default)
+        .with_task_manager(tasks)
+        .with_boss_actor_policy(BossActorPolicy::executor_b(BossStage::Execution));
+
+    let err = AgentTool
+        .invoke(
+            &ToolCall::new(
+                "Agent",
+                serde_json::json!({
+                    "task": "implement overflow child",
+                    "role": "implement"
+                })
+                .to_string(),
+            ),
+            &permissions,
+        )
+        .await
+        .expect_err("budget gate must reject spawning beyond the boss active cap");
+
+    assert!(
+        err.to_string().contains("boss budget queued"),
+        "budget gate should surface queue reason, got: {err}"
+    );
 }
 
 #[test]

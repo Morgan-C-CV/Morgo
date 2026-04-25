@@ -1,3 +1,6 @@
+use crate::core::concurrency::{
+    BossBudgetDecision, current_memory_pressure_level, evaluate_boss_budget,
+};
 use async_trait::async_trait;
 use serde::Deserialize;
 
@@ -156,6 +159,24 @@ impl Tool for AgentTool {
             AgentRequest::Spawn(request) => {
                 let role_label = request.role.as_str().to_string();
                 let task_label = request.task.clone();
+                if let Some(policy) = request
+                    .boss_actor_policy
+                    .as_ref()
+                    .or(permissions.boss_actor_policy.as_ref())
+                {
+                    match evaluate_boss_budget(
+                        tasks,
+                        request.role,
+                        policy.lineage_depth,
+                        current_memory_pressure_level(),
+                    ) {
+                        BossBudgetDecision::Allow => {}
+                        BossBudgetDecision::Queue { reason }
+                        | BossBudgetDecision::Deny { reason } => {
+                            anyhow::bail!(reason);
+                        }
+                    }
+                }
                 let action = match request.reuse_strategy {
                     ReuseStrategy::RunningOnly => maybe_reuse_running_task(
                         tasks,

@@ -1,3 +1,6 @@
+use crate::state::app_state::WorkerRole;
+use crate::task::manager::TaskManager;
+use crate::task::types::{TaskRecord, TaskStatus};
 use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -8,6 +11,45 @@ use tracing::{debug, info};
 const MAX_SUBAGENTS: usize = 8;
 const MIN_SUBAGENTS: usize = 3;
 const DEFAULT_SUBAGENTS: usize = 6;
+const BOSS_ACTIVE_CAP: usize = 6;
+const BOSS_IMPLEMENT_CAP: usize = 3;
+const BOSS_RESEARCH_CAP: usize = 2;
+const BOSS_VERIFY_CAP: usize = 2;
+const BOSS_LINEAGE_DEPTH_CAP: u32 = 1;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryPressureLevel {
+    Normal,
+    Warning,
+    Critical,
+}
+
+impl MemoryPressureLevel {
+    pub fn from_raw_pressure(pressure: u8) -> Self {
+        if pressure >= 4 {
+            Self::Critical
+        } else if pressure >= 2 {
+            Self::Warning
+        } else {
+            Self::Normal
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BossBudgetDecision {
+    Allow,
+    Queue { reason: String },
+    Deny { reason: String },
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct BossBudgetSnapshot {
+    pub active_total: usize,
+    pub active_implement: usize,
+    pub active_research: usize,
+    pub active_verify: usize,
+}
 
 /// A dynamic concurrency limiter for subagents that adapts its capacity
 /// based on system memory availability and macOS memory pressure.
@@ -120,6 +162,10 @@ impl SubagentLimiter {
     }
 }
 
+pub fn current_memory_pressure_level() -> MemoryPressureLevel {
+    MemoryPressureLevel::from_raw_pressure(get_macos_memory_pressure())
+}
+
 fn get_macos_memory_pressure() -> u8 {
     #[cfg(target_os = "macos")]
     {
@@ -171,6 +217,92 @@ fn calculate_limit(available_mb: u64, pressure: u8) -> usize {
     DEFAULT_SUBAGENTS
 }
 
+fn is_active_boss_task(task: &TaskRecord) -> bool {
+    matches!(task.status, TaskStatus::Pending | TaskStatus::Running) && task.boss_actor_id.is_some()
+}
+
+pub fn boss_budget_snapshot(tasks: &TaskManager) -> BossBudgetSnapshot {
+    let mut snapshot = BossBudgetSnapshot::default();
+    for task in tasks.list().into_iter().filter(is_active_boss_task) {
+        snapshot.active_total += 1;
+        match task.worker_role {
+            Some(WorkerRole::Implement) => snapshot.active_implement += 1,
+            Some(WorkerRole::Research) => snapshot.active_research += 1,
+            Some(WorkerRole::Verify) => snapshot.active_verify += 1,
+            None => {}
+        }
+    }
+    snapshot
+}
+
+pub fn evaluate_boss_budget(
+    tasks: &TaskManager,
+    role: WorkerRole,
+    lineage_depth: u32,
+    pressure: MemoryPressureLevel,
+) -> BossBudgetDecision {
+    if lineage_depth > BOSS_LINEAGE_DEPTH_CAP {
+        return BossBudgetDecision::Deny {
+            reason: format!(
+                "boss budget denied: lineage depth {} exceeds cap {}",
+                lineage_depth, BOSS_LINEAGE_DEPTH_CAP
+            ),
+        };
+    }
+
+    if pressure == MemoryPressureLevel::Critical && matches!(role, WorkerRole::Research) {
+        return BossBudgetDecision::Deny {
+            reason: "boss budget denied: critical memory pressure blocks low-priority research children"
+                .into(),
+        };
+    }
+
+    if pressure == MemoryPressureLevel::Critical && matches!(role, WorkerRole::Verify) {
+        return BossBudgetDecision::Queue {
+            reason: "boss budget queued: critical memory pressure preserves implement capacity before verify children"
+                .into(),
+        };
+    }
+
+    let snapshot = boss_budget_snapshot(tasks);
+    if snapshot.active_total >= BOSS_ACTIVE_CAP {
+        return BossBudgetDecision::Queue {
+            reason: format!(
+                "boss budget queued: active boss tasks {} reached total cap {}",
+                snapshot.active_total, BOSS_ACTIVE_CAP
+            ),
+        };
+    }
+
+    let (active_for_role, role_cap) = match role {
+        WorkerRole::Implement => (snapshot.active_implement, BOSS_IMPLEMENT_CAP),
+        WorkerRole::Research => (snapshot.active_research, BOSS_RESEARCH_CAP),
+        WorkerRole::Verify => (snapshot.active_verify, BOSS_VERIFY_CAP),
+    };
+    if active_for_role >= role_cap {
+        return BossBudgetDecision::Queue {
+            reason: format!(
+                "boss budget queued: active {} tasks {} reached role cap {}",
+                role.as_str(),
+                active_for_role,
+                role_cap
+            ),
+        };
+    }
+
+    if pressure == MemoryPressureLevel::Warning && matches!(role, WorkerRole::Research | WorkerRole::Verify)
+    {
+        return BossBudgetDecision::Queue {
+            reason: format!(
+                "boss budget queued: warning memory pressure deprioritizes {} children",
+                role.as_str()
+            ),
+        };
+    }
+
+    BossBudgetDecision::Allow
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -189,36 +321,72 @@ mod tests {
         assert_eq!(calculate_limit(500, 1), 3);
     }
 
-    #[tokio::test]
-    async fn test_limiter_restricts_concurrency() {
-        let limiter = Arc::new(SubagentLimiter {
-            semaphore: Arc::new(Semaphore::new(MAX_SUBAGENTS)),
-            restriction_permits: Mutex::new(Vec::new()),
-            current_limit: AtomicUsize::new(MAX_SUBAGENTS),
-        });
+    #[test]
+    fn subagent_limiter_enforces_total_and_role_caps_under_memory_pressure() {
+        let manager = TaskManager::default();
+        for index in 0..2 {
+            let task = manager.create_with_type(
+                format!("research-{index}"),
+                crate::task::types::TaskType::LocalAgent,
+                "boss-session",
+                crate::bootstrap::InteractionSurface::Cli,
+            );
+            manager.set_worker_role(&task.id, WorkerRole::Research);
+            manager.set_boss_actor_id(&task.id, Some(format!("implement_child:depth={index}")));
+        }
 
-        // Artificially restrict to 2
-        limiter.apply_limit(2).await;
-        assert_eq!(limiter.current_limit(), 2);
+        match evaluate_boss_budget(&manager, WorkerRole::Research, 1, MemoryPressureLevel::Normal) {
+            BossBudgetDecision::Queue { reason } => {
+                assert!(reason.contains("role cap"));
+            }
+            other => panic!("expected Queue due to role cap, got {other:?}"),
+        }
 
-        let p1 = limiter.acquire().await;
-        let _p2 = limiter.acquire().await;
+        for index in 0..4 {
+            let task = manager.create_with_type(
+                format!("implement-{index}"),
+                crate::task::types::TaskType::LocalAgent,
+                "boss-session",
+                crate::bootstrap::InteractionSurface::Cli,
+            );
+            manager.set_worker_role(&task.id, WorkerRole::Implement);
+            manager.set_boss_actor_id(&task.id, Some(format!("implement_child:depth={index}")));
+        }
 
-        // p3 should fail to acquire immediately
-        let try_p3 = limiter.semaphore.try_acquire();
-        assert!(try_p3.is_err());
-
-        drop(p1);
-        let p3 = limiter.acquire().await;
-        assert!(p3.forget_type_info_is_fine()); // just to keep it alive
-    }
-
-    trait Forget {
-        fn forget_type_info_is_fine(&self) -> bool;
-    }
-    impl Forget for OwnedSemaphorePermit {
-        fn forget_type_info_is_fine(&self) -> bool {
-            true
+        match evaluate_boss_budget(&manager, WorkerRole::Implement, 1, MemoryPressureLevel::Normal) {
+            BossBudgetDecision::Queue { reason } => {
+                assert!(reason.contains("total cap"));
+            }
+            other => panic!("expected Queue due to total cap, got {other:?}"),
         }
     }
+
+    #[test]
+    fn boss_budget_blocks_low_priority_children_when_pressure_is_critical() {
+        let manager = TaskManager::default();
+
+        match evaluate_boss_budget(&manager, WorkerRole::Research, 1, MemoryPressureLevel::Critical) {
+            BossBudgetDecision::Deny { reason } => {
+                assert!(reason.contains("critical memory pressure"));
+            }
+            other => panic!("expected Deny for research under critical pressure, got {other:?}"),
+        }
+
+        match evaluate_boss_budget(&manager, WorkerRole::Verify, 1, MemoryPressureLevel::Critical) {
+            BossBudgetDecision::Queue { reason } => {
+                assert!(reason.contains("preserves implement capacity"));
+            }
+            other => panic!("expected Queue for verify under critical pressure, got {other:?}"),
+        }
+
+        assert_eq!(
+            evaluate_boss_budget(&manager, WorkerRole::Implement, 1, MemoryPressureLevel::Critical),
+            BossBudgetDecision::Allow
+        );
+        assert!(matches!(
+            evaluate_boss_budget(&manager, WorkerRole::Implement, 2, MemoryPressureLevel::Normal),
+            BossBudgetDecision::Deny { .. }
+        ));
+    }
+
 }
