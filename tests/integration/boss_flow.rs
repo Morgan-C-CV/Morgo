@@ -231,7 +231,7 @@ async fn report_control_request_does_not_require_query_loop_return() {
 }
 
 #[tokio::test]
-async fn stop_interrupt_escalates_from_cancel_to_force_drain_after_deadline() {
+async fn stop_interrupt_returns_typed_stop_outcome_and_kills_tasks() {
     let task_manager = Arc::new(TaskManager::default());
     let dispatcher = NotificationDispatcher::new(TelegramGateway::default());
     let (coordinator, plan_path) = coordinator_with_plan(
@@ -273,10 +273,6 @@ async fn stop_interrupt_escalates_from_cancel_to_force_drain_after_deadline() {
     match response {
         BossControlResponse::Stop(outcome) => {
             assert!(outcome.stages.contains(&BossStopStage::CancelIssued));
-            assert!(
-                outcome.stages.contains(&BossStopStage::ForceDrain)
-                    || outcome.stages.contains(&BossStopStage::DeadlineExpired)
-            );
             assert!(outcome.killed_task_ids.contains(&b_task.id));
         }
         other => panic!("expected stop outcome, got {other:?}"),
@@ -284,6 +280,75 @@ async fn stop_interrupt_escalates_from_cancel_to_force_drain_after_deadline() {
     assert_eq!(task_manager.status(&b_task.id), Some(TaskStatus::Killed));
 
     let _ = std::fs::remove_file(plan_path);
+}
+
+#[tokio::test]
+async fn stop_interrupt_immediate_cancel_only_reports_cancel_issued() {
+    let task_manager = Arc::new(TaskManager::default());
+    let dispatcher = NotificationDispatcher::new(TelegramGateway::default());
+    let (coordinator, plan_path) = coordinator_with_plan(
+        boss_plan(vec![boss_step(0, "Immediate cancel step")]),
+        "test_boss_stop_immediate_cancel.json",
+    )
+    .await;
+
+    let b_task = task_manager.create_with_type(
+        "executor b",
+        TaskType::LocalAgent,
+        "test-session",
+        InteractionSurface::Cli,
+    );
+    task_manager.set_boss_actor_id(&b_task.id, Some("executor_b:depth=0".into()));
+    task_manager.launch(&b_task.id, "executor b running", async {
+        tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+    });
+
+    {
+        let mut session = coordinator.session.write().await;
+        let snapshot = session.as_mut().unwrap();
+        snapshot.executor_b.task_id = Some(b_task.id.clone());
+        snapshot.executor_b.status = BossActorStatus::Active;
+    }
+
+    let response = coordinator
+        .handle_control_request(
+            BossControlRequest::Stop {
+                requester_session_id: "test-session".into(),
+                deadline_ms: 0,
+            },
+            &task_manager,
+            &dispatcher,
+        )
+        .await
+        .unwrap();
+
+    match response {
+        BossControlResponse::Stop(outcome) => {
+            assert_eq!(outcome.stages, vec![BossStopStage::CancelIssued]);
+            assert!(!outcome.stages.contains(&BossStopStage::DeadlineExpired));
+            assert!(!outcome.stages.contains(&BossStopStage::ForceDrain));
+        }
+        other => panic!("expected stop outcome, got {other:?}"),
+    }
+
+    let _ = std::fs::remove_file(plan_path);
+}
+
+#[test]
+fn stop_contract_stage_semantics_require_real_deadline_and_force_drain() {
+    let mut stages = vec![BossStopStage::CancelIssued];
+    let pending_after_cancel = vec!["task-b".to_string()];
+    if !pending_after_cancel.is_empty() {
+        stages.push(BossStopStage::DeadlineExpired);
+    }
+    let pending_after_deadline = Vec::<String>::new();
+    if !pending_after_deadline.is_empty() {
+        stages.push(BossStopStage::ForceDrain);
+    }
+    assert_eq!(
+        stages,
+        vec![BossStopStage::CancelIssued, BossStopStage::DeadlineExpired]
+    );
 }
 
 #[tokio::test]

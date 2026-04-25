@@ -378,16 +378,29 @@ impl BossCoordinator {
             }
         }
 
-        stages.push(BossStopStage::DeadlineExpired);
-        tokio::time::sleep(tokio::time::Duration::from_millis(deadline_ms)).await;
+        let mut pending_after_cancel = tracked_task_ids
+            .iter()
+            .filter(|task_id| matches!(tasks.status(task_id), Some(TaskStatus::Pending | TaskStatus::Running)))
+            .cloned()
+            .collect::<Vec<_>>();
+
+        if !pending_after_cancel.is_empty() {
+            stages.push(BossStopStage::DeadlineExpired);
+            tokio::time::sleep(tokio::time::Duration::from_millis(deadline_ms)).await;
+            pending_after_cancel = tracked_task_ids
+                .iter()
+                .filter(|task_id| {
+                    matches!(tasks.status(task_id), Some(TaskStatus::Pending | TaskStatus::Running))
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+        }
 
         let mut force_drained = false;
-        for task_id in tracked_task_ids {
-            if matches!(tasks.status(&task_id), Some(TaskStatus::Pending | TaskStatus::Running)) {
-                force_drained = true;
-                if tasks.kill(&task_id, requester_session_id, dispatcher) && !killed.contains(&task_id) {
-                    killed.push(task_id.clone());
-                }
+        for task_id in pending_after_cancel {
+            force_drained = true;
+            if tasks.kill(&task_id, requester_session_id, dispatcher) && !killed.contains(&task_id) {
+                killed.push(task_id.clone());
             }
         }
         if force_drained {
