@@ -8,6 +8,9 @@ use crate::task::manager::TaskManager;
 use crate::task::types::{TaskEvent, TaskStatus};
 use crate::tool::definition::{Tool, ToolCall};
 use crate::core::boss_runtime::{BossControlRuntime, BossRuntimeOwner};
+use crate::core::boss_actor_runtime::{
+    BossActorRegistry, DesignerACommand, ExecutorBCommand,
+};
 use crate::history::session::SessionHistory;
 use serde_json::json;
 use std::sync::Arc;
@@ -21,6 +24,9 @@ pub struct BossCoordinator {
 
     /// Structured actor topology — replaces the former loose a/b session_id/cancel fields.
     pub session: Arc<RwLock<Option<BossSession>>>,
+
+    /// Live actor runtimes for A and B — bootstrapped on restore/init.
+    pub actor_registry: Arc<RwLock<Option<BossActorRegistry>>>,
 
     auto_advance_app_state: Arc<RwLock<Option<Arc<crate::state::app_state::AppState>>>>,
     runtime_key: Arc<RwLock<Option<String>>>,
@@ -37,6 +43,7 @@ impl BossCoordinator {
             status: Arc::new(RwLock::new(BossStatus::default())),
             plan: Arc::new(RwLock::new(None)),
             session: Arc::new(RwLock::new(None)),
+            actor_registry: Arc::new(RwLock::new(None)),
             auto_advance_app_state: Arc::new(RwLock::new(None)),
             runtime_key: Arc::new(RwLock::new(None)),
             runtime_owner,
@@ -153,6 +160,7 @@ impl BossCoordinator {
             status: self.status.clone(),
             plan: self.plan.clone(),
             session: self.session.clone(),
+            actor_registry: self.actor_registry.clone(),
             auto_advance_app_state: self.auto_advance_app_state.clone(),
             runtime_key: self.runtime_key.clone(),
             runtime_owner: self.runtime_owner.clone(),
@@ -214,6 +222,9 @@ impl BossCoordinator {
                 let mut session_guard = coordinator.session.write().await;
                 *session_guard = Some(BossSession::from_plan_id(&loaded_plan.plan_id, stage));
             }
+
+            // Bootstrap actor runtimes for A and B.
+            coordinator.bootstrap_actor_registry().await;
         } else {
             let mut status = coordinator.status.write().await;
             status.planning_file = Some(path.to_string_lossy().into_owned());
@@ -232,6 +243,24 @@ impl BossCoordinator {
         let mut guard = self.session.write().await;
         if guard.as_ref().map(|s| s.plan_id.as_str()) != Some(plan_id) {
             *guard = Some(BossSession::from_plan_id(plan_id, stage));
+        }
+    }
+
+    /// Spawn fresh A and B actor runtimes, replacing any existing ones.
+    pub async fn bootstrap_actor_registry(&self) {
+        let registry = BossActorRegistry::bootstrap();
+        let mut guard = self.actor_registry.write().await;
+        if let Some(old) = guard.take() {
+            old.shutdown_all();
+        }
+        *guard = Some(registry);
+    }
+
+    /// Ensure actor runtimes exist; bootstrap if not yet initialized.
+    pub async fn ensure_actor_registry(&self) {
+        let needs_bootstrap = self.actor_registry.read().await.is_none();
+        if needs_bootstrap {
+            self.bootstrap_actor_registry().await;
         }
     }
 
@@ -565,6 +594,12 @@ impl BossCoordinator {
             }
         }
 
+        // Stop A and B actor runtimes via their mailboxes.
+        if let Some(registry) = self.actor_registry.read().await.as_ref() {
+            let _ = registry.a_mailbox().send(DesignerACommand::Stop).await;
+            let _ = registry.b_mailbox().send(ExecutorBCommand::Stop).await;
+        }
+
         Ok(BossStopOutcome {
             killed_task_ids: killed,
             stages,
@@ -718,6 +753,15 @@ impl BossCoordinator {
             drop(plan_guard);
             self.update_current_step(next_step).await;
             self.maybe_auto_advance_after_completion().await?;
+        }
+
+        // Notify A's actor mailbox of the review outcome.
+        self.ensure_actor_registry().await;
+        if let Some(registry) = self.actor_registry.read().await.as_ref() {
+            let _ = registry.a_mailbox().send(DesignerACommand::Review {
+                step_id,
+                summary: review_summary.to_string(),
+            }).await;
         }
 
         Ok(())
@@ -991,14 +1035,23 @@ impl BossCoordinator {
                 };
 
                 let payload = if let Some(b_task_id) = running_b {
-                    // B is alive — deliver step context via Continue (no new task).
                     let continue_payload = self
                         .build_step_continue_payload(step_id, &b_task_id, &parent_session_id)
                         .await?;
                     self.invoke_agent_tool(app_state, &continue_payload).await?;
+
+                    // Notify B's actor mailbox that a step is continuing.
+                    self.ensure_actor_registry().await;
+                    if let Some(registry) = self.actor_registry.read().await.as_ref() {
+                        let _ = registry.b_mailbox().send(ExecutorBCommand::ContinueStep {
+                            step_id,
+                            task_id: b_task_id.clone(),
+                            payload: continue_payload.clone(),
+                        }).await;
+                    }
+
                     continue_payload
                 } else {
-                    // B is not running — spawn fresh and record the new task id.
                     let b_actor_id = {
                         let guard = self.session.read().await;
                         guard.as_ref()
@@ -1018,6 +1071,16 @@ impl BossCoordinator {
                             session.executor_b.status = BossActorStatus::Active;
                         }
                     }
+
+                    // Notify B's actor mailbox that a new step was dispatched.
+                    self.ensure_actor_registry().await;
+                    if let Some(registry) = self.actor_registry.read().await.as_ref() {
+                        let _ = registry.b_mailbox().send(ExecutorBCommand::DispatchStep {
+                            step_id,
+                            payload: spawn_payload.clone(),
+                        }).await;
+                    }
+
                     spawn_payload
                 };
 

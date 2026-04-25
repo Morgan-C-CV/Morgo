@@ -1,5 +1,6 @@
 pub mod attachment;
 pub mod boss;
+pub mod boss_actor_runtime;
 pub mod boss_runtime;
 pub mod boss_state;
 pub mod concurrency;

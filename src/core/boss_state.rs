@@ -1,8 +1,9 @@
 use serde::{Deserialize, Serialize};
 use std::time::SystemTime;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum BossStage {
+    #[default]
     /// Planning and discussion stage (Agent A & B in a documentation loop)
     Documentation,
     /// Waiting for user confirmation to proceed from Planning to Execution

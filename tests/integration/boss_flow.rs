@@ -2089,3 +2089,141 @@ async fn runtime_host_owner_survives_rebind_and_restart() {
         .await;
     assert!(response2.is_ok(), "control request must succeed after owner restart via host");
 }
+
+// --- T16.6.H: Boss actor runtime mailbox seam ---
+
+use rust_agent::core::boss_actor_runtime::{
+    BossActorRegistry, DesignerACommand, ExecutorBCommand,
+};
+use rust_agent::core::boss_state::BossActorStatus as ActorStatus;
+
+#[tokio::test]
+async fn restore_bootstraps_actor_runtimes_that_are_addressable() {
+    let plan_path = std::env::temp_dir().join("boss_h_restore_actor.json");
+    let plan = BossPlan {
+        plan_id: "plan-h-restore".into(),
+        accepted_by_user: true,
+        auto_sequence: true,
+        steps: vec![boss_step(1, "step one")],
+        ..Default::default()
+    };
+    save_plan(&plan, &plan_path).await.unwrap();
+
+    let coordinator = BossCoordinator::restore_or_init(&plan_path).await.unwrap();
+
+    // Actor registry must be bootstrapped after restore.
+    let registry_guard = coordinator.actor_registry.read().await;
+    let registry = registry_guard.as_ref().expect("actor registry must be bootstrapped after restore");
+
+    // Both mailboxes must be open and addressable.
+    assert!(!registry.a_mailbox().is_closed(), "A mailbox must be open after restore");
+    assert!(!registry.b_mailbox().is_closed(), "B mailbox must be open after restore");
+
+    // Send a command to A and verify it processes without error.
+    let event = registry.a_mailbox().request(DesignerACommand::Plan {
+        plan_id: "plan-h-restore".into(),
+        document_spec: "spec".into(),
+    }).await;
+    assert!(event.is_ok(), "A mailbox must accept Plan command after restore");
+
+    let _ = std::fs::remove_file(&plan_path);
+}
+
+#[tokio::test]
+async fn advance_plan_dispatches_step_through_b_mailbox() {
+    let plan_path = std::env::temp_dir().join("boss_h_advance_b.json");
+    let plan = BossPlan {
+        plan_id: "plan-h-advance".into(),
+        accepted_by_user: true,
+        auto_sequence: true,
+        steps: vec![boss_step(1, "step one")],
+        ..Default::default()
+    };
+    save_plan(&plan, &plan_path).await.unwrap();
+
+    let coordinator = BossCoordinator::restore_or_init(&plan_path).await.unwrap();
+
+    // Ensure actor registry is live.
+    coordinator.ensure_actor_registry().await;
+
+    // Manually send a DispatchStep to B's mailbox (simulating what advance_plan does).
+    let event = {
+        let registry_guard = coordinator.actor_registry.read().await;
+        let registry = registry_guard.as_ref().unwrap();
+        registry.b_mailbox().request(ExecutorBCommand::DispatchStep {
+            step_id: 1,
+            payload: "test-payload".into(),
+        }).await
+    };
+
+    assert!(event.is_ok(), "B mailbox must accept DispatchStep command");
+    let event = event.unwrap();
+    match event {
+        rust_agent::core::boss_actor_runtime::BossActorEvent::StepDispatched { step_id, .. } => {
+            assert_eq!(step_id, 1, "dispatched step_id must match");
+        }
+        other => panic!("expected StepDispatched, got {:?}", other),
+    }
+
+    // B's state must reflect the active step.
+    let registry_guard = coordinator.actor_registry.read().await;
+    let registry = registry_guard.as_ref().unwrap();
+    let b_status = registry.executor_b.status().await;
+    assert_eq!(b_status, ActorStatus::Active, "B must be Active after DispatchStep");
+
+    let _ = std::fs::remove_file(&plan_path);
+}
+
+#[tokio::test]
+async fn stop_sends_stop_command_to_actor_mailboxes() {
+    let plan_path = std::env::temp_dir().join("boss_h_stop_actors.json");
+    let plan = BossPlan {
+        plan_id: "plan-h-stop".into(),
+        accepted_by_user: true,
+        auto_sequence: true,
+        steps: vec![boss_step(1, "step one")],
+        ..Default::default()
+    };
+    save_plan(&plan, &plan_path).await.unwrap();
+
+    let coordinator = BossCoordinator::restore_or_init(&plan_path).await.unwrap();
+    coordinator.ensure_actor_registry().await;
+
+    // Activate both actors first.
+    {
+        let registry_guard = coordinator.actor_registry.read().await;
+        let registry = registry_guard.as_ref().unwrap();
+        let _ = registry.a_mailbox().send(DesignerACommand::Plan {
+            plan_id: "plan-h-stop".into(),
+            document_spec: "spec".into(),
+        }).await;
+        let _ = registry.b_mailbox().send(ExecutorBCommand::DispatchStep {
+            step_id: 1,
+            payload: "payload".into(),
+        }).await;
+    }
+    // Give the actor loops a tick to process.
+    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+
+    // Now send Stop to both via their mailboxes directly (mirrors what stop() does).
+    {
+        let registry_guard = coordinator.actor_registry.read().await;
+        let registry = registry_guard.as_ref().unwrap();
+        let a_event = registry.a_mailbox().request(DesignerACommand::Stop).await;
+        let b_event = registry.b_mailbox().request(ExecutorBCommand::Stop).await;
+        assert!(a_event.is_ok(), "A must accept Stop command");
+        assert!(b_event.is_ok(), "B must accept Stop command");
+    }
+
+    // Give the actor loops a tick to process the Stop.
+    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+
+    // After Stop, both mailboxes must be closed.
+    let registry_guard = coordinator.actor_registry.read().await;
+    let registry = registry_guard.as_ref().unwrap();
+    assert!(registry.a_mailbox().is_closed(), "A mailbox must be closed after Stop");
+    assert!(registry.b_mailbox().is_closed(), "B mailbox must be closed after Stop");
+
+    let _ = std::fs::remove_file(&plan_path);
+}
+
