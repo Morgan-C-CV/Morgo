@@ -7,9 +7,10 @@ use crate::interaction::dispatcher::NotificationDispatcher;
 use crate::task::manager::TaskManager;
 use crate::task::types::{TaskEvent, TaskStatus};
 use crate::tool::definition::{Tool, ToolCall};
+use crate::history::session::SessionHistory;
 use serde_json::json;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, mpsc, oneshot};
 
 #[derive(Debug)]
 pub struct BossCoordinator {
@@ -21,6 +22,15 @@ pub struct BossCoordinator {
     pub session: Arc<RwLock<Option<BossSession>>>,
 
     auto_advance_app_state: Arc<RwLock<Option<Arc<crate::state::app_state::AppState>>>>,
+    control_tx: Arc<RwLock<Option<mpsc::Sender<ControlEnvelope>>>>,
+}
+
+#[derive(Debug)]
+struct ControlEnvelope {
+    request: BossControlRequest,
+    tasks: Arc<TaskManager>,
+    dispatcher: NotificationDispatcher,
+    respond_to: oneshot::Sender<anyhow::Result<BossControlResponse>>,
 }
 
 impl BossCoordinator {
@@ -30,10 +40,81 @@ impl BossCoordinator {
             plan: Arc::new(RwLock::new(None)),
             session: Arc::new(RwLock::new(None)),
             auto_advance_app_state: Arc::new(RwLock::new(None)),
+            control_tx: Arc::new(RwLock::new(None)),
         }
     }
 
-    /// Attempts to restore a BossCoordinator from an existing planning file.
+    pub async fn attach_app_state_for_report_testing(
+        &self,
+        app_state: Arc<crate::state::app_state::AppState>,
+    ) {
+        let mut auto = self.auto_advance_app_state.write().await;
+        *auto = Some(app_state);
+    }
+
+    pub async fn has_control_runtime(&self) -> bool {
+        self.control_tx.read().await.is_some()
+    }
+
+    pub async fn ensure_control_runtime(&self) {
+        let mut control_tx = self.control_tx.write().await;
+        if control_tx.is_some() {
+            return;
+        }
+        let (tx, mut rx) = mpsc::channel::<ControlEnvelope>(16);
+        let coordinator = self.clone_for_runtime();
+        tokio::spawn(async move {
+            while let Some(envelope) = rx.recv().await {
+                let response = coordinator
+                    .handle_control_request_direct(
+                        envelope.request,
+                        &envelope.tasks,
+                        &envelope.dispatcher,
+                    )
+                    .await;
+                let _ = envelope.respond_to.send(response);
+            }
+        });
+        *control_tx = Some(tx);
+    }
+
+    async fn send_control_request(
+        &self,
+        request: BossControlRequest,
+        tasks: Arc<TaskManager>,
+        dispatcher: NotificationDispatcher,
+    ) -> anyhow::Result<BossControlResponse> {
+        self.ensure_control_runtime().await;
+        let tx = self
+            .control_tx
+            .read()
+            .await
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("boss control runtime unavailable"))?;
+        let (respond_to, rx) = oneshot::channel();
+        tx.send(ControlEnvelope {
+            request,
+            tasks,
+            dispatcher,
+            respond_to,
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("boss control mailbox send failed"))?;
+        rx.await
+            .map_err(|_| anyhow::anyhow!("boss control mailbox receive failed"))?
+    }
+
+    fn clone_for_runtime(&self) -> Self {
+        Self {
+            status: self.status.clone(),
+            plan: self.plan.clone(),
+            session: self.session.clone(),
+            auto_advance_app_state: self.auto_advance_app_state.clone(),
+            control_tx: self.control_tx.clone(),
+        }
+    }
+
     /// If the file doesn't exist, it falls back to a fresh coordinator.
     pub async fn restore_or_init(path: &std::path::Path) -> anyhow::Result<Self> {
         let coordinator = Self::new();
@@ -286,6 +367,16 @@ impl BossCoordinator {
         tasks: &TaskManager,
         dispatcher: &NotificationDispatcher,
     ) -> anyhow::Result<BossControlResponse> {
+        self.send_control_request(request, Arc::new(tasks.clone()), dispatcher.clone())
+            .await
+    }
+
+    async fn handle_control_request_direct(
+        &self,
+        request: BossControlRequest,
+        tasks: &TaskManager,
+        dispatcher: &NotificationDispatcher,
+    ) -> anyhow::Result<BossControlResponse> {
         match request {
             BossControlRequest::Report => {
                 Ok(BossControlResponse::Report(self.report_progress(tasks).await?))
@@ -321,12 +412,19 @@ impl BossCoordinator {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        let history_summary = tasks
-            .list()
-            .into_iter()
-            .filter(|task| task.boss_actor_id.is_some())
-            .map(|task| format!("{}:{:?}", task.id, task.status))
-            .collect::<Vec<_>>();
+        let history_summary = self
+            .auto_advance_app_state
+            .read()
+            .await
+            .as_ref()
+            .and_then(|app_state| history_summary_from_app_state(app_state))
+            .unwrap_or_else(|| {
+                tasks.list()
+                    .into_iter()
+                    .filter(|task| task.boss_actor_id.is_some())
+                    .map(|task| format!("{}:{:?}", task.id, task.status))
+                    .collect::<Vec<_>>()
+            });
 
         Ok(BossReportPayload {
             stage: status.stage,
@@ -975,6 +1073,41 @@ fn format_acceptance(step: &BossPlanStep) -> String {
             .collect::<Vec<_>>()
             .join("\n")
     }
+}
+
+fn history_summary_from_app_state(
+    app_state: &crate::state::app_state::AppState,
+) -> Option<Vec<String>> {
+    if let Some(history) = &app_state.history {
+        return Some(history_summary_from_history(history));
+    }
+
+    let session_store = app_state.session_store.as_ref()?;
+    let session = app_state.session.as_ref()?;
+    let request = crate::history::session::SessionRestoreRequest {
+        resume: Some(session.session_id.0.clone()),
+        continue_session: false,
+    };
+    let (_, history) = session_store.load(&request)?;
+    Some(history_summary_from_history(&history))
+}
+
+fn history_summary_from_history(history: &SessionHistory) -> Vec<String> {
+    history
+        .entries
+        .iter()
+        .rev()
+        .take(3)
+        .map(|entry| {
+            let text = entry.message.text();
+            let text = text.lines().next().unwrap_or("").trim();
+            if text.is_empty() {
+                "(empty history entry)".into()
+            } else {
+                text.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
 }
 
 impl Default for BossCoordinator {

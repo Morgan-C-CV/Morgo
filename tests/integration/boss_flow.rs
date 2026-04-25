@@ -11,6 +11,9 @@ use rust_agent::core::concurrency::{
 };
 use rust_agent::core::context::SubagentConfig;
 use rust_agent::cost::tracker::CostTracker;
+use rust_agent::history::session::{
+    InMemorySessionStore, SessionHistory, SessionHistoryEntry, SessionId, SessionSnapshot,
+};
 use rust_agent::interaction::dispatcher::NotificationDispatcher;
 use rust_agent::interaction::telegram::gateway::TelegramGateway;
 use rust_agent::state::app_state::{
@@ -130,6 +133,26 @@ fn task_event(task_id: &str, step_id: usize, status: TaskStatus) -> TaskEvent {
         output_file: "".into(),
         usage: None,
     }
+}
+
+fn app_state_with_history(
+    active_session_id: &str,
+    task_manager: Arc<TaskManager>,
+    session_store: Arc<InMemorySessionStore>,
+    history: SessionHistory,
+) -> Arc<AppState> {
+    let mut app = (*app_state_with_tasks(active_session_id, task_manager)).clone();
+    app.session_store = Some(session_store);
+    app.session = Some(SessionSnapshot {
+        session_id: SessionId(active_session_id.into()),
+        surface: InteractionSurface::Cli,
+        session_mode: SessionMode::Headless,
+        cwd: "/tmp".into(),
+        last_turn_at: None,
+        prompt_seed: None,
+    });
+    app.history = Some(history);
+    Arc::new(app)
 }
 
 async fn coordinator_with_plan(
@@ -395,6 +418,84 @@ async fn stop_interrupt_records_deadline_without_force_drain_when_task_finishes_
         }
         other => panic!("expected stop outcome, got {other:?}"),
     }
+
+    let _ = std::fs::remove_file(plan_path);
+}
+
+#[tokio::test]
+async fn report_payload_uses_historystore_derived_summary() {
+    let task_manager = Arc::new(TaskManager::default());
+    let store = Arc::new(InMemorySessionStore::default());
+    let history = SessionHistory {
+        entries: vec![
+            SessionHistoryEntry {
+                message: rust_agent::core::message::Message::user("first user note"),
+                timestamp: None,
+                tool_refs: Vec::new(),
+                milestone: None,
+            },
+            SessionHistoryEntry {
+                message: rust_agent::core::message::Message::assistant("second assistant summary"),
+                timestamp: None,
+                tool_refs: Vec::new(),
+                milestone: None,
+            },
+        ],
+    };
+    let app_state = app_state_with_history(
+        "history-session",
+        task_manager.clone(),
+        store,
+        history,
+    );
+    let (coordinator, plan_path) = coordinator_with_plan(
+        boss_plan(vec![boss_step(0, "History-backed step")]),
+        "test_boss_historystore_report.json",
+    )
+    .await;
+    coordinator
+        .attach_app_state_for_report_testing(app_state)
+        .await;
+
+    let response = coordinator
+        .handle_control_request(
+            BossControlRequest::Report,
+            &task_manager,
+            &NotificationDispatcher::new(TelegramGateway::default()),
+        )
+        .await
+        .unwrap();
+
+    match response {
+        BossControlResponse::Report(payload) => {
+            assert_eq!(payload.history_summary.len(), 2);
+            assert_eq!(payload.history_summary[0], "second assistant summary");
+            assert_eq!(payload.history_summary[1], "first user note");
+        }
+        other => panic!("expected report payload, got {other:?}"),
+    }
+
+    let _ = std::fs::remove_file(plan_path);
+}
+
+#[tokio::test]
+async fn report_control_request_uses_dedicated_mailbox_runtime() {
+    let task_manager = Arc::new(TaskManager::default());
+    let dispatcher = NotificationDispatcher::new(TelegramGateway::default());
+    let (coordinator, plan_path) = coordinator_with_plan(
+        boss_plan(vec![boss_step(0, "Mailbox report step")]),
+        "test_boss_report_mailbox_runtime.json",
+    )
+    .await;
+
+    coordinator.ensure_control_runtime().await;
+    assert!(coordinator.has_control_runtime().await);
+
+    let response = coordinator
+        .handle_control_request(BossControlRequest::Report, &task_manager, &dispatcher)
+        .await
+        .unwrap();
+    assert!(matches!(response, BossControlResponse::Report(_)));
 
     let _ = std::fs::remove_file(plan_path);
 }
