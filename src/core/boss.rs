@@ -355,6 +355,10 @@ impl BossCoordinator {
         Arc::new(move |step_id, accepted, summary: String, correction: Option<String>| {
             let c = c.clone_for_runtime();
             Box::pin(async move {
+                // Ensure A has a real LLM session before executing the review side effect.
+                if let Some(app) = c.auto_advance_app_state.read().await.clone() {
+                    c.ensure_a_session(&app).await;
+                }
                 c.apply_review_verdict(step_id, accepted, &summary, correction.as_deref()).await
             })
         })
@@ -369,7 +373,11 @@ impl BossCoordinator {
         Arc::new(move |signal: String| {
             let c = c.clone_for_runtime();
             let app = app.clone();
-            Box::pin(async move { c.apply_documentation_signal(&app, &signal).await })
+            Box::pin(async move {
+                // Ensure A has a real LLM session before executing the documentation side effect.
+                c.ensure_a_session(&app).await;
+                c.apply_documentation_signal(&app, &signal).await
+            })
         })
     }
 
@@ -1351,6 +1359,15 @@ impl BossCoordinator {
         app_state: &Arc<crate::state::app_state::AppState>,
         payload: &str,
     ) -> anyhow::Result<()> {
+        self.invoke_agent_tool_with_task_id(app_state, payload).await.map(|_| ())
+    }
+
+    /// Like `invoke_agent_tool` but returns the spawned task id extracted from the result text.
+    async fn invoke_agent_tool_with_task_id(
+        &self,
+        app_state: &Arc<crate::state::app_state::AppState>,
+        payload: &str,
+    ) -> anyhow::Result<String> {
         let agent_tool = crate::tool::builtin::agent::AgentTool;
         let result = agent_tool
             .invoke(
@@ -1360,7 +1377,15 @@ impl BossCoordinator {
             .await?;
 
         match result {
-            crate::tool::definition::ToolResult::Text(_) => Ok(()),
+            crate::tool::definition::ToolResult::Text(text) => {
+                // Result text is "agent task {task_id} respawned for ..." or "agent task {task_id} reused for ..."
+                let task_id = text
+                    .split_whitespace()
+                    .nth(2)
+                    .unwrap_or("unknown")
+                    .to_string();
+                Ok(task_id)
+            }
             crate::tool::definition::ToolResult::Denied(reason) => {
                 anyhow::bail!("boss worker dispatch denied: {reason}")
             }
@@ -1379,6 +1404,55 @@ impl BossCoordinator {
                 anyhow::bail!("boss worker dispatch returned oversized result: {reason}")
             }
         }
+    }
+
+    /// Ensure Designer A has a real LLM session. On first call, spawns an A session via
+    /// AgentTool and writes the task id back to BossSession.designer_a.session_id.
+    /// Subsequent calls are no-ops if the session id is already a real task id.
+    async fn ensure_a_session(&self, app_state: &Arc<crate::state::app_state::AppState>) {
+        // Check if already initialized to a real session id (not the deterministic placeholder).
+        let placeholder = {
+            let guard = self.session.read().await;
+            guard.as_ref().map(|s| {
+                let placeholder = format!("boss-{}-a", s.plan_id);
+                s.designer_a.session_id == placeholder || s.designer_a.session_id.is_empty()
+            }).unwrap_or(true)
+        };
+        if !placeholder {
+            return;
+        }
+
+        let payload = match self.build_a_session_payload(app_state).await {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+
+        if let Ok(task_id) = self.invoke_agent_tool_with_task_id(app_state, &payload).await {
+            let mut guard = self.session.write().await;
+            if let Some(session) = guard.as_mut() {
+                session.designer_a.session_id = task_id.clone();
+                session.designer_a.task_id = Some(task_id);
+                session.designer_a.status = crate::core::boss_state::BossActorStatus::Active;
+            }
+        }
+    }
+
+    /// Build the JSON payload for spawning Designer A's LLM session.
+    async fn build_a_session_payload(
+        &self,
+        app_state: &Arc<crate::state::app_state::AppState>,
+    ) -> anyhow::Result<String> {
+        let plan_id = self.plan.read().await.as_ref().map(|p| p.plan_id.clone()).unwrap_or_default();
+        let parent_session_id = app_state.active_session_id.clone();
+        Ok(json!({
+            "task": format!("Designer A review session for plan {plan_id}"),
+            "role": "research",
+            "boss_plan_id": plan_id,
+            "step_objective": "Review and approve boss plan steps as Designer A",
+            "parent_session_id": parent_session_id,
+            "reuse_strategy": "running_only",
+        })
+        .to_string())
     }
 
     async fn update_current_step(&self, current_step: Option<usize>) {

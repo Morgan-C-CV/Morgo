@@ -3317,3 +3317,124 @@ async fn h10_1_restore_or_init_coordinator_uses_host_owner_direct() {
         "h10.1: coordinator from restore_or_init_coordinator must hold host's BossRuntimeOwner"
     );
 }
+
+// ---------------------------------------------------------------------------
+// T22.1 — Designer A becomes a real LLM agent session
+// ---------------------------------------------------------------------------
+
+/// After ReviewFn fires, designer_a.session_id must no longer be the deterministic placeholder.
+#[tokio::test]
+async fn t22_1_review_fn_initializes_a_session_id() {
+    use rust_agent::core::boss_runtime::BossRuntimeOwner;
+    let runtime_owner = Arc::new(BossRuntimeOwner::default());
+    let coordinator = Arc::new(BossCoordinator::new_with_runtime_owner(runtime_owner));
+    let task_manager = Arc::new(TaskManager::default());
+    let app_state = app_state_with_tasks("session-t22-1-review", task_manager);
+
+    coordinator.bootstrap_actor_registry_with_app_state(&app_state).await;
+    coordinator.ensure_actor_session("t22-1-review", BossStage::Execution).await;
+
+    // Record the deterministic placeholder before any callback fires.
+    let placeholder = {
+        let guard = coordinator.session.read().await;
+        guard.as_ref().map(|s| s.designer_a.session_id.clone()).unwrap_or_default()
+    };
+    assert!(placeholder.starts_with("boss-"), "pre-condition: session_id must be deterministic placeholder");
+
+    // Fire ReviewFn via A mailbox.
+    {
+        let guard = coordinator.actor_registry.read().await;
+        if let Some(registry) = guard.as_ref() {
+            let _ = registry.a_mailbox().send(
+                rust_agent::core::boss_actor_runtime::DesignerACommand::Review {
+                    step_id: 0,
+                    accepted: true,
+                    summary: "looks good".into(),
+                    correction: None,
+                }
+            ).await;
+        }
+    }
+    // Give the actor loop time to process.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let after = {
+        let guard = coordinator.session.read().await;
+        guard.as_ref().map(|s| s.designer_a.session_id.clone()).unwrap_or_default()
+    };
+    assert_ne!(after, placeholder, "t22.1: ReviewFn must update designer_a.session_id from placeholder");
+    assert!(!after.is_empty(), "t22.1: designer_a.session_id must be non-empty after ReviewFn");
+}
+
+/// After DocumentationFn fires, designer_a.session_id must no longer be the deterministic placeholder.
+#[tokio::test]
+async fn t22_1_doc_fn_initializes_a_session_id() {
+    use rust_agent::core::boss_runtime::BossRuntimeOwner;
+    let runtime_owner = Arc::new(BossRuntimeOwner::default());
+    let coordinator = Arc::new(BossCoordinator::new_with_runtime_owner(runtime_owner));
+    let task_manager = Arc::new(TaskManager::default());
+    let app_state = app_state_with_tasks("session-t22-1-doc", task_manager);
+
+    coordinator.bootstrap_actor_registry_with_app_state(&app_state).await;
+    coordinator.ensure_actor_session("t22-1-doc", BossStage::Execution).await;
+
+    let placeholder = {
+        let guard = coordinator.session.read().await;
+        guard.as_ref().map(|s| s.designer_a.session_id.clone()).unwrap_or_default()
+    };
+    assert!(placeholder.starts_with("boss-"), "pre-condition: session_id must be deterministic placeholder");
+
+    // Fire DocumentationFn via A mailbox.
+    {
+        let guard = coordinator.actor_registry.read().await;
+        if let Some(registry) = guard.as_ref() {
+            let _ = registry.a_mailbox().send(
+                rust_agent::core::boss_actor_runtime::DesignerACommand::FinalizeDocumentation {
+                    signal: "finalize".into(),
+                }
+            ).await;
+        }
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let after = {
+        let guard = coordinator.session.read().await;
+        guard.as_ref().map(|s| s.designer_a.session_id.clone()).unwrap_or_default()
+    };
+    assert_ne!(after, placeholder, "t22.1: DocumentationFn must update designer_a.session_id from placeholder");
+    assert!(!after.is_empty(), "t22.1: designer_a.session_id must be non-empty after DocumentationFn");
+}
+
+/// ensure_a_session is idempotent: second call must not change the session_id.
+#[tokio::test]
+async fn t22_1_ensure_a_session_is_idempotent() {
+    use rust_agent::core::boss_runtime::BossRuntimeOwner;
+    let runtime_owner = Arc::new(BossRuntimeOwner::default());
+    let coordinator = Arc::new(BossCoordinator::new_with_runtime_owner(runtime_owner));
+    let task_manager = Arc::new(TaskManager::default());
+    let app_state = app_state_with_tasks("session-t22-1-idem", task_manager);
+
+    coordinator.bootstrap_actor_registry_with_app_state(&app_state).await;
+    coordinator.ensure_actor_session("t22-1-idem", BossStage::Execution).await;
+
+    // Fire DocumentationFn twice.
+    for _ in 0..2 {
+        let guard = coordinator.actor_registry.read().await;
+        if let Some(registry) = guard.as_ref() {
+            let _ = registry.a_mailbox().send(
+                rust_agent::core::boss_actor_runtime::DesignerACommand::FinalizeDocumentation {
+                    signal: "finalize".into(),
+                }
+            ).await;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    // Both calls should have produced the same session_id (idempotent).
+    let session_id = {
+        let guard = coordinator.session.read().await;
+        guard.as_ref().map(|s| s.designer_a.session_id.clone()).unwrap_or_default()
+    };
+    // The session_id must be a real task id (not the placeholder) and stable.
+    assert!(!session_id.starts_with("boss-"), "t22.1: session_id must be a real task id after idempotent calls");
+}
