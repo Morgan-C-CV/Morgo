@@ -160,6 +160,76 @@ impl BossCoordinator {
         root.join(".claude").join("boss").join("planning.json")
     }
 
+    /// Records one Documentation-stage red/blue loop pass.
+    ///
+    /// A drafts the spec, B reviews feasibility/risk/testability, then A revises.
+    /// The revised spec becomes the immutable planning content and the coordinator
+    /// transitions to `WaitingForApproval`.
+    pub async fn finalize_documentation_loop(
+        &self,
+        draft_spec: &str,
+        review_feedback: &str,
+        revision_notes: &str,
+        final_document_spec: &str,
+        final_pseudo_code: &str,
+    ) -> anyhow::Result<()> {
+        {
+            let mut plan_guard = self.plan.write().await;
+            let plan = plan_guard
+                .as_mut()
+                .ok_or_else(|| anyhow::anyhow!("No plan loaded"))?;
+            plan.draft_spec = Some(draft_spec.to_string());
+            plan.review_feedback = Some(review_feedback.to_string());
+            plan.revision_notes = Some(revision_notes.to_string());
+            plan.document_spec = final_document_spec.to_string();
+            plan.pseudo_code = final_pseudo_code.to_string();
+            plan.finalized = true;
+            plan.accepted_by_user = false;
+        }
+
+        let path_to_save = self.status.read().await.planning_file.clone();
+        if let Some(path_str) = path_to_save {
+            let path = std::path::PathBuf::from(path_str);
+            if let Some(plan) = self.plan.read().await.as_ref() {
+                save_plan(plan, &path).await?;
+            }
+        }
+
+        self.transition_to(BossStage::WaitingForApproval).await?;
+        Ok(())
+    }
+
+    /// Records user feedback while in the documentation/approval loop.
+    /// Any non-confirmation input during `WaitingForApproval` reopens Documentation,
+    /// preserving a feedback trail for the next A/B revision pass.
+    pub async fn record_documentation_feedback(&self, feedback: &str) -> anyhow::Result<()> {
+        let trimmed = feedback.trim();
+        if trimmed.is_empty() {
+            return Ok(());
+        }
+
+        {
+            let mut plan_guard = self.plan.write().await;
+            let plan = plan_guard
+                .as_mut()
+                .ok_or_else(|| anyhow::anyhow!("No plan loaded"))?;
+            plan.documentation_feedback.push(trimmed.to_string());
+            plan.accepted_by_user = false;
+            plan.finalized = false;
+        }
+
+        let path_to_save = self.status.read().await.planning_file.clone();
+        if let Some(path_str) = path_to_save {
+            let path = std::path::PathBuf::from(path_str);
+            if let Some(plan) = self.plan.read().await.as_ref() {
+                save_plan(plan, &path).await?;
+            }
+        }
+
+        self.transition_to(BossStage::Documentation).await?;
+        Ok(())
+    }
+
     /// Handles the user confirmation for transitioning from Documentation -> Execution.
     /// MUST only be called when in WaitingForApproval.
     /// Returns true if user confirmed (Y/enter), false if they provided feedback (re-enter Documentation).
@@ -196,7 +266,7 @@ impl BossCoordinator {
             self.transition_to(BossStage::Execution).await?;
             Ok(true)
         } else {
-            self.transition_to(BossStage::Documentation).await?;
+            self.record_documentation_feedback(user_input).await?;
             Ok(false)
         }
     }
@@ -836,6 +906,10 @@ mod tests {
             .transition_to(BossStage::WaitingForApproval)
             .await
             .unwrap();
+        {
+            let mut plan = coordinator.plan.write().await;
+            *plan = Some(BossPlan::default());
+        }
         let rejected = coordinator
             .handle_user_approval("Wait, this is wrong")
             .await
@@ -861,6 +935,11 @@ mod tests {
             task_description: "Fix bugs".into(),
             document_spec: "Spec v1".into(),
             pseudo_code: "Code v1".into(),
+            draft_spec: None,
+            review_feedback: None,
+            revision_notes: None,
+            finalized: false,
+            documentation_feedback: Vec::new(),
             steps: vec![],
             accepted_by_user: true,
             auto_sequence: false,
@@ -913,6 +992,11 @@ mod tests {
             plan_id: "plan-restore".into(),
             task_description: "task".into(),
             accepted_by_user: true,
+            draft_spec: None,
+            review_feedback: None,
+            revision_notes: None,
+            finalized: false,
+            documentation_feedback: Vec::new(),
             steps: vec![crate::core::boss_state::BossPlanStep {
                 id: 0,
                 description: "".into(),

@@ -29,6 +29,16 @@ pub struct BossPlan {
     pub task_description: String,
     pub document_spec: String,
     pub pseudo_code: String,
+    #[serde(default)]
+    pub draft_spec: Option<String>,
+    #[serde(default)]
+    pub review_feedback: Option<String>,
+    #[serde(default)]
+    pub revision_notes: Option<String>,
+    #[serde(default)]
+    pub finalized: bool,
+    #[serde(default)]
+    pub documentation_feedback: Vec<String>,
     pub steps: Vec<BossPlanStep>,
     pub accepted_by_user: bool,
     pub auto_sequence: bool,

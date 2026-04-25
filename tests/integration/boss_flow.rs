@@ -991,6 +991,136 @@ async fn boss_child_event_cannot_complete_step_before_group_fan_in() {
 
 // --- T16.6.C.2: ExecutorB policy injection ---
 
+#[tokio::test]
+async fn documentation_stage_runs_designer_reviewer_revision_loop() {
+    let plan = BossPlan {
+        plan_id: "plan-doc-loop".into(),
+        task_description: "Design a safe execution plan".into(),
+        document_spec: String::new(),
+        pseudo_code: String::new(),
+        draft_spec: None,
+        review_feedback: None,
+        revision_notes: None,
+        finalized: false,
+        documentation_feedback: Vec::new(),
+        steps: vec![boss_step(0, "Implement validated step")],
+        accepted_by_user: false,
+        auto_sequence: true,
+    };
+
+    let (coordinator, plan_path) =
+        coordinator_with_plan(plan, "test_boss_documentation_loop.json").await;
+
+    assert_eq!(coordinator.get_stage().await, BossStage::Documentation);
+
+    coordinator
+        .finalize_documentation_loop(
+            "A draft: outline the implementation and risks.",
+            "B review: add feasibility notes, test plan, and edge-case risks.",
+            "A revision: tighten scope and clarify acceptance criteria.",
+            "Final spec: scoped implementation with explicit acceptance criteria.",
+            "Pseudo-code: validate -> execute -> review -> complete.",
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(coordinator.get_stage().await, BossStage::WaitingForApproval);
+
+    let plan_guard = coordinator.plan.read().await;
+    let plan = plan_guard.as_ref().unwrap();
+    assert_eq!(
+        plan.draft_spec.as_deref(),
+        Some("A draft: outline the implementation and risks.")
+    );
+    assert_eq!(
+        plan.review_feedback.as_deref(),
+        Some("B review: add feasibility notes, test plan, and edge-case risks.")
+    );
+    assert_eq!(
+        plan.revision_notes.as_deref(),
+        Some("A revision: tighten scope and clarify acceptance criteria.")
+    );
+    assert_eq!(
+        plan.document_spec,
+        "Final spec: scoped implementation with explicit acceptance criteria."
+    );
+    assert_eq!(
+        plan.pseudo_code,
+        "Pseudo-code: validate -> execute -> review -> complete."
+    );
+    assert!(plan.finalized, "documentation loop must finalize the plan");
+    assert!(
+        !plan.accepted_by_user,
+        "documentation finalization must not skip user approval"
+    );
+    drop(plan_guard);
+
+    let saved = rust_agent::core::boss::load_plan(&plan_path).await.unwrap();
+    assert!(saved.finalized, "finalized plan must be persisted");
+    assert_eq!(
+        saved.review_feedback.as_deref(),
+        Some("B review: add feasibility notes, test plan, and edge-case risks.")
+    );
+
+    let _ = std::fs::remove_file(plan_path);
+}
+
+#[tokio::test]
+async fn user_feedback_reopens_documentation_loop_before_execution() {
+    let plan = BossPlan {
+        plan_id: "plan-doc-feedback".into(),
+        task_description: "Refine plan from user notes".into(),
+        document_spec: "Initial final spec".into(),
+        pseudo_code: "Initial pseudo-code".into(),
+        draft_spec: Some("Initial draft".into()),
+        review_feedback: Some("Initial B review".into()),
+        revision_notes: Some("Initial A revision".into()),
+        finalized: true,
+        documentation_feedback: Vec::new(),
+        steps: vec![boss_step(0, "Implement after approval")],
+        accepted_by_user: false,
+        auto_sequence: true,
+    };
+
+    let (coordinator, plan_path) =
+        coordinator_with_plan(plan, "test_boss_documentation_feedback.json").await;
+
+    coordinator
+        .transition_to(BossStage::WaitingForApproval)
+        .await
+        .unwrap();
+
+    let confirmed = coordinator
+        .handle_user_approval("Please add rollback handling and explicit failure cases")
+        .await
+        .unwrap();
+
+    assert!(!confirmed, "non-confirmation input must not enter execution");
+    assert_eq!(coordinator.get_stage().await, BossStage::Documentation);
+
+    let plan_guard = coordinator.plan.read().await;
+    let plan = plan_guard.as_ref().unwrap();
+    assert!(
+        !plan.finalized,
+        "user feedback must reopen the documentation loop"
+    );
+    assert!(
+        !plan.accepted_by_user,
+        "user feedback must keep approval unset"
+    );
+    assert_eq!(plan.documentation_feedback.len(), 1);
+    assert_eq!(
+        plan.documentation_feedback[0],
+        "Please add rollback handling and explicit failure cases"
+    );
+    drop(plan_guard);
+
+    let saved = rust_agent::core::boss::load_plan(&plan_path).await.unwrap();
+    assert_eq!(saved.documentation_feedback.len(), 1);
+    assert!(!saved.finalized);
+
+    let _ = std::fs::remove_file(plan_path);
+}
 #[test]
 fn boss_spawned_b_runtime_has_executor_policy_and_agent_tool() {
     use rust_agent::tool::builtin::agent::AgentTool;
