@@ -784,6 +784,39 @@ fn boss_b_spawns_children_with_child_policy_and_depth() {
 }
 
 #[tokio::test]
+async fn boss_b_coerces_non_child_spawn_policy_to_child_depth() {
+    let task_manager = Arc::new(TaskManager::default());
+    let permissions = ToolPermissionContext::new(PermissionMode::Default)
+        .with_task_manager(task_manager.clone())
+        .with_active_session_id("parent-session-policy")
+        .with_active_surface(InteractionSurface::Cli)
+        .with_boss_actor_policy(BossActorPolicy::executor_b(BossStage::Execution));
+
+    let payload = serde_json::json!({
+        "task": "spawn child from B",
+        "role": "implement",
+        "inherit_context": false,
+        "max_turns": 0,
+        "boss_actor_role": "executor_b",
+        "boss_lineage_depth": 0
+    })
+    .to_string();
+
+    AgentTool
+        .invoke(&ToolCall::new("Agent", payload), &permissions)
+        .await
+        .expect("ExecutorB should be allowed to spawn a child");
+
+    let tasks = task_manager.list();
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(
+        tasks[0].boss_actor_id.as_deref(),
+        Some("implement_child:depth=1"),
+        "non-child explicit role must be coerced to implement_child at depth 1"
+    );
+}
+
+#[tokio::test]
 async fn boss_b_fans_out_children_and_fans_in_summary() {
     let task_manager = Arc::new(TaskManager::default());
     let app_state = app_state_with_tasks("parent-session-fan-in", task_manager.clone());

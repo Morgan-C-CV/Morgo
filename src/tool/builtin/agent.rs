@@ -139,7 +139,11 @@ impl Tool for AgentTool {
                         phase: BossStage::Execution,
                     });
                 } else if let Some(child_policy) = spawn.boss_actor_policy.as_mut() {
-                    // Explicit child role provided — enforce depth = parent + 1.
+                    // Explicit role provided — enforce child role + depth = parent + 1.
+                    if !child_policy.actor_role.is_child() {
+                        use crate::core::boss_state::BossActorRole;
+                        child_policy.actor_role = BossActorRole::ImplementChild;
+                    }
                     child_policy.lineage_depth = parent_policy.lineage_depth + 1;
                 }
             }
@@ -191,7 +195,11 @@ impl Tool for AgentTool {
                 tasks.set_orchestration_group_id(&task.id, request.orchestration_group_id.clone());
                 tasks.set_phase(&task.id, request.phase);
                 tasks.set_step_id(&task.id, request.step_id);
-                if let Some(policy) = &permissions.boss_actor_policy {
+                if let Some(policy) = request
+                    .boss_actor_policy
+                    .as_ref()
+                    .or(permissions.boss_actor_policy.as_ref())
+                {
                     tasks.set_boss_actor_id(
                         &task.id,
                         Some(format!(
