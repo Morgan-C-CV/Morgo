@@ -15,7 +15,7 @@ pub type ExecutionFn =
 /// Callback type for A's review side effect.
 /// Takes (step_id, accepted, summary, correction) — drives plan mutation + auto-advance.
 pub type ReviewFn = Arc<
-    dyn Fn(usize, bool, String, Option<String>) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send>>
+    dyn Fn(usize, bool, String, Option<String>) -> Pin<Box<dyn Future<Output = anyhow::Result<bool>> + Send>>
         + Send
         + Sync,
 >;
@@ -305,10 +305,13 @@ async fn handle_designer_a_command(
                 s.current_step = Some(step_id);
             }
             // A's handler owns the review side effect — plan mutation + auto-advance.
-            if let Some(f) = review_fn {
-                let _ = f(step_id, accepted, summary.clone(), correction).await;
-            }
-            BossActorEvent::ReviewComplete { step_id, accepted, summary }
+            // The callback returns the effective accepted bool (A's verdict or fallback).
+            let effective_accepted = if let Some(f) = review_fn {
+                f(step_id, accepted, summary.clone(), correction).await.unwrap_or(accepted)
+            } else {
+                accepted
+            };
+            BossActorEvent::ReviewComplete { step_id, accepted: effective_accepted, summary }
         }
         DesignerACommand::FinalizeDocumentation { signal } => {
             {

@@ -3495,103 +3495,177 @@ fn t22_1b_parse_a_review_verdict_default_accept_when_no_keyword() {
 
 #[tokio::test]
 async fn t22_1b_review_fn_falls_back_to_coordinator_verdict_when_a_unavailable() {
-    // When A's session is not running (no real task), ask_a_session fails and
-    // build_review_fn falls back to the coordinator-supplied accepted value.
+    // When A's session is not running, ask_a_session fails and build_review_fn
+    // falls back to the coordinator-supplied accepted value. Assert step.status directly.
     let task_manager = Arc::new(TaskManager::default());
-    let app_state = app_state_with_tasks("t22-1b-fallback", task_manager.clone());
-    let host = BossRuntimeHost::new();
-    let coordinator = host.build_coordinator(&app_state).await;
+    let session_id = "t22-1b-fallback-strong";
+    let app_state = app_state_with_tasks(session_id, task_manager.clone());
 
-    // Seed a plan so ensure_a_session has a plan_id.
-    coordinator.ensure_actor_session("t22-1b-fallback", BossStage::Execution).await;
+    let (coordinator, plan_path) = coordinator_with_plan(
+        boss_plan(vec![boss_step(0, "Step for fallback test")]),
+        "t22_1b_fallback_strong.json",
+    )
+    .await;
+    coordinator.bootstrap_actor_registry_with_app_state(&app_state).await;
 
-    // Directly invoke the review fn with accepted=true; A is not running so fallback applies.
-    let review_fn = coordinator.review_fn_for_test();
-    review_fn(0, true, "step summary".into(), None).await;
+    {
+        let mut guard = coordinator.plan.write().await;
+        let plan = guard.as_mut().unwrap();
+        plan.steps[0].worker_task_id = Some("b-task-fallback".into());
+        plan.steps[0].status = BossPlanStepStatus::Running;
+    }
 
-    // State machine should have processed the review (no panic, no hang).
-    // The key assertion: last_a_dispatch_message is set (ask_a_session was attempted).
-    let msg = coordinator.status.read().await.last_a_dispatch_message.clone();
-    assert!(msg.is_some(), "t22.1b: ask_a_session must be attempted even when A is unavailable");
-    assert!(msg.unwrap().contains("coordinator verdict=accepted"), "t22.1b: message must include coordinator verdict hint");
+    // Pre-seed designer_a.session_id with a non-running task id so ensure_a_session
+    // skips the real LLM spawn, and ask_a_session fails fast (task not running).
+    {
+        let mut guard = coordinator.session.write().await;
+        if let Some(s) = guard.as_mut() {
+            s.designer_a.session_id = "fake-a-not-running".to_string();
+        }
+    }
+
+    // No fake A task running — ask_a_session will fail fast.
+    // Coordinator says accepted=true → fallback must complete the step.
+    coordinator
+        .on_review_event(0, true, "Fallback accept", None)
+        .await
+        .unwrap();
+
+    let guard = coordinator.plan.read().await;
+    let step = &guard.as_ref().unwrap().steps[0];
+    assert_eq!(step.status, BossPlanStepStatus::Completed, "fallback must use coordinator verdict (accepted=true → Completed)");
+    assert!(step.completed, "step.completed must be true on fallback accept");
+
+    let _ = std::fs::remove_file(plan_path);
 }
 
 #[tokio::test]
 async fn t22_1b_review_fn_uses_a_verdict_when_a_responds_accept() {
-    // Simulate A responding ACCEPT by pre-populating the task output.
+    // A responds ACCEPT; coordinator passes accepted=false. A's verdict must win.
     let task_manager = Arc::new(TaskManager::default());
     let session_id = "t22-1b-a-accept";
     let app_state = app_state_with_tasks(session_id, task_manager.clone());
-    let host = BossRuntimeHost::new();
-    let coordinator = host.build_coordinator(&app_state).await;
-    coordinator.ensure_actor_session("t22-1b-a-accept", BossStage::Execution).await;
 
-    // Create a fake A task that is "running" and pre-populate its output with ACCEPT.
+    let (coordinator, plan_path) = coordinator_with_plan(
+        boss_plan(vec![boss_step(0, "Step for A accept override")]),
+        "t22_1b_a_accept.json",
+    )
+    .await;
+    coordinator.bootstrap_actor_registry_with_app_state(&app_state).await;
+
+    {
+        let mut guard = coordinator.plan.write().await;
+        let plan = guard.as_mut().unwrap();
+        plan.steps[0].worker_task_id = Some("b-task-accept".into());
+        plan.steps[0].status = BossPlanStepStatus::Running;
+    }
+
     let fake_a_task = task_manager.create_with_type(
         "fake designer A".to_string(),
-        rust_agent::task::types::TaskType::LocalAgent,
+        TaskType::LocalAgent,
         session_id.to_string(),
         InteractionSurface::Cli,
     );
-    task_manager.start(&fake_a_task.id);
-    // Write the real task id into designer_a.session_id so ask_a_session uses it.
+    // Launch the fake A task so it's in running_owners (required for send_message).
+    let aid_clone = fake_a_task.id.clone();
+    task_manager.launch(&fake_a_task.id, "", async move {
+        // Keep the task "running" long enough for the test.
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        drop(aid_clone);
+    });
+    // Pre-seed designer_a.session_id so ensure_a_session skips the real LLM spawn.
     {
         let mut guard = coordinator.session.write().await;
         if let Some(s) = guard.as_mut() {
             s.designer_a.session_id = fake_a_task.id.clone();
         }
     }
-    // Pre-populate output so polling finds it immediately.
-    task_manager.append_output(&fake_a_task.id, "ACCEPT: step looks good\n");
+    // Append A's response after a short delay so ask_a_session's polling loop finds it.
+    let tm = task_manager.clone();
+    let aid = fake_a_task.id.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        tm.append_output(&aid, "ACCEPT: step output looks good\n");
+    });
 
-    let review_fn = coordinator.review_fn_for_test();
-    // Pass accepted=false from coordinator — A should override to accepted=true.
-    review_fn(0, false, "step summary".into(), None).await;
+    // Coordinator says accepted=false — A's ACCEPT must override to Completed.
+    coordinator
+        .on_review_event(0, false, "Step output looks good", None)
+        .await
+        .unwrap();
 
-    // Verify A's ACCEPT was used: the step should not be in rejected state.
-    let status = coordinator.status.read().await;
-    assert!(
-        status.last_a_dispatch_message.is_some(),
-        "t22.1b: ask_a_session must be called"
-    );
+    let guard = coordinator.plan.read().await;
+    let step = &guard.as_ref().unwrap().steps[0];
+    assert_eq!(step.status, BossPlanStepStatus::Completed, "A ACCEPT must complete the step even when coordinator says rejected");
+    assert!(step.completed, "step.completed must be true after A accepts");
+
+    let _ = std::fs::remove_file(plan_path);
 }
 
 #[tokio::test]
 async fn t22_1b_review_fn_uses_a_verdict_when_a_responds_reject() {
+    // A responds REJECT + CORRECTION; coordinator passes accepted=true. A's verdict must win.
     let task_manager = Arc::new(TaskManager::default());
     let session_id = "t22-1b-a-reject";
     let app_state = app_state_with_tasks(session_id, task_manager.clone());
-    let host = BossRuntimeHost::new();
-    let coordinator = host.build_coordinator(&app_state).await;
-    coordinator.ensure_actor_session("t22-1b-a-reject", BossStage::Execution).await;
+
+    let (coordinator, plan_path) = coordinator_with_plan(
+        boss_plan(vec![boss_step(0, "Step for A reject override")]),
+        "t22_1b_a_reject.json",
+    )
+    .await;
+    coordinator.bootstrap_actor_registry_with_app_state(&app_state).await;
+
+    {
+        let mut guard = coordinator.plan.write().await;
+        let plan = guard.as_mut().unwrap();
+        plan.steps[0].worker_task_id = Some("b-task-reject".into());
+        plan.steps[0].status = BossPlanStepStatus::Running;
+    }
 
     let fake_a_task = task_manager.create_with_type(
         "fake designer A".to_string(),
-        rust_agent::task::types::TaskType::LocalAgent,
+        TaskType::LocalAgent,
         session_id.to_string(),
         InteractionSurface::Cli,
     );
-    task_manager.start(&fake_a_task.id);
+    // Launch the fake A task so it's in running_owners (required for send_message).
+    let aid_clone = fake_a_task.id.clone();
+    task_manager.launch(&fake_a_task.id, "", async move {
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        drop(aid_clone);
+    });
+    // Pre-seed designer_a.session_id so ensure_a_session skips the real LLM spawn.
     {
         let mut guard = coordinator.session.write().await;
         if let Some(s) = guard.as_mut() {
             s.designer_a.session_id = fake_a_task.id.clone();
         }
     }
-    task_manager.append_output(&fake_a_task.id, "REJECT: output incomplete. CORRECTION: add retry logic\n");
+    // Append A's response after a short delay so ask_a_session's polling loop finds it.
+    let tm = task_manager.clone();
+    let aid = fake_a_task.id.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        tm.append_output(&aid, "REJECT: output incomplete. CORRECTION: add retry logic for transient failures\n");
+    });
 
-    let review_fn = coordinator.review_fn_for_test();
-    // Pass accepted=true from coordinator — A should override to rejected.
-    review_fn(0, true, "step summary".into(), None).await;
+    // Coordinator says accepted=true — A's REJECT must override to Rejected.
+    coordinator
+        .on_review_event(0, true, "Output incomplete", None)
+        .await
+        .unwrap();
 
-    let status = coordinator.status.read().await;
-    assert!(
-        status.last_a_dispatch_message.is_some(),
-        "t22.1b: ask_a_session must be called"
+    let guard = coordinator.plan.read().await;
+    let step = &guard.as_ref().unwrap().steps[0];
+    assert_eq!(step.status, BossPlanStepStatus::Rejected, "A REJECT must set Rejected status even when coordinator says accepted");
+    assert!(!step.completed, "step must not be completed after A rejects");
+    assert_eq!(step.attempt_count, 1, "attempt_count must increment on rejection");
+    assert_eq!(
+        step.last_correction.as_deref(),
+        Some("add retry logic for transient failures"),
+        "A's correction must be recorded"
     );
-    // The dispatch message must contain the coordinator verdict hint.
-    assert!(
-        status.last_a_dispatch_message.as_deref().unwrap().contains("coordinator verdict=accepted"),
-        "t22.1b: message must include coordinator verdict hint"
-    );
+
+    let _ = std::fs::remove_file(plan_path);
 }

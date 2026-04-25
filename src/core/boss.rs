@@ -381,14 +381,16 @@ impl BossCoordinator {
                     match c.ask_a_session(&app, msg).await {
                         Ok(response) => {
                             let (a_accepted, a_correction) = Self::parse_a_review_verdict(&response);
-                            return c.apply_review_verdict(step_id, a_accepted, &summary, a_correction.as_deref()).await;
+                            c.apply_review_verdict(step_id, a_accepted, &summary, a_correction.as_deref()).await?;
+                            return Ok(a_accepted);
                         }
                         Err(_) => {
                             // A session unavailable — fall through to coordinator verdict.
                         }
                     }
                 }
-                c.apply_review_verdict(step_id, accepted, &summary, correction.as_deref()).await
+                c.apply_review_verdict(step_id, accepted, &summary, correction.as_deref()).await?;
+                Ok(accepted)
             })
         })
     }
@@ -1539,12 +1541,19 @@ impl BossCoordinator {
         }
 
         // Send the message to A's mailbox.
-        if !tasks.send_message(&task_id, session_id, message) {
+        let sent = tasks.send_message(&task_id, session_id, message);
+        #[cfg(test)]
+        eprintln!("[ask_a_session] task_id={task_id} session_id={session_id} sent={sent} offset_before={offset_before}");
+        if !sent {
             anyhow::bail!("A session task {task_id} is not running");
         }
 
-        // Poll for new output with a 30-second timeout.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        // Poll for new output with a timeout (short in tests, 30s in production).
+        #[cfg(test)]
+        let timeout_secs = 2u64;
+        #[cfg(not(test))]
+        let timeout_secs = 30u64;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
         loop {
             if std::time::Instant::now() >= deadline {
                 anyhow::bail!("A session response timed out after 30s");
