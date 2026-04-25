@@ -46,29 +46,50 @@ impl BossCoordinator {
     }
 
     pub async fn has_control_runtime(&self) -> bool {
-        self.control_tx.read().await.is_some()
+        self.runtime_key
+            .read()
+            .await
+            .as_ref()
+            .and_then(|key| BossRuntimeRegistry::global().get(key))
+            .is_some()
     }
 
     pub async fn ensure_control_runtime(&self) {
-        let mut control_tx = self.control_tx.write().await;
-        if control_tx.is_some() {
+        let mut runtime_key = self.runtime_key.write().await;
+        if runtime_key
+            .as_ref()
+            .and_then(|key| BossRuntimeRegistry::global().get(key))
+            .is_some()
+        {
             return;
         }
-        let (tx, mut rx) = mpsc::channel::<ControlEnvelope>(16);
-        let coordinator = self.clone_for_runtime();
-        tokio::spawn(async move {
-            while let Some(envelope) = rx.recv().await {
-                let response = coordinator
-                    .handle_control_request_direct(
-                        envelope.request,
-                        &envelope.tasks,
-                        &envelope.dispatcher,
-                    )
-                    .await;
-                let _ = envelope.respond_to.send(response);
-            }
-        });
-        *control_tx = Some(tx);
+        let key = self
+            .plan
+            .read()
+            .await
+            .as_ref()
+            .map(|plan| plan.plan_id.clone())
+            .unwrap_or_else(|| "boss-default".into());
+        let runtime = BossControlRuntime::spawn(self.clone_for_runtime());
+        BossRuntimeRegistry::global().bind(key.clone(), runtime);
+        *runtime_key = Some(key);
+    }
+
+    pub async fn rebind_control_runtime(&self) {
+        let mut runtime_key = self.runtime_key.write().await;
+        if let Some(key) = runtime_key.as_ref() {
+            BossRuntimeRegistry::global().unbind(key);
+        }
+        let key = self
+            .plan
+            .read()
+            .await
+            .as_ref()
+            .map(|plan| plan.plan_id.clone())
+            .unwrap_or_else(|| "boss-default".into());
+        let runtime = BossControlRuntime::spawn(self.clone_for_runtime());
+        BossRuntimeRegistry::global().bind(key.clone(), runtime);
+        *runtime_key = Some(key);
     }
 
     async fn send_control_request(
@@ -78,24 +99,16 @@ impl BossCoordinator {
         dispatcher: NotificationDispatcher,
     ) -> anyhow::Result<BossControlResponse> {
         self.ensure_control_runtime().await;
-        let tx = self
-            .control_tx
+        let key = self
+            .runtime_key
             .read()
             .await
-            .as_ref()
-            .cloned()
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("boss control runtime key unavailable"))?;
+        let runtime = BossRuntimeRegistry::global()
+            .get(&key)
             .ok_or_else(|| anyhow::anyhow!("boss control runtime unavailable"))?;
-        let (respond_to, rx) = oneshot::channel();
-        tx.send(ControlEnvelope {
-            request,
-            tasks,
-            dispatcher,
-            respond_to,
-        })
-        .await
-        .map_err(|_| anyhow::anyhow!("boss control mailbox send failed"))?;
-        rx.await
-            .map_err(|_| anyhow::anyhow!("boss control mailbox receive failed"))?
+        runtime.request(request, tasks, dispatcher).await
     }
 
     fn clone_for_runtime(&self) -> Self {
@@ -104,7 +117,7 @@ impl BossCoordinator {
             plan: self.plan.clone(),
             session: self.session.clone(),
             auto_advance_app_state: self.auto_advance_app_state.clone(),
-            control_tx: self.control_tx.clone(),
+            runtime_key: self.runtime_key.clone(),
         }
     }
 
@@ -364,7 +377,7 @@ impl BossCoordinator {
             .await
     }
 
-    async fn handle_control_request_direct(
+    pub(crate) async fn handle_control_request_direct(
         &self,
         request: BossControlRequest,
         tasks: &TaskManager,

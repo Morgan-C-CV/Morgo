@@ -501,6 +501,31 @@ async fn report_control_request_uses_dedicated_mailbox_runtime() {
 }
 
 #[tokio::test]
+async fn control_mailbox_runtime_remains_available_after_rebind() {
+    let task_manager = Arc::new(TaskManager::default());
+    let dispatcher = NotificationDispatcher::new(TelegramGateway::default());
+    let (coordinator, plan_path) = coordinator_with_plan(
+        boss_plan(vec![boss_step(0, "Mailbox rebind step")]),
+        "test_boss_mailbox_rebind.json",
+    )
+    .await;
+
+    coordinator.ensure_control_runtime().await;
+    assert!(coordinator.has_control_runtime().await);
+
+    coordinator.rebind_control_runtime().await;
+    assert!(coordinator.has_control_runtime().await);
+
+    let response = coordinator
+        .handle_control_request(BossControlRequest::Report, &task_manager, &dispatcher)
+        .await
+        .unwrap();
+    assert!(matches!(response, BossControlResponse::Report(_)));
+
+    let _ = std::fs::remove_file(plan_path);
+}
+
+#[tokio::test]
 async fn boss_auto_advances_to_next_step_after_completion() {
     let (coordinator, plan_path) = coordinator_with_plan(
         boss_plan(vec![
