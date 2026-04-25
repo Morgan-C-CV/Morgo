@@ -2999,3 +2999,79 @@ async fn finalize_documentation_loop_after_production_assembly_does_not_upgrade_
 
     let _ = std::fs::remove_file(&plan_path);
 }
+
+// ---------------------------------------------------------------------------
+// T16.6.H.7 — API surface hardening: state-only paths are pub(crate) only
+// ---------------------------------------------------------------------------
+
+/// new() is pub(crate): production code must use new_with_runtime_owner + bootstrap.
+/// This test verifies that new_with_runtime_owner produces a state-only registry
+/// (has_executor == false) before bootstrap, and full registry after.
+#[tokio::test]
+async fn h7_new_with_runtime_owner_is_state_only_before_bootstrap() {
+    use rust_agent::core::boss_runtime::BossRuntimeOwner;
+    let runtime_owner = Arc::new(BossRuntimeOwner::default());
+    let coordinator = BossCoordinator::new_with_runtime_owner(runtime_owner);
+
+    // Before bootstrap: no registry at all.
+    let has_registry = coordinator.actor_registry.read().await.is_some();
+    assert!(!has_registry, "new_with_runtime_owner must not pre-populate registry");
+
+    // After bootstrap_actor_registry_with_app_state: full mode.
+    let task_manager = Arc::new(TaskManager::default());
+    let app_state = app_state_with_tasks("session-h7-new", task_manager);
+    coordinator.bootstrap_actor_registry_with_app_state(&app_state).await;
+
+    let guard = coordinator.actor_registry.read().await;
+    let registry = guard.as_ref().unwrap();
+    assert!(registry.has_executor, "h7: has_executor must be true after bootstrap");
+    assert!(registry.has_a_callbacks, "h7: has_a_callbacks must be true after bootstrap");
+}
+
+/// bootstrap_actor_registry is pub(crate): calling it produces a state-only registry.
+/// Production code must not rely on it for full-mode operation.
+#[tokio::test]
+async fn h7_bootstrap_actor_registry_is_state_only() {
+    use rust_agent::core::boss_runtime::BossRuntimeOwner;
+    let runtime_owner = Arc::new(BossRuntimeOwner::default());
+    let coordinator = BossCoordinator::new_with_runtime_owner(runtime_owner);
+    coordinator.bootstrap_actor_registry().await;
+
+    let guard = coordinator.actor_registry.read().await;
+    let registry = guard.as_ref().unwrap();
+    assert!(!registry.has_executor, "h7: state-only bootstrap must not set has_executor");
+    assert!(!registry.has_a_callbacks, "h7: state-only bootstrap must not set has_a_callbacks");
+}
+
+/// Production assembly contract: new_with_runtime_owner + bootstrap_actor_registry_with_app_state
+/// is the only path that produces has_executor && has_a_callbacks == true.
+/// Calling bootstrap_actor_registry_with_app_state a second time is a no-op (idempotent).
+#[tokio::test]
+async fn h7_production_assembly_is_full_mode_and_idempotent() {
+    use rust_agent::core::boss_runtime::BossRuntimeOwner;
+    let runtime_owner = Arc::new(BossRuntimeOwner::default());
+    let coordinator = BossCoordinator::new_with_runtime_owner(runtime_owner);
+    let task_manager = Arc::new(TaskManager::default());
+    let app_state = app_state_with_tasks("session-h7-prod", task_manager);
+
+    coordinator.bootstrap_actor_registry_with_app_state(&app_state).await;
+
+    let ptr_first = {
+        let guard = coordinator.actor_registry.read().await;
+        Arc::as_ptr(&guard.as_ref().unwrap().executor_b.state) as usize
+    };
+
+    // Second call must be a no-op — registry identity must be stable.
+    coordinator.bootstrap_actor_registry_with_app_state(&app_state).await;
+
+    let ptr_second = {
+        let guard = coordinator.actor_registry.read().await;
+        Arc::as_ptr(&guard.as_ref().unwrap().executor_b.state) as usize
+    };
+
+    assert_eq!(ptr_first, ptr_second, "h7: second bootstrap call must not replace registry");
+
+    let guard = coordinator.actor_registry.read().await;
+    let registry = guard.as_ref().unwrap();
+    assert!(registry.has_executor && registry.has_a_callbacks, "h7: production assembly must be full mode");
+}

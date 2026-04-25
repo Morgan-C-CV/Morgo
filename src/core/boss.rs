@@ -34,6 +34,10 @@ pub struct BossCoordinator {
 }
 
 impl BossCoordinator {
+    /// State-only constructor — no callbacks wired. Use in tests or low-level assembly only.
+    /// Production code must call `new_with_runtime_owner` followed by
+    /// `bootstrap_actor_registry_with_app_state`.
+    #[doc(hidden)]
     pub fn new() -> Self {
         Self::new_with_runtime_owner(Arc::new(BossRuntimeOwner::default()))
     }
@@ -168,6 +172,8 @@ impl BossCoordinator {
     }
 
     /// If the file doesn't exist, it falls back to a fresh coordinator.
+    /// State-only restore — no callbacks wired. Prefer `restore_or_init_with_app_state` in production.
+    #[doc(hidden)]
     pub async fn restore_or_init(path: &std::path::Path) -> anyhow::Result<Self> {
         Self::restore_or_init_with_owner(path, Arc::new(BossRuntimeOwner::default())).await
     }
@@ -259,6 +265,8 @@ impl BossCoordinator {
     }
 
     /// Spawn fresh A and B actor runtimes (state-only, no execution callback).
+    /// Low-level / test-only. Production code must use `bootstrap_actor_registry_with_app_state`.
+    #[doc(hidden)]
     pub async fn bootstrap_actor_registry(&self) {
         let registry = BossActorRegistry::bootstrap();
         let mut guard = self.actor_registry.write().await;
@@ -344,6 +352,7 @@ impl BossCoordinator {
 
     /// Ensure actor runtimes exist with a real execution callback wired to B.
     /// If the registry already has an executor, this is a no-op.
+    #[deprecated(note = "use bootstrap_actor_registry_with_app_state directly")]
     pub async fn ensure_actor_registry_with_executor(
         &self,
         app_state: &Arc<crate::state::app_state::AppState>,
@@ -353,6 +362,8 @@ impl BossCoordinator {
     }
 
     /// Ensure actor runtimes exist; bootstrap if not yet initialized.
+    /// State-only fallback — no callbacks wired. Prefer `bootstrap_actor_registry_with_app_state`.
+    #[doc(hidden)]
     pub async fn ensure_actor_registry(&self) {
         let needs_bootstrap = self.actor_registry.read().await.is_none();
         if needs_bootstrap {
@@ -373,6 +384,7 @@ impl BossCoordinator {
 
     /// Ensure A's review and documentation callbacks are wired.
     /// Delegates to bootstrap_actor_registry_with_app_state — no-op if already fully bootstrapped.
+    #[deprecated(note = "use bootstrap_actor_registry_with_app_state directly")]
     pub async fn ensure_actor_registry_with_a_callbacks(
         &self,
         app_state: &Arc<crate::state::app_state::AppState>,
@@ -1262,7 +1274,7 @@ impl BossCoordinator {
 
                     // B's mailbox handler owns the execution side effect.
                     // Coordinator awaits StepDispatched before proceeding.
-                    self.ensure_actor_registry_with_executor(app_state).await;
+                    self.bootstrap_actor_registry_with_app_state(app_state).await;
                     if let Some(registry) = self.actor_registry.read().await.as_ref() {
                         let _ = registry.b_mailbox().request(ExecutorBCommand::ContinueStep {
                             step_id,
@@ -1284,7 +1296,7 @@ impl BossCoordinator {
                         .await?;
 
                     // B's mailbox handler owns the execution side effect.
-                    self.ensure_actor_registry_with_executor(app_state).await;
+                    self.bootstrap_actor_registry_with_app_state(app_state).await;
                     if let Some(registry) = self.actor_registry.read().await.as_ref() {
                         let _ = registry.b_mailbox().request(ExecutorBCommand::DispatchStep {
                             step_id,
