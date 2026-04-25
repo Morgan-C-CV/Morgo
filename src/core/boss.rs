@@ -7,10 +7,11 @@ use crate::interaction::dispatcher::NotificationDispatcher;
 use crate::task::manager::TaskManager;
 use crate::task::types::{TaskEvent, TaskStatus};
 use crate::tool::definition::{Tool, ToolCall};
+use crate::core::boss_runtime::{BossControlRuntime, BossRuntimeRegistry};
 use crate::history::session::SessionHistory;
 use serde_json::json;
 use std::sync::Arc;
-use tokio::sync::{RwLock, mpsc, oneshot};
+use tokio::sync::RwLock;
 
 #[derive(Debug)]
 pub struct BossCoordinator {
@@ -22,15 +23,7 @@ pub struct BossCoordinator {
     pub session: Arc<RwLock<Option<BossSession>>>,
 
     auto_advance_app_state: Arc<RwLock<Option<Arc<crate::state::app_state::AppState>>>>,
-    control_tx: Arc<RwLock<Option<mpsc::Sender<ControlEnvelope>>>>,
-}
-
-#[derive(Debug)]
-struct ControlEnvelope {
-    request: BossControlRequest,
-    tasks: Arc<TaskManager>,
-    dispatcher: NotificationDispatcher,
-    respond_to: oneshot::Sender<anyhow::Result<BossControlResponse>>,
+    runtime_key: Arc<RwLock<Option<String>>>,
 }
 
 impl BossCoordinator {
@@ -40,7 +33,7 @@ impl BossCoordinator {
             plan: Arc::new(RwLock::new(None)),
             session: Arc::new(RwLock::new(None)),
             auto_advance_app_state: Arc::new(RwLock::new(None)),
-            control_tx: Arc::new(RwLock::new(None)),
+            runtime_key: Arc::new(RwLock::new(None)),
         }
     }
 
