@@ -1812,6 +1812,22 @@ impl BossCoordinator {
     }
 
     /// Send a message to B's running LLM session and wait for B's response.
+    /// Summarize `old_part` via A session. Returns A's response string.
+    /// If A is unavailable or the ask fails, returns Err — caller must fallback.
+    /// Note: this call goes through ask_a_session and may leave a trace in A's runtime history.
+    /// It does NOT write to BossPlan or session_snapshot.
+    async fn summarize_context_with_a(
+        &self,
+        app_state: &Arc<crate::state::app_state::AppState>,
+        old_part: &str,
+    ) -> anyhow::Result<String> {
+        let prompt = format!(
+            "Summarize the following context concisely so it can replace the original in a continuation prompt. Preserve key decisions, constraints, and outcomes:\n\n{}",
+            old_part
+        );
+        self.ask_a_session(app_state, prompt).await
+    }
+
     /// Mirrors `ask_a_session` but reads from `executor_b.session_id`.
     async fn ask_b_session(
         &self,
@@ -1838,8 +1854,19 @@ impl BossCoordinator {
             .unwrap_or("")
             .to_string();
 
-        // Trim outbound payload before sending — does not modify BossPlan or session_snapshot.
-        let message = trim_context_payload(&message, B_CONTEXT_TRIM_THRESHOLD, B_CONTEXT_KEEP_CHARS);
+        // Compress outbound payload before sending — does not modify BossPlan or session_snapshot.
+        // Prefer LLM summarize via A session; fall back to character-truncation trim if A is unavailable.
+        let message = if message.len() > B_CONTEXT_TRIM_THRESHOLD {
+            let split = message.len().saturating_sub(B_CONTEXT_KEEP_CHARS);
+            let old_part = &message[..split];
+            let recent_tail = &message[split..];
+            match self.summarize_context_with_a(app_state, old_part).await {
+                Ok(summary) => assemble_summarized_payload(&summary, recent_tail),
+                Err(_) => trim_context_payload(&message, B_CONTEXT_TRIM_THRESHOLD, B_CONTEXT_KEEP_CHARS),
+            }
+        } else {
+            message
+        };
 
         let offset_before = tasks.get_output(&task_id, 0).map(|s| s.next_offset).unwrap_or(0);
 
@@ -2051,6 +2078,13 @@ pub fn trim_context_payload(payload: &str, threshold: usize, keep_chars: usize) 
         &payload[payload.len() - keep_chars..]
     };
     format!("[trimmed earlier context: {omitted} chars omitted]\n{tail}")
+}
+
+/// Assemble a summarized B context payload from a pre-computed summary and the recent tail.
+/// This is the output shape produced by the summarize-first path in `ask_b_session`.
+/// Exposed as a pure function so tests can verify the assembly contract without a live A session.
+pub fn assemble_summarized_payload(summary: &str, recent_tail: &str) -> String {
+    format!("[summary: {summary}]\n{recent_tail}")
 }
 
 impl BossCoordinator {

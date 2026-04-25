@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use rust_agent::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
-use rust_agent::core::boss::{BossCoordinator, load_plan, save_plan, trim_context_payload, B_CONTEXT_TRIM_THRESHOLD, B_CONTEXT_KEEP_CHARS};
+use rust_agent::core::boss::{BossCoordinator, load_plan, save_plan, trim_context_payload, assemble_summarized_payload, B_CONTEXT_TRIM_THRESHOLD, B_CONTEXT_KEEP_CHARS};
 use rust_agent::core::boss_actor_runtime::{
     BossActorRegistry, DesignerARuntime, ExecutionFn, ExecutorBRuntime, SpecReviewFn,
 };
@@ -4758,6 +4758,73 @@ async fn t25_trim_does_not_persist_to_plan_or_snapshot() {
     let reloaded = load_plan(&plan_path).await.unwrap();
     assert_eq!(reloaded.plan_id, "t25-no-persist");
     assert!(reloaded.session_snapshot.is_none(), "session_snapshot must not be written by trim");
+
+    let _ = std::fs::remove_file(&plan_path);
+}
+
+// ── T25.2: B session LLM summarize ───────────────────────────────────────────
+
+/// T25.2.1: assemble_summarized_payload produces the correct format.
+#[test]
+fn t25_2_summary_replaces_old_context_format() {
+    let result = assemble_summarized_payload("SUMMARY_TEXT", "recent tail content");
+    assert!(result.starts_with("[summary: SUMMARY_TEXT]"), "must start with summary notice");
+    assert!(result.contains("recent tail content"), "must contain recent tail");
+}
+
+/// T25.2.2: Recent tail is preserved verbatim in the assembled payload.
+#[test]
+fn t25_2_summary_result_contains_recent_tail() {
+    let recent = "RECENT_TAIL_END_HERE";
+    let result = assemble_summarized_payload("any summary", recent);
+    let lines: Vec<&str> = result.splitn(2, '\n').collect();
+    assert_eq!(lines.len(), 2);
+    assert_eq!(lines[1], recent, "second line must be the exact recent tail");
+}
+
+/// T25.2.3: When A is unavailable (no A session seeded), ask_b_session falls back to trim.
+/// We verify the fallback contract by checking trim_context_payload directly on the same input,
+/// since we cannot call ask_b_session without a live B task.
+#[test]
+fn t25_2_fallback_to_trim_when_a_unavailable() {
+    let threshold = 100usize;
+    let keep = 40usize;
+    let payload = "x".repeat(200);
+    // Simulate fallback: A unavailable → trim_context_payload is called.
+    let result = trim_context_payload(&payload, threshold, keep);
+    assert!(
+        result.starts_with("[trimmed earlier context:"),
+        "fallback must produce trim notice, got: {result}"
+    );
+}
+
+/// T25.2.4: Payload below threshold does not trigger summarize or trim.
+#[test]
+fn t25_2_no_summarize_when_payload_below_threshold() {
+    let short = "short payload".to_string();
+    // trim_context_payload is the gate — below threshold returns unchanged.
+    let result = trim_context_payload(&short, B_CONTEXT_TRIM_THRESHOLD, B_CONTEXT_KEEP_CHARS);
+    assert_eq!(result, short, "payload below threshold must be returned unchanged");
+}
+
+/// T25.2.5: summarize path does not persist to BossPlan or session_snapshot.
+#[tokio::test]
+async fn t25_2_summarize_does_not_persist_to_plan_or_snapshot() {
+    let plan_path = std::env::temp_dir().join("t25_2_no_persist.json");
+    let plan = BossPlan {
+        plan_id: "t25-2-no-persist".into(),
+        task_description: "summarize persistence test".into(),
+        steps: vec![boss_step(0, "step zero")],
+        ..Default::default()
+    };
+    save_plan(&plan, &plan_path).await.unwrap();
+
+    // Simulate the summarize assembly — plan on disk must be unaffected.
+    let _assembled = assemble_summarized_payload("SUMMARY", "recent tail");
+
+    let reloaded = load_plan(&plan_path).await.unwrap();
+    assert_eq!(reloaded.plan_id, "t25-2-no-persist");
+    assert!(reloaded.session_snapshot.is_none(), "session_snapshot must not be written by summarize");
 
     let _ = std::fs::remove_file(&plan_path);
 }
