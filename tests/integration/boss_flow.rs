@@ -529,7 +529,7 @@ async fn boss_child_cannot_spawn_grandchild_agent() {
     );
 }
 
-// --- T16.6.C: Persistent ExecutorB routing ---
+// --- T16.6.C.1: Persistent ExecutorB routing ---
 
 #[tokio::test]
 async fn execution_reuses_persistent_b_instead_of_fresh_worker_per_step() {
@@ -550,62 +550,136 @@ async fn execution_reuses_persistent_b_instead_of_fresh_worker_per_step() {
     )
     .await;
 
-    // Dispatch step 1 — spawns B with orchestration_group_id == B's actor id.
+    // Dispatch step 1 — spawns B fresh (no running B yet).
     let payload1 = coordinator
         .advance_plan(&app_state)
         .await
         .unwrap()
         .expect("step 1 should dispatch");
 
-    assert!(payload1.contains("\"step_id\":1"), "payload must carry step_id");
+    assert!(payload1.contains("\"step_id\":1"), "spawn payload must carry step_id");
     assert!(
         payload1.contains("\"reuse_strategy\":\"running_only\""),
-        "payload must use running_only reuse strategy"
+        "spawn payload must use running_only reuse strategy"
     );
 
     let tasks_after_step1 = task_manager.list();
-    assert_eq!(tasks_after_step1.len(), 1, "exactly one task for step 1");
+    assert_eq!(tasks_after_step1.len(), 1, "exactly one B task spawned for step 1");
     let b_task_id = tasks_after_step1[0].id.clone();
 
-    // Verify step 1 payload targets B's stable actor id.
-    let extract_group = |p: &str| -> String {
-        let v: serde_json::Value = serde_json::from_str(p).unwrap();
-        v["orchestration_group_id"].as_str().unwrap_or("").to_string()
-    };
-    let group_id = extract_group(&payload1);
-    assert!(!group_id.is_empty(), "orchestration_group_id must be non-empty");
     // B's actor id is deterministically derived from the plan id.
+    let v1: serde_json::Value = serde_json::from_str(&payload1).unwrap();
+    let group_id = v1["orchestration_group_id"].as_str().unwrap_or("");
     assert!(
         group_id.contains("plan-alpha"),
         "orchestration_group_id must embed the plan id, got: {group_id}"
     );
 
-    // Simulate step 1 completing — auto-advance fires step 2 via the stored app_state.
-    coordinator
-        .on_task_event(&task_event(&b_task_id, 1, TaskStatus::Completed))
+    // Manually mark B's task as Running so the Continue path triggers for step 2.
+    task_manager.start(&b_task_id);
+    // Record B's task id in the session so find_running_b_task_id can find it.
+    {
+        let mut guard = coordinator.session.write().await;
+        if let Some(session) = guard.as_mut() {
+            session.executor_b.task_id = Some(b_task_id.clone());
+        }
+    }
+
+    // Mark step 1 completed so advance_plan can move to step 2.
+    {
+        let mut plan_guard = coordinator.plan.write().await;
+        let plan = plan_guard.as_mut().unwrap();
+        plan.steps[1].completed = true;
+        plan.steps[1].status = BossPlanStepStatus::Completed;
+    }
+
+    // Dispatch step 2 — B is running, so this must use Continue (no new task).
+    let payload2 = coordinator
+        .advance_plan(&app_state)
         .await
-        .unwrap();
+        .unwrap()
+        .expect("step 2 should dispatch via continue");
 
-    // Step 2 should now be Running or Completed (auto-dispatched by on_task_event → maybe_auto_advance).
-    let plan = coordinator.plan.read().await;
-    let steps = &plan.as_ref().unwrap().steps;
-    assert!(
-        matches!(
-            steps[1].status,
-            BossPlanStepStatus::Running | BossPlanStepStatus::Completed
-        ),
-        "step 2 must be Running or Completed after auto-advance, got: {:?}",
-        steps[1].status
+    // Continue payload carries task_id, not reuse_strategy.
+    let v2: serde_json::Value = serde_json::from_str(&payload2).unwrap();
+    assert_eq!(
+        v2["task_id"].as_str().unwrap_or(""),
+        b_task_id,
+        "continue payload must target the existing B task"
     );
-    drop(plan);
+    assert_eq!(v2["step_id"], 2, "continue payload must carry step_id 2");
+    assert!(v2["reuse_strategy"].is_null(), "continue payload must NOT have reuse_strategy");
 
-    // The second task spawned for step 2 must share the same orchestration_group_id as step 1.
+    // Critically: still only one task in the manager — no new task was spawned.
     let tasks_after_step2 = task_manager.list();
-    assert_eq!(tasks_after_step2.len(), 2, "two tasks total: one per step");
-    // Both tasks are spawned via the same B actor — verify step_ids are distinct.
-    let step_ids: Vec<_> = tasks_after_step2.iter().filter_map(|t| t.step_id).collect();
-    assert!(step_ids.contains(&1), "task for step 1 must exist");
-    assert!(step_ids.contains(&2), "task for step 2 must exist");
+    assert_eq!(
+        tasks_after_step2.len(),
+        1,
+        "step 2 must reuse B's task via Continue — no new task should be created"
+    );
+
+    let _ = std::fs::remove_file(plan_path);
+}
+
+#[tokio::test]
+async fn boss_advance_plan_uses_continue_payload_when_b_is_running() {
+    let task_manager = Arc::new(TaskManager::default());
+    let app_state = app_state_with_tasks("parent-session-continue", task_manager.clone());
+
+    let (coordinator, plan_path) = coordinator_with_plan(
+        boss_plan(vec![boss_step(0, "Step A"), boss_step(1, "Step B")]),
+        "test_boss_flow_continue_path.json",
+    )
+    .await;
+
+    // Dispatch step 0 — spawns B fresh.
+    let _ = coordinator
+        .advance_plan(&app_state)
+        .await
+        .unwrap()
+        .expect("step 0 should dispatch");
+
+    let tasks = task_manager.list();
+    assert_eq!(tasks.len(), 1, "one B task after step 0");
+    let b_task_id = tasks[0].id.clone();
+
+    // Mark B as Running and record its id in the session.
+    task_manager.start(&b_task_id);
+    {
+        let mut guard = coordinator.session.write().await;
+        if let Some(session) = guard.as_mut() {
+            session.executor_b.task_id = Some(b_task_id.clone());
+        }
+    }
+
+    // Mark step 0 completed so advance_plan can move to step 1.
+    {
+        let mut plan_guard = coordinator.plan.write().await;
+        let plan = plan_guard.as_mut().unwrap();
+        plan.steps[0].completed = true;
+        plan.steps[0].status = BossPlanStepStatus::Completed;
+    }
+
+    // Dispatch step 1 — B is running, must use Continue.
+    let payload = coordinator
+        .advance_plan(&app_state)
+        .await
+        .unwrap()
+        .expect("step 1 should dispatch via continue");
+
+    let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
+    assert_eq!(
+        v["task_id"].as_str().unwrap_or(""),
+        b_task_id,
+        "continue payload must target the running B task"
+    );
+    assert_eq!(v["step_id"], 1, "continue payload must carry step_id 1");
+    assert_eq!(v["boss_plan_id"], "plan-alpha");
+    assert_eq!(v["step_objective"], "objective 1");
+    assert_eq!(v["step_acceptance"][0], "acceptance 1");
+
+    // No new task created.
+    assert_eq!(task_manager.list().len(), 1, "no new task — B was reused via Continue");
 
     let _ = std::fs::remove_file(plan_path);
 }
@@ -648,6 +722,23 @@ async fn boss_b_receives_step_context_via_continue_or_mailbox() {
         v["orchestration_group_id"], b_actor_id,
         "orchestration_group_id must be B's actor id"
     );
+
+    // build_step_continue_payload must embed step context and target the B task id.
+    let continue_payload = coordinator
+        .build_step_continue_payload(0, "b-task-42", "parent-ctx-session")
+        .await
+        .unwrap();
+
+    let vc: serde_json::Value = serde_json::from_str(&continue_payload).unwrap();
+    assert_eq!(vc["task_id"], "b-task-42", "continue payload must target B's task id");
+    assert_eq!(vc["step_id"], 0);
+    assert_eq!(vc["boss_plan_id"], "plan-alpha");
+    assert_eq!(vc["step_objective"], "objective 0");
+    assert_eq!(vc["step_acceptance"][0], "acceptance 0");
+    assert_eq!(vc["parent_session_id"], "parent-ctx-session");
+    // Continue payload must NOT have reuse_strategy or task field.
+    assert!(vc["reuse_strategy"].is_null(), "continue payload must not have reuse_strategy");
+    assert!(vc["task"].is_null(), "continue payload must not have task field");
 
     let _ = std::fs::remove_file(plan_path);
 }
