@@ -367,7 +367,11 @@ impl BossCoordinator {
         Arc::new(move |step_id, accepted, summary: String, correction: Option<String>| {
             let c = c.clone_for_runtime();
             Box::pin(async move {
-                if let Some(app) = c.auto_advance_app_state.read().await.clone() {
+                let app_state = {
+                    let guard = c.auto_advance_app_state.read().await;
+                    guard.clone()
+                };
+                if let Some(app) = app_state {
                     c.ensure_a_session(&app).await;
                     let verdict_hint = if accepted { "accepted" } else { "rejected" };
                     let msg = match correction.as_deref() {
@@ -957,8 +961,12 @@ impl BossCoordinator {
 
         // Send Review to A's mailbox first — A's handler calls the callback (if wired)
         // which mutates plan state and fires auto-advance before returning ReviewComplete.
-        let effective_accepted = if let Some(registry) = self.actor_registry.read().await.as_ref() {
-            match registry.a_mailbox().request(DesignerACommand::Review {
+        let a_mailbox = {
+            let guard = self.actor_registry.read().await;
+            guard.as_ref().map(|registry| registry.a_mailbox().clone())
+        };
+        let effective_accepted = if let Some(a_mailbox) = a_mailbox {
+            match a_mailbox.request(DesignerACommand::Review {
                 step_id,
                 accepted,
                 summary: review_summary.to_string(),
@@ -1145,7 +1153,10 @@ impl BossCoordinator {
     }
 
     async fn maybe_auto_advance_after_completion(&self) -> anyhow::Result<()> {
-        let app_state = self.auto_advance_app_state.read().await.clone();
+        let app_state = {
+            let guard = self.auto_advance_app_state.read().await;
+            guard.clone()
+        };
         let Some(app_state) = app_state else {
             return Ok(());
         };
@@ -1455,6 +1466,10 @@ impl BossCoordinator {
     /// AgentTool and writes the task id back to BossSession.designer_a.session_id.
     /// Subsequent calls are no-ops if the session id is already a real task id.
     async fn ensure_a_session(&self, app_state: &Arc<crate::state::app_state::AppState>) {
+        // Without a task manager there is no way to track the spawned session — skip.
+        if app_state.permission_context.task_manager.is_none() {
+            return;
+        }
         // Check if already initialized to a real session id (not the deterministic placeholder).
         let placeholder = {
             let guard = self.session.read().await;
@@ -1540,18 +1555,22 @@ impl BossCoordinator {
             guard.last_a_dispatch_message = Some(message.clone());
         }
 
-        // Send the message to A's mailbox.
-        let sent = tasks.send_message(&task_id, session_id, message);
-        #[cfg(test)]
-        eprintln!("[ask_a_session] task_id={task_id} session_id={session_id} sent={sent} offset_before={offset_before}");
+        // send_message uses std::sync::RwLock internally — run it on the blocking pool
+        // so it doesn't stall the async runtime thread.
+        let tasks_clone = tasks.clone();
+        let task_id_clone = task_id.clone();
+        let session_id_owned = session_id.to_string();
+        let message_clone = message.clone();
+        let sent = tokio::task::spawn_blocking(move || {
+            tasks_clone.send_message(&task_id_clone, &session_id_owned, message_clone)
+        })
+        .await
+        .unwrap_or(false);
         if !sent {
             anyhow::bail!("A session task {task_id} is not running");
         }
 
-        // Poll for new output with a timeout (short in tests, 30s in production).
-        #[cfg(test)]
-        let timeout_secs = 2u64;
-        #[cfg(not(test))]
+        // Poll for new output with a timeout.
         let timeout_secs = 30u64;
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
         loop {

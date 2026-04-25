@@ -10,7 +10,7 @@ use rust_agent::command::builtin::help::HelpCommand;
 use rust_agent::command::builtin::plugins::{PluginSlashCommand, PluginsCommand};
 use rust_agent::command::builtin::status::StatusCommand;
 use rust_agent::command::registry::CommandRegistry;
-use rust_agent::command::types::{Command, CommandResult};
+use rust_agent::command::types::Command;
 use rust_agent::history::session::InMemorySessionStore;
 use rust_agent::interaction::dispatcher::NotificationDispatcher;
 use rust_agent::interaction::envelope::NormalizedInput;
@@ -242,15 +242,9 @@ async fn plugin_runtime_exposes_command_hook_tool_and_diagnostics() {
         .await
         .expect("plugins should render");
 
-    let CommandResult::Message(help_text) = help else {
-        panic!("expected help message");
-    };
-    let CommandResult::Message(status_text) = status else {
-        panic!("expected status message");
-    };
-    let CommandResult::Message(plugins_text) = plugins else {
-        panic!("expected plugins message");
-    };
+    let help_text = help.to_plain_text().expect("help should render text");
+    let status_text = status.to_plain_text().expect("status should render text");
+    let plugins_text = plugins.to_plain_text().expect("plugins should render text");
 
     assert!(help_text.contains("/demo-plugin-cmd — Demo plugin command"));
     assert!(status_text.contains("Observability:"));

@@ -2092,9 +2092,7 @@ async fn runtime_host_owner_survives_rebind_and_restart() {
 
 // --- T16.6.H: Boss actor runtime mailbox seam ---
 
-use rust_agent::core::boss_actor_runtime::{
-    BossActorRegistry, DesignerACommand, ExecutorBCommand,
-};
+use rust_agent::core::boss_actor_runtime::{DesignerACommand, ExecutorBCommand};
 use rust_agent::core::boss_state::BossActorStatus as ActorStatus;
 
 #[tokio::test]
@@ -2494,6 +2492,16 @@ async fn on_review_event_side_effect_triggered_from_a_runtime_handler() {
     {
         let mut guard = coordinator.auto_advance_app_state.write().await;
         *guard = Some(app_state.clone());
+    }
+
+    // Pre-seed designer_a.session_id to a non-placeholder value so ensure_a_session
+    // skips the real LLM spawn. send_message will return false (task not in running_owners),
+    // causing ask_a_session to bail and fall back to coordinator's accepted=true verdict.
+    {
+        let mut guard = coordinator.session.write().await;
+        if let Some(s) = guard.as_mut() {
+            s.designer_a.session_id = "fake-a-session-h3".into();
+        }
     }
 
     // Call on_review_event — A's callback should mutate the plan.
@@ -3497,7 +3505,8 @@ fn t22_1b_parse_a_review_verdict_default_accept_when_no_keyword() {
 async fn t22_1b_review_fn_falls_back_to_coordinator_verdict_when_a_unavailable() {
     // When A's session is not running, ask_a_session fails and build_review_fn
     // falls back to the coordinator-supplied accepted value. Assert step.status directly.
-    let task_manager = Arc::new(TaskManager::default());
+    let tmp = std::env::temp_dir().join("t22_1b_fallback_tasks");
+    let task_manager = Arc::new(TaskManager::new_with_output_root(&tmp));
     let session_id = "t22-1b-fallback-strong";
     let app_state = app_state_with_tasks(session_id, task_manager.clone());
 
@@ -3542,7 +3551,8 @@ async fn t22_1b_review_fn_falls_back_to_coordinator_verdict_when_a_unavailable()
 #[tokio::test]
 async fn t22_1b_review_fn_uses_a_verdict_when_a_responds_accept() {
     // A responds ACCEPT; coordinator passes accepted=false. A's verdict must win.
-    let task_manager = Arc::new(TaskManager::default());
+    let tmp = std::env::temp_dir().join("t22_1b_accept_tasks");
+    let task_manager = Arc::new(TaskManager::new_with_output_root(&tmp));
     let session_id = "t22-1b-a-accept";
     let app_state = app_state_with_tasks(session_id, task_manager.clone());
 
@@ -3569,7 +3579,6 @@ async fn t22_1b_review_fn_uses_a_verdict_when_a_responds_accept() {
     // Launch the fake A task so it's in running_owners (required for send_message).
     let aid_clone = fake_a_task.id.clone();
     task_manager.launch(&fake_a_task.id, "", async move {
-        // Keep the task "running" long enough for the test.
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         drop(aid_clone);
     });
@@ -3593,7 +3602,6 @@ async fn t22_1b_review_fn_uses_a_verdict_when_a_responds_accept() {
         .on_review_event(0, false, "Step output looks good", None)
         .await
         .unwrap();
-
     let guard = coordinator.plan.read().await;
     let step = &guard.as_ref().unwrap().steps[0];
     assert_eq!(step.status, BossPlanStepStatus::Completed, "A ACCEPT must complete the step even when coordinator says rejected");
@@ -3605,7 +3613,8 @@ async fn t22_1b_review_fn_uses_a_verdict_when_a_responds_accept() {
 #[tokio::test]
 async fn t22_1b_review_fn_uses_a_verdict_when_a_responds_reject() {
     // A responds REJECT + CORRECTION; coordinator passes accepted=true. A's verdict must win.
-    let task_manager = Arc::new(TaskManager::default());
+    let tmp = std::env::temp_dir().join("t22_1b_reject_tasks");
+    let task_manager = Arc::new(TaskManager::new_with_output_root(&tmp));
     let session_id = "t22-1b-a-reject";
     let app_state = app_state_with_tasks(session_id, task_manager.clone());
 
