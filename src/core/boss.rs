@@ -29,13 +29,17 @@ pub struct BossCoordinator {
 
 impl BossCoordinator {
     pub fn new() -> Self {
+        Self::new_with_runtime_owner(BossRuntimeOwner::global())
+    }
+
+    pub fn new_with_runtime_owner(runtime_owner: Arc<BossRuntimeOwner>) -> Self {
         Self {
             status: Arc::new(RwLock::new(BossStatus::default())),
             plan: Arc::new(RwLock::new(None)),
             session: Arc::new(RwLock::new(None)),
             auto_advance_app_state: Arc::new(RwLock::new(None)),
             runtime_key: Arc::new(RwLock::new(None)),
-            runtime_owner: BossRuntimeOwner::global(),
+            runtime_owner,
         }
     }
 
@@ -58,8 +62,16 @@ impl BossCoordinator {
             .unwrap_or(true)
     }
 
+    pub fn shutdown_all_runtime_instances(&self) {
+        self.runtime_owner.shutdown_all_runtimes();
+    }
+
     pub fn shutdown_runtime_owner(&self) {
-        self.runtime_owner.shutdown_all();
+        self.runtime_owner.shutdown_owner();
+    }
+
+    pub fn restart_runtime_owner(&self) {
+        self.runtime_owner.restart_owner();
     }
 
     pub async fn has_control_runtime(&self) -> bool {
@@ -72,6 +84,9 @@ impl BossCoordinator {
     }
 
     pub async fn ensure_control_runtime(&self) {
+        if self.runtime_owner.is_closed() {
+            return;
+        }
         let mut runtime_key = self.runtime_key.write().await;
         if runtime_key
             .as_ref()
@@ -118,6 +133,9 @@ impl BossCoordinator {
         dispatcher: NotificationDispatcher,
     ) -> anyhow::Result<BossControlResponse> {
         self.ensure_control_runtime().await;
+        if self.runtime_owner.is_closed() {
+            anyhow::bail!("boss runtime owner is closed");
+        }
         let key = self
             .runtime_key
             .read()
@@ -143,7 +161,14 @@ impl BossCoordinator {
 
     /// If the file doesn't exist, it falls back to a fresh coordinator.
     pub async fn restore_or_init(path: &std::path::Path) -> anyhow::Result<Self> {
-        let coordinator = Self::new();
+        Self::restore_or_init_with_owner(path, BossRuntimeOwner::global()).await
+    }
+
+    pub async fn restore_or_init_with_owner(
+        path: &std::path::Path,
+        runtime_owner: Arc<BossRuntimeOwner>,
+    ) -> anyhow::Result<Self> {
+        let coordinator = Self::new_with_runtime_owner(runtime_owner);
 
         if path.exists() {
             let loaded_plan = load_plan(path).await?;

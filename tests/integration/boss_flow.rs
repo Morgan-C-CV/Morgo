@@ -161,7 +161,12 @@ async fn coordinator_with_plan(
 ) -> (Arc<BossCoordinator>, std::path::PathBuf) {
     let plan_path = std::env::temp_dir().join(file_name);
     save_plan(&plan, &plan_path).await.unwrap();
-    let coordinator = Arc::new(BossCoordinator::restore_or_init(&plan_path).await.unwrap());
+    let owner = Arc::new(rust_agent::core::boss_runtime::BossRuntimeOwner::default());
+    let coordinator = Arc::new(
+        BossCoordinator::restore_or_init_with_owner(&plan_path, owner)
+            .await
+            .unwrap(),
+    );
     (coordinator, plan_path)
 }
 
@@ -607,11 +612,68 @@ async fn runtime_owner_shutdown_makes_runtime_unaddressable() {
         coordinator
             .handle_control_request(BossControlRequest::Report, &task_manager, &dispatcher)
             .await
-            .is_ok(),
-        "owner may bootstrap a fresh runtime on demand after shutdown"
+            .is_err(),
+        "owner shutdown must block fresh runtime bootstrap"
     );
+    coordinator.restart_runtime_owner();
 
     let _ = std::fs::remove_file(plan_path);
+}
+
+#[tokio::test]
+async fn shutdown_all_runtimes_allows_fresh_bootstrap_after_cleanup() {
+    let task_manager = Arc::new(TaskManager::default());
+    let dispatcher = NotificationDispatcher::new(TelegramGateway::default());
+    let (coordinator, plan_path) = coordinator_with_plan(
+        boss_plan(vec![boss_step(0, "Owner cleanup step")]),
+        "test_boss_runtime_cleanup.json",
+    )
+    .await;
+
+    coordinator.ensure_control_runtime().await;
+    let runtime_key = coordinator.current_runtime_key().await.unwrap();
+    coordinator.shutdown_all_runtime_instances();
+
+    assert!(coordinator.runtime_is_closed_for_testing(&runtime_key).await);
+    let response = coordinator
+        .handle_control_request(BossControlRequest::Report, &task_manager, &dispatcher)
+        .await;
+    assert!(response.is_ok(), "cleanup-only shutdown must allow fresh bootstrap");
+
+    let _ = std::fs::remove_file(plan_path);
+}
+
+#[tokio::test]
+async fn shutdown_owner_does_not_block_fresh_coordinator_with_fresh_owner() {
+    let task_manager = Arc::new(TaskManager::default());
+    let dispatcher = NotificationDispatcher::new(TelegramGateway::default());
+
+    let (closed_coordinator, closed_path) = coordinator_with_plan(
+        boss_plan(vec![boss_step(0, "Closed owner step")]),
+        "test_boss_closed_owner_isolation.json",
+    )
+    .await;
+    closed_coordinator.ensure_control_runtime().await;
+    closed_coordinator.shutdown_runtime_owner();
+    assert!(
+        closed_coordinator
+            .handle_control_request(BossControlRequest::Report, &task_manager, &dispatcher)
+            .await
+            .is_err()
+    );
+
+    let (fresh_coordinator, fresh_path) = coordinator_with_plan(
+        boss_plan(vec![boss_step(0, "Fresh owner step")]),
+        "test_boss_fresh_owner_isolation.json",
+    )
+    .await;
+    let response = fresh_coordinator
+        .handle_control_request(BossControlRequest::Report, &task_manager, &dispatcher)
+        .await;
+    assert!(response.is_ok(), "fresh owner must remain usable after another owner shuts down");
+
+    let _ = std::fs::remove_file(closed_path);
+    let _ = std::fs::remove_file(fresh_path);
 }
 
 #[tokio::test]

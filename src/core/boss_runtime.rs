@@ -32,6 +32,7 @@ struct BossRuntimeRegistry {
 #[derive(Debug, Default)]
 pub struct BossRuntimeOwner {
     registry: BossRuntimeRegistry,
+    closed: AtomicBool,
 }
 
 impl BossRuntimeOwner {
@@ -47,6 +48,33 @@ impl BossRuntimeOwner {
             .write()
             .expect("boss runtime registry poisoned")
             .insert(key, runtime);
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::SeqCst)
+    }
+
+    pub fn shutdown_all_runtimes(&self) {
+        let runtimes = self
+            .registry
+            .runtimes
+            .write()
+            .expect("boss runtime registry poisoned")
+            .drain()
+            .map(|(_, runtime)| runtime)
+            .collect::<Vec<_>>();
+        for runtime in runtimes {
+            runtime.shutdown();
+        }
+    }
+
+    pub fn shutdown_owner(&self) {
+        self.closed.store(true, Ordering::SeqCst);
+        self.shutdown_all_runtimes();
+    }
+
+    pub fn restart_owner(&self) {
+        self.closed.store(false, Ordering::SeqCst);
     }
 
     pub fn get_runtime(&self, key: &str) -> Option<Arc<BossControlRuntime>> {
@@ -69,20 +97,6 @@ impl BossRuntimeOwner {
             runtime.shutdown();
         }
         runtime
-    }
-
-    pub fn shutdown_all(&self) {
-        let runtimes = self
-            .registry
-            .runtimes
-            .write()
-            .expect("boss runtime registry poisoned")
-            .drain()
-            .map(|(_, runtime)| runtime)
-            .collect::<Vec<_>>();
-        for runtime in runtimes {
-            runtime.shutdown();
-        }
     }
 
     pub fn fresh_runtime_key(&self, plan_id: &str) -> String {
