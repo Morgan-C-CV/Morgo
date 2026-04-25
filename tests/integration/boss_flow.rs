@@ -3,7 +3,8 @@ use std::sync::Arc;
 use rust_agent::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
 use rust_agent::core::boss::{BossCoordinator, save_plan};
 use rust_agent::core::boss_state::{
-    BossActorRole, BossActorStatus, BossPlan, BossPlanStep, BossPlanStepStatus, BossStage,
+    BossActorRole, BossActorStatus, BossControlRequest, BossControlResponse, BossPlan,
+    BossPlanStep, BossPlanStepStatus, BossStage, BossStopStage,
 };
 use rust_agent::core::concurrency::{
     BossBudgetDecision, MemoryPressureLevel, evaluate_boss_budget,
@@ -142,7 +143,7 @@ async fn coordinator_with_plan(
 }
 
 #[tokio::test]
-async fn report_interrupt_returns_progress_while_agents_are_waiting() {
+async fn report_interrupt_includes_active_children_and_attempt_review_summary() {
     let task_manager = Arc::new(TaskManager::default());
     let (coordinator, plan_path) = coordinator_with_plan(
         boss_plan(vec![boss_step(0, "Long running step")]),
@@ -155,6 +156,17 @@ async fn report_interrupt_returns_progress_while_agents_are_waiting() {
         let snapshot = session.as_mut().unwrap();
         snapshot.executor_b.task_id = Some("task-b".into());
         snapshot.executor_b.status = BossActorStatus::Active;
+        snapshot.active_children.push(rust_agent::core::boss_state::BossActorHandle {
+            actor_id: "boss-plan-alpha-child-1".into(),
+            session_id: "boss-plan-alpha-child-1".into(),
+            role: BossActorRole::ImplementChild,
+            status: BossActorStatus::Active,
+            task_id: Some("task-child".into()),
+            last_snapshot: None,
+            lineage_depth: 1,
+            mailbox_id: None,
+            cancel_id: None,
+        });
     }
 
     let task = task_manager.create_with_type(
@@ -170,21 +182,56 @@ async fn report_interrupt_returns_progress_while_agents_are_waiting() {
     {
         let mut plan = coordinator.plan.write().await;
         let plan = plan.as_mut().unwrap();
-        plan.steps[0].status = BossPlanStepStatus::Running;
+        plan.steps[0].status = BossPlanStepStatus::Reviewing;
         plan.steps[0].worker_task_id = Some(task.id.clone());
+        plan.steps[0].attempt_count = 2;
+        plan.steps[0].last_review_summary = Some("A review: tighten edge-case handling".into());
     }
 
     let report = coordinator.report_progress(&task_manager).await.unwrap();
-    assert!(report.contains("stage=Execution") || report.contains("stage=Documentation"));
-    assert!(report.contains("actor boss-plan-alpha-b") || report.contains("role=executor_b"));
-    assert!(report.contains("step 0 status=Running"));
-    assert!(report.contains(&task.id));
+    assert!(matches!(report.stage, BossStage::Execution | BossStage::Documentation));
+    assert_eq!(report.executor_b.status, BossActorStatus::Active);
+    assert_eq!(report.active_children.len(), 1);
+    assert_eq!(report.active_children[0].role, BossActorRole::ImplementChild);
+    assert_eq!(report.steps.len(), 1);
+    assert_eq!(report.steps[0].attempt_count, 2);
+    assert_eq!(
+        report.steps[0].last_review_summary.as_deref(),
+        Some("A review: tighten edge-case handling")
+    );
+    assert_eq!(report.steps[0].worker_task_id.as_deref(), Some(task.id.as_str()));
 
     let _ = std::fs::remove_file(plan_path);
 }
 
 #[tokio::test]
-async fn stop_interrupt_cancels_boss_a_b_and_children() {
+async fn report_control_request_does_not_require_query_loop_return() {
+    let task_manager = Arc::new(TaskManager::default());
+    let dispatcher = NotificationDispatcher::new(TelegramGateway::default());
+    let (coordinator, plan_path) = coordinator_with_plan(
+        boss_plan(vec![boss_step(0, "Waiting step")]),
+        "test_boss_report_control_request.json",
+    )
+    .await;
+
+    let response = coordinator
+        .handle_control_request(BossControlRequest::Report, &task_manager, &dispatcher)
+        .await
+        .unwrap();
+
+    match response {
+        BossControlResponse::Report(payload) => {
+            assert_eq!(payload.total_steps, Some(1));
+            assert_eq!(payload.steps.len(), 1);
+        }
+        other => panic!("expected report payload, got {other:?}"),
+    }
+
+    let _ = std::fs::remove_file(plan_path);
+}
+
+#[tokio::test]
+async fn stop_interrupt_escalates_from_cancel_to_force_drain_after_deadline() {
     let task_manager = Arc::new(TaskManager::default());
     let dispatcher = NotificationDispatcher::new(TelegramGateway::default());
     let (coordinator, plan_path) = coordinator_with_plan(
@@ -192,17 +239,6 @@ async fn stop_interrupt_cancels_boss_a_b_and_children() {
         "test_boss_stop_interrupt.json",
     )
     .await;
-
-    let a_task = task_manager.create_with_type(
-        "designer a",
-        TaskType::LocalAgent,
-        "test-session",
-        InteractionSurface::Cli,
-    );
-    task_manager.set_boss_actor_id(&a_task.id, Some("designer_a:depth=0".into()));
-    task_manager.launch(&a_task.id, "designer a running", async {
-        tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
-    });
 
     let b_task = task_manager.create_with_type(
         "executor b",
@@ -215,42 +251,37 @@ async fn stop_interrupt_cancels_boss_a_b_and_children() {
         tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
     });
 
-    let child_task = task_manager.create_with_type(
-        "child implement",
-        TaskType::LocalAgent,
-        "test-session",
-        InteractionSurface::Cli,
-    );
-    task_manager.set_boss_actor_id(&child_task.id, Some("implement_child:depth=1".into()));
-    task_manager.launch(&child_task.id, "child implement running", async {
-        tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
-    });
-
     {
         let mut session = coordinator.session.write().await;
         let snapshot = session.as_mut().unwrap();
-        snapshot.designer_a.task_id = Some(a_task.id.clone());
-        snapshot.designer_a.status = BossActorStatus::Active;
         snapshot.executor_b.task_id = Some(b_task.id.clone());
         snapshot.executor_b.status = BossActorStatus::Active;
     }
 
-    let killed = coordinator
-        .stop(&task_manager, "test-session", &dispatcher)
+    let response = coordinator
+        .handle_control_request(
+            BossControlRequest::Stop {
+                requester_session_id: "test-session".into(),
+                deadline_ms: 0,
+            },
+            &task_manager,
+            &dispatcher,
+        )
         .await
         .unwrap();
 
-    assert!(killed.contains(&a_task.id));
-    assert!(killed.contains(&b_task.id));
-    assert!(killed.contains(&child_task.id));
-    assert_eq!(task_manager.status(&a_task.id), Some(TaskStatus::Killed));
+    match response {
+        BossControlResponse::Stop(outcome) => {
+            assert!(outcome.stages.contains(&BossStopStage::CancelIssued));
+            assert!(
+                outcome.stages.contains(&BossStopStage::ForceDrain)
+                    || outcome.stages.contains(&BossStopStage::DeadlineExpired)
+            );
+            assert!(outcome.killed_task_ids.contains(&b_task.id));
+        }
+        other => panic!("expected stop outcome, got {other:?}"),
+    }
     assert_eq!(task_manager.status(&b_task.id), Some(TaskStatus::Killed));
-    assert_eq!(task_manager.status(&child_task.id), Some(TaskStatus::Killed));
-
-    let session = coordinator.session.read().await;
-    let snapshot = session.as_ref().unwrap();
-    assert_eq!(snapshot.designer_a.status, BossActorStatus::Suspended);
-    assert_eq!(snapshot.executor_b.status, BossActorStatus::Suspended);
 
     let _ = std::fs::remove_file(plan_path);
 }

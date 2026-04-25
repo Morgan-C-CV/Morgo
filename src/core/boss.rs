@@ -1,6 +1,7 @@
 use crate::core::boss_state::{
-    BossActorHandle, BossActorStatus, BossPlan, BossPlanStep, BossPlanStepStatus, BossSession,
-    BossStage, BossStatus,
+    BossActorHandle, BossActorStatus, BossControlRequest, BossControlResponse, BossPlan,
+    BossPlanStep, BossPlanStepStatus, BossReportPayload, BossSession, BossStage, BossStatus,
+    BossStepReport, BossStopOutcome, BossStopStage,
 };
 use crate::interaction::dispatcher::NotificationDispatcher;
 use crate::task::manager::TaskManager;
@@ -279,56 +280,64 @@ impl BossCoordinator {
         }
     }
 
-    pub async fn report_progress(&self, tasks: &TaskManager) -> anyhow::Result<String> {
+    pub async fn handle_control_request(
+        &self,
+        request: BossControlRequest,
+        tasks: &TaskManager,
+        dispatcher: &NotificationDispatcher,
+    ) -> anyhow::Result<BossControlResponse> {
+        match request {
+            BossControlRequest::Report => {
+                Ok(BossControlResponse::Report(self.report_progress(tasks).await?))
+            }
+            BossControlRequest::Stop {
+                requester_session_id,
+                deadline_ms,
+            } => Ok(BossControlResponse::Stop(
+                self.stop(tasks, &requester_session_id, dispatcher, deadline_ms)
+                    .await?,
+            )),
+        }
+    }
+
+    pub async fn report_progress(&self, tasks: &TaskManager) -> anyhow::Result<BossReportPayload> {
         let status = self.status.read().await.clone();
         let session = self.session.read().await.clone();
         let plan = self.plan.read().await.clone();
+        let empty_session = BossSession::from_plan_id("unknown", status.stage);
+        let session = session.unwrap_or(empty_session);
+        let steps = plan
+            .as_ref()
+            .map(|plan| {
+                plan.steps
+                    .iter()
+                    .map(|step| BossStepReport {
+                        id: step.id,
+                        status: step.status,
+                        worker_task_id: step.worker_task_id.clone(),
+                        attempt_count: step.attempt_count,
+                        last_review_summary: step.last_review_summary.clone(),
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let history_summary = tasks
+            .list()
+            .into_iter()
+            .filter(|task| task.boss_actor_id.is_some())
+            .map(|task| format!("{}:{:?}", task.id, task.status))
+            .collect::<Vec<_>>();
 
-        let mut lines = vec![format!(
-            "Boss report: stage={:?}, current_step={:?}, total_steps={:?}",
-            status.stage, status.current_step, status.total_steps
-        )];
-
-        if let Some(session) = session {
-            let actor_lines = [session.designer_a, session.executor_b]
-                .into_iter()
-                .map(|actor| {
-                    let task_status = actor
-                        .task_id
-                        .as_deref()
-                        .and_then(|task_id| tasks.get(task_id))
-                        .map(|task| format!("{}:{:?}", task.id, task.status))
-                        .unwrap_or_else(|| "none".into());
-                    format!(
-                        "actor {} role={} status={} task={}",
-                        actor.actor_id,
-                        actor.role.as_str(),
-                        actor.status.as_str(),
-                        task_status
-                    )
-                })
-                .collect::<Vec<_>>();
-            lines.extend(actor_lines);
-        }
-
-        if let Some(plan) = plan {
-            let step_lines = plan
-                .steps
-                .iter()
-                .map(|step| {
-                    format!(
-                        "step {} status={:?} completed={} worker_task_id={}",
-                        step.id,
-                        step.status,
-                        step.completed,
-                        step.worker_task_id.as_deref().unwrap_or("none")
-                    )
-                })
-                .collect::<Vec<_>>();
-            lines.extend(step_lines);
-        }
-
-        Ok(lines.join("\n"))
+        Ok(BossReportPayload {
+            stage: status.stage,
+            current_step: status.current_step,
+            total_steps: status.total_steps,
+            designer_a: session.designer_a,
+            executor_b: session.executor_b,
+            active_children: session.active_children,
+            steps,
+            history_summary,
+        })
     }
 
     pub async fn stop(
@@ -336,8 +345,9 @@ impl BossCoordinator {
         tasks: &TaskManager,
         requester_session_id: &str,
         dispatcher: &NotificationDispatcher,
-    ) -> anyhow::Result<Vec<String>> {
-        let mut killed = Vec::new();
+        deadline_ms: u64,
+    ) -> anyhow::Result<BossStopOutcome> {
+        let mut stages = vec![BossStopStage::CancelIssued];
         let tracked_task_ids = {
             let session = self.session.read().await;
             session
@@ -361,10 +371,27 @@ impl BossCoordinator {
                 .unwrap_or_default()
         };
 
-        for task_id in tracked_task_ids {
-            if tasks.kill(&task_id, requester_session_id, dispatcher) {
-                killed.push(task_id);
+        let mut killed = Vec::new();
+        for task_id in &tracked_task_ids {
+            if tasks.kill(task_id, requester_session_id, dispatcher) {
+                killed.push(task_id.clone());
             }
+        }
+
+        stages.push(BossStopStage::DeadlineExpired);
+        tokio::time::sleep(tokio::time::Duration::from_millis(deadline_ms)).await;
+
+        let mut force_drained = false;
+        for task_id in tracked_task_ids {
+            if matches!(tasks.status(&task_id), Some(TaskStatus::Pending | TaskStatus::Running)) {
+                force_drained = true;
+                if tasks.kill(&task_id, requester_session_id, dispatcher) && !killed.contains(&task_id) {
+                    killed.push(task_id.clone());
+                }
+            }
+        }
+        if force_drained {
+            stages.push(BossStopStage::ForceDrain);
         }
 
         {
@@ -376,7 +403,10 @@ impl BossCoordinator {
             }
         }
 
-        Ok(killed)
+        Ok(BossStopOutcome {
+            killed_task_ids: killed,
+            stages,
+        })
     }
 
     /// Processes a task event to update the BossPlan by structured step identity.

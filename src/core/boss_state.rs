@@ -100,6 +100,56 @@ fn default_retry_budget() -> u32 {
     3
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BossStepReport {
+    pub id: usize,
+    pub status: BossPlanStepStatus,
+    pub worker_task_id: Option<String>,
+    pub attempt_count: u32,
+    pub last_review_summary: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BossReportPayload {
+    pub stage: BossStage,
+    pub current_step: Option<usize>,
+    pub total_steps: Option<usize>,
+    pub designer_a: BossActorHandle,
+    pub executor_b: BossActorHandle,
+    pub active_children: Vec<BossActorHandle>,
+    pub steps: Vec<BossStepReport>,
+    #[serde(default)]
+    pub history_summary: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum BossControlRequest {
+    Report,
+    Stop {
+        requester_session_id: String,
+        deadline_ms: u64,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum BossStopStage {
+    CancelIssued,
+    DeadlineExpired,
+    ForceDrain,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BossStopOutcome {
+    pub killed_task_ids: Vec<String>,
+    pub stages: Vec<BossStopStage>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum BossControlResponse {
+    Report(BossReportPayload),
+    Stop(BossStopOutcome),
+}
+
 impl BossPlanStep {
     pub fn objective(&self) -> &str {
         self.objective.as_deref().unwrap_or(&self.description)
@@ -173,7 +223,7 @@ impl BossActorStatus {
 }
 
 /// Stable, observable handle for a single long-lived actor in the boss topology.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BossActorHandle {
     /// Stable session id for this actor (e.g. "boss-{plan_id}-a").
     pub actor_id: String,
