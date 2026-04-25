@@ -2744,3 +2744,127 @@ async fn restore_then_bootstrap_with_app_state_is_immediately_ready() {
 
     let _ = std::fs::remove_file(&plan_path);
 }
+
+// ---------------------------------------------------------------------------
+// T16.6.H.5 — Converged restore/bootstrap: full registry from restore
+// ---------------------------------------------------------------------------
+
+/// restore_or_init_with_app_state produces a full registry immediately —
+/// no state-only phase, no lazy upgrade needed.
+#[tokio::test]
+async fn restore_or_init_with_app_state_produces_full_registry_immediately() {
+    let plan_path = std::env::temp_dir().join("boss_h5_full_restore.json");
+    let plan = BossPlan {
+        plan_id: "plan-h5-full".into(),
+        accepted_by_user: true,
+        auto_sequence: true,
+        steps: vec![boss_step(0, "step zero")],
+        ..Default::default()
+    };
+    save_plan(&plan, &plan_path).await.unwrap();
+
+    let task_manager = Arc::new(TaskManager::default());
+    let app_state = app_state_with_tasks("session-h5-full", task_manager.clone());
+
+    let coordinator =
+        BossCoordinator::restore_or_init_with_app_state(&plan_path, &app_state)
+            .await
+            .unwrap();
+
+    // Registry must be full immediately — no lazy upgrade required.
+    let (has_exec, has_a) = {
+        let guard = coordinator.actor_registry.read().await;
+        let r = guard.as_ref().unwrap();
+        (r.has_executor, r.has_a_callbacks)
+    };
+    assert!(has_exec, "restore_or_init_with_app_state must produce has_executor=true");
+    assert!(has_a, "restore_or_init_with_app_state must produce has_a_callbacks=true");
+
+    let _ = std::fs::remove_file(&plan_path);
+}
+
+/// After restore_or_init_with_app_state, advance_plan does not replace the registry.
+#[tokio::test]
+async fn advance_plan_after_full_restore_does_not_replace_registry() {
+    let plan_path = std::env::temp_dir().join("boss_h5_advance_stable.json");
+    let plan = BossPlan {
+        plan_id: "plan-h5-advance".into(),
+        accepted_by_user: true,
+        auto_sequence: false,
+        steps: vec![boss_step(0, "step zero")],
+        ..Default::default()
+    };
+    save_plan(&plan, &plan_path).await.unwrap();
+
+    let task_manager = Arc::new(TaskManager::default());
+    let app_state = app_state_with_tasks("session-h5-advance", task_manager.clone());
+
+    let coordinator =
+        BossCoordinator::restore_or_init_with_app_state(&plan_path, &app_state)
+            .await
+            .unwrap();
+
+    let b_ptr_before = {
+        let guard = coordinator.actor_registry.read().await;
+        Arc::as_ptr(&guard.as_ref().unwrap().executor_b.state) as usize
+    };
+
+    coordinator.advance_plan(&app_state).await.unwrap();
+    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+
+    let b_ptr_after = {
+        let guard = coordinator.actor_registry.read().await;
+        Arc::as_ptr(&guard.as_ref().unwrap().executor_b.state) as usize
+    };
+
+    assert_eq!(
+        b_ptr_before, b_ptr_after,
+        "advance_plan must not replace registry after restore_or_init_with_app_state"
+    );
+
+    let _ = std::fs::remove_file(&plan_path);
+}
+
+/// After restore_or_init_with_app_state, finalize_documentation_loop does not replace the registry.
+#[tokio::test]
+async fn finalize_documentation_loop_after_full_restore_does_not_replace_registry() {
+    let plan_path = std::env::temp_dir().join("boss_h5_finalize_stable.json");
+    let plan = BossPlan {
+        plan_id: "plan-h5-finalize".into(),
+        accepted_by_user: false,
+        auto_sequence: false,
+        steps: vec![boss_step(0, "step zero")],
+        ..Default::default()
+    };
+    save_plan(&plan, &plan_path).await.unwrap();
+
+    let task_manager = Arc::new(TaskManager::default());
+    let app_state = app_state_with_tasks("session-h5-finalize", task_manager.clone());
+
+    let coordinator =
+        BossCoordinator::restore_or_init_with_app_state(&plan_path, &app_state)
+            .await
+            .unwrap();
+
+    let a_ptr_before = {
+        let guard = coordinator.actor_registry.read().await;
+        Arc::as_ptr(&guard.as_ref().unwrap().designer_a.state) as usize
+    };
+
+    coordinator
+        .finalize_documentation_loop("draft", "feedback", "notes", "final spec", "pseudo")
+        .await
+        .unwrap();
+
+    let a_ptr_after = {
+        let guard = coordinator.actor_registry.read().await;
+        Arc::as_ptr(&guard.as_ref().unwrap().designer_a.state) as usize
+    };
+
+    assert_eq!(
+        a_ptr_before, a_ptr_after,
+        "finalize_documentation_loop must not replace registry after restore_or_init_with_app_state"
+    );
+
+    let _ = std::fs::remove_file(&plan_path);
+}

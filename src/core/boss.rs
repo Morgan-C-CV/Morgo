@@ -172,6 +172,18 @@ impl BossCoordinator {
         Self::restore_or_init_with_owner(path, Arc::new(BossRuntimeOwner::default())).await
     }
 
+    /// Restore (or init) and immediately bootstrap with full A+B callbacks.
+    /// After this call the registry is in full mode — no lazy upgrade on first production entry.
+    pub async fn restore_or_init_with_app_state(
+        path: &std::path::Path,
+        app_state: &Arc<crate::state::app_state::AppState>,
+    ) -> anyhow::Result<Self> {
+        let coordinator =
+            Self::restore_or_init_with_owner(path, Arc::new(BossRuntimeOwner::default())).await?;
+        coordinator.bootstrap_actor_registry_with_app_state(app_state).await;
+        Ok(coordinator)
+    }
+
     pub async fn restore_or_init_with_owner(
         path: &std::path::Path,
         runtime_owner: Arc<BossRuntimeOwner>,
