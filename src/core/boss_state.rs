@@ -27,6 +27,9 @@ pub struct BossStatus {
     /// Last message sent to A's LLM session via Continue — observable for tests.
     #[serde(default)]
     pub last_a_dispatch_message: Option<String>,
+    /// Last outbound message sent to B via ask_b_session (after trim/summarize) — observable for tests.
+    #[serde(default)]
+    pub last_b_ask_message: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -178,6 +181,7 @@ impl Default for BossStatus {
             planning_file: None,
             last_b_dispatch_payload: None,
             last_a_dispatch_message: None,
+            last_b_ask_message: None,
         }
     }
 }

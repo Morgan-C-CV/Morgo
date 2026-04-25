@@ -1868,6 +1868,12 @@ impl BossCoordinator {
             message
         };
 
+        // Record the final outbound message for test observability.
+        {
+            let mut guard = self.status.write().await;
+            guard.last_b_ask_message = Some(message.clone());
+        }
+
         let offset_before = tasks.get_output(&task_id, 0).map(|s| s.next_offset).unwrap_or(0);
 
         let tasks_clone = tasks.clone();
@@ -2100,6 +2106,14 @@ impl BossCoordinator {
             save_plan(plan, path).await?;
         }
         Ok(())
+    }
+
+    pub async fn ask_b_session_pub(
+        &self,
+        app_state: &Arc<crate::state::app_state::AppState>,
+        message: String,
+    ) -> anyhow::Result<String> {
+        self.ask_b_session(app_state, message).await
     }
 }
 

@@ -4829,3 +4829,138 @@ async fn t25_2_summarize_does_not_persist_to_plan_or_snapshot() {
     let _ = std::fs::remove_file(&plan_path);
 }
 
+/// T25.2.6 production path: ask_b_session with oversized payload + live A session
+/// → summarize_context_with_a succeeds → outbound message starts with "[summary: ...]".
+#[tokio::test]
+async fn t25_2_production_path_summarize_success_via_ask_b_session() {
+    let plan_path = std::env::temp_dir().join("t25_2_prod_summarize.json");
+    let plan = BossPlan {
+        plan_id: "t25-2-prod-summarize".into(),
+        task_description: "summarize production path test".into(),
+        steps: vec![boss_step(0, "step zero")],
+        ..Default::default()
+    };
+    save_plan(&plan, &plan_path).await.unwrap();
+
+    let coordinator = BossCoordinator::restore_or_init(&plan_path).await.unwrap();
+    let unique_dir = std::env::temp_dir().join("t25_2_prod_summarize_output");
+    let task_manager = Arc::new(TaskManager::new_with_output_root(unique_dir));
+    let app_state = app_state_with_tasks("session-t25-2-prod-summarize", task_manager.clone());
+
+    // Fake A session: responds to any message with a fixed summary string.
+    let fake_a = task_manager.create_with_type(
+        "fake A summarize session",
+        TaskType::LocalAgent,
+        "session-t25-2-prod-summarize",
+        InteractionSurface::Cli,
+    );
+    let a_task_id = fake_a.id.clone();
+    let tm_for_a = task_manager.clone();
+    let a_id_for_loop = a_task_id.clone();
+    task_manager.launch(&a_task_id, "", async move {
+        loop {
+            let messages = tm_for_a.drain_mailbox(&a_id_for_loop);
+            for _msg in messages {
+                tm_for_a.append_output(&a_id_for_loop, "SUMMARIZED_CONTEXT");
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        }
+    });
+    coordinator.record_a_session_id_pub(&a_task_id).await;
+
+    // Fake B session: responds to any message so ask_b_session doesn't time out.
+    let fake_b = task_manager.create_with_type(
+        "fake B session",
+        TaskType::LocalAgent,
+        "session-t25-2-prod-summarize",
+        InteractionSurface::Cli,
+    );
+    let b_task_id = fake_b.id.clone();
+    let tm_for_b = task_manager.clone();
+    let b_id_for_loop = b_task_id.clone();
+    task_manager.launch(&b_task_id, "", async move {
+        loop {
+            let messages = tm_for_b.drain_mailbox(&b_id_for_loop);
+            for _msg in messages {
+                tm_for_b.append_output(&b_id_for_loop, "B_ACK");
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        }
+    });
+    coordinator.record_b_session_id_pub(&b_task_id).await;
+
+    // Build an oversized payload (> B_CONTEXT_TRIM_THRESHOLD).
+    let oversized = "context_data_".repeat(B_CONTEXT_TRIM_THRESHOLD / 12 + 1);
+    assert!(oversized.len() > B_CONTEXT_TRIM_THRESHOLD, "payload must exceed threshold for this test");
+
+    let _ = coordinator.ask_b_session_pub(&app_state, oversized).await;
+
+    // The outbound message recorded in status must start with "[summary: ...]".
+    let sent = coordinator.status.read().await.last_b_ask_message.clone().unwrap_or_default();
+    assert!(
+        sent.starts_with("[summary:"),
+        "summarize success path: outbound message must start with '[summary:', got: {sent:.80}"
+    );
+    assert!(
+        sent.contains("SUMMARIZED_CONTEXT"),
+        "outbound message must contain A's summary, got: {sent:.80}"
+    );
+
+    let _ = std::fs::remove_file(&plan_path);
+}
+
+/// T25.2.7 production path: ask_b_session with oversized payload + A unavailable
+/// → summarize_context_with_a fails → fallback to trim → outbound message starts with "[trimmed earlier context:".
+#[tokio::test]
+async fn t25_2_production_path_fallback_to_trim_when_a_unavailable() {
+    let plan_path = std::env::temp_dir().join("t25_2_prod_fallback.json");
+    let plan = BossPlan {
+        plan_id: "t25-2-prod-fallback".into(),
+        task_description: "fallback production path test".into(),
+        steps: vec![boss_step(0, "step zero")],
+        ..Default::default()
+    };
+    save_plan(&plan, &plan_path).await.unwrap();
+
+    let coordinator = BossCoordinator::restore_or_init(&plan_path).await.unwrap();
+    let unique_dir = std::env::temp_dir().join("t25_2_prod_fallback_output");
+    let task_manager = Arc::new(TaskManager::new_with_output_root(unique_dir));
+    let app_state = app_state_with_tasks("session-t25-2-prod-fallback", task_manager.clone());
+
+    // No A session seeded — summarize_context_with_a will fail fast.
+
+    // Fake B session: responds so ask_b_session doesn't time out.
+    let fake_b = task_manager.create_with_type(
+        "fake B session",
+        TaskType::LocalAgent,
+        "session-t25-2-prod-fallback",
+        InteractionSurface::Cli,
+    );
+    let b_task_id = fake_b.id.clone();
+    let tm_for_b = task_manager.clone();
+    let b_id_for_loop = b_task_id.clone();
+    task_manager.launch(&b_task_id, "", async move {
+        loop {
+            let messages = tm_for_b.drain_mailbox(&b_id_for_loop);
+            for _msg in messages {
+                tm_for_b.append_output(&b_id_for_loop, "B_ACK");
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        }
+    });
+    coordinator.record_b_session_id_pub(&b_task_id).await;
+
+    let oversized = "context_data_".repeat(B_CONTEXT_TRIM_THRESHOLD / 12 + 1);
+    assert!(oversized.len() > B_CONTEXT_TRIM_THRESHOLD);
+
+    let _ = coordinator.ask_b_session_pub(&app_state, oversized).await;
+
+    let sent = coordinator.status.read().await.last_b_ask_message.clone().unwrap_or_default();
+    assert!(
+        sent.starts_with("[trimmed earlier context:"),
+        "fallback path: outbound message must start with '[trimmed earlier context:', got: {sent:.80}"
+    );
+
+    let _ = std::fs::remove_file(&plan_path);
+}
+
