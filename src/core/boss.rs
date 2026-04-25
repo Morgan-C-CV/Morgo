@@ -61,6 +61,18 @@ impl BossCoordinator {
         Arc::as_ptr(&self.runtime_owner) as usize
     }
 
+    /// Test-only seam: exposes `parse_a_review_verdict` as a public associated function.
+    #[doc(hidden)]
+    pub fn parse_a_review_verdict_pub(response: &str) -> (bool, Option<String>) {
+        Self::parse_a_review_verdict(response)
+    }
+
+    /// Test-only seam: builds and returns the ReviewFn for this coordinator.
+    #[doc(hidden)]
+    pub fn review_fn_for_test(&self) -> crate::core::boss_actor_runtime::ReviewFn {
+        Self::build_review_fn(self)
+    }
+
     /// Full-mode constructor — wires A+B callbacks immediately.
     /// Prefer `BossRuntimeHost::build_coordinator` in production so the host's
     /// `BossRuntimeOwner` is used. This method is the building block used by the host.
@@ -357,14 +369,24 @@ impl BossCoordinator {
             Box::pin(async move {
                 if let Some(app) = c.auto_advance_app_state.read().await.clone() {
                     c.ensure_a_session(&app).await;
-                    let verdict = if accepted { "accepted" } else { "rejected" };
+                    let verdict_hint = if accepted { "accepted" } else { "rejected" };
                     let msg = match correction.as_deref() {
                         Some(corr) => format!(
-                            "Review step {step_id}: {verdict}. Summary: {summary}. Correction: {corr}"
+                            "Review step {step_id}: coordinator verdict={verdict_hint}. Summary: {summary}. Correction: {corr}. Please respond with ACCEPT or REJECT, and if REJECT include CORRECTION: <your correction>."
                         ),
-                        None => format!("Review step {step_id}: {verdict}. Summary: {summary}"),
+                        None => format!(
+                            "Review step {step_id}: coordinator verdict={verdict_hint}. Summary: {summary}. Please respond with ACCEPT or REJECT, and if REJECT include CORRECTION: <your correction>."
+                        ),
                     };
-                    c.send_to_a_session(&app, msg).await;
+                    match c.ask_a_session(&app, msg).await {
+                        Ok(response) => {
+                            let (a_accepted, a_correction) = Self::parse_a_review_verdict(&response);
+                            return c.apply_review_verdict(step_id, a_accepted, &summary, a_correction.as_deref()).await;
+                        }
+                        Err(_) => {
+                            // A session unavailable — fall through to coordinator verdict.
+                        }
+                    }
                 }
                 c.apply_review_verdict(step_id, accepted, &summary, correction.as_deref()).await
             })
@@ -382,8 +404,22 @@ impl BossCoordinator {
             let app = app.clone();
             Box::pin(async move {
                 c.ensure_a_session(&app).await;
-                c.send_to_a_session(&app, format!("Documentation signal: {signal}")).await;
-                c.apply_documentation_signal(&app, &signal).await
+                let msg = format!(
+                    "Documentation signal: {signal}. Please acknowledge with ACCEPT or provide CORRECTION: <feedback>."
+                );
+                let effective_signal = match c.ask_a_session(&app, msg).await {
+                    Ok(response) => {
+                        // If A rejects, use A's correction as the effective signal.
+                        let (a_accepted, a_correction) = Self::parse_a_review_verdict(&response);
+                        if !a_accepted {
+                            a_correction.unwrap_or_else(|| signal.clone())
+                        } else {
+                            signal.clone()
+                        }
+                    }
+                    Err(_) => signal.clone(),
+                };
+                c.apply_documentation_signal(&app, &effective_signal).await
             })
         })
     }
@@ -1461,6 +1497,83 @@ impl BossCoordinator {
         }
         let payload = json!({ "task_id": task_id, "message": message }).to_string();
         let _ = self.invoke_agent_tool(app_state, &payload).await;
+    }
+
+    /// Send a message to A's running LLM session and wait for A's response.
+    /// Returns A's response text, or an error if A is not running or times out.
+    /// Polls `TaskManager::get_output` until new content appears after the message is sent.
+    async fn ask_a_session(
+        &self,
+        app_state: &Arc<crate::state::app_state::AppState>,
+        message: String,
+    ) -> anyhow::Result<String> {
+        let task_id = {
+            let guard = self.session.read().await;
+            guard.as_ref().map(|s| s.designer_a.session_id.clone()).unwrap_or_default()
+        };
+        if task_id.is_empty() {
+            anyhow::bail!("A session not initialized");
+        }
+
+        let tasks = app_state
+            .permission_context
+            .task_manager
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("task manager not configured"))?;
+        let session_id = app_state
+            .permission_context
+            .active_session_id
+            .as_deref()
+            .unwrap_or("");
+
+        // Record current output offset before sending.
+        let offset_before = tasks
+            .get_output(&task_id, 0)
+            .map(|s| s.next_offset)
+            .unwrap_or(0);
+
+        // Record the dispatch message for observability.
+        {
+            let mut guard = self.status.write().await;
+            guard.last_a_dispatch_message = Some(message.clone());
+        }
+
+        // Send the message to A's mailbox.
+        if !tasks.send_message(&task_id, session_id, message) {
+            anyhow::bail!("A session task {task_id} is not running");
+        }
+
+        // Poll for new output with a 30-second timeout.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            if std::time::Instant::now() >= deadline {
+                anyhow::bail!("A session response timed out after 30s");
+            }
+            if let Some(slice) = tasks.get_output(&task_id, offset_before) {
+                if !slice.content.is_empty() {
+                    return Ok(slice.content);
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+    }
+
+    /// Parse A's LLM response text into (accepted, correction).
+    /// Looks for "ACCEPT" / "REJECT" keywords (case-insensitive).
+    /// If "REJECT" is found, extracts any text after "CORRECTION:" as the correction.
+    fn parse_a_review_verdict(response: &str) -> (bool, Option<String>) {
+        let upper = response.to_uppercase();
+        let accepted = !upper.contains("REJECT");
+        let correction = if !accepted {
+            response
+                .to_uppercase()
+                .find("CORRECTION:")
+                .map(|pos| response[pos + "CORRECTION:".len()..].trim().to_string())
+                .filter(|s| !s.is_empty())
+        } else {
+            None
+        };
+        (accepted, correction)
     }
 
     /// Build the JSON payload for spawning Designer A's LLM session.

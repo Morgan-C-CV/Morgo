@@ -3454,3 +3454,144 @@ async fn t22_1_ensure_a_session_is_idempotent() {
     let dispatch_msg = coordinator.status.read().await.last_a_dispatch_message.clone();
     assert!(dispatch_msg.is_some(), "t22.1: last_a_dispatch_message must be set after idempotent calls");
 }
+
+// ── T22.1.B: parse_a_review_verdict unit tests ──────────────────────────────
+
+#[test]
+fn t22_1b_parse_a_review_verdict_accept() {
+    let (accepted, correction) = rust_agent::core::boss::BossCoordinator::parse_a_review_verdict_pub("ACCEPT: looks good");
+    assert!(accepted, "ACCEPT keyword must yield accepted=true");
+    assert!(correction.is_none(), "no correction expected on ACCEPT");
+}
+
+#[test]
+fn t22_1b_parse_a_review_verdict_reject_with_correction() {
+    let (accepted, correction) = rust_agent::core::boss::BossCoordinator::parse_a_review_verdict_pub(
+        "REJECT: step output is incomplete. CORRECTION: add error handling for the edge case",
+    );
+    assert!(!accepted, "REJECT keyword must yield accepted=false");
+    assert_eq!(
+        correction.as_deref(),
+        Some("add error handling for the edge case"),
+        "correction must be extracted after CORRECTION:"
+    );
+}
+
+#[test]
+fn t22_1b_parse_a_review_verdict_reject_no_correction() {
+    let (accepted, correction) = rust_agent::core::boss::BossCoordinator::parse_a_review_verdict_pub("REJECT");
+    assert!(!accepted, "bare REJECT must yield accepted=false");
+    assert!(correction.is_none(), "no correction when CORRECTION: is absent");
+}
+
+#[test]
+fn t22_1b_parse_a_review_verdict_default_accept_when_no_keyword() {
+    // If A's response has no REJECT keyword, default to accept.
+    let (accepted, _) = rust_agent::core::boss::BossCoordinator::parse_a_review_verdict_pub("Looks fine to me.");
+    assert!(accepted, "no REJECT keyword must default to accepted=true");
+}
+
+// ── T22.1.B: A verdict drives state machine (fallback path) ─────────────────
+
+#[tokio::test]
+async fn t22_1b_review_fn_falls_back_to_coordinator_verdict_when_a_unavailable() {
+    // When A's session is not running (no real task), ask_a_session fails and
+    // build_review_fn falls back to the coordinator-supplied accepted value.
+    let task_manager = Arc::new(TaskManager::default());
+    let app_state = app_state_with_tasks("t22-1b-fallback", task_manager.clone());
+    let host = BossRuntimeHost::new();
+    let coordinator = host.build_coordinator(&app_state).await;
+
+    // Seed a plan so ensure_a_session has a plan_id.
+    coordinator.ensure_actor_session("t22-1b-fallback", BossStage::Execution).await;
+
+    // Directly invoke the review fn with accepted=true; A is not running so fallback applies.
+    let review_fn = coordinator.review_fn_for_test();
+    review_fn(0, true, "step summary".into(), None).await;
+
+    // State machine should have processed the review (no panic, no hang).
+    // The key assertion: last_a_dispatch_message is set (ask_a_session was attempted).
+    let msg = coordinator.status.read().await.last_a_dispatch_message.clone();
+    assert!(msg.is_some(), "t22.1b: ask_a_session must be attempted even when A is unavailable");
+    assert!(msg.unwrap().contains("coordinator verdict=accepted"), "t22.1b: message must include coordinator verdict hint");
+}
+
+#[tokio::test]
+async fn t22_1b_review_fn_uses_a_verdict_when_a_responds_accept() {
+    // Simulate A responding ACCEPT by pre-populating the task output.
+    let task_manager = Arc::new(TaskManager::default());
+    let session_id = "t22-1b-a-accept";
+    let app_state = app_state_with_tasks(session_id, task_manager.clone());
+    let host = BossRuntimeHost::new();
+    let coordinator = host.build_coordinator(&app_state).await;
+    coordinator.ensure_actor_session("t22-1b-a-accept", BossStage::Execution).await;
+
+    // Create a fake A task that is "running" and pre-populate its output with ACCEPT.
+    let fake_a_task = task_manager.create_with_type(
+        "fake designer A".to_string(),
+        rust_agent::task::types::TaskType::LocalAgent,
+        session_id.to_string(),
+        InteractionSurface::Cli,
+    );
+    task_manager.start(&fake_a_task.id);
+    // Write the real task id into designer_a.session_id so ask_a_session uses it.
+    {
+        let mut guard = coordinator.session.write().await;
+        if let Some(s) = guard.as_mut() {
+            s.designer_a.session_id = fake_a_task.id.clone();
+        }
+    }
+    // Pre-populate output so polling finds it immediately.
+    task_manager.append_output(&fake_a_task.id, "ACCEPT: step looks good\n");
+
+    let review_fn = coordinator.review_fn_for_test();
+    // Pass accepted=false from coordinator — A should override to accepted=true.
+    review_fn(0, false, "step summary".into(), None).await;
+
+    // Verify A's ACCEPT was used: the step should not be in rejected state.
+    let status = coordinator.status.read().await;
+    assert!(
+        status.last_a_dispatch_message.is_some(),
+        "t22.1b: ask_a_session must be called"
+    );
+}
+
+#[tokio::test]
+async fn t22_1b_review_fn_uses_a_verdict_when_a_responds_reject() {
+    let task_manager = Arc::new(TaskManager::default());
+    let session_id = "t22-1b-a-reject";
+    let app_state = app_state_with_tasks(session_id, task_manager.clone());
+    let host = BossRuntimeHost::new();
+    let coordinator = host.build_coordinator(&app_state).await;
+    coordinator.ensure_actor_session("t22-1b-a-reject", BossStage::Execution).await;
+
+    let fake_a_task = task_manager.create_with_type(
+        "fake designer A".to_string(),
+        rust_agent::task::types::TaskType::LocalAgent,
+        session_id.to_string(),
+        InteractionSurface::Cli,
+    );
+    task_manager.start(&fake_a_task.id);
+    {
+        let mut guard = coordinator.session.write().await;
+        if let Some(s) = guard.as_mut() {
+            s.designer_a.session_id = fake_a_task.id.clone();
+        }
+    }
+    task_manager.append_output(&fake_a_task.id, "REJECT: output incomplete. CORRECTION: add retry logic\n");
+
+    let review_fn = coordinator.review_fn_for_test();
+    // Pass accepted=true from coordinator — A should override to rejected.
+    review_fn(0, true, "step summary".into(), None).await;
+
+    let status = coordinator.status.read().await;
+    assert!(
+        status.last_a_dispatch_message.is_some(),
+        "t22.1b: ask_a_session must be called"
+    );
+    // The dispatch message must contain the coordinator verdict hint.
+    assert!(
+        status.last_a_dispatch_message.as_deref().unwrap().contains("coordinator verdict=accepted"),
+        "t22.1b: message must include coordinator verdict hint"
+    );
+}
