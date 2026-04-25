@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use rust_agent::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
-use rust_agent::core::boss::{BossCoordinator, save_plan};
+use rust_agent::core::boss::{BossCoordinator, load_plan, save_plan};
 use rust_agent::core::boss_actor_runtime::{
     BossActorRegistry, DesignerARuntime, ExecutionFn, ExecutorBRuntime, SpecReviewFn,
 };
@@ -1656,6 +1656,7 @@ async fn documentation_stage_runs_designer_reviewer_revision_loop() {
         steps: vec![boss_step(0, "Implement validated step")],
         accepted_by_user: false,
         auto_sequence: true,
+        session_snapshot: None,
     };
 
     let (coordinator, plan_path) =
@@ -1730,6 +1731,7 @@ async fn user_feedback_reopens_documentation_loop_before_execution() {
         steps: vec![boss_step(0, "Implement after approval")],
         accepted_by_user: false,
         auto_sequence: true,
+        session_snapshot: None,
     };
 
     let (coordinator, plan_path) =
@@ -4565,6 +4567,124 @@ async fn t23_production_path_a_draft_via_ask_a_session() {
     assert!(
         draft.contains("REST API") || draft.contains("spec"),
         "draft must contain A's response, got: {draft}"
+    );
+
+    let _ = std::fs::remove_file(&plan_path);
+}
+
+// ---------------------------------------------------------------------------
+// T24: A/B session 跨 restart 恢复
+// ---------------------------------------------------------------------------
+
+/// T24.1: save_plan_with_session embeds A/B task_id into plan.session_snapshot.
+#[tokio::test]
+async fn t24_session_snapshot_persisted_on_save_plan() {
+    let plan_path = std::env::temp_dir().join("t24_snapshot_persist.json");
+    let plan = BossPlan {
+        plan_id: "t24-persist".into(),
+        task_description: "test session persistence".into(),
+        steps: vec![boss_step(0, "step zero")],
+        ..Default::default()
+    };
+    save_plan(&plan, &plan_path).await.unwrap();
+
+    let coordinator = BossCoordinator::restore_or_init(&plan_path).await.unwrap();
+    coordinator.record_a_session_id_pub("real-a-task-001").await;
+    coordinator.record_b_session_id_pub("real-b-task-002").await;
+
+    coordinator
+        .finalize_documentation_loop("some spec", "LGTM", "no revision", "final spec", "pseudo code")
+        .await
+        .unwrap();
+
+    let loaded = load_plan(&plan_path).await.unwrap();
+    let snap = loaded.session_snapshot.expect("session_snapshot must be present after save");
+    assert_eq!(snap.designer_a.task_id.as_deref(), Some("real-a-task-001"));
+    assert_eq!(snap.executor_b.task_id.as_deref(), Some("real-b-task-002"));
+
+    let _ = std::fs::remove_file(&plan_path);
+}
+
+/// T24.2: restore_or_init uses persisted session_snapshot instead of fresh from_plan_id.
+#[tokio::test]
+async fn t24_restore_uses_persisted_session_snapshot() {
+    let plan_path = std::env::temp_dir().join("t24_restore_snapshot.json");
+    let plan = BossPlan {
+        plan_id: "t24-restore".into(),
+        task_description: "test restore".into(),
+        steps: vec![boss_step(0, "step zero")],
+        ..Default::default()
+    };
+    save_plan(&plan, &plan_path).await.unwrap();
+
+    let c1 = BossCoordinator::restore_or_init(&plan_path).await.unwrap();
+    c1.record_a_session_id_pub("a-task-persist-001").await;
+    c1.record_b_session_id_pub("b-task-persist-002").await;
+    c1.finalize_documentation_loop("spec", "LGTM", "no revision", "final spec", "pseudo")
+        .await
+        .unwrap();
+
+    let c2 = BossCoordinator::restore_or_init(&plan_path).await.unwrap();
+    let session = c2.session.read().await;
+    let s = session.as_ref().expect("session must be present after restore");
+    assert_eq!(s.designer_a.task_id.as_deref(), Some("a-task-persist-001"), "A task_id must survive restart");
+    assert_eq!(s.executor_b.task_id.as_deref(), Some("b-task-persist-002"), "B task_id must survive restart");
+    assert_eq!(s.designer_a.session_id, "a-task-persist-001", "A session_id must survive restart");
+
+    let _ = std::fs::remove_file(&plan_path);
+}
+
+/// T24.3: Old plan file without session_snapshot restores cleanly (fallback to from_plan_id).
+#[tokio::test]
+async fn t24_restore_fallback_when_no_snapshot() {
+    let plan_path = std::env::temp_dir().join("t24_no_snapshot.json");
+    let raw = r#"{
+        "plan_id": "t24-no-snap",
+        "task_description": "old plan",
+        "document_spec": "",
+        "pseudo_code": "",
+        "steps": [],
+        "accepted_by_user": false,
+        "auto_sequence": false
+    }"#;
+    tokio::fs::write(&plan_path, raw).await.unwrap();
+
+    let coordinator = BossCoordinator::restore_or_init(&plan_path).await.unwrap();
+    let session = coordinator.session.read().await;
+    let s = session.as_ref().expect("session must be present after restore");
+    assert_eq!(s.designer_a.session_id, "boss-t24-no-snap-a", "fallback session_id must be deterministic placeholder");
+    assert_eq!(s.executor_b.session_id, "boss-t24-no-snap-b");
+    assert!(s.designer_a.task_id.is_none(), "task_id must be None on fallback");
+
+    let _ = std::fs::remove_file(&plan_path);
+}
+
+/// T24.4: Stale task_id in restored snapshot does not panic; liveness check is caller's responsibility.
+#[tokio::test]
+async fn t24_stale_task_id_does_not_panic_on_restore() {
+    let plan_path = std::env::temp_dir().join("t24_stale_task.json");
+    let plan = BossPlan {
+        plan_id: "t24-stale".into(),
+        task_description: "stale task test".into(),
+        steps: vec![boss_step(0, "step zero")],
+        ..Default::default()
+    };
+    save_plan(&plan, &plan_path).await.unwrap();
+
+    let c1 = BossCoordinator::restore_or_init(&plan_path).await.unwrap();
+    c1.record_a_session_id_pub("stale-task-id-does-not-exist").await;
+    c1.finalize_documentation_loop("spec", "LGTM", "no revision", "final spec", "pseudo")
+        .await
+        .unwrap();
+
+    // Restore: stale task_id is present — no panic expected.
+    let c2 = BossCoordinator::restore_or_init(&plan_path).await.unwrap();
+    let session = c2.session.read().await;
+    let s = session.as_ref().unwrap();
+    assert_eq!(
+        s.designer_a.task_id.as_deref(),
+        Some("stale-task-id-does-not-exist"),
+        "stale task_id must be restored without panic"
     );
 
     let _ = std::fs::remove_file(&plan_path);

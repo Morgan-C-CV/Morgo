@@ -301,10 +301,17 @@ impl BossCoordinator {
                 *plan_guard = Some(loaded_plan.clone());
             }
 
-            // Init actor session from plan — deterministic A/B ids, no real spawn yet.
+            // Init actor session — prefer persisted snapshot so A/B identity
+            // (session_id / task_id) survives restart. Fallback to deterministic
+            // placeholder when no snapshot exists (new plan or old plan file).
             {
                 let mut session_guard = coordinator.session.write().await;
-                *session_guard = Some(BossSession::from_plan_id(&loaded_plan.plan_id, stage));
+                *session_guard = Some(
+                    loaded_plan
+                        .session_snapshot
+                        .clone()
+                        .unwrap_or_else(|| BossSession::from_plan_id(&loaded_plan.plan_id, stage)),
+                );
             }
 
             // Bootstrap actor runtimes for A and B.
@@ -742,9 +749,7 @@ impl BossCoordinator {
         let path_to_save = self.status.read().await.planning_file.clone();
         if let Some(path_str) = path_to_save {
             let path = std::path::PathBuf::from(path_str);
-            if let Some(plan) = self.plan.read().await.as_ref() {
-                save_plan(plan, &path).await?;
-            }
+            self.save_plan_with_session(&path).await?;
         }
 
         // Send FinalizeDocumentation to A mailbox — A's handler drives the stage transition.
@@ -785,9 +790,7 @@ impl BossCoordinator {
         let path_to_save = self.status.read().await.planning_file.clone();
         if let Some(path_str) = path_to_save {
             let path = std::path::PathBuf::from(path_str);
-            if let Some(plan) = self.plan.read().await.as_ref() {
-                save_plan(plan, &path).await?;
-            }
+            self.save_plan_with_session(&path).await?;
         }
 
         self.transition_to(BossStage::Documentation).await?;
@@ -827,9 +830,7 @@ impl BossCoordinator {
             }
             if let Some(path_str) = path_to_save {
                 let path = std::path::PathBuf::from(path_str);
-                if let Some(plan) = self.plan.read().await.as_ref() {
-                    save_plan(plan, &path).await?;
-                }
+                self.save_plan_with_session(&path).await?;
             }
         }
 
@@ -2021,6 +2022,22 @@ pub async fn load_plan(path: &std::path::Path) -> anyhow::Result<BossPlan> {
     let content = tokio::fs::read_to_string(path).await?;
     let plan = serde_json::from_str(&content)?;
     Ok(plan)
+}
+
+impl BossCoordinator {
+    /// Save the current plan to disk, embedding the current session snapshot so
+    /// A/B identity (session_id / task_id) survives a restart.
+    /// Liveness of the stored task_id is NOT guaranteed — callers must do a
+    /// live-task check before reusing it.
+    async fn save_plan_with_session(&self, path: &std::path::Path) -> anyhow::Result<()> {
+        let session_snap = self.session.read().await.clone();
+        let mut plan_guard = self.plan.write().await;
+        if let Some(plan) = plan_guard.as_mut() {
+            plan.session_snapshot = session_snap;
+            save_plan(plan, path).await?;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]

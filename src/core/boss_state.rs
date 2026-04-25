@@ -49,6 +49,12 @@ pub struct BossPlan {
     pub steps: Vec<BossPlanStep>,
     pub accepted_by_user: bool,
     pub auto_sequence: bool,
+    /// Persisted A/B session identity snapshot.
+    /// Restored on `/boss` re-entry so A/B task_id / session_id survive restart.
+    /// Liveness (whether the task is still running) is NOT guaranteed — callers
+    /// must perform a live-task check before reusing the stored task_id.
+    #[serde(default)]
+    pub session_snapshot: Option<BossSession>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
