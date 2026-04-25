@@ -4026,3 +4026,139 @@ async fn t22_3_b_child_cannot_spawn_grandchild_agent() {
         "error must mention boss spawn policy, got: {err}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// T22.3 production path evidence
+// ---------------------------------------------------------------------------
+
+/// T22.3.1 production path: finalize_documentation_loop walks the real
+/// build_spec_review_fn → ensure_b_session (skipped, pre-seeded) → ask_b_session
+/// → ReviewSpec mailbox → SpecReviewed feedback stored in plan.
+///
+/// B's session is a fake Running task that appends output when it receives a message.
+#[tokio::test]
+async fn t22_3_production_path_doc_b_reviewer_via_ask_b_session() {
+    let plan_id = "t22-3-prod-doc";
+    let plan_path = std::env::temp_dir().join("t22_3_prod_doc.json");
+    let plan = BossPlan {
+        plan_id: plan_id.into(),
+        accepted_by_user: false,
+        auto_sequence: false,
+        steps: vec![boss_step(0, "step zero")],
+        ..Default::default()
+    };
+    save_plan(&plan, &plan_path).await.unwrap();
+
+    let coordinator = BossCoordinator::restore_or_init(&plan_path).await.unwrap();
+    let unique_dir = std::env::temp_dir().join("t22_3_prod_doc_output");
+    let task_manager = Arc::new(TaskManager::new_with_output_root(unique_dir));
+    let app_state = app_state_with_tasks("session-t22-3-prod-doc", task_manager.clone());
+
+    // Create a fake B task that stays Running and responds to send_message.
+    let fake_b = task_manager.create_with_type(
+        "fake B session",
+        TaskType::LocalAgent,
+        "session-t22-3-prod-doc",
+        InteractionSurface::Cli,
+    );
+    let b_task_id = fake_b.id.clone();
+    let tm_for_b = task_manager.clone();
+    let b_id_for_loop = b_task_id.clone();
+    task_manager.launch(&b_task_id, "", async move {
+        // Respond to any incoming message by appending output.
+        loop {
+            let messages = tm_for_b.drain_mailbox(&b_id_for_loop);
+            for msg in messages {
+                let feedback = format!("FEEDBACK: B reviewed spec — {msg} needs auth error handling");
+                tm_for_b.append_output(&b_id_for_loop, &feedback);
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        }
+    });
+
+    // Pre-seed B's session_id so ensure_b_session skips spawning.
+    coordinator.record_b_session_id_pub(&b_task_id).await;
+
+    // Wire the production callbacks (build_spec_review_fn uses ask_b_session).
+    coordinator.bootstrap_actor_registry_with_app_state(&app_state).await;
+
+    // finalize with empty review_feedback — B must supply it via ask_b_session.
+    coordinator
+        .finalize_documentation_loop(
+            "implement login with OAuth",
+            "",
+            "revised per B feedback",
+            "final spec",
+            "pseudo code",
+        )
+        .await
+        .unwrap();
+
+    let plan_guard = coordinator.plan.read().await;
+    let stored_feedback = plan_guard.as_ref().unwrap().review_feedback.clone().unwrap_or_default();
+    assert!(
+        stored_feedback.contains("FEEDBACK:"),
+        "B's real feedback must be stored, got: {stored_feedback}"
+    );
+    assert!(
+        stored_feedback.contains("auth error handling"),
+        "B's feedback must reference the spec content, got: {stored_feedback}"
+    );
+
+    let _ = std::fs::remove_file(&plan_path);
+}
+
+/// T22.3.2 production path: advance_plan walks the real build_exec_fn →
+/// invoke_agent_tool_with_task_id → AgentTool.invoke → creates a child task
+/// in the task manager. Verifies the task manager has a new task after dispatch.
+#[tokio::test]
+async fn t22_3_production_path_exec_b_creates_child_task_via_agent_tool() {
+    let plan_id = "t22-3-prod-exec";
+    let plan_path = std::env::temp_dir().join("t22_3_prod_exec.json");
+    let plan = BossPlan {
+        plan_id: plan_id.into(),
+        accepted_by_user: true,
+        auto_sequence: true,
+        steps: vec![boss_step(0, "implement auth module")],
+        ..Default::default()
+    };
+    save_plan(&plan, &plan_path).await.unwrap();
+
+    let coordinator = BossCoordinator::restore_or_init(&plan_path).await.unwrap();
+    let task_manager = Arc::new(TaskManager::default());
+    let app_state = app_state_with_tasks("session-t22-3-prod-exec", task_manager.clone());
+
+    // Wire the production exec_fn (build_exec_fn → invoke_agent_tool_with_task_id).
+    coordinator.bootstrap_actor_registry_with_app_state(&app_state).await;
+
+    let tasks_before = task_manager.list().len();
+
+    // advance_plan → DispatchStep → exec_fn → AgentTool.invoke → new child task.
+    coordinator.advance_plan(&app_state).await.unwrap();
+    // Give exec_fn time to fire asynchronously.
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+    let tasks_after = task_manager.list().len();
+    assert!(
+        tasks_after > tasks_before,
+        "AgentTool must have created at least one child task (before={tasks_before}, after={tasks_after})"
+    );
+
+    // The new task must have B's actor role label.
+    let new_tasks: Vec<_> = task_manager
+        .list()
+        .into_iter()
+        .filter(|t| t.boss_actor_id.is_some())
+        .collect();
+    assert!(
+        !new_tasks.is_empty(),
+        "at least one task must have a boss_actor_id set (B's child)"
+    );
+
+    // B's session_id must be non-placeholder after exec_fn fires.
+    let b_session = coordinator.b_session_id().await;
+    let placeholder = format!("boss-{plan_id}-b");
+    assert_ne!(b_session, placeholder, "B session_id must be real after exec_fn fires");
+
+    let _ = std::fs::remove_file(&plan_path);
+}
