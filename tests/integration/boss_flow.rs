@@ -2868,3 +2868,134 @@ async fn finalize_documentation_loop_after_full_restore_does_not_replace_registr
 
     let _ = std::fs::remove_file(&plan_path);
 }
+
+// ---------------------------------------------------------------------------
+// T16.6.H.6 — Production assembly default: full registry from new_with_runtime_owner
+// ---------------------------------------------------------------------------
+
+/// Simulates the production assembly path: new_with_runtime_owner + bootstrap_actor_registry_with_app_state.
+/// The coordinator must have has_executor && has_a_callbacks immediately after bootstrap.
+#[tokio::test]
+async fn production_assembly_produces_full_registry() {
+    use rust_agent::core::boss_runtime::BossRuntimeOwner;
+    let task_manager = Arc::new(TaskManager::default());
+    let app_state = app_state_with_tasks("session-h6-prod", task_manager.clone());
+
+    let runtime_owner = Arc::new(BossRuntimeOwner::default());
+    let coordinator = Arc::new(BossCoordinator::new_with_runtime_owner(runtime_owner));
+
+    coordinator.bootstrap_actor_registry_with_app_state(&app_state).await;
+
+    let (has_exec, has_a) = {
+        let guard = coordinator.actor_registry.read().await;
+        let r = guard.as_ref().unwrap();
+        (r.has_executor, r.has_a_callbacks)
+    };
+    assert!(has_exec, "production assembly must produce has_executor=true");
+    assert!(has_a, "production assembly must produce has_a_callbacks=true");
+}
+
+/// After production assembly bootstrap, advance_plan does not trigger a mode upgrade.
+#[tokio::test]
+async fn advance_plan_after_production_assembly_does_not_upgrade_registry() {
+    use rust_agent::core::boss_runtime::BossRuntimeOwner;
+    let plan_path = std::env::temp_dir().join("boss_h6_advance_no_upgrade.json");
+    let plan = BossPlan {
+        plan_id: "plan-h6-advance".into(),
+        accepted_by_user: true,
+        auto_sequence: false,
+        steps: vec![boss_step(0, "step zero")],
+        ..Default::default()
+    };
+    save_plan(&plan, &plan_path).await.unwrap();
+
+    let task_manager = Arc::new(TaskManager::default());
+    let app_state = app_state_with_tasks("session-h6-advance", task_manager.clone());
+
+    let runtime_owner = Arc::new(BossRuntimeOwner::default());
+    let coordinator = BossCoordinator::new_with_runtime_owner(runtime_owner);
+
+    {
+        let loaded = rust_agent::core::boss::load_plan(&plan_path).await.unwrap();
+        let mut guard = coordinator.plan.write().await;
+        *guard = Some(loaded);
+        let mut status = coordinator.status.write().await;
+        status.planning_file = Some(plan_path.to_string_lossy().into_owned());
+        status.stage = rust_agent::core::boss_state::BossStage::Execution;
+    }
+
+    coordinator.bootstrap_actor_registry_with_app_state(&app_state).await;
+
+    let b_ptr_before = {
+        let guard = coordinator.actor_registry.read().await;
+        Arc::as_ptr(&guard.as_ref().unwrap().executor_b.state) as usize
+    };
+
+    coordinator.advance_plan(&app_state).await.unwrap();
+    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+
+    let b_ptr_after = {
+        let guard = coordinator.actor_registry.read().await;
+        Arc::as_ptr(&guard.as_ref().unwrap().executor_b.state) as usize
+    };
+
+    assert_eq!(
+        b_ptr_before, b_ptr_after,
+        "advance_plan must not upgrade registry after production assembly bootstrap"
+    );
+
+    let _ = std::fs::remove_file(&plan_path);
+}
+
+/// After production assembly bootstrap, finalize_documentation_loop does not trigger a mode upgrade.
+#[tokio::test]
+async fn finalize_documentation_loop_after_production_assembly_does_not_upgrade_registry() {
+    use rust_agent::core::boss_runtime::BossRuntimeOwner;
+    let plan_path = std::env::temp_dir().join("boss_h6_finalize_no_upgrade.json");
+    let plan = BossPlan {
+        plan_id: "plan-h6-finalize".into(),
+        accepted_by_user: false,
+        auto_sequence: false,
+        steps: vec![boss_step(0, "step zero")],
+        ..Default::default()
+    };
+    save_plan(&plan, &plan_path).await.unwrap();
+
+    let task_manager = Arc::new(TaskManager::default());
+    let app_state = app_state_with_tasks("session-h6-finalize", task_manager.clone());
+
+    let runtime_owner = Arc::new(BossRuntimeOwner::default());
+    let coordinator = BossCoordinator::new_with_runtime_owner(runtime_owner);
+
+    {
+        let loaded = rust_agent::core::boss::load_plan(&plan_path).await.unwrap();
+        let mut guard = coordinator.plan.write().await;
+        *guard = Some(loaded);
+        let mut status = coordinator.status.write().await;
+        status.planning_file = Some(plan_path.to_string_lossy().into_owned());
+    }
+
+    coordinator.bootstrap_actor_registry_with_app_state(&app_state).await;
+
+    let a_ptr_before = {
+        let guard = coordinator.actor_registry.read().await;
+        Arc::as_ptr(&guard.as_ref().unwrap().designer_a.state) as usize
+    };
+
+    coordinator
+        .finalize_documentation_loop("draft", "feedback", "notes", "final spec", "pseudo")
+        .await
+        .unwrap();
+
+    let a_ptr_after = {
+        let guard = coordinator.actor_registry.read().await;
+        Arc::as_ptr(&guard.as_ref().unwrap().designer_a.state) as usize
+    };
+
+    assert_eq!(
+        a_ptr_before, a_ptr_after,
+        "finalize_documentation_loop must not upgrade registry after production assembly bootstrap"
+    );
+
+    let _ = std::fs::remove_file(&plan_path);
+}

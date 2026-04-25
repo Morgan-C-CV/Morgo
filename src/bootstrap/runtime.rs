@@ -479,6 +479,13 @@ impl RuntimeBootstrap {
         let router = finalized.router;
         let engine = finalized.engine;
 
+        // Bootstrap actor runtimes with full A+B callbacks now that AppState is available.
+        // This eliminates the state-only phase and prevents lazy mode upgrades on first entry.
+        if let Some(boss) = app_state.boss_coordinator.as_ref() {
+            let app_arc = Arc::new(app_state.clone());
+            boss.bootstrap_actor_registry_with_app_state(&app_arc).await;
+        }
+
         if let Some(task_manager) = app_state.permission_context.task_manager.as_ref() {
             task_manager.set_activity_tracker(app_state.last_activity_ts.clone());
         }
