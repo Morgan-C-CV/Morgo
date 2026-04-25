@@ -399,7 +399,7 @@ impl BossCoordinator {
         let mut force_drained = false;
         for task_id in pending_after_cancel {
             force_drained = true;
-            if tasks.kill(&task_id, requester_session_id, dispatcher) && !killed.contains(&task_id) {
+            if tasks.force_kill(&task_id, dispatcher) && !killed.contains(&task_id) {
                 killed.push(task_id.clone());
             }
         }

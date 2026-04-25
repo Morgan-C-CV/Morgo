@@ -415,6 +415,24 @@ impl TaskManager {
         true
     }
 
+    pub fn force_kill(&self, id: &str, dispatcher: &NotificationDispatcher) -> bool {
+        let is_active = matches!(self.status(id), Some(TaskStatus::Pending | TaskStatus::Running));
+        if !is_active {
+            return false;
+        }
+        if let Some(handle) = self
+            .runtime_store
+            .write()
+            .expect("task runtime store poisoned")
+            .abort_handles
+            .remove(id)
+        {
+            handle.abort();
+        }
+        self.finish(id, TaskStatus::Killed, dispatcher, None);
+        true
+    }
+
     pub fn hibernate_owned_running_tasks(
         &self,
         owner_session_id: &str,

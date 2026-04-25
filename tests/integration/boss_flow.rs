@@ -235,7 +235,7 @@ async fn stop_interrupt_returns_typed_stop_outcome_and_kills_tasks() {
     let task_manager = Arc::new(TaskManager::default());
     let dispatcher = NotificationDispatcher::new(TelegramGateway::default());
     let (coordinator, plan_path) = coordinator_with_plan(
-        boss_plan(vec![boss_step(0, "Cancellable step")]),
+        boss_plan(vec![boss_step(0, "Force-drain step")]),
         "test_boss_stop_interrupt.json",
     )
     .await;
@@ -247,9 +247,7 @@ async fn stop_interrupt_returns_typed_stop_outcome_and_kills_tasks() {
         InteractionSurface::Cli,
     );
     task_manager.set_boss_actor_id(&b_task.id, Some("executor_b:depth=0".into()));
-    task_manager.launch(&b_task.id, "executor b running", async {
-        tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
-    });
+    task_manager.start(&b_task.id);
 
     {
         let mut session = coordinator.session.write().await;
@@ -272,7 +270,14 @@ async fn stop_interrupt_returns_typed_stop_outcome_and_kills_tasks() {
 
     match response {
         BossControlResponse::Stop(outcome) => {
-            assert!(outcome.stages.contains(&BossStopStage::CancelIssued));
+            assert_eq!(
+                outcome.stages,
+                vec![
+                    BossStopStage::CancelIssued,
+                    BossStopStage::DeadlineExpired,
+                    BossStopStage::ForceDrain,
+                ]
+            );
             assert!(outcome.killed_task_ids.contains(&b_task.id));
         }
         other => panic!("expected stop outcome, got {other:?}"),
