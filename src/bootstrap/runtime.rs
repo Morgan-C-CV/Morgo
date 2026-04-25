@@ -307,6 +307,7 @@ pub struct RuntimeInitializeBundle {
     pub api_client: ModelProviderClient,
     pub compactor: ReactiveCompactor,
     pub subagent_limiter: Arc<SubagentLimiter>,
+    pub boss_runtime_host: Option<BossRuntimeHost>,
     pub boss_coordinator: Option<Arc<BossCoordinator>>,
     pub startup_warnings: crate::bootstrap::warnings::StartupWarnings,
 }
@@ -342,6 +343,7 @@ pub struct FinalizedRuntime {
     pub engine: QueryEngine,
     #[allow(dead_code)]
     pub prompts: PromptAugmentation,
+    pub boss_runtime_host: Option<BossRuntimeHost>,
 }
 
 impl std::fmt::Debug for RuntimeInitializeBundle {
@@ -481,11 +483,14 @@ impl RuntimeBootstrap {
 
         // Bootstrap actor runtimes with full A+B callbacks now that AppState is available.
         // BossCoordinator must be constructed before AppState (it is a field of AppState),
-        // so new_with_app_state() cannot be used here. This explicit call is the equivalent
-        // two-step: new_with_runtime_owner (sync, above) + bootstrap_actor_registry_with_app_state.
-        if let Some(boss) = app_state.boss_coordinator.as_ref() {
+        // so new_with_app_state() cannot be used here. Route through host.bootstrap_coordinator
+        // to keep the factory contract in one place.
+        if let (Some(host), Some(boss)) = (
+            finalized.boss_runtime_host.as_ref(),
+            app_state.boss_coordinator.as_ref(),
+        ) {
             let app_arc = Arc::new(app_state.clone());
-            boss.bootstrap_actor_registry_with_app_state(&app_arc).await;
+            host.bootstrap_coordinator(boss, &app_arc).await;
         }
 
         if let Some(task_manager) = app_state.permission_context.task_manager.as_ref() {
@@ -884,6 +889,7 @@ impl RuntimeBootstrap {
             api_client,
             compactor: ReactiveCompactor,
             subagent_limiter,
+            boss_runtime_host: Some(boss_runtime_host),
             boss_coordinator: Some(boss_coordinator),
             startup_warnings,
         })
@@ -1073,6 +1079,7 @@ impl RuntimeBootstrap {
             router,
             engine,
             prompts,
+            boss_runtime_host: initialize_bundle.boss_runtime_host,
         }
     }
 

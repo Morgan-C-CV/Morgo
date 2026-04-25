@@ -3129,3 +3129,70 @@ async fn h8_new_with_runtime_owner_alone_is_not_full_mode() {
     let has_registry = coordinator.actor_registry.read().await.is_some();
     assert!(!has_registry, "h8: new_with_runtime_owner alone must not produce a registry");
 }
+
+// ---------------------------------------------------------------------------
+// T16.6.H.9 — BossRuntimeHost is the first-class factory / host contract
+// ---------------------------------------------------------------------------
+
+/// BossRuntimeHost::build_coordinator produces a full-mode coordinator in one call.
+#[tokio::test]
+async fn h9_host_build_coordinator_is_full_mode() {
+    use rust_agent::core::boss_runtime::BossRuntimeHost;
+    let host = BossRuntimeHost::new();
+    let task_manager = Arc::new(TaskManager::default());
+    let app_state = app_state_with_tasks("session-h9-build", task_manager);
+
+    let coordinator = host.build_coordinator(&app_state).await;
+
+    let guard = coordinator.actor_registry.read().await;
+    let registry = guard.as_ref().unwrap();
+    assert!(registry.has_executor, "h9: host.build_coordinator must set has_executor");
+    assert!(registry.has_a_callbacks, "h9: host.build_coordinator must set has_a_callbacks");
+}
+
+/// BossRuntimeHost::bootstrap_coordinator brings an existing coordinator to full mode.
+/// This is the production path when coordinator is a field of AppState.
+#[tokio::test]
+async fn h9_host_bootstrap_coordinator_brings_existing_to_full_mode() {
+    use rust_agent::core::boss_runtime::{BossRuntimeHost, BossRuntimeOwner};
+    let host = BossRuntimeHost::new();
+    let runtime_owner = Arc::new(BossRuntimeOwner::default());
+    let coordinator = Arc::new(BossCoordinator::new_with_runtime_owner(runtime_owner));
+    let task_manager = Arc::new(TaskManager::default());
+    let app_state = app_state_with_tasks("session-h9-bootstrap", task_manager);
+
+    // Before: no registry.
+    assert!(coordinator.actor_registry.read().await.is_none());
+
+    host.bootstrap_coordinator(&coordinator, &app_state).await;
+
+    let guard = coordinator.actor_registry.read().await;
+    let registry = guard.as_ref().unwrap();
+    assert!(registry.has_executor, "h9: host.bootstrap_coordinator must set has_executor");
+    assert!(registry.has_a_callbacks, "h9: host.bootstrap_coordinator must set has_a_callbacks");
+}
+
+/// bootstrap_coordinator is idempotent — calling it twice does not replace the registry.
+#[tokio::test]
+async fn h9_host_bootstrap_coordinator_is_idempotent() {
+    use rust_agent::core::boss_runtime::{BossRuntimeHost, BossRuntimeOwner};
+    let host = BossRuntimeHost::new();
+    let runtime_owner = Arc::new(BossRuntimeOwner::default());
+    let coordinator = Arc::new(BossCoordinator::new_with_runtime_owner(runtime_owner));
+    let task_manager = Arc::new(TaskManager::default());
+    let app_state = app_state_with_tasks("session-h9-idem", task_manager);
+
+    host.bootstrap_coordinator(&coordinator, &app_state).await;
+    let ptr_first = {
+        let guard = coordinator.actor_registry.read().await;
+        Arc::as_ptr(&guard.as_ref().unwrap().executor_b.state) as usize
+    };
+
+    host.bootstrap_coordinator(&coordinator, &app_state).await;
+    let ptr_second = {
+        let guard = coordinator.actor_registry.read().await;
+        Arc::as_ptr(&guard.as_ref().unwrap().executor_b.state) as usize
+    };
+
+    assert_eq!(ptr_first, ptr_second, "h9: bootstrap_coordinator must be idempotent");
+}

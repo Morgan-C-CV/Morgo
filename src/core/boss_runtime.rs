@@ -123,6 +123,28 @@ impl BossRuntimeHost {
     pub fn owner(&self) -> Arc<BossRuntimeOwner> {
         self.owner.clone()
     }
+
+    /// Full-mode factory — creates a coordinator and immediately bootstraps A+B callbacks.
+    /// This is the preferred production entry point; callers do not need to call
+    /// `bootstrap_actor_registry_with_app_state` separately.
+    pub async fn build_coordinator(
+        &self,
+        app_state: &Arc<crate::state::app_state::AppState>,
+    ) -> Arc<BossCoordinator> {
+        Arc::new(BossCoordinator::new_with_app_state(self.owner.clone(), app_state).await)
+    }
+
+    /// Bootstrap an already-constructed coordinator with full A+B callbacks.
+    /// Use this when the coordinator was constructed before `AppState` was available
+    /// (e.g. the production assembly path where coordinator is a field of AppState).
+    /// After this call the coordinator is in full mode — equivalent to `build_coordinator`.
+    pub async fn bootstrap_coordinator(
+        &self,
+        coordinator: &Arc<BossCoordinator>,
+        app_state: &Arc<crate::state::app_state::AppState>,
+    ) {
+        coordinator.bootstrap_actor_registry_with_app_state(app_state).await;
+    }
 }
 
 impl Default for BossRuntimeHost {
