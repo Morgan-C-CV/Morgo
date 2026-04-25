@@ -203,6 +203,43 @@ impl BossCoordinator {
 
     /// Processes a task event to update the BossPlan by structured step identity.
     pub async fn on_task_event(&self, event: &TaskEvent) -> anyhow::Result<()> {
+        // Group fan-in: task_id starts with "group-" and orchestration_group_id is B's task id.
+        // Find the step whose worker_task_id matches the group_id (B's task id).
+        if event.task_id.starts_with("group-") {
+            if let Some(group_id) = &event.orchestration_group_id {
+                let mut plan_guard = self.plan.write().await;
+                let Some(plan) = plan_guard.as_mut() else {
+                    return Ok(());
+                };
+                let step = plan.steps.iter_mut().find(|s| {
+                    s.worker_task_id.as_deref() == Some(group_id.as_str())
+                });
+                if let Some(step) = step {
+                    let step_id = step.id;
+                    let was_completed = step.completed;
+                    match event.status {
+                        TaskStatus::Completed => {
+                            step.completed = true;
+                            step.status = BossPlanStepStatus::Completed;
+                            tracing::info!("BossPlan: Step {} fan-in completed via group {}", step_id, group_id);
+                        }
+                        TaskStatus::Failed | TaskStatus::Killed => {
+                            step.status = BossPlanStepStatus::Failed;
+                            tracing::warn!("BossPlan: Step {} fan-in failed via group {}", step_id, group_id);
+                        }
+                        _ => {}
+                    }
+                    let next_step = next_unfinished_step_id(plan);
+                    drop(plan_guard);
+                    self.update_current_step(next_step).await;
+                    if event.status == TaskStatus::Completed && !was_completed {
+                        self.maybe_auto_advance_after_completion().await?;
+                    }
+                    return Ok(());
+                }
+            }
+        }
+
         let Some(step_id) = event.step_id else {
             return Ok(());
         };

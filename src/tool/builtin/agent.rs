@@ -124,7 +124,26 @@ impl Tool for AgentTool {
             }
         }
 
-        let request = parse_agent_request(&call.input)?;
+        let mut request = parse_agent_request(&call.input)?;
+
+        // When ExecutorB spawns a child, auto-inject child depth into the child's policy.
+        if let AgentRequest::Spawn(ref mut spawn) = request {
+            if let Some(parent_policy) = &permissions.boss_actor_policy {
+                if spawn.boss_actor_policy.is_none() {
+                    // B is spawning without an explicit child role — default to ImplementChild.
+                    use crate::core::boss_state::{BossActorRole, BossStage};
+                    use crate::state::permission_context::BossActorPolicy;
+                    spawn.boss_actor_policy = Some(BossActorPolicy {
+                        actor_role: BossActorRole::ImplementChild,
+                        lineage_depth: parent_policy.lineage_depth + 1,
+                        phase: BossStage::Execution,
+                    });
+                } else if let Some(child_policy) = spawn.boss_actor_policy.as_mut() {
+                    // Explicit child role provided — enforce depth = parent + 1.
+                    child_policy.lineage_depth = parent_policy.lineage_depth + 1;
+                }
+            }
+        }
 
         let parent_context = build_parent_query_context(permissions.clone());
         let dispatcher = parent_context.app_state.notification_dispatcher.clone();

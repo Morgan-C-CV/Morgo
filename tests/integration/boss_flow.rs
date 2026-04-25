@@ -744,6 +744,159 @@ async fn boss_b_receives_step_context_via_continue_or_mailbox() {
     let _ = std::fs::remove_file(plan_path);
 }
 
+// --- T16.6.C.3: B child spawn contract + fan-in summary ---
+
+#[test]
+fn boss_b_spawns_children_with_child_policy_and_depth() {
+    use rust_agent::state::permission_context::BossActorPolicy;
+
+    // Simulate B (ExecutorB, depth=0) spawning a child with explicit role.
+    let b_policy = BossActorPolicy::executor_b(BossStage::Execution);
+    assert!(b_policy.may_spawn(), "ExecutorB must be allowed to spawn");
+
+    // Child policy: implement_child at depth 1.
+    let child_policy = BossActorPolicy {
+        actor_role: BossActorRole::ImplementChild,
+        lineage_depth: b_policy.lineage_depth + 1,
+        phase: BossStage::Execution,
+    };
+    assert_eq!(child_policy.lineage_depth, 1, "child must be at depth 1");
+    assert!(!child_policy.may_spawn(), "ImplementChild must not be allowed to spawn");
+    assert!(child_policy.actor_role.is_child(), "ImplementChild must be classified as child");
+
+    // Verify all three child roles are blocked from spawning.
+    for role in [
+        BossActorRole::ReviewChild,
+        BossActorRole::ImplementChild,
+        BossActorRole::VerifyChild,
+    ] {
+        let p = BossActorPolicy {
+            actor_role: role,
+            lineage_depth: 1,
+            phase: BossStage::Execution,
+        };
+        assert!(!p.may_spawn(), "{} must not be allowed to spawn", role.as_str());
+    }
+
+    // boss_actor_id recorded on task must encode role and depth.
+    let boss_actor_id = format!("{}:depth={}", child_policy.actor_role.as_str(), child_policy.lineage_depth);
+    assert_eq!(boss_actor_id, "implement_child:depth=1");
+}
+
+#[tokio::test]
+async fn boss_b_fans_out_children_and_fans_in_summary() {
+    let task_manager = Arc::new(TaskManager::default());
+    let app_state = app_state_with_tasks("parent-session-fan-in", task_manager.clone());
+
+    let (coordinator, plan_path) = coordinator_with_plan(
+        boss_plan(vec![boss_step(0, "Fan-out step")]),
+        "test_boss_flow_fan_in.json",
+    )
+    .await;
+
+    // Dispatch step 0 — spawns B fresh.
+    let _ = coordinator
+        .advance_plan(&app_state)
+        .await
+        .unwrap()
+        .expect("step 0 should dispatch");
+
+    let tasks = task_manager.list();
+    assert_eq!(tasks.len(), 1, "one B task after step 0 dispatch");
+    let b_task_id = tasks[0].id.clone();
+
+    // Record B's task id in the session so fan-in can find the step.
+    {
+        let mut guard = coordinator.session.write().await;
+        if let Some(session) = guard.as_mut() {
+            session.executor_b.task_id = Some(b_task_id.clone());
+        }
+    }
+    // Also record B's task id in the step's worker_task_id so fan-in lookup works.
+    {
+        let mut plan_guard = coordinator.plan.write().await;
+        let plan = plan_guard.as_mut().unwrap();
+        plan.steps[0].worker_task_id = Some(b_task_id.clone());
+        plan.steps[0].status = BossPlanStepStatus::Running;
+    }
+
+    // Simulate B spawning two children with orchestration_group_id = B's task id.
+    let child1 = task_manager.create_with_type(
+        "child-impl-1".to_string(),
+        rust_agent::task::types::TaskType::LocalAgent,
+        "parent-session-fan-in".to_string(),
+        InteractionSurface::Cli,
+    );
+    let child2 = task_manager.create_with_type(
+        "child-impl-2".to_string(),
+        rust_agent::task::types::TaskType::LocalAgent,
+        "parent-session-fan-in".to_string(),
+        InteractionSurface::Cli,
+    );
+    task_manager.set_orchestration_group_id(&child1.id, Some(b_task_id.clone()));
+    task_manager.set_orchestration_group_id(&child2.id, Some(b_task_id.clone()));
+    task_manager.set_boss_actor_id(&child1.id, Some("implement_child:depth=1".into()));
+    task_manager.set_boss_actor_id(&child2.id, Some("implement_child:depth=1".into()));
+
+    // Verify group is not yet ready (children still pending).
+    assert!(
+        !task_manager.group_ready_for_fan_in(&b_task_id),
+        "group must not be ready while children are pending"
+    );
+
+    // Complete both children — group fan-in fires.
+    let dispatcher = rust_agent::interaction::dispatcher::NotificationDispatcher::new(
+        rust_agent::interaction::telegram::gateway::TelegramGateway::default(),
+    );
+    task_manager.complete_with_usage(&child1.id, &dispatcher, None);
+    task_manager.complete_with_usage(&child2.id, &dispatcher, None);
+
+    assert!(
+        task_manager.group_ready_for_fan_in(&b_task_id),
+        "group must be ready after all children complete"
+    );
+
+    // Verify group_summary returns a summary for B's group.
+    let summary = task_manager.group_summary(&b_task_id);
+    assert!(summary.is_some(), "group_summary must return a summary when all children complete");
+
+    // Simulate the group fan-in event arriving at the coordinator.
+    let fan_in_event = TaskEvent {
+        task_id: format!("group-{}", b_task_id),
+        task_type: rust_agent::task::types::TaskType::LocalAgent,
+        status: TaskStatus::Completed,
+        step_id: None,
+        owner: rust_agent::task::types::TaskOwner {
+            session_id: "parent-session-fan-in".into(),
+            surface: InteractionSurface::Cli,
+        },
+        target_task_id: Some(b_task_id.clone()),
+        summary: "grouped research tasks completed".into(),
+        result: "Agent task completed".into(),
+        next_action: "synthesize grouped findings".into(),
+        worker_role: None,
+        orchestration_group_id: Some(b_task_id.clone()),
+        phase: None,
+        validation_state: None,
+        output_file: "".into(),
+        usage: None,
+    };
+
+    coordinator.on_task_event(&fan_in_event).await.unwrap();
+
+    // Step 0 must now be marked Completed by the fan-in handler.
+    let plan = coordinator.plan.read().await;
+    let step = &plan.as_ref().unwrap().steps[0];
+    assert_eq!(
+        step.status,
+        BossPlanStepStatus::Completed,
+        "fan-in event must mark the step as Completed"
+    );
+    assert!(step.completed, "step.completed must be true after fan-in");
+
+    let _ = std::fs::remove_file(plan_path);
+}
+
 // --- T16.6.C.2: ExecutorB policy injection ---
 
 #[test]
