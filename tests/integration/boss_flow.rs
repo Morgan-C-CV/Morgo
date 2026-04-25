@@ -526,6 +526,68 @@ async fn control_mailbox_runtime_remains_available_after_rebind() {
 }
 
 #[tokio::test]
+async fn coordinators_with_same_plan_id_do_not_collide_in_runtime_registry() {
+    let task_manager = Arc::new(TaskManager::default());
+    let dispatcher = NotificationDispatcher::new(TelegramGateway::default());
+    let plan = boss_plan(vec![boss_step(0, "Same plan id step")]);
+    let (coordinator_a, path_a) =
+        coordinator_with_plan(plan.clone(), "test_boss_same_plan_a.json").await;
+    let (coordinator_b, path_b) = coordinator_with_plan(plan, "test_boss_same_plan_b.json").await;
+
+    coordinator_a.ensure_control_runtime().await;
+    coordinator_b.ensure_control_runtime().await;
+
+    let key_a = coordinator_a.current_runtime_key().await.unwrap();
+    let key_b = coordinator_b.current_runtime_key().await.unwrap();
+    assert_ne!(key_a, key_b, "same plan_id coordinators must have distinct runtime keys");
+
+    let response_a = coordinator_a
+        .handle_control_request(BossControlRequest::Report, &task_manager, &dispatcher)
+        .await
+        .unwrap();
+    let response_b = coordinator_b
+        .handle_control_request(BossControlRequest::Report, &task_manager, &dispatcher)
+        .await
+        .unwrap();
+    assert!(matches!(response_a, BossControlResponse::Report(_)));
+    assert!(matches!(response_b, BossControlResponse::Report(_)));
+
+    let _ = std::fs::remove_file(path_a);
+    let _ = std::fs::remove_file(path_b);
+}
+
+#[tokio::test]
+async fn old_runtime_is_shutdown_and_unavailable_after_rebind() {
+    let task_manager = Arc::new(TaskManager::default());
+    let dispatcher = NotificationDispatcher::new(TelegramGateway::default());
+    let (coordinator, plan_path) = coordinator_with_plan(
+        boss_plan(vec![boss_step(0, "Shutdown old runtime step")]),
+        "test_boss_old_runtime_shutdown.json",
+    )
+    .await;
+
+    coordinator.ensure_control_runtime().await;
+    let old_key = coordinator.current_runtime_key().await.unwrap();
+    let old_runtime = rust_agent::core::boss_runtime::BossRuntimeRegistry::global()
+        .get(&old_key)
+        .expect("old runtime must exist before rebind");
+
+    coordinator.rebind_control_runtime().await;
+    let new_key = coordinator.current_runtime_key().await.unwrap();
+    assert_ne!(old_key, new_key);
+    assert!(old_runtime.is_closed(), "old runtime must be explicitly shut down");
+    assert!(
+        old_runtime
+            .request(BossControlRequest::Report, task_manager.clone(), dispatcher.clone())
+            .await
+            .is_err(),
+        "old runtime must reject requests after shutdown"
+    );
+
+    let _ = std::fs::remove_file(plan_path);
+}
+
+#[tokio::test]
 async fn boss_auto_advances_to_next_step_after_completion() {
     let (coordinator, plan_path) = coordinator_with_plan(
         boss_plan(vec![

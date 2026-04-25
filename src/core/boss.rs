@@ -45,6 +45,17 @@ impl BossCoordinator {
         *auto = Some(app_state);
     }
 
+    pub async fn current_runtime_key(&self) -> Option<String> {
+        self.runtime_key.read().await.clone()
+    }
+
+    pub async fn runtime_is_closed_for_testing(&self, key: &str) -> bool {
+        BossRuntimeRegistry::global()
+            .get(key)
+            .map(|runtime| runtime.is_closed())
+            .unwrap_or(true)
+    }
+
     pub async fn has_control_runtime(&self) -> bool {
         self.runtime_key
             .read()
@@ -63,13 +74,14 @@ impl BossCoordinator {
         {
             return;
         }
-        let key = self
+        let plan_id = self
             .plan
             .read()
             .await
             .as_ref()
             .map(|plan| plan.plan_id.clone())
             .unwrap_or_else(|| "boss-default".into());
+        let key = BossRuntimeRegistry::fresh_runtime_key(&plan_id);
         let runtime = BossControlRuntime::spawn(self.clone_for_runtime());
         BossRuntimeRegistry::global().bind(key.clone(), runtime);
         *runtime_key = Some(key);
@@ -78,15 +90,18 @@ impl BossCoordinator {
     pub async fn rebind_control_runtime(&self) {
         let mut runtime_key = self.runtime_key.write().await;
         if let Some(key) = runtime_key.as_ref() {
-            BossRuntimeRegistry::global().unbind(key);
+            if let Some(runtime) = BossRuntimeRegistry::global().unbind(key) {
+                runtime.shutdown();
+            }
         }
-        let key = self
+        let plan_id = self
             .plan
             .read()
             .await
             .as_ref()
             .map(|plan| plan.plan_id.clone())
             .unwrap_or_else(|| "boss-default".into());
+        let key = BossRuntimeRegistry::fresh_runtime_key(&plan_id);
         let runtime = BossControlRuntime::spawn(self.clone_for_runtime());
         BossRuntimeRegistry::global().bind(key.clone(), runtime);
         *runtime_key = Some(key);
