@@ -1838,6 +1838,9 @@ impl BossCoordinator {
             .unwrap_or("")
             .to_string();
 
+        // Trim outbound payload before sending — does not modify BossPlan or session_snapshot.
+        let message = trim_context_payload(&message, B_CONTEXT_TRIM_THRESHOLD, B_CONTEXT_KEEP_CHARS);
+
         let offset_before = tasks.get_output(&task_id, 0).map(|s| s.next_offset).unwrap_or(0);
 
         let tasks_clone = tasks.clone();
@@ -2024,6 +2027,32 @@ pub async fn load_plan(path: &std::path::Path) -> anyhow::Result<BossPlan> {
     Ok(plan)
 }
 
+/// Default character threshold above which outbound B context payloads are trimmed.
+pub const B_CONTEXT_TRIM_THRESHOLD: usize = 80_000;
+/// Default number of characters to keep (tail window) when trimming.
+pub const B_CONTEXT_KEEP_CHARS: usize = 40_000;
+
+/// Trim an outbound B context payload to at most `keep_chars` characters.
+///
+/// If `payload.len() <= threshold`, returns the payload unchanged.
+/// Otherwise, keeps the last `keep_chars` characters and prepends a fixed notice line
+/// so the provider knows earlier context was omitted.
+///
+/// This operates only on the runtime payload string — it never touches BossPlan,
+/// session_snapshot, or any persisted state.
+pub fn trim_context_payload(payload: &str, threshold: usize, keep_chars: usize) -> String {
+    if payload.len() <= threshold {
+        return payload.to_string();
+    }
+    let omitted = payload.len().saturating_sub(keep_chars);
+    let tail = if keep_chars >= payload.len() {
+        payload
+    } else {
+        &payload[payload.len() - keep_chars..]
+    };
+    format!("[trimmed earlier context: {omitted} chars omitted]\n{tail}")
+}
+
 impl BossCoordinator {
     /// Save the current plan to disk, embedding the current session snapshot so
     /// A/B identity (session_id / task_id) survives a restart.
@@ -2159,6 +2188,7 @@ mod tests {
             steps: vec![],
             accepted_by_user: true,
             auto_sequence: false,
+            session_snapshot: None,
         };
 
         let temp_dir = std::env::temp_dir();

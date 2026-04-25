@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use rust_agent::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
-use rust_agent::core::boss::{BossCoordinator, load_plan, save_plan};
+use rust_agent::core::boss::{BossCoordinator, load_plan, save_plan, trim_context_payload, B_CONTEXT_TRIM_THRESHOLD, B_CONTEXT_KEEP_CHARS};
 use rust_agent::core::boss_actor_runtime::{
     BossActorRegistry, DesignerARuntime, ExecutionFn, ExecutorBRuntime, SpecReviewFn,
 };
@@ -4686,6 +4686,78 @@ async fn t24_stale_task_id_does_not_panic_on_restore() {
         Some("stale-task-id-does-not-exist"),
         "stale task_id must be restored without panic"
     );
+
+    let _ = std::fs::remove_file(&plan_path);
+}
+
+// ── T25: B session context window management ─────────────────────────────────
+
+/// T25.1: Payload below threshold is returned unchanged.
+#[test]
+fn t25_no_trim_when_payload_below_threshold() {
+    let short = "hello world".to_string();
+    let result = trim_context_payload(&short, B_CONTEXT_TRIM_THRESHOLD, B_CONTEXT_KEEP_CHARS);
+    assert_eq!(result, short);
+}
+
+/// T25.2: Payload above threshold is trimmed to at most keep_chars + notice line.
+#[test]
+fn t25_trim_triggered_when_payload_exceeds_threshold() {
+    let threshold = 100usize;
+    let keep = 40usize;
+    let payload = "x".repeat(200);
+    let result = trim_context_payload(&payload, threshold, keep);
+    assert!(result.len() < payload.len(), "trimmed result should be shorter");
+    let lines: Vec<&str> = result.splitn(2, '\n').collect();
+    assert_eq!(lines.len(), 2);
+    assert!(lines[1].len() <= keep);
+}
+
+/// T25.3: Trim notice is inserted at the head with the correct format.
+#[test]
+fn t25_trim_notice_inserted_at_head() {
+    let threshold = 50usize;
+    let keep = 20usize;
+    let payload = "a".repeat(100);
+    let result = trim_context_payload(&payload, threshold, keep);
+    let first_line = result.lines().next().unwrap_or("");
+    assert!(
+        first_line.starts_with("[trimmed earlier context:") && first_line.contains("chars omitted]"),
+        "notice line must match fixed format, got: {first_line}"
+    );
+}
+
+/// T25.4: The most recent `keep_chars` characters are preserved verbatim.
+#[test]
+fn t25_recent_content_preserved_after_trim() {
+    let threshold = 50usize;
+    let keep = 20usize;
+    let payload = format!("{}{}", "old_content_".repeat(10), "RECENT_TAIL_END_HERE");
+    let result = trim_context_payload(&payload, threshold, keep);
+    assert!(
+        result.contains("RECENT_TAIL_END_HERE"),
+        "recent tail must be present in trimmed result"
+    );
+}
+
+/// T25.5: trim_context_payload does not modify BossPlan or session_snapshot.
+#[tokio::test]
+async fn t25_trim_does_not_persist_to_plan_or_snapshot() {
+    let plan_path = std::env::temp_dir().join("t25_no_persist.json");
+    let plan = BossPlan {
+        plan_id: "t25-no-persist".into(),
+        task_description: "trim persistence test".into(),
+        steps: vec![boss_step(0, "step zero")],
+        ..Default::default()
+    };
+    save_plan(&plan, &plan_path).await.unwrap();
+
+    let large_payload = "context_data_".repeat(10_000);
+    let _trimmed = trim_context_payload(&large_payload, B_CONTEXT_TRIM_THRESHOLD, B_CONTEXT_KEEP_CHARS);
+
+    let reloaded = load_plan(&plan_path).await.unwrap();
+    assert_eq!(reloaded.plan_id, "t25-no-persist");
+    assert!(reloaded.session_snapshot.is_none(), "session_snapshot must not be written by trim");
 
     let _ = std::fs::remove_file(&plan_path);
 }
