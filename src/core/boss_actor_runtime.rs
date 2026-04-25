@@ -1,9 +1,16 @@
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use tokio::sync::{mpsc, oneshot, RwLock};
 
 use crate::core::boss_state::{BossActorRole, BossActorStatus, BossStage};
+
+/// Callback type for B's execution side effect.
+/// Takes the step payload string, returns the tool invocation result.
+pub type ExecutionFn =
+    Arc<dyn Fn(String) -> Pin<Box<dyn Future<Output = anyhow::Result<String>> + Send>> + Send + Sync>;
 
 // ---------------------------------------------------------------------------
 // Commands
@@ -15,7 +22,7 @@ pub enum DesignerACommand {
     /// Deliver a plan document for A to review.
     Plan { plan_id: String, document_spec: String },
     /// Ask A to review a completed step output.
-    Review { step_id: usize, summary: String },
+    Review { step_id: usize, accepted: bool, summary: String },
     /// Notify A that the user approved the plan.
     Approve,
     /// Stop A's runtime.
@@ -192,7 +199,13 @@ impl DesignerARuntime {
 }
 
 impl ExecutorBRuntime {
+    /// Spawn with no execution side effect (state-only).
     pub fn spawn() -> Self {
+        Self::spawn_with_executor(None)
+    }
+
+    /// Spawn with an execution callback — B's handler calls it for DispatchStep/ContinueStep.
+    pub fn spawn_with_executor(exec_fn: Option<ExecutionFn>) -> Self {
         let (tx, mut rx) = mpsc::channel::<ExecutorBEnvelope>(16);
         let closed = Arc::new(AtomicBool::new(false));
         let state = Arc::new(RwLock::new(BossActorState::default()));
@@ -201,7 +214,9 @@ impl ExecutorBRuntime {
 
         let join = tokio::spawn(async move {
             while let Some(envelope) = rx.recv().await {
-                let event = handle_executor_b_command(envelope.command, &state_loop).await;
+                let event =
+                    handle_executor_b_command(envelope.command, &state_loop, exec_fn.as_ref())
+                        .await;
                 if let Some(respond_to) = envelope.respond_to {
                     let _ = respond_to.send(event.clone());
                 }
@@ -247,13 +262,13 @@ async fn handle_designer_a_command(
                 status: BossActorStatus::Active,
             }
         }
-        DesignerACommand::Review { step_id, summary } => {
+        DesignerACommand::Review { step_id, accepted, summary } => {
             let mut s = state.write().await;
             s.status = BossActorStatus::Active;
             s.current_step = Some(step_id);
             BossActorEvent::ReviewComplete {
                 step_id,
-                accepted: true,
+                accepted,
                 summary,
             }
         }
@@ -276,20 +291,32 @@ async fn handle_designer_a_command(
 async fn handle_executor_b_command(
     command: ExecutorBCommand,
     state: &Arc<RwLock<BossActorState>>,
+    exec_fn: Option<&ExecutionFn>,
 ) -> BossActorEvent {
     match command {
-        ExecutorBCommand::DispatchStep { step_id, payload: _ } => {
-            let mut s = state.write().await;
-            s.status = BossActorStatus::Active;
-            s.current_step = Some(step_id);
+        ExecutorBCommand::DispatchStep { step_id, payload } => {
+            {
+                let mut s = state.write().await;
+                s.status = BossActorStatus::Active;
+                s.current_step = Some(step_id);
+            }
+            // Call the execution side effect if wired — B owns the tool invocation.
+            if let Some(f) = exec_fn {
+                let _ = f(payload).await;
+            }
             BossActorEvent::StepDispatched {
                 step_id,
                 task_id: format!("b-task-step-{step_id}"),
             }
         }
-        ExecutorBCommand::ContinueStep { step_id, task_id, payload: _ } => {
-            let mut s = state.write().await;
-            s.current_step = Some(step_id);
+        ExecutorBCommand::ContinueStep { step_id, task_id, payload } => {
+            {
+                let mut s = state.write().await;
+                s.current_step = Some(step_id);
+            }
+            if let Some(f) = exec_fn {
+                let _ = f(payload).await;
+            }
             BossActorEvent::StepDispatched { step_id, task_id }
         }
         ExecutorBCommand::Stop => {
@@ -309,6 +336,8 @@ async fn handle_executor_b_command(
 pub struct BossActorRegistry {
     pub designer_a: DesignerARuntime,
     pub executor_b: ExecutorBRuntime,
+    /// True when B was spawned with a real execution callback.
+    pub has_executor: bool,
 }
 
 impl BossActorRegistry {
@@ -316,6 +345,7 @@ impl BossActorRegistry {
         Self {
             designer_a: DesignerARuntime::spawn(),
             executor_b: ExecutorBRuntime::spawn(),
+            has_executor: false,
         }
     }
 
@@ -330,5 +360,14 @@ impl BossActorRegistry {
 
     pub fn b_mailbox(&self) -> &ExecutorBMailbox {
         &self.executor_b.mailbox
+    }
+}
+
+/// Convenience constructor for wiring an execution callback at bootstrap time.
+pub fn bootstrap_with_executor(exec_fn: ExecutionFn) -> BossActorRegistry {
+    BossActorRegistry {
+        designer_a: DesignerARuntime::spawn(),
+        executor_b: ExecutorBRuntime::spawn_with_executor(Some(exec_fn)),
+        has_executor: true,
     }
 }

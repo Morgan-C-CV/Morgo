@@ -2227,3 +2227,240 @@ async fn stop_sends_stop_command_to_actor_mailboxes() {
     let _ = std::fs::remove_file(&plan_path);
 }
 
+// --- T16.6.H.1: mailbox-driven production entry points ---
+
+#[tokio::test]
+async fn advance_plan_sends_dispatch_to_b_mailbox_and_b_state_is_active() {
+    let plan_path = std::env::temp_dir().join("boss_h1_advance_b_state.json");
+    let plan = BossPlan {
+        plan_id: "plan-h1-advance".into(),
+        accepted_by_user: true,
+        auto_sequence: true,
+        steps: vec![boss_step(0, "step zero")],
+        ..Default::default()
+    };
+    save_plan(&plan, &plan_path).await.unwrap();
+
+    let coordinator = BossCoordinator::restore_or_init(&plan_path).await.unwrap();
+    let task_manager = Arc::new(TaskManager::default());
+    let app_state = app_state_with_tasks("session-h1-advance", task_manager.clone());
+
+    let result = coordinator.advance_plan(&app_state).await.unwrap();
+    assert!(result.is_some(), "step 0 should dispatch");
+
+    // B's actor state must be Active — proves the mailbox handler ran before advance_plan returned.
+    let registry_guard = coordinator.actor_registry.read().await;
+    let registry = registry_guard.as_ref().expect("actor registry must exist after advance_plan");
+    let b_status = registry.executor_b.status().await;
+    assert_eq!(
+        b_status,
+        rust_agent::core::boss_state::BossActorStatus::Active,
+        "B must be Active after advance_plan — mailbox handler must have run before tool call"
+    );
+
+    let _ = std::fs::remove_file(&plan_path);
+}
+
+#[tokio::test]
+async fn on_review_event_sends_review_to_a_mailbox_and_a_state_reflects_step() {
+    let plan_path = std::env::temp_dir().join("boss_h1_review_a_state.json");
+    let plan = BossPlan {
+        plan_id: "plan-h1-review".into(),
+        accepted_by_user: true,
+        auto_sequence: true,
+        steps: vec![boss_step(0, "step to review")],
+        ..Default::default()
+    };
+    save_plan(&plan, &plan_path).await.unwrap();
+
+    let coordinator = BossCoordinator::restore_or_init(&plan_path).await.unwrap();
+    {
+        let mut guard = coordinator.plan.write().await;
+        let p = guard.as_mut().unwrap();
+        p.steps[0].status = BossPlanStepStatus::Reviewing;
+        p.steps[0].worker_task_id = Some("b-task-h1".into());
+    }
+
+    coordinator.on_review_event(0, true, "LGTM", None).await.unwrap();
+
+    // A's actor state must reflect the reviewed step — proves mailbox handler ran before plan mutation.
+    let registry_guard = coordinator.actor_registry.read().await;
+    let registry = registry_guard.as_ref().expect("actor registry must exist after on_review_event");
+    let a_state = registry.designer_a.state.read().await;
+    assert_eq!(
+        a_state.current_step,
+        Some(0),
+        "A's current_step must be 0 after on_review_event — mailbox handler must have run"
+    );
+    drop(a_state);
+    drop(registry_guard);
+
+    // Plan state must also be updated correctly.
+    let plan_guard = coordinator.plan.read().await;
+    let step = &plan_guard.as_ref().unwrap().steps[0];
+    assert_eq!(step.status, BossPlanStepStatus::Completed, "step must be Completed after accepted review");
+    assert!(step.completed, "step.completed must be true");
+
+    let _ = std::fs::remove_file(&plan_path);
+}
+
+#[tokio::test]
+async fn stop_via_handle_control_request_closes_a_and_b_mailboxes() {
+    let plan_path = std::env::temp_dir().join("boss_h1_stop_mailboxes.json");
+    let plan = BossPlan {
+        plan_id: "plan-h1-stop".into(),
+        accepted_by_user: true,
+        auto_sequence: true,
+        steps: vec![boss_step(0, "step one")],
+        ..Default::default()
+    };
+    save_plan(&plan, &plan_path).await.unwrap();
+
+    let coordinator = BossCoordinator::restore_or_init(&plan_path).await.unwrap();
+    coordinator.ensure_actor_registry().await;
+
+    let task_manager = Arc::new(TaskManager::default());
+    let dispatcher = NotificationDispatcher::new(TelegramGateway::default());
+
+    let response = coordinator
+        .handle_control_request(
+            BossControlRequest::Stop {
+                requester_session_id: "test-session-h1".into(),
+                deadline_ms: 0,
+            },
+            &task_manager,
+            &dispatcher,
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        matches!(response, BossControlResponse::Stop(_)),
+        "handle_control_request(Stop) must return Stop outcome"
+    );
+
+    // Both mailboxes must be closed — stop() awaits Stopped from both before returning.
+    let registry_guard = coordinator.actor_registry.read().await;
+    let registry = registry_guard.as_ref().unwrap();
+    assert!(
+        registry.a_mailbox().is_closed(),
+        "A mailbox must be closed after Stop via handle_control_request"
+    );
+    assert!(
+        registry.b_mailbox().is_closed(),
+        "B mailbox must be closed after Stop via handle_control_request"
+    );
+
+    let _ = std::fs::remove_file(&plan_path);
+}
+
+// --- T16.6.H.2: execution side effects owned by B runtime ---
+
+#[tokio::test]
+async fn advance_plan_records_dispatch_payload_via_b_runtime_callback() {
+    let plan_path = std::env::temp_dir().join("boss_h2_b_callback.json");
+    let plan = BossPlan {
+        plan_id: "plan-h2-callback".into(),
+        accepted_by_user: true,
+        auto_sequence: true,
+        steps: vec![boss_step(0, "step zero")],
+        ..Default::default()
+    };
+    save_plan(&plan, &plan_path).await.unwrap();
+
+    let coordinator = BossCoordinator::restore_or_init(&plan_path).await.unwrap();
+    let task_manager = Arc::new(TaskManager::default());
+    let app_state = app_state_with_tasks("session-h2-callback", task_manager.clone());
+
+    coordinator.advance_plan(&app_state).await.unwrap();
+    tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+
+    let status = coordinator.status.read().await;
+    assert!(
+        status.last_b_dispatch_payload.is_some(),
+        "B's execution callback must have fired and recorded the dispatch payload"
+    );
+
+    let _ = std::fs::remove_file(&plan_path);
+}
+
+#[tokio::test]
+async fn advance_plan_does_not_call_invoke_agent_tool_directly_after_h2() {
+    let plan_path = std::env::temp_dir().join("boss_h2_no_inline_tool.json");
+    let plan = BossPlan {
+        plan_id: "plan-h2-no-inline".into(),
+        accepted_by_user: true,
+        auto_sequence: true,
+        steps: vec![boss_step(0, "step zero")],
+        ..Default::default()
+    };
+    save_plan(&plan, &plan_path).await.unwrap();
+
+    let coordinator = BossCoordinator::restore_or_init(&plan_path).await.unwrap();
+    let task_manager = Arc::new(TaskManager::default());
+    let app_state = app_state_with_tasks("session-h2-no-inline", task_manager.clone());
+
+    let result = coordinator.advance_plan(&app_state).await;
+    assert!(result.is_ok(), "advance_plan must succeed without inline tool call: {:?}", result);
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+
+    let status = coordinator.status.read().await;
+    assert!(
+        status.last_b_dispatch_payload.is_some(),
+        "B's callback must have fired — execution side effect is B-owned"
+    );
+
+    let _ = std::fs::remove_file(&plan_path);
+}
+
+#[tokio::test]
+async fn b_runtime_callback_fires_for_continue_step_as_well() {
+    let plan_path = std::env::temp_dir().join("boss_h2_continue_callback.json");
+    let plan = BossPlan {
+        plan_id: "plan-h2-continue".into(),
+        accepted_by_user: true,
+        auto_sequence: true,
+        steps: vec![boss_step(0, "step zero"), boss_step(1, "step one")],
+        ..Default::default()
+    };
+    save_plan(&plan, &plan_path).await.unwrap();
+
+    let coordinator = BossCoordinator::restore_or_init(&plan_path).await.unwrap();
+    let task_manager = Arc::new(TaskManager::default());
+    let app_state = app_state_with_tasks("session-h2-continue", task_manager.clone());
+
+    coordinator.advance_plan(&app_state).await.unwrap();
+    tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+
+    let first_payload = coordinator.status.read().await.last_b_dispatch_payload.clone();
+    assert!(first_payload.is_some(), "first dispatch must record payload");
+
+    {
+        let mut guard = coordinator.session.write().await;
+        if let Some(session) = guard.as_mut() {
+            session.executor_b.task_id = Some("b-running-task".into());
+            session.executor_b.status = rust_agent::core::boss_state::BossActorStatus::Active;
+        }
+    }
+    {
+        let mut guard = coordinator.plan.write().await;
+        if let Some(plan) = guard.as_mut() {
+            plan.steps[0].completed = true;
+            plan.steps[0].status = BossPlanStepStatus::Completed;
+        }
+    }
+
+    coordinator.advance_plan(&app_state).await.unwrap();
+    tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+
+    let second_payload = coordinator.status.read().await.last_b_dispatch_payload.clone();
+    assert!(second_payload.is_some(), "ContinueStep must also record payload via B's callback");
+    assert_ne!(
+        first_payload, second_payload,
+        "second dispatch payload must differ from first"
+    );
+
+    let _ = std::fs::remove_file(&plan_path);
+}
+

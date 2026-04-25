@@ -9,7 +9,7 @@ use crate::task::types::{TaskEvent, TaskStatus};
 use crate::tool::definition::{Tool, ToolCall};
 use crate::core::boss_runtime::{BossControlRuntime, BossRuntimeOwner};
 use crate::core::boss_actor_runtime::{
-    BossActorRegistry, DesignerACommand, ExecutorBCommand,
+    BossActorEvent, BossActorRegistry, DesignerACommand, ExecutorBCommand,
 };
 use crate::history::session::SessionHistory;
 use serde_json::json;
@@ -246,9 +246,45 @@ impl BossCoordinator {
         }
     }
 
-    /// Spawn fresh A and B actor runtimes, replacing any existing ones.
+    /// Spawn fresh A and B actor runtimes (state-only, no execution callback).
     pub async fn bootstrap_actor_registry(&self) {
         let registry = BossActorRegistry::bootstrap();
+        let mut guard = self.actor_registry.write().await;
+        if let Some(old) = guard.take() {
+            old.shutdown_all();
+        }
+        *guard = Some(registry);
+    }
+
+    /// Ensure actor runtimes exist with a real execution callback wired to B.
+    /// If the registry already has an executor, this is a no-op.
+    pub async fn ensure_actor_registry_with_executor(
+        &self,
+        app_state: &Arc<crate::state::app_state::AppState>,
+    ) {
+        let needs_wire = {
+            let guard = self.actor_registry.read().await;
+            guard.as_ref().map(|r| !r.has_executor).unwrap_or(true)
+        };
+        if !needs_wire {
+            return;
+        }
+        let coordinator = self.clone_for_runtime();
+        let app_state = app_state.clone();
+        let exec_fn: crate::core::boss_actor_runtime::ExecutionFn =
+            Arc::new(move |payload: String| {
+                let c = coordinator.clone_for_runtime();
+                let app = app_state.clone();
+                Box::pin(async move {
+                    // Record the payload for observability before calling the tool.
+                    {
+                        let mut guard = c.status.write().await;
+                        guard.last_b_dispatch_payload = Some(payload.clone());
+                    }
+                    c.invoke_agent_tool(&app, &payload).await.map(|_| payload)
+                })
+            });
+        let registry = crate::core::boss_actor_runtime::bootstrap_with_executor(exec_fn);
         let mut guard = self.actor_registry.write().await;
         if let Some(old) = guard.take() {
             old.shutdown_all();
@@ -594,10 +630,10 @@ impl BossCoordinator {
             }
         }
 
-        // Stop A and B actor runtimes via their mailboxes.
+        // Stop A and B actor runtimes via their mailboxes — await Stopped before returning.
         if let Some(registry) = self.actor_registry.read().await.as_ref() {
-            let _ = registry.a_mailbox().send(DesignerACommand::Stop).await;
-            let _ = registry.b_mailbox().send(ExecutorBCommand::Stop).await;
+            let _ = registry.a_mailbox().request(DesignerACommand::Stop).await;
+            let _ = registry.b_mailbox().request(ExecutorBCommand::Stop).await;
         }
 
         Ok(BossStopOutcome {
@@ -710,6 +746,22 @@ impl BossCoordinator {
         review_summary: &str,
         correction: Option<&str>,
     ) -> anyhow::Result<()> {
+        // 1. Send Review to A's mailbox first — await ReviewComplete before mutating plan state.
+        self.ensure_actor_registry().await;
+        let effective_accepted = if let Some(registry) = self.actor_registry.read().await.as_ref() {
+            match registry.a_mailbox().request(DesignerACommand::Review {
+                step_id,
+                accepted,
+                summary: review_summary.to_string(),
+            }).await {
+                Ok(BossActorEvent::ReviewComplete { accepted: a_accepted, .. }) => a_accepted,
+                _ => accepted,
+            }
+        } else {
+            accepted
+        };
+
+        // 2. Mutate plan state based on the verdict from A's mailbox.
         let should_auto_advance = {
             let mut plan_guard = self.plan.write().await;
             let Some(plan) = plan_guard.as_mut() else {
@@ -721,7 +773,7 @@ impl BossCoordinator {
 
             step.last_review_summary = Some(review_summary.to_string());
 
-            if accepted {
+            if effective_accepted {
                 step.completed = true;
                 step.status = BossPlanStepStatus::Completed;
                 step.last_correction = None;
@@ -753,15 +805,6 @@ impl BossCoordinator {
             drop(plan_guard);
             self.update_current_step(next_step).await;
             self.maybe_auto_advance_after_completion().await?;
-        }
-
-        // Notify A's actor mailbox of the review outcome.
-        self.ensure_actor_registry().await;
-        if let Some(registry) = self.actor_registry.read().await.as_ref() {
-            let _ = registry.a_mailbox().send(DesignerACommand::Review {
-                step_id,
-                summary: review_summary.to_string(),
-            }).await;
         }
 
         Ok(())
@@ -1038,12 +1081,12 @@ impl BossCoordinator {
                     let continue_payload = self
                         .build_step_continue_payload(step_id, &b_task_id, &parent_session_id)
                         .await?;
-                    self.invoke_agent_tool(app_state, &continue_payload).await?;
 
-                    // Notify B's actor mailbox that a step is continuing.
-                    self.ensure_actor_registry().await;
+                    // B's mailbox handler owns the execution side effect.
+                    // Coordinator awaits StepDispatched before proceeding.
+                    self.ensure_actor_registry_with_executor(app_state).await;
                     if let Some(registry) = self.actor_registry.read().await.as_ref() {
-                        let _ = registry.b_mailbox().send(ExecutorBCommand::ContinueStep {
+                        let _ = registry.b_mailbox().request(ExecutorBCommand::ContinueStep {
                             step_id,
                             task_id: b_task_id.clone(),
                             payload: continue_payload.clone(),
@@ -1061,7 +1104,16 @@ impl BossCoordinator {
                     let spawn_payload = self
                         .build_step_spawn_payload(step_id, &parent_session_id, &b_actor_id)
                         .await?;
-                    self.invoke_agent_tool(app_state, &spawn_payload).await?;
+
+                    // B's mailbox handler owns the execution side effect.
+                    self.ensure_actor_registry_with_executor(app_state).await;
+                    if let Some(registry) = self.actor_registry.read().await.as_ref() {
+                        let _ = registry.b_mailbox().request(ExecutorBCommand::DispatchStep {
+                            step_id,
+                            payload: spawn_payload.clone(),
+                        }).await;
+                    }
+
                     // Record the newly created task id in the B handle.
                     let records = tasks.list();
                     if let Some(task) = records.last() {
@@ -1070,15 +1122,6 @@ impl BossCoordinator {
                             session.executor_b.task_id = Some(task.id.clone());
                             session.executor_b.status = BossActorStatus::Active;
                         }
-                    }
-
-                    // Notify B's actor mailbox that a new step was dispatched.
-                    self.ensure_actor_registry().await;
-                    if let Some(registry) = self.actor_registry.read().await.as_ref() {
-                        let _ = registry.b_mailbox().send(ExecutorBCommand::DispatchStep {
-                            step_id,
-                            payload: spawn_payload.clone(),
-                        }).await;
                     }
 
                     spawn_payload

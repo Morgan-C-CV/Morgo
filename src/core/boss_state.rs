@@ -21,6 +21,9 @@ pub struct BossStatus {
     pub total_steps: Option<usize>,
     /// Path to the immutable planning file
     pub planning_file: Option<String>,
+    /// Last payload dispatched to B's execution callback — observable for tests.
+    #[serde(default)]
+    pub last_b_dispatch_payload: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -164,6 +167,7 @@ impl Default for BossStatus {
             current_step: None,
             total_steps: None,
             planning_file: None,
+            last_b_dispatch_payload: None,
         }
     }
 }
