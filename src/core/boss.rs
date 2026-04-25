@@ -251,6 +251,12 @@ impl BossCoordinator {
             {
                 let mut plan_guard = self.plan.write().await;
                 if let Some(plan) = plan_guard.as_mut() {
+                    if !plan.finalized {
+                        tracing::warn!(
+                            "handle_user_approval called before documentation loop finalized"
+                        );
+                        return Ok(false);
+                    }
                     plan.accepted_by_user = true;
                 }
             }
@@ -883,7 +889,10 @@ mod tests {
         // set dummy plan to avoid ignoring boolean conversion
         {
             let mut plan = coordinator.plan.write().await;
-            *plan = Some(BossPlan::default());
+            *plan = Some(BossPlan {
+                finalized: true,
+                ..BossPlan::default()
+            });
         }
         let confirmed = coordinator.handle_user_approval("Y").await.unwrap();
         assert!(confirmed);
@@ -916,6 +925,32 @@ mod tests {
             .unwrap();
         assert!(!rejected);
         assert_eq!(coordinator.get_stage().await, BossStage::Documentation);
+    }
+
+    #[tokio::test]
+    async fn test_user_approval_requires_finalized_documentation() {
+        let coordinator = BossCoordinator::new();
+        coordinator
+            .transition_to(BossStage::WaitingForApproval)
+            .await
+            .unwrap();
+        {
+            let mut plan = coordinator.plan.write().await;
+            *plan = Some(BossPlan::default());
+        }
+
+        let confirmed = coordinator.handle_user_approval("Y").await.unwrap();
+        assert!(!confirmed);
+        assert_eq!(coordinator.get_stage().await, BossStage::WaitingForApproval);
+        assert!(
+            !coordinator
+                .plan
+                .read()
+                .await
+                .as_ref()
+                .unwrap()
+                .accepted_by_user
+        );
     }
 
     #[tokio::test]
