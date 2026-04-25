@@ -974,10 +974,39 @@ impl BossCoordinator {
             let _ = registry.b_mailbox().request(ExecutorBCommand::Stop).await;
         }
 
+        // Abort A/B LLM session tasks directly — these may not have boss_actor_id set
+        // (spawned by invoke_agent_tool_with_task_id without a boss_actor_policy), so the
+        // tracked_task_ids filter above may have missed them.
+        self.abort_a_b_sessions(tasks, dispatcher).await;
+
         Ok(BossStopOutcome {
             killed_task_ids: killed,
             stages,
         })
+    }
+
+    /// Abort A's and B's LLM session tasks by their stored task_id.
+    /// Uses force_kill (no session ownership check) because these tasks are owned by the
+    /// coordinator's session, not the requester's session.
+    async fn abort_a_b_sessions(
+        &self,
+        tasks: &TaskManager,
+        dispatcher: &NotificationDispatcher,
+    ) {
+        let (a_task_id, b_task_id) = {
+            let guard = self.session.read().await;
+            let (a, b) = guard
+                .as_ref()
+                .map(|s| (s.designer_a.task_id.clone(), s.executor_b.task_id.clone()))
+                .unwrap_or((None, None));
+            (a, b)
+        };
+        if let Some(id) = a_task_id {
+            tasks.force_kill(&id, dispatcher);
+        }
+        if let Some(id) = b_task_id {
+            tasks.force_kill(&id, dispatcher);
+        }
     }
 
     /// Processes a task event to update the BossPlan by structured step identity.

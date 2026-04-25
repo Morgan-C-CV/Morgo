@@ -4162,3 +4162,209 @@ async fn t22_3_production_path_exec_b_creates_child_task_via_agent_tool() {
 
     let _ = std::fs::remove_file(&plan_path);
 }
+
+// --- T22.4: /stop真实抢占 LLM 推理态 ---
+
+/// T22.4.A: A's LLM session task is Running when /stop fires.
+/// After stop(), A's task must be Killed.
+#[tokio::test]
+async fn t22_4_stop_aborts_a_session_while_waiting_for_llm() {
+    let plan_path = std::env::temp_dir().join("t22_4_stop_a.json");
+    let plan = BossPlan {
+        plan_id: "t22-4-stop-a".into(),
+        accepted_by_user: true,
+        auto_sequence: true,
+        steps: vec![boss_step(0, "step for A abort test")],
+        ..Default::default()
+    };
+    save_plan(&plan, &plan_path).await.unwrap();
+
+    let coordinator = BossCoordinator::restore_or_init(&plan_path).await.unwrap();
+    let task_manager = Arc::new(TaskManager::default());
+    let dispatcher = NotificationDispatcher::new(TelegramGateway::default());
+
+    let fake_a_task = task_manager.create_with_type(
+        "fake designer A LLM session".to_string(),
+        TaskType::LocalAgent,
+        "t22-4-stop-a-session".to_string(),
+        InteractionSurface::Cli,
+    );
+    let aid = fake_a_task.id.clone();
+    task_manager.launch(&fake_a_task.id, "", async move {
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        drop(aid);
+    });
+
+    {
+        let mut guard = coordinator.session.write().await;
+        if let Some(s) = guard.as_mut() {
+            s.designer_a.task_id = Some(fake_a_task.id.clone());
+        }
+    }
+
+    assert_eq!(
+        task_manager.status(&fake_a_task.id),
+        Some(TaskStatus::Running),
+        "fake A task must be Running before stop"
+    );
+
+    coordinator
+        .handle_control_request(
+            BossControlRequest::Stop {
+                requester_session_id: "t22-4-stop-a-session".into(),
+                deadline_ms: 0,
+            },
+            &task_manager,
+            &dispatcher,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        task_manager.status(&fake_a_task.id),
+        Some(TaskStatus::Killed),
+        "A's LLM session task must be Killed after stop()"
+    );
+
+    let _ = std::fs::remove_file(&plan_path);
+}
+
+/// T22.4.B: B's LLM session task is Running when /stop fires.
+/// After stop(), B's task must be Killed.
+#[tokio::test]
+async fn t22_4_stop_aborts_b_session_while_waiting_for_llm() {
+    let plan_path = std::env::temp_dir().join("t22_4_stop_b.json");
+    let plan = BossPlan {
+        plan_id: "t22-4-stop-b".into(),
+        accepted_by_user: true,
+        auto_sequence: true,
+        steps: vec![boss_step(0, "step for B abort test")],
+        ..Default::default()
+    };
+    save_plan(&plan, &plan_path).await.unwrap();
+
+    let coordinator = BossCoordinator::restore_or_init(&plan_path).await.unwrap();
+    let task_manager = Arc::new(TaskManager::default());
+    let dispatcher = NotificationDispatcher::new(TelegramGateway::default());
+
+    let fake_b_task = task_manager.create_with_type(
+        "fake executor B LLM session".to_string(),
+        TaskType::LocalAgent,
+        "t22-4-stop-b-session".to_string(),
+        InteractionSurface::Cli,
+    );
+    let bid = fake_b_task.id.clone();
+    task_manager.launch(&fake_b_task.id, "", async move {
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        drop(bid);
+    });
+
+    {
+        let mut guard = coordinator.session.write().await;
+        if let Some(s) = guard.as_mut() {
+            s.executor_b.task_id = Some(fake_b_task.id.clone());
+        }
+    }
+
+    assert_eq!(
+        task_manager.status(&fake_b_task.id),
+        Some(TaskStatus::Running),
+        "fake B task must be Running before stop"
+    );
+
+    coordinator
+        .handle_control_request(
+            BossControlRequest::Stop {
+                requester_session_id: "t22-4-stop-b-session".into(),
+                deadline_ms: 0,
+            },
+            &task_manager,
+            &dispatcher,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        task_manager.status(&fake_b_task.id),
+        Some(TaskStatus::Killed),
+        "B's LLM session task must be Killed after stop()"
+    );
+
+    let _ = std::fs::remove_file(&plan_path);
+}
+
+/// T22.4.C: Both A and B have Running LLM sessions when /stop fires.
+/// Both must be Killed — abort_a_b_sessions handles both in one pass.
+#[tokio::test]
+async fn t22_4_stop_aborts_both_a_and_b_sessions() {
+    let plan_path = std::env::temp_dir().join("t22_4_stop_both.json");
+    let plan = BossPlan {
+        plan_id: "t22-4-stop-both".into(),
+        accepted_by_user: true,
+        auto_sequence: true,
+        steps: vec![boss_step(0, "step for A+B abort test")],
+        ..Default::default()
+    };
+    save_plan(&plan, &plan_path).await.unwrap();
+
+    let coordinator = BossCoordinator::restore_or_init(&plan_path).await.unwrap();
+    let task_manager = Arc::new(TaskManager::default());
+    let dispatcher = NotificationDispatcher::new(TelegramGateway::default());
+
+    let fake_a_task = task_manager.create_with_type(
+        "fake A LLM".to_string(),
+        TaskType::LocalAgent,
+        "t22-4-both-session".to_string(),
+        InteractionSurface::Cli,
+    );
+    let fake_b_task = task_manager.create_with_type(
+        "fake B LLM".to_string(),
+        TaskType::LocalAgent,
+        "t22-4-both-session".to_string(),
+        InteractionSurface::Cli,
+    );
+
+    let aid = fake_a_task.id.clone();
+    task_manager.launch(&fake_a_task.id, "", async move {
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        drop(aid);
+    });
+    let bid = fake_b_task.id.clone();
+    task_manager.launch(&fake_b_task.id, "", async move {
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        drop(bid);
+    });
+
+    {
+        let mut guard = coordinator.session.write().await;
+        if let Some(s) = guard.as_mut() {
+            s.designer_a.task_id = Some(fake_a_task.id.clone());
+            s.executor_b.task_id = Some(fake_b_task.id.clone());
+        }
+    }
+
+    coordinator
+        .handle_control_request(
+            BossControlRequest::Stop {
+                requester_session_id: "t22-4-both-session".into(),
+                deadline_ms: 0,
+            },
+            &task_manager,
+            &dispatcher,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        task_manager.status(&fake_a_task.id),
+        Some(TaskStatus::Killed),
+        "A's LLM session must be Killed"
+    );
+    assert_eq!(
+        task_manager.status(&fake_b_task.id),
+        Some(TaskStatus::Killed),
+        "B's LLM session must be Killed"
+    );
+
+    let _ = std::fs::remove_file(&plan_path);
+}
