@@ -3,6 +3,7 @@ use std::sync::Arc;
 use rust_agent::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
 use rust_agent::core::boss::{BossCoordinator, load_plan, save_plan, trim_context_payload, assemble_summarized_payload, B_CONTEXT_TRIM_THRESHOLD, B_CONTEXT_KEEP_CHARS};
 use rust_agent::core::boss_context_brief::{BossContextBrief, BossContextStrategy, BossStateFrame, assemble_brief_prompt};
+use rust_agent::core::boss_state::{CompressionStrategy, ContextMode};
 use rust_agent::core::prompt_budget::{evaluate_prompt_budget, BudgetDecision, PromptCacheCapability, ProviderProfile};
 use rust_agent::core::prompt_cache_adapter::apply_cache_control;
 use rust_agent::core::prompt_segment::{PromptAssembly, PromptSegment, PromptSegmentKind};
@@ -5622,4 +5623,121 @@ async fn t26_6_b_context_summary_uses_stateless_path() {
     }
 
     let _ = std::fs::remove_file(&plan_path);
+}
+
+// ── T26.7: Cache observability ────────────────────────────────────────────────
+
+async fn setup_coordinator_with_b_session(plan_id: &str, output_dir_name: &str) -> (BossCoordinator, std::path::PathBuf, Arc<TaskManager>, Arc<AppState>) {
+    let plan_path = std::env::temp_dir().join(format!("{plan_id}.json"));
+    let plan = BossPlan {
+        plan_id: plan_id.into(),
+        task_description: "T26.7 metrics test".into(),
+        steps: vec![boss_step(0, "step zero")],
+        ..Default::default()
+    };
+    save_plan(&plan, &plan_path).await.unwrap();
+
+    let coordinator = BossCoordinator::restore_or_init(&plan_path).await.unwrap();
+    let unique_dir = std::env::temp_dir().join(output_dir_name);
+    let task_manager = Arc::new(TaskManager::new_with_output_root(unique_dir));
+    let app_state = app_state_with_tasks(&format!("session-{plan_id}"), task_manager.clone());
+
+    let fake_b = task_manager.create_with_type(
+        "fake B session",
+        TaskType::LocalAgent,
+        &format!("session-{plan_id}"),
+        InteractionSurface::Cli,
+    );
+    let b_task_id = fake_b.id.clone();
+    let tm_for_b = task_manager.clone();
+    let b_id_for_loop = b_task_id.clone();
+    task_manager.launch(&b_task_id, "", async move {
+        loop {
+            let messages = tm_for_b.drain_mailbox(&b_id_for_loop);
+            for _msg in messages {
+                tm_for_b.append_output(&b_id_for_loop, "B_ACK");
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        }
+    });
+    coordinator.record_b_session_id_pub(&b_task_id).await;
+
+    (coordinator, plan_path, task_manager, app_state)
+}
+
+/// T26.7.1: Short message (within budget) → CompressionStrategy::None, original_chars == sent_chars.
+#[tokio::test]
+async fn t26_7_no_compression_records_none_strategy() {
+    let (coordinator, plan_path, _, app_state) =
+        setup_coordinator_with_b_session("t26-7-none", "t26_7_none_output").await;
+
+    let short_msg = "short message within budget".to_string();
+    let original_len = short_msg.len();
+    let _ = coordinator.ask_b_session_pub(&app_state, short_msg).await;
+
+    let guard = coordinator.status.read().await;
+    let metrics = guard.last_step_metrics.as_ref().expect("last_step_metrics must be set");
+    assert_eq!(metrics.compression_strategy, CompressionStrategy::None);
+    assert_eq!(metrics.original_chars, original_len);
+    assert_eq!(metrics.sent_chars, original_len);
+
+    let _ = std::fs::remove_file(&plan_path);
+}
+
+/// T26.7.2: Oversized message with no active_model_runtime → fallback trim → CompressionStrategy::Trimmed.
+#[tokio::test]
+async fn t26_7_trim_path_records_trimmed_strategy() {
+    let (coordinator, plan_path, _, app_state) =
+        setup_coordinator_with_b_session("t26-7-trim", "t26_7_trim_output").await;
+
+    let oversized = "trim_data_".repeat(B_CONTEXT_TRIM_THRESHOLD / 9 + 1);
+    assert!(oversized.len() > B_CONTEXT_TRIM_THRESHOLD);
+    let original_len = oversized.len();
+    let _ = coordinator.ask_b_session_pub(&app_state, oversized).await;
+
+    let guard = coordinator.status.read().await;
+    let metrics = guard.last_step_metrics.as_ref().expect("last_step_metrics must be set");
+    assert_eq!(metrics.compression_strategy, CompressionStrategy::Trimmed);
+    assert_eq!(metrics.original_chars, original_len);
+    assert!(metrics.sent_chars < original_len, "sent_chars must be less than original after trim");
+
+    let _ = std::fs::remove_file(&plan_path);
+}
+
+/// T26.7.3: Default context mode is Brief.
+#[tokio::test]
+async fn t26_7_brief_context_mode_recorded() {
+    let (coordinator, plan_path, _, app_state) =
+        setup_coordinator_with_b_session("t26-7-brief", "t26_7_brief_output").await;
+
+    let _ = coordinator.ask_b_session_pub(&app_state, "hello".to_string()).await;
+
+    let guard = coordinator.status.read().await;
+    let metrics = guard.last_step_metrics.as_ref().expect("last_step_metrics must be set");
+    assert_eq!(metrics.context_mode, ContextMode::Brief);
+
+    let _ = std::fs::remove_file(&plan_path);
+}
+
+/// T26.7.4: original_chars matches the input message length before any compression.
+#[tokio::test]
+async fn t26_7_metrics_original_chars_matches_input_length() {
+    let (coordinator, plan_path, _, app_state) =
+        setup_coordinator_with_b_session("t26-7-chars", "t26_7_chars_output").await;
+
+    let msg = "x".repeat(42);
+    let _ = coordinator.ask_b_session_pub(&app_state, msg).await;
+
+    let guard = coordinator.status.read().await;
+    let metrics = guard.last_step_metrics.as_ref().expect("last_step_metrics must be set");
+    assert_eq!(metrics.original_chars, 42);
+
+    let _ = std::fs::remove_file(&plan_path);
+}
+
+/// T26.7.5: last_step_metrics is None before any ask_b_session call.
+#[test]
+fn t26_7_metrics_none_before_first_dispatch() {
+    let status = rust_agent::core::boss_state::BossStatus::default();
+    assert!(status.last_step_metrics.is_none(), "last_step_metrics must be None before first dispatch");
 }

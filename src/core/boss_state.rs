@@ -1,6 +1,41 @@
 use serde::{Deserialize, Serialize};
 use std::time::SystemTime;
 
+/// How the outbound B context was compressed before dispatch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum CompressionStrategy {
+    /// No compression — message was within budget.
+    #[default]
+    None,
+    /// LLM summarize path (stateless provider call).
+    Summarized,
+    /// Tail-trim path (pure char truncation).
+    Trimmed,
+}
+
+/// Which context assembly mode was used for the B dispatch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum ContextMode {
+    /// Full conversation history inherited (legacy / escape hatch).
+    FullInherit,
+    /// BossContextBrief + BossStateFrame (default).
+    #[default]
+    Brief,
+    /// StateFrame only (minimal context).
+    StateFrame,
+}
+
+/// Per-dispatch observability record written by ask_b_session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BossStepMetrics {
+    pub compression_strategy: CompressionStrategy,
+    pub context_mode: ContextMode,
+    /// Char length of the message before any compression.
+    pub original_chars: usize,
+    /// Char length of the message actually sent to B.
+    pub sent_chars: usize,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum BossStage {
     #[default]
@@ -30,6 +65,9 @@ pub struct BossStatus {
     /// Last outbound message sent to B via ask_b_session (after trim/summarize) — observable for tests.
     #[serde(default)]
     pub last_b_ask_message: Option<String>,
+    /// Per-dispatch observability record — compression strategy + context mode + char counts.
+    #[serde(default)]
+    pub last_step_metrics: Option<BossStepMetrics>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -182,6 +220,7 @@ impl Default for BossStatus {
             last_b_dispatch_payload: None,
             last_a_dispatch_message: None,
             last_b_ask_message: None,
+            last_step_metrics: None,
         }
     }
 }

@@ -1,7 +1,7 @@
 use crate::core::boss_state::{
     BossActorHandle, BossActorStatus, BossControlRequest, BossControlResponse, BossPlan,
     BossPlanStep, BossPlanStepStatus, BossReportPayload, BossSession, BossStage, BossStatus,
-    BossStepReport, BossStopOutcome, BossStopStage,
+    BossStepMetrics, BossStepReport, BossStopOutcome, BossStopStage, CompressionStrategy, ContextMode,
 };
 use crate::core::boss_context_brief::{BossContextBrief, BossContextStrategy, BossStateFrame, assemble_brief_prompt};
 use crate::core::prompt_budget::{evaluate_message_budget, BudgetDecision};
@@ -1910,23 +1910,30 @@ impl BossCoordinator {
         }
 
         // Compress outbound payload before sending — does not modify BossPlan or session_snapshot.
-        // Prefer LLM summarize via A session; fall back to character-truncation trim if A is unavailable.
-        let message = if message.len() > B_CONTEXT_TRIM_THRESHOLD {
+        // Prefer LLM summarize via stateless provider call; fall back to character-truncation trim if unavailable.
+        let original_chars = message.len();
+        let (message, compression_strategy) = if message.len() > B_CONTEXT_TRIM_THRESHOLD {
             let split = message.len().saturating_sub(B_CONTEXT_KEEP_CHARS);
             let old_part = &message[..split];
             let recent_tail = &message[split..];
             match self.summarize_context_stateless(app_state, old_part).await {
-                Ok(summary) => assemble_summarized_payload(&summary, recent_tail),
-                Err(_) => trim_context_payload(&message, B_CONTEXT_TRIM_THRESHOLD, B_CONTEXT_KEEP_CHARS),
+                Ok(summary) => (assemble_summarized_payload(&summary, recent_tail), CompressionStrategy::Summarized),
+                Err(_) => (trim_context_payload(&message, B_CONTEXT_TRIM_THRESHOLD, B_CONTEXT_KEEP_CHARS), CompressionStrategy::Trimmed),
             }
         } else {
-            message
+            (message, CompressionStrategy::None)
         };
 
-        // Record the final outbound message for test observability.
+        // Record the final outbound message and per-dispatch metrics for test observability.
         {
             let mut guard = self.status.write().await;
             guard.last_b_ask_message = Some(message.clone());
+            guard.last_step_metrics = Some(BossStepMetrics {
+                compression_strategy,
+                context_mode: ContextMode::Brief,
+                original_chars,
+                sent_chars: message.len(),
+            });
         }
 
         let offset_before = tasks.get_output(&task_id, 0).map(|s| s.next_offset).unwrap_or(0);
