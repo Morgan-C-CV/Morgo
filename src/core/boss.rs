@@ -3,6 +3,7 @@ use crate::core::boss_state::{
     BossPlanStep, BossPlanStepStatus, BossReportPayload, BossSession, BossStage, BossStatus,
     BossStepReport, BossStopOutcome, BossStopStage,
 };
+use crate::core::boss_context_brief::{BossContextBrief, BossContextStrategy, BossStateFrame, assemble_brief_prompt};
 use crate::interaction::dispatcher::NotificationDispatcher;
 use crate::task::manager::TaskManager;
 use crate::task::types::{TaskEvent, TaskStatus};
@@ -1450,18 +1451,31 @@ impl BossCoordinator {
             .ok_or_else(|| anyhow::anyhow!("Unknown boss step {step_id}"))?;
 
         Ok(json!({
-            "task": format!(
-                "Boss mode step {}\nplan_id: {}\nobjective: {}\nacceptance:\n{}{}",
-                step.id,
-                plan.plan_id,
-                step.objective(),
-                format_acceptance(step),
-                step.last_correction.as_deref()
-                    .map(|c| format!("\ncorrection from review:\n{c}"))
-                    .unwrap_or_default(),
+            "task": assemble_brief_prompt(
+                &BossContextBrief {
+                    plan_id: plan.plan_id.clone(),
+                    step_id: step.id,
+                    objective: step.objective().to_string(),
+                    acceptance: step.acceptance.clone(),
+                    last_correction: step.last_correction.clone(),
+                    recent_decisions: Vec::new(),
+                    relevant_files: Vec::new(),
+                    allowed_tools: Vec::new(),
+                    parent_session_id: parent_session_id.to_string(),
+                    context_strategy: BossContextStrategy::Brief,
+                },
+                &BossStateFrame {
+                    step_id: step.id,
+                    status: step.status,
+                    open_items: Vec::new(),
+                    blocked_items: Vec::new(),
+                    allowed_actions: vec!["implement".into()],
+                    required_output_hint: Some("return a unified diff or file edits".into()),
+                },
             ),
             "role": "implement",
-            "inherit_context": true,
+            "inherit_context": false,
+            "context_strategy": "brief",
             "reuse_strategy": "running_only",
             "step_id": step.id,
             "boss_plan_id": plan.plan_id,
@@ -2114,6 +2128,15 @@ impl BossCoordinator {
         message: String,
     ) -> anyhow::Result<String> {
         self.ask_b_session(app_state, message).await
+    }
+
+    pub async fn build_b_step_payload_pub(
+        &self,
+        step_id: usize,
+        parent_session_id: &str,
+        b_actor_id: &str,
+    ) -> anyhow::Result<String> {
+        self.build_step_spawn_payload(step_id, parent_session_id, b_actor_id).await
     }
 }
 

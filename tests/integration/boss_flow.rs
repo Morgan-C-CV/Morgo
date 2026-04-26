@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use rust_agent::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
 use rust_agent::core::boss::{BossCoordinator, load_plan, save_plan, trim_context_payload, assemble_summarized_payload, B_CONTEXT_TRIM_THRESHOLD, B_CONTEXT_KEEP_CHARS};
+use rust_agent::core::boss_context_brief::{BossContextBrief, BossContextStrategy, BossStateFrame, assemble_brief_prompt};
 use rust_agent::core::prompt_segment::{PromptAssembly, PromptSegment, PromptSegmentKind};
 use rust_agent::core::boss_actor_runtime::{
     BossActorRegistry, DesignerARuntime, ExecutionFn, ExecutorBRuntime, SpecReviewFn,
@@ -5021,5 +5022,130 @@ fn t26_1_assembly_fallback_matches_existing_string_join() {
     assembly.push(PromptSegment::new("user", PromptSegmentKind::DynamicEvidence, parts[3]));
 
     assert_eq!(assembly.assemble(), expected);
+}
+
+// ── T26.4: BossContextBrief / StateFrame bridge ───────────────────────────────
+
+fn make_brief(strategy: BossContextStrategy) -> BossContextBrief {
+    BossContextBrief {
+        plan_id: "plan-t26-4".into(),
+        step_id: 1,
+        objective: "implement the feature".into(),
+        acceptance: vec!["tests pass".into()],
+        last_correction: None,
+        recent_decisions: Vec::new(),
+        relevant_files: Vec::new(),
+        allowed_tools: Vec::new(),
+        parent_session_id: "parent-session-1".into(),
+        context_strategy: strategy,
+    }
+}
+
+fn make_frame(step_id: usize) -> BossStateFrame {
+    BossStateFrame {
+        step_id,
+        status: BossPlanStepStatus::Running,
+        open_items: vec!["write tests".into()],
+        blocked_items: Vec::new(),
+        allowed_actions: vec!["implement".into()],
+        required_output_hint: Some("return a unified diff".into()),
+    }
+}
+
+/// T26.4.1: BossContextBrief renders to ActorBrief segment (cacheable), contains objective.
+#[test]
+fn t26_4_brief_renders_to_actor_brief_segment() {
+    let brief = make_brief(BossContextStrategy::Brief);
+    let seg = brief.to_prompt_segment();
+    assert_eq!(seg.kind, PromptSegmentKind::ActorBrief);
+    assert!(seg.is_cacheable(), "ActorBrief segment must be cacheable");
+    assert!(seg.content.contains("implement the feature"), "content must include objective");
+    assert!(seg.content.contains("tests pass"), "content must include acceptance");
+}
+
+/// T26.4.2: BossStateFrame renders to StateFrame segment (non-cacheable).
+#[test]
+fn t26_4_state_frame_renders_to_non_cacheable_segment() {
+    let frame = make_frame(1);
+    let seg = frame.to_prompt_segment();
+    assert_eq!(seg.kind, PromptSegmentKind::StateFrame);
+    assert!(!seg.is_cacheable(), "StateFrame segment must not be cacheable");
+    assert!(seg.content.contains("write tests"), "content must include open_items");
+}
+
+/// T26.4.3: Brief fingerprint is stable; state_frame change does not affect it.
+#[test]
+fn t26_4_brief_fingerprint_stable_across_state_frame_changes() {
+    let brief = make_brief(BossContextStrategy::Brief);
+    let seg1 = brief.to_prompt_segment();
+
+    let frame1 = make_frame(1);
+    let frame2 = BossStateFrame {
+        step_id: 1,
+        status: BossPlanStepStatus::Running,
+        open_items: vec!["DIFFERENT open item".into()],
+        blocked_items: Vec::new(),
+        allowed_actions: vec!["implement".into()],
+        required_output_hint: None,
+    };
+
+    let mut assembly1 = PromptAssembly::new();
+    assembly1.push(seg1.clone());
+    assembly1.push(frame1.to_prompt_segment());
+
+    let mut assembly2 = PromptAssembly::new();
+    assembly2.push(seg1);
+    assembly2.push(frame2.to_prompt_segment());
+
+    assert_eq!(
+        assembly1.stable_prefix_fingerprint(),
+        assembly2.stable_prefix_fingerprint(),
+        "brief fingerprint must not change when state_frame changes"
+    );
+}
+
+/// T26.4.4: FullInherit escape hatch is observable via context_strategy field.
+#[test]
+fn t26_4_full_inherit_escape_hatch_is_observable() {
+    let brief = make_brief(BossContextStrategy::FullInherit);
+    assert_eq!(brief.context_strategy, BossContextStrategy::FullInherit);
+    // FullInherit brief still renders to ActorBrief segment — strategy is metadata only.
+    let seg = brief.to_prompt_segment();
+    assert_eq!(seg.kind, PromptSegmentKind::ActorBrief);
+}
+
+/// T26.4.5: assemble_brief_prompt output contains both objective and open_items.
+#[test]
+fn t26_4_assembly_output_contains_brief_and_state_frame() {
+    let brief = make_brief(BossContextStrategy::Brief);
+    let frame = make_frame(1);
+    let prompt = assemble_brief_prompt(&brief, &frame);
+    assert!(prompt.contains("implement the feature"), "prompt must contain objective");
+    assert!(prompt.contains("write tests"), "prompt must contain open_items");
+    assert!(prompt.contains("return a unified diff"), "prompt must contain output hint");
+}
+
+/// T26.4.6: build_b_step_payload uses brief/state_frame (inherit_context: false).
+#[tokio::test]
+async fn t26_4_dispatch_payload_uses_brief_not_full_inherit() {
+    let plan_path = std::env::temp_dir().join("t26_4_dispatch.json");
+    let plan = BossPlan {
+        plan_id: "t26-4-dispatch".into(),
+        task_description: "dispatch brief test".into(),
+        steps: vec![boss_step(0, "implement feature")],
+        accepted_by_user: true,
+        ..Default::default()
+    };
+    save_plan(&plan, &plan_path).await.unwrap();
+
+    let coordinator = BossCoordinator::restore_or_init(&plan_path).await.unwrap();
+    let payload = coordinator.build_b_step_payload_pub(0, "parent-session", "b-actor").await.unwrap();
+    let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
+
+    assert_eq!(v["inherit_context"], false, "default dispatch must use inherit_context: false");
+    assert_eq!(v["context_strategy"], "brief", "default dispatch must use brief strategy");
+    assert!(v["task"].as_str().unwrap_or("").contains("objective 0"), "task must contain objective");
+
+    let _ = std::fs::remove_file(&plan_path);
 }
 
