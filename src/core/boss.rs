@@ -4,6 +4,7 @@ use crate::core::boss_state::{
     BossStepReport, BossStopOutcome, BossStopStage,
 };
 use crate::core::boss_context_brief::{BossContextBrief, BossContextStrategy, BossStateFrame, assemble_brief_prompt};
+use crate::core::prompt_budget::{evaluate_message_budget, BudgetDecision};
 use crate::interaction::dispatcher::NotificationDispatcher;
 use crate::task::manager::TaskManager;
 use crate::task::types::{TaskEvent, TaskStatus};
@@ -1867,6 +1868,12 @@ impl BossCoordinator {
             .as_deref()
             .unwrap_or("")
             .to_string();
+
+        // T26.5: dispatch-time budget gate — runs before T25/T25.2 trim/summarize.
+        // Reject immediately if even the static prefix exceeds budget.
+        if let BudgetDecision::Reject { reason } = evaluate_message_budget(&message) {
+            anyhow::bail!("prompt budget exceeded: {reason}");
+        }
 
         // Compress outbound payload before sending — does not modify BossPlan or session_snapshot.
         // Prefer LLM summarize via A session; fall back to character-truncation trim if A is unavailable.

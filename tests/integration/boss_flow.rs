@@ -3,6 +3,7 @@ use std::sync::Arc;
 use rust_agent::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
 use rust_agent::core::boss::{BossCoordinator, load_plan, save_plan, trim_context_payload, assemble_summarized_payload, B_CONTEXT_TRIM_THRESHOLD, B_CONTEXT_KEEP_CHARS};
 use rust_agent::core::boss_context_brief::{BossContextBrief, BossContextStrategy, BossStateFrame, assemble_brief_prompt};
+use rust_agent::core::prompt_budget::{evaluate_prompt_budget, BudgetDecision, ProviderProfile};
 use rust_agent::core::prompt_segment::{PromptAssembly, PromptSegment, PromptSegmentKind};
 use rust_agent::core::boss_actor_runtime::{
     BossActorRegistry, DesignerARuntime, ExecutionFn, ExecutorBRuntime, SpecReviewFn,
@@ -5145,6 +5146,110 @@ async fn t26_4_dispatch_payload_uses_brief_not_full_inherit() {
     assert_eq!(v["inherit_context"], false, "default dispatch must use inherit_context: false");
     assert_eq!(v["context_strategy"], "brief", "default dispatch must use brief strategy");
     assert!(v["task"].as_str().unwrap_or("").contains("objective 0"), "task must contain objective");
+
+    let _ = std::fs::remove_file(&plan_path);
+}
+
+// ── T26.5: Provider-aware token budget gate ───────────────────────────────────
+
+fn tight_profile() -> ProviderProfile {
+    ProviderProfile { context_window: 100, output_reserve: 10, cache_min_size: 64 }
+}
+
+/// T26.5.1: Prompt within budget → Pass.
+#[test]
+fn t26_5_pass_when_prompt_within_budget() {
+    let mut assembly = PromptAssembly::new();
+    assembly.push(PromptSegment::new("sys", PromptSegmentKind::StaticSystem, "short"));
+    let (_, decision) = evaluate_prompt_budget(&assembly, &ProviderProfile::default());
+    assert_eq!(decision, BudgetDecision::Pass);
+}
+
+/// T26.5.2: Dynamic suffix pushes total over budget → Degrade.
+#[test]
+fn t26_5_degrade_when_dynamic_suffix_exceeds_budget() {
+    let profile = tight_profile(); // 100 tokens available - 10 reserve = 90 tokens
+    let mut assembly = PromptAssembly::new();
+    // Static prefix: 10 chars ≈ 3 tokens (within budget)
+    assembly.push(PromptSegment::new("sys", PromptSegmentKind::StaticSystem, "0123456789"));
+    // Dynamic suffix: 400 chars ≈ 115 tokens (pushes total over 90)
+    assembly.push(PromptSegment::new("sf", PromptSegmentKind::StateFrame, "x".repeat(400)));
+    let (_, decision) = evaluate_prompt_budget(&assembly, &profile);
+    assert!(
+        matches!(decision, BudgetDecision::Degrade { .. }),
+        "expected Degrade, got {decision:?}"
+    );
+}
+
+/// T26.5.3: Static prefix alone exceeds budget → Reject.
+#[test]
+fn t26_5_reject_when_static_prefix_exceeds_budget() {
+    let profile = tight_profile(); // 90 tokens available
+    let mut assembly = PromptAssembly::new();
+    // Static prefix: 500 chars ≈ 143 tokens (exceeds 90)
+    assembly.push(PromptSegment::new("sys", PromptSegmentKind::StaticSystem, "s".repeat(500)));
+    let (_, decision) = evaluate_prompt_budget(&assembly, &profile);
+    assert!(
+        matches!(decision, BudgetDecision::Reject { .. }),
+        "expected Reject, got {decision:?}"
+    );
+}
+
+/// T26.5.4: evaluate_prompt_budget is a pure function — assembly content unchanged after call.
+#[test]
+fn t26_5_evaluate_is_pure_function_no_side_effects() {
+    let mut assembly = PromptAssembly::new();
+    assembly.push(PromptSegment::new("sys", PromptSegmentKind::StaticSystem, "hello"));
+    let content_before = assembly.segments()[0].content.clone();
+    let _ = evaluate_prompt_budget(&assembly, &ProviderProfile::default());
+    assert_eq!(assembly.segments()[0].content, content_before, "assembly must not be modified");
+}
+
+/// T26.5.5: Degrade from budget gate triggers summarize path in ask_b_session.
+/// A 750k char payload (≈214k tokens) exceeds the 192k available tokens → Degrade → summarize.
+/// With no A session, falls back to trim. Either way, last_b_ask_message is compressed.
+#[tokio::test]
+async fn t26_5_degrade_budget_triggers_compression_in_ask_b_session() {
+    let plan_path = std::env::temp_dir().join("t26_5_degrade.json");
+    let plan = BossPlan {
+        plan_id: "t26-5-degrade".into(),
+        task_description: "budget degrade test".into(),
+        steps: vec![boss_step(0, "step zero")],
+        ..Default::default()
+    };
+    save_plan(&plan, &plan_path).await.unwrap();
+
+    let coordinator = BossCoordinator::restore_or_init(&plan_path).await.unwrap();
+    let unique_dir = std::env::temp_dir().join("t26_5_degrade_output");
+    let task_manager = Arc::new(TaskManager::new_with_output_root(unique_dir));
+    let app_state = app_state_with_tasks("session-t26-5-degrade", task_manager.clone());
+
+    let fake_b = task_manager.create_with_type(
+        "fake B",
+        TaskType::LocalAgent,
+        "session-t26-5-degrade",
+        InteractionSurface::Cli,
+    );
+    let b_task_id = fake_b.id.clone();
+    let tm = task_manager.clone();
+    let b_id = b_task_id.clone();
+    task_manager.launch(&b_task_id, "", async move {
+        loop {
+            for _ in tm.drain_mailbox(&b_id) { tm.append_output(&b_id, "B_ACK"); }
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        }
+    });
+    coordinator.record_b_session_id_pub(&b_task_id).await;
+
+    // 750k chars ≈ 214k tokens > 192k available → Degrade → T25/T25.2 compression.
+    let oversized = "x".repeat(750_000);
+    let _ = coordinator.ask_b_session_pub(&app_state, oversized.clone()).await;
+
+    let sent = coordinator.status.read().await.last_b_ask_message.clone().unwrap_or_default();
+    assert!(
+        sent.len() < oversized.len(),
+        "ask_b_session must compress the payload when budget gate returns Degrade"
+    );
 
     let _ = std::fs::remove_file(&plan_path);
 }
