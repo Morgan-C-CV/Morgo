@@ -4,6 +4,7 @@ use rust_agent::bootstrap::{ClientType, InteractionSurface, SessionMode, Session
 use rust_agent::core::boss::{BossCoordinator, load_plan, save_plan, trim_context_payload, assemble_summarized_payload, B_CONTEXT_TRIM_THRESHOLD, B_CONTEXT_KEEP_CHARS};
 use rust_agent::core::boss_context_brief::{BossContextBrief, BossContextStrategy, BossStateFrame, assemble_brief_prompt};
 use rust_agent::core::prompt_budget::{evaluate_prompt_budget, BudgetDecision, PromptCacheCapability, ProviderProfile};
+use rust_agent::core::prompt_cache_adapter::apply_cache_control;
 use rust_agent::core::prompt_segment::{PromptAssembly, PromptSegment, PromptSegmentKind};
 use rust_agent::core::boss_actor_runtime::{
     BossActorRegistry, DesignerARuntime, ExecutionFn, ExecutorBRuntime, SpecReviewFn,
@@ -5308,4 +5309,114 @@ fn t26_2_manual_none_is_distinct_from_unsupported() {
         PromptCacheCapability::Unsupported,
         "ManualNone (explicitly disabled) must be distinct from Unsupported (not available)"
     );
+}
+
+// ── T26.3: Request builder cache adapter ─────────────────────────────────────
+
+fn make_payload() -> serde_json::Value {
+    serde_json::json!({
+        "model": "claude-3-5-sonnet",
+        "messages": [{"role": "user", "content": [{"type": "text", "text": "hello"}]}],
+        "stream": true,
+        "max_tokens": 4096
+    })
+}
+
+/// T26.3.1: AnthropicEphemeral injects system array with cache_control on last cacheable block.
+#[test]
+fn t26_3_anthropic_ephemeral_injects_system_cache_control() {
+    let mut assembly = PromptAssembly::new();
+    assembly.push(PromptSegment::new("sys", PromptSegmentKind::StaticSystem, "system content"));
+    assembly.push(PromptSegment::new("dyn", PromptSegmentKind::DynamicEvidence, "dynamic content"));
+
+    let profile = ProviderProfile { prompt_cache: PromptCacheCapability::AnthropicEphemeral, ..ProviderProfile::default() };
+    let mut payload = make_payload();
+    apply_cache_control(&assembly, &profile, &mut payload);
+
+    let system = &payload["system"];
+    assert!(system.is_array(), "system must be an array");
+    let blocks = system.as_array().unwrap();
+    assert_eq!(blocks.len(), 1);
+    assert_eq!(blocks[0]["cache_control"]["type"], "ephemeral");
+}
+
+/// T26.3.2: Only the last cacheable block gets cache_control; earlier ones do not.
+#[test]
+fn t26_3_only_last_cacheable_block_gets_cache_control() {
+    let mut assembly = PromptAssembly::new();
+    assembly.push(PromptSegment::new("s1", PromptSegmentKind::StaticSystem, "first"));
+    assembly.push(PromptSegment::new("s2", PromptSegmentKind::ActorBrief, "second"));
+    assembly.push(PromptSegment::new("dyn", PromptSegmentKind::DynamicEvidence, "dynamic"));
+
+    let profile = ProviderProfile { prompt_cache: PromptCacheCapability::AnthropicEphemeral, ..ProviderProfile::default() };
+    let mut payload = make_payload();
+    apply_cache_control(&assembly, &profile, &mut payload);
+
+    let blocks = payload["system"].as_array().unwrap();
+    assert_eq!(blocks.len(), 2);
+    assert!(blocks[0].get("cache_control").is_none(), "first block must not have cache_control");
+    assert_eq!(blocks[1]["cache_control"]["type"], "ephemeral", "last block must have cache_control");
+}
+
+/// T26.3.3: Dynamic segments go to messages[0].content, not system.
+#[test]
+fn t26_3_dynamic_segments_go_to_messages_not_system() {
+    let mut assembly = PromptAssembly::new();
+    assembly.push(PromptSegment::new("sys", PromptSegmentKind::StaticSystem, "system"));
+    assembly.push(PromptSegment::new("ev", PromptSegmentKind::DynamicEvidence, "evidence"));
+
+    let profile = ProviderProfile { prompt_cache: PromptCacheCapability::AnthropicEphemeral, ..ProviderProfile::default() };
+    let mut payload = make_payload();
+    apply_cache_control(&assembly, &profile, &mut payload);
+
+    let content = &payload["messages"][0]["content"];
+    assert!(content.is_array());
+    let blocks = content.as_array().unwrap();
+    assert_eq!(blocks.len(), 1);
+    assert_eq!(blocks[0]["text"], "evidence");
+    // system must not contain the dynamic segment
+    let system_texts: Vec<_> = payload["system"].as_array().unwrap()
+        .iter().map(|b| b["text"].as_str().unwrap_or("")).collect();
+    assert!(!system_texts.contains(&"evidence"));
+}
+
+/// T26.3.4: Unsupported profile leaves payload unchanged.
+#[test]
+fn t26_3_unsupported_profile_is_noop() {
+    let mut assembly = PromptAssembly::new();
+    assembly.push(PromptSegment::new("sys", PromptSegmentKind::StaticSystem, "system"));
+
+    let profile = ProviderProfile { prompt_cache: PromptCacheCapability::Unsupported, ..ProviderProfile::default() };
+    let original = make_payload();
+    let mut payload = original.clone();
+    apply_cache_control(&assembly, &profile, &mut payload);
+
+    assert_eq!(payload, original, "Unsupported must leave payload unchanged");
+}
+
+/// T26.3.5: ManualNone profile leaves payload unchanged.
+#[test]
+fn t26_3_manual_none_is_noop() {
+    let mut assembly = PromptAssembly::new();
+    assembly.push(PromptSegment::new("sys", PromptSegmentKind::StaticSystem, "system"));
+
+    let profile = ProviderProfile { prompt_cache: PromptCacheCapability::ManualNone, ..ProviderProfile::default() };
+    let original = make_payload();
+    let mut payload = original.clone();
+    apply_cache_control(&assembly, &profile, &mut payload);
+
+    assert_eq!(payload, original, "ManualNone must leave payload unchanged");
+}
+
+/// T26.3.6: Assembly with no cacheable segments leaves system field absent.
+#[test]
+fn t26_3_no_cacheable_segments_leaves_system_absent() {
+    let mut assembly = PromptAssembly::new();
+    assembly.push(PromptSegment::new("ev", PromptSegmentKind::DynamicEvidence, "only dynamic"));
+
+    let profile = ProviderProfile { prompt_cache: PromptCacheCapability::AnthropicEphemeral, ..ProviderProfile::default() };
+    let mut payload = make_payload();
+    apply_cache_control(&assembly, &profile, &mut payload);
+
+    assert!(payload.get("system").is_none(), "no cacheable segments → system field must be absent");
 }
