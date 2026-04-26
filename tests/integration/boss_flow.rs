@@ -3,7 +3,7 @@ use std::sync::Arc;
 use rust_agent::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
 use rust_agent::core::boss::{BossCoordinator, load_plan, save_plan, trim_context_payload, assemble_summarized_payload, B_CONTEXT_TRIM_THRESHOLD, B_CONTEXT_KEEP_CHARS};
 use rust_agent::core::boss_context_brief::{BossContextBrief, BossContextStrategy, BossStateFrame, assemble_brief_prompt};
-use rust_agent::core::prompt_budget::{evaluate_prompt_budget, BudgetDecision, ProviderProfile};
+use rust_agent::core::prompt_budget::{evaluate_prompt_budget, BudgetDecision, PromptCacheCapability, ProviderProfile};
 use rust_agent::core::prompt_segment::{PromptAssembly, PromptSegment, PromptSegmentKind};
 use rust_agent::core::boss_actor_runtime::{
     BossActorRegistry, DesignerARuntime, ExecutionFn, ExecutorBRuntime, SpecReviewFn,
@@ -5153,7 +5153,7 @@ async fn t26_4_dispatch_payload_uses_brief_not_full_inherit() {
 // ── T26.5: Provider-aware token budget gate ───────────────────────────────────
 
 fn tight_profile() -> ProviderProfile {
-    ProviderProfile { context_window: 100, output_reserve: 10, cache_min_size: 64 }
+    ProviderProfile { context_window: 100, output_reserve: 10, cache_min_size: 64, prompt_cache: PromptCacheCapability::Unsupported }
 }
 
 /// T26.5.1: Prompt within budget → Pass.
@@ -5254,3 +5254,58 @@ async fn t26_5_degrade_budget_triggers_compression_in_ask_b_session() {
     let _ = std::fs::remove_file(&plan_path);
 }
 
+// ── T26.2: Provider cache capability ─────────────────────────────────────────
+
+/// T26.2.1: Default ProviderProfile (Claude baseline) has AnthropicEphemeral cache.
+#[test]
+fn t26_2_default_profile_has_anthropic_ephemeral_cache() {
+    assert_eq!(
+        ProviderProfile::default().prompt_cache,
+        PromptCacheCapability::AnthropicEphemeral,
+        "default profile must reflect Claude's ephemeral cache capability"
+    );
+}
+
+/// T26.2.2: PromptCacheCapability::default() is Unsupported (conservative type default).
+#[test]
+fn t26_2_unsupported_is_type_default() {
+    assert_eq!(
+        PromptCacheCapability::default(),
+        PromptCacheCapability::Unsupported,
+        "PromptCacheCapability type default must be Unsupported"
+    );
+}
+
+/// T26.2.3: cache capability is pure metadata — Unsupported vs AnthropicEphemeral
+/// profiles with identical token counts produce the same BudgetDecision.
+#[test]
+fn t26_2_cache_capability_is_pure_metadata() {
+    let mut assembly = PromptAssembly::new();
+    assembly.push(PromptSegment::new("sys", PromptSegmentKind::StaticSystem, "hello world"));
+
+    let profile_unsupported = ProviderProfile {
+        prompt_cache: PromptCacheCapability::Unsupported,
+        ..ProviderProfile::default()
+    };
+    let profile_ephemeral = ProviderProfile {
+        prompt_cache: PromptCacheCapability::AnthropicEphemeral,
+        ..ProviderProfile::default()
+    };
+
+    let (_, decision_a) = evaluate_prompt_budget(&assembly, &profile_unsupported);
+    let (_, decision_b) = evaluate_prompt_budget(&assembly, &profile_ephemeral);
+    assert_eq!(
+        decision_a, decision_b,
+        "prompt_cache must not affect BudgetDecision"
+    );
+}
+
+/// T26.2.4: ManualNone is distinct from Unsupported — different semantic intent.
+#[test]
+fn t26_2_manual_none_is_distinct_from_unsupported() {
+    assert_ne!(
+        PromptCacheCapability::ManualNone,
+        PromptCacheCapability::Unsupported,
+        "ManualNone (explicitly disabled) must be distinct from Unsupported (not available)"
+    );
+}

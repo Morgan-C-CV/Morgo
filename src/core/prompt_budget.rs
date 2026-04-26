@@ -1,5 +1,25 @@
 use crate::core::prompt_segment::{PromptAssembly, PromptSegmentKind};
 
+/// Provider prompt-cache capability declaration.
+/// T26.2: pure metadata — does not affect budget decisions or request payload (T26.3 handles that).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptCacheCapability {
+    /// Provider does not support prompt caching.
+    Unsupported,
+    /// Anthropic ephemeral cache-control blocks (per-segment, TTL ~5 min).
+    AnthropicEphemeral,
+    /// OpenAI-compatible prefix caching (automatic, no explicit cache-control).
+    OpenAICompatiblePrefix,
+    /// Cache capability present but explicitly disabled for this session.
+    ManualNone,
+}
+
+impl Default for PromptCacheCapability {
+    fn default() -> Self {
+        Self::Unsupported
+    }
+}
+
 /// Provider context window parameters.
 /// v1: hardcoded for Claude 3.5 Sonnet (200k context, 8k output reserve).
 #[derive(Debug, Clone, Copy)]
@@ -10,6 +30,8 @@ pub struct ProviderProfile {
     pub output_reserve: usize,
     /// Minimum chars for a cache block to be eligible (provider-side).
     pub cache_min_size: usize,
+    /// Cache capability for this provider. T26.2: metadata only, not used in budget decisions.
+    pub prompt_cache: PromptCacheCapability,
 }
 
 impl Default for ProviderProfile {
@@ -18,6 +40,8 @@ impl Default for ProviderProfile {
             context_window: 200_000,
             output_reserve: 8_000,
             cache_min_size: 1_024,
+            // Default profile represents Claude (Anthropic) — ephemeral cache is available.
+            prompt_cache: PromptCacheCapability::AnthropicEphemeral,
         }
     }
 }
