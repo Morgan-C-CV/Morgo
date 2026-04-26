@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use rust_agent::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
 use rust_agent::core::boss::{BossCoordinator, load_plan, save_plan, trim_context_payload, assemble_summarized_payload, B_CONTEXT_TRIM_THRESHOLD, B_CONTEXT_KEEP_CHARS};
+use rust_agent::core::prompt_segment::{PromptAssembly, PromptSegment, PromptSegmentKind};
 use rust_agent::core::boss_actor_runtime::{
     BossActorRegistry, DesignerARuntime, ExecutionFn, ExecutorBRuntime, SpecReviewFn,
 };
@@ -4962,5 +4963,63 @@ async fn t25_2_production_path_fallback_to_trim_when_a_unavailable() {
     );
 
     let _ = std::fs::remove_file(&plan_path);
+}
+
+// ── T26.1: PromptSegment model + fingerprint ─────────────────────────────────
+
+/// T26.1.1: Same kind + content → identical fingerprint (stability).
+#[test]
+fn t26_1_same_content_produces_stable_fingerprint() {
+    let a = PromptSegment::new("sys", PromptSegmentKind::StaticSystem, "hello world");
+    let b = PromptSegment::new("sys", PromptSegmentKind::StaticSystem, "hello world");
+    assert_eq!(a.fingerprint, b.fingerprint);
+}
+
+/// T26.1.2: Content change → fingerprint changes.
+#[test]
+fn t26_1_content_change_changes_fingerprint() {
+    let a = PromptSegment::new("sys", PromptSegmentKind::StaticSystem, "hello world");
+    let b = PromptSegment::new("sys", PromptSegmentKind::StaticSystem, "hello world CHANGED");
+    assert_ne!(a.fingerprint, b.fingerprint);
+}
+
+/// T26.1.3: Kind change → fingerprint changes even with identical content.
+#[test]
+fn t26_1_kind_change_changes_fingerprint() {
+    let a = PromptSegment::new("seg", PromptSegmentKind::StaticSystem, "same content");
+    let b = PromptSegment::new("seg", PromptSegmentKind::StateFrame, "same content");
+    assert_ne!(a.fingerprint, b.fingerprint);
+}
+
+/// T26.1.4: Dynamic segment does not affect stable prefix fingerprint.
+#[test]
+fn t26_1_dynamic_segment_excluded_from_stable_prefix_fingerprint() {
+    let mut assembly_static_only = PromptAssembly::new();
+    assembly_static_only.push(PromptSegment::new("sys", PromptSegmentKind::StaticSystem, "system"));
+
+    let mut assembly_with_dynamic = PromptAssembly::new();
+    assembly_with_dynamic.push(PromptSegment::new("sys", PromptSegmentKind::StaticSystem, "system"));
+    assembly_with_dynamic.push(PromptSegment::new("sf", PromptSegmentKind::StateFrame, "dynamic state"));
+
+    assert_eq!(
+        assembly_static_only.stable_prefix_fingerprint(),
+        assembly_with_dynamic.stable_prefix_fingerprint(),
+        "dynamic segment must not affect stable prefix fingerprint"
+    );
+}
+
+/// T26.1.5: PromptAssembly::assemble() matches the existing string-join fallback.
+#[test]
+fn t26_1_assembly_fallback_matches_existing_string_join() {
+    let parts = ["system prompt", "tools prompt", "context prompt", "user input"];
+    let expected = parts.join("\n");
+
+    let mut assembly = PromptAssembly::new();
+    assembly.push(PromptSegment::new("sys", PromptSegmentKind::StaticSystem, parts[0]));
+    assembly.push(PromptSegment::new("tools", PromptSegmentKind::ToolSchema, parts[1]));
+    assembly.push(PromptSegment::new("ctx", PromptSegmentKind::ProjectContext, parts[2]));
+    assembly.push(PromptSegment::new("user", PromptSegmentKind::DynamicEvidence, parts[3]));
+
+    assert_eq!(assembly.assemble(), expected);
 }
 

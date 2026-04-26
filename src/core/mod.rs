@@ -10,4 +10,5 @@ pub mod events;
 pub mod housekeeping;
 pub mod message;
 pub mod output;
+pub mod prompt_segment;
 pub mod query_loop;
