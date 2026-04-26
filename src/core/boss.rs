@@ -1826,7 +1826,6 @@ impl BossCoordinator {
         (accepted, correction)
     }
 
-    /// Send a message to B's running LLM session and wait for B's response.
     /// Summarize `old_part` via A session. Returns A's response string.
     /// If A is unavailable or the ask fails, returns Err — caller must fallback.
     /// Note: this call goes through ask_a_session and may leave a trace in A's runtime history.
@@ -1841,6 +1840,41 @@ impl BossCoordinator {
             old_part
         );
         self.ask_a_session(app_state, prompt).await
+    }
+
+    /// Summarize `old_part` via a stateless one-shot provider call.
+    /// Does NOT go through any session actor — A session history is never touched.
+    /// Returns Err if the active model runtime is unavailable or the call fails.
+    async fn summarize_context_stateless(
+        &self,
+        app_state: &Arc<crate::state::app_state::AppState>,
+        old_part: &str,
+    ) -> anyhow::Result<String> {
+        let runtime = app_state
+            .active_model_runtime
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("active model runtime not available"))?;
+        let snapshot = runtime.snapshot().await;
+        let prompt = format!(
+            "Summarize the following context concisely so it can replace the original in a continuation prompt. Preserve key decisions, constraints, and outcomes:\n\n{}",
+            old_part
+        );
+        let msg = crate::core::message::Message::user(prompt);
+        let events = snapshot.client.stream_message(&msg).await;
+        let text: String = events
+            .into_iter()
+            .filter_map(|e| {
+                if let crate::service::api::streaming::StreamEvent::TextDelta(t) = e {
+                    Some(t)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        if text.is_empty() {
+            anyhow::bail!("stateless summarize returned empty response");
+        }
+        Ok(text)
     }
 
     /// Mirrors `ask_a_session` but reads from `executor_b.session_id`.
@@ -1881,7 +1915,7 @@ impl BossCoordinator {
             let split = message.len().saturating_sub(B_CONTEXT_KEEP_CHARS);
             let old_part = &message[..split];
             let recent_tail = &message[split..];
-            match self.summarize_context_with_a(app_state, old_part).await {
+            match self.summarize_context_stateless(app_state, old_part).await {
                 Ok(summary) => assemble_summarized_payload(&summary, recent_tail),
                 Err(_) => trim_context_payload(&message, B_CONTEXT_TRIM_THRESHOLD, B_CONTEXT_KEEP_CHARS),
             }

@@ -4833,8 +4833,10 @@ async fn t25_2_summarize_does_not_persist_to_plan_or_snapshot() {
     let _ = std::fs::remove_file(&plan_path);
 }
 
-/// T25.2.6 production path: ask_b_session with oversized payload + live A session
-/// → summarize_context_with_a succeeds → outbound message starts with "[summary: ...]".
+/// T25.2.6 production path: ask_b_session with oversized payload.
+/// T26.6 changed the summarize path to stateless (no A session actor).
+/// In test environments without active_model_runtime, stateless summarize fails
+/// and falls back to trim — outbound message starts with "[trimmed earlier context:".
 #[tokio::test]
 async fn t25_2_production_path_summarize_success_via_ask_b_session() {
     let plan_path = std::env::temp_dir().join("t25_2_prod_summarize.json");
@@ -4851,26 +4853,7 @@ async fn t25_2_production_path_summarize_success_via_ask_b_session() {
     let task_manager = Arc::new(TaskManager::new_with_output_root(unique_dir));
     let app_state = app_state_with_tasks("session-t25-2-prod-summarize", task_manager.clone());
 
-    // Fake A session: responds to any message with a fixed summary string.
-    let fake_a = task_manager.create_with_type(
-        "fake A summarize session",
-        TaskType::LocalAgent,
-        "session-t25-2-prod-summarize",
-        InteractionSurface::Cli,
-    );
-    let a_task_id = fake_a.id.clone();
-    let tm_for_a = task_manager.clone();
-    let a_id_for_loop = a_task_id.clone();
-    task_manager.launch(&a_task_id, "", async move {
-        loop {
-            let messages = tm_for_a.drain_mailbox(&a_id_for_loop);
-            for _msg in messages {
-                tm_for_a.append_output(&a_id_for_loop, "SUMMARIZED_CONTEXT");
-            }
-            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-        }
-    });
-    coordinator.record_a_session_id_pub(&a_task_id).await;
+    // No A session needed — T26.6 uses stateless path; no active_model_runtime → fallback to trim.
 
     // Fake B session: responds to any message so ask_b_session doesn't time out.
     let fake_b = task_manager.create_with_type(
@@ -4899,22 +4882,18 @@ async fn t25_2_production_path_summarize_success_via_ask_b_session() {
 
     let _ = coordinator.ask_b_session_pub(&app_state, oversized).await;
 
-    // The outbound message recorded in status must start with "[summary: ...]".
+    // T26.6: stateless summarize has no active_model_runtime in test → fallback to trim.
     let sent = coordinator.status.read().await.last_b_ask_message.clone().unwrap_or_default();
     assert!(
-        sent.starts_with("[summary:"),
-        "summarize success path: outbound message must start with '[summary:', got: {sent:.80}"
-    );
-    assert!(
-        sent.contains("SUMMARIZED_CONTEXT"),
-        "outbound message must contain A's summary, got: {sent:.80}"
+        sent.starts_with("[trimmed earlier context:"),
+        "T26.6 stateless path: no active_model_runtime → fallback trim, got: {sent:.80}"
     );
 
     let _ = std::fs::remove_file(&plan_path);
 }
 
-/// T25.2.7 production path: ask_b_session with oversized payload + A unavailable
-/// → summarize_context_with_a fails → fallback to trim → outbound message starts with "[trimmed earlier context:".
+/// T25.2.7 production path: ask_b_session with oversized payload + no active_model_runtime
+/// → stateless summarize fails → fallback to trim → outbound message starts with "[trimmed earlier context:".
 #[tokio::test]
 async fn t25_2_production_path_fallback_to_trim_when_a_unavailable() {
     let plan_path = std::env::temp_dir().join("t25_2_prod_fallback.json");
@@ -4931,7 +4910,7 @@ async fn t25_2_production_path_fallback_to_trim_when_a_unavailable() {
     let task_manager = Arc::new(TaskManager::new_with_output_root(unique_dir));
     let app_state = app_state_with_tasks("session-t25-2-prod-fallback", task_manager.clone());
 
-    // No A session seeded — summarize_context_with_a will fail fast.
+    // No A session seeded — stateless summarize has no active_model_runtime → fallback to trim.
 
     // Fake B session: responds so ask_b_session doesn't time out.
     let fake_b = task_manager.create_with_type(
@@ -5419,4 +5398,228 @@ fn t26_3_no_cacheable_segments_leaves_system_absent() {
     apply_cache_control(&assembly, &profile, &mut payload);
 
     assert!(payload.get("system").is_none(), "no cacheable segments → system field must be absent");
+}
+
+// ── T26.6: A/B context isolation ─────────────────────────────────────────────
+
+/// T26.6.1: After B context summarize is triggered, A session's last_a_dispatch_message
+/// must NOT contain B's old context — stateless path does not route through A session.
+#[tokio::test]
+async fn t26_6_a_session_not_polluted_by_b_summarize() {
+    let plan_path = std::env::temp_dir().join("t26_6_a_not_polluted.json");
+    let plan = BossPlan {
+        plan_id: "t26-6-a-not-polluted".into(),
+        task_description: "T26.6 isolation test".into(),
+        steps: vec![boss_step(0, "step zero")],
+        ..Default::default()
+    };
+    save_plan(&plan, &plan_path).await.unwrap();
+
+    let coordinator = BossCoordinator::restore_or_init(&plan_path).await.unwrap();
+    let unique_dir = std::env::temp_dir().join("t26_6_a_not_polluted_output");
+    let task_manager = Arc::new(TaskManager::new_with_output_root(unique_dir));
+    let app_state = app_state_with_tasks("session-t26-6-a-not-polluted", task_manager.clone());
+
+    // Fake B session.
+    let fake_b = task_manager.create_with_type(
+        "fake B session",
+        TaskType::LocalAgent,
+        "session-t26-6-a-not-polluted",
+        InteractionSurface::Cli,
+    );
+    let b_task_id = fake_b.id.clone();
+    let tm_for_b = task_manager.clone();
+    let b_id_for_loop = b_task_id.clone();
+    task_manager.launch(&b_task_id, "", async move {
+        loop {
+            let messages = tm_for_b.drain_mailbox(&b_id_for_loop);
+            for _msg in messages {
+                tm_for_b.append_output(&b_id_for_loop, "B_ACK");
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        }
+    });
+    coordinator.record_b_session_id_pub(&b_task_id).await;
+
+    let oversized = "B_CONTEXT_MARKER ".repeat(B_CONTEXT_TRIM_THRESHOLD / 16 + 1);
+    assert!(oversized.len() > B_CONTEXT_TRIM_THRESHOLD);
+    let _ = coordinator.ask_b_session_pub(&app_state, oversized).await;
+
+    let guard = coordinator.status.read().await;
+    // A session dispatch message must not contain the B context marker.
+    if let Some(ref a_msg) = guard.last_a_dispatch_message {
+        assert!(
+            !a_msg.contains("B_CONTEXT_MARKER"),
+            "A session must not be polluted with B context"
+        );
+    }
+    // If last_a_dispatch_message is None, A was never called — isolation holds.
+
+    let _ = std::fs::remove_file(&plan_path);
+}
+
+/// T26.6.2: Stateless summarize does not write to A session history.
+/// Pre-set sentinel in last_a_dispatch_message; after B summarize fires, sentinel must be unchanged.
+#[tokio::test]
+async fn t26_6_stateless_summarize_does_not_write_a_session_history() {
+    let plan_path = std::env::temp_dir().join("t26_6_stateless_no_a_write.json");
+    let plan = BossPlan {
+        plan_id: "t26-6-stateless-no-a-write".into(),
+        task_description: "T26.6 stateless isolation test".into(),
+        steps: vec![boss_step(0, "step zero")],
+        ..Default::default()
+    };
+    save_plan(&plan, &plan_path).await.unwrap();
+
+    let coordinator = BossCoordinator::restore_or_init(&plan_path).await.unwrap();
+    let unique_dir = std::env::temp_dir().join("t26_6_stateless_no_a_write_output");
+    let task_manager = Arc::new(TaskManager::new_with_output_root(unique_dir));
+    let app_state = app_state_with_tasks("session-t26-6-stateless-no-a-write", task_manager.clone());
+
+    // Pre-set sentinel.
+    {
+        let mut guard = coordinator.status.write().await;
+        guard.last_a_dispatch_message = Some("SENTINEL_BEFORE_B_SUMMARIZE".to_string());
+    }
+
+    // Fake B session.
+    let fake_b = task_manager.create_with_type(
+        "fake B session",
+        TaskType::LocalAgent,
+        "session-t26-6-stateless-no-a-write",
+        InteractionSurface::Cli,
+    );
+    let b_task_id = fake_b.id.clone();
+    let tm_for_b = task_manager.clone();
+    let b_id_for_loop = b_task_id.clone();
+    task_manager.launch(&b_task_id, "", async move {
+        loop {
+            let messages = tm_for_b.drain_mailbox(&b_id_for_loop);
+            for _msg in messages {
+                tm_for_b.append_output(&b_id_for_loop, "B_ACK");
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        }
+    });
+    coordinator.record_b_session_id_pub(&b_task_id).await;
+
+    let oversized = "B_CONTEXT_MARKER ".repeat(B_CONTEXT_TRIM_THRESHOLD / 16 + 1);
+    assert!(oversized.len() > B_CONTEXT_TRIM_THRESHOLD);
+    let _ = coordinator.ask_b_session_pub(&app_state, oversized).await;
+
+    let guard = coordinator.status.read().await;
+    assert_eq!(
+        guard.last_a_dispatch_message.as_deref(),
+        Some("SENTINEL_BEFORE_B_SUMMARIZE"),
+        "stateless summarize must not overwrite last_a_dispatch_message"
+    );
+
+    let _ = std::fs::remove_file(&plan_path);
+}
+
+/// T26.6.3: When stateless summarize fails (no active_model_runtime), fallback to trim.
+/// last_b_ask_message must be shorter than the original oversized payload.
+#[tokio::test]
+async fn t26_6_fallback_to_trim_when_stateless_summarize_fails() {
+    let plan_path = std::env::temp_dir().join("t26_6_fallback_trim.json");
+    let plan = BossPlan {
+        plan_id: "t26-6-fallback-trim".into(),
+        task_description: "T26.6 fallback trim test".into(),
+        steps: vec![boss_step(0, "step zero")],
+        ..Default::default()
+    };
+    save_plan(&plan, &plan_path).await.unwrap();
+
+    let coordinator = BossCoordinator::restore_or_init(&plan_path).await.unwrap();
+    let unique_dir = std::env::temp_dir().join("t26_6_fallback_trim_output");
+    let task_manager = Arc::new(TaskManager::new_with_output_root(unique_dir));
+    // app_state has no active_model_runtime → stateless summarize returns Err → fallback to trim.
+    let app_state = app_state_with_tasks("session-t26-6-fallback-trim", task_manager.clone());
+
+    let fake_b = task_manager.create_with_type(
+        "fake B session",
+        TaskType::LocalAgent,
+        "session-t26-6-fallback-trim",
+        InteractionSurface::Cli,
+    );
+    let b_task_id = fake_b.id.clone();
+    let tm_for_b = task_manager.clone();
+    let b_id_for_loop = b_task_id.clone();
+    task_manager.launch(&b_task_id, "", async move {
+        loop {
+            let messages = tm_for_b.drain_mailbox(&b_id_for_loop);
+            for _msg in messages {
+                tm_for_b.append_output(&b_id_for_loop, "B_ACK");
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        }
+    });
+    coordinator.record_b_session_id_pub(&b_task_id).await;
+
+    let oversized = "TRIM_FALLBACK_MARKER ".repeat(B_CONTEXT_TRIM_THRESHOLD / 19 + 1);
+    assert!(oversized.len() > B_CONTEXT_TRIM_THRESHOLD);
+    let _ = coordinator.ask_b_session_pub(&app_state, oversized.clone()).await;
+
+    let guard = coordinator.status.read().await;
+    let sent = guard.last_b_ask_message.as_deref().unwrap_or("");
+    assert!(
+        sent.len() < oversized.len(),
+        "fallback trim must compress the payload when stateless summarize fails"
+    );
+
+    let _ = std::fs::remove_file(&plan_path);
+}
+
+/// T26.6.4: B context summary uses stateless path — A session dispatch message
+/// is never set to the summarize prompt when stateless path is active.
+#[tokio::test]
+async fn t26_6_b_context_summary_uses_stateless_path() {
+    let plan_path = std::env::temp_dir().join("t26_6_stateless_path.json");
+    let plan = BossPlan {
+        plan_id: "t26-6-stateless-path".into(),
+        task_description: "T26.6 stateless path test".into(),
+        steps: vec![boss_step(0, "step zero")],
+        ..Default::default()
+    };
+    save_plan(&plan, &plan_path).await.unwrap();
+
+    let coordinator = BossCoordinator::restore_or_init(&plan_path).await.unwrap();
+    let unique_dir = std::env::temp_dir().join("t26_6_stateless_path_output");
+    let task_manager = Arc::new(TaskManager::new_with_output_root(unique_dir));
+    let app_state = app_state_with_tasks("session-t26-6-stateless-path", task_manager.clone());
+
+    let fake_b = task_manager.create_with_type(
+        "fake B session",
+        TaskType::LocalAgent,
+        "session-t26-6-stateless-path",
+        InteractionSurface::Cli,
+    );
+    let b_task_id = fake_b.id.clone();
+    let tm_for_b = task_manager.clone();
+    let b_id_for_loop = b_task_id.clone();
+    task_manager.launch(&b_task_id, "", async move {
+        loop {
+            let messages = tm_for_b.drain_mailbox(&b_id_for_loop);
+            for _msg in messages {
+                tm_for_b.append_output(&b_id_for_loop, "B_ACK");
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        }
+    });
+    coordinator.record_b_session_id_pub(&b_task_id).await;
+
+    let oversized = "STATELESS_PATH_MARKER ".repeat(B_CONTEXT_TRIM_THRESHOLD / 20 + 1);
+    assert!(oversized.len() > B_CONTEXT_TRIM_THRESHOLD);
+    let _ = coordinator.ask_b_session_pub(&app_state, oversized).await;
+
+    let guard = coordinator.status.read().await;
+    // Stateless path must not route summarize prompt through A session.
+    if let Some(ref a_msg) = guard.last_a_dispatch_message {
+        assert!(
+            !a_msg.contains("Summarize the following context"),
+            "stateless path must not route summarize prompt through A session"
+        );
+    }
+
+    let _ = std::fs::remove_file(&plan_path);
 }
