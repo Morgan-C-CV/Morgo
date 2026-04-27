@@ -100,6 +100,7 @@ pub struct ToolPermissionContext {
     telegram_surface_admission_policy: Arc<RwLock<SurfaceAdmissionPolicy>>,
     pub external_memory_entries: Arc<RwLock<Vec<String>>>,
     pub nested_memory_lineage: Arc<RwLock<Vec<String>>>,
+    pub lism_mode: Arc<RwLock<bool>>,
     pub last_activity_ts: Option<Arc<AtomicU64>>,
     pub cancellation_token: Option<CancellationToken>,
     pub subagent_limiter: Option<Arc<SubagentLimiter>>,
@@ -139,6 +140,7 @@ impl ToolPermissionContext {
             )),
             external_memory_entries: Arc::new(RwLock::new(Vec::new())),
             nested_memory_lineage: Arc::new(RwLock::new(Vec::new())),
+            lism_mode: Arc::new(RwLock::new(false)),
             last_activity_ts: None,
             cancellation_token: None,
             subagent_limiter: None,
@@ -249,6 +251,16 @@ impl ToolPermissionContext {
     pub fn set_mode(&self, mode: PermissionMode) {
         if let Ok(mut slot) = self.mode.write() {
             *slot = mode;
+        }
+    }
+
+    pub fn lism_enabled(&self) -> bool {
+        self.lism_mode.read().map(|enabled| *enabled).unwrap_or(false)
+    }
+
+    pub fn set_lism_enabled(&self, enabled: bool) {
+        if let Ok(mut slot) = self.lism_mode.write() {
+            *slot = enabled;
         }
     }
 

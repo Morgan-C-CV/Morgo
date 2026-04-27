@@ -785,6 +785,7 @@ fn assembly_environment_can_explicitly_disable_open_world_tools() {
         include_deferred_tools: true,
         include_interactive_tools: true,
         include_open_world_tools: false,
+        boss_actor_policy: None,
     });
     let names = assembled
         .all_metadata()
@@ -1003,6 +1004,7 @@ fn open_world_remains_independent_assembly_gate_under_always_load() {
         include_deferred_tools: true,
         include_interactive_tools: true,
         include_open_world_tools: false,
+        boss_actor_policy: None,
     });
     let restricted_names = restricted
         .all_metadata()

@@ -8,6 +8,7 @@ use rust_agent::command::builtin::help::HelpCommand;
 use rust_agent::command::builtin::permissions::PermissionsCommand;
 use rust_agent::command::builtin::plugins::{PluginSlashCommand, PluginsCommand};
 use rust_agent::command::builtin::skills::{SkillSlashCommand, SkillsCommand};
+use rust_agent::command::builtin::lism::LisMCommand;
 use rust_agent::command::builtin::status::StatusCommand;
 use rust_agent::command::builtin::tasks::TasksCommand;
 use rust_agent::command::registry::CommandRegistry;
@@ -1996,4 +1997,117 @@ fn plugin_slash_command_metadata_preserves_contract_flags() {
 
 fn _assert_path_exists(path: &Path) {
     assert!(path.exists() || !path.as_os_str().is_empty());
+}
+
+#[tokio::test]
+async fn lism_command_on_sets_flag_true() {
+    let app_state = test_app_state(None, None, None, None);
+
+    let result = LisMCommand
+        .execute(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/LisM on"),
+            &app_state,
+        )
+        .await
+        .expect("LisM on should succeed");
+
+    let CommandResult::Message(text) = result else {
+        panic!("expected LisM message");
+    };
+    assert!(app_state.permission_context.lism_enabled());
+    assert!(text.contains("LisM enabled"));
+    assert!(text.contains("not automatically switched"));
+}
+
+#[tokio::test]
+async fn lism_command_off_sets_flag_false() {
+    let app_state = test_app_state(None, None, None, None);
+    app_state.permission_context.set_lism_enabled(true);
+
+    let result = LisMCommand
+        .execute(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/LisM off"),
+            &app_state,
+        )
+        .await
+        .expect("LisM off should succeed");
+
+    let CommandResult::Message(text) = result else {
+        panic!("expected LisM message");
+    };
+    assert!(!app_state.permission_context.lism_enabled());
+    assert!(text.contains("LisM disabled"));
+}
+
+#[tokio::test]
+async fn lism_command_status_reports_current_mode() {
+    let app_state = test_app_state(None, None, None, None);
+
+    let disabled = LisMCommand
+        .execute(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/LisM status"),
+            &app_state,
+        )
+        .await
+        .expect("LisM status should succeed");
+    let CommandResult::Message(disabled_text) = disabled else {
+        panic!("expected LisM message");
+    };
+    assert!(disabled_text.contains("disabled"));
+
+    app_state.permission_context.set_lism_enabled(true);
+    let enabled = LisMCommand
+        .execute(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/LisM status"),
+            &app_state,
+        )
+        .await
+        .expect("LisM status should succeed");
+    let CommandResult::Message(enabled_text) = enabled else {
+        panic!("expected LisM message");
+    };
+    assert!(enabled_text.contains("enabled"));
+}
+
+#[tokio::test]
+async fn lism_command_explain_lists_available_building_blocks_and_deferred_items() {
+    let app_state = test_app_state(None, None, None, None);
+
+    let result = LisMCommand
+        .execute(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/LisM explain"),
+            &app_state,
+        )
+        .await
+        .expect("LisM explain should succeed");
+
+    let CommandResult::Message(text) = result else {
+        panic!("expected LisM message");
+    };
+    assert!(text.contains("Available building blocks"));
+    assert!(text.contains("StateFrame schema and StateDecision validation"));
+    assert!(text.contains("BossPlan -> StateFrame projection"));
+    assert!(text.contains("Stateless JSON decision loop"));
+    assert!(text.contains("model tier routing"));
+    assert!(text.contains("does not automatically switch the current /boss production path"));
+}
+
+#[tokio::test]
+async fn lism_command_unknown_subcommand_returns_usage() {
+    let app_state = test_app_state(None, None, None, None);
+
+    let result = LisMCommand
+        .execute(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/LisM nope"),
+            &app_state,
+        )
+        .await
+        .expect("LisM usage should succeed");
+
+    let CommandResult::Message(text) = result else {
+        panic!("expected LisM message");
+    };
+    assert!(text.contains("usage: /LisM <subcommand>"));
+    assert!(text.contains("status"));
+    assert!(text.contains("explain"));
 }

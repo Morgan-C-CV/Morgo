@@ -5,6 +5,7 @@ pub mod config;
 pub mod cost;
 pub mod doctor;
 pub mod help;
+pub mod lism;
 pub mod mcp;
 pub mod model;
 pub mod permissions;
@@ -27,6 +28,7 @@ use config::ConfigCommand;
 use cost::CostCommand;
 use doctor::DoctorCommand;
 use help::HelpCommand;
+use lism::LisMCommand;
 use mcp::McpCommand;
 use model::ModelCommand;
 use permissions::PermissionsCommand;
@@ -42,6 +44,7 @@ use tasks::TasksCommand;
 pub fn register_builtin_commands(registry: CommandRegistry) -> CommandRegistry {
     registry
         .register(Arc::new(HelpCommand))
+        .register(Arc::new(LisMCommand))
         .register(Arc::new(CostCommand))
         .register(Arc::new(CompactCommand))
         .register(Arc::new(ClearCommand))
