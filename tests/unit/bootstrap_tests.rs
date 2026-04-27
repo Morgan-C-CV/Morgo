@@ -3720,6 +3720,7 @@ fn teammate_registry_rejects_unknown_field() {
 
 #[test]
 fn proxy_env_var_is_read_into_config() {
+    let _env_lock = bootstrap_env_lock().lock().expect("bootstrap env lock");
     let _guard = BootstrapEnvGuard::new();
     set_env_var("RUST_AGENT_PROVIDER_BASE_URL", "https://api.anthropic.com");
     set_env_var("RUST_AGENT_PROVIDER_API_KEY", "test-key");
@@ -3748,6 +3749,7 @@ fn proxy_env_var_is_read_into_config() {
 
 #[test]
 fn no_proxy_env_var_is_read_into_config() {
+    let _env_lock = bootstrap_env_lock().lock().expect("bootstrap env lock");
     let _guard = BootstrapEnvGuard::new();
     set_env_var("RUST_AGENT_PROVIDER_BASE_URL", "https://api.anthropic.com");
     set_env_var("RUST_AGENT_PROVIDER_API_KEY", "test-key");
@@ -3773,6 +3775,7 @@ fn no_proxy_env_var_is_read_into_config() {
 
 #[test]
 fn ca_bundle_env_var_is_read_into_config() {
+    let _env_lock = bootstrap_env_lock().lock().expect("bootstrap env lock");
     let _guard = BootstrapEnvGuard::new();
     set_env_var("RUST_AGENT_PROVIDER_BASE_URL", "https://api.anthropic.com");
     set_env_var("RUST_AGENT_PROVIDER_API_KEY", "test-key");
@@ -3801,6 +3804,7 @@ fn ca_bundle_env_var_is_read_into_config() {
 
 #[test]
 fn no_proxy_env_unset_leaves_field_none() {
+    let _env_lock = bootstrap_env_lock().lock().expect("bootstrap env lock");
     let _guard = BootstrapEnvGuard::new();
     set_env_var("RUST_AGENT_PROVIDER_BASE_URL", "https://api.anthropic.com");
     set_env_var("RUST_AGENT_PROVIDER_API_KEY", "test-key");
@@ -3827,6 +3831,7 @@ fn no_proxy_env_unset_leaves_field_none() {
 
 #[test]
 fn startup_warning_invalid_proxy_url_fires_for_bad_url() {
+    let _env_lock = bootstrap_env_lock().lock().expect("bootstrap env lock");
     let _guard = BootstrapEnvGuard::new();
     set_env_var("RUST_AGENT_PROXY_URL", "not-a-valid-proxy-url");
 
@@ -3846,6 +3851,7 @@ fn startup_warning_invalid_proxy_url_fires_for_bad_url() {
 
 #[test]
 fn startup_warning_invalid_proxy_url_does_not_fire_for_valid_url() {
+    let _env_lock = bootstrap_env_lock().lock().expect("bootstrap env lock");
     let _guard = BootstrapEnvGuard::new();
     set_env_var("RUST_AGENT_PROXY_URL", "http://proxy.corp.example:3128");
 
@@ -3865,6 +3871,7 @@ fn startup_warning_invalid_proxy_url_does_not_fire_for_valid_url() {
 
 #[test]
 fn startup_warning_invalid_proxy_url_does_not_fire_when_unset() {
+    let _env_lock = bootstrap_env_lock().lock().expect("bootstrap env lock");
     let _guard = BootstrapEnvGuard::new();
 
     let warnings = rust_agent::bootstrap::warnings::collect_startup_warnings(
