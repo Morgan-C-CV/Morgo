@@ -1865,10 +1865,18 @@ async fn provider_fixture_harness_locks_openai_compatible_quirk_matrix_baseline(
     ];
 
     for quirk_case in cases {
+        let label = quirk_case.label;
         let result = run_provider_case(quirk_case.case).await;
+        if let Some(expected_terminal) = quirk_case.expected.expected_terminal.as_ref() {
+            if let Some(Terminal::ModelError { message, .. }) = result.query_terminal.as_ref() {
+                eprintln!(
+                    "quirk case {label}: terminal message={message:?}, expected_contains={:?}",
+                    expected_terminal.message_contains
+                );
+            }
+        }
         assert_provider_case(&result, &quirk_case.expected);
         finish_provider_case(result).await;
-        let _ = quirk_case.label;
     }
 }
 

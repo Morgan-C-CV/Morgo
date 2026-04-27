@@ -1185,6 +1185,26 @@ impl<'a> OpenAICompatibleStreamParser<'a> {
         payload: &Value,
         output: &mut Vec<StreamEvent>,
     ) -> Result<(), ApiError> {
+        let choices_value = payload.get("choices");
+        if let Some(error) = payload.get("error") {
+            let choices_absent_or_empty = match choices_value {
+                None => true,
+                Some(Value::Array(choices)) => choices.is_empty(),
+                Some(_) => false,
+            };
+            if choices_absent_or_empty {
+                let message = error
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown provider error");
+                let error_type = error.get("type").and_then(Value::as_str).unwrap_or("unknown");
+                let error_code = error.get("code").and_then(Value::as_str).unwrap_or("unknown");
+                return Err(ApiError::invalid_response(format!(
+                    "provider returned error envelope in openai-compatible stream: message={message}, type={error_type}, code={error_code}",
+                )));
+            }
+        }
+
         if let Some(usage) = payload.get("usage") {
             let incoming = normalize_usage(usage, self.default_model);
             self.pending_usage = Some(match self.pending_usage.take() {
@@ -1193,8 +1213,7 @@ impl<'a> OpenAICompatibleStreamParser<'a> {
             });
         }
 
-        let choices = payload
-            .get("choices")
+        let choices = choices_value
             .and_then(Value::as_array)
             .ok_or_else(|| self.protocol_error("openai-compatible event missing choices"))?;
 
