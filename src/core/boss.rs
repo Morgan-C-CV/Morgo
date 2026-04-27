@@ -63,10 +63,13 @@ impl BossCoordinator {
         Arc::as_ptr(&self.runtime_owner) as usize
     }
 
-    /// Test-only seam: exposes `parse_a_review_verdict` as a public associated function.
+    /// Test-only seam: exposes `parse_a_review_decision` as a public associated function.
     #[doc(hidden)]
-    pub fn parse_a_review_verdict_pub(response: &str) -> (bool, Option<String>) {
-        Self::parse_a_review_verdict(response)
+    pub fn parse_a_review_decision_pub(
+        response: &str,
+        summary: &str,
+    ) -> crate::core::boss_actor_runtime::ReviewDecision {
+        Self::parse_a_review_decision(response, summary)
     }
 
     /// Test-only seam: builds and returns the ReviewFn for this coordinator.
@@ -517,25 +520,34 @@ impl BossCoordinator {
                     let verdict_hint = if accepted { "accepted" } else { "rejected" };
                     let msg = match correction.as_deref() {
                         Some(corr) => format!(
-                            "Review step {step_id}: coordinator verdict={verdict_hint}. Summary: {summary}. Correction: {corr}. Please respond with ACCEPT or REJECT, and if REJECT include CORRECTION: <your correction>."
+                            "Review step {step_id}: coordinator verdict={verdict_hint}. Summary: {summary}. Correction: {corr}. Please respond with ACCEPT, REJECT, or REPLAN_STEP. If REJECT include CORRECTION: <your correction>. If REPLAN_STEP include REASON: <why this step needs replanning>."
                         ),
                         None => format!(
-                            "Review step {step_id}: coordinator verdict={verdict_hint}. Summary: {summary}. Please respond with ACCEPT or REJECT, and if REJECT include CORRECTION: <your correction>."
+                            "Review step {step_id}: coordinator verdict={verdict_hint}. Summary: {summary}. Please respond with ACCEPT, REJECT, or REPLAN_STEP. If REJECT include CORRECTION: <your correction>. If REPLAN_STEP include REASON: <why this step needs replanning>."
                         ),
                     };
                     match c.ask_a_session(&app, msg).await {
                         Ok(response) => {
-                            let (a_accepted, a_correction) = Self::parse_a_review_verdict(&response);
-                            c.apply_review_verdict(step_id, a_accepted, &summary, a_correction.as_deref()).await?;
-                            return Ok(a_accepted);
+                            let decision = Self::parse_a_review_decision(&response, &summary);
+                            c.apply_review_verdict(step_id, &decision).await?;
+                            return Ok(decision);
                         }
                         Err(_) => {
-                            // A session unavailable — fall through to coordinator verdict.
                         }
                     }
                 }
-                c.apply_review_verdict(step_id, accepted, &summary, correction.as_deref()).await?;
-                Ok(accepted)
+                let decision = if accepted {
+                    crate::core::boss_actor_runtime::ReviewDecision::Accept {
+                        summary: summary.clone(),
+                    }
+                } else {
+                    crate::core::boss_actor_runtime::ReviewDecision::Correct {
+                        summary: summary.clone(),
+                        correction,
+                    }
+                };
+                c.apply_review_verdict(step_id, &decision).await?;
+                Ok(decision)
             })
         })
     }
@@ -556,12 +568,13 @@ impl BossCoordinator {
                 );
                 let effective_signal = match c.ask_a_session(&app, msg).await {
                     Ok(response) => {
-                        // If A rejects, use A's correction as the effective signal.
-                        let (a_accepted, a_correction) = Self::parse_a_review_verdict(&response);
-                        if !a_accepted {
-                            a_correction.unwrap_or_else(|| signal.clone())
-                        } else {
-                            signal.clone()
+                        let decision = Self::parse_a_review_decision(&response, &signal);
+                        match decision {
+                            crate::core::boss_actor_runtime::ReviewDecision::Accept { .. } => signal.clone(),
+                            crate::core::boss_actor_runtime::ReviewDecision::Correct { correction, .. } => {
+                                correction.unwrap_or_else(|| signal.clone())
+                            }
+                            crate::core::boss_actor_runtime::ReviewDecision::ReplanStep { reason, .. } => reason,
                         }
                     }
                     Err(_) => signal.clone(),
@@ -1162,71 +1175,42 @@ impl BossCoordinator {
         review_summary: &str,
         correction: Option<&str>,
     ) -> anyhow::Result<()> {
-        // Wire A's callbacks lazily — review side effect is owned by A's runtime handler.
         self.ensure_actor_registry_with_a_callbacks_auto().await;
 
         let has_a_callbacks = self.actor_registry.read().await
             .as_ref().map(|r| r.has_a_callbacks).unwrap_or(false);
 
-        // Send Review to A's mailbox first — A's handler calls the callback (if wired)
-        // which mutates plan state and fires auto-advance before returning ReviewComplete.
+        let fallback_decision = if accepted {
+            crate::core::boss_actor_runtime::ReviewDecision::Accept {
+                summary: review_summary.to_string(),
+            }
+        } else {
+            crate::core::boss_actor_runtime::ReviewDecision::Correct {
+                summary: review_summary.to_string(),
+                correction: correction.map(str::to_string),
+            }
+        };
+
         let a_mailbox = {
             let guard = self.actor_registry.read().await;
             guard.as_ref().map(|registry| registry.a_mailbox().clone())
         };
-        let effective_accepted = if let Some(a_mailbox) = a_mailbox {
+        let decision = if let Some(a_mailbox) = a_mailbox {
             match a_mailbox.request(DesignerACommand::Review {
                 step_id,
                 accepted,
                 summary: review_summary.to_string(),
                 correction: correction.map(str::to_string),
             }).await {
-                Ok(BossActorEvent::ReviewComplete { accepted: a_accepted, .. }) => a_accepted,
-                _ => accepted,
+                Ok(BossActorEvent::ReviewComplete { decision, .. }) => decision,
+                _ => fallback_decision,
             }
         } else {
-            accepted
+            fallback_decision
         };
 
-        // Inline mutation is the fallback for state-only mode (no A callbacks wired).
         if !has_a_callbacks {
-            let should_auto_advance = {
-                let mut plan_guard = self.plan.write().await;
-                let Some(plan) = plan_guard.as_mut() else { return Ok(()); };
-                let Some(step) = plan.steps.iter_mut().find(|s| s.id == step_id) else { return Ok(()); };
-                step.last_review_summary = Some(review_summary.to_string());
-                if effective_accepted {
-                    step.completed = true;
-                    step.status = BossPlanStepStatus::Completed;
-                    step.last_correction = None;
-                    tracing::info!("BossPlan: Step {} accepted by A review", step_id);
-                    true
-                } else {
-                    step.attempt_count += 1;
-                    if step.attempt_count >= step.retry_budget {
-                        step.status = BossPlanStepStatus::Failed;
-                        tracing::warn!(
-                            "BossPlan: Step {} rejected by A review, retry budget exhausted ({}/{})",
-                            step_id, step.attempt_count, step.retry_budget
-                        );
-                    } else {
-                        step.status = BossPlanStepStatus::Rejected;
-                        step.last_correction = correction.map(str::to_string);
-                        tracing::info!(
-                            "BossPlan: Step {} rejected by A review, attempt {}/{}, queuing retry",
-                            step_id, step.attempt_count, step.retry_budget
-                        );
-                    }
-                    false
-                }
-            };
-            if should_auto_advance {
-                let plan_guard = self.plan.read().await;
-                let next_step = plan_guard.as_ref().and_then(|p| next_unfinished_step_id(p));
-                drop(plan_guard);
-                self.update_current_step(next_step).await;
-                self.maybe_auto_advance_after_completion().await?;
-            }
+            self.apply_review_verdict(step_id, &decision).await?;
         }
 
         Ok(())
@@ -1237,29 +1221,37 @@ impl BossCoordinator {
     pub(crate) async fn apply_review_verdict(
         &self,
         step_id: usize,
-        accepted: bool,
-        review_summary: &str,
-        correction: Option<&str>,
+        decision: &crate::core::boss_actor_runtime::ReviewDecision,
     ) -> anyhow::Result<()> {
         let should_auto_advance = {
             let mut plan_guard = self.plan.write().await;
             let Some(plan) = plan_guard.as_mut() else { return Ok(()); };
             let Some(step) = plan.steps.iter_mut().find(|s| s.id == step_id) else { return Ok(()); };
-            step.last_review_summary = Some(review_summary.to_string());
-            if accepted {
-                step.completed = true;
-                step.status = BossPlanStepStatus::Completed;
-                step.last_correction = None;
-                true
-            } else {
-                step.attempt_count += 1;
-                if step.attempt_count >= step.retry_budget {
-                    step.status = BossPlanStepStatus::Failed;
-                } else {
-                    step.status = BossPlanStepStatus::Rejected;
-                    step.last_correction = correction.map(str::to_string);
+            match decision {
+                crate::core::boss_actor_runtime::ReviewDecision::Accept { summary } => {
+                    step.last_review_summary = Some(summary.clone());
+                    step.completed = true;
+                    step.status = BossPlanStepStatus::Completed;
+                    step.last_correction = None;
+                    true
                 }
-                false
+                crate::core::boss_actor_runtime::ReviewDecision::Correct { summary, correction } => {
+                    step.last_review_summary = Some(summary.clone());
+                    step.attempt_count += 1;
+                    if step.attempt_count >= step.retry_budget {
+                        step.status = BossPlanStepStatus::Failed;
+                    } else {
+                        step.status = BossPlanStepStatus::Rejected;
+                        step.last_correction = correction.clone();
+                    }
+                    false
+                }
+                crate::core::boss_actor_runtime::ReviewDecision::ReplanStep { summary, reason } => {
+                    step.last_review_summary = Some(summary.clone());
+                    step.status = BossPlanStepStatus::Rejected;
+                    step.last_correction = Some(format!("replan required: {reason}"));
+                    false
+                }
             }
         };
         if should_auto_advance {
@@ -1808,22 +1800,38 @@ impl BossCoordinator {
         }
     }
 
-    /// Parse A's LLM response text into (accepted, correction).
-    /// Looks for "ACCEPT" / "REJECT" keywords (case-insensitive).
-    /// If "REJECT" is found, extracts any text after "CORRECTION:" as the correction.
-    fn parse_a_review_verdict(response: &str) -> (bool, Option<String>) {
+    /// Parse A's LLM response text into a structured review decision.
+    fn parse_a_review_decision(
+        response: &str,
+        summary: &str,
+    ) -> crate::core::boss_actor_runtime::ReviewDecision {
         let upper = response.to_uppercase();
-        let accepted = !upper.contains("REJECT");
-        let correction = if !accepted {
-            response
+        if upper.contains("REPLAN_STEP") {
+            let reason = response
+                .to_uppercase()
+                .find("REASON:")
+                .map(|pos| response[pos + "REASON:".len()..].trim().to_string())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "review requested step replanning".to_string());
+            return crate::core::boss_actor_runtime::ReviewDecision::ReplanStep {
+                summary: summary.to_string(),
+                reason,
+            };
+        }
+        if upper.contains("REJECT") {
+            let correction = response
                 .to_uppercase()
                 .find("CORRECTION:")
                 .map(|pos| response[pos + "CORRECTION:".len()..].trim().to_string())
-                .filter(|s| !s.is_empty())
-        } else {
-            None
-        };
-        (accepted, correction)
+                .filter(|s| !s.is_empty());
+            return crate::core::boss_actor_runtime::ReviewDecision::Correct {
+                summary: summary.to_string(),
+                correction,
+            };
+        }
+        crate::core::boss_actor_runtime::ReviewDecision::Accept {
+            summary: summary.to_string(),
+        }
     }
 
     /// Summarize `old_part` via A session. Returns A's response string.

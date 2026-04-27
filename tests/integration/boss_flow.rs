@@ -3473,21 +3473,33 @@ async fn t22_1_ensure_a_session_is_idempotent() {
     assert!(dispatch_msg.is_some(), "t22.1: last_a_dispatch_message must be set after idempotent calls");
 }
 
-// ── T22.1.B: parse_a_review_verdict unit tests ──────────────────────────────
+// ── T22.1.B: parse_a_review_decision unit tests ─────────────────────────────
 
 #[test]
-fn t22_1b_parse_a_review_verdict_accept() {
-    let (accepted, correction) = rust_agent::core::boss::BossCoordinator::parse_a_review_verdict_pub("ACCEPT: looks good");
-    assert!(accepted, "ACCEPT keyword must yield accepted=true");
-    assert!(correction.is_none(), "no correction expected on ACCEPT");
+fn t22_1b_parse_a_review_decision_accept() {
+    let decision = rust_agent::core::boss::BossCoordinator::parse_a_review_decision_pub(
+        "ACCEPT: looks good",
+        "review summary",
+    );
+    assert!(matches!(
+        decision,
+        rust_agent::core::boss_actor_runtime::ReviewDecision::Accept { .. }
+    ));
 }
 
 #[test]
-fn t22_1b_parse_a_review_verdict_reject_with_correction() {
-    let (accepted, correction) = rust_agent::core::boss::BossCoordinator::parse_a_review_verdict_pub(
+fn t22_1b_parse_a_review_decision_reject_with_correction() {
+    let decision = rust_agent::core::boss::BossCoordinator::parse_a_review_decision_pub(
         "REJECT: step output is incomplete. CORRECTION: add error handling for the edge case",
+        "review summary",
     );
-    assert!(!accepted, "REJECT keyword must yield accepted=false");
+    assert!(matches!(
+        decision,
+        rust_agent::core::boss_actor_runtime::ReviewDecision::Correct { .. }
+    ));
+    let rust_agent::core::boss_actor_runtime::ReviewDecision::Correct { correction, .. } = decision else {
+        unreachable!();
+    };
     assert_eq!(
         correction.as_deref(),
         Some("add error handling for the edge case"),
@@ -3496,17 +3508,30 @@ fn t22_1b_parse_a_review_verdict_reject_with_correction() {
 }
 
 #[test]
-fn t22_1b_parse_a_review_verdict_reject_no_correction() {
-    let (accepted, correction) = rust_agent::core::boss::BossCoordinator::parse_a_review_verdict_pub("REJECT");
-    assert!(!accepted, "bare REJECT must yield accepted=false");
-    assert!(correction.is_none(), "no correction when CORRECTION: is absent");
+fn t22_1b_parse_a_review_decision_replan_step() {
+    let decision = rust_agent::core::boss::BossCoordinator::parse_a_review_decision_pub(
+        "REPLAN_STEP. REASON: step mixes migration and validation and must be split",
+        "review summary",
+    );
+    let rust_agent::core::boss_actor_runtime::ReviewDecision::ReplanStep { reason, .. } = decision else {
+        panic!("expected ReplanStep decision");
+    };
+    assert_eq!(
+        reason,
+        "step mixes migration and validation and must be split"
+    );
 }
 
 #[test]
-fn t22_1b_parse_a_review_verdict_default_accept_when_no_keyword() {
-    // If A's response has no REJECT keyword, default to accept.
-    let (accepted, _) = rust_agent::core::boss::BossCoordinator::parse_a_review_verdict_pub("Looks fine to me.");
-    assert!(accepted, "no REJECT keyword must default to accepted=true");
+fn t22_1b_parse_a_review_decision_default_accept_when_no_keyword() {
+    let decision = rust_agent::core::boss::BossCoordinator::parse_a_review_decision_pub(
+        "Looks fine to me.",
+        "review summary",
+    );
+    assert!(matches!(
+        decision,
+        rust_agent::core::boss_actor_runtime::ReviewDecision::Accept { .. }
+    ));
 }
 
 // ── T22.1.B: A verdict drives state machine (fallback path) ─────────────────

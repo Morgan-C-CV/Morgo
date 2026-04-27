@@ -19,8 +19,15 @@ pub type SpecReviewFn =
 
 /// Callback type for A's review side effect.
 /// Takes (step_id, accepted, summary, correction) — drives plan mutation + auto-advance.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReviewDecision {
+    Accept { summary: String },
+    Correct { summary: String, correction: Option<String> },
+    ReplanStep { summary: String, reason: String },
+}
+
 pub type ReviewFn = Arc<
-    dyn Fn(usize, bool, String, Option<String>) -> Pin<Box<dyn Future<Output = anyhow::Result<bool>> + Send>>
+    dyn Fn(usize, bool, String, Option<String>) -> Pin<Box<dyn Future<Output = anyhow::Result<ReviewDecision>> + Send>>
         + Send
         + Sync,
 >;
@@ -72,7 +79,7 @@ pub enum ExecutorBCommand {
 pub enum BossActorEvent {
     StatusChanged { role: BossActorRole, status: BossActorStatus },
     StepDispatched { step_id: usize, task_id: String },
-    ReviewComplete { step_id: usize, accepted: bool, summary: String },
+    ReviewComplete { step_id: usize, accepted: bool, summary: String, decision: ReviewDecision },
     DocumentationAdvanced { signal: String },
     ApprovalHandled { approved: bool },
     SpecReviewed { feedback: String },
@@ -320,14 +327,39 @@ async fn handle_designer_a_command(
                 s.status = BossActorStatus::Active;
                 s.current_step = Some(step_id);
             }
-            // A's handler owns the review side effect — plan mutation + auto-advance.
-            // The callback returns the effective accepted bool (A's verdict or fallback).
-            let effective_accepted = if let Some(f) = review_fn {
-                f(step_id, accepted, summary.clone(), correction).await.unwrap_or(accepted)
+            let decision = if let Some(f) = review_fn {
+                let fallback_correction = correction.clone();
+                f(step_id, accepted, summary.clone(), correction)
+                    .await
+                    .unwrap_or_else(|_| {
+                        if accepted {
+                            ReviewDecision::Accept {
+                                summary: summary.clone(),
+                            }
+                        } else {
+                            ReviewDecision::Correct {
+                                summary: summary.clone(),
+                                correction: fallback_correction,
+                            }
+                        }
+                    })
+            } else if accepted {
+                ReviewDecision::Accept {
+                    summary: summary.clone(),
+                }
             } else {
-                accepted
+                ReviewDecision::Correct {
+                    summary: summary.clone(),
+                    correction: correction.clone(),
+                }
             };
-            BossActorEvent::ReviewComplete { step_id, accepted: effective_accepted, summary }
+            let effective_accepted = matches!(decision, ReviewDecision::Accept { .. });
+            BossActorEvent::ReviewComplete {
+                step_id,
+                accepted: effective_accepted,
+                summary,
+                decision,
+            }
         }
         DesignerACommand::FinalizeDocumentation { signal } => {
             {
