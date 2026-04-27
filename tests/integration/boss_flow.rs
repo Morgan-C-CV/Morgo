@@ -5918,3 +5918,97 @@ async fn t26_9_instability_recorded_in_step_metrics() {
 
     let _ = std::fs::remove_file(&plan_path);
 }
+
+// ── T27.2 StateFrame / StateDecision model ────────────────────────────────
+
+#[test]
+fn t27_2_state_frame_serializes_and_deserializes() {
+    use rust_agent::core::state_frame::{ActorRole, AgentState, EffortLevel, StateBudget, StateFrame};
+
+    let frame = StateFrame {
+        role: ActorRole::ExecutorB,
+        state: AgentState::Executing,
+        objective: "implement step 3".into(),
+        open_items: vec!["write tests".into()],
+        blocked_items: vec![],
+        accepted_summary: vec!["step 1 done".into()],
+        recent_evidence: vec!["diff: +10 lines".into()],
+        allowed_actions: vec!["read_file".into(), "edit_file".into()],
+        toolset_id: Some("minimal-edit".into()),
+        skillset_id: None,
+        required_output_schema: Some("state_decision_v1".into()),
+        budget: StateBudget { effort: EffortLevel::M, max_input_tokens: 50_000, max_tool_calls: 10, max_wall_time_ms: 0 },
+    };
+
+    let json = serde_json::to_string(&frame).expect("serialize");
+    let back: StateFrame = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(back.role, ActorRole::ExecutorB);
+    assert_eq!(back.state, AgentState::Executing);
+    assert_eq!(back.open_items, vec!["write tests"]);
+    assert_eq!(back.budget.effort, EffortLevel::M);
+    assert_eq!(back.budget.max_input_tokens, 50_000);
+}
+
+#[test]
+fn t27_2_state_decision_valid_json_parses() {
+    use rust_agent::core::state_frame::{AgentState, DecisionKind, validate_state_decision};
+
+    let json = r#"{
+        "state": "executing",
+        "decision": "continue",
+        "confidence": 0.9
+    }"#;
+
+    let decision = validate_state_decision(json).expect("should parse");
+    assert_eq!(decision.state, AgentState::Executing);
+    assert_eq!(decision.decision, DecisionKind::Continue);
+    assert!((decision.confidence - 0.9).abs() < 0.001);
+    assert!(!decision.escalate);
+    assert!(decision.needed_context.is_empty());
+}
+
+#[test]
+fn t27_2_state_decision_invalid_json_returns_repair_needed() {
+    use rust_agent::core::state_frame::validate_state_decision;
+
+    let bad = r#"{ "state": "executing", "decision": }"#;
+    let err = validate_state_decision(bad).expect_err("should fail");
+    assert!(err.reason.contains("JSON parse error"), "reason: {}", err.reason);
+    assert_eq!(err.raw_json, bad);
+}
+
+#[test]
+fn t27_2_default_effort_is_m() {
+    use rust_agent::core::state_frame::{EffortLevel, StateBudget};
+
+    let budget = StateBudget::default();
+    assert_eq!(budget.effort, EffortLevel::M);
+    assert_eq!(budget.max_input_tokens, 0);
+    assert_eq!(budget.max_tool_calls, 0);
+}
+
+#[test]
+fn t27_2_state_frame_to_prompt_segment_is_non_cacheable() {
+    use rust_agent::core::state_frame::{ActorRole, AgentState, StateFrame, StateBudget};
+    use rust_agent::core::prompt_segment::PromptSegmentKind;
+
+    let frame = StateFrame {
+        role: ActorRole::Worker,
+        state: AgentState::Planning,
+        objective: "plan the task".into(),
+        open_items: vec![],
+        blocked_items: vec![],
+        accepted_summary: vec![],
+        recent_evidence: vec![],
+        allowed_actions: vec![],
+        toolset_id: None,
+        skillset_id: None,
+        required_output_schema: None,
+        budget: StateBudget::default(),
+    };
+
+    let seg = frame.to_prompt_segment();
+    assert_eq!(seg.kind, PromptSegmentKind::StateFrame);
+    assert!(!seg.is_cacheable(), "StateFrame segment must not be cacheable");
+    assert!(seg.content.contains("planning"), "content should include state");
+}
