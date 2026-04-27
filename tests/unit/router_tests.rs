@@ -4377,7 +4377,7 @@ async fn computer_stop_returns_stub_message() {
     let output = router.route(&input, &app_state).await.unwrap();
     if let RouteExecution::CommandResult(CommandResult::Message(msg)) = output {
         assert!(
-            msg.contains("no active computer-use session"),
+            msg.contains("no active computer-use session; stop is currently a no-op control command"),
             "unexpected stop message: {msg}"
         );
     } else {
@@ -4396,6 +4396,10 @@ async fn computer_unknown_subcommand_returns_usage() {
     let output = router.route(&input, &app_state).await.unwrap();
     if let RouteExecution::CommandResult(CommandResult::Message(msg)) = output {
         assert!(msg.contains("usage:"), "expected usage string, got {msg}");
+        assert!(msg.contains("primary observation entry point"));
+        assert!(msg.contains("explicit absolute screen coordinates"));
+        assert!(msg.contains("no typing, no hotkeys, no autonomous multi-step execution"));
+        assert!(msg.contains("no generic agent tool exposure and no remote surface access"));
     } else {
         panic!("expected Message result, got {output:?}");
     }
@@ -4406,6 +4410,14 @@ async fn computer_command_is_cli_only_and_sensitive() {
     let meta = ComputerCommand.metadata();
     assert_eq!(meta.availability, CommandAvailability::CliOnly);
     assert!(meta.is_sensitive);
+}
+
+#[tokio::test]
+async fn computer_command_description_emphasizes_contract_first_semantics() {
+    let meta = ComputerCommand.metadata();
+    assert!(meta.description.contains("CLI-only"));
+    assert!(meta.description.contains("observation-first"));
+    assert!(meta.description.contains("explicitly commanded actions"));
 }
 
 #[tokio::test]

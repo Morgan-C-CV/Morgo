@@ -15,7 +15,7 @@ impl Command for ComputerCommand {
     fn metadata(&self) -> CommandMetadata {
         CommandMetadata {
             name: "computer".into(),
-            description: "macOS computer-use actions (screenshot, click, move)".into(),
+            description: "CLI-only computer control with observation-first, explicitly commanded actions".into(),
             source: CommandSource::Builtin,
             category: "system".into(),
             command_type: CommandType::Local,
@@ -74,7 +74,8 @@ impl Command for ComputerCommand {
                 }
             }
             "stop" => Ok(CommandResult::Message(
-                "no active computer-use session".into(),
+                "no active computer-use session; stop is currently a no-op control command"
+                    .into(),
             )),
             _ => Ok(CommandResult::Message(usage())),
         }
@@ -82,7 +83,8 @@ impl Command for ComputerCommand {
 }
 
 fn usage() -> String {
-    "usage: /computer <subcommand>\n  screenshot       capture the screen to a temp file\n  click <x> <y>   click at absolute screen coordinates\n  move <x> <y>    move the pointer to absolute screen coordinates (no click)\n  stop             stop an active computer-use session".into()
+    "usage: /computer <subcommand>\n  screenshot       capture the screen to a temp file (primary observation entry point)\n  click <x> <y>   click at explicit absolute screen coordinates\n  move <x> <y>    move the pointer to explicit absolute screen coordinates (no click)\n  stop             no active computer-use session; no-op control command\n\nconstraints:\n  - CLI-only, sensitive, explicitly commanded actions only\n  - screenshot is the primary observation entry point\n  - no typing, no hotkeys, no autonomous multi-step execution\n  - no generic agent tool exposure and no remote surface access"
+        .into()
 }
 
 #[derive(Clone, Copy)]
