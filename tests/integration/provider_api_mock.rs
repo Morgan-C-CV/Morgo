@@ -1856,7 +1856,7 @@ async fn provider_fixture_harness_locks_openai_compatible_quirk_matrix_baseline(
                 expected_terminal: Some(ExpectedTerminal {
                     state: QueryLoopState::Failed,
                     code: Some(ServiceFailureCode::ApiStreamProtocol),
-                    message_contains: "truncated",
+                    message_contains: "EOF while parsing an object",
                 }),
                 expected_usage_notice_count: Some(0),
                 expected_cost_report_fragments: &[],
