@@ -6596,3 +6596,183 @@ fn t27_6_apply_route_fills_frame_fields() {
     assert_eq!(frame.toolset_id.as_deref(), Some("executor-edit"));
     assert!(frame.allowed_actions.contains(&"edit_file".to_string()));
 }
+
+// ── T27.7 StateFrame archive / retention ─────────────────────────────────
+
+#[test]
+fn t27_7_build_accepted_archive_excludes_current_step() {
+    use rust_agent::core::boss_state::{BossPlan, BossPlanStep, BossPlanStepStatus};
+    use rust_agent::core::state_frame_archive::build_accepted_archive;
+
+    let make_step = |id: usize, status: BossPlanStepStatus, completed: bool| BossPlanStep {
+        id,
+        description: format!("step {id}"),
+        objective: None,
+        acceptance: vec![format!("criterion {id}")],
+        requires_approval: false,
+        status,
+        completed,
+        result_diff: None,
+        worker_task_id: None,
+        attempt_count: 1,
+        retry_budget: 3,
+        last_review_summary: None,
+        last_correction: None,
+        review_task_id: None,
+    };
+
+    let plan = BossPlan {
+        plan_id: "p-t277".into(),
+        task_description: "archive test".into(),
+        document_spec: String::new(),
+        pseudo_code: String::new(),
+        steps: vec![
+            make_step(0, BossPlanStepStatus::Completed, true),
+            make_step(1, BossPlanStepStatus::Completed, true),
+            make_step(2, BossPlanStepStatus::Running, false),
+        ],
+        accepted_by_user: true,
+        auto_sequence: true,
+        ..Default::default()
+    };
+
+    // current step = 1 → only step 0 should be in archive
+    let archive = build_accepted_archive(&plan, Some(1));
+    assert_eq!(archive.len(), 1);
+    assert_eq!(archive[0].step_id, 0);
+    assert_eq!(archive[0].description, "step 0");
+}
+
+#[test]
+fn t27_7_retain_open_items_filters_already_satisfied_criteria() {
+    use rust_agent::core::state_frame_archive::{AcceptedItem, retain_open_items};
+
+    let archive = vec![
+        AcceptedItem {
+            step_id: 0,
+            description: "step 0".into(),
+            acceptance_criteria: vec!["tests pass".into(), "no regressions".into()],
+        },
+    ];
+
+    // "tests pass" is already in archive → should be filtered out
+    let open = retain_open_items(
+        &["tests pass".into(), "add documentation".into()],
+        &archive,
+    );
+    assert_eq!(open, vec!["add documentation"]);
+}
+
+#[test]
+fn t27_7_retain_blocked_items_waiting_for_approval() {
+    use rust_agent::core::boss_state::BossStage;
+    use rust_agent::core::state_frame_archive::retain_blocked_items;
+
+    let blocked = retain_blocked_items(BossStage::WaitingForApproval, &[]);
+    assert_eq!(blocked, vec!["waiting for user approval"]);
+
+    let not_blocked = retain_blocked_items(BossStage::Execution, &[]);
+    assert!(not_blocked.is_empty());
+}
+
+#[test]
+fn t27_7_projection_uses_archive_for_accepted_summary() {
+    use rust_agent::core::boss_state::{BossPlan, BossPlanStep, BossPlanStepStatus, BossStage};
+    use rust_agent::core::state_frame::ActorRole;
+    use rust_agent::core::state_frame_projection::project_state_frame;
+
+    let make_step = |id: usize, status: BossPlanStepStatus, completed: bool| BossPlanStep {
+        id,
+        description: format!("step {id} description"),
+        objective: None,
+        acceptance: vec![],
+        requires_approval: false,
+        status,
+        completed,
+        result_diff: None,
+        worker_task_id: None,
+        attempt_count: 1,
+        retry_budget: 3,
+        last_review_summary: None,
+        last_correction: None,
+        review_task_id: None,
+    };
+
+    let plan = BossPlan {
+        plan_id: "p-t277b".into(),
+        task_description: "projection archive test".into(),
+        document_spec: String::new(),
+        pseudo_code: String::new(),
+        steps: vec![
+            make_step(0, BossPlanStepStatus::Completed, true),
+            make_step(1, BossPlanStepStatus::Completed, true),
+            make_step(2, BossPlanStepStatus::Running, false),
+        ],
+        accepted_by_user: true,
+        auto_sequence: true,
+        ..Default::default()
+    };
+
+    let frame = project_state_frame(&plan, BossStage::Execution, Some(2), ActorRole::Worker);
+    // steps 0 and 1 are completed and not current → both in accepted_summary
+    assert_eq!(frame.accepted_summary.len(), 2);
+    assert!(frame.accepted_summary.contains(&"step 0 description".to_string()));
+    assert!(frame.accepted_summary.contains(&"step 1 description".to_string()));
+    // current step 2 must NOT appear in accepted_summary
+    assert!(!frame.accepted_summary.iter().any(|s| s.contains("step 2")));
+}
+
+#[test]
+fn t27_7_open_items_excludes_criteria_already_in_archive() {
+    use rust_agent::core::boss_state::{BossPlan, BossPlanStep, BossPlanStepStatus, BossStage};
+    use rust_agent::core::state_frame::ActorRole;
+    use rust_agent::core::state_frame_projection::project_state_frame;
+
+    let completed_step = BossPlanStep {
+        id: 0,
+        description: "step 0".into(),
+        objective: None,
+        acceptance: vec!["shared criterion".into()],
+        requires_approval: false,
+        status: BossPlanStepStatus::Completed,
+        completed: true,
+        result_diff: None,
+        worker_task_id: None,
+        attempt_count: 1,
+        retry_budget: 3,
+        last_review_summary: None,
+        last_correction: None,
+        review_task_id: None,
+    };
+    let current_step = BossPlanStep {
+        id: 1,
+        description: "step 1".into(),
+        objective: None,
+        // "shared criterion" already satisfied in step 0; "new criterion" is genuinely open
+        acceptance: vec!["shared criterion".into(), "new criterion".into()],
+        requires_approval: false,
+        status: BossPlanStepStatus::Running,
+        completed: false,
+        result_diff: None,
+        worker_task_id: None,
+        attempt_count: 1,
+        retry_budget: 3,
+        last_review_summary: None,
+        last_correction: None,
+        review_task_id: None,
+    };
+    let plan = BossPlan {
+        plan_id: "p-t277c".into(),
+        task_description: "open items filter test".into(),
+        document_spec: String::new(),
+        pseudo_code: String::new(),
+        steps: vec![completed_step, current_step],
+        accepted_by_user: true,
+        auto_sequence: true,
+        ..Default::default()
+    };
+
+    let frame = project_state_frame(&plan, BossStage::Execution, Some(1), ActorRole::Worker);
+    // "shared criterion" is already in archive → filtered out
+    assert_eq!(frame.open_items, vec!["new criterion"]);
+}
