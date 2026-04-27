@@ -1597,6 +1597,282 @@ async fn provider_fixture_harness_covers_openai_compatible_429_retry_then_succes
 }
 
 #[tokio::test]
+async fn provider_fixture_harness_locks_openai_compatible_quirk_matrix_baseline() {
+    struct QuirkCase {
+        label: &'static str,
+        case: ProviderCase,
+        expected: ExpectedOutcome,
+    }
+
+    let cases = vec![
+        QuirkCase {
+            label: "choices_empty_with_usage_and_finish_signal",
+            case: ProviderCase {
+                provider_kind: FixtureProviderKind::OpenAICompatible,
+                run_mode: FixtureRunMode::SubmitTurn,
+                base_url: None,
+                model_id: "openai-test",
+                request_timeout_ms: 5_000,
+                stream_timeout_ms: 120_000,
+                retry_policy: RetryPolicy {
+                    max_attempts: 1,
+                    initial_backoff_ms: 1,
+                    max_backoff_ms: 1,
+                },
+                exchanges: vec![transcript_mock_exchange(concat!(
+                    "data: {\"id\":\"chatcmpl-redacted\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"delta\":{\"content\":\"prefix\"},\"index\":0,\"finish_reason\":null}]}\r\n\r\n",
+                    "data: {\"id\":\"chatcmpl-redacted\",\"object\":\"chat.completion.chunk\",\"choices\":[],\"usage\":{\"model\":\"gpt-redacted\",\"prompt_tokens\":11,\"completion_tokens\":3},\"finish_reason\":\"stop\"}\r\n\r\n",
+                    "data: [DONE]\r\n\r\n"
+                ))],
+                message: Message::user("hello"),
+                expected: ExpectedOutcome {
+                    expected_text: &[],
+                    expected_usage: None,
+                    expected_tool_use: None,
+                    expected_stop_reason: None,
+                    expected_provider_error: None,
+                    expected_terminal: None,
+                    expected_usage_notice_count: None,
+                    expected_cost_report_fragments: &[],
+                },
+            },
+            expected: ExpectedOutcome {
+                expected_text: &[],
+                expected_usage: None,
+                expected_tool_use: None,
+                expected_stop_reason: None,
+                expected_provider_error: None,
+                expected_terminal: Some(ExpectedTerminal {
+                    state: QueryLoopState::Failed,
+                    code: Some(ServiceFailureCode::ApiStreamProtocol),
+                    message_contains: "choices",
+                }),
+                expected_usage_notice_count: Some(0),
+                expected_cost_report_fragments: &[],
+            },
+        },
+        QuirkCase {
+            label: "delta_content_array_object_or_null_gets_typed_protocol_error",
+            case: ProviderCase {
+                provider_kind: FixtureProviderKind::OpenAICompatible,
+                run_mode: FixtureRunMode::StreamOnly,
+                base_url: None,
+                model_id: "openai-test",
+                request_timeout_ms: 5_000,
+                stream_timeout_ms: 120_000,
+                retry_policy: RetryPolicy {
+                    max_attempts: 1,
+                    initial_backoff_ms: 1,
+                    max_backoff_ms: 1,
+                },
+                exchanges: vec![transcript_mock_exchange(concat!(
+                    "data: {\"id\":\"chatcmpl-redacted\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"delta\":{\"content\":[{\"type\":\"text\",\"text\":\"hello\"}]},\"index\":0,\"finish_reason\":null}]}\r\n\r\n",
+                    "data: {\"id\":\"chatcmpl-redacted\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"delta\":{\"content\":{\"text\":\"oops\"}},\"index\":0,\"finish_reason\":null}]}\r\n\r\n",
+                    "data: {\"id\":\"chatcmpl-redacted\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"delta\":{\"content\":null},\"index\":0,\"finish_reason\":\"stop\"}]}\r\n\r\n",
+                    "data: [DONE]\r\n\r\n"
+                ))],
+                message: Message::user("hello"),
+                expected: ExpectedOutcome {
+                    expected_text: &[],
+                    expected_usage: None,
+                    expected_tool_use: None,
+                    expected_stop_reason: None,
+                    expected_provider_error: None,
+                    expected_terminal: None,
+                    expected_usage_notice_count: None,
+                    expected_cost_report_fragments: &[],
+                },
+            },
+            expected: ExpectedOutcome {
+                expected_text: &[],
+                expected_usage: None,
+                expected_tool_use: None,
+                expected_stop_reason: None,
+                expected_provider_error: Some(ExpectedProviderError {
+                    provider_id: "openai-compatible",
+                    kind: "sse_protocol",
+                    disposition: ProviderFailureDisposition::StreamTerminal,
+                    retryable: false,
+                    status_code: None,
+                    message_contains: "content",
+                }),
+                expected_terminal: None,
+                expected_usage_notice_count: None,
+                expected_cost_report_fragments: &[],
+            },
+        },
+        QuirkCase {
+            label: "tool_call_arguments_stringified_json_or_null_or_truncated_remain_typed",
+            case: ProviderCase {
+                provider_kind: FixtureProviderKind::OpenAICompatible,
+                run_mode: FixtureRunMode::StreamOnly,
+                base_url: None,
+                model_id: "openai-test",
+                request_timeout_ms: 5_000,
+                stream_timeout_ms: 120_000,
+                retry_policy: RetryPolicy {
+                    max_attempts: 1,
+                    initial_backoff_ms: 1,
+                    max_backoff_ms: 1,
+                },
+                exchanges: vec![transcript_mock_exchange(concat!(
+                    "data: {\"id\":\"chatcmpl-redacted\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_redacted\",\"type\":\"function\",\"function\":{\"name\":\"Read\",\"arguments\":\"{\\\"path\\\":\\\"/tmp/a\"\"}}]},\"index\":0,\"finish_reason\":null}]}\r\n\r\n",
+                    "data: {\"id\":\"chatcmpl-redacted\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":null}}]},\"index\":0,\"finish_reason\":null}]}\r\n\r\n",
+                    "data: {\"id\":\"chatcmpl-redacted\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\"{\\\\\\\"path\\\\\\\":\\\\\\\"/tmp/a\\\\\\\"}\\\"\"}}]},\"index\":0,\"finish_reason\":\"tool_calls\"}],\"usage\":{\"model\":\"gpt-redacted\",\"prompt_tokens\":15,\"completion_tokens\":4}}\r\n\r\n",
+                    "data: [DONE]\r\n\r\n"
+                ))],
+                message: Message::user("hello"),
+                expected: ExpectedOutcome {
+                    expected_text: &[],
+                    expected_usage: None,
+                    expected_tool_use: None,
+                    expected_stop_reason: None,
+                    expected_provider_error: None,
+                    expected_terminal: None,
+                    expected_usage_notice_count: None,
+                    expected_cost_report_fragments: &[],
+                },
+            },
+            expected: ExpectedOutcome {
+                expected_text: &[],
+                expected_usage: None,
+                expected_tool_use: None,
+                expected_stop_reason: None,
+                expected_provider_error: Some(ExpectedProviderError {
+                    provider_id: "openai-compatible",
+                    kind: "tool_use_protocol",
+                    disposition: ProviderFailureDisposition::StreamTerminal,
+                    retryable: false,
+                    status_code: None,
+                    message_contains: "tool",
+                }),
+                expected_terminal: None,
+                expected_usage_notice_count: None,
+                expected_cost_report_fragments: &[],
+            },
+        },
+        QuirkCase {
+            label: "event_stream_with_provider_error_envelope_is_typed_error",
+            case: ProviderCase {
+                provider_kind: FixtureProviderKind::OpenAICompatible,
+                run_mode: FixtureRunMode::StreamOnly,
+                base_url: None,
+                model_id: "openai-test",
+                request_timeout_ms: 5_000,
+                stream_timeout_ms: 120_000,
+                retry_policy: RetryPolicy {
+                    max_attempts: 1,
+                    initial_backoff_ms: 1,
+                    max_backoff_ms: 1,
+                },
+                exchanges: vec![MockExchange {
+                    delay: None,
+                    body_delay: None,
+                    response: MockHttpResponse {
+                        status_line: "200 OK",
+                        content_type: Some("text/event-stream"),
+                        extra_headers: &[],
+                        body: MockBody::Sse(
+                            "data: {\"error\":{\"message\":\"upstream provider exploded\",\"type\":\"server_error\",\"code\":\"provider_error\"}}\r\n\r\n",
+                        ),
+                    },
+                }],
+                message: Message::user("hello"),
+                expected: ExpectedOutcome {
+                    expected_text: &[],
+                    expected_usage: None,
+                    expected_tool_use: None,
+                    expected_stop_reason: None,
+                    expected_provider_error: None,
+                    expected_terminal: None,
+                    expected_usage_notice_count: None,
+                    expected_cost_report_fragments: &[],
+                },
+            },
+            expected: ExpectedOutcome {
+                expected_text: &[],
+                expected_usage: None,
+                expected_tool_use: None,
+                expected_stop_reason: None,
+                expected_provider_error: Some(ExpectedProviderError {
+                    provider_id: "openai-compatible",
+                    kind: "invalid_response",
+                    disposition: ProviderFailureDisposition::PreStreamTerminal,
+                    retryable: false,
+                    status_code: None,
+                    message_contains: "provider",
+                }),
+                expected_terminal: None,
+                expected_usage_notice_count: None,
+                expected_cost_report_fragments: &[],
+            },
+        },
+        QuirkCase {
+            label: "missing_done_truncated_final_frame_and_usage_only_terminal_chunk_are_typed",
+            case: ProviderCase {
+                provider_kind: FixtureProviderKind::OpenAICompatible,
+                run_mode: FixtureRunMode::SubmitTurn,
+                base_url: None,
+                model_id: "openai-test",
+                request_timeout_ms: 5_000,
+                stream_timeout_ms: 120_000,
+                retry_policy: RetryPolicy {
+                    max_attempts: 1,
+                    initial_backoff_ms: 1,
+                    max_backoff_ms: 1,
+                },
+                exchanges: vec![MockExchange {
+                    delay: None,
+                    body_delay: None,
+                    response: MockHttpResponse {
+                        status_line: "200 OK",
+                        content_type: Some("text/event-stream"),
+                        extra_headers: &[],
+                        body: MockBody::Raw(concat!(
+                            "data: {\"id\":\"chatcmpl-redacted\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"delta\":{\"content\":\"partial\"},\"index\":0,\"finish_reason\":null}]}\r\n\r\n",
+                            "data: {\"id\":\"chatcmpl-redacted\",\"object\":\"chat.completion.chunk\",\"choices\":[],\"usage\":{\"model\":\"gpt-redacted\",\"prompt_tokens\":8,\"completion_tokens\":2}}\r\n\r\n",
+                            "data: {\"id\":\"chatcmpl-redacted\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"delta\":{\"content\":\"unterminated\"},\"index\":0,\"finish_reason\":null}]"
+                        )),
+                    },
+                }],
+                message: Message::user("hello"),
+                expected: ExpectedOutcome {
+                    expected_text: &[],
+                    expected_usage: None,
+                    expected_tool_use: None,
+                    expected_stop_reason: None,
+                    expected_provider_error: None,
+                    expected_terminal: None,
+                    expected_usage_notice_count: None,
+                    expected_cost_report_fragments: &[],
+                },
+            },
+            expected: ExpectedOutcome {
+                expected_text: &[],
+                expected_usage: None,
+                expected_tool_use: None,
+                expected_stop_reason: None,
+                expected_provider_error: None,
+                expected_terminal: Some(ExpectedTerminal {
+                    state: QueryLoopState::Failed,
+                    code: Some(ServiceFailureCode::ApiStreamProtocol),
+                    message_contains: "truncated",
+                }),
+                expected_usage_notice_count: Some(0),
+                expected_cost_report_fragments: &[],
+            },
+        },
+    ];
+
+    for quirk_case in cases {
+        let result = run_provider_case(quirk_case.case).await;
+        assert_provider_case(&result, &quirk_case.expected);
+        finish_provider_case(result).await;
+        let _ = quirk_case.label;
+    }
+}
+
+#[tokio::test]
 async fn provider_fixture_harness_covers_gemini_native_as_typed_unsupported() {
     let case = ProviderCase {
         provider_kind: FixtureProviderKind::GeminiNative,

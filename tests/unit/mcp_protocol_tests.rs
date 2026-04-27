@@ -1,7 +1,11 @@
 use std::collections::BTreeMap;
 
 use rust_agent::service::mcp::client::{McpClient, RoutingMcpClient};
-use rust_agent::service::mcp::types::{McpCapabilities, McpServerConfig, McpTransportKind};
+use rust_agent::service::mcp::runtime::McpRuntime;
+use rust_agent::service::mcp::types::{
+    McpAction, McpCapabilities, McpFailureCode, McpRequest, McpServerConfig,
+    McpTransportKind,
+};
 use serde_json::json;
 
 #[tokio::test]
@@ -83,6 +87,205 @@ while True:
     })
     .await
     .expect("legacy MCP round-trip test should not hang");
+}
+
+#[tokio::test]
+async fn stdio_mcp_client_rejects_malformed_content_length_header() {
+    let script = r#"
+import json, sys
+
+
+def write_bad_header(msg):
+    data = json.dumps(msg).encode()
+    sys.stdout.write('Content-Length: nope\r\n\r\n')
+    sys.stdout.flush()
+    sys.stdout.buffer.write(data)
+    sys.stdout.buffer.flush()
+
+while True:
+    headers = {}
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            raise SystemExit(0)
+        if line == b'\r\n':
+            break
+        key, value = line.decode().split(':', 1)
+        headers[key.strip().lower()] = value.strip()
+    length = int(headers['content-length'])
+    payload = json.loads(sys.stdin.buffer.read(length))
+    method = payload.get('method')
+    if method == 'initialize':
+        write_bad_header({
+            'jsonrpc': '2.0',
+            'id': payload['id'],
+            'result': {
+                'protocolVersion': '2025-03-26',
+                'serverInfo': {'name': 'bad-header-mcp', 'version': '1.0.0'},
+                'capabilities': {'tools': {}, 'resources': {}}
+            }
+        })
+    else:
+        write_bad_header({'jsonrpc': '2.0', 'id': payload.get('id'), 'result': {}})
+"#;
+
+    let config = McpServerConfig {
+        id: "bad-header".into(),
+        name: "bad-header".into(),
+        command: "python3".into(),
+        args: vec!["-c".into(), script.into()],
+        env: BTreeMap::new(),
+        transport: McpTransportKind::StdioProcess,
+        governance: rust_agent::service::mcp::types::McpServerGovernanceConfig {
+            review_required: false,
+            notes: None,
+        },
+        connect_timeout_ms: 10_000,
+    };
+
+    let client = RoutingMcpClient::default();
+    let error = client.connect(&config).await.expect_err("connect should fail");
+    assert!(error.to_string().contains("Content-Length") || error.to_string().contains("invalid digit"));
+}
+
+#[tokio::test]
+async fn stdio_mcp_client_rejects_response_id_mismatch() {
+    let script = r#"
+import json, sys
+
+
+def write(msg):
+    data = json.dumps(msg).encode()
+    sys.stdout.write(f'Content-Length: {len(data)}\r\n\r\n')
+    sys.stdout.flush()
+    sys.stdout.buffer.write(data)
+    sys.stdout.buffer.flush()
+
+while True:
+    headers = {}
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            raise SystemExit(0)
+        if line == b'\r\n':
+            break
+        key, value = line.decode().split(':', 1)
+        headers[key.strip().lower()] = value.strip()
+    length = int(headers['content-length'])
+    payload = json.loads(sys.stdin.buffer.read(length))
+    method = payload.get('method')
+    if method == 'initialize':
+        write({
+            'jsonrpc': '2.0',
+            'id': payload['id'] + 99,
+            'result': {
+                'protocolVersion': '2025-03-26',
+                'serverInfo': {'name': 'id-mismatch-mcp', 'version': '1.0.0'},
+                'capabilities': {'tools': {}, 'resources': {}}
+            }
+        })
+    else:
+        write({'jsonrpc': '2.0', 'id': payload.get('id'), 'result': {}})
+"#;
+
+    let config = McpServerConfig {
+        id: "id-mismatch".into(),
+        name: "id-mismatch".into(),
+        command: "python3".into(),
+        args: vec!["-c".into(), script.into()],
+        env: BTreeMap::new(),
+        transport: McpTransportKind::StdioProcess,
+        governance: rust_agent::service::mcp::types::McpServerGovernanceConfig {
+            review_required: false,
+            notes: None,
+        },
+        connect_timeout_ms: 10_000,
+    };
+
+    let client = RoutingMcpClient::default();
+    let error = client.connect(&config).await.expect_err("connect should fail");
+    assert!(error.to_string().contains("id mismatch"));
+}
+
+#[tokio::test]
+async fn mcp_runtime_marks_post_initialize_inventory_failure_as_protocol_baseline() {
+    let script = r#"
+import json, sys
+
+
+def write(msg):
+    data = json.dumps(msg).encode()
+    sys.stdout.write(f'Content-Length: {len(data)}\r\n\r\n')
+    sys.stdout.flush()
+    sys.stdout.buffer.write(data)
+    sys.stdout.buffer.flush()
+
+while True:
+    headers = {}
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            raise SystemExit(0)
+        if line == b'\r\n':
+            break
+        key, value = line.decode().split(':', 1)
+        headers[key.strip().lower()] = value.strip()
+    length = int(headers['content-length'])
+    payload = json.loads(sys.stdin.buffer.read(length))
+    method = payload.get('method')
+    if method == 'initialize':
+        write({
+            'jsonrpc': '2.0',
+            'id': payload['id'],
+            'result': {
+                'protocolVersion': '2025-03-26',
+                'serverInfo': {'name': 'inventory-fail-mcp', 'version': '1.0.0'},
+                'capabilities': {'tools': {}, 'resources': {}}
+            }
+        })
+    elif method == 'notifications/initialized':
+        continue
+    elif method == 'tools/list':
+        write({'jsonrpc': '2.0', 'id': payload['id'] + 1, 'result': {'tools': []}})
+    elif method == 'resources/list':
+        write({'jsonrpc': '2.0', 'id': payload['id'], 'result': {'resources': []}})
+    else:
+        write({'jsonrpc': '2.0', 'id': payload.get('id'), 'result': {}})
+"#;
+
+    let config = McpServerConfig {
+        id: "inventory-fail".into(),
+        name: "inventory-fail".into(),
+        command: "python3".into(),
+        args: vec!["-c".into(), script.into()],
+        env: BTreeMap::new(),
+        transport: McpTransportKind::StdioProcess,
+        governance: rust_agent::service::mcp::types::McpServerGovernanceConfig {
+            review_required: false,
+            notes: None,
+        },
+        connect_timeout_ms: 10_000,
+    };
+
+    let runtime = McpRuntime::new(std::sync::Arc::new(RoutingMcpClient::default()), vec![config]);
+    let error = runtime
+        .dispatch(McpRequest {
+            action: McpAction::ListTools,
+            server: "inventory-fail".into(),
+            tool: None,
+            resource: None,
+            input: None,
+        })
+        .await
+        .expect_err("inventory bootstrap should fail");
+    assert!(error.to_string().contains("id mismatch"));
+
+    let servers = runtime.list_servers().await;
+    let failure = servers[0]
+        .last_failure
+        .clone()
+        .expect("failure metadata should be recorded");
+    assert_eq!(failure.code, McpFailureCode::Protocol);
 }
 
 #[tokio::test]
