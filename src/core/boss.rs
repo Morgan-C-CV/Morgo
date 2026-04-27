@@ -1184,10 +1184,19 @@ impl BossCoordinator {
             crate::core::boss_actor_runtime::ReviewDecision::Accept {
                 summary: review_summary.to_string(),
             }
+        } else if let Some(correction_text) = correction {
+            if correction_text.to_uppercase().contains("REPLAN_STEP") {
+                Self::parse_a_review_decision(correction_text, review_summary)
+            } else {
+                crate::core::boss_actor_runtime::ReviewDecision::Correct {
+                    summary: review_summary.to_string(),
+                    correction: Some(correction_text.to_string()),
+                }
+            }
         } else {
             crate::core::boss_actor_runtime::ReviewDecision::Correct {
                 summary: review_summary.to_string(),
-                correction: correction.map(str::to_string),
+                correction: None,
             }
         };
 
@@ -1248,7 +1257,7 @@ impl BossCoordinator {
                 }
                 crate::core::boss_actor_runtime::ReviewDecision::ReplanStep { summary, reason } => {
                     step.last_review_summary = Some(summary.clone());
-                    step.status = BossPlanStepStatus::Rejected;
+                    step.status = BossPlanStepStatus::ReplanRequired;
                     step.last_correction = Some(format!("replan required: {reason}"));
                     false
                 }

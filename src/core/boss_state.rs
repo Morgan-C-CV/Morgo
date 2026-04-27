@@ -117,6 +117,8 @@ pub enum BossPlanStepStatus {
     Reviewing,
     /// A rejected the step output; B will retry with a correction.
     Rejected,
+    /// A determined the step needs replanning before any further dispatch.
+    ReplanRequired,
     Completed,
     Failed,
 }

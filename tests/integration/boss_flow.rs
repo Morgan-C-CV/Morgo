@@ -2036,6 +2036,64 @@ async fn boss_step_fails_only_after_retry_budget_exhausted() {
     let _ = std::fs::remove_file(plan_path);
 }
 
+#[tokio::test]
+async fn boss_a_replan_step_does_not_redispatch_b_and_is_distinct_from_rejected() {
+    let (coordinator, plan_path) = coordinator_with_plan(
+        boss_plan(vec![boss_step(0, "Step to replan")]),
+        "test_boss_review_replan.json",
+    )
+    .await;
+
+    {
+        let mut guard = coordinator.plan.write().await;
+        let plan = guard.as_mut().unwrap();
+        plan.steps[0].worker_task_id = Some("b-task-replan".into());
+        plan.steps[0].status = BossPlanStepStatus::Running;
+    }
+
+    // Force state-only fallback path so the provided review signal is interpreted directly.
+    *coordinator.actor_registry.write().await = None;
+
+    coordinator
+        .on_review_event(
+            0,
+            false,
+            "Current step needs strategy rewrite",
+            Some("REPLAN_STEP. REASON: split implementation from validation"),
+        )
+        .await
+        .unwrap();
+
+    {
+        let guard = coordinator.plan.read().await;
+        let step = &guard.as_ref().unwrap().steps[0];
+        assert_eq!(
+            step.status,
+            BossPlanStepStatus::ReplanRequired,
+            "replan decision must not collapse into Rejected"
+        );
+        assert_eq!(
+            step.last_review_summary.as_deref(),
+            Some("Current step needs strategy rewrite")
+        );
+        assert_eq!(
+            step.last_correction.as_deref(),
+            Some("replan required: split implementation from validation")
+        );
+    }
+
+    let task_manager = Arc::new(TaskManager::default());
+    let app_state = app_state_with_tasks("parent-session-replan", task_manager.clone());
+    let payload = coordinator.advance_plan(&app_state).await.unwrap();
+    assert!(payload.is_none(), "replan-required step must not be redispatched like Rejected");
+    assert_eq!(coordinator.get_next_runnable_step().await, None);
+
+    let report = coordinator.report_progress(&task_manager).await.unwrap();
+    assert_eq!(report.steps[0].status, BossPlanStepStatus::ReplanRequired);
+
+    let _ = std::fs::remove_file(plan_path);
+}
+
 // --- T16.6.G.5: BossRuntimeHost assembly layer ---
 
 #[tokio::test]
