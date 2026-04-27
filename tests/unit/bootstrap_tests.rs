@@ -89,6 +89,45 @@ fn remove_env_var(key: &str) {
     unsafe { std::env::remove_var(key) }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProxyEnvScenario {
+    NoProxyEnv,
+    RustAgentProxyOnly,
+    SystemProxyOnly,
+    DualLayerProxyEnv,
+}
+
+fn apply_proxy_env_scenario(scenario: ProxyEnvScenario) {
+    for key in [
+        "RUST_AGENT_PROXY_URL",
+        "RUST_AGENT_NO_PROXY",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "NO_PROXY",
+    ] {
+        remove_env_var(key);
+    }
+
+    match scenario {
+        ProxyEnvScenario::NoProxyEnv => {}
+        ProxyEnvScenario::RustAgentProxyOnly => {
+            set_env_var("RUST_AGENT_PROXY_URL", "http://rust-agent-proxy:3128");
+            set_env_var("RUST_AGENT_NO_PROXY", "rust-agent.local");
+        }
+        ProxyEnvScenario::SystemProxyOnly => {
+            set_env_var("HTTPS_PROXY", "http://system-https-proxy:8443");
+            set_env_var("NO_PROXY", "example.local");
+        }
+        ProxyEnvScenario::DualLayerProxyEnv => {
+            set_env_var("RUST_AGENT_PROXY_URL", "http://rust-agent-proxy:3128");
+            set_env_var("RUST_AGENT_NO_PROXY", "rust-agent.local");
+            set_env_var("HTTPS_PROXY", "http://system-https-proxy:8443");
+            set_env_var("HTTP_PROXY", "http://system-http-proxy:8080");
+            set_env_var("NO_PROXY", "system.local");
+        }
+    }
+}
+
 fn bootstrap_env_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
@@ -3727,6 +3766,7 @@ fn proxy_env_var_is_read_into_config() {
     let _guard = BootstrapEnvGuard::new();
     set_env_var("RUST_AGENT_PROVIDER_BASE_URL", "https://api.anthropic.com");
     set_env_var("RUST_AGENT_PROVIDER_API_KEY", "test-key");
+    apply_proxy_env_scenario(ProxyEnvScenario::NoProxyEnv);
     set_env_var("RUST_AGENT_PROXY_URL", "http://proxy.corp.example:3128");
 
     let runtime = RuntimeBootstrap::from_cli(BootstrapCli {
@@ -3756,6 +3796,7 @@ fn no_proxy_env_var_is_read_into_config() {
     let _guard = BootstrapEnvGuard::new();
     set_env_var("RUST_AGENT_PROVIDER_BASE_URL", "https://api.anthropic.com");
     set_env_var("RUST_AGENT_PROVIDER_API_KEY", "test-key");
+    apply_proxy_env_scenario(ProxyEnvScenario::NoProxyEnv);
     set_env_var("RUST_AGENT_NO_PROXY", "localhost,127.0.0.1");
 
     let runtime = RuntimeBootstrap::from_cli(BootstrapCli {
