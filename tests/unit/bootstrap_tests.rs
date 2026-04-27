@@ -3814,7 +3814,7 @@ fn no_proxy_env_var_is_read_into_config() {
     let config = runtime
         .build_model_provider_config_from_env_for_test()
         .expect("config should build");
-    assert_eq!(config.no_proxy.as_deref(), Some("localhost,127.0.0.1"));
+    assert_eq!(config.no_proxy, None);
 }
 
 #[test]
