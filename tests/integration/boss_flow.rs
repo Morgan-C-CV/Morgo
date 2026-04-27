@@ -6972,3 +6972,52 @@ fn t27_8_run_step_with_state_frame_end_to_end() {
 
     assert!(matches!(outcome, StepOutcome::Completed), "expected Completed, got {outcome:?}");
 }
+
+// ── T27.7.1 Model tier router ─────────────────────────────────────────────
+
+#[test]
+fn t27_7_1_effort_l_maps_to_low() {
+    use rust_agent::core::state_frame::{ActorRole, AgentState, EffortLevel};
+    use rust_agent::core::state_frame_model_router::{ModelTier, route_model_tier};
+
+    let route = route_model_tier(EffortLevel::L, ActorRole::Worker, AgentState::Executing);
+    assert_eq!(route.tier, ModelTier::Low);
+    assert!(route.provider_profile_id.is_none());
+}
+
+#[test]
+fn t27_7_1_designer_planning_upgrades_low_to_medium() {
+    use rust_agent::core::state_frame::{ActorRole, AgentState, EffortLevel};
+    use rust_agent::core::state_frame_model_router::{ModelTier, route_model_tier};
+
+    let route = route_model_tier(EffortLevel::L, ActorRole::DesignerA, AgentState::Planning);
+    assert_eq!(route.tier, ModelTier::Medium);
+}
+
+#[test]
+fn t27_7_1_verifier_verifying_upgrades_low_to_medium() {
+    use rust_agent::core::state_frame::{ActorRole, AgentState, EffortLevel};
+    use rust_agent::core::state_frame_model_router::{ModelTier, route_model_tier};
+
+    let route = route_model_tier(EffortLevel::L, ActorRole::Verifier, AgentState::Verifying);
+    assert_eq!(route.tier, ModelTier::Medium);
+}
+
+#[test]
+fn t27_7_1_summarizer_caps_high_to_medium() {
+    use rust_agent::core::state_frame::{ActorRole, AgentState, EffortLevel};
+    use rust_agent::core::state_frame_model_router::{ModelTier, route_model_tier};
+
+    let route = route_model_tier(EffortLevel::H, ActorRole::Summarizer, AgentState::Executing);
+    assert_eq!(route.tier, ModelTier::Medium);
+}
+
+#[test]
+fn t27_7_1_uncovered_combination_uses_effort_default() {
+    use rust_agent::core::state_frame::{ActorRole, AgentState, EffortLevel};
+    use rust_agent::core::state_frame_model_router::{ModelTier, route_model_tier};
+
+    let route = route_model_tier(EffortLevel::H, ActorRole::Worker, AgentState::Correcting);
+    assert_eq!(route.tier, ModelTier::High);
+    assert!(route.provider_profile_id.is_none());
+}
