@@ -95,7 +95,7 @@ fn bootstrap_env_lock() -> &'static Mutex<()> {
 }
 
 struct BootstrapEnvGuard {
-    keys: [&'static str; 18],
+    keys: [&'static str; 21],
 }
 
 impl BootstrapEnvGuard {
@@ -116,6 +116,9 @@ impl BootstrapEnvGuard {
             "RUST_AGENT_PROVIDER_RETRY_INITIAL_BACKOFF_MS",
             "RUST_AGENT_PROVIDER_RETRY_MAX_BACKOFF_MS",
             "OPENAI_API_KEY",
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "NO_PROXY",
             "RUST_AGENT_PROXY_URL",
             "RUST_AGENT_NO_PROXY",
             "RUST_AGENT_CA_BUNDLE",
