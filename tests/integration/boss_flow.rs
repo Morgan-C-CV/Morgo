@@ -6776,3 +6776,199 @@ fn t27_7_open_items_excludes_criteria_already_in_archive() {
     // "shared criterion" is already in archive → filtered out
     assert_eq!(frame.open_items, vec!["new criterion"]);
 }
+
+// ── T27.8 Production-path tests ───────────────────────────────────────────
+
+fn make_t278_plan(steps: Vec<rust_agent::core::boss_state::BossPlanStep>) -> rust_agent::core::boss_state::BossPlan {
+    rust_agent::core::boss_state::BossPlan {
+        plan_id: "p-t278".into(),
+        task_description: "production path test".into(),
+        document_spec: String::new(),
+        pseudo_code: String::new(),
+        steps,
+        accepted_by_user: true,
+        auto_sequence: true,
+        ..Default::default()
+    }
+}
+
+fn make_t278_step(id: usize, status: rust_agent::core::boss_state::BossPlanStepStatus, completed: bool, acceptance: Vec<String>) -> rust_agent::core::boss_state::BossPlanStep {
+    rust_agent::core::boss_state::BossPlanStep {
+        id,
+        description: format!("step {id}"),
+        objective: Some(format!("objective for step {id}")),
+        acceptance,
+        requires_approval: false,
+        status,
+        completed,
+        result_diff: None,
+        worker_task_id: None,
+        attempt_count: 1,
+        retry_budget: 3,
+        last_review_summary: None,
+        last_correction: None,
+        review_task_id: None,
+    }
+}
+
+#[test]
+fn t27_8_full_pipeline_project_route_loop_done() {
+    use rust_agent::core::boss_state::{BossStage, BossPlanStepStatus};
+    use rust_agent::core::state_frame::ActorRole;
+    use rust_agent::core::state_frame_projection::project_state_frame;
+    use rust_agent::core::state_frame_router::{apply_route, route_toolset};
+    use rust_agent::core::state_frame_loop::{DecisionLoopConfig, LoopOutcome, run_decision_loop};
+    use rust_agent::service::api::client::ModelProviderClient;
+    use rust_agent::service::api::streaming::StreamEvent;
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let done_json = r#"{"state":"done","decision":"done","confidence":0.95}"#;
+    let client = ModelProviderClient::with_scripted_turns(vec![
+        vec![StreamEvent::TextDelta(done_json.into())],
+    ]);
+
+    let plan = make_t278_plan(vec![
+        make_t278_step(0, BossPlanStepStatus::Running, false, vec!["write tests".into()]),
+    ]);
+
+    // Full pipeline: project → route → loop
+    let mut frame = project_state_frame(&plan, BossStage::Execution, Some(0), ActorRole::Worker);
+    let route = route_toolset(&frame);
+    apply_route(&mut frame, route);
+
+    // Verify route was applied
+    assert_eq!(frame.toolset_id.as_deref(), Some("worker-minimal"));
+    assert!(frame.allowed_actions.contains(&"edit_file".to_string()));
+
+    let outcome = rt.block_on(run_decision_loop(&client, frame, DecisionLoopConfig::default()))
+        .expect("loop should not error");
+    assert!(matches!(outcome, LoopOutcome::Done { .. }), "expected Done, got {outcome:?}");
+}
+
+#[test]
+fn t27_8_archive_retention_affects_loop_input() {
+    use rust_agent::core::boss_state::{BossStage, BossPlanStepStatus};
+    use rust_agent::core::state_frame::ActorRole;
+    use rust_agent::core::state_frame_projection::project_state_frame;
+    use rust_agent::core::state_frame_loop::{DecisionLoopConfig, LoopOutcome, run_decision_loop};
+    use rust_agent::service::api::client::ModelProviderClient;
+    use rust_agent::service::api::streaming::StreamEvent;
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let done_json = r#"{"state":"done","decision":"done"}"#;
+    let client = ModelProviderClient::with_scripted_turns(vec![
+        vec![StreamEvent::TextDelta(done_json.into())],
+    ]);
+
+    let plan = make_t278_plan(vec![
+        make_t278_step(0, BossPlanStepStatus::Completed, true, vec!["shared criterion".into()]),
+        make_t278_step(1, BossPlanStepStatus::Running, false, vec!["shared criterion".into(), "new criterion".into()]),
+    ]);
+
+    let frame = project_state_frame(&plan, BossStage::Execution, Some(1), ActorRole::Worker);
+
+    // Archive retention: "shared criterion" already satisfied in step 0 → filtered from open_items
+    assert_eq!(frame.open_items, vec!["new criterion"]);
+    // Step 0 in accepted_summary, step 1 (current) not
+    assert!(frame.accepted_summary.contains(&"step 0".to_string()));
+    assert!(!frame.accepted_summary.iter().any(|s| s.contains("step 1")));
+
+    let outcome = rt.block_on(run_decision_loop(&client, frame, DecisionLoopConfig::default()))
+        .expect("loop should not error");
+    assert!(matches!(outcome, LoopOutcome::Done { .. }));
+}
+
+#[test]
+fn t27_8_blocked_route_produces_empty_actions_loop_still_runs() {
+    use rust_agent::core::boss_state::{BossStage, BossPlanStepStatus};
+    use rust_agent::core::state_frame::ActorRole;
+    use rust_agent::core::state_frame_projection::project_state_frame;
+    use rust_agent::core::state_frame_router::{apply_route, route_toolset};
+    use rust_agent::core::state_frame_loop::{DecisionLoopConfig, LoopOutcome, run_decision_loop};
+    use rust_agent::service::api::client::ModelProviderClient;
+    use rust_agent::service::api::streaming::StreamEvent;
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let done_json = r#"{"state":"done","decision":"done"}"#;
+    let client = ModelProviderClient::with_scripted_turns(vec![
+        vec![StreamEvent::TextDelta(done_json.into())],
+    ]);
+
+    let plan = make_t278_plan(vec![
+        make_t278_step(0, BossPlanStepStatus::Running, false, vec![]),
+    ]);
+
+    let mut frame = project_state_frame(&plan, BossStage::WaitingForApproval, Some(0), ActorRole::DesignerA);
+    let route = route_toolset(&frame);
+    apply_route(&mut frame, route);
+
+    // Blocked state: route clears all actions
+    assert!(frame.allowed_actions.is_empty());
+    assert!(frame.toolset_id.is_none());
+    assert_eq!(frame.blocked_items, vec!["waiting for user approval"]);
+
+    // Loop still runs and terminates cleanly
+    let outcome = rt.block_on(run_decision_loop(&client, frame, DecisionLoopConfig::default()))
+        .expect("loop should not error");
+    assert!(matches!(outcome, LoopOutcome::Done { .. }));
+}
+
+#[test]
+fn t27_8_repair_path_in_full_pipeline() {
+    use rust_agent::core::boss_state::{BossStage, BossPlanStepStatus};
+    use rust_agent::core::state_frame::ActorRole;
+    use rust_agent::core::state_frame_projection::project_state_frame;
+    use rust_agent::core::state_frame_loop::{DecisionLoopConfig, LoopOutcome, run_decision_loop};
+    use rust_agent::service::api::client::ModelProviderClient;
+    use rust_agent::service::api::streaming::StreamEvent;
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    // First turn: bad JSON → triggers repair; repair turn: valid done
+    let bad_json = r#"{ "state": "done", "decision": }"#;
+    let done_json = r#"{"state":"done","decision":"done"}"#;
+    let client = ModelProviderClient::with_scripted_turns(vec![
+        vec![StreamEvent::TextDelta(bad_json.into())],
+        vec![StreamEvent::TextDelta(done_json.into())],
+    ]);
+
+    let plan = make_t278_plan(vec![
+        make_t278_step(0, BossPlanStepStatus::Running, false, vec![]),
+    ]);
+
+    let frame = project_state_frame(&plan, BossStage::Execution, Some(0), ActorRole::ExecutorB);
+    let config = DecisionLoopConfig { max_iterations: 3, repair_budget: 2 };
+    let outcome = rt.block_on(run_decision_loop(&client, frame, config))
+        .expect("loop should not error");
+    assert!(matches!(outcome, LoopOutcome::Done { .. }), "expected Done after repair, got {outcome:?}");
+}
+
+#[test]
+fn t27_8_run_step_with_state_frame_end_to_end() {
+    use rust_agent::core::boss_state::{BossStage, BossPlanStepStatus};
+    use rust_agent::core::state_frame::ActorRole;
+    use rust_agent::core::state_frame_loop::DecisionLoopConfig;
+    use rust_agent::core::state_frame_orchestrator::{StepOutcome, run_step_with_state_frame};
+    use rust_agent::service::api::client::ModelProviderClient;
+    use rust_agent::service::api::streaming::StreamEvent;
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let done_json = r#"{"state":"done","decision":"done","confidence":1.0}"#;
+    let client = ModelProviderClient::with_scripted_turns(vec![
+        vec![StreamEvent::TextDelta(done_json.into())],
+    ]);
+
+    let plan = make_t278_plan(vec![
+        make_t278_step(0, BossPlanStepStatus::Completed, true, vec!["criterion A".into()]),
+        make_t278_step(1, BossPlanStepStatus::Running, false, vec!["criterion A".into(), "criterion B".into()]),
+    ]);
+
+    // run_step_with_state_frame uses project_state_frame internally:
+    // - archive filters "criterion A" from open_items (already in step 0)
+    // - only "criterion B" remains open
+    let outcome = rt.block_on(run_step_with_state_frame(
+        &client, &plan, BossStage::Execution, 1, ActorRole::Worker,
+        DecisionLoopConfig::default(),
+    )).expect("should not error");
+
+    assert!(matches!(outcome, StepOutcome::Completed), "expected Completed, got {outcome:?}");
+}
