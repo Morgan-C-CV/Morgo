@@ -1156,6 +1156,8 @@ pub fn parse_openai_compatible_sse_response(
 struct PendingOpenAIToolCall {
     name: Option<String>,
     arguments: String,
+    saw_arguments: bool,
+    saw_null_arguments: bool,
     emitted: bool,
 }
 
@@ -1197,18 +1199,34 @@ impl<'a> OpenAICompatibleStreamParser<'a> {
             .ok_or_else(|| self.protocol_error("openai-compatible event missing choices"))?;
 
         if choices.is_empty() {
-            return Ok(());
+            let finish_reason = payload.get("finish_reason").and_then(Value::as_str);
+            let has_error = payload.get("error").is_some();
+            let usage_only_terminal_chunk = finish_reason.is_none()
+                && !has_error
+                && payload.get("usage").is_some()
+                && payload
+                    .as_object()
+                    .is_some_and(|object| object.keys().all(|key| matches!(key.as_str(), "id" | "object" | "created" | "model" | "system_fingerprint" | "usage" | "choices")));
+            if usage_only_terminal_chunk {
+                return Ok(());
+            }
+            return Err(self.protocol_error(
+                "openai-compatible event had empty choices outside usage-only terminal chunk",
+            ));
         }
 
         self.ensure_message_start(output);
 
         for choice in choices {
-            if let Some(text) = choice
-                .get("delta")
-                .and_then(|delta| delta.get("content"))
-                .and_then(Value::as_str)
-            {
-                output.push(StreamEvent::TextDelta(text.to_string()));
+            if let Some(delta) = choice.get("delta") {
+                if let Some(content) = delta.get("content") {
+                    let Some(text) = content.as_str() else {
+                        return Err(self.protocol_error(
+                            "openai-compatible delta.content must be string when present",
+                        ));
+                    };
+                    output.push(StreamEvent::TextDelta(text.to_string()));
+                }
             }
 
             if let Some(tool_calls) = choice
@@ -1236,9 +1254,15 @@ impl<'a> OpenAICompatibleStreamParser<'a> {
                         .get("function")
                         .and_then(|function| function.get("arguments"))
                     {
+                        pending.saw_arguments = true;
                         match arguments {
                             Value::String(text) => pending.arguments.push_str(text),
-                            other => pending.arguments.push_str(&other.to_string()),
+                            Value::Null => pending.saw_null_arguments = true,
+                            _ => {
+                                return Err(self.tool_use_protocol_error(
+                                    "tool_call arguments must be string or null",
+                                ));
+                            }
                         }
                     }
                 }
@@ -1295,17 +1319,38 @@ impl<'a> OpenAICompatibleStreamParser<'a> {
             let Some(tool_name) = pending.name.clone() else {
                 return Err(self.tool_use_protocol_error("tool_call missing function name"));
             };
-            let input = if pending.arguments.trim().is_empty() {
-                "{}".to_string()
-            } else {
-                normalize_json_like_value(
-                    &Value::String(pending.arguments.clone()),
-                    "tool_use input",
-                )?
-                .to_string()
-            };
+            if pending.saw_null_arguments {
+                return Err(self.tool_use_protocol_error("tool_call arguments must not be null"));
+            }
+            if pending.arguments.trim().is_empty() {
+                if pending.saw_arguments {
+                    return Err(self.tool_use_protocol_error(
+                        "tool_call arguments did not contain valid JSON payload",
+                    ));
+                }
+                pending.emitted = true;
+                output.push(StreamEvent::ToolUse {
+                    tool_name,
+                    input: "{}".to_string(),
+                });
+                continue;
+            }
+
+            let normalized = normalize_json_like_value(
+                &Value::String(pending.arguments.clone()),
+                "tool_use input",
+            )?;
+            if matches!(normalized, Value::String(_)) {
+                return Err(ApiError::tool_use_protocol_with_disposition(
+                    "tool_call arguments must normalize to JSON object or array",
+                    ProviderFailureDisposition::StreamTerminal,
+                ));
+            }
             pending.emitted = true;
-            output.push(StreamEvent::ToolUse { tool_name, input });
+            output.push(StreamEvent::ToolUse {
+                tool_name,
+                input: normalized.to_string(),
+            });
         }
 
         Ok(())

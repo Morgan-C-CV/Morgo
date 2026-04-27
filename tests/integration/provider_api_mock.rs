@@ -1716,7 +1716,7 @@ async fn provider_fixture_harness_locks_openai_compatible_quirk_matrix_baseline(
                     max_backoff_ms: 1,
                 },
                 exchanges: vec![transcript_mock_exchange(concat!(
-                    "data: {\"id\":\"chatcmpl-redacted\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_redacted\",\"type\":\"function\",\"function\":{\"name\":\"Read\",\"arguments\":\"{\\\"path\\\":\\\"/tmp/a\"\"}}]},\"index\":0,\"finish_reason\":null}]}\r\n\r\n",
+                    "data: {\"id\":\"chatcmpl-redacted\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_redacted\",\"type\":\"function\",\"function\":{\"name\":\"Read\",\"arguments\":\"{\"}}]},\"index\":0,\"finish_reason\":null}]}\r\n\r\n",
                     "data: {\"id\":\"chatcmpl-redacted\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":null}}]},\"index\":0,\"finish_reason\":null}]}\r\n\r\n",
                     "data: {\"id\":\"chatcmpl-redacted\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\"{\\\\\\\"path\\\\\\\":\\\\\\\"/tmp/a\\\\\\\"}\\\"\"}}]},\"index\":0,\"finish_reason\":\"tool_calls\"}],\"usage\":{\"model\":\"gpt-redacted\",\"prompt_tokens\":15,\"completion_tokens\":4}}\r\n\r\n",
                     "data: [DONE]\r\n\r\n"
