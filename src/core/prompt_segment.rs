@@ -117,3 +117,26 @@ impl PromptAssembly {
         if any { Some(PromptSegmentFingerprint(hasher.finish())) } else { None }
     }
 }
+
+/// Result of a prefix stability check between two consecutive assemblies.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PrefixStabilityResult {
+    /// Cacheable prefix fingerprint is unchanged — cache is valid.
+    Stable { fingerprint: Option<PromptSegmentFingerprint> },
+    /// Cacheable prefix fingerprint changed unexpectedly — cache must be invalidated.
+    Unstable { prev: Option<PromptSegmentFingerprint>, current: Option<PromptSegmentFingerprint> },
+}
+
+/// Compare the current assembly's stable prefix fingerprint against a previously recorded value.
+/// Pure function — does not modify assembly or any state.
+pub fn check_prefix_stability(
+    prev_fingerprint: Option<PromptSegmentFingerprint>,
+    assembly: &PromptAssembly,
+) -> PrefixStabilityResult {
+    let current = assembly.stable_prefix_fingerprint();
+    if current == prev_fingerprint {
+        PrefixStabilityResult::Stable { fingerprint: current }
+    } else {
+        PrefixStabilityResult::Unstable { prev: prev_fingerprint, current }
+    }
+}

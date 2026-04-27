@@ -40,6 +40,9 @@ pub struct BossStepMetrics {
     /// Cache read tokens from provider usage (0 if not yet reported by B actor).
     #[serde(default)]
     pub cache_read_tokens: usize,
+    /// True if the cacheable prefix fingerprint changed unexpectedly during this dispatch.
+    #[serde(default)]
+    pub cache_prefix_instability: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]

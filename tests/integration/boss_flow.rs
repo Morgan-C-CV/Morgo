@@ -5825,3 +5825,96 @@ async fn t26_8_cache_token_fields_default_to_zero_before_b_reports() {
 
     let _ = std::fs::remove_file(&plan_path);
 }
+
+// ── T26.9: Cache stability guard ─────────────────────────────────────────────
+
+use rust_agent::core::prompt_segment::{check_prefix_stability, PrefixStabilityResult};
+
+/// T26.9.1: StateFrame change does not affect stable prefix fingerprint.
+#[test]
+fn t26_9_state_frame_change_does_not_affect_prefix_fingerprint() {
+    let mut a1 = PromptAssembly::new();
+    a1.push(PromptSegment::new("sys", PromptSegmentKind::StaticSystem, "system"));
+    a1.push(PromptSegment::new("sf", PromptSegmentKind::StateFrame, "step 1"));
+
+    let mut a2 = PromptAssembly::new();
+    a2.push(PromptSegment::new("sys", PromptSegmentKind::StaticSystem, "system"));
+    a2.push(PromptSegment::new("sf", PromptSegmentKind::StateFrame, "step 2 CHANGED"));
+
+    assert_eq!(
+        a1.stable_prefix_fingerprint(),
+        a2.stable_prefix_fingerprint(),
+        "StateFrame change must not affect stable prefix fingerprint"
+    );
+}
+
+/// T26.9.2: DebugTrace (tool output) change does not affect stable prefix fingerprint.
+#[test]
+fn t26_9_tool_output_does_not_affect_prefix_fingerprint() {
+    let mut a1 = PromptAssembly::new();
+    a1.push(PromptSegment::new("brief", PromptSegmentKind::ActorBrief, "actor brief"));
+    a1.push(PromptSegment::new("trace", PromptSegmentKind::DynamicEvidence, "tool output v1"));
+
+    let mut a2 = PromptAssembly::new();
+    a2.push(PromptSegment::new("brief", PromptSegmentKind::ActorBrief, "actor brief"));
+    a2.push(PromptSegment::new("trace", PromptSegmentKind::DynamicEvidence, "tool output v2 CHANGED"));
+
+    assert_eq!(
+        a1.stable_prefix_fingerprint(),
+        a2.stable_prefix_fingerprint(),
+        "DynamicEvidence change must not affect stable prefix fingerprint"
+    );
+}
+
+/// T26.9.3: Changing a cacheable segment triggers Unstable result.
+#[test]
+fn t26_9_cacheable_change_triggers_unstable() {
+    let mut a1 = PromptAssembly::new();
+    a1.push(PromptSegment::new("sys", PromptSegmentKind::StaticSystem, "original system"));
+
+    let prev_fp = a1.stable_prefix_fingerprint();
+
+    let mut a2 = PromptAssembly::new();
+    a2.push(PromptSegment::new("sys", PromptSegmentKind::StaticSystem, "CHANGED system"));
+
+    let result = check_prefix_stability(prev_fp, &a2);
+    assert!(
+        matches!(result, PrefixStabilityResult::Unstable { .. }),
+        "changing a cacheable segment must produce Unstable result"
+    );
+}
+
+/// T26.9.4: Only dynamic segments change → Stable result.
+#[test]
+fn t26_9_stable_when_only_dynamic_changes() {
+    let mut a1 = PromptAssembly::new();
+    a1.push(PromptSegment::new("sys", PromptSegmentKind::StaticSystem, "system"));
+    a1.push(PromptSegment::new("dyn", PromptSegmentKind::DynamicEvidence, "dynamic v1"));
+
+    let prev_fp = a1.stable_prefix_fingerprint();
+
+    let mut a2 = PromptAssembly::new();
+    a2.push(PromptSegment::new("sys", PromptSegmentKind::StaticSystem, "system"));
+    a2.push(PromptSegment::new("dyn", PromptSegmentKind::DynamicEvidence, "dynamic v2 CHANGED"));
+
+    let result = check_prefix_stability(prev_fp, &a2);
+    assert!(
+        matches!(result, PrefixStabilityResult::Stable { .. }),
+        "only dynamic segment change must produce Stable result"
+    );
+}
+
+/// T26.9.5: BossStepMetrics.cache_prefix_instability field exists and defaults to false.
+#[tokio::test]
+async fn t26_9_instability_recorded_in_step_metrics() {
+    let (coordinator, plan_path, _, app_state) =
+        setup_coordinator_with_b_session("t26-9-instability", "t26_9_instability_output").await;
+
+    let _ = coordinator.ask_b_session_pub(&app_state, "hello".to_string()).await;
+
+    let guard = coordinator.status.read().await;
+    let metrics = guard.last_step_metrics.as_ref().expect("last_step_metrics must be set");
+    assert!(!metrics.cache_prefix_instability, "cache_prefix_instability must default to false");
+
+    let _ = std::fs::remove_file(&plan_path);
+}
