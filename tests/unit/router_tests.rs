@@ -1,6 +1,6 @@
 use std::fs;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
@@ -54,6 +54,11 @@ fn unique_temp_path(prefix: &str) -> PathBuf {
         .expect("clock should be after unix epoch")
         .as_nanos();
     std::env::temp_dir().join(format!("{prefix}-{nanos}"))
+}
+
+fn router_env_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
 }
 
 fn app_state_with_session_root(root: &std::path::Path) -> AppState {
@@ -671,6 +676,7 @@ async fn model_command_shows_runtime_active_summary() {
 
 #[tokio::test]
 async fn model_command_list_show_reload_and_local_rejection_work() {
+    let _env_lock = router_env_lock().lock().expect("router env lock");
     let registry = Arc::new(CommandRegistry::new().register(Arc::new(ModelCommand)));
     let router = CommandRouter::new(registry, Box::new(DefaultSurfaceAuthorizer::default()));
     let root = unique_temp_path("rust-agent-router-model-registry");
@@ -795,6 +801,7 @@ auth_strategy = "none"
 
 #[tokio::test]
 async fn model_use_rejects_missing_profile_and_env_override() {
+    let _env_lock = router_env_lock().lock().expect("router env lock");
     let registry = Arc::new(CommandRegistry::new().register(Arc::new(ModelCommand)));
     let router = CommandRouter::new(registry, Box::new(DefaultSurfaceAuthorizer::default()));
     let root = unique_temp_path("rust-agent-router-model-use-reject");
