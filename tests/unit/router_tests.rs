@@ -626,9 +626,12 @@ async fn status_command_shows_active_model_summary_without_secret_leak() {
         .await
         .expect("status route should succeed");
 
-    let RouteExecution::CommandResult(CommandResult::Message(text)) = result else {
+    let RouteExecution::CommandResult(command_result) = result else {
         panic!("expected status command result");
     };
+    let text = command_result
+        .to_plain_text()
+        .expect("status command should produce plain text");
     assert!(text.contains("active_model_profile: openai-fast"));
     assert!(text.contains("active_model_source: models_toml"));
     assert!(text.contains("provider_id=openai"));
@@ -811,6 +814,7 @@ api_key_env = "OPENAI_API_KEY"
 "#,
     )
     .expect("write models.toml");
+    unsafe { std::env::set_var("OPENAI_API_KEY", "router-test-key") };
     let app_state = app_state_with_session_root(&root);
 
     let missing_result = router
@@ -839,7 +843,10 @@ api_key_env = "OPENAI_API_KEY"
         panic!("expected env override denial");
     };
     assert!(reason.contains("RUST_AGENT_PROVIDER_*"));
-    unsafe { std::env::remove_var("RUST_AGENT_PROVIDER_ID") };
+    unsafe {
+        std::env::remove_var("RUST_AGENT_PROVIDER_ID");
+        std::env::remove_var("OPENAI_API_KEY");
+    };
 
     fs::remove_dir_all(root).expect("cleanup model use reject root");
 }

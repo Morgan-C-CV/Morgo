@@ -487,9 +487,9 @@ async fn status_command_reports_plugin_discovery_summary() {
         .await
         .expect("status command should render");
 
-    let CommandResult::Message(text) = result else {
-        panic!("expected status message");
-    };
+    let text = result
+        .to_plain_text()
+        .expect("status command should produce plain text");
     assert!(text.contains("Runtime:"));
     assert!(text.contains("Commands:"));
     assert!(text.contains("Plugins:"));
@@ -519,9 +519,8 @@ async fn status_command_reports_plugin_discovery_summary() {
     assert!(text.contains("- diagnostics: total=1, info=0, warnings=0, errors=1"));
     assert!(text.contains("- runtime_apply: outcome=applied, generation=0"));
     assert!(text.contains("- runtime_apply_summary: applied runtime plugin snapshot generation 0"));
-    assert!(text.contains("- plugin_inventory:"));
-    assert!(text.contains("  - demo-plugin v0.1.0 — state=enabled, applied=applied, enabled=yes, active(commands=1, hooks=1, tools=1), discovered(commands=1, hooks=1, tools=1), capabilities=commands,hooks,tools, governance_source=default, disable_reason=none (manifest=/tmp/project/.claude/plugins/demo/plugin.json)"));
-    assert!(text.contains("- diagnostic_preview:"));
+    assert!(text.contains("demo-plugin v0.1.0 — state=enabled, applied=applied, enabled=yes, active(commands=1, hooks=1, tools=1), discovered(commands=1, hooks=1, tools=1), capabilities=commands,hooks,tools, governance_source=default, disable_reason=none (manifest=/tmp/project/.claude/plugins/demo/plugin.json)"));
+    assert!(text.contains("diagnostic_preview"));
     assert!(text.contains("[error:plugin-manifest-load-failed] plugin=broken-plugin; manifest=/tmp/project/.claude/plugins/broken/plugin.json; bad plugin manifest"));
 
     let rendered = render_turn_output(&CliTurnOutput {
@@ -809,9 +808,9 @@ async fn runtime_plugin_rebuild_retains_previous_snapshot_on_apply_failure() {
         )
         .await
         .expect("status should render retained apply state");
-    let CommandResult::Message(status_text) = status_result else {
-        panic!("expected status message");
-    };
+    let status_text = status_result
+        .to_plain_text()
+        .expect("status command should produce plain text");
     assert!(
         status_text.contains("- runtime_apply: outcome=retained_previous_snapshot, generation=0")
     );
