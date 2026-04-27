@@ -34,6 +34,12 @@ pub struct BossStepMetrics {
     pub original_chars: usize,
     /// Char length of the message actually sent to B.
     pub sent_chars: usize,
+    /// Cache creation tokens from provider usage (0 if not yet reported by B actor).
+    #[serde(default)]
+    pub cache_creation_tokens: usize,
+    /// Cache read tokens from provider usage (0 if not yet reported by B actor).
+    #[serde(default)]
+    pub cache_read_tokens: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]

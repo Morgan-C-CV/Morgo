@@ -5741,3 +5741,87 @@ fn t26_7_metrics_none_before_first_dispatch() {
     let status = rust_agent::core::boss_state::BossStatus::default();
     assert!(status.last_step_metrics.is_none(), "last_step_metrics must be None before first dispatch");
 }
+
+// ── T26.8: Production-path tests ─────────────────────────────────────────────
+
+/// T26.8.1: stable_prefix_fingerprint is stable across consecutive dispatches with the same brief.
+#[test]
+fn t26_8_stable_prefix_fingerprint_stable_across_dispatches() {
+    let mut assembly = PromptAssembly::new();
+    assembly.push(PromptSegment::new("sys", PromptSegmentKind::StaticSystem, "system prompt"));
+    assembly.push(PromptSegment::new("brief", PromptSegmentKind::ActorBrief, "actor brief"));
+    assembly.push(PromptSegment::new("dyn", PromptSegmentKind::DynamicEvidence, "dynamic content"));
+
+    let fp1 = assembly.stable_prefix_fingerprint();
+    let fp2 = assembly.stable_prefix_fingerprint();
+    assert_eq!(fp1, fp2, "stable_prefix_fingerprint must be deterministic across calls");
+
+    // Changing dynamic content must not change the stable prefix fingerprint.
+    let mut assembly2 = PromptAssembly::new();
+    assembly2.push(PromptSegment::new("sys", PromptSegmentKind::StaticSystem, "system prompt"));
+    assembly2.push(PromptSegment::new("brief", PromptSegmentKind::ActorBrief, "actor brief"));
+    assembly2.push(PromptSegment::new("dyn", PromptSegmentKind::DynamicEvidence, "DIFFERENT dynamic content"));
+
+    assert_eq!(
+        assembly.stable_prefix_fingerprint(),
+        assembly2.stable_prefix_fingerprint(),
+        "changing dynamic suffix must not affect stable prefix fingerprint"
+    );
+}
+
+/// T26.8.2: Child worker dispatch payload uses context_strategy: "brief", not "full_inherit".
+#[tokio::test]
+async fn t26_8_child_worker_payload_uses_brief_not_full_inherit() {
+    let plan_path = std::env::temp_dir().join("t26-8-brief-payload.json");
+    let plan = BossPlan {
+        plan_id: "t26-8-brief-payload".into(),
+        task_description: "T26.8 brief payload test".into(),
+        steps: vec![boss_step(0, "implement feature")],
+        ..Default::default()
+    };
+    save_plan(&plan, &plan_path).await.unwrap();
+
+    let coordinator = BossCoordinator::restore_or_init(&plan_path).await.unwrap();
+    let payload = coordinator.build_b_step_payload_pub(0, "parent-session", "b-actor").await.unwrap();
+    let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
+
+    assert_eq!(v["inherit_context"], false, "child worker must not inherit full context");
+    assert_eq!(v["context_strategy"], "brief", "child worker must use brief context strategy");
+
+    let _ = std::fs::remove_file(&plan_path);
+}
+
+/// T26.8.3: Unsupported provider profile → apply_cache_control is no-op in production path.
+#[test]
+fn t26_8_unsupported_provider_noop_in_production_path() {
+    let mut assembly = PromptAssembly::new();
+    assembly.push(PromptSegment::new("sys", PromptSegmentKind::StaticSystem, "system"));
+    assembly.push(PromptSegment::new("dyn", PromptSegmentKind::DynamicEvidence, "dynamic"));
+
+    let profile = ProviderProfile { prompt_cache: PromptCacheCapability::Unsupported, ..ProviderProfile::default() };
+    let original = serde_json::json!({
+        "model": "claude-3-5-sonnet",
+        "messages": [{"role": "user", "content": [{"type": "text", "text": "hello"}]}],
+        "max_tokens": 4096
+    });
+    let mut payload = original.clone();
+    apply_cache_control(&assembly, &profile, &mut payload);
+
+    assert_eq!(payload, original, "Unsupported provider must leave payload unchanged in production path");
+}
+
+/// T26.8.4: BossStepMetrics has cache token fields defaulting to 0 before B actor reports usage.
+#[tokio::test]
+async fn t26_8_cache_token_fields_default_to_zero_before_b_reports() {
+    let (coordinator, plan_path, _, app_state) =
+        setup_coordinator_with_b_session("t26-8-cache-tokens", "t26_8_cache_tokens_output").await;
+
+    let _ = coordinator.ask_b_session_pub(&app_state, "hello".to_string()).await;
+
+    let guard = coordinator.status.read().await;
+    let metrics = guard.last_step_metrics.as_ref().expect("last_step_metrics must be set");
+    assert_eq!(metrics.cache_creation_tokens, 0, "cache_creation_tokens must default to 0 before B actor reports");
+    assert_eq!(metrics.cache_read_tokens, 0, "cache_read_tokens must default to 0 before B actor reports");
+
+    let _ = std::fs::remove_file(&plan_path);
+}

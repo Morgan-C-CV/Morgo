@@ -1933,6 +1933,8 @@ impl BossCoordinator {
                 context_mode: ContextMode::Brief,
                 original_chars,
                 sent_chars: message.len(),
+                cache_creation_tokens: 0,
+                cache_read_tokens: 0,
             });
         }
 
