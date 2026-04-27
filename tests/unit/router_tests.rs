@@ -4367,7 +4367,7 @@ async fn computer_screenshot_denied_on_telegram() {
 }
 
 #[tokio::test]
-async fn computer_stop_returns_stub_message() {
+async fn computer_stop_returns_noop_control_contract_message() {
     let root = unique_temp_path("computer-stop");
     std::fs::create_dir_all(&root).unwrap();
     let app_state = app_state_with_session_root(&root);
