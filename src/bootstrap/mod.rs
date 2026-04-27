@@ -1,5 +1,6 @@
 pub mod config_root;
 pub mod model_profiles;
+pub mod proxy_env;
 mod runtime;
 mod setup;
 mod state;

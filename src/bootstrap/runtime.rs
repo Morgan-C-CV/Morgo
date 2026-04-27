@@ -9,6 +9,7 @@ use clap::Parser;
 use crate::bootstrap::config_root::resolve_config_root;
 use crate::bootstrap::model_profiles::load_active_model_profile_from_root;
 use crate::bootstrap::setup::SetupContext;
+use crate::bootstrap::proxy_env::resolve_proxy_env_contract;
 use crate::bootstrap::{BootstrapPhase, BootstrapState, InteractionSurface, SessionMode};
 use crate::command::registry::CommandRegistry;
 use crate::core::boss::BossCoordinator;
@@ -1289,6 +1290,7 @@ impl RuntimeBootstrap {
                     ProviderAuthStrategy::NoAuth
                 }
             });
+        let proxy_resolution = resolve_proxy_env_contract();
         Ok(ModelProviderConfig {
             provider_id,
             protocol,
@@ -1309,12 +1311,8 @@ impl RuntimeBootstrap {
                 max_backoff_ms,
             },
             pricing: ModelPricing::default(),
-            proxy_url: std::env::var("RUST_AGENT_PROXY_URL")
-                .ok()
-                .filter(|v| !v.trim().is_empty()),
-            no_proxy: std::env::var("RUST_AGENT_NO_PROXY")
-                .ok()
-                .filter(|v| !v.trim().is_empty()),
+            proxy_url: proxy_resolution.proxy_url,
+            no_proxy: proxy_resolution.no_proxy,
             ca_bundle_path: std::env::var("RUST_AGENT_CA_BUNDLE")
                 .ok()
                 .filter(|v| !v.trim().is_empty()),

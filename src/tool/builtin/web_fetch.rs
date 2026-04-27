@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use reqwest::Url;
 use serde::Deserialize;
 
+use crate::bootstrap::proxy_env::resolve_proxy_env_contract;
 use crate::state::permission_context::ToolPermissionContext;
 use crate::tool::definition::{Tool, ToolCall, ToolMetadata, ToolResult};
 
@@ -23,19 +24,21 @@ fn parse_url_input(call: &ToolCall) -> anyhow::Result<String> {
 
 fn build_web_fetch_client() -> reqwest::Client {
     let mut builder = reqwest::Client::builder();
-    if let Ok(proxy_url) = std::env::var("RUST_AGENT_PROXY_URL") {
-        if !proxy_url.trim().is_empty() {
-            if let Ok(mut proxy) = reqwest::Proxy::all(&proxy_url) {
-                if let Ok(no_proxy) = std::env::var("RUST_AGENT_NO_PROXY") {
-                    if !no_proxy.trim().is_empty() {
-                        proxy = proxy.no_proxy(reqwest::NoProxy::from_string(&no_proxy));
-                    }
-                }
-                builder = builder.proxy(proxy);
+    let resolution = resolve_proxy_env_contract();
+    if let Some(proxy_url) = resolution.proxy_url {
+        if let Ok(mut proxy) = reqwest::Proxy::all(&proxy_url) {
+            if let Some(no_proxy) = resolution.no_proxy {
+                proxy = proxy.no_proxy(reqwest::NoProxy::from_string(&no_proxy));
             }
+            builder = builder.proxy(proxy);
         }
     }
     builder.build().unwrap_or_else(|_| reqwest::Client::new())
+}
+
+pub fn resolved_web_fetch_proxy_for_test() -> (Option<String>, Option<String>) {
+    let resolution = resolve_proxy_env_contract();
+    (resolution.proxy_url, resolution.no_proxy)
 }
 
 pub async fn fetch_text_with<F, Fut>(raw_url: &str, fetcher: F) -> anyhow::Result<String>

@@ -3935,3 +3935,99 @@ fn startup_warning_invalid_proxy_url_message_redacts_userinfo() {
         "warning message should contain redacted marker"
     );
 }
+
+#[test]
+fn rust_agent_proxy_env_overrides_system_env() {
+    let _env_lock = bootstrap_env_lock().lock().expect("bootstrap env lock");
+    let _guard = BootstrapEnvGuard::new();
+    set_env_var("RUST_AGENT_PROXY_URL", "http://rust-agent-proxy:3128");
+    set_env_var("RUST_AGENT_NO_PROXY", "internal.local");
+    set_env_var("HTTPS_PROXY", "http://system-https-proxy:8443");
+    set_env_var("HTTP_PROXY", "http://system-http-proxy:8080");
+    set_env_var("NO_PROXY", "system.local");
+
+    let resolution = rust_agent::bootstrap::proxy_env::resolve_proxy_env_contract();
+    assert_eq!(resolution.source, rust_agent::bootstrap::proxy_env::ProxySource::RustAgentEnv);
+    assert_eq!(resolution.proxy_url.as_deref(), Some("http://rust-agent-proxy:3128"));
+    assert_eq!(resolution.no_proxy.as_deref(), Some("internal.local"));
+}
+
+#[test]
+fn https_proxy_falls_back_when_rust_agent_proxy_unset() {
+    let _env_lock = bootstrap_env_lock().lock().expect("bootstrap env lock");
+    let _guard = BootstrapEnvGuard::new();
+    set_env_var("HTTPS_PROXY", "http://system-https-proxy:8443");
+    set_env_var("NO_PROXY", "example.local");
+
+    let runtime = RuntimeBootstrap::from_cli(BootstrapCli {
+        print: None,
+        interactive: false,
+        init_only: true,
+        continue_session: false,
+        resume: None,
+        trace_startup: false,
+        show_tools: false,
+        tui: false,
+        attachments: Vec::new(),
+        surface: "cli".into(),
+    });
+    let config = runtime
+        .build_model_provider_config_from_env_for_test()
+        .expect("config should build");
+    assert_eq!(config.proxy_url.as_deref(), Some("http://system-https-proxy:8443"));
+    assert_eq!(config.no_proxy.as_deref(), Some("example.local"));
+}
+
+#[test]
+fn http_proxy_used_when_https_proxy_missing() {
+    let _env_lock = bootstrap_env_lock().lock().expect("bootstrap env lock");
+    let _guard = BootstrapEnvGuard::new();
+    set_env_var("HTTP_PROXY", "http://system-http-proxy:8080");
+
+    let resolution = rust_agent::bootstrap::proxy_env::resolve_proxy_env_contract();
+    assert_eq!(resolution.source, rust_agent::bootstrap::proxy_env::ProxySource::SystemEnv);
+    assert_eq!(resolution.proxy_url.as_deref(), Some("http://system-http-proxy:8080"));
+    assert!(resolution.no_proxy.is_none());
+}
+
+#[test]
+fn webfetch_uses_same_proxy_resolution_contract() {
+    let _env_lock = bootstrap_env_lock().lock().expect("bootstrap env lock");
+    let _guard = BootstrapEnvGuard::new();
+    set_env_var("HTTPS_PROXY", "http://system-https-proxy:8443");
+    set_env_var("NO_PROXY", "example.local");
+
+    let runtime = RuntimeBootstrap::from_cli(BootstrapCli {
+        print: None,
+        interactive: false,
+        init_only: true,
+        continue_session: false,
+        resume: None,
+        trace_startup: false,
+        show_tools: false,
+        tui: false,
+        attachments: Vec::new(),
+        surface: "cli".into(),
+    });
+    let config = runtime
+        .build_model_provider_config_from_env_for_test()
+        .expect("config should build");
+    let (webfetch_proxy, webfetch_no_proxy) =
+        rust_agent::tool::builtin::web_fetch::resolved_web_fetch_proxy_for_test();
+
+    assert_eq!(config.proxy_url, webfetch_proxy);
+    assert_eq!(config.no_proxy, webfetch_no_proxy);
+}
+
+#[test]
+fn no_proxy_resolution_tracks_selected_proxy_source() {
+    let _env_lock = bootstrap_env_lock().lock().expect("bootstrap env lock");
+    let _guard = BootstrapEnvGuard::new();
+    set_env_var("RUST_AGENT_PROXY_URL", "http://rust-agent-proxy:3128");
+    set_env_var("RUST_AGENT_NO_PROXY", "rust-agent.local");
+    set_env_var("NO_PROXY", "system.local");
+
+    let resolution = rust_agent::bootstrap::proxy_env::resolve_proxy_env_contract();
+    assert_eq!(resolution.source, rust_agent::bootstrap::proxy_env::ProxySource::RustAgentEnv);
+    assert_eq!(resolution.no_proxy.as_deref(), Some("rust-agent.local"));
+}
