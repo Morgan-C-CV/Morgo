@@ -6360,3 +6360,134 @@ fn t27_4_max_iterations_reached_when_always_continue() {
         "expected MaxIterationsReached, got {outcome:?}"
     );
 }
+
+// ── T27.5 StateFrame orchestrator seam ───────────────────────────────────
+
+fn make_plan_with_step(step_id: usize, description: &str, acceptance: Vec<String>) -> rust_agent::core::boss_state::BossPlan {
+    use rust_agent::core::boss_state::{BossPlan, BossPlanStep, BossPlanStepStatus};
+    BossPlan {
+        plan_id: format!("p-t275-{step_id}"),
+        task_description: "orchestrator seam test".into(),
+        document_spec: String::new(),
+        pseudo_code: String::new(),
+        steps: vec![BossPlanStep {
+            id: step_id,
+            description: description.into(),
+            objective: None,
+            acceptance,
+            requires_approval: false,
+            status: BossPlanStepStatus::Running,
+            completed: false,
+            result_diff: None,
+            worker_task_id: None,
+            attempt_count: 1,
+            retry_budget: 3,
+            last_review_summary: None,
+            last_correction: None,
+            review_task_id: None,
+        }],
+        accepted_by_user: true,
+        auto_sequence: true,
+        ..Default::default()
+    }
+}
+
+#[test]
+fn t27_5_done_loop_outcome_maps_to_completed() {
+    use rust_agent::core::boss_state::BossStage;
+    use rust_agent::core::state_frame::ActorRole;
+    use rust_agent::core::state_frame_loop::DecisionLoopConfig;
+    use rust_agent::core::state_frame_orchestrator::{StepOutcome, run_step_with_state_frame};
+    use rust_agent::service::api::client::ModelProviderClient;
+    use rust_agent::service::api::streaming::StreamEvent;
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let done_json = r#"{"state":"done","decision":"done"}"#;
+    let client = ModelProviderClient::with_scripted_turns(vec![
+        vec![StreamEvent::TextDelta(done_json.into())],
+    ]);
+    let plan = make_plan_with_step(0, "implement feature", vec!["tests pass".into()]);
+    let outcome = rt.block_on(run_step_with_state_frame(
+        &client, &plan, BossStage::Execution, 0, ActorRole::Worker,
+        DecisionLoopConfig::default(),
+    )).expect("should not error");
+    assert!(matches!(outcome, StepOutcome::Completed));
+}
+
+#[test]
+fn t27_5_rejected_loop_outcome_maps_to_failed_with_reason() {
+    use rust_agent::core::boss_state::BossStage;
+    use rust_agent::core::state_frame::ActorRole;
+    use rust_agent::core::state_frame_loop::DecisionLoopConfig;
+    use rust_agent::core::state_frame_orchestrator::{StepOutcome, run_step_with_state_frame};
+    use rust_agent::service::api::client::ModelProviderClient;
+    use rust_agent::service::api::streaming::StreamEvent;
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let reject_json = r#"{"state":"blocked","decision":"reject","next_action":{"action_type":"reject","args":{"reason":"output does not meet criteria"}}}"#;
+    let client = ModelProviderClient::with_scripted_turns(vec![
+        vec![StreamEvent::TextDelta(reject_json.into())],
+    ]);
+    let plan = make_plan_with_step(1, "verify output", vec![]);
+    let outcome = rt.block_on(run_step_with_state_frame(
+        &client, &plan, BossStage::Execution, 1, ActorRole::Verifier,
+        DecisionLoopConfig::default(),
+    )).expect("should not error");
+    match outcome {
+        StepOutcome::Failed { reason } => assert!(reason.contains("output does not meet criteria")),
+        other => panic!("expected Failed, got {other:?}"),
+    }
+}
+
+#[test]
+fn t27_5_max_iterations_maps_to_failed() {
+    use rust_agent::core::boss_state::BossStage;
+    use rust_agent::core::state_frame::ActorRole;
+    use rust_agent::core::state_frame_loop::DecisionLoopConfig;
+    use rust_agent::core::state_frame_orchestrator::{StepOutcome, run_step_with_state_frame};
+    use rust_agent::service::api::client::ModelProviderClient;
+    use rust_agent::service::api::streaming::StreamEvent;
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let continue_json = r#"{"state":"executing","decision":"continue"}"#;
+    let client = ModelProviderClient::with_scripted_turns(vec![
+        vec![StreamEvent::TextDelta(continue_json.into())],
+        vec![StreamEvent::TextDelta(continue_json.into())],
+    ]);
+    let plan = make_plan_with_step(2, "never finishes", vec![]);
+    let config = DecisionLoopConfig { max_iterations: 2, repair_budget: 1 };
+    let outcome = rt.block_on(run_step_with_state_frame(
+        &client, &plan, BossStage::Execution, 2, ActorRole::Worker, config,
+    )).expect("should not error");
+    match outcome {
+        StepOutcome::Failed { reason } => assert!(reason.contains("max iterations"), "reason: {reason}"),
+        other => panic!("expected Failed, got {other:?}"),
+    }
+}
+
+#[test]
+fn t27_5_repair_exhausted_maps_to_failed() {
+    use rust_agent::core::boss_state::BossStage;
+    use rust_agent::core::state_frame::ActorRole;
+    use rust_agent::core::state_frame_loop::DecisionLoopConfig;
+    use rust_agent::core::state_frame_orchestrator::{StepOutcome, run_step_with_state_frame};
+    use rust_agent::service::api::client::ModelProviderClient;
+    use rust_agent::service::api::streaming::StreamEvent;
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let bad_json = r#"not json at all"#;
+    // 1 initial + 1 repair attempt = repair_budget=1 exhausted
+    let client = ModelProviderClient::with_scripted_turns(vec![
+        vec![StreamEvent::TextDelta(bad_json.into())],
+        vec![StreamEvent::TextDelta(bad_json.into())],
+    ]);
+    let plan = make_plan_with_step(3, "bad model output", vec![]);
+    let config = DecisionLoopConfig { max_iterations: 3, repair_budget: 1 };
+    let outcome = rt.block_on(run_step_with_state_frame(
+        &client, &plan, BossStage::Execution, 3, ActorRole::Worker, config,
+    )).expect("should not error");
+    match outcome {
+        StepOutcome::Failed { reason } => assert!(reason.contains("repair exhausted"), "reason: {reason}"),
+        other => panic!("expected Failed, got {other:?}"),
+    }
+}
