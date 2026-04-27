@@ -6184,3 +6184,179 @@ fn t27_3_projected_frame_is_non_cacheable_segment() {
     assert!(!seg.is_cacheable());
     assert!(seg.content.contains("state_decision_v1"));
 }
+
+// ── T27.4 JSON decision loop ──────────────────────────────────────────────
+
+#[test]
+fn t27_4_done_decision_terminates_loop() {
+    use rust_agent::core::state_frame::{ActorRole, AgentState, StateFrame, StateBudget};
+    use rust_agent::core::state_frame_loop::{DecisionLoopConfig, LoopOutcome, run_decision_loop};
+    use rust_agent::service::api::client::ModelProviderClient;
+    use rust_agent::service::api::streaming::StreamEvent;
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let done_json = r#"{"state":"done","decision":"done","confidence":1.0}"#;
+    let client = ModelProviderClient::with_scripted_turns(vec![
+        vec![StreamEvent::TextDelta(done_json.into())],
+    ]);
+    let frame = StateFrame {
+        role: ActorRole::Worker,
+        state: AgentState::Executing,
+        objective: "finish the task".into(),
+        open_items: vec![],
+        blocked_items: vec![],
+        accepted_summary: vec![],
+        recent_evidence: vec![],
+        allowed_actions: vec![],
+        toolset_id: None,
+        skillset_id: None,
+        required_output_schema: Some("state_decision_v1".into()),
+        budget: StateBudget::default(),
+    };
+    let outcome = rt.block_on(run_decision_loop(&client, frame, DecisionLoopConfig::default()))
+        .expect("loop should not error");
+    assert!(matches!(outcome, LoopOutcome::Done { final_state: AgentState::Done }));
+}
+
+#[test]
+fn t27_4_continue_decision_advances_state() {
+    use rust_agent::core::state_frame::{ActorRole, AgentState, StateFrame, StateBudget};
+    use rust_agent::core::state_frame_loop::{DecisionLoopConfig, LoopOutcome, run_decision_loop};
+    use rust_agent::service::api::client::ModelProviderClient;
+    use rust_agent::service::api::streaming::StreamEvent;
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    // First turn: continue (state stays executing), second turn: done
+    let continue_json = r#"{"state":"executing","decision":"continue"}"#;
+    let done_json = r#"{"state":"done","decision":"done"}"#;
+    let client = ModelProviderClient::with_scripted_turns(vec![
+        vec![StreamEvent::TextDelta(continue_json.into())],
+        vec![StreamEvent::TextDelta(done_json.into())],
+    ]);
+    let frame = StateFrame {
+        role: ActorRole::ExecutorB,
+        state: AgentState::Executing,
+        objective: "run tests".into(),
+        open_items: vec![],
+        blocked_items: vec![],
+        accepted_summary: vec![],
+        recent_evidence: vec![],
+        allowed_actions: vec![],
+        toolset_id: None,
+        skillset_id: None,
+        required_output_schema: None,
+        budget: StateBudget::default(),
+    };
+    let outcome = rt.block_on(run_decision_loop(&client, frame, DecisionLoopConfig::default()))
+        .expect("loop should not error");
+    assert!(matches!(outcome, LoopOutcome::Done { .. }));
+}
+
+#[test]
+fn t27_4_reject_decision_returns_rejected_outcome() {
+    use rust_agent::core::state_frame::{ActorRole, AgentState, StateFrame, StateBudget};
+    use rust_agent::core::state_frame_loop::{DecisionLoopConfig, LoopOutcome, run_decision_loop};
+    use rust_agent::service::api::client::ModelProviderClient;
+    use rust_agent::service::api::streaming::StreamEvent;
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let reject_json = r#"{"state":"blocked","decision":"reject","next_action":{"action_type":"reject","args":{"reason":"acceptance criteria not met"}}}"#;
+    let client = ModelProviderClient::with_scripted_turns(vec![
+        vec![StreamEvent::TextDelta(reject_json.into())],
+    ]);
+    let frame = StateFrame {
+        role: ActorRole::Verifier,
+        state: AgentState::Verifying,
+        objective: "verify step output".into(),
+        open_items: vec![],
+        blocked_items: vec![],
+        accepted_summary: vec![],
+        recent_evidence: vec![],
+        allowed_actions: vec![],
+        toolset_id: None,
+        skillset_id: None,
+        required_output_schema: None,
+        budget: StateBudget::default(),
+    };
+    let outcome = rt.block_on(run_decision_loop(&client, frame, DecisionLoopConfig::default()))
+        .expect("loop should not error");
+    match outcome {
+        LoopOutcome::Rejected { reason } => {
+            assert_eq!(reason, "acceptance criteria not met");
+        }
+        other => panic!("expected Rejected, got {other:?}"),
+    }
+}
+
+#[test]
+fn t27_4_invalid_json_triggers_repair_then_done() {
+    use rust_agent::core::state_frame::{ActorRole, AgentState, StateFrame, StateBudget};
+    use rust_agent::core::state_frame_loop::{DecisionLoopConfig, LoopOutcome, run_decision_loop};
+    use rust_agent::service::api::client::ModelProviderClient;
+    use rust_agent::service::api::streaming::StreamEvent;
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    // First turn: invalid JSON → triggers repair; repair turn: valid done JSON
+    let bad_json = r#"{ "state": "done", "decision": }"#;
+    let done_json = r#"{"state":"done","decision":"done"}"#;
+    let client = ModelProviderClient::with_scripted_turns(vec![
+        vec![StreamEvent::TextDelta(bad_json.into())],
+        vec![StreamEvent::TextDelta(done_json.into())],
+    ]);
+    let frame = StateFrame {
+        role: ActorRole::Worker,
+        state: AgentState::Executing,
+        objective: "repair test".into(),
+        open_items: vec![],
+        blocked_items: vec![],
+        accepted_summary: vec![],
+        recent_evidence: vec![],
+        allowed_actions: vec![],
+        toolset_id: None,
+        skillset_id: None,
+        required_output_schema: None,
+        budget: StateBudget::default(),
+    };
+    let config = DecisionLoopConfig { max_iterations: 3, repair_budget: 2 };
+    let outcome = rt.block_on(run_decision_loop(&client, frame, config))
+        .expect("loop should not error");
+    assert!(matches!(outcome, LoopOutcome::Done { .. }), "expected Done after repair, got {outcome:?}");
+}
+
+#[test]
+fn t27_4_max_iterations_reached_when_always_continue() {
+    use rust_agent::core::state_frame::{ActorRole, AgentState, StateFrame, StateBudget};
+    use rust_agent::core::state_frame_loop::{DecisionLoopConfig, LoopOutcome, run_decision_loop};
+    use rust_agent::service::api::client::ModelProviderClient;
+    use rust_agent::service::api::streaming::StreamEvent;
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let continue_json = r#"{"state":"executing","decision":"continue"}"#;
+    // 3 turns of continue → max_iterations=3 → MaxIterationsReached
+    let client = ModelProviderClient::with_scripted_turns(vec![
+        vec![StreamEvent::TextDelta(continue_json.into())],
+        vec![StreamEvent::TextDelta(continue_json.into())],
+        vec![StreamEvent::TextDelta(continue_json.into())],
+    ]);
+    let frame = StateFrame {
+        role: ActorRole::Worker,
+        state: AgentState::Executing,
+        objective: "never finishes".into(),
+        open_items: vec![],
+        blocked_items: vec![],
+        accepted_summary: vec![],
+        recent_evidence: vec![],
+        allowed_actions: vec![],
+        toolset_id: None,
+        skillset_id: None,
+        required_output_schema: None,
+        budget: StateBudget::default(),
+    };
+    let config = DecisionLoopConfig { max_iterations: 3, repair_budget: 1 };
+    let outcome = rt.block_on(run_decision_loop(&client, frame, config))
+        .expect("loop should not error");
+    assert!(
+        matches!(outcome, LoopOutcome::MaxIterationsReached { last_state: AgentState::Executing }),
+        "expected MaxIterationsReached, got {outcome:?}"
+    );
+}

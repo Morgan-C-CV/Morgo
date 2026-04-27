@@ -16,4 +16,5 @@ pub mod prompt_cache_adapter;
 pub mod prompt_segment;
 pub mod query_loop;
 pub mod state_frame;
+pub mod state_frame_loop;
 pub mod state_frame_projection;
