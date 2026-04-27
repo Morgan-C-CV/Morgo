@@ -6012,3 +6012,175 @@ fn t27_2_state_frame_to_prompt_segment_is_non_cacheable() {
     assert!(!seg.is_cacheable(), "StateFrame segment must not be cacheable");
     assert!(seg.content.contains("planning"), "content should include state");
 }
+
+// ── T27.3 StateFrame projection ───────────────────────────────────────────
+
+#[test]
+fn t27_3_documentation_stage_maps_to_planning_state() {
+    use rust_agent::core::boss_state::{BossPlan, BossStage};
+    use rust_agent::core::state_frame::{ActorRole, AgentState};
+    use rust_agent::core::state_frame_projection::project_state_frame;
+
+    let plan = BossPlan {
+        plan_id: "p1".into(),
+        task_description: "build the feature".into(),
+        document_spec: String::new(),
+        pseudo_code: String::new(),
+        steps: vec![],
+        accepted_by_user: false,
+        auto_sequence: false,
+        ..Default::default()
+    };
+
+    let frame = project_state_frame(&plan, BossStage::Documentation, None, ActorRole::DesignerA);
+    assert_eq!(frame.state, AgentState::Planning);
+    assert_eq!(frame.objective, "build the feature");
+    assert!(frame.open_items.is_empty());
+    assert!(frame.blocked_items.is_empty());
+    assert_eq!(frame.allowed_actions, vec!["read_file", "write_spec"]);
+    assert_eq!(frame.required_output_schema.as_deref(), Some("state_decision_v1"));
+}
+
+#[test]
+fn t27_3_execution_stage_with_step_maps_objective_and_open_items() {
+    use rust_agent::core::boss_state::{BossPlan, BossPlanStep, BossPlanStepStatus, BossStage};
+    use rust_agent::core::state_frame::{ActorRole, AgentState};
+    use rust_agent::core::state_frame_projection::project_state_frame;
+
+    let step = BossPlanStep {
+        id: 0,
+        description: "implement auth".into(),
+        objective: Some("add JWT middleware".into()),
+        acceptance: vec!["tests pass".into(), "no regressions".into()],
+        requires_approval: false,
+        status: BossPlanStepStatus::Running,
+        completed: false,
+        result_diff: None,
+        worker_task_id: None,
+        attempt_count: 1,
+        retry_budget: 3,
+        last_review_summary: None,
+        last_correction: None,
+        review_task_id: None,
+    };
+    let plan = BossPlan {
+        plan_id: "p2".into(),
+        task_description: "build the feature".into(),
+        document_spec: String::new(),
+        pseudo_code: String::new(),
+        steps: vec![step],
+        accepted_by_user: true,
+        auto_sequence: true,
+        ..Default::default()
+    };
+
+    let frame = project_state_frame(&plan, BossStage::Execution, Some(0), ActorRole::ExecutorB);
+    assert_eq!(frame.state, AgentState::Executing);
+    assert_eq!(frame.objective, "add JWT middleware");
+    assert_eq!(frame.open_items, vec!["tests pass", "no regressions"]);
+    assert!(frame.blocked_items.is_empty());
+    assert!(frame.allowed_actions.contains(&"edit_file".to_string()));
+}
+
+#[test]
+fn t27_3_completed_steps_go_into_accepted_summary() {
+    use rust_agent::core::boss_state::{BossPlan, BossPlanStep, BossPlanStepStatus, BossStage};
+    use rust_agent::core::state_frame::ActorRole;
+    use rust_agent::core::state_frame_projection::project_state_frame;
+
+    let done_step = BossPlanStep {
+        id: 0,
+        description: "step zero done".into(),
+        objective: None,
+        acceptance: vec![],
+        requires_approval: false,
+        status: BossPlanStepStatus::Completed,
+        completed: true,
+        result_diff: None,
+        worker_task_id: None,
+        attempt_count: 1,
+        retry_budget: 3,
+        last_review_summary: None,
+        last_correction: None,
+        review_task_id: None,
+    };
+    let current_step = BossPlanStep {
+        id: 1,
+        description: "step one running".into(),
+        objective: None,
+        acceptance: vec![],
+        requires_approval: false,
+        status: BossPlanStepStatus::Running,
+        completed: false,
+        result_diff: None,
+        worker_task_id: None,
+        attempt_count: 1,
+        retry_budget: 3,
+        last_review_summary: None,
+        last_correction: None,
+        review_task_id: None,
+    };
+    let plan = BossPlan {
+        plan_id: "p3".into(),
+        task_description: "multi-step task".into(),
+        document_spec: String::new(),
+        pseudo_code: String::new(),
+        steps: vec![done_step, current_step],
+        accepted_by_user: true,
+        auto_sequence: true,
+        ..Default::default()
+    };
+
+    let frame = project_state_frame(&plan, BossStage::Execution, Some(1), ActorRole::Worker);
+    assert_eq!(frame.accepted_summary, vec!["step zero done"]);
+    // current step must NOT appear in accepted_summary
+    assert!(!frame.accepted_summary.iter().any(|s| s.contains("step one")));
+}
+
+#[test]
+fn t27_3_waiting_for_approval_maps_to_blocked_with_blocked_item() {
+    use rust_agent::core::boss_state::{BossPlan, BossStage};
+    use rust_agent::core::state_frame::{ActorRole, AgentState};
+    use rust_agent::core::state_frame_projection::project_state_frame;
+
+    let plan = BossPlan {
+        plan_id: "p4".into(),
+        task_description: "awaiting sign-off".into(),
+        document_spec: String::new(),
+        pseudo_code: String::new(),
+        steps: vec![],
+        accepted_by_user: false,
+        auto_sequence: false,
+        ..Default::default()
+    };
+
+    let frame = project_state_frame(&plan, BossStage::WaitingForApproval, None, ActorRole::DesignerA);
+    assert_eq!(frame.state, AgentState::Blocked);
+    assert_eq!(frame.blocked_items, vec!["waiting for user approval"]);
+    assert!(frame.allowed_actions.is_empty());
+}
+
+#[test]
+fn t27_3_projected_frame_is_non_cacheable_segment() {
+    use rust_agent::core::boss_state::{BossPlan, BossStage};
+    use rust_agent::core::prompt_segment::PromptSegmentKind;
+    use rust_agent::core::state_frame::ActorRole;
+    use rust_agent::core::state_frame_projection::project_state_frame;
+
+    let plan = BossPlan {
+        plan_id: "p5".into(),
+        task_description: "verify cacheability".into(),
+        document_spec: String::new(),
+        pseudo_code: String::new(),
+        steps: vec![],
+        accepted_by_user: false,
+        auto_sequence: false,
+        ..Default::default()
+    };
+
+    let frame = project_state_frame(&plan, BossStage::Documentation, None, ActorRole::Worker);
+    let seg = frame.to_prompt_segment();
+    assert_eq!(seg.kind, PromptSegmentKind::StateFrame);
+    assert!(!seg.is_cacheable());
+    assert!(seg.content.contains("state_decision_v1"));
+}
