@@ -6491,3 +6491,108 @@ fn t27_5_repair_exhausted_maps_to_failed() {
         other => panic!("expected Failed, got {other:?}"),
     }
 }
+
+// ── T27.6 Toolset / skillset router ──────────────────────────────────────
+
+fn make_state_frame(role: rust_agent::core::state_frame::ActorRole, state: rust_agent::core::state_frame::AgentState) -> rust_agent::core::state_frame::StateFrame {
+    use rust_agent::core::state_frame::{StateFrame, StateBudget};
+    StateFrame {
+        role,
+        state,
+        objective: "test".into(),
+        open_items: vec![],
+        blocked_items: vec![],
+        accepted_summary: vec![],
+        recent_evidence: vec![],
+        allowed_actions: vec![],
+        toolset_id: None,
+        skillset_id: None,
+        required_output_schema: None,
+        budget: StateBudget::default(),
+    }
+}
+
+#[test]
+fn t27_6_designer_a_planning_gets_spec_writer_toolset() {
+    use rust_agent::core::state_frame::{ActorRole, AgentState};
+    use rust_agent::core::state_frame_router::route_toolset;
+
+    let frame = make_state_frame(ActorRole::DesignerA, AgentState::Planning);
+    let route = route_toolset(&frame);
+    assert_eq!(route.toolset_id.as_deref(), Some("designer-planning"));
+    assert_eq!(route.skillset_id.as_deref(), Some("spec-writer"));
+    assert!(route.allowed_actions.contains(&"write_spec".to_string()));
+}
+
+#[test]
+fn t27_6_executor_b_executing_gets_edit_toolset() {
+    use rust_agent::core::state_frame::{ActorRole, AgentState};
+    use rust_agent::core::state_frame_router::route_toolset;
+
+    let frame = make_state_frame(ActorRole::ExecutorB, AgentState::Executing);
+    let route = route_toolset(&frame);
+    assert_eq!(route.toolset_id.as_deref(), Some("executor-edit"));
+    assert!(route.allowed_actions.contains(&"edit_file".to_string()));
+    assert!(route.allowed_actions.contains(&"run_test".to_string()));
+}
+
+#[test]
+fn t27_6_verifier_gets_readonly_toolset() {
+    use rust_agent::core::state_frame::{ActorRole, AgentState};
+    use rust_agent::core::state_frame_router::route_toolset;
+
+    let frame = make_state_frame(ActorRole::Verifier, AgentState::Verifying);
+    let route = route_toolset(&frame);
+    assert_eq!(route.toolset_id.as_deref(), Some("verifier-readonly"));
+    assert_eq!(route.skillset_id.as_deref(), Some("acceptance-checker"));
+    assert!(!route.allowed_actions.contains(&"edit_file".to_string()));
+}
+
+#[test]
+fn t27_6_blocked_state_clears_all_actions_for_any_role() {
+    use rust_agent::core::state_frame::{ActorRole, AgentState};
+    use rust_agent::core::state_frame_router::route_toolset;
+
+    for role in [ActorRole::DesignerA, ActorRole::ExecutorB, ActorRole::Worker, ActorRole::Verifier, ActorRole::Summarizer] {
+        let frame = make_state_frame(role, AgentState::Blocked);
+        let route = route_toolset(&frame);
+        assert!(route.toolset_id.is_none(), "role {role:?} blocked should have no toolset");
+        assert!(route.allowed_actions.is_empty(), "role {role:?} blocked should have no actions");
+    }
+}
+
+#[test]
+fn t27_6_done_state_clears_all_actions() {
+    use rust_agent::core::state_frame::{ActorRole, AgentState};
+    use rust_agent::core::state_frame_router::route_toolset;
+
+    let frame = make_state_frame(ActorRole::Worker, AgentState::Done);
+    let route = route_toolset(&frame);
+    assert!(route.toolset_id.is_none());
+    assert!(route.allowed_actions.is_empty());
+}
+
+#[test]
+fn t27_6_unknown_state_falls_back_to_readonly() {
+    use rust_agent::core::state_frame::{ActorRole, AgentState};
+    use rust_agent::core::state_frame_router::route_toolset;
+
+    // Worker in Verifying state — not a natural combination, should get conservative fallback.
+    let frame = make_state_frame(ActorRole::Worker, AgentState::Verifying);
+    let route = route_toolset(&frame);
+    assert!(route.toolset_id.is_none());
+    assert_eq!(route.allowed_actions, vec!["read_file"]);
+    assert!(!route.allowed_actions.contains(&"edit_file".to_string()));
+}
+
+#[test]
+fn t27_6_apply_route_fills_frame_fields() {
+    use rust_agent::core::state_frame::{ActorRole, AgentState};
+    use rust_agent::core::state_frame_router::{apply_route, route_toolset};
+
+    let mut frame = make_state_frame(ActorRole::ExecutorB, AgentState::Executing);
+    let route = route_toolset(&frame);
+    apply_route(&mut frame, route);
+    assert_eq!(frame.toolset_id.as_deref(), Some("executor-edit"));
+    assert!(frame.allowed_actions.contains(&"edit_file".to_string()));
+}
