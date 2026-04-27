@@ -3877,6 +3877,7 @@ fn no_proxy_env_unset_leaves_field_none() {
 fn startup_warning_invalid_proxy_url_fires_for_bad_url() {
     let _env_lock = bootstrap_env_lock().lock().expect("bootstrap env lock");
     let _guard = BootstrapEnvGuard::new();
+    apply_proxy_env_scenario(ProxyEnvScenario::NoProxyEnv);
     set_env_var("RUST_AGENT_PROXY_URL", "not-a-valid-proxy-url");
 
     let warnings = rust_agent::bootstrap::warnings::collect_startup_warnings(
@@ -3897,6 +3898,7 @@ fn startup_warning_invalid_proxy_url_fires_for_bad_url() {
 fn startup_warning_invalid_proxy_url_does_not_fire_for_valid_url() {
     let _env_lock = bootstrap_env_lock().lock().expect("bootstrap env lock");
     let _guard = BootstrapEnvGuard::new();
+    apply_proxy_env_scenario(ProxyEnvScenario::NoProxyEnv);
     set_env_var("RUST_AGENT_PROXY_URL", "http://proxy.corp.example:3128");
 
     let warnings = rust_agent::bootstrap::warnings::collect_startup_warnings(
@@ -3917,6 +3919,7 @@ fn startup_warning_invalid_proxy_url_does_not_fire_for_valid_url() {
 fn startup_warning_invalid_proxy_url_does_not_fire_when_unset() {
     let _env_lock = bootstrap_env_lock().lock().expect("bootstrap env lock");
     let _guard = BootstrapEnvGuard::new();
+    apply_proxy_env_scenario(ProxyEnvScenario::NoProxyEnv);
 
     let warnings = rust_agent::bootstrap::warnings::collect_startup_warnings(
         "https://api.anthropic.com",
@@ -3984,24 +3987,19 @@ fn startup_warning_invalid_proxy_url_message_redacts_userinfo() {
 fn rust_agent_proxy_env_overrides_system_env() {
     let _env_lock = bootstrap_env_lock().lock().expect("bootstrap env lock");
     let _guard = BootstrapEnvGuard::new();
-    set_env_var("RUST_AGENT_PROXY_URL", "http://rust-agent-proxy:3128");
-    set_env_var("RUST_AGENT_NO_PROXY", "internal.local");
-    set_env_var("HTTPS_PROXY", "http://system-https-proxy:8443");
-    set_env_var("HTTP_PROXY", "http://system-http-proxy:8080");
-    set_env_var("NO_PROXY", "system.local");
+    apply_proxy_env_scenario(ProxyEnvScenario::DualLayerProxyEnv);
 
     let resolution = rust_agent::bootstrap::proxy_env::resolve_proxy_env_contract();
     assert_eq!(resolution.source, rust_agent::bootstrap::proxy_env::ProxySource::RustAgentEnv);
     assert_eq!(resolution.proxy_url.as_deref(), Some("http://rust-agent-proxy:3128"));
-    assert_eq!(resolution.no_proxy.as_deref(), Some("internal.local"));
+    assert_eq!(resolution.no_proxy.as_deref(), Some("rust-agent.local"));
 }
 
 #[test]
 fn https_proxy_falls_back_when_rust_agent_proxy_unset() {
     let _env_lock = bootstrap_env_lock().lock().expect("bootstrap env lock");
     let _guard = BootstrapEnvGuard::new();
-    set_env_var("HTTPS_PROXY", "http://system-https-proxy:8443");
-    set_env_var("NO_PROXY", "example.local");
+    apply_proxy_env_scenario(ProxyEnvScenario::SystemProxyOnly);
 
     let runtime = RuntimeBootstrap::from_cli(BootstrapCli {
         print: None,
@@ -4026,6 +4024,7 @@ fn https_proxy_falls_back_when_rust_agent_proxy_unset() {
 fn http_proxy_used_when_https_proxy_missing() {
     let _env_lock = bootstrap_env_lock().lock().expect("bootstrap env lock");
     let _guard = BootstrapEnvGuard::new();
+    apply_proxy_env_scenario(ProxyEnvScenario::NoProxyEnv);
     set_env_var("HTTP_PROXY", "http://system-http-proxy:8080");
 
     let resolution = rust_agent::bootstrap::proxy_env::resolve_proxy_env_contract();
@@ -4038,8 +4037,7 @@ fn http_proxy_used_when_https_proxy_missing() {
 fn webfetch_uses_same_proxy_resolution_contract() {
     let _env_lock = bootstrap_env_lock().lock().expect("bootstrap env lock");
     let _guard = BootstrapEnvGuard::new();
-    set_env_var("HTTPS_PROXY", "http://system-https-proxy:8443");
-    set_env_var("NO_PROXY", "example.local");
+    apply_proxy_env_scenario(ProxyEnvScenario::SystemProxyOnly);
 
     let runtime = RuntimeBootstrap::from_cli(BootstrapCli {
         print: None,
