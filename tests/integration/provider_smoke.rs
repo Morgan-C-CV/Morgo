@@ -5,6 +5,7 @@
 ///
 ///   RUST_AGENT_SMOKE_OPENAI_API_KEY=sk-...   cargo test --test integration provider_smoke -- --nocapture
 ///   RUST_AGENT_SMOKE_GEMINI_API_KEY=AIza...  cargo test --test integration provider_smoke -- --nocapture
+///   RUST_AGENT_SMOKE_KIMI_API_KEY=sk-...     cargo test --test integration provider_smoke -- --nocapture
 ///
 /// Failure output is structured to distinguish:
 ///   auth_error       — 401/403 from provider
@@ -183,4 +184,44 @@ async fn smoke_gemini_openai_compatible() {
     };
 
     run_smoke(config, "smoke_gemini_openai_compatible").await;
+}
+
+#[tokio::test]
+async fn smoke_kimi_openai_compatible() {
+    let key = match std::env::var("RUST_AGENT_SMOKE_KIMI_API_KEY") {
+        Ok(k) if !k.trim().is_empty() => k,
+        _ => {
+            println!(
+                "[smoke_kimi_openai_compatible] SKIPPED — RUST_AGENT_SMOKE_KIMI_API_KEY not set"
+            );
+            return;
+        }
+    };
+
+    let config = ModelProviderConfig {
+        provider_id: "kimi-openai".into(),
+        protocol: ProviderProtocol::OpenAICompatible,
+        compatibility_profile: ProviderCompatibilityProfileKind::OpenAICompatible,
+        base_url: "https://api.moonshot.ai".into(),
+        chat_completions_path: "/v1/chat/completions".into(),
+        auth_strategy: ProviderAuthStrategy::BearerApiKey,
+        api_key: Some(key),
+        api_key_env: Some("RUST_AGENT_SMOKE_KIMI_API_KEY".into()),
+        model_id: "moonshot-v1-8k".into(),
+        timeout: ProviderTimeout {
+            request_timeout_ms: 30_000,
+            stream_timeout_ms: 60_000,
+        },
+        retry_policy: RetryPolicy {
+            max_attempts: 1,
+            initial_backoff_ms: 0,
+            max_backoff_ms: 0,
+        },
+        pricing: ModelPricing::default(),
+        proxy_url: None,
+        no_proxy: None,
+        ca_bundle_path: None,
+    };
+
+    run_smoke(config, "smoke_kimi_openai_compatible").await;
 }
