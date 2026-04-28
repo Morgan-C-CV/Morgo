@@ -6866,15 +6866,30 @@ fn t27_6_build_routed_state_frame_blocked_and_done_clear_tools_and_actions() {
     use rust_agent::core::state_frame_orchestrator::build_routed_state_frame;
     use rust_agent::core::boss_state::{BossPlanStepStatus, BossStage};
 
-    let blocked_plan = make_t278_plan(vec![make_t278_step(0, BossPlanStepStatus::ReplanRequired, false, vec![])]);
-    let blocked_frame = build_routed_state_frame(&blocked_plan, BossStage::Execution, 0, ActorRole::DesignerA);
+    let blocked_plan = make_t278_plan(vec![make_t278_step(0, BossPlanStepStatus::Pending, false, vec![])]);
+    let blocked_frame = build_routed_state_frame(&blocked_plan, BossStage::WaitingForApproval, 0, ActorRole::DesignerA);
     assert_eq!(blocked_frame.toolset_id, None);
     assert!(blocked_frame.allowed_actions.is_empty());
 
     let done_plan = make_t278_plan(vec![make_t278_step(0, BossPlanStepStatus::Completed, true, vec![])]);
-    let done_frame = build_routed_state_frame(&done_plan, BossStage::Execution, 0, ActorRole::Worker);
+    let done_frame = build_routed_state_frame(&done_plan, BossStage::Completed, 0, ActorRole::Worker);
     assert_eq!(done_frame.toolset_id, None);
     assert!(done_frame.allowed_actions.is_empty());
+}
+
+#[test]
+fn t27_7_1_routed_frame_executor_b_executing_carries_expected_model_route() {
+    use rust_agent::core::state_frame::ActorRole;
+    use rust_agent::core::state_frame_model_router::ModelTier;
+    use rust_agent::core::state_frame_orchestrator::build_routed_state_frame_with_model_route;
+    use rust_agent::core::boss_state::BossStage;
+
+    let plan = make_plan_with_step(0, "execute", vec!["criterion".into()]);
+    let routed = build_routed_state_frame_with_model_route(&plan, BossStage::Execution, 0, ActorRole::ExecutorB);
+
+    assert_eq!(routed.frame.toolset_id.as_deref(), Some("executor-edit"));
+    assert_eq!(routed.model_route.tier, ModelTier::Medium);
+    assert_eq!(routed.model_route.provider_profile_id, None);
 }
 
 // ── T27.5 StateFrame orchestrator seam ───────────────────────────────────

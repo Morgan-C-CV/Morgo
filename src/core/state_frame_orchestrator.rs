@@ -1,6 +1,7 @@
 use crate::core::boss_state::{BossPlan, BossStage};
 use crate::core::state_frame::{ActorRole, StateFrame};
 use crate::core::state_frame_loop::{DecisionLoopConfig, LoopOutcome, run_decision_loop};
+use crate::core::state_frame_model_router::{ModelRoute, route_model_tier};
 use crate::core::state_frame_projection::project_state_frame;
 use crate::core::state_frame_router::{apply_route, route_toolset};
 use crate::service::api::client::ModelProviderClient;
@@ -12,16 +13,32 @@ pub enum StepOutcome {
     Failed { reason: String },
 }
 
+#[derive(Debug, Clone)]
+pub struct RoutedStateFrame {
+    pub frame: StateFrame,
+    pub model_route: ModelRoute,
+}
+
 pub fn build_routed_state_frame(
     plan: &BossPlan,
     stage: BossStage,
     step_id: usize,
     role: ActorRole,
 ) -> StateFrame {
+    build_routed_state_frame_with_model_route(plan, stage, step_id, role).frame
+}
+
+pub fn build_routed_state_frame_with_model_route(
+    plan: &BossPlan,
+    stage: BossStage,
+    step_id: usize,
+    role: ActorRole,
+) -> RoutedStateFrame {
     let mut frame = project_state_frame(plan, stage, Some(step_id), role);
     let route = route_toolset(&frame);
     apply_route(&mut frame, route);
-    frame
+    let model_route = route_model_tier(frame.budget.effort, frame.role, frame.state);
+    RoutedStateFrame { frame, model_route }
 }
 
 /// Run a single plan step through the StateFrame decision loop.
@@ -36,8 +53,8 @@ pub async fn run_step_with_state_frame(
     role: ActorRole,
     config: DecisionLoopConfig,
 ) -> anyhow::Result<StepOutcome> {
-    let frame = build_routed_state_frame(plan, stage, step_id, role);
-    let outcome = run_decision_loop(client, frame, config).await?;
+    let routed = build_routed_state_frame_with_model_route(plan, stage, step_id, role);
+    let outcome = run_decision_loop(client, routed.frame, config).await?;
     Ok(map_loop_outcome(outcome))
 }
 
