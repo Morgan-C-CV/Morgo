@@ -37,7 +37,7 @@ impl Command for LisMCommand {
         let message = match subcommand {
             "on" => {
                 permissions.set_lism_enabled(true);
-                "LisM enabled for this session. Available building blocks are ready, but the current /boss production path is not automatically switched.".to_string()
+                "LisM enabled for this session. The /boss production path now switches to the StateFrame execution seam when LisM is on.".to_string()
             }
             "off" => {
                 permissions.set_lism_enabled(false);
@@ -62,6 +62,6 @@ fn usage() -> String {
 fn explain(enabled: bool) -> String {
     let mode = if enabled { "enabled" } else { "disabled" };
     format!(
-        "LisM is currently {mode}.\n\nAvailable building blocks:\n- StateFrame schema and StateDecision validation\n- BossPlan -> StateFrame projection\n- Stateless JSON decision loop\n- StateFrame orchestrator seam\n- Toolset / skillset router\n- Archive / retention for accepted and open items\n- Production-path tests for the current StateFrame orchestration pipeline\n\nDeferred items:\n- model tier routing (/effort L|M|H) is not yet connected\n- /LisM does not automatically switch the current /boss production path"
+        "LisM is currently {mode}.\n\nAvailable building blocks:\n- StateFrame schema and StateDecision validation\n- BossPlan -> StateFrame projection\n- Stateless JSON decision loop\n- StateFrame orchestrator seam\n- Toolset / skillset router is attached to the live LisM -> /boss production path\n- Model-tier router metadata is attached to the same seam (metadata-only; no provider/profile switching yet)\n- Archive / retention for accepted and open items\n- Production-path tests for the current StateFrame orchestration pipeline\n\nDeferred items:\n- real provider/profile switching from model-tier routing is not yet connected\n- /LisM persistence is not yet connected\n- fallback ladder expansion is still deferred"
     )
 }

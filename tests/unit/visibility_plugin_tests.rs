@@ -2015,7 +2015,7 @@ async fn lism_command_on_sets_flag_true() {
     };
     assert!(app_state.permission_context.lism_enabled());
     assert!(text.contains("LisM enabled"));
-    assert!(text.contains("not automatically switched"));
+    assert!(text.contains("/boss production path now switches to the StateFrame execution seam"));
 }
 
 #[tokio::test]
@@ -2087,8 +2087,9 @@ async fn lism_command_explain_lists_available_building_blocks_and_deferred_items
     assert!(text.contains("StateFrame schema and StateDecision validation"));
     assert!(text.contains("BossPlan -> StateFrame projection"));
     assert!(text.contains("Stateless JSON decision loop"));
-    assert!(text.contains("model tier routing"));
-    assert!(text.contains("does not automatically switch the current /boss production path"));
+    assert!(text.contains("Toolset / skillset router is attached to the live LisM -> /boss production path"));
+    assert!(text.contains("Model-tier router metadata is attached to the same seam"));
+    assert!(text.contains("real provider/profile switching from model-tier routing is not yet connected"));
 }
 
 #[tokio::test]
