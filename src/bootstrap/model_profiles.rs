@@ -324,6 +324,12 @@ mod tests {
         LOCK.get_or_init(|| Mutex::new(()))
     }
 
+    fn with_env_lock<F: FnOnce()>(f: F) {
+        let lock = env_lock();
+        let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        f();
+    }
+
     fn set_env(key: &str, value: &str) {
         unsafe { std::env::set_var(key, value) }
     }
@@ -334,7 +340,7 @@ mod tests {
 
     #[test]
     fn models_toml_active_profile_resolves_to_model_provider_config() {
-        let _guard = env_lock().lock().expect("env lock");
+        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
         set_env("OPENAI_API_KEY", "test-openai-key");
         let resolved = resolve_active_model_profile(
             r#"
@@ -460,5 +466,188 @@ auth_strategy = "none"
         .expect_err("protocol/profile mismatch should fail");
 
         assert!(error.to_string().contains("incompatible protocol/profile"));
+    }
+
+    #[test]
+    fn models_toml_multi_profile_registry_resolves_named_profile() {
+        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        set_env("WORKER_API_KEY", "worker-key");
+        let registry = parse_model_profiles_registry(
+            r#"
+active = "default"
+
+[profiles.default]
+provider_id = "openai"
+protocol = "openai_compatible"
+compatibility_profile = "openai_compatible"
+base_url = "https://api.openai.com"
+model = "gpt-4.1-mini"
+api_key_env = "WORKER_API_KEY"
+
+[profiles.worker-override]
+provider_id = "openai"
+protocol = "openai_compatible"
+compatibility_profile = "openai_compatible"
+base_url = "http://127.0.0.1:9999"
+model = "gpt-4.1-nano"
+api_key_env = "WORKER_API_KEY"
+request_timeout_ms = 5000
+stream_timeout_ms = 10000
+"#,
+        )
+        .expect("registry should parse");
+
+        let resolved = resolve_model_profile_from_registry(&registry, "worker-override")
+            .expect("worker-override should resolve");
+        remove_env("WORKER_API_KEY");
+
+        assert_eq!(resolved.name, "worker-override");
+        assert_eq!(resolved.config.base_url, "http://127.0.0.1:9999");
+        assert_eq!(resolved.config.model_id, "gpt-4.1-nano");
+        assert_eq!(resolved.config.timeout.request_timeout_ms, 5_000);
+        assert_eq!(resolved.config.timeout.stream_timeout_ms, 10_000);
+    }
+
+    #[test]
+    fn models_toml_no_auth_profile_resolves_without_api_key() {
+        let registry = parse_model_profiles_registry(
+            r#"
+active = "local"
+
+[profiles.local]
+provider_id = "ollama"
+protocol = "openai_compatible"
+compatibility_profile = "openai_compatible"
+base_url = "http://localhost:11434"
+model = "llama3.2"
+auth_strategy = "none"
+"#,
+        )
+        .expect("no-auth registry should parse");
+
+        let resolved = resolve_model_profile_from_registry(&registry, "local")
+            .expect("local profile should resolve");
+
+        assert_eq!(resolved.config.provider_id, "ollama");
+        assert_eq!(resolved.config.base_url, "http://localhost:11434");
+        assert_eq!(resolved.config.model_id, "llama3.2");
+        assert!(resolved.config.api_key.is_none());
+    }
+
+    #[test]
+    fn models_toml_proxy_fields_are_preserved() {
+        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        set_env("PROXY_API_KEY", "proxy-key");
+        let registry = parse_model_profiles_registry(
+            r#"
+active = "proxied"
+
+[profiles.proxied]
+provider_id = "openai"
+protocol = "openai_compatible"
+compatibility_profile = "openai_compatible"
+base_url = "https://api.openai.com"
+model = "gpt-4.1-mini"
+api_key_env = "PROXY_API_KEY"
+proxy_url = "http://proxy.corp.example:8080"
+no_proxy = "localhost,127.0.0.1"
+"#,
+        )
+        .expect("proxied registry should parse");
+
+        let resolved = resolve_model_profile_from_registry(&registry, "proxied")
+            .expect("proxied profile should resolve");
+        remove_env("PROXY_API_KEY");
+
+        assert_eq!(
+            resolved.config.proxy_url.as_deref(),
+            Some("http://proxy.corp.example:8080")
+        );
+        assert_eq!(
+            resolved.config.no_proxy.as_deref(),
+            Some("localhost,127.0.0.1")
+        );
+    }
+
+    #[test]
+    fn models_toml_gemini_custom_path_resolves() {
+        let registry = parse_model_profiles_registry(
+            r#"
+active = "gemini-flash"
+
+[profiles.gemini-flash]
+provider_id = "gemini-openai"
+protocol = "openai_compatible"
+compatibility_profile = "openai_compatible"
+base_url = "https://generativelanguage.googleapis.com"
+chat_completions_path = "/v1beta/openai/chat/completions"
+model = "gemini-2.0-flash"
+auth_strategy = "none"
+"#,
+        )
+        .expect("gemini registry should parse");
+
+        let resolved = resolve_model_profile_from_registry(&registry, "gemini-flash")
+            .expect("gemini-flash should resolve");
+
+        assert_eq!(
+            resolved.config.chat_completions_path,
+            "/v1beta/openai/chat/completions"
+        );
+        assert_eq!(resolved.config.model_id, "gemini-2.0-flash");
+    }
+
+    #[test]
+    fn models_toml_resolve_unknown_profile_returns_error() {
+        let registry = parse_model_profiles_registry(
+            r#"
+active = "default"
+
+[profiles.default]
+provider_id = "openai"
+protocol = "openai_compatible"
+compatibility_profile = "openai_compatible"
+base_url = "https://api.openai.com"
+model = "gpt-4.1-mini"
+auth_strategy = "none"
+"#,
+        )
+        .expect("registry should parse");
+
+        let error = resolve_model_profile_from_registry(&registry, "nonexistent")
+            .expect_err("unknown profile should fail");
+
+        assert!(error.to_string().contains("model profile 'nonexistent' was not found"));
+    }
+
+    #[test]
+    fn models_toml_display_view_shows_api_key_env_status() {
+        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        set_env("DISPLAY_TEST_KEY", "some-key");
+        let spec = ModelProfileSpec {
+            provider_id: "openai".into(),
+            protocol: "openai_compatible".into(),
+            compatibility_profile: "openai_compatible".into(),
+            base_url: "https://api.openai.com".into(),
+            chat_completions_path: "/v1/chat/completions".into(),
+            model: "gpt-4.1-mini".into(),
+            auth_strategy: "bearer".into(),
+            api_key_env: Some("DISPLAY_TEST_KEY".into()),
+            request_timeout_ms: None,
+            stream_timeout_ms: None,
+            retry_max_attempts: None,
+            retry_initial_backoff_ms: None,
+            retry_max_backoff_ms: None,
+            proxy_url: None,
+            no_proxy: None,
+            ca_bundle_path: None,
+        };
+        let view = build_model_profile_display_view("test-profile", &spec)
+            .expect("display view should build");
+        remove_env("DISPLAY_TEST_KEY");
+
+        assert_eq!(view.api_key_env_status.as_deref(), Some("set"));
+        assert_eq!(view.request_timeout_ms, 30_000);
+        assert_eq!(view.retry_max_attempts, 3);
     }
 }

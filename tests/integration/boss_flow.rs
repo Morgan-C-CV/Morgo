@@ -254,6 +254,38 @@ auth_strategy = "none"
     .unwrap();
 }
 
+fn write_two_profile_models_toml(
+    dir: &std::path::Path,
+    default_base_url: &str,
+    worker_override_base_url: &str,
+) {
+    let claude_dir = dir.join(".claude");
+    std::fs::create_dir_all(&claude_dir).unwrap();
+    std::fs::write(
+        claude_dir.join("models.toml"),
+        format!(
+            r#"active = "default"
+[profiles.default]
+provider_id = "test"
+protocol = "openai_compatible"
+compatibility_profile = "openai_compatible"
+base_url = "{default_base_url}"
+model = "default-model"
+auth_strategy = "none"
+
+[profiles.worker-override]
+provider_id = "worker-override-provider"
+protocol = "openai_compatible"
+compatibility_profile = "openai_compatible"
+base_url = "{worker_override_base_url}"
+model = "worker-override-model"
+auth_strategy = "none"
+"#
+        ),
+    )
+    .unwrap();
+}
+
 fn boss_step(id: usize, description: &str) -> BossPlanStep {
     BossPlanStep {
         id,
@@ -7395,6 +7427,125 @@ async fn t27_r1_report_lism_policy_field_reflects_coordinator_policy() {
 
     let _ = std::fs::remove_file(plan_path);
     let _ = app_state;
+}
+
+// ── R2 provider routing integration tests ────────────────────────────────────
+
+/// Verifies that when models.toml has two profiles (default + worker-override)
+/// pointing to different mock servers, the LisM path selects worker-override
+/// (because route_model_tier(M, Worker, Executing) → provider_profile_id = "worker-override")
+/// and the request lands on the worker-override server, not the default server.
+#[tokio::test]
+async fn r2_multi_profile_routing_selects_worker_override_endpoint() {
+    let task_manager = Arc::new(TaskManager::default());
+    let (coordinator, plan_path) = coordinator_with_plan(
+        boss_plan(vec![boss_step(0, "r2-routing-step")]),
+        "test_r2_multi_profile_routing.json",
+    )
+    .await;
+
+    // Two separate mock servers — one for default, one for worker-override.
+    let default_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let worker_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let default_addr = default_listener.local_addr().unwrap();
+    let worker_addr = worker_listener.local_addr().unwrap();
+
+    // The default server should NOT receive any request — if it does, the test
+    // will hang (no response) and eventually time out, surfacing the routing bug.
+    // We give it a rejected-response mock so a misrouted request fails fast.
+    let default_server = tokio::spawn(async move {
+        run_minimal_openai_mock_server_rejected(default_listener).await;
+    });
+    let worker_server = tokio::spawn(async move {
+        run_minimal_openai_mock_server(worker_listener).await;
+    });
+
+    let config_dir = std::env::temp_dir().join("r2_multi_profile_routing_test");
+    write_two_profile_models_toml(
+        &config_dir,
+        &format!("http://{default_addr}"),
+        &format!("http://{worker_addr}"),
+    );
+
+    let mut app = (*app_state_with_tasks("r2-routing", task_manager.clone())).clone();
+    app.permission_context.set_lism_enabled(true);
+    app.permission_context.inherited_active_model_snapshot =
+        Some(make_inherited_runtime_snapshot_with_scripted_turns(vec![]));
+    app.session = Some(rust_agent::history::session::SessionSnapshot {
+        session_id: rust_agent::history::session::SessionId("r2-routing".into()),
+        surface: rust_agent::bootstrap::InteractionSurface::Cli,
+        session_mode: rust_agent::bootstrap::SessionMode::Headless,
+        cwd: config_dir.to_string_lossy().to_string(),
+        last_turn_at: None,
+        prompt_seed: None,
+    });
+    let app_state = Arc::new(app);
+
+    coordinator.advance_plan(&app_state).await.unwrap();
+
+    let report = coordinator.report_progress(&task_manager).await.unwrap();
+    let step = &report.steps[0];
+
+    // The step must have completed via the worker-override profile.
+    assert_eq!(
+        step.routed_metadata
+            .as_ref()
+            .and_then(|m| m.provider_profile_id.as_deref()),
+        Some("worker-override"),
+        "expected worker-override profile to be selected"
+    );
+
+    worker_server.await.expect("worker mock server finished");
+    // default_server may not have been hit — drop it.
+    default_server.abort();
+    let _ = std::fs::remove_file(plan_path);
+    let _ = std::fs::remove_dir_all(config_dir);
+}
+
+/// Verifies that when models.toml is absent, the LisM path errors out because
+/// route_model_tier returns provider_profile_id = "worker-override" but the
+/// registry is unavailable to resolve it.
+#[tokio::test]
+async fn r2_missing_registry_lism_path_errors_on_profile_override() {
+    let task_manager = Arc::new(TaskManager::default());
+    let (coordinator, plan_path) = coordinator_with_plan(
+        boss_plan(vec![boss_step(0, "r2-fallback-step")]),
+        "test_r2_missing_registry.json",
+    )
+    .await;
+
+    // No models.toml — use a temp dir with no .claude/models.toml.
+    let config_dir = std::env::temp_dir().join("r2_missing_registry_test");
+    std::fs::create_dir_all(&config_dir).unwrap();
+
+    let mut app = (*app_state_with_tasks("r2-fallback", task_manager.clone())).clone();
+    app.permission_context.set_lism_enabled(true);
+    app.permission_context.inherited_active_model_snapshot =
+        Some(make_inherited_runtime_snapshot_with_scripted_turns(vec![]));
+    app.session = Some(rust_agent::history::session::SessionSnapshot {
+        session_id: rust_agent::history::session::SessionId("r2-fallback".into()),
+        surface: rust_agent::bootstrap::InteractionSurface::Cli,
+        session_mode: rust_agent::bootstrap::SessionMode::Headless,
+        cwd: config_dir.to_string_lossy().to_string(),
+        last_turn_at: None,
+        prompt_seed: None,
+    });
+    let app_state = Arc::new(app);
+
+    // advance_plan must fail because worker-override profile can't be resolved.
+    let result = coordinator.advance_plan(&app_state).await;
+    assert!(
+        result.is_err(),
+        "expected error when registry is absent and profile override is required"
+    );
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("registry is unavailable") || err.contains("worker-override"),
+        "expected registry-unavailable error, got: {err}"
+    );
+
+    let _ = std::fs::remove_file(plan_path);
+    let _ = std::fs::remove_dir_all(config_dir);
 }
 
 #[tokio::test]
