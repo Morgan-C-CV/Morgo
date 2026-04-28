@@ -329,6 +329,14 @@ pub enum McpFailureCode {
     RequestValidation,
     GovernanceReviewRequired,
     ConnectionTimeout,
+    /// Subprocess failed to spawn (command not found, permission denied, etc.).
+    ProcessStartup,
+    /// Server rejected the connection due to authentication / authorization.
+    AuthFailure,
+    /// Server config is malformed or missing required fields.
+    ConfigurationError,
+    /// Governance fingerprint changed since last approval — re-review required.
+    StaleGovernance,
 }
 
 impl McpFailureCode {
@@ -344,7 +352,30 @@ impl McpFailureCode {
             Self::RequestValidation => "request_validation",
             Self::GovernanceReviewRequired => "mcp_governance_review_required",
             Self::ConnectionTimeout => "connection_timeout",
+            Self::ProcessStartup => "process_startup",
+            Self::AuthFailure => "auth_failure",
+            Self::ConfigurationError => "configuration_error",
+            Self::StaleGovernance => "stale_governance",
         }
+    }
+
+    /// True if the failure is likely transient and worth retrying.
+    pub fn is_retryable(&self) -> bool {
+        matches!(
+            self,
+            Self::Transport | Self::ConnectionTimeout | Self::Inventory
+        )
+    }
+
+    /// True if the failure requires user action before retrying.
+    pub fn requires_user_action(&self) -> bool {
+        matches!(
+            self,
+            Self::GovernanceReviewRequired
+                | Self::StaleGovernance
+                | Self::AuthFailure
+                | Self::ConfigurationError
+        )
     }
 }
 

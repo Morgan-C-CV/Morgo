@@ -180,16 +180,75 @@ impl McpRuntime {
         self.connect(server).await
     }
 
+    /// Reconnect with exponential backoff. Only retries on `is_retryable()` failures.
+    /// Non-retryable failures (governance, auth, config) are returned immediately.
+    pub async fn reconnect_with_backoff(
+        &self,
+        server: &str,
+        max_attempts: u32,
+        initial_backoff_ms: u64,
+        max_backoff_ms: u64,
+    ) -> anyhow::Result<McpServerState> {
+        let mut backoff_ms = initial_backoff_ms;
+        let mut last_error: Option<anyhow::Error> = None;
+
+        for attempt in 0..max_attempts {
+            if attempt > 0 {
+                tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                backoff_ms = (backoff_ms * 2).min(max_backoff_ms);
+            }
+
+            self.set_status(server, McpConnectionStatus::Reconnecting, None, None)
+                .await?;
+            self.invalidate_server_cache(server).await;
+            let _ = self.disconnect(server).await;
+
+            match self.connect(server).await {
+                Ok(state) => return Ok(state),
+                Err(e) => {
+                    // Check if the failure is retryable by inspecting last_failure.
+                    let is_retryable = self
+                        .find_server(server)
+                        .await
+                        .ok()
+                        .and_then(|s| s.last_failure)
+                        .map(|f| f.code.is_retryable())
+                        .unwrap_or(true);
+
+                    if !is_retryable {
+                        return Err(e);
+                    }
+                    last_error = Some(e);
+                }
+            }
+        }
+
+        Err(last_error.unwrap_or_else(|| anyhow::anyhow!("reconnect_with_backoff: no attempts made")))
+    }
+
     pub async fn connect(&self, server: &str) -> anyhow::Result<McpServerState> {
         self.refresh_stale_server_config(server).await?;
         let state = self.find_server(server).await?;
         if requires_governance_approval(&state) {
-            let message = governance_review_required_message(&state);
+            // Distinguish stale approval (fingerprint changed) from never-approved.
+            let (code, message) = if matches!(
+                state.governance.approval_status,
+                McpGovernanceApprovalStatus::Stale
+            ) {
+                let msg = format!(
+                    "MCP connect stale_governance: server {} ({}) config changed since last approval — re-review required. approve with /mcp approve {}",
+                    state.config.name, state.config.id, state.config.id
+                );
+                (McpFailureCode::StaleGovernance, msg)
+            } else {
+                let msg = governance_review_required_message(&state);
+                (McpFailureCode::GovernanceReviewRequired, msg)
+            };
             return self
                 .fail_server(
                     server,
                     McpOperationKind::Connect,
-                    McpFailureCode::GovernanceReviewRequired,
+                    code,
                     message.clone(),
                     Some(message),
                 )
@@ -678,9 +737,28 @@ fn mcp_request_error(
 }
 
 fn classify_client_failure(error: &anyhow::Error, fallback: McpFailureCode) -> McpFailureCode {
-    let message = error.to_string();
-    if message.contains("Content-Length") || message.contains("id mismatch") {
+    let message = error.to_string().to_lowercase();
+    if message.contains("content-length") || message.contains("id mismatch") {
         McpFailureCode::Protocol
+    } else if message.contains("failed to spawn")
+        || message.contains("no such file or directory")
+        || message.contains("permission denied")
+        || message.contains("os error 2")
+        || message.contains("os error 13")
+    {
+        McpFailureCode::ProcessStartup
+    } else if message.contains("unauthorized")
+        || message.contains("authentication")
+        || message.contains("forbidden")
+        || message.contains("401")
+        || message.contains("403")
+    {
+        McpFailureCode::AuthFailure
+    } else if message.contains("missing required field")
+        || message.contains("invalid configuration")
+        || message.contains("malformed")
+    {
+        McpFailureCode::ConfigurationError
     } else {
         fallback
     }
@@ -978,5 +1056,233 @@ mod tests {
         assert_eq!(failure.operation, McpOperationKind::Connect);
         assert_eq!(failure.code, McpFailureCode::Inventory);
         assert_eq!(failure.detail.as_deref(), Some("list_tools exploded"));
+    }
+
+    // ── MCP failure taxonomy tests ────────────────────────────────────────────
+
+    #[test]
+    fn classify_client_failure_protocol_on_content_length_error() {
+        let err = anyhow::anyhow!("invalid Content-Length header");
+        assert_eq!(
+            super::classify_client_failure(&err, McpFailureCode::Transport),
+            McpFailureCode::Protocol
+        );
+    }
+
+    #[test]
+    fn classify_client_failure_protocol_on_id_mismatch() {
+        let err = anyhow::anyhow!("response id mismatch: expected 1, got 2");
+        assert_eq!(
+            super::classify_client_failure(&err, McpFailureCode::Transport),
+            McpFailureCode::Protocol
+        );
+    }
+
+    #[test]
+    fn classify_client_failure_process_startup_on_spawn_error() {
+        let err = anyhow::anyhow!("Failed to spawn MCP stdio process 'nonexistent-cmd'");
+        assert_eq!(
+            super::classify_client_failure(&err, McpFailureCode::Transport),
+            McpFailureCode::ProcessStartup
+        );
+    }
+
+    #[test]
+    fn classify_client_failure_process_startup_on_no_such_file() {
+        let err = anyhow::anyhow!("No such file or directory (os error 2)");
+        assert_eq!(
+            super::classify_client_failure(&err, McpFailureCode::Transport),
+            McpFailureCode::ProcessStartup
+        );
+    }
+
+    #[test]
+    fn classify_client_failure_auth_failure_on_unauthorized() {
+        let err = anyhow::anyhow!("server returned 401 Unauthorized");
+        assert_eq!(
+            super::classify_client_failure(&err, McpFailureCode::Transport),
+            McpFailureCode::AuthFailure
+        );
+    }
+
+    #[test]
+    fn classify_client_failure_auth_failure_on_forbidden() {
+        let err = anyhow::anyhow!("403 Forbidden: access denied");
+        assert_eq!(
+            super::classify_client_failure(&err, McpFailureCode::Transport),
+            McpFailureCode::AuthFailure
+        );
+    }
+
+    #[test]
+    fn classify_client_failure_config_error_on_missing_field() {
+        let err = anyhow::anyhow!("missing required field: command");
+        assert_eq!(
+            super::classify_client_failure(&err, McpFailureCode::Transport),
+            McpFailureCode::ConfigurationError
+        );
+    }
+
+    #[test]
+    fn classify_client_failure_falls_back_to_provided_code() {
+        let err = anyhow::anyhow!("some unknown transport error");
+        assert_eq!(
+            super::classify_client_failure(&err, McpFailureCode::Transport),
+            McpFailureCode::Transport
+        );
+        assert_eq!(
+            super::classify_client_failure(&err, McpFailureCode::Execution),
+            McpFailureCode::Execution
+        );
+    }
+
+    #[test]
+    fn failure_code_is_retryable_contract() {
+        assert!(McpFailureCode::Transport.is_retryable());
+        assert!(McpFailureCode::ConnectionTimeout.is_retryable());
+        assert!(McpFailureCode::Inventory.is_retryable());
+        assert!(!McpFailureCode::GovernanceReviewRequired.is_retryable());
+        assert!(!McpFailureCode::StaleGovernance.is_retryable());
+        assert!(!McpFailureCode::AuthFailure.is_retryable());
+        assert!(!McpFailureCode::ConfigurationError.is_retryable());
+        assert!(!McpFailureCode::ProcessStartup.is_retryable());
+    }
+
+    #[test]
+    fn failure_code_requires_user_action_contract() {
+        assert!(McpFailureCode::GovernanceReviewRequired.requires_user_action());
+        assert!(McpFailureCode::StaleGovernance.requires_user_action());
+        assert!(McpFailureCode::AuthFailure.requires_user_action());
+        assert!(McpFailureCode::ConfigurationError.requires_user_action());
+        assert!(!McpFailureCode::Transport.requires_user_action());
+        assert!(!McpFailureCode::ConnectionTimeout.requires_user_action());
+        assert!(!McpFailureCode::Inventory.requires_user_action());
+    }
+
+    #[test]
+    fn failure_code_as_str_round_trips() {
+        let codes = [
+            McpFailureCode::UnknownServer,
+            McpFailureCode::MissingTool,
+            McpFailureCode::MissingResource,
+            McpFailureCode::Transport,
+            McpFailureCode::Protocol,
+            McpFailureCode::Execution,
+            McpFailureCode::Inventory,
+            McpFailureCode::RequestValidation,
+            McpFailureCode::GovernanceReviewRequired,
+            McpFailureCode::ConnectionTimeout,
+            McpFailureCode::ProcessStartup,
+            McpFailureCode::AuthFailure,
+            McpFailureCode::ConfigurationError,
+            McpFailureCode::StaleGovernance,
+        ];
+        for code in codes {
+            let s = code.as_str();
+            assert!(!s.is_empty(), "as_str() must not be empty for {code:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn connect_emits_stale_governance_when_fingerprint_changed() {
+        use crate::service::mcp::config::{McpConfigLoadResult, McpConfigSource};
+        use crate::service::mcp::state::{
+            McpGovernanceStateEntry, McpGovernanceStateLoadResult, McpGovernanceStateSource,
+        };
+        use crate::service::mcp::types::McpGovernanceApprovalStatus;
+        use std::collections::BTreeMap;
+
+        let mut config = test_config("stale-gov-server", "Stale Gov Server");
+        config.governance.review_required = true;
+
+        let real_fingerprint = super::fingerprint_config(&config);
+        let stale_fingerprint = real_fingerprint.wrapping_add(1);
+
+        let mut governance_states = BTreeMap::new();
+        governance_states.insert(
+            "stale-gov-server".to_string(),
+            McpGovernanceStateEntry {
+                server_id: "stale-gov-server".into(),
+                approved: true,
+                fingerprint: stale_fingerprint,
+                reason: None,
+            },
+        );
+
+        let governance_load = McpGovernanceStateLoadResult {
+            path: std::path::PathBuf::from(".claude/mcp-governance.json"),
+            source: McpGovernanceStateSource::Defaults,
+            states: governance_states,
+            diagnostics: vec![],
+        };
+
+        let config_load = McpConfigLoadResult {
+            path: std::path::PathBuf::from(".claude/mcp_servers.json"),
+            source: McpConfigSource::Defaults,
+            configs: vec![config],
+            diagnostics: vec![],
+        };
+
+        let runtime = McpRuntime::new_with_config_and_governance_result_and_observability(
+            Arc::new(MockMcpClient),
+            config_load,
+            governance_load,
+            Default::default(),
+        );
+
+        let result = runtime.connect("stale-gov-server").await;
+        assert!(result.is_err(), "connect should fail for stale governance");
+
+        let servers = runtime.list_servers().await;
+        let failure = servers[0]
+            .last_failure
+            .clone()
+            .expect("failure must be recorded");
+        assert_eq!(
+            failure.code,
+            McpFailureCode::StaleGovernance,
+            "expected StaleGovernance, got {:?}",
+            failure.code
+        );
+        assert_eq!(
+            servers[0].governance.approval_status,
+            McpGovernanceApprovalStatus::Stale
+        );
+    }
+
+    #[tokio::test]
+    async fn reconnect_with_backoff_succeeds_on_first_attempt() {
+        let config = test_config("backoff-server", "Backoff Server");
+        let runtime = McpRuntime::new(Arc::new(MockMcpClient), vec![config]);
+
+        let state = runtime
+            .reconnect_with_backoff("backoff-server", 3, 10, 100)
+            .await
+            .expect("reconnect_with_backoff should succeed");
+
+        assert_eq!(state.status.as_str(), "connected");
+    }
+
+    #[tokio::test]
+    async fn reconnect_with_backoff_stops_immediately_on_non_retryable_failure() {
+        // GovernanceReviewRequired is non-retryable — should fail on first attempt, not retry.
+        let mut config = test_config("gov-server", "Gov Server");
+        config.governance.review_required = true;
+        let runtime = McpRuntime::new(Arc::new(MockMcpClient), vec![config]);
+
+        let start = std::time::Instant::now();
+        let result = runtime
+            .reconnect_with_backoff("gov-server", 3, 50, 500)
+            .await;
+        let elapsed = start.elapsed();
+
+        assert!(result.is_err(), "should fail for governance-required server");
+        // With 3 attempts and 50ms initial backoff, retrying would take ~150ms.
+        // Non-retryable should exit immediately (< 30ms).
+        assert!(
+            elapsed.as_millis() < 30,
+            "non-retryable failure should not retry; elapsed={}ms",
+            elapsed.as_millis()
+        );
     }
 }
