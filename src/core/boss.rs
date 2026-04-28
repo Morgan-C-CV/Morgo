@@ -1641,8 +1641,12 @@ impl BossCoordinator {
                                 step.completed = true;
                                 step.status = BossPlanStepStatus::Completed;
                             }
+                            if let Some(path) = self.status.read().await.planning_file.clone() {
+                                self.save_plan_with_session(std::path::Path::new(&path)).await?;
+                            }
                             let next_step = self.plan.read().await.as_ref().and_then(|p| next_unfinished_step_id(p));
                             self.update_current_step(next_step).await;
+                            self.maybe_auto_advance_after_completion().await?;
                             return Ok(Some(format!(
                                 "LisM executed boss step {} to completion.",
                                 step_id
@@ -1663,6 +1667,9 @@ impl BossCoordinator {
                                 step.completed = false;
                                 step.status = BossPlanStepStatus::Failed;
                                 step.last_review_summary = Some(reason_clone.clone());
+                            }
+                            if let Some(path) = self.status.read().await.planning_file.clone() {
+                                self.save_plan_with_session(std::path::Path::new(&path)).await?;
                             }
                             return Ok(Some(format!(
                                 "LisM failed boss step {}: {}",

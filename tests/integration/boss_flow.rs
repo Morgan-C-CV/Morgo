@@ -6628,6 +6628,199 @@ fn t27_4_max_iterations_reached_when_always_continue() {
     );
 }
 
+#[tokio::test]
+async fn lism_enabled_boss_completed_step_auto_advances_to_next_step() {
+    use rust_agent::service::api::client::ModelProviderClient;
+    use rust_agent::service::api::streaming::StreamEvent;
+
+    let (coordinator, plan_path) = coordinator_with_plan(
+        boss_plan(vec![boss_step(0, "LisM first"), boss_step(1, "LisM second")]),
+        "test_boss_lism_auto_advance.json",
+    )
+    .await;
+
+    let done_json = r#"{"state":"done","decision":"done"}"#;
+    let mut app = (*app_state_with_tasks("lism-auto-advance-session", Arc::new(TaskManager::default()))).clone();
+    app.permission_context.set_lism_enabled(true);
+    app.permission_context.inherited_active_model_snapshot = Some(
+        rust_agent::state::active_model_runtime::ActiveModelRuntimeSnapshot {
+            config: rust_agent::service::api::client::ModelProviderConfig {
+                provider_id: "scripted".into(),
+                protocol: rust_agent::service::api::client::ProviderProtocol::OpenAICompatible,
+                compatibility_profile: rust_agent::service::api::client::ProviderCompatibilityProfileKind::OpenAICompatible,
+                base_url: "http://localhost".into(),
+                auth_strategy: rust_agent::service::api::client::ProviderAuthStrategy::NoAuth,
+                api_key: None,
+                api_key_env: None,
+                chat_completions_path: "/v1/chat/completions".into(),
+                model_id: "scripted-lism".into(),
+                timeout: rust_agent::service::api::client::ProviderTimeout {
+                    request_timeout_ms: 1_000,
+                    stream_timeout_ms: 1_000,
+                },
+                retry_policy: rust_agent::service::api::retry::RetryPolicy {
+                    max_attempts: 1,
+                    initial_backoff_ms: 0,
+                    max_backoff_ms: 0,
+                },
+                pricing: rust_agent::service::api::client::ModelPricing::default(),
+                proxy_url: None,
+                no_proxy: None,
+                ca_bundle_path: None,
+            },
+            client: ModelProviderClient::with_scripted_turns(vec![
+                vec![StreamEvent::TextDelta(done_json.into())],
+                vec![StreamEvent::TextDelta(done_json.into())],
+            ]),
+            active_profile_name: None,
+            source: rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
+            summary: rust_agent::state::app_state::ActiveModelProviderSummary {
+                provider_id: "scripted".into(),
+                protocol: "OpenAICompatible".into(),
+                compatibility_profile: "OpenAICompatible".into(),
+                base_url_host: "localhost".into(),
+                model: "scripted-lism".into(),
+                auth_status: "test".into(),
+            },
+        },
+    );
+    let app_state = Arc::new(app);
+
+    let _ = coordinator.advance_plan(&app_state).await.unwrap();
+
+    let guard = coordinator.plan.read().await;
+    let plan = guard.as_ref().unwrap();
+    assert_eq!(plan.steps[0].status, BossPlanStepStatus::Completed);
+    assert_eq!(plan.steps[1].status, BossPlanStepStatus::Completed);
+    assert!(plan.steps[1].completed, "second step should auto-complete via existing auto-advance contract");
+
+    let _ = std::fs::remove_file(plan_path);
+}
+
+#[tokio::test]
+async fn lism_enabled_boss_outcomes_are_persisted_for_reload() {
+    use rust_agent::service::api::client::ModelProviderClient;
+    use rust_agent::service::api::streaming::StreamEvent;
+
+    let (coordinator_ok, plan_path_ok) = coordinator_with_plan(
+        boss_plan(vec![boss_step(0, "LisM persisted complete")]),
+        "test_boss_lism_persist_complete.json",
+    )
+    .await;
+
+    let done_json = r#"{"state":"done","decision":"done"}"#;
+    let mut app_ok = (*app_state_with_tasks("lism-persist-complete", Arc::new(TaskManager::default()))).clone();
+    app_ok.permission_context.set_lism_enabled(true);
+    app_ok.permission_context.inherited_active_model_snapshot = Some(
+        rust_agent::state::active_model_runtime::ActiveModelRuntimeSnapshot {
+            config: rust_agent::service::api::client::ModelProviderConfig {
+                provider_id: "scripted".into(),
+                protocol: rust_agent::service::api::client::ProviderProtocol::OpenAICompatible,
+                compatibility_profile: rust_agent::service::api::client::ProviderCompatibilityProfileKind::OpenAICompatible,
+                base_url: "http://localhost".into(),
+                auth_strategy: rust_agent::service::api::client::ProviderAuthStrategy::NoAuth,
+                api_key: None,
+                api_key_env: None,
+                chat_completions_path: "/v1/chat/completions".into(),
+                model_id: "scripted-lism".into(),
+                timeout: rust_agent::service::api::client::ProviderTimeout {
+                    request_timeout_ms: 1_000,
+                    stream_timeout_ms: 1_000,
+                },
+                retry_policy: rust_agent::service::api::retry::RetryPolicy {
+                    max_attempts: 1,
+                    initial_backoff_ms: 0,
+                    max_backoff_ms: 0,
+                },
+                pricing: rust_agent::service::api::client::ModelPricing::default(),
+                proxy_url: None,
+                no_proxy: None,
+                ca_bundle_path: None,
+            },
+            client: ModelProviderClient::with_scripted_turns(vec![
+                vec![StreamEvent::TextDelta(done_json.into())],
+            ]),
+            active_profile_name: None,
+            source: rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
+            summary: rust_agent::state::app_state::ActiveModelProviderSummary {
+                provider_id: "scripted".into(),
+                protocol: "OpenAICompatible".into(),
+                compatibility_profile: "OpenAICompatible".into(),
+                base_url_host: "localhost".into(),
+                model: "scripted-lism".into(),
+                auth_status: "test".into(),
+            },
+        },
+    );
+    let app_ok = Arc::new(app_ok);
+    let _ = coordinator_ok.advance_plan(&app_ok).await.unwrap();
+    let persisted_ok = load_plan(&plan_path_ok).await.unwrap();
+    assert_eq!(persisted_ok.steps[0].status, BossPlanStepStatus::Completed);
+    assert!(persisted_ok.steps[0].completed);
+
+    let (coordinator_fail, plan_path_fail) = coordinator_with_plan(
+        boss_plan(vec![boss_step(0, "LisM persisted fail")]),
+        "test_boss_lism_persist_fail.json",
+    )
+    .await;
+
+    let reject_json = r#"{"state":"blocked","decision":"reject","next_action":{"action_type":"reject","args":{"reason":"state frame output does not satisfy acceptance"}}}"#;
+    let mut app_fail = (*app_state_with_tasks("lism-persist-fail", Arc::new(TaskManager::default()))).clone();
+    app_fail.permission_context.set_lism_enabled(true);
+    app_fail.permission_context.inherited_active_model_snapshot = Some(
+        rust_agent::state::active_model_runtime::ActiveModelRuntimeSnapshot {
+            config: rust_agent::service::api::client::ModelProviderConfig {
+                provider_id: "scripted".into(),
+                protocol: rust_agent::service::api::client::ProviderProtocol::OpenAICompatible,
+                compatibility_profile: rust_agent::service::api::client::ProviderCompatibilityProfileKind::OpenAICompatible,
+                base_url: "http://localhost".into(),
+                auth_strategy: rust_agent::service::api::client::ProviderAuthStrategy::NoAuth,
+                api_key: None,
+                api_key_env: None,
+                chat_completions_path: "/v1/chat/completions".into(),
+                model_id: "scripted-lism".into(),
+                timeout: rust_agent::service::api::client::ProviderTimeout {
+                    request_timeout_ms: 1_000,
+                    stream_timeout_ms: 1_000,
+                },
+                retry_policy: rust_agent::service::api::retry::RetryPolicy {
+                    max_attempts: 1,
+                    initial_backoff_ms: 0,
+                    max_backoff_ms: 0,
+                },
+                pricing: rust_agent::service::api::client::ModelPricing::default(),
+                proxy_url: None,
+                no_proxy: None,
+                ca_bundle_path: None,
+            },
+            client: ModelProviderClient::with_scripted_turns(vec![
+                vec![StreamEvent::TextDelta(reject_json.into())],
+            ]),
+            active_profile_name: None,
+            source: rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
+            summary: rust_agent::state::app_state::ActiveModelProviderSummary {
+                provider_id: "scripted".into(),
+                protocol: "OpenAICompatible".into(),
+                compatibility_profile: "OpenAICompatible".into(),
+                base_url_host: "localhost".into(),
+                model: "scripted-lism".into(),
+                auth_status: "test".into(),
+            },
+        },
+    );
+    let app_fail = Arc::new(app_fail);
+    let _ = coordinator_fail.advance_plan(&app_fail).await.unwrap();
+    let persisted_fail = load_plan(&plan_path_fail).await.unwrap();
+    assert_eq!(persisted_fail.steps[0].status, BossPlanStepStatus::Failed);
+    assert_eq!(
+        persisted_fail.steps[0].last_review_summary.as_deref(),
+        Some("state frame output does not satisfy acceptance")
+    );
+
+    let _ = std::fs::remove_file(plan_path_ok);
+    let _ = std::fs::remove_file(plan_path_fail);
+}
+
 // ── T27.5 StateFrame orchestrator seam ───────────────────────────────────
 
 #[tokio::test]
