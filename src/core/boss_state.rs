@@ -173,6 +173,18 @@ pub struct BossStepRoutedMetadata {
     pub skillset_id: Option<String>,
     #[serde(default)]
     pub model_tier: Option<String>,
+    #[serde(default)]
+    pub provider_profile_id: Option<String>,
+    #[serde(default)]
+    pub state_frame_size: Option<usize>,
+    #[serde(default)]
+    pub cache_read_tokens: Option<usize>,
+    #[serde(default)]
+    pub cache_write_tokens: Option<usize>,
+    #[serde(default)]
+    pub fallback_count: Option<usize>,
+    #[serde(default)]
+    pub projection_mismatch_count: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

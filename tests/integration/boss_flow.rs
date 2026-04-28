@@ -14,7 +14,7 @@ use rust_agent::core::boss_actor_runtime::{
 use rust_agent::core::boss_runtime::BossRuntimeHost;
 use rust_agent::core::boss_state::{
     BossActorRole, BossActorStatus, BossControlRequest, BossControlResponse, BossPlan,
-    BossPlanStep, BossPlanStepStatus, BossStage, BossStepRoutedMetadata, BossStopStage,
+    BossPlanStep, BossPlanStepStatus, BossStage, BossStopStage,
 };
 use rust_agent::core::concurrency::{
     BossBudgetDecision, MemoryPressureLevel, evaluate_boss_budget,
@@ -6876,14 +6876,16 @@ async fn report_progress_includes_lism_routed_metadata_for_completed_step() {
     let report = coordinator.report_progress(&task_manager).await.unwrap();
 
     assert_eq!(report.steps.len(), 1);
-    assert_eq!(
-        report.steps[0].routed_metadata,
-        Some(BossStepRoutedMetadata {
-            toolset_id: Some("worker-minimal".into()),
-            skillset_id: None,
-            model_tier: Some("medium".into()),
-        })
-    );
+    let meta = report.steps[0].routed_metadata.as_ref().expect("routed_metadata must be set for LisM step");
+    assert_eq!(meta.toolset_id.as_deref(), Some("worker-minimal"));
+    assert_eq!(meta.skillset_id, None);
+    assert_eq!(meta.model_tier.as_deref(), Some("medium"));
+    assert_eq!(meta.provider_profile_id.as_deref(), Some("worker-override"));
+    assert!(meta.state_frame_size.unwrap_or(0) > 0, "state_frame_size must be non-zero");
+    assert_eq!(meta.cache_read_tokens, Some(0));
+    assert_eq!(meta.cache_write_tokens, Some(0));
+    assert_eq!(meta.fallback_count, Some(0));
+    assert_eq!(meta.projection_mismatch_count, Some(0));
 
     server.await.expect("mock provider server finished");
     let _ = std::fs::remove_file(plan_path);
@@ -6910,6 +6912,61 @@ async fn report_progress_does_not_fill_routed_metadata_for_non_lism_path() {
     assert_eq!(report.steps[0].routed_metadata, None);
 
     let _ = std::fs::remove_file(plan_path);
+}
+
+#[tokio::test]
+async fn t27_r1_worker_override_hit_report_shows_routed_metadata() {
+    let task_manager = Arc::new(TaskManager::default());
+    let (coordinator, plan_path) = coordinator_with_plan(
+        boss_plan(vec![boss_step(0, "R1.1 override metadata")]),
+        "test_t27_r1_override_metadata.json",
+    )
+    .await;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(run_minimal_openai_mock_server(listener));
+
+    let config_dir = std::env::temp_dir().join("t27_r1_override_metadata_test");
+    write_worker_override_models_toml(&config_dir, &format!("http://{addr}"));
+
+    let mut app = (*app_state_with_tasks("t27-r1-session", task_manager.clone())).clone();
+    app.permission_context.set_lism_enabled(true);
+    app.permission_context.inherited_active_model_snapshot =
+        Some(make_inherited_runtime_snapshot_with_scripted_turns(vec![]));
+    app.session = Some(rust_agent::history::session::SessionSnapshot {
+        session_id: rust_agent::history::session::SessionId("t27-r1-session".into()),
+        surface: rust_agent::bootstrap::InteractionSurface::Cli,
+        session_mode: rust_agent::bootstrap::SessionMode::Headless,
+        cwd: config_dir.to_string_lossy().to_string(),
+        last_turn_at: None,
+        prompt_seed: None,
+    });
+    let app_state = Arc::new(app);
+
+    let result = coordinator.advance_plan(&app_state).await.unwrap();
+    assert!(result.is_some(), "advance_plan must return a message");
+
+    let report = coordinator.report_progress(&task_manager).await.unwrap();
+    assert_eq!(report.steps.len(), 1);
+
+    let meta = report.steps[0]
+        .routed_metadata
+        .as_ref()
+        .expect("routed_metadata must be populated for worker-override hit");
+
+    assert_eq!(meta.provider_profile_id.as_deref(), Some("worker-override"),
+        "provider_profile_id must reflect the router-produced override");
+    assert_eq!(meta.model_tier.as_deref(), Some("medium"));
+    assert!(meta.state_frame_size.unwrap_or(0) > 0, "state_frame_size must be non-zero");
+    assert_eq!(meta.fallback_count, Some(0));
+    assert_eq!(meta.projection_mismatch_count, Some(0));
+    assert_eq!(meta.cache_read_tokens, Some(0));
+    assert_eq!(meta.cache_write_tokens, Some(0));
+
+    server.await.expect("mock provider server finished");
+    let _ = std::fs::remove_file(plan_path);
+    let _ = std::fs::remove_dir_all(config_dir);
 }
 
 #[tokio::test]

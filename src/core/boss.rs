@@ -920,6 +920,12 @@ impl BossCoordinator {
         }
     }
 
+    pub async fn routed_step_metadata_snapshot(
+        &self,
+    ) -> std::collections::HashMap<usize, BossStepRoutedMetadata> {
+        self.routed_step_metadata.read().await.clone()
+    }
+
     pub async fn report_progress(&self, tasks: &TaskManager) -> anyhow::Result<BossReportPayload> {
         let status = self.status.read().await.clone();
         let session = self.session.read().await.clone();
@@ -1507,10 +1513,17 @@ impl BossCoordinator {
                             step_id,
                             ActorRole::Worker,
                         );
+                        let state_frame_size = serde_json::to_string(&routed.frame).map(|s| s.len()).ok();
                         let routed_metadata = BossStepRoutedMetadata {
                             toolset_id: routed.frame.toolset_id.clone(),
                             skillset_id: routed.frame.skillset_id.clone(),
                             model_tier: Some(model_tier_label(routed.model_route.tier).to_string()),
+                            provider_profile_id: routed.model_route.provider_profile_id.clone(),
+                            state_frame_size,
+                            cache_read_tokens: Some(0),
+                            cache_write_tokens: Some(0),
+                            fallback_count: Some(0),
+                            projection_mismatch_count: Some(0),
                         };
                         let cwd = app_state
                             .session
