@@ -201,6 +201,9 @@ fn fake_config(command: &str) -> McpServerConfig {
             notes: None,
         },
         connect_timeout_ms: 10_000,
+        proxy_url: None,
+        no_proxy: None,
+        ca_bundle_path: None,
     }
 }
 
@@ -595,5 +598,106 @@ async fn mcp_connect_timeout_produces_typed_failure_and_does_not_hang() {
             .unwrap_or(false),
         "last_failure must be ConnectionTimeout, got: {:?}",
         server.last_failure
+    );
+}
+
+// ── Proxy P2 focused tests ────────────────────────────────────────────────────
+
+#[test]
+fn r2_mcp_server_config_proxy_fields_round_trip_serde() {
+    let config = McpServerConfig {
+        id: "sse-server".into(),
+        name: "sse-server".into(),
+        command: "mcp-sse".into(),
+        args: vec![],
+        env: BTreeMap::new(),
+        transport: McpTransportKind::StdioProcess,
+        governance: McpServerGovernanceConfig { review_required: false, notes: None },
+        connect_timeout_ms: 5_000,
+        proxy_url: Some("http://proxy.corp:3128".into()),
+        no_proxy: Some("localhost,127.0.0.1".into()),
+        ca_bundle_path: Some("/etc/ssl/corp-ca.pem".into()),
+    };
+
+    let json = serde_json::to_string(&config).expect("serialize");
+    let decoded: McpServerConfig = serde_json::from_str(&json).expect("deserialize");
+
+    assert_eq!(decoded.proxy_url.as_deref(), Some("http://proxy.corp:3128"));
+    assert_eq!(decoded.no_proxy.as_deref(), Some("localhost,127.0.0.1"));
+    assert_eq!(decoded.ca_bundle_path.as_deref(), Some("/etc/ssl/corp-ca.pem"));
+}
+
+#[test]
+fn r2_mcp_server_config_proxy_fields_default_to_none_when_absent() {
+    let json = r#"{"id":"s","name":"s","command":"cmd","args":[],"env":{}}"#;
+    let config: McpServerConfig = serde_json::from_str(json).expect("deserialize");
+
+    assert!(config.proxy_url.is_none());
+    assert!(config.no_proxy.is_none());
+    assert!(config.ca_bundle_path.is_none());
+}
+
+#[test]
+fn r2_build_mcp_http_client_returns_ok_with_no_proxy_config() {
+    let config = McpServerConfig {
+        id: "s".into(),
+        name: "s".into(),
+        command: "cmd".into(),
+        args: vec![],
+        env: BTreeMap::new(),
+        transport: McpTransportKind::StdioProcess,
+        governance: McpServerGovernanceConfig { review_required: false, notes: None },
+        connect_timeout_ms: 5_000,
+        proxy_url: None,
+        no_proxy: None,
+        ca_bundle_path: None,
+    };
+
+    let result = rust_agent::service::mcp::client::build_mcp_http_client(&config);
+    assert!(result.is_ok(), "build_mcp_http_client must succeed with no proxy config");
+}
+
+#[test]
+fn r2_build_mcp_http_client_returns_ok_with_valid_proxy_url() {
+    let config = McpServerConfig {
+        id: "s".into(),
+        name: "s".into(),
+        command: "cmd".into(),
+        args: vec![],
+        env: BTreeMap::new(),
+        transport: McpTransportKind::StdioProcess,
+        governance: McpServerGovernanceConfig { review_required: false, notes: None },
+        connect_timeout_ms: 5_000,
+        proxy_url: Some("http://proxy.corp:3128".into()),
+        no_proxy: Some("localhost".into()),
+        ca_bundle_path: None,
+    };
+
+    let result = rust_agent::service::mcp::client::build_mcp_http_client(&config);
+    assert!(result.is_ok(), "build_mcp_http_client must succeed with valid proxy URL");
+}
+
+#[test]
+fn r2_build_mcp_http_client_errors_on_missing_ca_bundle_path() {
+    let config = McpServerConfig {
+        id: "s".into(),
+        name: "s".into(),
+        command: "cmd".into(),
+        args: vec![],
+        env: BTreeMap::new(),
+        transport: McpTransportKind::StdioProcess,
+        governance: McpServerGovernanceConfig { review_required: false, notes: None },
+        connect_timeout_ms: 5_000,
+        proxy_url: None,
+        no_proxy: None,
+        ca_bundle_path: Some("/nonexistent/path/ca.pem".into()),
+    };
+
+    let result = rust_agent::service::mcp::client::build_mcp_http_client(&config);
+    assert!(result.is_err(), "build_mcp_http_client must fail when CA bundle path does not exist");
+    let msg = result.unwrap_err().to_string();
+    assert!(
+        msg.contains("failed to read MCP CA bundle"),
+        "error must mention CA bundle read failure, got: {msg}"
     );
 }

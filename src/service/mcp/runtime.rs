@@ -1003,6 +1003,9 @@ mod tests {
                 notes: None,
             },
             connect_timeout_ms: 10_000,
+            proxy_url: None,
+            no_proxy: None,
+            ca_bundle_path: None,
         }
     }
 

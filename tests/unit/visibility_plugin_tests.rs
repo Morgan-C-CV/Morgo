@@ -2088,8 +2088,8 @@ async fn lism_command_explain_lists_available_building_blocks_and_deferred_items
     assert!(text.contains("BossPlan -> StateFrame projection"));
     assert!(text.contains("Stateless JSON decision loop"));
     assert!(text.contains("Toolset / skillset router is attached to the live LisM -> /boss production path"));
-    assert!(text.contains("Model-tier router metadata is attached to the same seam"));
-    assert!(text.contains("real provider/profile switching from model-tier routing is not yet connected"));
+    assert!(text.contains("Model-tier router and provider_profile_id routing are connected to the production path"));
+    assert!(text.contains("Per-step routed metadata"));
 }
 
 #[tokio::test]

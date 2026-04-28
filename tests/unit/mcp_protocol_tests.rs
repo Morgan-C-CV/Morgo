@@ -67,6 +67,9 @@ while True:
                 notes: None,
             },
             connect_timeout_ms: 10_000,
+            proxy_url: None,
+            no_proxy: None,
+            ca_bundle_path: None,
         };
 
         let client = RoutingMcpClient::default();
@@ -141,6 +144,9 @@ while True:
             notes: None,
         },
         connect_timeout_ms: 10_000,
+        proxy_url: None,
+        no_proxy: None,
+        ca_bundle_path: None,
     };
 
     let client = RoutingMcpClient::default();
@@ -200,6 +206,9 @@ while True:
             notes: None,
         },
         connect_timeout_ms: 10_000,
+        proxy_url: None,
+        no_proxy: None,
+        ca_bundle_path: None,
     };
 
     let client = RoutingMcpClient::default();
@@ -265,6 +274,9 @@ while True:
             notes: None,
         },
         connect_timeout_ms: 10_000,
+        proxy_url: None,
+        no_proxy: None,
+        ca_bundle_path: None,
     };
 
     let runtime = McpRuntime::new(std::sync::Arc::new(RoutingMcpClient::default()), vec![config]);
@@ -346,6 +358,9 @@ while True:
             notes: None,
         },
         connect_timeout_ms: 10_000,
+        proxy_url: None,
+        no_proxy: None,
+        ca_bundle_path: None,
     };
 
     let client = RoutingMcpClient::default();

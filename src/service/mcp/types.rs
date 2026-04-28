@@ -37,6 +37,15 @@ pub struct McpServerConfig {
     pub governance: McpServerGovernanceConfig,
     #[serde(default = "default_connect_timeout_ms")]
     pub connect_timeout_ms: u64,
+    /// Explicit proxy URL for HTTP-based transports (SSE). Ignored for stdio.
+    #[serde(default)]
+    pub proxy_url: Option<String>,
+    /// Comma-separated no-proxy bypass list.
+    #[serde(default)]
+    pub no_proxy: Option<String>,
+    /// Path to a PEM CA bundle for TLS verification on HTTP-based transports.
+    #[serde(default)]
+    pub ca_bundle_path: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

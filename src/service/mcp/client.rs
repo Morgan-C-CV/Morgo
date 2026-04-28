@@ -564,3 +564,46 @@ mod tests {
         assert_eq!(content, "hello");
     }
 }
+
+/// Build an HTTP client for MCP HTTP-based transports (SSE, future).
+/// Applies proxy and CA bundle from `McpServerConfig`, falling back to
+/// `resolve_proxy_env_contract()` when no explicit proxy is configured.
+pub fn build_mcp_http_client(config: &McpServerConfig) -> anyhow::Result<reqwest::Client> {
+    use crate::bootstrap::proxy_env::resolve_proxy_env_contract;
+
+    let mut builder = reqwest::Client::builder();
+
+    // CA bundle.
+    if let Some(path) = &config.ca_bundle_path {
+        let pem = std::fs::read(path)
+            .map_err(|e| anyhow::anyhow!("failed to read MCP CA bundle at {path}: {e}"))?;
+        let cert = reqwest::Certificate::from_pem(&pem)
+            .map_err(|e| anyhow::anyhow!("invalid MCP CA bundle PEM at {path}: {e}"))?;
+        builder = builder.add_root_certificate(cert);
+    }
+
+    // Proxy — explicit config > env fallback.
+    let proxy_url = config.proxy_url.as_deref();
+    let no_proxy = config.no_proxy.as_deref();
+
+    if let Some(url) = proxy_url {
+        let mut proxy = reqwest::Proxy::all(url)
+            .map_err(|e| anyhow::anyhow!("invalid MCP proxy URL '{url}': {e}"))?;
+        if let Some(np) = no_proxy {
+            proxy = proxy.no_proxy(reqwest::NoProxy::from_string(np));
+        }
+        builder = builder.proxy(proxy);
+    } else {
+        let env = resolve_proxy_env_contract();
+        if let Some(url) = env.proxy_url {
+            let mut proxy = reqwest::Proxy::all(&url)
+                .map_err(|e| anyhow::anyhow!("invalid MCP proxy URL from env '{url}': {e}"))?;
+            if let Some(np) = env.no_proxy {
+                proxy = proxy.no_proxy(reqwest::NoProxy::from_string(&np));
+            }
+            builder = builder.proxy(proxy);
+        }
+    }
+
+    Ok(builder.build()?)
+}

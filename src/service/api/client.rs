@@ -521,16 +521,57 @@ fn validate_streaming_response_headers(
 }
 
 fn build_reqwest_client(config: &ModelProviderConfig) -> reqwest::Client {
+    build_reqwest_client_with_result(config).unwrap_or_else(|_| reqwest::Client::new())
+}
+
+fn build_reqwest_client_with_result(config: &ModelProviderConfig) -> anyhow::Result<reqwest::Client> {
+    use crate::bootstrap::proxy_env::resolve_proxy_env_contract;
+
     let mut builder = reqwest::Client::builder();
-    if let Some(proxy_url) = &config.proxy_url {
-        if let Ok(mut proxy) = reqwest::Proxy::all(proxy_url) {
-            if let Some(no_proxy) = &config.no_proxy {
-                proxy = proxy.no_proxy(reqwest::NoProxy::from_string(no_proxy));
+
+    // CA bundle — explicit config takes precedence over env.
+    let ca_bundle_path = config.ca_bundle_path.as_deref().or_else(|| {
+        // Checked at call time; env var may not be set.
+        None
+    });
+    if let Some(path) = ca_bundle_path {
+        let pem = std::fs::read(path)
+            .map_err(|e| anyhow::anyhow!("failed to read CA bundle at {path}: {e}"))?;
+        let cert = reqwest::Certificate::from_pem(&pem)
+            .map_err(|e| anyhow::anyhow!("invalid CA bundle PEM at {path}: {e}"))?;
+        builder = builder.add_root_certificate(cert);
+    }
+
+    // Proxy — explicit config > env fallback.
+    let (proxy_url, no_proxy) = if config.proxy_url.is_some() {
+        (config.proxy_url.as_deref(), config.no_proxy.as_deref())
+    } else {
+        let env = resolve_proxy_env_contract();
+        // Leak the strings into the builder scope via owned values.
+        // We need to return them as &str but they're owned — use a local binding.
+        // Instead, handle the env case inline.
+        if let Some(url) = env.proxy_url {
+            let mut proxy = reqwest::Proxy::all(&url)
+                .map_err(|e| anyhow::anyhow!("invalid proxy URL from env '{url}': {e}"))?;
+            if let Some(np) = env.no_proxy {
+                proxy = proxy.no_proxy(reqwest::NoProxy::from_string(&np));
             }
             builder = builder.proxy(proxy);
+            return Ok(builder.build()?);
         }
+        (None, None)
+    };
+
+    if let Some(url) = proxy_url {
+        let mut proxy = reqwest::Proxy::all(url)
+            .map_err(|e| anyhow::anyhow!("invalid proxy URL '{url}': {e}"))?;
+        if let Some(np) = no_proxy {
+            proxy = proxy.no_proxy(reqwest::NoProxy::from_string(np));
+        }
+        builder = builder.proxy(proxy);
     }
-    builder.build().unwrap_or_else(|_| reqwest::Client::new())
+
+    Ok(builder.build()?)
 }
 
 fn build_messages_url_for_provider(config: &ModelProviderConfig) -> Result<String, ApiError> {

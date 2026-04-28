@@ -101,5 +101,8 @@ pub fn default_server_configs() -> Vec<McpServerConfig> {
         transport: McpTransportKind::Mock,
         governance: Default::default(),
         connect_timeout_ms: 10_000,
+        proxy_url: None,
+        no_proxy: None,
+        ca_bundle_path: None,
     }]
 }
