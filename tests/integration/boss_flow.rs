@@ -2085,7 +2085,10 @@ async fn boss_a_replan_step_does_not_redispatch_b_and_is_distinct_from_rejected(
     let task_manager = Arc::new(TaskManager::default());
     let app_state = app_state_with_tasks("parent-session-replan", task_manager.clone());
     let payload = coordinator.advance_plan(&app_state).await.unwrap();
-    assert!(payload.is_none(), "replan-required step must not be redispatched like Rejected");
+    assert_eq!(
+        payload.as_deref(),
+        Some("Boss step 0 requires replanning before execution can continue. Reason: split implementation from validation")
+    );
     assert_eq!(coordinator.get_next_runnable_step().await, None);
 
     let report = coordinator.report_progress(&task_manager).await.unwrap();
@@ -2093,6 +2096,14 @@ async fn boss_a_replan_step_does_not_redispatch_b_and_is_distinct_from_rejected(
     assert_eq!(
         report.steps[0].last_review_summary.as_deref(),
         Some("Current step needs strategy rewrite")
+    );
+    assert_eq!(
+        report.steps[0].action_required.as_deref(),
+        Some("replan_current_step")
+    );
+    assert_eq!(
+        report.steps[0].blocker_reason.as_deref(),
+        Some("split implementation from validation")
     );
 
     // Distinguish from ordinary correction-based rejection: status is different,

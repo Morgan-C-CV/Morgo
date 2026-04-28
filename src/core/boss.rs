@@ -924,6 +924,18 @@ impl BossCoordinator {
                         worker_task_id: step.worker_task_id.clone(),
                         attempt_count: step.attempt_count,
                         last_review_summary: step.last_review_summary.clone(),
+                        action_required: if step.status == BossPlanStepStatus::ReplanRequired {
+                            Some("replan_current_step".into())
+                        } else {
+                            None
+                        },
+                        blocker_reason: if step.status == BossPlanStepStatus::ReplanRequired {
+                            step.last_correction
+                                .as_deref()
+                                .map(|value| value.strip_prefix("replan required: ").unwrap_or(value).to_string())
+                        } else {
+                            None
+                        },
                     })
                     .collect::<Vec<_>>()
             })
@@ -1542,6 +1554,18 @@ impl BossCoordinator {
                     step.status = BossPlanStepStatus::Running;
                     Some(AdvanceOutcome::Dispatch(step_id))
                 }
+            } else if let Some(step) = plan
+                .steps
+                .iter()
+                .find(|step| step.status == BossPlanStepStatus::ReplanRequired)
+            {
+                Some(AdvanceOutcome::ReplanRequired(
+                    step.id,
+                    step.last_correction
+                        .as_deref()
+                        .map(|value| value.strip_prefix("replan required: ").unwrap_or(value).to_string())
+                        .unwrap_or_else(|| "current step requires replanning".to_string()),
+                ))
             } else {
                 Some(AdvanceOutcome::NoRunnableStep)
             }
@@ -1630,6 +1654,13 @@ impl BossCoordinator {
                 };
 
                 Ok(Some(payload))
+            }
+            Some(AdvanceOutcome::ReplanRequired(step_id, reason)) => {
+                self.update_current_step(Some(step_id)).await;
+                Ok(Some(format!(
+                    "Boss step {} requires replanning before execution can continue. Reason: {}",
+                    step_id, reason
+                )))
             }
             Some(AdvanceOutcome::NoRunnableStep) | None => Ok(None),
         }
@@ -2042,12 +2073,13 @@ impl BossCoordinator {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum AdvanceOutcome {
     Dispatch(usize),
     ApprovalBarrier(usize),
     TerminalFailure,
     PlanComplete,
+    ReplanRequired(usize, String),
     NoRunnableStep,
 }
 

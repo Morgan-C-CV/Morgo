@@ -172,6 +172,10 @@ pub struct BossStepReport {
     pub worker_task_id: Option<String>,
     pub attempt_count: u32,
     pub last_review_summary: Option<String>,
+    #[serde(default)]
+    pub action_required: Option<String>,
+    #[serde(default)]
+    pub blocker_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
