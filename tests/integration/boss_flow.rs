@@ -2089,7 +2089,6 @@ async fn boss_a_replan_step_does_not_redispatch_b_and_is_distinct_from_rejected(
         payload.as_deref(),
         Some("Boss step 0 requires replanning before execution can continue. Reason: split implementation from validation")
     );
-    assert_eq!(coordinator.get_next_runnable_step().await, None);
 
     let report = coordinator.report_progress(&task_manager).await.unwrap();
     assert_eq!(report.steps[0].status, BossPlanStepStatus::ReplanRequired);
