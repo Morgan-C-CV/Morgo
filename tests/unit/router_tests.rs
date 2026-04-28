@@ -148,6 +148,7 @@ fn app_state_with_session_root(root: &std::path::Path) -> AppState {
         cancellation_token: tokio_util::sync::CancellationToken::new(),
         subagent_limiter: None,
         boss_coordinator: None,
+        remote_actor_store: None,
     }
 }
 

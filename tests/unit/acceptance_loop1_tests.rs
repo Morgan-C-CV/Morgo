@@ -99,6 +99,7 @@ fn test_app_state() -> AppState {
         cancellation_token: tokio_util::sync::CancellationToken::new(),
         subagent_limiter: None,
         boss_coordinator: None,
+        remote_actor_store: None,
     }
 }
 
