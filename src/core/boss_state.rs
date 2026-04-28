@@ -185,6 +185,12 @@ pub struct BossStepRoutedMetadata {
     pub fallback_count: Option<usize>,
     #[serde(default)]
     pub projection_mismatch_count: Option<usize>,
+    /// Total input tokens billed for this step (v1 stub: always 0).
+    #[serde(default)]
+    pub input_tokens: Option<usize>,
+    /// Total output tokens billed for this step (v1 stub: always 0).
+    #[serde(default)]
+    pub output_tokens: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -212,6 +218,34 @@ pub struct BossObservabilitySummary {
     /// Steps where provider_profile_id is Some (i.e. a non-inherited model profile was used).
     pub override_hit_count: usize,
     pub model_tier_counts: std::collections::HashMap<String, usize>,
+    /// Total input tokens across all routed steps (v1 stub: always 0).
+    #[serde(default)]
+    pub total_input_tokens: usize,
+    /// Total output tokens across all routed steps (v1 stub: always 0).
+    #[serde(default)]
+    pub total_output_tokens: usize,
+    /// Estimated cost in micros USD across all routed steps (v1 stub: always 0).
+    #[serde(default)]
+    pub estimated_cost_micros_usd: u64,
+}
+
+impl BossObservabilitySummary {
+    /// Cache hit ratio: cache_read / (cache_read + cache_write).
+    /// Returns None when both are 0 (no cache data available yet).
+    pub fn cache_hit_ratio(&self) -> Option<f64> {
+        let total = self.total_cache_read_tokens + self.total_cache_write_tokens;
+        if total == 0 {
+            None
+        } else {
+            Some(self.total_cache_read_tokens as f64 / total as f64)
+        }
+    }
+
+    /// Tokens served from cache instead of being re-processed.
+    /// Each cache-read token represents one full input token of compute saved.
+    pub fn estimated_tokens_saved(&self) -> usize {
+        self.total_cache_read_tokens
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -256,12 +290,20 @@ impl BossReportPayload {
             ));
         }
         if let Some(s) = &self.observability_summary {
+            let hit_ratio = s.cache_hit_ratio()
+                .map(|r| format!("{:.1}%", r * 100.0))
+                .unwrap_or_else(|| "-".into());
             lines.push(format!(
-                "  summary: routed={} override_hits={} cache_r={} cache_w={} fallback={} mismatch={} tiers={:?}",
+                "  summary: routed={} override_hits={} cache_r={} cache_w={} hit_ratio={} tokens_saved={} input={} output={} cost_micros_usd={} fallback={} mismatch={} tiers={:?}",
                 s.total_steps_routed,
                 s.override_hit_count,
                 s.total_cache_read_tokens,
                 s.total_cache_write_tokens,
+                hit_ratio,
+                s.estimated_tokens_saved(),
+                s.total_input_tokens,
+                s.total_output_tokens,
+                s.estimated_cost_micros_usd,
                 s.total_fallback_count,
                 s.total_projection_mismatch_count,
                 s.model_tier_counts,

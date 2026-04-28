@@ -60,6 +60,8 @@ impl Command for LisMCommand {
                         let mut total_cache_w: usize = 0;
                         let mut total_fallback: usize = 0;
                         let mut total_mismatch: usize = 0;
+                        let mut total_input: usize = 0;
+                        let mut total_output: usize = 0;
                         for id in step_ids {
                             let m = &metadata[&id];
                             total_routed += 1;
@@ -68,19 +70,31 @@ impl Command for LisMCommand {
                             total_cache_w += m.cache_write_tokens.unwrap_or(0);
                             total_fallback += m.fallback_count.unwrap_or(0);
                             total_mismatch += m.projection_mismatch_count.unwrap_or(0);
+                            total_input += m.input_tokens.unwrap_or(0);
+                            total_output += m.output_tokens.unwrap_or(0);
                             lines.push(format!(
-                                "  step {id}: tier={tier} profile={profile} frame_size={size} cache_r={cr} cache_w={cw} fallback={fb} mismatch={mm}",
+                                "  step {id}: tier={tier} profile={profile} frame_size={size} cache_r={cr} cache_w={cw} input={inp} output={out} fallback={fb} mismatch={mm}",
                                 tier = m.model_tier.as_deref().unwrap_or("-"),
                                 profile = m.provider_profile_id.as_deref().unwrap_or("-"),
                                 size = m.state_frame_size.map(|n| n.to_string()).unwrap_or_else(|| "-".into()),
                                 cr = m.cache_read_tokens.map(|n| n.to_string()).unwrap_or_else(|| "-".into()),
                                 cw = m.cache_write_tokens.map(|n| n.to_string()).unwrap_or_else(|| "-".into()),
+                                inp = m.input_tokens.map(|n| n.to_string()).unwrap_or_else(|| "-".into()),
+                                out = m.output_tokens.map(|n| n.to_string()).unwrap_or_else(|| "-".into()),
                                 fb = m.fallback_count.map(|n| n.to_string()).unwrap_or_else(|| "-".into()),
                                 mm = m.projection_mismatch_count.map(|n| n.to_string()).unwrap_or_else(|| "-".into()),
                             ));
                         }
+                        let hit_ratio_str = {
+                            let denom = total_cache_r + total_cache_w;
+                            if denom == 0 {
+                                "-".to_string()
+                            } else {
+                                format!("{:.1}%", total_cache_r as f64 / denom as f64 * 100.0)
+                            }
+                        };
                         lines.push(format!(
-                            "  total_steps_routed: {total_routed} override_hits: {override_hits} cache_r: {total_cache_r} cache_w: {total_cache_w} fallback: {total_fallback} mismatch: {total_mismatch}"
+                            "  total_steps_routed: {total_routed} override_hits: {override_hits} cache_r: {total_cache_r} cache_w: {total_cache_w} hit_ratio: {hit_ratio_str} tokens_saved: {total_cache_r} input: {total_input} output: {total_output} fallback: {total_fallback} mismatch: {total_mismatch}"
                         ));
                         lines.join("\n")
                     }

@@ -995,6 +995,8 @@ impl BossCoordinator {
                     summary.total_cache_write_tokens += m.cache_write_tokens.unwrap_or(0);
                     summary.total_fallback_count += m.fallback_count.unwrap_or(0);
                     summary.total_projection_mismatch_count += m.projection_mismatch_count.unwrap_or(0);
+                    summary.total_input_tokens += m.input_tokens.unwrap_or(0);
+                    summary.total_output_tokens += m.output_tokens.unwrap_or(0);
                     if m.provider_profile_id.is_some() {
                         summary.override_hit_count += 1;
                     }
@@ -1559,6 +1561,8 @@ impl BossCoordinator {
                             cache_write_tokens: Some(0),
                             fallback_count: Some(0),
                             projection_mismatch_count: Some(0),
+                            input_tokens: Some(0),
+                            output_tokens: Some(0),
                         };
                         let cwd = app_state
                             .session

@@ -7089,6 +7089,154 @@ async fn t27_r1_lism_status_shows_summary_line() {
     let _ = std::fs::remove_dir_all(config_dir);
 }
 
+// ── cache_hit_ratio / token aggregation tests ────────────────────────────────
+
+#[tokio::test]
+async fn t27_r1_cache_hit_ratio_none_when_both_zero() {
+    use rust_agent::core::boss_state::BossObservabilitySummary;
+    let summary = BossObservabilitySummary::default();
+    assert_eq!(summary.cache_hit_ratio(), None);
+    assert_eq!(summary.estimated_tokens_saved(), 0);
+}
+
+#[tokio::test]
+async fn t27_r1_cache_hit_ratio_computed_correctly() {
+    use rust_agent::core::boss_state::BossObservabilitySummary;
+    let summary = BossObservabilitySummary {
+        total_cache_read_tokens: 300,
+        total_cache_write_tokens: 100,
+        ..Default::default()
+    };
+    let ratio = summary.cache_hit_ratio().expect("ratio must be Some when tokens > 0");
+    assert!((ratio - 0.75).abs() < 1e-9, "expected 0.75, got {ratio}");
+    assert_eq!(summary.estimated_tokens_saved(), 300);
+}
+
+#[tokio::test]
+async fn t27_r1_cache_hit_ratio_zero_reads() {
+    use rust_agent::core::boss_state::BossObservabilitySummary;
+    let summary = BossObservabilitySummary {
+        total_cache_read_tokens: 0,
+        total_cache_write_tokens: 500,
+        ..Default::default()
+    };
+    let ratio = summary.cache_hit_ratio().expect("ratio must be Some when write > 0");
+    assert!((ratio - 0.0).abs() < 1e-9, "expected 0.0, got {ratio}");
+    assert_eq!(summary.estimated_tokens_saved(), 0);
+}
+
+#[tokio::test]
+async fn t27_r1_observability_summary_aggregates_token_fields() {
+    // Verify report_progress aggregates input_tokens + output_tokens across steps.
+    let task_manager = Arc::new(TaskManager::default());
+    let (coordinator, plan_path) = coordinator_with_plan(
+        boss_plan(vec![boss_step(0, "tok-step-0"), boss_step(1, "tok-step-1")]),
+        "test_t27_r1_token_agg.json",
+    )
+    .await;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        run_minimal_openai_mock_server_n(listener, 2).await;
+    });
+
+    let config_dir = std::env::temp_dir().join("t27_r1_token_agg_test");
+    write_worker_override_models_toml(&config_dir, &format!("http://{addr}"));
+
+    let mut app = (*app_state_with_tasks("t27-r1-token-agg", task_manager.clone())).clone();
+    app.permission_context.set_lism_enabled(true);
+    app.permission_context.inherited_active_model_snapshot =
+        Some(make_inherited_runtime_snapshot_with_scripted_turns(vec![]));
+    app.session = Some(rust_agent::history::session::SessionSnapshot {
+        session_id: rust_agent::history::session::SessionId("t27-r1-token-agg".into()),
+        surface: rust_agent::bootstrap::InteractionSurface::Cli,
+        session_mode: rust_agent::bootstrap::SessionMode::Headless,
+        cwd: config_dir.to_string_lossy().to_string(),
+        last_turn_at: None,
+        prompt_seed: None,
+    });
+    let app_state = Arc::new(app);
+
+    // Advance both steps.
+    coordinator.advance_plan(&app_state).await.unwrap();
+    coordinator.advance_plan(&app_state).await.unwrap();
+
+    let report = coordinator.report_progress(&task_manager).await.unwrap();
+    let summary = report.observability_summary.expect("summary must be Some after LisM steps");
+
+    // v1 stubs: input/output are 0, but fields must be present and aggregated.
+    assert_eq!(summary.total_input_tokens, 0, "v1 stub: input_tokens always 0");
+    assert_eq!(summary.total_output_tokens, 0, "v1 stub: output_tokens always 0");
+    assert_eq!(summary.estimated_cost_micros_usd, 0, "v1 stub: cost always 0");
+    assert_eq!(summary.total_steps_routed, 2);
+
+    server.await.expect("mock server finished");
+    let _ = std::fs::remove_file(plan_path);
+    let _ = std::fs::remove_dir_all(config_dir);
+}
+
+#[tokio::test]
+async fn t27_r1_format_report_includes_hit_ratio_and_tokens_saved() {
+    use rust_agent::core::boss_state::{
+        BossActorHandle, BossActorRole, BossObservabilitySummary, BossReportPayload,
+        BossStage, BossStepReport, BossStepRoutedMetadata,
+    };
+    use rust_agent::core::boss_state::BossPlanStepStatus;
+
+    let summary = BossObservabilitySummary {
+        total_steps_routed: 1,
+        total_cache_read_tokens: 400,
+        total_cache_write_tokens: 100,
+        override_hit_count: 1,
+        total_input_tokens: 0,
+        total_output_tokens: 0,
+        estimated_cost_micros_usd: 0,
+        ..Default::default()
+    };
+
+    let make_handle = |id: &str, role| BossActorHandle::new(id, id, role);
+    let payload = BossReportPayload {
+        stage: BossStage::Execution,
+        current_step: Some(0),
+        total_steps: Some(1),
+        designer_a: make_handle("a", BossActorRole::DesignerA),
+        executor_b: make_handle("b", BossActorRole::ExecutorB),
+        active_children: vec![],
+        steps: vec![BossStepReport {
+            id: 0,
+            status: BossPlanStepStatus::Completed,
+            worker_task_id: None,
+            attempt_count: 1,
+            last_review_summary: None,
+            action_required: None,
+            blocker_reason: None,
+            routed_metadata: Some(BossStepRoutedMetadata {
+                toolset_id: None,
+                skillset_id: None,
+                model_tier: Some("medium".into()),
+                provider_profile_id: Some("worker-override".into()),
+                state_frame_size: Some(512),
+                cache_read_tokens: Some(400),
+                cache_write_tokens: Some(100),
+                fallback_count: Some(0),
+                projection_mismatch_count: Some(0),
+                input_tokens: Some(0),
+                output_tokens: Some(0),
+            }),
+        }],
+        history_summary: vec![],
+        observability_summary: Some(summary),
+        lism_policy: rust_agent::core::boss_state::BossLisMPolicy::Inherit,
+    };
+
+    let report = payload.format_report();
+    assert!(report.contains("hit_ratio=80.0%"), "expected hit_ratio in report, got: {report}");
+    assert!(report.contains("tokens_saved=400"), "expected tokens_saved in report, got: {report}");
+    assert!(report.contains("input=0"), "expected input= in report, got: {report}");
+    assert!(report.contains("output=0"), "expected output= in report, got: {report}");
+}
+
 // ── BossLisMPolicy precedence tests ─────────────────────────────────────────
 
 #[tokio::test]
