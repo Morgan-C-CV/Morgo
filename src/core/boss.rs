@@ -5,6 +5,9 @@ use crate::core::boss_state::{
 };
 use crate::core::boss_context_brief::{BossContextBrief, BossContextStrategy, BossStateFrame, assemble_brief_prompt};
 use crate::core::prompt_budget::{evaluate_message_budget, BudgetDecision};
+use crate::core::state_frame::ActorRole;
+use crate::core::state_frame_loop::DecisionLoopConfig;
+use crate::core::state_frame_orchestrator::{StepOutcome, run_step_with_state_frame};
 use crate::interaction::dispatcher::NotificationDispatcher;
 use crate::task::manager::TaskManager;
 use crate::task::types::{TaskEvent, TaskStatus};
@@ -1599,6 +1602,75 @@ impl BossCoordinator {
             }
             Some(AdvanceOutcome::Dispatch(step_id)) => {
                 self.update_current_step(Some(step_id)).await;
+
+                if app_state.permission_context.lism_enabled() {
+                    let outcome = {
+                        let plan_guard = self.plan.read().await;
+                        let plan = plan_guard
+                            .as_ref()
+                            .ok_or_else(|| anyhow::anyhow!("No plan loaded"))?;
+                        let client = app_state
+                            .permission_context
+                            .inherited_active_model_snapshot
+                            .as_ref()
+                            .map(|snapshot| snapshot.client.clone())
+                            .ok_or_else(|| anyhow::anyhow!("LisM boss path requires an active model snapshot"))?;
+                        run_step_with_state_frame(
+                            &client,
+                            plan,
+                            BossStage::Execution,
+                            step_id,
+                            ActorRole::Worker,
+                            DecisionLoopConfig::default(),
+                        )
+                        .await?
+                    };
+
+                    match outcome {
+                        StepOutcome::Completed => {
+                            {
+                                let mut plan_guard = self.plan.write().await;
+                                let plan = plan_guard
+                                    .as_mut()
+                                    .ok_or_else(|| anyhow::anyhow!("No plan loaded"))?;
+                                let step = plan
+                                    .steps
+                                    .iter_mut()
+                                    .find(|step| step.id == step_id)
+                                    .ok_or_else(|| anyhow::anyhow!("Unknown boss step {step_id}"))?;
+                                step.completed = true;
+                                step.status = BossPlanStepStatus::Completed;
+                            }
+                            let next_step = self.plan.read().await.as_ref().and_then(|p| next_unfinished_step_id(p));
+                            self.update_current_step(next_step).await;
+                            return Ok(Some(format!(
+                                "LisM executed boss step {} to completion.",
+                                step_id
+                            )));
+                        }
+                        StepOutcome::Failed { reason } => {
+                            let reason_clone = reason.clone();
+                            {
+                                let mut plan_guard = self.plan.write().await;
+                                let plan = plan_guard
+                                    .as_mut()
+                                    .ok_or_else(|| anyhow::anyhow!("No plan loaded"))?;
+                                let step = plan
+                                    .steps
+                                    .iter_mut()
+                                    .find(|step| step.id == step_id)
+                                    .ok_or_else(|| anyhow::anyhow!("Unknown boss step {step_id}"))?;
+                                step.completed = false;
+                                step.status = BossPlanStepStatus::Failed;
+                                step.last_review_summary = Some(reason_clone.clone());
+                            }
+                            return Ok(Some(format!(
+                                "LisM failed boss step {}: {}",
+                                step_id, reason
+                            )));
+                        }
+                    }
+                }
 
                 let tasks = app_state.permission_context.task_manager.as_ref()
                     .ok_or_else(|| anyhow::anyhow!("task manager not configured"))?;
