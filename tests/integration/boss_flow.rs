@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use rust_agent::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
+use rust_agent::bootstrap::model_profiles::parse_model_profiles_registry;
 use rust_agent::core::boss::{BossCoordinator, load_plan, save_plan, trim_context_payload, assemble_summarized_payload, B_CONTEXT_TRIM_THRESHOLD, B_CONTEXT_KEEP_CHARS};
 use rust_agent::core::boss_context_brief::{BossContextBrief, BossContextStrategy, BossStateFrame, assemble_brief_prompt};
 use rust_agent::core::boss_state::{CompressionStrategy, ContextMode};
@@ -37,6 +38,102 @@ use rust_agent::tool::builtin::agent::AgentTool;
 use rust_agent::tool::definition::{Tool, ToolCall};
 use rust_agent::tool::registry::{ToolAssemblyContext, ToolRegistry};
 use tokio::sync::RwLock;
+
+fn make_inherited_runtime_snapshot_with_scripted_turns(
+    scripted_turns: Vec<Vec<rust_agent::service::api::streaming::StreamEvent>>,
+) -> rust_agent::state::active_model_runtime::ActiveModelRuntimeSnapshot {
+    rust_agent::state::active_model_runtime::ActiveModelRuntimeSnapshot {
+        config: rust_agent::service::api::client::ModelProviderConfig {
+            provider_id: "scripted".into(),
+            protocol: rust_agent::service::api::client::ProviderProtocol::OpenAICompatible,
+            compatibility_profile: rust_agent::service::api::client::ProviderCompatibilityProfileKind::OpenAICompatible,
+            base_url: "http://localhost".into(),
+            auth_strategy: rust_agent::service::api::client::ProviderAuthStrategy::NoAuth,
+            api_key: None,
+            api_key_env: None,
+            chat_completions_path: "/v1/chat/completions".into(),
+            model_id: "scripted-inherited".into(),
+            timeout: rust_agent::service::api::client::ProviderTimeout {
+                request_timeout_ms: 1_000,
+                stream_timeout_ms: 1_000,
+            },
+            retry_policy: rust_agent::service::api::retry::RetryPolicy {
+                max_attempts: 1,
+                initial_backoff_ms: 0,
+                max_backoff_ms: 0,
+            },
+            pricing: rust_agent::service::api::client::ModelPricing::default(),
+            proxy_url: None,
+            no_proxy: None,
+            ca_bundle_path: None,
+        },
+        client: rust_agent::service::api::client::ModelProviderClient::with_scripted_turns(scripted_turns),
+        active_profile_name: Some("inherited-fast".into()),
+        source: ActiveModelProfileSource::ModelsToml,
+        summary: ActiveModelProviderSummary {
+            provider_id: "scripted".into(),
+            protocol: "OpenAICompatible".into(),
+            compatibility_profile: "OpenAICompatible".into(),
+            base_url_host: "localhost".into(),
+            model: "scripted-inherited".into(),
+            auth_status: "test".into(),
+        },
+    }
+}
+
+fn make_step_model_registry() -> rust_agent::bootstrap::model_profiles::ModelProfileRegistry {
+    parse_model_profiles_registry(
+        r#"
+active = "default"
+
+[profiles.default]
+provider_id = "openai"
+protocol = "openai_compatible"
+compatibility_profile = "openai_compatible"
+base_url = "https://default.example"
+model = "default-model"
+auth_strategy = "none"
+
+[profiles.worker-override]
+provider_id = "override-provider"
+protocol = "openai_compatible"
+compatibility_profile = "openai_compatible"
+base_url = "https://override.example"
+model = "override-model"
+auth_strategy = "none"
+"#,
+    )
+    .expect("registry should parse")
+}
+
+fn make_orchestrator_route_override_plan(step_id: usize) -> BossPlan {
+    use rust_agent::core::boss_state::{BossPlan, BossPlanStep, BossPlanStepStatus};
+    BossPlan {
+        plan_id: format!("p-route-override-{step_id}"),
+        task_description: "runtime resolution test".into(),
+        document_spec: String::new(),
+        pseudo_code: String::new(),
+        steps: vec![BossPlanStep {
+            id: step_id,
+            description: "worker override step".into(),
+            objective: None,
+            acceptance: vec![],
+            requires_approval: false,
+            status: BossPlanStepStatus::Running,
+            completed: false,
+            result_diff: None,
+            worker_task_id: None,
+            attempt_count: 1,
+            retry_budget: 3,
+            last_review_summary: None,
+            last_correction: None,
+            review_task_id: None,
+        }],
+        accepted_by_user: true,
+        auto_sequence: true,
+        ..Default::default()
+    }
+}
 
 fn boss_step(id: usize, description: &str) -> BossPlanStep {
     BossPlanStep {
@@ -7164,6 +7261,135 @@ fn make_plan_with_step(step_id: usize, description: &str, acceptance: Vec<String
         auto_sequence: true,
         ..Default::default()
     }
+}
+
+#[test]
+fn t27_5_runtime_override_live_seam_uses_resolved_snapshot_client() {
+    use rust_agent::core::boss_state::BossStage;
+    use rust_agent::core::state_frame::ActorRole;
+    use rust_agent::core::state_frame_orchestrator::{
+        StepRuntimeResolutionContext, build_routed_state_frame_with_model_route,
+        resolve_routed_step_runtime,
+    };
+    use rust_agent::core::state_frame_model_router::ModelRoute;
+
+    let inherited = make_inherited_runtime_snapshot_with_scripted_turns(vec![]);
+    let registry = make_step_model_registry();
+    let plan = make_orchestrator_route_override_plan(0);
+    let routed = build_routed_state_frame_with_model_route(&plan, BossStage::Execution, 0, ActorRole::Worker);
+    let routed = rust_agent::core::state_frame_orchestrator::RoutedStateFrame {
+        frame: routed.frame,
+        model_route: ModelRoute {
+            tier: routed.model_route.tier,
+            provider_profile_id: Some("worker-override".into()),
+        },
+    };
+
+    let runtime = StepRuntimeResolutionContext {
+        inherited_snapshot: &inherited,
+        model_registry: Some(&registry),
+        observability: rust_agent::service::observability::ServiceObservabilityTracker::default(),
+    };
+
+    let resolved = resolve_routed_step_runtime(routed, runtime)
+        .expect("override path should resolve");
+
+    assert_eq!(
+        resolved.resolved_snapshot.active_profile_name.as_deref(),
+        Some("worker-override")
+    );
+    assert_eq!(resolved.resolved_snapshot.config.provider_id, "override-provider");
+    assert_eq!(resolved.resolved_snapshot.config.model_id, "override-model");
+    assert!(!resolved.resolved_snapshot.client.is_scripted());
+    assert!(inherited.client.is_scripted(), "parent snapshot should remain scripted");
+    assert_eq!(inherited.active_profile_name.as_deref(), Some("inherited-fast"));
+}
+
+#[test]
+fn t27_5_runtime_override_missing_registry_fails_step_without_mutating_parent_snapshot() {
+    use rust_agent::core::boss_state::BossStage;
+    use rust_agent::core::state_frame::ActorRole;
+    use rust_agent::core::state_frame_loop::DecisionLoopConfig;
+    use rust_agent::core::state_frame_orchestrator::{
+        StepRuntimeResolutionContext, build_routed_state_frame_with_model_route,
+    };
+    use rust_agent::core::state_frame_model_router::ModelRoute;
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let inherited = make_inherited_runtime_snapshot_with_scripted_turns(vec![]);
+    let original_profile = inherited.active_profile_name.clone();
+    let original_source = inherited.source.clone();
+    let original_config = inherited.config.clone();
+    let plan = make_orchestrator_route_override_plan(0);
+    let routed = build_routed_state_frame_with_model_route(&plan, BossStage::Execution, 0, ActorRole::Worker);
+    let routed = rust_agent::core::state_frame_orchestrator::RoutedStateFrame {
+        frame: routed.frame,
+        model_route: ModelRoute {
+            tier: routed.model_route.tier,
+            provider_profile_id: Some("worker-override".into()),
+        },
+    };
+
+    let runtime = StepRuntimeResolutionContext {
+        inherited_snapshot: &inherited,
+        model_registry: None,
+        observability: rust_agent::service::observability::ServiceObservabilityTracker::default(),
+    };
+
+    let error = rt.block_on(rust_agent::core::state_frame_orchestrator::run_routed_step_with_runtime(
+        routed,
+        DecisionLoopConfig::default(),
+        runtime,
+    )).expect_err("missing registry should fail");
+
+    assert!(error.to_string().contains("model profile registry is unavailable"));
+    assert_eq!(inherited.active_profile_name, original_profile);
+    assert_eq!(inherited.source, original_source);
+    assert_eq!(inherited.config, original_config);
+}
+
+#[test]
+fn t27_5_runtime_override_unknown_profile_fails_step_without_mutating_parent_snapshot() {
+    use rust_agent::core::boss_state::BossStage;
+    use rust_agent::core::state_frame::ActorRole;
+    use rust_agent::core::state_frame_loop::DecisionLoopConfig;
+    use rust_agent::core::state_frame_orchestrator::{
+        StepRuntimeResolutionContext, build_routed_state_frame_with_model_route,
+    };
+    use rust_agent::core::state_frame_model_router::ModelRoute;
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let inherited = make_inherited_runtime_snapshot_with_scripted_turns(vec![]);
+    let original_profile = inherited.active_profile_name.clone();
+    let original_source = inherited.source.clone();
+    let original_config = inherited.config.clone();
+    let registry = make_step_model_registry();
+    let plan = make_orchestrator_route_override_plan(0);
+    let routed = build_routed_state_frame_with_model_route(&plan, BossStage::Execution, 0, ActorRole::Worker);
+    let routed = rust_agent::core::state_frame_orchestrator::RoutedStateFrame {
+        frame: routed.frame,
+        model_route: ModelRoute {
+            tier: routed.model_route.tier,
+            provider_profile_id: Some("missing-profile".into()),
+        },
+    };
+
+    let runtime = StepRuntimeResolutionContext {
+        inherited_snapshot: &inherited,
+        model_registry: Some(&registry),
+        observability: rust_agent::service::observability::ServiceObservabilityTracker::default(),
+    };
+
+    let error = rt.block_on(rust_agent::core::state_frame_orchestrator::run_routed_step_with_runtime(
+        routed,
+        DecisionLoopConfig::default(),
+        runtime,
+    )).expect_err("unknown profile should fail");
+
+    assert!(error.to_string().contains("failed to resolve step model profile 'missing-profile'"));
+    assert_eq!(inherited.active_profile_name, original_profile);
+    assert_eq!(inherited.source, original_source);
+    assert_eq!(inherited.config, original_config);
 }
 
 #[test]
