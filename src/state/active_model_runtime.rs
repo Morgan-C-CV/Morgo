@@ -1,6 +1,9 @@
 use std::sync::{Arc, RwLock};
 
+use crate::bootstrap::model_profiles::ResolvedModelProfile;
+use crate::bootstrap::summarize_active_model_provider;
 use crate::service::api::client::{ModelProviderClient, ModelProviderConfig};
+use crate::service::observability::ServiceObservabilityTracker;
 use crate::state::app_state::{ActiveModelProfileSource, ActiveModelProviderSummary};
 
 #[derive(Debug, Clone)]
@@ -10,6 +13,25 @@ pub struct ActiveModelRuntimeSnapshot {
     pub active_profile_name: Option<String>,
     pub source: ActiveModelProfileSource,
     pub summary: ActiveModelProviderSummary,
+}
+
+impl ActiveModelRuntimeSnapshot {
+    pub fn from_resolved_profile(
+        resolved: &ResolvedModelProfile,
+        observability: ServiceObservabilityTracker,
+    ) -> Self {
+        let client = ModelProviderClient::from_config_with_observability(
+            resolved.config.clone(),
+            observability,
+        );
+        Self {
+            config: resolved.config.clone(),
+            client,
+            active_profile_name: Some(resolved.name.clone()),
+            source: ActiveModelProfileSource::ModelsToml,
+            summary: summarize_active_model_provider(&resolved.config),
+        }
+    }
 }
 
 #[derive(Clone)]

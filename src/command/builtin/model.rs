@@ -5,12 +5,11 @@ use crate::bootstrap::model_profiles::{
     build_model_profile_display_view, load_model_profiles_registry_from_root,
     resolve_model_profile_from_registry,
 };
-use crate::bootstrap::{has_explicit_provider_env_override, summarize_active_model_provider};
+use crate::bootstrap::has_explicit_provider_env_override;
 use crate::command::types::{
     Command, CommandAvailability, CommandMetadata, CommandResult, CommandSource, CommandType,
 };
 use crate::interaction::envelope::NormalizedInput;
-use crate::service::api::client::ModelProviderClient;
 use crate::state::active_model_runtime::ActiveModelRuntimeSnapshot;
 use crate::state::app_state::{ActiveModelProfileSource, AppState};
 
@@ -235,17 +234,10 @@ async fn apply_model_use(app_state: &AppState, profile: &str) -> anyhow::Result<
         Err(error) => return Err(error),
     };
 
-    let client = ModelProviderClient::from_config_with_observability(
-        resolved.config.clone(),
+    let snapshot = ActiveModelRuntimeSnapshot::from_resolved_profile(
+        &resolved,
         app_state.service_observability_tracker.clone(),
     );
-    let snapshot = ActiveModelRuntimeSnapshot {
-        config: resolved.config.clone(),
-        client,
-        active_profile_name: Some(resolved.name.clone()),
-        source: ActiveModelProfileSource::ModelsToml,
-        summary: summarize_active_model_provider(&resolved.config),
-    };
     active_model_runtime.replace(snapshot).await;
 
     Ok(CommandResult::Message(format!(

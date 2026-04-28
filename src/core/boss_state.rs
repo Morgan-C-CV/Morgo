@@ -166,6 +166,16 @@ fn default_retry_budget() -> u32 {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BossStepRoutedMetadata {
+    #[serde(default)]
+    pub toolset_id: Option<String>,
+    #[serde(default)]
+    pub skillset_id: Option<String>,
+    #[serde(default)]
+    pub model_tier: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BossStepReport {
     pub id: usize,
     pub status: BossPlanStepStatus,
@@ -176,6 +186,8 @@ pub struct BossStepReport {
     pub action_required: Option<String>,
     #[serde(default)]
     pub blocker_reason: Option<String>,
+    #[serde(default)]
+    pub routed_metadata: Option<BossStepRoutedMetadata>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

@@ -1,13 +1,17 @@
 use crate::core::boss_state::{
     BossActorHandle, BossActorStatus, BossControlRequest, BossControlResponse, BossPlan,
     BossPlanStep, BossPlanStepStatus, BossReportPayload, BossSession, BossStage, BossStatus,
-    BossStepMetrics, BossStepReport, BossStopOutcome, BossStopStage, CompressionStrategy, ContextMode,
+    BossStepMetrics, BossStepReport, BossStepRoutedMetadata, BossStopOutcome, BossStopStage,
+    CompressionStrategy, ContextMode,
 };
 use crate::core::boss_context_brief::{BossContextBrief, BossContextStrategy, BossStateFrame, assemble_brief_prompt};
 use crate::core::prompt_budget::{evaluate_message_budget, BudgetDecision};
 use crate::core::state_frame::ActorRole;
-use crate::core::state_frame_loop::DecisionLoopConfig;
-use crate::core::state_frame_orchestrator::{StepOutcome, run_step_with_state_frame};
+use crate::core::state_frame_loop::{DecisionLoopConfig, LoopOutcome, run_decision_loop};
+use crate::core::state_frame_model_router::ModelTier;
+use crate::core::state_frame_orchestrator::{
+    StepOutcome, build_routed_state_frame_with_model_route,
+};
 use crate::interaction::dispatcher::NotificationDispatcher;
 use crate::task::manager::TaskManager;
 use crate::task::types::{TaskEvent, TaskStatus};
@@ -34,6 +38,7 @@ pub struct BossCoordinator {
     pub actor_registry: Arc<RwLock<Option<BossActorRegistry>>>,
 
     pub auto_advance_app_state: Arc<RwLock<Option<Arc<crate::state::app_state::AppState>>>>,
+    routed_step_metadata: Arc<RwLock<std::collections::HashMap<usize, BossStepRoutedMetadata>>>,
     runtime_key: Arc<RwLock<Option<String>>>,
     runtime_owner: Arc<BossRuntimeOwner>,
 }
@@ -54,6 +59,7 @@ impl BossCoordinator {
             session: Arc::new(RwLock::new(None)),
             actor_registry: Arc::new(RwLock::new(None)),
             auto_advance_app_state: Arc::new(RwLock::new(None)),
+            routed_step_metadata: Arc::new(RwLock::new(std::collections::HashMap::new())),
             runtime_key: Arc::new(RwLock::new(None)),
             runtime_owner,
         }
@@ -236,6 +242,7 @@ impl BossCoordinator {
             session: self.session.clone(),
             actor_registry: self.actor_registry.clone(),
             auto_advance_app_state: self.auto_advance_app_state.clone(),
+            routed_step_metadata: self.routed_step_metadata.clone(),
             runtime_key: self.runtime_key.clone(),
             runtime_owner: self.runtime_owner.clone(),
         }
@@ -914,6 +921,7 @@ impl BossCoordinator {
         let status = self.status.read().await.clone();
         let session = self.session.read().await.clone();
         let plan = self.plan.read().await.clone();
+        let routed_step_metadata = self.routed_step_metadata.read().await.clone();
         let empty_session = BossSession::from_plan_id("unknown", status.stage);
         let session = session.unwrap_or(empty_session);
         let steps = plan
@@ -939,6 +947,7 @@ impl BossCoordinator {
                         } else {
                             None
                         },
+                        routed_metadata: routed_step_metadata.get(&step.id).cloned(),
                     })
                     .collect::<Vec<_>>()
             })
@@ -1479,7 +1488,7 @@ impl BossCoordinator {
                 self.update_current_step(Some(step_id)).await;
 
                 if app_state.permission_context.lism_enabled() {
-                    let outcome = {
+                    let (outcome, routed_metadata) = {
                         let plan_guard = self.plan.read().await;
                         let plan = plan_guard
                             .as_ref()
@@ -1490,16 +1499,29 @@ impl BossCoordinator {
                             .as_ref()
                             .map(|snapshot| snapshot.client.clone())
                             .ok_or_else(|| anyhow::anyhow!("LisM boss path requires an active model snapshot"))?;
-                        run_step_with_state_frame(
-                            &client,
+                        let routed = build_routed_state_frame_with_model_route(
                             plan,
                             BossStage::Execution,
                             step_id,
                             ActorRole::Worker,
+                        );
+                        let routed_metadata = BossStepRoutedMetadata {
+                            toolset_id: routed.frame.toolset_id.clone(),
+                            skillset_id: routed.frame.skillset_id.clone(),
+                            model_tier: Some(model_tier_label(routed.model_route.tier).to_string()),
+                        };
+                        let outcome = run_decision_loop(
+                            &client,
+                            routed.frame,
                             DecisionLoopConfig::default(),
                         )
-                        .await?
+                        .await?;
+                        (map_lism_loop_outcome(outcome), routed_metadata)
                     };
+                    {
+                        let mut routed_step_metadata = self.routed_step_metadata.write().await;
+                        routed_step_metadata.insert(step_id, routed_metadata);
+                    }
 
                     match outcome {
                         StepOutcome::Completed => {
@@ -2180,6 +2202,27 @@ enum AdvanceOutcome {
     PlanComplete,
     ReplanRequired(usize, String),
     NoRunnableStep,
+}
+
+fn map_lism_loop_outcome(outcome: LoopOutcome) -> StepOutcome {
+    match outcome {
+        LoopOutcome::Done { .. } => StepOutcome::Completed,
+        LoopOutcome::Rejected { reason } => StepOutcome::Failed { reason },
+        LoopOutcome::MaxIterationsReached { last_state } => StepOutcome::Failed {
+            reason: format!("max iterations reached; last state: {last_state:?}"),
+        },
+        LoopOutcome::RepairExhausted { reason, raw_json } => StepOutcome::Failed {
+            reason: format!("repair exhausted: {reason}; raw: {raw_json}"),
+        },
+    }
+}
+
+fn model_tier_label(tier: ModelTier) -> &'static str {
+    match tier {
+        ModelTier::Low => "low",
+        ModelTier::Medium => "medium",
+        ModelTier::High => "high",
+    }
 }
 
 fn next_unfinished_step_id(plan: &BossPlan) -> Option<usize> {
