@@ -7,10 +7,13 @@ use crate::core::boss_state::{
 use crate::core::boss_context_brief::{BossContextBrief, BossContextStrategy, BossStateFrame, assemble_brief_prompt};
 use crate::core::prompt_budget::{evaluate_message_budget, BudgetDecision};
 use crate::core::state_frame::ActorRole;
-use crate::core::state_frame_loop::{DecisionLoopConfig, LoopOutcome, run_decision_loop};
+use crate::bootstrap::config_root::resolve_config_root;
+use crate::bootstrap::model_profiles::load_model_profiles_registry_from_root;
+use crate::core::state_frame_loop::DecisionLoopConfig;
 use crate::core::state_frame_model_router::ModelTier;
 use crate::core::state_frame_orchestrator::{
-    StepOutcome, build_routed_state_frame_with_model_route,
+    StepOutcome, StepRuntimeResolutionContext, build_routed_state_frame_with_model_route,
+    run_routed_step_with_runtime,
 };
 use crate::interaction::dispatcher::NotificationDispatcher;
 use crate::task::manager::TaskManager;
@@ -1493,11 +1496,10 @@ impl BossCoordinator {
                         let plan = plan_guard
                             .as_ref()
                             .ok_or_else(|| anyhow::anyhow!("No plan loaded"))?;
-                        let client = app_state
+                        let inherited_snapshot = app_state
                             .permission_context
                             .inherited_active_model_snapshot
                             .as_ref()
-                            .map(|snapshot| snapshot.client.clone())
                             .ok_or_else(|| anyhow::anyhow!("LisM boss path requires an active model snapshot"))?;
                         let routed = build_routed_state_frame_with_model_route(
                             plan,
@@ -1510,13 +1512,26 @@ impl BossCoordinator {
                             skillset_id: routed.frame.skillset_id.clone(),
                             model_tier: Some(model_tier_label(routed.model_route.tier).to_string()),
                         };
-                        let outcome = run_decision_loop(
-                            &client,
-                            routed.frame,
+                        let cwd = app_state
+                            .session
+                            .as_ref()
+                            .map(|s| std::path::Path::new(s.cwd.as_str()).to_path_buf())
+                            .unwrap_or_else(|| std::path::PathBuf::from("."));
+                        let model_registry = resolve_config_root(&cwd)
+                            .ok()
+                            .and_then(|root| load_model_profiles_registry_from_root(&root).ok().flatten());
+                        let runtime = StepRuntimeResolutionContext {
+                            inherited_snapshot,
+                            model_registry: model_registry.as_ref(),
+                            observability: app_state.service_observability_tracker.clone(),
+                        };
+                        let outcome = run_routed_step_with_runtime(
+                            routed,
                             DecisionLoopConfig::default(),
+                            runtime,
                         )
                         .await?;
-                        (map_lism_loop_outcome(outcome), routed_metadata)
+                        (outcome, routed_metadata)
                     };
                     {
                         let mut routed_step_metadata = self.routed_step_metadata.write().await;
@@ -2204,18 +2219,6 @@ enum AdvanceOutcome {
     NoRunnableStep,
 }
 
-fn map_lism_loop_outcome(outcome: LoopOutcome) -> StepOutcome {
-    match outcome {
-        LoopOutcome::Done { .. } => StepOutcome::Completed,
-        LoopOutcome::Rejected { reason } => StepOutcome::Failed { reason },
-        LoopOutcome::MaxIterationsReached { last_state } => StepOutcome::Failed {
-            reason: format!("max iterations reached; last state: {last_state:?}"),
-        },
-        LoopOutcome::RepairExhausted { reason, raw_json } => StepOutcome::Failed {
-            reason: format!("repair exhausted: {reason}; raw: {raw_json}"),
-        },
-    }
-}
 
 fn model_tier_label(tier: ModelTier) -> &'static str {
     match tier {

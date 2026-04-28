@@ -8054,3 +8054,191 @@ fn t27_7_1_uncovered_combination_uses_effort_default() {
     assert_eq!(route.tier, ModelTier::High);
     assert!(route.provider_profile_id.is_none());
 }
+
+// ── T27.8 Boss production-path runtime wiring ─────────────────────────────
+
+#[tokio::test]
+async fn t27_8_lism_boss_production_path_no_registry_uses_inherited_snapshot() {
+    use rust_agent::service::api::client::ModelProviderClient;
+    use rust_agent::service::api::streaming::StreamEvent;
+
+    let (coordinator, plan_path) = coordinator_with_plan(
+        boss_plan(vec![boss_step(0, "runtime wiring no registry")]),
+        "test_boss_t278_no_registry.json",
+    )
+    .await;
+
+    let done_json = r#"{"state":"done","decision":"done"}"#;
+    let mut app = (*app_state_with_tasks("t278-no-registry", Arc::new(TaskManager::default()))).clone();
+    app.permission_context.set_lism_enabled(true);
+    // session is None → cwd defaults to "." → no models.toml → registry is None
+    // route has provider_profile_id = None → inherited snapshot is used
+    app.permission_context.inherited_active_model_snapshot = Some(
+        rust_agent::state::active_model_runtime::ActiveModelRuntimeSnapshot {
+            config: rust_agent::service::api::client::ModelProviderConfig {
+                provider_id: "scripted".into(),
+                protocol: rust_agent::service::api::client::ProviderProtocol::OpenAICompatible,
+                compatibility_profile: rust_agent::service::api::client::ProviderCompatibilityProfileKind::OpenAICompatible,
+                base_url: "http://localhost".into(),
+                auth_strategy: rust_agent::service::api::client::ProviderAuthStrategy::NoAuth,
+                api_key: None,
+                api_key_env: None,
+                chat_completions_path: "/v1/chat/completions".into(),
+                model_id: "scripted-t278".into(),
+                timeout: rust_agent::service::api::client::ProviderTimeout {
+                    request_timeout_ms: 1_000,
+                    stream_timeout_ms: 1_000,
+                },
+                retry_policy: rust_agent::service::api::retry::RetryPolicy {
+                    max_attempts: 1,
+                    initial_backoff_ms: 0,
+                    max_backoff_ms: 0,
+                },
+                pricing: rust_agent::service::api::client::ModelPricing::default(),
+                proxy_url: None,
+                no_proxy: None,
+                ca_bundle_path: None,
+            },
+            client: ModelProviderClient::with_scripted_turns(vec![
+                vec![StreamEvent::TextDelta(done_json.into())],
+            ]),
+            active_profile_name: Some("inherited-t278".into()),
+            source: ActiveModelProfileSource::BootstrapDefault,
+            summary: ActiveModelProviderSummary {
+                provider_id: "scripted".into(),
+                protocol: "OpenAICompatible".into(),
+                compatibility_profile: "OpenAICompatible".into(),
+                base_url_host: "localhost".into(),
+                model: "scripted-t278".into(),
+                auth_status: "test".into(),
+            },
+        },
+    );
+    let app_state = Arc::new(app);
+
+    let _ = coordinator.advance_plan(&app_state).await.unwrap();
+
+    let guard = coordinator.plan.read().await;
+    let plan = guard.as_ref().unwrap();
+    assert_eq!(plan.steps[0].status, BossPlanStepStatus::Completed);
+
+    let _ = std::fs::remove_file(plan_path);
+}
+
+#[tokio::test]
+async fn t27_8_lism_boss_production_path_with_registry_on_disk_uses_inherited_when_no_override() {
+    use rust_agent::service::api::client::ModelProviderClient;
+    use rust_agent::service::api::streaming::StreamEvent;
+
+    let (coordinator, plan_path) = coordinator_with_plan(
+        boss_plan(vec![boss_step(0, "runtime wiring with registry")]),
+        "test_boss_t278_with_registry.json",
+    )
+    .await;
+
+    // Write a minimal models.toml to a temp dir so the registry loads successfully
+    let config_dir = std::env::temp_dir().join("t278_registry_test");
+    let claude_dir = config_dir.join(".claude");
+    std::fs::create_dir_all(&claude_dir).unwrap();
+    std::fs::write(
+        claude_dir.join("models.toml"),
+        r#"active = "default"
+[profiles.default]
+provider_id = "test"
+protocol = "openai_compatible"
+compatibility_profile = "openai_compatible"
+base_url = "http://localhost"
+model = "test-model"
+auth_strategy = "none"
+"#,
+    )
+    .unwrap();
+
+    let done_json = r#"{"state":"done","decision":"done"}"#;
+    let mut app = (*app_state_with_tasks("t278-with-registry", Arc::new(TaskManager::default()))).clone();
+    app.permission_context.set_lism_enabled(true);
+    app.session = Some(rust_agent::history::session::SessionSnapshot {
+        session_id: rust_agent::history::session::SessionId("t278-with-registry".into()),
+        surface: rust_agent::bootstrap::InteractionSurface::Cli,
+        session_mode: rust_agent::bootstrap::SessionMode::Headless,
+        cwd: config_dir.to_string_lossy().to_string(),
+        last_turn_at: None,
+        prompt_seed: None,
+    });
+    // route has provider_profile_id = None → inherited snapshot is used even with registry present
+    app.permission_context.inherited_active_model_snapshot = Some(
+        rust_agent::state::active_model_runtime::ActiveModelRuntimeSnapshot {
+            config: rust_agent::service::api::client::ModelProviderConfig {
+                provider_id: "scripted".into(),
+                protocol: rust_agent::service::api::client::ProviderProtocol::OpenAICompatible,
+                compatibility_profile: rust_agent::service::api::client::ProviderCompatibilityProfileKind::OpenAICompatible,
+                base_url: "http://localhost".into(),
+                auth_strategy: rust_agent::service::api::client::ProviderAuthStrategy::NoAuth,
+                api_key: None,
+                api_key_env: None,
+                chat_completions_path: "/v1/chat/completions".into(),
+                model_id: "scripted-t278-reg".into(),
+                timeout: rust_agent::service::api::client::ProviderTimeout {
+                    request_timeout_ms: 1_000,
+                    stream_timeout_ms: 1_000,
+                },
+                retry_policy: rust_agent::service::api::retry::RetryPolicy {
+                    max_attempts: 1,
+                    initial_backoff_ms: 0,
+                    max_backoff_ms: 0,
+                },
+                pricing: rust_agent::service::api::client::ModelPricing::default(),
+                proxy_url: None,
+                no_proxy: None,
+                ca_bundle_path: None,
+            },
+            client: ModelProviderClient::with_scripted_turns(vec![
+                vec![StreamEvent::TextDelta(done_json.into())],
+            ]),
+            active_profile_name: Some("inherited-t278-reg".into()),
+            source: ActiveModelProfileSource::BootstrapDefault,
+            summary: ActiveModelProviderSummary {
+                provider_id: "scripted".into(),
+                protocol: "OpenAICompatible".into(),
+                compatibility_profile: "OpenAICompatible".into(),
+                base_url_host: "localhost".into(),
+                model: "scripted-t278-reg".into(),
+                auth_status: "test".into(),
+            },
+        },
+    );
+    let app_state = Arc::new(app);
+
+    let _ = coordinator.advance_plan(&app_state).await.unwrap();
+
+    let guard = coordinator.plan.read().await;
+    let plan = guard.as_ref().unwrap();
+    assert_eq!(plan.steps[0].status, BossPlanStepStatus::Completed);
+
+    let _ = std::fs::remove_file(plan_path);
+    let _ = std::fs::remove_dir_all(config_dir);
+}
+
+#[tokio::test]
+async fn t27_8_lism_boss_production_path_missing_inherited_snapshot_returns_error() {
+    let (coordinator, plan_path) = coordinator_with_plan(
+        boss_plan(vec![boss_step(0, "runtime wiring missing snapshot")]),
+        "test_boss_t278_missing_snapshot.json",
+    )
+    .await;
+
+    let mut app = (*app_state_with_tasks("t278-missing-snapshot", Arc::new(TaskManager::default()))).clone();
+    app.permission_context.set_lism_enabled(true);
+    // inherited_active_model_snapshot is None → boss.rs should return an error
+    app.permission_context.inherited_active_model_snapshot = None;
+    let app_state = Arc::new(app);
+
+    let result = coordinator.advance_plan(&app_state).await;
+    assert!(result.is_err(), "missing inherited snapshot should return error");
+    assert!(
+        result.unwrap_err().to_string().contains("active model snapshot"),
+        "error should mention active model snapshot"
+    );
+
+    let _ = std::fs::remove_file(plan_path);
+}
