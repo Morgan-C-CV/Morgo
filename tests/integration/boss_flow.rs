@@ -2090,6 +2090,14 @@ async fn boss_a_replan_step_does_not_redispatch_b_and_is_distinct_from_rejected(
 
     let report = coordinator.report_progress(&task_manager).await.unwrap();
     assert_eq!(report.steps[0].status, BossPlanStepStatus::ReplanRequired);
+    assert_eq!(
+        report.steps[0].last_review_summary.as_deref(),
+        Some("Current step needs strategy rewrite")
+    );
+
+    // Distinguish from ordinary correction-based rejection: status is different,
+    // and the step carries the structured replan signal instead of a normal patch retry path.
+    assert_ne!(report.steps[0].status, BossPlanStepStatus::Rejected);
 
     let _ = std::fs::remove_file(plan_path);
 }
