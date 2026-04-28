@@ -37,6 +37,8 @@ use rust_agent::task::types::{TaskEvent, TaskOwner, TaskStatus, TaskType};
 use rust_agent::tool::builtin::agent::AgentTool;
 use rust_agent::tool::definition::{Tool, ToolCall};
 use rust_agent::tool::registry::{ToolAssemblyContext, ToolRegistry};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
 use tokio::sync::RwLock;
 
 fn make_inherited_runtime_snapshot_with_scripted_turns(
@@ -81,9 +83,12 @@ fn make_inherited_runtime_snapshot_with_scripted_turns(
     }
 }
 
-fn make_step_model_registry() -> rust_agent::bootstrap::model_profiles::ModelProfileRegistry {
+fn make_step_model_registry_with_base_url(
+    override_base_url: &str,
+) -> rust_agent::bootstrap::model_profiles::ModelProfileRegistry {
     parse_model_profiles_registry(
-        r#"
+        &format!(
+            r#"
 active = "default"
 
 [profiles.default]
@@ -98,12 +103,37 @@ auth_strategy = "none"
 provider_id = "override-provider"
 protocol = "openai_compatible"
 compatibility_profile = "openai_compatible"
-base_url = "https://override.example"
+base_url = "{override_base_url}"
 model = "override-model"
 auth_strategy = "none"
-"#,
+"#
+        ),
     )
     .expect("registry should parse")
+}
+
+fn make_step_model_registry() -> rust_agent::bootstrap::model_profiles::ModelProfileRegistry {
+    make_step_model_registry_with_base_url("https://override.example")
+}
+
+async fn run_minimal_openai_mock_server(listener: TcpListener) {
+    let (mut stream, _) = listener.accept().await.expect("accept mock provider request");
+    let mut buffer = vec![0_u8; 16 * 1024];
+    let _ = stream.read(&mut buffer).await.expect("read request");
+    let body = concat!(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"{\\\"state\\\":\\\"done\\\",\\\"decision\\\":\\\"done\\\"}\"}}]}\n\n",
+        "data: [DONE]\n\n"
+    );
+    let response = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    stream
+        .write_all(response.as_bytes())
+        .await
+        .expect("write scripted response");
+    stream.flush().await.expect("flush scripted response");
 }
 
 fn make_orchestrator_route_override_plan(step_id: usize) -> BossPlan {
@@ -7263,18 +7293,24 @@ fn make_plan_with_step(step_id: usize, description: &str, acceptance: Vec<String
     }
 }
 
-#[test]
-fn t27_5_runtime_override_live_seam_uses_resolved_snapshot_client() {
+#[tokio::test]
+async fn t27_5_runtime_override_live_seam_uses_resolved_snapshot_client() {
     use rust_agent::core::boss_state::BossStage;
     use rust_agent::core::state_frame::ActorRole;
+    use rust_agent::core::state_frame_loop::DecisionLoopConfig;
     use rust_agent::core::state_frame_orchestrator::{
-        StepRuntimeResolutionContext, build_routed_state_frame_with_model_route,
-        resolve_routed_step_runtime,
+        StepOutcome, StepRuntimeResolutionContext, build_routed_state_frame_with_model_route,
+        run_routed_step_with_runtime,
     };
     use rust_agent::core::state_frame_model_router::ModelRoute;
 
     let inherited = make_inherited_runtime_snapshot_with_scripted_turns(vec![]);
-    let registry = make_step_model_registry();
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind mock provider listener");
+    let addr = listener.local_addr().expect("listener addr");
+    let server = tokio::spawn(run_minimal_openai_mock_server(listener));
+    let registry = make_step_model_registry_with_base_url(&format!("http://{}", addr));
     let plan = make_orchestrator_route_override_plan(0);
     let routed = build_routed_state_frame_with_model_route(&plan, BossStage::Execution, 0, ActorRole::Worker);
     let routed = rust_agent::core::state_frame_orchestrator::RoutedStateFrame {
@@ -7291,18 +7327,15 @@ fn t27_5_runtime_override_live_seam_uses_resolved_snapshot_client() {
         observability: rust_agent::service::observability::ServiceObservabilityTracker::default(),
     };
 
-    let resolved = resolve_routed_step_runtime(routed, runtime)
-        .expect("override path should resolve");
+    let outcome = run_routed_step_with_runtime(routed, DecisionLoopConfig::default(), runtime)
+        .await
+        .expect("runtime-aware seam should succeed");
 
-    assert_eq!(
-        resolved.resolved_snapshot.active_profile_name.as_deref(),
-        Some("worker-override")
-    );
-    assert_eq!(resolved.resolved_snapshot.config.provider_id, "override-provider");
-    assert_eq!(resolved.resolved_snapshot.config.model_id, "override-model");
-    assert!(!resolved.resolved_snapshot.client.is_scripted());
+    assert!(matches!(outcome, StepOutcome::Completed));
     assert!(inherited.client.is_scripted(), "parent snapshot should remain scripted");
     assert_eq!(inherited.active_profile_name.as_deref(), Some("inherited-fast"));
+
+    server.await.expect("mock provider server finished");
 }
 
 #[test]
