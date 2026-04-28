@@ -202,6 +202,18 @@ pub struct BossStepReport {
     pub routed_metadata: Option<BossStepRoutedMetadata>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct BossObservabilitySummary {
+    pub total_steps_routed: usize,
+    pub total_cache_read_tokens: usize,
+    pub total_cache_write_tokens: usize,
+    pub total_fallback_count: usize,
+    pub total_projection_mismatch_count: usize,
+    /// Steps where provider_profile_id is Some (i.e. a non-inherited model profile was used).
+    pub override_hit_count: usize,
+    pub model_tier_counts: std::collections::HashMap<String, usize>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BossReportPayload {
     pub stage: BossStage,
@@ -213,6 +225,48 @@ pub struct BossReportPayload {
     pub steps: Vec<BossStepReport>,
     #[serde(default)]
     pub history_summary: Vec<String>,
+    #[serde(default)]
+    pub observability_summary: Option<BossObservabilitySummary>,
+}
+
+impl BossReportPayload {
+    pub fn format_report(&self) -> String {
+        let mut lines = Vec::new();
+        lines.push(format!(
+            "stage={:?} step={}/{} ",
+            self.stage,
+            self.current_step.map(|n| n.to_string()).unwrap_or_else(|| "-".into()),
+            self.total_steps.map(|n| n.to_string()).unwrap_or_else(|| "-".into()),
+        ));
+        for step in &self.steps {
+            let m = step.routed_metadata.as_ref();
+            lines.push(format!(
+                "  step {:>3}: status={:?} tier={} profile={} frame={}B cache_r={} cache_w={} fb={} mm={}",
+                step.id,
+                step.status,
+                m.and_then(|m| m.model_tier.as_deref()).unwrap_or("-"),
+                m.and_then(|m| m.provider_profile_id.as_deref()).unwrap_or("-"),
+                m.and_then(|m| m.state_frame_size).map(|n| n.to_string()).unwrap_or_else(|| "-".into()),
+                m.and_then(|m| m.cache_read_tokens).map(|n| n.to_string()).unwrap_or_else(|| "-".into()),
+                m.and_then(|m| m.cache_write_tokens).map(|n| n.to_string()).unwrap_or_else(|| "-".into()),
+                m.and_then(|m| m.fallback_count).map(|n| n.to_string()).unwrap_or_else(|| "-".into()),
+                m.and_then(|m| m.projection_mismatch_count).map(|n| n.to_string()).unwrap_or_else(|| "-".into()),
+            ));
+        }
+        if let Some(s) = &self.observability_summary {
+            lines.push(format!(
+                "  summary: routed={} override_hits={} cache_r={} cache_w={} fallback={} mismatch={} tiers={:?}",
+                s.total_steps_routed,
+                s.override_hit_count,
+                s.total_cache_read_tokens,
+                s.total_cache_write_tokens,
+                s.total_fallback_count,
+                s.total_projection_mismatch_count,
+                s.model_tier_counts,
+            ));
+        }
+        lines.join("\n")
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

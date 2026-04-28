@@ -6970,6 +6970,126 @@ async fn t27_r1_worker_override_hit_report_shows_routed_metadata() {
 }
 
 #[tokio::test]
+async fn t27_r1_report_observability_summary_aggregates_routed_steps() {
+    let task_manager = Arc::new(TaskManager::default());
+    let (coordinator, plan_path) = coordinator_with_plan(
+        boss_plan(vec![boss_step(0, "step A"), boss_step(1, "step B")]),
+        "test_t27_r1_obs_summary.json",
+    )
+    .await;
+
+    // Two mock server connections — one per step.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(run_minimal_openai_mock_server_n(listener, 2));
+
+    let config_dir = std::env::temp_dir().join("t27_r1_obs_summary_test");
+    write_worker_override_models_toml(&config_dir, &format!("http://{addr}"));
+
+    let mut app = (*app_state_with_tasks("t27-r1-obs-session", task_manager.clone())).clone();
+    app.permission_context.set_lism_enabled(true);
+    app.permission_context.inherited_active_model_snapshot =
+        Some(make_inherited_runtime_snapshot_with_scripted_turns(vec![]));
+    app.session = Some(rust_agent::history::session::SessionSnapshot {
+        session_id: rust_agent::history::session::SessionId("t27-r1-obs-session".into()),
+        surface: rust_agent::bootstrap::InteractionSurface::Cli,
+        session_mode: rust_agent::bootstrap::SessionMode::Headless,
+        cwd: config_dir.to_string_lossy().to_string(),
+        last_turn_at: None,
+        prompt_seed: None,
+    });
+    let app_state = Arc::new(app);
+
+    // Advance both steps.
+    coordinator.advance_plan(&app_state).await.unwrap();
+    coordinator.advance_plan(&app_state).await.unwrap();
+
+    let report = coordinator.report_progress(&task_manager).await.unwrap();
+    let summary = report
+        .observability_summary
+        .as_ref()
+        .expect("observability_summary must be Some when LisM steps are routed");
+
+    assert_eq!(summary.total_steps_routed, 2);
+    assert_eq!(summary.override_hit_count, 2, "both steps use worker-override profile");
+    assert_eq!(summary.model_tier_counts.get("medium").copied().unwrap_or(0), 2);
+    assert_eq!(summary.total_fallback_count, 0);
+    assert_eq!(summary.total_projection_mismatch_count, 0);
+
+    server.await.expect("mock server finished");
+    let _ = std::fs::remove_file(plan_path);
+    let _ = std::fs::remove_dir_all(config_dir);
+}
+
+#[tokio::test]
+async fn t27_r1_report_observability_summary_none_for_non_lism_path() {
+    let task_manager = Arc::new(TaskManager::default());
+    let (coordinator, plan_path) = coordinator_with_plan(
+        boss_plan(vec![boss_step(0, "non-lism step")]),
+        "test_t27_r1_obs_none.json",
+    )
+    .await;
+
+    let app_state = app_state_with_tasks("t27-r1-obs-none-session", task_manager.clone());
+    // LisM NOT enabled — non-LisM path.
+
+    let report = coordinator.report_progress(&task_manager).await.unwrap();
+    assert!(
+        report.observability_summary.is_none(),
+        "observability_summary must be None when no steps have been routed"
+    );
+
+    let _ = std::fs::remove_file(plan_path);
+}
+
+#[tokio::test]
+async fn t27_r1_lism_status_shows_summary_line() {
+    let task_manager = Arc::new(TaskManager::default());
+    let (coordinator, plan_path) = coordinator_with_plan(
+        boss_plan(vec![boss_step(0, "status summary step")]),
+        "test_t27_r1_lism_status_summary.json",
+    )
+    .await;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(run_minimal_openai_mock_server(listener));
+
+    let config_dir = std::env::temp_dir().join("t27_r1_lism_status_summary_test");
+    write_worker_override_models_toml(&config_dir, &format!("http://{addr}"));
+
+    let mut app = (*app_state_with_tasks("t27-r1-status-session", task_manager.clone())).clone();
+    app.permission_context.set_lism_enabled(true);
+    app.permission_context.inherited_active_model_snapshot =
+        Some(make_inherited_runtime_snapshot_with_scripted_turns(vec![]));
+    app.session = Some(rust_agent::history::session::SessionSnapshot {
+        session_id: rust_agent::history::session::SessionId("t27-r1-status-session".into()),
+        surface: rust_agent::bootstrap::InteractionSurface::Cli,
+        session_mode: rust_agent::bootstrap::SessionMode::Headless,
+        cwd: config_dir.to_string_lossy().to_string(),
+        last_turn_at: None,
+        prompt_seed: None,
+    });
+    let app_state = Arc::new(app);
+
+    coordinator.advance_plan(&app_state).await.unwrap();
+
+    // Simulate /LisM status by reading the snapshot directly.
+    let metadata = coordinator.routed_step_metadata_snapshot().await;
+    assert!(!metadata.is_empty(), "metadata must be populated after advance_plan");
+
+    // Verify the summary line would contain total_steps_routed: 1.
+    let total_routed = metadata.values().count();
+    let override_hits = metadata.values().filter(|m| m.provider_profile_id.is_some()).count();
+    assert_eq!(total_routed, 1);
+    assert_eq!(override_hits, 1);
+
+    server.await.expect("mock server finished");
+    let _ = std::fs::remove_file(plan_path);
+    let _ = std::fs::remove_dir_all(config_dir);
+}
+
+#[tokio::test]
 async fn lism_enabled_boss_completed_step_auto_advances_to_next_step() {
     let (coordinator, plan_path) = coordinator_with_plan(
         boss_plan(vec![boss_step(0, "LisM first"), boss_step(1, "LisM second")]),

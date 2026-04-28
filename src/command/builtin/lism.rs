@@ -54,8 +54,20 @@ impl Command for LisMCommand {
                         let mut lines = vec![base];
                         let mut step_ids: Vec<usize> = metadata.keys().copied().collect();
                         step_ids.sort_unstable();
+                        let mut total_routed: usize = 0;
+                        let mut override_hits: usize = 0;
+                        let mut total_cache_r: usize = 0;
+                        let mut total_cache_w: usize = 0;
+                        let mut total_fallback: usize = 0;
+                        let mut total_mismatch: usize = 0;
                         for id in step_ids {
                             let m = &metadata[&id];
+                            total_routed += 1;
+                            if m.provider_profile_id.is_some() { override_hits += 1; }
+                            total_cache_r += m.cache_read_tokens.unwrap_or(0);
+                            total_cache_w += m.cache_write_tokens.unwrap_or(0);
+                            total_fallback += m.fallback_count.unwrap_or(0);
+                            total_mismatch += m.projection_mismatch_count.unwrap_or(0);
                             lines.push(format!(
                                 "  step {id}: tier={tier} profile={profile} frame_size={size} cache_r={cr} cache_w={cw} fallback={fb} mismatch={mm}",
                                 tier = m.model_tier.as_deref().unwrap_or("-"),
@@ -67,6 +79,9 @@ impl Command for LisMCommand {
                                 mm = m.projection_mismatch_count.map(|n| n.to_string()).unwrap_or_else(|| "-".into()),
                             ));
                         }
+                        lines.push(format!(
+                            "  total_steps_routed: {total_routed} override_hits: {override_hits} cache_r: {total_cache_r} cache_w: {total_cache_w} fallback: {total_fallback} mismatch: {total_mismatch}"
+                        ));
                         lines.join("\n")
                     }
                 } else {

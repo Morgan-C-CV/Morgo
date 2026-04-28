@@ -1,8 +1,8 @@
 use crate::core::boss_state::{
     BossActorHandle, BossActorStatus, BossControlRequest, BossControlResponse, BossPlan,
-    BossPlanStep, BossPlanStepStatus, BossReportPayload, BossSession, BossStage, BossStatus,
-    BossStepMetrics, BossStepReport, BossStepRoutedMetadata, BossStopOutcome, BossStopStage,
-    CompressionStrategy, ContextMode,
+    BossPlanStep, BossPlanStepStatus, BossObservabilitySummary, BossReportPayload, BossSession,
+    BossStage, BossStatus, BossStepMetrics, BossStepReport, BossStepRoutedMetadata,
+    BossStopOutcome, BossStopStage, CompressionStrategy, ContextMode,
 };
 use crate::core::boss_context_brief::{BossContextBrief, BossContextStrategy, BossStateFrame, assemble_brief_prompt};
 use crate::core::prompt_budget::{evaluate_message_budget, BudgetDecision};
@@ -975,6 +975,28 @@ impl BossCoordinator {
                     .collect::<Vec<_>>()
             });
 
+        let observability_summary = if steps.iter().any(|s| s.routed_metadata.is_some()) {
+            let mut summary = BossObservabilitySummary::default();
+            for step in &steps {
+                if let Some(m) = &step.routed_metadata {
+                    summary.total_steps_routed += 1;
+                    summary.total_cache_read_tokens += m.cache_read_tokens.unwrap_or(0);
+                    summary.total_cache_write_tokens += m.cache_write_tokens.unwrap_or(0);
+                    summary.total_fallback_count += m.fallback_count.unwrap_or(0);
+                    summary.total_projection_mismatch_count += m.projection_mismatch_count.unwrap_or(0);
+                    if m.provider_profile_id.is_some() {
+                        summary.override_hit_count += 1;
+                    }
+                    if let Some(tier) = &m.model_tier {
+                        *summary.model_tier_counts.entry(tier.clone()).or_insert(0) += 1;
+                    }
+                }
+            }
+            Some(summary)
+        } else {
+            None
+        };
+
         Ok(BossReportPayload {
             stage: status.stage,
             current_step: status.current_step,
@@ -984,6 +1006,7 @@ impl BossCoordinator {
             active_children: session.active_children,
             steps,
             history_summary,
+            observability_summary,
         })
     }
 
