@@ -18,6 +18,7 @@ use crate::security::authorizer::{
 use crate::state::app_state::AppState;
 use crate::state::permission_context::PendingApproval;
 use crate::task::types::{TaskEvent, TaskUsageSummary};
+use serde::{Deserialize, Serialize};
 use std::fmt::Write as _;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,12 +28,89 @@ pub struct RemoteRequest {
     pub is_authenticated: bool,
     pub from_trusted_surface: bool,
     pub raw: String,
+    #[allow(dead_code)]
+    pub correlation_id: Option<String>,
+}
+
+impl RemoteRequest {
+    pub fn new(
+        session_id: impl Into<String>,
+        actor_id: impl Into<String>,
+        is_authenticated: bool,
+        from_trusted_surface: bool,
+        raw: impl Into<String>,
+    ) -> Self {
+        Self {
+            session_id: session_id.into(),
+            actor_id: actor_id.into(),
+            is_authenticated,
+            from_trusted_surface,
+            raw: raw.into(),
+            correlation_id: None,
+        }
+    }
+
+    pub fn with_correlation_id(mut self, id: impl Into<String>) -> Self {
+        self.correlation_id = Some(id.into());
+        self
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteResponseOutcome {
+    #[default]
+    Ok,
+    Denied,
+    RuntimeError,
+}
+
+impl RemoteResponseOutcome {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Denied => "denied",
+            Self::RuntimeError => "runtime_error",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteResponseMeta {
+    pub session_id: String,
+    pub actor_id: String,
+    pub request_count: u64,
+    pub is_authenticated: bool,
+    pub from_trusted_surface: bool,
+    pub outcome: RemoteResponseOutcome,
+    pub task_ids: Vec<String>,
+    pub has_pending_approval: bool,
+    pub audit_event_kind: &'static str,
+    pub correlation_id: Option<String>,
+}
+
+impl Default for RemoteResponseMeta {
+    fn default() -> Self {
+        Self {
+            session_id: String::new(),
+            actor_id: String::new(),
+            request_count: 0,
+            is_authenticated: false,
+            from_trusted_surface: false,
+            outcome: RemoteResponseOutcome::Ok,
+            task_ids: Vec::new(),
+            has_pending_approval: false,
+            audit_event_kind: "none",
+            correlation_id: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteResponse {
     pub primary_text: String,
     pub events: Vec<RemoteEventEnvelope>,
+    pub meta: RemoteResponseMeta,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -190,6 +268,7 @@ pub async fn handle_remote_request(
     app_state: &AppState,
     request: RemoteRequest,
 ) -> anyhow::Result<RemoteResponse> {
+    let correlation_id = request.correlation_id.clone();
     let input = NormalizedInput::from_remote_raw(
         request.session_id,
         request.actor_id,
@@ -214,6 +293,15 @@ pub async fn handle_remote_request(
         return Ok(RemoteResponse {
             primary_text: denial_message_for_category(category),
             events: Vec::new(),
+            meta: RemoteResponseMeta {
+                session_id: input.session_id.clone(),
+                actor_id: input.actor.actor_id.clone(),
+                is_authenticated: input.actor.is_authenticated,
+                from_trusted_surface: input.metadata.from_trusted_surface,
+                outcome: RemoteResponseOutcome::Denied,
+                correlation_id,
+                ..Default::default()
+            },
         });
     }
     let remote_engine = bind_remote_engine(engine, app_state, &input);
@@ -234,7 +322,6 @@ pub async fn handle_remote_request(
                     from_trusted_surface: input.metadata.from_trusted_surface,
                 },
             );
-            upsert_remote_actor(&remote_engine.context.app_state, &input);
             output
         }
         Err(error) => {
@@ -251,12 +338,50 @@ pub async fn handle_remote_request(
         }
     };
 
+    let audit_event_kind = upsert_remote_actor(&remote_engine.context.app_state, &input);
+    let request_count = remote_engine
+        .context
+        .app_state
+        .remote_actor_store
+        .as_ref()
+        .and_then(|s| s.get(&input.session_id, &input.actor.actor_id))
+        .map(|r| r.request_count)
+        .unwrap_or(0);
+
     let view = build_surface_view(&output);
     dispatch_remote_runtime_notifications(&remote_engine.context.app_state, &input, &view);
+
+    let task_ids: Vec<String> = view
+        .items
+        .iter()
+        .filter_map(|item| {
+            if let SurfaceItem::TaskUpdate(t) = item {
+                Some(t.task_id.clone())
+            } else {
+                None
+            }
+        })
+        .collect();
+    let has_pending_approval = view
+        .items
+        .iter()
+        .any(|item| matches!(item, SurfaceItem::ApprovalRequired { .. }));
 
     Ok(RemoteResponse {
         primary_text: view.primary_text,
         events: remote_response_events_from_surface_items(&view.items),
+        meta: RemoteResponseMeta {
+            session_id: input.session_id.clone(),
+            actor_id: input.actor.actor_id.clone(),
+            request_count,
+            is_authenticated: input.actor.is_authenticated,
+            from_trusted_surface: input.metadata.from_trusted_surface,
+            outcome: RemoteResponseOutcome::Ok,
+            task_ids,
+            has_pending_approval,
+            audit_event_kind,
+            correlation_id,
+        },
     })
 }
 
@@ -705,13 +830,13 @@ fn record_remote_audit(app_state: &AppState, event: AuditEvent) {
         .record(event);
 }
 
-pub fn upsert_remote_actor_for_test(app_state: &AppState, input: &NormalizedInput) {
-    upsert_remote_actor(app_state, input);
+pub fn upsert_remote_actor_for_test(app_state: &AppState, input: &NormalizedInput) -> &'static str {
+    upsert_remote_actor(app_state, input)
 }
 
-fn upsert_remote_actor(app_state: &AppState, input: &NormalizedInput) {
+fn upsert_remote_actor(app_state: &AppState, input: &NormalizedInput) -> &'static str {
     let Some(store) = &app_state.remote_actor_store else {
-        return;
+        return "none";
     };
     let record = make_actor_record(
         &input.session_id,
@@ -724,20 +849,27 @@ fn upsert_remote_actor(app_state: &AppState, input: &NormalizedInput) {
         .get(&input.session_id, &input.actor.actor_id)
         .map(|r| r.request_count)
         .unwrap_or(1);
-    let event = if is_new {
-        AuditEvent::RemoteActorCreated {
-            session_id: input.session_id.clone(),
-            actor_id: input.actor.actor_id.clone(),
-            is_authenticated: input.actor.is_authenticated,
-        }
+    let (event, kind) = if is_new {
+        (
+            AuditEvent::RemoteActorCreated {
+                session_id: input.session_id.clone(),
+                actor_id: input.actor.actor_id.clone(),
+                is_authenticated: input.actor.is_authenticated,
+            },
+            "remote_actor_created",
+        )
     } else {
-        AuditEvent::RemoteActorResumed {
-            session_id: input.session_id.clone(),
-            actor_id: input.actor.actor_id.clone(),
-            request_count,
-        }
+        (
+            AuditEvent::RemoteActorResumed {
+                session_id: input.session_id.clone(),
+                actor_id: input.actor.actor_id.clone(),
+                request_count,
+            },
+            "remote_actor_resumed",
+        )
     };
     record_remote_audit(app_state, event);
+    kind
 }
 
 fn record_remote_notification_audit(app_state: &AppState, notification: &Notification) {

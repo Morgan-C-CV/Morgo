@@ -550,6 +550,7 @@ impl RuntimeBootstrap {
                         is_authenticated: true,
                         from_trusted_surface: true,
                         raw: prompt.clone(),
+                        correlation_id: None,
                     },
                 )
                 .await?;

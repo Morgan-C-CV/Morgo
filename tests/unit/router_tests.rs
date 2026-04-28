@@ -1777,6 +1777,7 @@ async fn remote_handler_preserves_remote_actor_and_session_for_query_flow() {
             is_authenticated: true,
             from_trusted_surface: true,
             raw: "hello from remote".into(),
+            correlation_id: None,
         },
     )
     .await
@@ -2468,6 +2469,7 @@ async fn remote_handler_uses_next_turn_plugin_snapshot_after_reload_removes_dele
             is_authenticated: true,
             from_trusted_surface: true,
             raw: "/help".into(),
+            correlation_id: None,
         },
     )
     .await
@@ -2495,6 +2497,7 @@ async fn remote_handler_uses_next_turn_plugin_snapshot_after_reload_removes_dele
             is_authenticated: true,
             from_trusted_surface: true,
             raw: "/help".into(),
+            correlation_id: None,
         },
     )
     .await

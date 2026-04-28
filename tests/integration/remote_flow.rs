@@ -17,7 +17,8 @@ use rust_agent::interaction::dispatcher::NotificationDispatcher;
 use rust_agent::interaction::envelope::NormalizedInput;
 use rust_agent::interaction::notification::{Notification, NotificationTarget};
 use rust_agent::interaction::remote::{
-    RemoteEventPayload, RemoteRequest, drain_remote_notifications, handle_remote_request,
+    RemoteEventPayload, RemoteRequest, RemoteResponseMeta, RemoteResponseOutcome,
+    drain_remote_notifications, handle_remote_request,
 };
 use rust_agent::interaction::telegram::gateway::TelegramGateway;
 use rust_agent::plan::manager::PlanManager;
@@ -185,6 +186,7 @@ async fn remote_request_prefers_active_model_runtime_client_for_bound_turns() {
             is_authenticated: true,
             from_trusted_surface: true,
             raw: "summarize remote chain".into(),
+            correlation_id: None,
         },
     )
     .await
@@ -289,6 +291,7 @@ async fn remote_request_runs_minimal_query_chain() {
             is_authenticated: true,
             from_trusted_surface: true,
             raw: "summarize remote chain".into(),
+            correlation_id: None,
         },
     )
     .await
@@ -452,6 +455,7 @@ async fn remote_request_uses_shared_session_apply_contract() {
             is_authenticated: true,
             from_trusted_surface: true,
             raw: "hello shared contract".into(),
+            correlation_id: None,
         },
     )
     .await
@@ -573,6 +577,7 @@ async fn remote_request_records_accept_and_notification_audit_events() {
             is_authenticated: true,
             from_trusted_surface: true,
             raw: "hello audit".into(),
+            correlation_id: None,
         },
     )
     .await
@@ -769,6 +774,7 @@ async fn remote_request_denies_not_allowlisted_and_records_audit_event() {
             is_authenticated: true,
             from_trusted_surface: true,
             raw: "hello audit".into(),
+            correlation_id: None,
         },
     )
     .await
@@ -1034,6 +1040,7 @@ async fn remote_request_drains_async_task_update_notifications() {
             is_authenticated: true,
             from_trusted_surface: true,
             raw: "/remote-spawn-task".into(),
+            correlation_id: None,
         },
     )
     .await
@@ -1197,6 +1204,7 @@ async fn remote_request_preserves_response_boundary_and_async_inbox_semantics() 
             is_authenticated: true,
             from_trusted_surface: true,
             raw: "hello boundary".into(),
+            correlation_id: None,
         },
     )
     .await
@@ -1339,6 +1347,7 @@ async fn remote_request_dual_channel_events_appear_in_response_and_async_inbox()
             is_authenticated: true,
             from_trusted_surface: true,
             raw: "/remote-spawn-task".into(),
+            correlation_id: None,
         },
     )
     .await
@@ -1454,6 +1463,7 @@ async fn remote_request_returns_typed_remote_event_envelopes() {
             is_authenticated: true,
             from_trusted_surface: true,
             raw: "typed remote chain".into(),
+            correlation_id: None,
         },
     )
     .await
@@ -1890,4 +1900,314 @@ fn r3_actor_snapshot_returns_none_when_store_absent() {
         app_state.actor_snapshot("any-session", "any-actor").is_none(),
         "actor_snapshot must return None when remote_actor_store is absent"
     );
+}
+
+// ── R3.2 richer remote runtime contract tests ─────────────────────────────────
+
+fn make_r3_2_app_state(store: Option<Arc<RemoteActorStore>>) -> AppState {
+    AppState {
+        surface: InteractionSurface::Remote,
+        session_mode: SessionMode::Interactive,
+        client_type: ClientType::RemoteControl,
+        session_source: SessionSource::RemoteControl,
+        runtime_role: RuntimeRole::Coordinator,
+        worker_role: None,
+        permission_context: ToolPermissionContext::new(PermissionMode::Default)
+            .with_task_manager(Arc::new(TaskManager::default()))
+            .with_plan_manager(Arc::new(PlanManager::default())),
+        command_registry: Some(Arc::new(CommandRegistry::new())),
+        runtime_tool_registry: Some(Arc::new(RwLock::new(ToolRegistry::new()))),
+        skill_registry: None,
+        mcp_runtime: None,
+        plugin_load_result: None,
+        cost_tracker: CostTracker::default(),
+        service_observability_tracker:
+            rust_agent::service::observability::ServiceObservabilityTracker::default(),
+        notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
+        audit_log: Arc::new(std::sync::Mutex::new(AuditLog::default())),
+        startup_trace: Vec::new(),
+        active_model_runtime: None,
+        active_model_profile_name: None,
+        active_model_profile_source:
+            rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
+        active_model_provider_summary: rust_agent::state::app_state::ActiveModelProviderSummary {
+            provider_id: "test".into(),
+            protocol: "test".into(),
+            compatibility_profile: "test".into(),
+            base_url_host: "test".into(),
+            model: "test".into(),
+            auth_status: "none".into(),
+        },
+        active_session_id: "r32-session".into(),
+        session_store: Some(Arc::new(InMemorySessionStore::default())),
+        session: None,
+        history: None,
+        restored_session: None,
+        last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        cancellation_token: tokio_util::sync::CancellationToken::new(),
+        subagent_limiter: None,
+        boss_coordinator: None,
+        remote_actor_store: store,
+    }
+}
+
+fn make_r3_2_engine(
+    app_state: &AppState,
+    reply: &str,
+) -> rust_agent::core::engine::QueryEngine {
+    use rust_agent::service::api::streaming::{StopReason, StreamEvent};
+    rust_agent::core::engine::QueryEngine::new(rust_agent::core::context::QueryContext {
+        app_state: app_state.clone(),
+        tool_registry: ToolRegistry::new(),
+        api_client: rust_agent::service::api::client::ModelProviderClient::with_scripted_turns(
+            vec![vec![
+                StreamEvent::MessageStart,
+                StreamEvent::TextDelta(reply.into()),
+                StreamEvent::MessageStop {
+                    stop_reason: StopReason::EndTurn,
+                },
+            ]],
+        ),
+        compactor: rust_agent::service::compact::reactive_compact::ReactiveCompactor,
+        hook_registry: rust_agent::hook::registry::HookRegistry::default(),
+        agent_id: None,
+        system_prompt: "test".into(),
+        tools_prompt: "test".into(),
+        context_prompt: "test".into(),
+    })
+}
+
+#[tokio::test]
+async fn r3_2_response_meta_ok_outcome_on_accepted_request() {
+    let store = Arc::new(RemoteActorStore::in_memory());
+    let app_state = make_r3_2_app_state(Some(store));
+    let router = rust_agent::interaction::router::CommandRouter::new(
+        Arc::new(CommandRegistry::new()),
+        Box::new(DefaultSurfaceAuthorizer::default()),
+    );
+    let engine = make_r3_2_engine(&app_state, "ok reply");
+
+    let response = handle_remote_request(
+        &router,
+        &engine,
+        &app_state,
+        RemoteRequest::new("sess-ok", "actor-ok", true, false, "hello"),
+    )
+    .await
+    .expect("request should succeed");
+
+    assert_eq!(response.meta.outcome, RemoteResponseOutcome::Ok);
+    assert_eq!(response.meta.actor_id, "actor-ok");
+    assert_eq!(response.meta.session_id, "sess-ok");
+    assert!(response.meta.is_authenticated);
+    assert!(!response.meta.from_trusted_surface);
+}
+
+#[tokio::test]
+async fn r3_2_response_meta_denied_outcome_on_unauthorized_request() {
+    let app_state = make_r3_2_app_state(None);
+    let router = rust_agent::interaction::router::CommandRouter::new(
+        Arc::new(CommandRegistry::new()),
+        Box::new(
+            DefaultSurfaceAuthorizer::default().with_remote_policy(
+                rust_agent::security::authorizer::SurfaceAdmissionPolicy {
+                    allowlisted_actors: ["allowed-only".to_string()].into_iter().collect(),
+                    max_requests_per_window: None,
+                    window_seconds: 60,
+                    abuse_denial_threshold: None,
+                },
+            ),
+        ),
+    );
+    let engine = make_r3_2_engine(&app_state, "should not reach");
+
+    let response = handle_remote_request(
+        &router,
+        &engine,
+        &app_state,
+        RemoteRequest::new("sess-denied", "not-allowed", false, false, "hello"),
+    )
+    .await
+    .expect("denial should return Ok(response)");
+
+    assert_eq!(response.meta.outcome, RemoteResponseOutcome::Denied);
+    assert!(!response.primary_text.is_empty());
+    assert!(response.events.is_empty());
+}
+
+#[tokio::test]
+async fn r3_2_response_meta_request_count_increments() {
+    let store = Arc::new(RemoteActorStore::in_memory());
+    let app_state = make_r3_2_app_state(Some(store));
+    let router = rust_agent::interaction::router::CommandRouter::new(
+        Arc::new(CommandRegistry::new()),
+        Box::new(DefaultSurfaceAuthorizer::default()),
+    );
+
+    // First request
+    let engine1 = make_r3_2_engine(&app_state, "first");
+    handle_remote_request(
+        &router,
+        &engine1,
+        &app_state,
+        RemoteRequest::new("sess-count", "actor-count", true, true, "first"),
+    )
+    .await
+    .expect("first request should succeed");
+
+    // Second request
+    let engine2 = make_r3_2_engine(&app_state, "second");
+    let response2 = handle_remote_request(
+        &router,
+        &engine2,
+        &app_state,
+        RemoteRequest::new("sess-count", "actor-count", true, true, "second"),
+    )
+    .await
+    .expect("second request should succeed");
+
+    assert_eq!(response2.meta.request_count, 2);
+}
+
+#[tokio::test]
+async fn r3_2_response_meta_has_pending_approval_set() {
+    use rust_agent::state::permission_context::PendingApproval;
+    use rust_agent::service::api::streaming::{StopReason, StreamEvent};
+
+    let store = Arc::new(RemoteActorStore::in_memory());
+    let mut app_state = make_r3_2_app_state(Some(store));
+    app_state.permission_context = ToolPermissionContext::new(PermissionMode::Default)
+        .with_task_manager(Arc::new(TaskManager::default()))
+        .with_plan_manager(Arc::new(PlanManager::default()))
+        .with_pending_approval(PendingApproval {
+            tool_name: "Bash".into(),
+            tool_input: "{}".into(),
+            message: "requires approval".into(),
+            code: Some("bash_warning".into()),
+            summary: Some("Bash pending".into()),
+            detail: Some("requires approval".into()),
+            approval_kind: Some("tool_permission".into()),
+            escalation_reasons: vec!["privileged_system".into()],
+        });
+
+    let router = rust_agent::interaction::router::CommandRouter::new(
+        Arc::new(CommandRegistry::new()),
+        Box::new(DefaultSurfaceAuthorizer::default()),
+    );
+    let engine = rust_agent::core::engine::QueryEngine::new(
+        rust_agent::core::context::QueryContext {
+            app_state: app_state.clone(),
+            tool_registry: ToolRegistry::new().register(Arc::new(BashTool)),
+            api_client: rust_agent::service::api::client::ModelProviderClient::with_scripted_turns(
+                vec![vec![
+                    StreamEvent::MessageStart,
+                    StreamEvent::ToolUse {
+                        tool_name: "Bash".into(),
+                        input: serde_json::json!({
+                            "command": "ls",
+                            "dangerously_disable_sandbox": true
+                        })
+                        .to_string(),
+                    },
+                    StreamEvent::MessageStop {
+                        stop_reason: StopReason::ToolUse,
+                    },
+                ]],
+            ),
+            compactor: rust_agent::service::compact::reactive_compact::ReactiveCompactor,
+            hook_registry: rust_agent::hook::registry::HookRegistry::default(),
+            agent_id: None,
+            system_prompt: "test".into(),
+            tools_prompt: "test".into(),
+            context_prompt: "test".into(),
+        },
+    );
+
+    let response = handle_remote_request(
+        &router,
+        &engine,
+        &app_state,
+        RemoteRequest::new("sess-approval", "actor-approval", true, true, "run bash"),
+    )
+    .await
+    .expect("request should succeed");
+
+    assert!(response.meta.has_pending_approval);
+}
+
+#[tokio::test]
+async fn r3_2_response_meta_correlation_id_echoed() {
+    let store = Arc::new(RemoteActorStore::in_memory());
+    let app_state = make_r3_2_app_state(Some(store));
+    let router = rust_agent::interaction::router::CommandRouter::new(
+        Arc::new(CommandRegistry::new()),
+        Box::new(DefaultSurfaceAuthorizer::default()),
+    );
+    let engine = make_r3_2_engine(&app_state, "corr reply");
+
+    let response = handle_remote_request(
+        &router,
+        &engine,
+        &app_state,
+        RemoteRequest::new("sess-corr", "actor-corr", true, false, "hello")
+            .with_correlation_id("req-123"),
+    )
+    .await
+    .expect("request should succeed");
+
+    assert_eq!(response.meta.correlation_id, Some("req-123".into()));
+}
+
+#[tokio::test]
+async fn r3_2_response_meta_audit_event_kind_created_on_first_request() {
+    let store = Arc::new(RemoteActorStore::in_memory());
+    let app_state = make_r3_2_app_state(Some(store));
+    let router = rust_agent::interaction::router::CommandRouter::new(
+        Arc::new(CommandRegistry::new()),
+        Box::new(DefaultSurfaceAuthorizer::default()),
+    );
+    let engine = make_r3_2_engine(&app_state, "first reply");
+
+    let response = handle_remote_request(
+        &router,
+        &engine,
+        &app_state,
+        RemoteRequest::new("sess-created", "actor-created", true, false, "hello"),
+    )
+    .await
+    .expect("request should succeed");
+
+    assert_eq!(response.meta.audit_event_kind, "remote_actor_created");
+}
+
+#[tokio::test]
+async fn r3_2_response_meta_audit_event_kind_resumed_on_second_request() {
+    let store = Arc::new(RemoteActorStore::in_memory());
+    let app_state = make_r3_2_app_state(Some(store));
+    let router = rust_agent::interaction::router::CommandRouter::new(
+        Arc::new(CommandRegistry::new()),
+        Box::new(DefaultSurfaceAuthorizer::default()),
+    );
+
+    let engine1 = make_r3_2_engine(&app_state, "first");
+    handle_remote_request(
+        &router,
+        &engine1,
+        &app_state,
+        RemoteRequest::new("sess-resumed", "actor-resumed", true, false, "first"),
+    )
+    .await
+    .expect("first request should succeed");
+
+    let engine2 = make_r3_2_engine(&app_state, "second");
+    let response2 = handle_remote_request(
+        &router,
+        &engine2,
+        &app_state,
+        RemoteRequest::new("sess-resumed", "actor-resumed", true, false, "second"),
+    )
+    .await
+    .expect("second request should succeed");
+
+    assert_eq!(response2.meta.audit_event_kind, "remote_actor_resumed");
 }
