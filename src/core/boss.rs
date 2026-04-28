@@ -1200,9 +1200,11 @@ impl BossCoordinator {
             }
         };
 
-        let a_mailbox = {
+        let a_mailbox = if has_a_callbacks {
             let guard = self.actor_registry.read().await;
             guard.as_ref().map(|registry| registry.a_mailbox().clone())
+        } else {
+            None
         };
         let decision = if let Some(a_mailbox) = a_mailbox {
             match a_mailbox.request(DesignerACommand::Review {
