@@ -154,6 +154,7 @@ async fn remote_request_prefers_active_model_runtime_client_for_bound_turns() {
         cancellation_token: tokio_util::sync::CancellationToken::new(),
         subagent_limiter: None,
         boss_coordinator: None,
+        remote_actor_store: None,
     };
     let engine =
         rust_agent::core::engine::QueryEngine::new(rust_agent::core::context::QueryContext {
@@ -257,6 +258,7 @@ async fn remote_request_runs_minimal_query_chain() {
         cancellation_token: tokio_util::sync::CancellationToken::new(),
         subagent_limiter: None,
         boss_coordinator: None,
+        remote_actor_store: None,
     };
     let engine =
         rust_agent::core::engine::QueryEngine::new(rust_agent::core::context::QueryContext {
@@ -419,6 +421,7 @@ async fn remote_request_uses_shared_session_apply_contract() {
         cancellation_token: tokio_util::sync::CancellationToken::new(),
         subagent_limiter: None,
         boss_coordinator: None,
+        remote_actor_store: None,
     };
     let engine =
         rust_agent::core::engine::QueryEngine::new(rust_agent::core::context::QueryContext {
@@ -532,6 +535,7 @@ async fn remote_request_records_accept_and_notification_audit_events() {
         cancellation_token: tokio_util::sync::CancellationToken::new(),
         subagent_limiter: None,
         boss_coordinator: None,
+        remote_actor_store: None,
     };
     let engine =
         rust_agent::core::engine::QueryEngine::new(rust_agent::core::context::QueryContext {
@@ -740,6 +744,7 @@ async fn remote_request_denies_not_allowlisted_and_records_audit_event() {
         cancellation_token: tokio_util::sync::CancellationToken::new(),
         subagent_limiter: None,
         boss_coordinator: None,
+        remote_actor_store: None,
     };
     let engine =
         rust_agent::core::engine::QueryEngine::new(rust_agent::core::context::QueryContext {
@@ -861,6 +866,7 @@ async fn remote_request_drains_async_remote_notifications() {
         cancellation_token: tokio_util::sync::CancellationToken::new(),
         subagent_limiter: None,
         boss_coordinator: None,
+        remote_actor_store: None,
     };
 
     let mut actor_notification = Notification::approval_required(
@@ -1003,6 +1009,7 @@ async fn remote_request_drains_async_task_update_notifications() {
         cancellation_token: tokio_util::sync::CancellationToken::new(),
         subagent_limiter: None,
         boss_coordinator: None,
+        remote_actor_store: None,
     };
     let engine =
         rust_agent::core::engine::QueryEngine::new(rust_agent::core::context::QueryContext {
@@ -1144,6 +1151,7 @@ async fn remote_request_preserves_response_boundary_and_async_inbox_semantics() 
         cancellation_token: tokio_util::sync::CancellationToken::new(),
         subagent_limiter: None,
         boss_coordinator: None,
+        remote_actor_store: None,
     };
     app_state.notification_dispatcher.dispatch(
         InteractionSurface::Remote,
@@ -1306,6 +1314,7 @@ async fn remote_request_dual_channel_events_appear_in_response_and_async_inbox()
         cancellation_token: tokio_util::sync::CancellationToken::new(),
         subagent_limiter: None,
         boss_coordinator: None,
+        remote_actor_store: None,
     };
     let engine =
         rust_agent::core::engine::QueryEngine::new(rust_agent::core::context::QueryContext {
@@ -1414,6 +1423,7 @@ async fn remote_request_returns_typed_remote_event_envelopes() {
         cancellation_token: tokio_util::sync::CancellationToken::new(),
         subagent_limiter: None,
         boss_coordinator: None,
+        remote_actor_store: None,
     };
     let engine =
         rust_agent::core::engine::QueryEngine::new(rust_agent::core::context::QueryContext {
@@ -1570,6 +1580,7 @@ async fn drain_remote_notifications_skips_surface_invisible_notice_and_records_d
         cancellation_token: tokio_util::sync::CancellationToken::new(),
         subagent_limiter: None,
         boss_coordinator: None,
+        remote_actor_store: None,
     };
 
     let mut visible_notice = Notification::runtime_notice(
@@ -1658,4 +1669,225 @@ async fn drain_remote_notifications_skips_surface_invisible_notice_and_records_d
             && record.actor_id.as_deref() == Some("test-actor")
             && record.outcome == "dispatched"
     }));
+}
+
+// ── R3 remote actor persistence tests ────────────────────────────────────────
+
+use rust_agent::interaction::remote_actor::{RemoteActorStatus, RemoteActorStore};
+
+fn make_actor_app_state(
+    audit_log: Arc<std::sync::Mutex<AuditLog>>,
+    store: Arc<RemoteActorStore>,
+) -> AppState {
+    AppState {
+        surface: InteractionSurface::Remote,
+        session_mode: SessionMode::Interactive,
+        client_type: ClientType::RemoteControl,
+        session_source: SessionSource::RemoteControl,
+        runtime_role: RuntimeRole::Coordinator,
+        worker_role: None,
+        permission_context: ToolPermissionContext::new(PermissionMode::Default)
+            .with_task_manager(Arc::new(TaskManager::default()))
+            .with_plan_manager(Arc::new(PlanManager::default())),
+        command_registry: None,
+        runtime_tool_registry: Some(Arc::new(RwLock::new(ToolRegistry::new()))),
+        skill_registry: None,
+        mcp_runtime: None,
+        plugin_load_result: None,
+        cost_tracker: CostTracker::default(),
+        service_observability_tracker:
+            rust_agent::service::observability::ServiceObservabilityTracker::default(),
+        notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
+        audit_log,
+        startup_trace: Vec::new(),
+        active_model_runtime: None,
+        active_model_profile_name: None,
+        active_model_profile_source:
+            rust_agent::state::app_state::ActiveModelProfileSource::ModelsToml,
+        active_model_provider_summary: rust_agent::state::app_state::ActiveModelProviderSummary {
+            provider_id: "test".into(),
+            protocol: "test".into(),
+            compatibility_profile: "test".into(),
+            base_url_host: "test".into(),
+            model: "test".into(),
+            auth_status: "none".into(),
+        },
+        active_session_id: "actor-test-session".into(),
+        session_store: Some(Arc::new(InMemorySessionStore::default())),
+        session: None,
+        history: None,
+        restored_session: None,
+        last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        cancellation_token: tokio_util::sync::CancellationToken::new(),
+        subagent_limiter: None,
+        boss_coordinator: None,
+        remote_actor_store: Some(store),
+    }
+}
+
+#[test]
+fn r3_remote_actor_record_created_on_first_request() {
+    let store = Arc::new(RemoteActorStore::in_memory());
+    let audit_log = Arc::new(std::sync::Mutex::new(AuditLog::default()));
+    let app_state = make_actor_app_state(audit_log, store.clone());
+
+    let input = NormalizedInput::from_remote_raw(
+        "sess-1".into(),
+        "actor-1".into(),
+        true,
+        false,
+        "hello".into(),
+    );
+
+    rust_agent::interaction::remote::upsert_remote_actor_for_test(&app_state, &input);
+
+    let record = store.get("sess-1", "actor-1").expect("record must exist");
+    assert_eq!(record.request_count, 1);
+    assert_eq!(record.status, RemoteActorStatus::Active);
+    assert!(record.is_authenticated);
+    assert!(!record.from_trusted_surface);
+}
+
+#[test]
+fn r3_remote_actor_record_resumed_on_second_request() {
+    let store = Arc::new(RemoteActorStore::in_memory());
+    let audit_log = Arc::new(std::sync::Mutex::new(AuditLog::default()));
+    let app_state = make_actor_app_state(audit_log, store.clone());
+
+    let input = NormalizedInput::from_remote_raw(
+        "sess-2".into(),
+        "actor-2".into(),
+        false,
+        true,
+        "first".into(),
+    );
+    rust_agent::interaction::remote::upsert_remote_actor_for_test(&app_state, &input);
+
+    let input2 = NormalizedInput::from_remote_raw(
+        "sess-2".into(),
+        "actor-2".into(),
+        false,
+        true,
+        "second".into(),
+    );
+    rust_agent::interaction::remote::upsert_remote_actor_for_test(&app_state, &input2);
+
+    let record = store.get("sess-2", "actor-2").expect("record must exist");
+    assert_eq!(record.request_count, 2);
+    assert_eq!(record.status, RemoteActorStatus::Active);
+}
+
+#[test]
+fn r3_remote_actor_lifecycle_audit_events_recorded() {
+    let store = Arc::new(RemoteActorStore::in_memory());
+    let audit_log = Arc::new(std::sync::Mutex::new(AuditLog::default()));
+    let app_state = make_actor_app_state(audit_log.clone(), store.clone());
+
+    let input = NormalizedInput::from_remote_raw(
+        "sess-3".into(),
+        "actor-3".into(),
+        true,
+        false,
+        "msg".into(),
+    );
+    rust_agent::interaction::remote::upsert_remote_actor_for_test(&app_state, &input);
+    rust_agent::interaction::remote::upsert_remote_actor_for_test(&app_state, &input);
+
+    let records = audit_log.lock().expect("poisoned").load_records();
+    let created: Vec<_> = records
+        .iter()
+        .filter(|r| r.event_kind == "remote_actor_created")
+        .collect();
+    let resumed: Vec<_> = records
+        .iter()
+        .filter(|r| r.event_kind == "remote_actor_resumed")
+        .collect();
+
+    assert_eq!(created.len(), 1, "exactly one created event");
+    assert_eq!(resumed.len(), 1, "exactly one resumed event");
+    assert_eq!(created[0].actor_id.as_deref(), Some("actor-3"));
+    assert_eq!(resumed[0].actor_id.as_deref(), Some("actor-3"));
+    assert_eq!(created[0].outcome, "created");
+    assert_eq!(resumed[0].outcome, "resumed");
+}
+
+#[test]
+fn r3_remote_actor_store_file_backed_round_trip() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().to_path_buf();
+
+    {
+        let store = RemoteActorStore::file_backed(root.clone());
+        let audit_log = Arc::new(std::sync::Mutex::new(AuditLog::default()));
+        let app_state = make_actor_app_state(audit_log, Arc::new(store));
+        let input = NormalizedInput::from_remote_raw(
+            "sess-4".into(),
+            "actor-4".into(),
+            true,
+            true,
+            "persist".into(),
+        );
+        rust_agent::interaction::remote::upsert_remote_actor_for_test(&app_state, &input);
+    }
+
+    // Reload from same path
+    let store2 = RemoteActorStore::file_backed(root);
+    let record = store2.get("sess-4", "actor-4").expect("record must survive reload");
+    assert_eq!(record.request_count, 1);
+    assert!(record.is_authenticated);
+    assert!(record.from_trusted_surface);
+}
+
+#[test]
+fn r3_actor_snapshot_returns_none_when_store_absent() {
+    let audit_log = Arc::new(std::sync::Mutex::new(AuditLog::default()));
+    let app_state = AppState {
+        surface: InteractionSurface::Remote,
+        session_mode: SessionMode::Interactive,
+        client_type: ClientType::RemoteControl,
+        session_source: SessionSource::RemoteControl,
+        runtime_role: RuntimeRole::Coordinator,
+        worker_role: None,
+        permission_context: ToolPermissionContext::new(PermissionMode::Default)
+            .with_task_manager(Arc::new(TaskManager::default()))
+            .with_plan_manager(Arc::new(PlanManager::default())),
+        command_registry: None,
+        runtime_tool_registry: Some(Arc::new(RwLock::new(ToolRegistry::new()))),
+        skill_registry: None,
+        mcp_runtime: None,
+        plugin_load_result: None,
+        cost_tracker: CostTracker::default(),
+        service_observability_tracker:
+            rust_agent::service::observability::ServiceObservabilityTracker::default(),
+        notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
+        audit_log,
+        startup_trace: Vec::new(),
+        active_model_runtime: None,
+        active_model_profile_name: None,
+        active_model_profile_source:
+            rust_agent::state::app_state::ActiveModelProfileSource::ModelsToml,
+        active_model_provider_summary: rust_agent::state::app_state::ActiveModelProviderSummary {
+            provider_id: "t".into(),
+            protocol: "t".into(),
+            compatibility_profile: "t".into(),
+            base_url_host: "t".into(),
+            model: "t".into(),
+            auth_status: "none".into(),
+        },
+        active_session_id: "no-store-session".into(),
+        session_store: None,
+        session: None,
+        history: None,
+        restored_session: None,
+        last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        cancellation_token: tokio_util::sync::CancellationToken::new(),
+        subagent_limiter: None,
+        boss_coordinator: None,
+        remote_actor_store: None,
+    };
+
+    assert!(
+        app_state.actor_snapshot("any-session", "any-actor").is_none(),
+        "actor_snapshot must return None when remote_actor_store is absent"
+    );
 }

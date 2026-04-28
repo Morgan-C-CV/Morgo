@@ -59,6 +59,16 @@ pub enum AuditEvent {
     HookUpdatedInput {
         event_kind: String,
     },
+    RemoteActorCreated {
+        session_id: String,
+        actor_id: String,
+        is_authenticated: bool,
+    },
+    RemoteActorResumed {
+        session_id: String,
+        actor_id: String,
+        request_count: u64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -242,6 +252,38 @@ impl AuditRecord {
                 notification_kind: None,
                 channel: None,
                 outcome: "updated_input".into(),
+                event,
+            },
+            AuditEvent::RemoteActorCreated {
+                session_id,
+                actor_id,
+                ..
+            } => Self {
+                timestamp,
+                event_kind: "remote_actor_created".into(),
+                session_id: Some(session_id.clone()),
+                actor_id: Some(actor_id.clone()),
+                surface: Some("remote".into()),
+                request_id: None,
+                notification_kind: None,
+                channel: None,
+                outcome: "created".into(),
+                event,
+            },
+            AuditEvent::RemoteActorResumed {
+                session_id,
+                actor_id,
+                ..
+            } => Self {
+                timestamp,
+                event_kind: "remote_actor_resumed".into(),
+                session_id: Some(session_id.clone()),
+                actor_id: Some(actor_id.clone()),
+                surface: Some("remote".into()),
+                request_id: None,
+                notification_kind: None,
+                channel: None,
+                outcome: "resumed".into(),
                 event,
             },
         }

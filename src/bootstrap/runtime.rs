@@ -843,6 +843,7 @@ impl RuntimeBootstrap {
             cancellation_token,
             subagent_limiter: Some(subagent_limiter.clone()),
             boss_coordinator: Some(boss_coordinator.clone()),
+            remote_actor_store: None,
         };
         let snapshot = build_runtime_plugin_snapshot(&app_state);
         let command_registry = snapshot.command_registry.clone();
@@ -980,6 +981,7 @@ impl RuntimeBootstrap {
             cancellation_token,
             subagent_limiter: Some(initialize_bundle.subagent_limiter.clone()),
             boss_coordinator: initialize_bundle.boss_coordinator.clone(),
+            remote_actor_store: None,
         };
         app_state.apply_resolved_session_state(resolved_session);
         app_state

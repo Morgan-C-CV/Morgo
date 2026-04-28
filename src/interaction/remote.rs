@@ -8,6 +8,7 @@ use crate::history::resume::{
 use crate::interaction::cli::repl::handle_normalized_input;
 use crate::interaction::envelope::NormalizedInput;
 use crate::interaction::notification::{Notification, NotificationTarget, NotificationType};
+use crate::interaction::remote_actor::make_actor_record;
 use crate::interaction::router::CommandRouter;
 use crate::interaction::view::{SurfaceItem, SurfaceView, TaskView, build_surface_view};
 use crate::security::audit::AuditEvent;
@@ -233,6 +234,7 @@ pub async fn handle_remote_request(
                     from_trusted_surface: input.metadata.from_trusted_surface,
                 },
             );
+            upsert_remote_actor(&remote_engine.context.app_state, &input);
             output
         }
         Err(error) => {
@@ -701,6 +703,41 @@ fn record_remote_audit(app_state: &AppState, event: AuditEvent) {
         .lock()
         .expect("audit log poisoned")
         .record(event);
+}
+
+pub fn upsert_remote_actor_for_test(app_state: &AppState, input: &NormalizedInput) {
+    upsert_remote_actor(app_state, input);
+}
+
+fn upsert_remote_actor(app_state: &AppState, input: &NormalizedInput) {
+    let Some(store) = &app_state.remote_actor_store else {
+        return;
+    };
+    let record = make_actor_record(
+        &input.session_id,
+        &input.actor.actor_id,
+        input.actor.is_authenticated,
+        input.metadata.from_trusted_surface,
+    );
+    let is_new = store.upsert(record);
+    let request_count = store
+        .get(&input.session_id, &input.actor.actor_id)
+        .map(|r| r.request_count)
+        .unwrap_or(1);
+    let event = if is_new {
+        AuditEvent::RemoteActorCreated {
+            session_id: input.session_id.clone(),
+            actor_id: input.actor.actor_id.clone(),
+            is_authenticated: input.actor.is_authenticated,
+        }
+    } else {
+        AuditEvent::RemoteActorResumed {
+            session_id: input.session_id.clone(),
+            actor_id: input.actor.actor_id.clone(),
+            request_count,
+        }
+    };
+    record_remote_audit(app_state, event);
 }
 
 fn record_remote_notification_audit(app_state: &AppState, notification: &Notification) {

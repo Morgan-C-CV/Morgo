@@ -765,6 +765,7 @@ mod tests {
             cancellation_token: token,
             subagent_limiter: None,
             boss_coordinator: None,
+            remote_actor_store: None,
         }
     }
 

@@ -3,6 +3,7 @@ pub mod dispatcher;
 pub mod envelope;
 pub mod notification;
 pub mod remote;
+pub mod remote_actor;
 pub mod router;
 pub mod telegram;
 pub mod view;

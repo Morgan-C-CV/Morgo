@@ -4,6 +4,7 @@ use crate::command::types::CommandResult;
 use crate::core::boss::BossCoordinator;
 use crate::core::concurrency::SubagentLimiter;
 use crate::cost::tracker::CostTracker;
+use crate::interaction::remote_actor::RemoteActorStore;
 use crate::plugins::types::PluginLoadResult;
 use crate::service::mcp::runtime::McpRuntime;
 use crate::service::observability::ServiceObservabilityTracker;
@@ -156,6 +157,7 @@ pub struct AppState {
     pub cancellation_token: CancellationToken,
     pub subagent_limiter: Option<Arc<SubagentLimiter>>,
     pub boss_coordinator: Option<Arc<BossCoordinator>>,
+    pub remote_actor_store: Option<Arc<RemoteActorStore>>,
 }
 
 impl AppState {
@@ -183,6 +185,14 @@ impl AppState {
 
     pub fn shutdown(&self) {
         self.cancellation_token.cancel();
+    }
+
+    pub fn actor_snapshot(
+        &self,
+        session_id: &str,
+        actor_id: &str,
+    ) -> Option<crate::interaction::remote_actor::RemoteActorRecord> {
+        self.remote_actor_store.as_ref()?.get(session_id, actor_id)
     }
 
     pub fn persist_current_session_state(&self) -> Result<(), SessionPersistFailure> {
