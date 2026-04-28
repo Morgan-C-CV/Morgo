@@ -1,8 +1,8 @@
 use crate::core::boss_state::{
     BossActorHandle, BossActorStatus, BossControlRequest, BossControlResponse, BossPlan,
-    BossPlanStep, BossPlanStepStatus, BossObservabilitySummary, BossReportPayload, BossSession,
-    BossStage, BossStatus, BossStepMetrics, BossStepReport, BossStepRoutedMetadata,
-    BossStopOutcome, BossStopStage, CompressionStrategy, ContextMode,
+    BossPlanStep, BossPlanStepStatus, BossLisMPolicy, BossObservabilitySummary,
+    BossReportPayload, BossSession, BossStage, BossStatus, BossStepMetrics, BossStepReport,
+    BossStepRoutedMetadata, BossStopOutcome, BossStopStage, CompressionStrategy, ContextMode,
 };
 use crate::core::boss_context_brief::{BossContextBrief, BossContextStrategy, BossStateFrame, assemble_brief_prompt};
 use crate::core::prompt_budget::{evaluate_message_budget, BudgetDecision};
@@ -44,6 +44,7 @@ pub struct BossCoordinator {
     routed_step_metadata: Arc<RwLock<std::collections::HashMap<usize, BossStepRoutedMetadata>>>,
     runtime_key: Arc<RwLock<Option<String>>>,
     runtime_owner: Arc<BossRuntimeOwner>,
+    lism_policy: Arc<RwLock<BossLisMPolicy>>,
 }
 
 impl BossCoordinator {
@@ -65,6 +66,7 @@ impl BossCoordinator {
             routed_step_metadata: Arc::new(RwLock::new(std::collections::HashMap::new())),
             runtime_key: Arc::new(RwLock::new(None)),
             runtime_owner,
+            lism_policy: Arc::new(RwLock::new(BossLisMPolicy::Inherit)),
         }
     }
 
@@ -248,6 +250,7 @@ impl BossCoordinator {
             routed_step_metadata: self.routed_step_metadata.clone(),
             runtime_key: self.runtime_key.clone(),
             runtime_owner: self.runtime_owner.clone(),
+            lism_policy: self.lism_policy.clone(),
         }
     }
 
@@ -926,6 +929,14 @@ impl BossCoordinator {
         self.routed_step_metadata.read().await.clone()
     }
 
+    pub async fn set_lism_policy(&self, policy: BossLisMPolicy) {
+        *self.lism_policy.write().await = policy;
+    }
+
+    pub async fn lism_policy(&self) -> BossLisMPolicy {
+        *self.lism_policy.read().await
+    }
+
     pub async fn report_progress(&self, tasks: &TaskManager) -> anyhow::Result<BossReportPayload> {
         let status = self.status.read().await.clone();
         let session = self.session.read().await.clone();
@@ -1007,6 +1018,7 @@ impl BossCoordinator {
             steps,
             history_summary,
             observability_summary,
+            lism_policy: self.lism_policy().await,
         })
     }
 
@@ -1519,7 +1531,7 @@ impl BossCoordinator {
             Some(AdvanceOutcome::Dispatch(step_id)) => {
                 self.update_current_step(Some(step_id)).await;
 
-                if app_state.permission_context.lism_enabled() {
+                if effective_lism_enabled(self.lism_policy().await, app_state.permission_context.lism_enabled()) {
                     let (outcome, routed_metadata) = {
                         let plan_guard = self.plan.read().await;
                         let plan = plan_guard
@@ -2261,6 +2273,14 @@ fn model_tier_label(tier: ModelTier) -> &'static str {
         ModelTier::Low => "low",
         ModelTier::Medium => "medium",
         ModelTier::High => "high",
+    }
+}
+
+fn effective_lism_enabled(policy: BossLisMPolicy, session_lism: bool) -> bool {
+    match policy {
+        BossLisMPolicy::Inherit => session_lism,
+        BossLisMPolicy::ForceOn => true,
+        BossLisMPolicy::ForceOff => false,
     }
 }
 

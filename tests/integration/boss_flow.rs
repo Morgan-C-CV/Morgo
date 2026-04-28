@@ -7089,6 +7089,166 @@ async fn t27_r1_lism_status_shows_summary_line() {
     let _ = std::fs::remove_dir_all(config_dir);
 }
 
+// ── BossLisMPolicy precedence tests ─────────────────────────────────────────
+
+#[tokio::test]
+async fn t27_r1_boss_lism_policy_inherit_follows_session_toggle() {
+    // Inherit + session=on → LisM path (routed_metadata populated)
+    let task_manager = Arc::new(TaskManager::default());
+    let (coordinator, plan_path) = coordinator_with_plan(
+        boss_plan(vec![boss_step(0, "inherit-on")]),
+        "test_t27_r1_policy_inherit_on.json",
+    )
+    .await;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(run_minimal_openai_mock_server(listener));
+    let config_dir = std::env::temp_dir().join("t27_r1_policy_inherit_on");
+    write_worker_override_models_toml(&config_dir, &format!("http://{addr}"));
+
+    let mut app = (*app_state_with_tasks("t27-r1-inherit-on", task_manager.clone())).clone();
+    app.permission_context.set_lism_enabled(true);
+    app.permission_context.inherited_active_model_snapshot =
+        Some(make_inherited_runtime_snapshot_with_scripted_turns(vec![]));
+    app.session = Some(rust_agent::history::session::SessionSnapshot {
+        session_id: rust_agent::history::session::SessionId("t27-r1-inherit-on".into()),
+        surface: rust_agent::bootstrap::InteractionSurface::Cli,
+        session_mode: rust_agent::bootstrap::SessionMode::Headless,
+        cwd: config_dir.to_string_lossy().to_string(),
+        last_turn_at: None,
+        prompt_seed: None,
+    });
+    let app_state = Arc::new(app);
+
+    // policy = Inherit (default), session = on → LisM path
+    coordinator.advance_plan(&app_state).await.unwrap();
+    let report = coordinator.report_progress(&task_manager).await.unwrap();
+    assert_eq!(report.lism_policy, rust_agent::core::boss_state::BossLisMPolicy::Inherit);
+    assert!(
+        report.steps[0].routed_metadata.is_some(),
+        "Inherit+session_on must use LisM path"
+    );
+
+    server.await.expect("mock server");
+    let _ = std::fs::remove_file(plan_path);
+    let _ = std::fs::remove_dir_all(config_dir);
+}
+
+#[tokio::test]
+async fn t27_r1_boss_lism_policy_force_on_ignores_session_off() {
+    // ForceOn + session=off → LisM path (routed_metadata populated)
+    let task_manager = Arc::new(TaskManager::default());
+    let (coordinator, plan_path) = coordinator_with_plan(
+        boss_plan(vec![boss_step(0, "force-on")]),
+        "test_t27_r1_policy_force_on.json",
+    )
+    .await;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(run_minimal_openai_mock_server(listener));
+    let config_dir = std::env::temp_dir().join("t27_r1_policy_force_on");
+    write_worker_override_models_toml(&config_dir, &format!("http://{addr}"));
+
+    let mut app = (*app_state_with_tasks("t27-r1-force-on", task_manager.clone())).clone();
+    // session toggle is OFF
+    app.permission_context.set_lism_enabled(false);
+    app.permission_context.inherited_active_model_snapshot =
+        Some(make_inherited_runtime_snapshot_with_scripted_turns(vec![]));
+    app.session = Some(rust_agent::history::session::SessionSnapshot {
+        session_id: rust_agent::history::session::SessionId("t27-r1-force-on".into()),
+        surface: rust_agent::bootstrap::InteractionSurface::Cli,
+        session_mode: rust_agent::bootstrap::SessionMode::Headless,
+        cwd: config_dir.to_string_lossy().to_string(),
+        last_turn_at: None,
+        prompt_seed: None,
+    });
+    let app_state = Arc::new(app);
+
+    // Boss policy = ForceOn → overrides session=off
+    coordinator
+        .set_lism_policy(rust_agent::core::boss_state::BossLisMPolicy::ForceOn)
+        .await;
+
+    coordinator.advance_plan(&app_state).await.unwrap();
+    let report = coordinator.report_progress(&task_manager).await.unwrap();
+    assert_eq!(report.lism_policy, rust_agent::core::boss_state::BossLisMPolicy::ForceOn);
+    assert!(
+        report.steps[0].routed_metadata.is_some(),
+        "ForceOn must use LisM path even when session toggle is off"
+    );
+
+    server.await.expect("mock server");
+    let _ = std::fs::remove_file(plan_path);
+    let _ = std::fs::remove_dir_all(config_dir);
+}
+
+#[tokio::test]
+async fn t27_r1_boss_lism_policy_force_off_ignores_session_on() {
+    // ForceOff + session=on → non-LisM path (routed_metadata is None)
+    let task_manager = Arc::new(TaskManager::default());
+    let (coordinator, plan_path) = coordinator_with_plan(
+        boss_plan(vec![boss_step(0, "force-off")]),
+        "test_t27_r1_policy_force_off.json",
+    )
+    .await;
+
+    let mut app = (*app_state_with_tasks("t27-r1-force-off", task_manager.clone())).clone();
+    // session toggle is ON
+    app.permission_context.set_lism_enabled(true);
+    let app_state = Arc::new(app);
+
+    // Boss policy = ForceOff → overrides session=on
+    coordinator
+        .set_lism_policy(rust_agent::core::boss_state::BossLisMPolicy::ForceOff)
+        .await;
+
+    coordinator.advance_plan(&app_state).await.unwrap();
+    let report = coordinator.report_progress(&task_manager).await.unwrap();
+    assert_eq!(report.lism_policy, rust_agent::core::boss_state::BossLisMPolicy::ForceOff);
+    assert!(
+        report.steps[0].routed_metadata.is_none(),
+        "ForceOff must use non-LisM path even when session toggle is on"
+    );
+
+    let _ = std::fs::remove_file(plan_path);
+}
+
+#[tokio::test]
+async fn t27_r1_report_lism_policy_field_reflects_coordinator_policy() {
+    // Verify report.lism_policy always reflects the coordinator's current policy.
+    let task_manager = Arc::new(TaskManager::default());
+    let (coordinator, plan_path) = coordinator_with_plan(
+        boss_plan(vec![boss_step(0, "policy-report")]),
+        "test_t27_r1_policy_report.json",
+    )
+    .await;
+
+    let app_state = app_state_with_tasks("t27-r1-policy-report", task_manager.clone());
+
+    // Default: Inherit
+    let report = coordinator.report_progress(&task_manager).await.unwrap();
+    assert_eq!(report.lism_policy, rust_agent::core::boss_state::BossLisMPolicy::Inherit);
+
+    // Set ForceOn
+    coordinator
+        .set_lism_policy(rust_agent::core::boss_state::BossLisMPolicy::ForceOn)
+        .await;
+    let report = coordinator.report_progress(&task_manager).await.unwrap();
+    assert_eq!(report.lism_policy, rust_agent::core::boss_state::BossLisMPolicy::ForceOn);
+
+    // Set ForceOff
+    coordinator
+        .set_lism_policy(rust_agent::core::boss_state::BossLisMPolicy::ForceOff)
+        .await;
+    let report = coordinator.report_progress(&task_manager).await.unwrap();
+    assert_eq!(report.lism_policy, rust_agent::core::boss_state::BossLisMPolicy::ForceOff);
+
+    let _ = std::fs::remove_file(plan_path);
+    let _ = app_state;
+}
+
 #[tokio::test]
 async fn lism_enabled_boss_completed_step_auto_advances_to_next_step() {
     let (coordinator, plan_path) = coordinator_with_plan(

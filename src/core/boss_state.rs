@@ -227,6 +227,8 @@ pub struct BossReportPayload {
     pub history_summary: Vec<String>,
     #[serde(default)]
     pub observability_summary: Option<BossObservabilitySummary>,
+    #[serde(default)]
+    pub lism_policy: BossLisMPolicy,
 }
 
 impl BossReportPayload {
@@ -295,6 +297,23 @@ pub struct BossStopOutcome {
 pub enum BossControlResponse {
     Report(BossReportPayload),
     Stop(BossStopOutcome),
+}
+
+/// Boss-level LisM execution policy.
+///
+/// Precedence (high → low):
+///   1. User explicit `/LisM on|off` (session toggle — always wins)
+///   2. This policy field on BossCoordinator
+///   3. Global default: Inherit
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum BossLisMPolicy {
+    /// Follow the session-level `lism_enabled()` toggle (current behaviour).
+    #[default]
+    Inherit,
+    /// Force LisM on for this Boss session regardless of the session toggle.
+    ForceOn,
+    /// Force LisM off for this Boss session regardless of the session toggle.
+    ForceOff,
 }
 
 impl BossPlanStep {
