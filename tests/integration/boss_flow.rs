@@ -156,6 +156,45 @@ async fn run_minimal_openai_mock_server_rejected(listener: TcpListener) {
     stream.flush().await.expect("flush scripted response");
 }
 
+async fn run_mock_server_with_json_content(listener: TcpListener, content_json: String) {
+    let (mut stream, _) = listener.accept().await.expect("accept mock provider request");
+    let mut buffer = vec![0_u8; 16 * 1024];
+    let _ = stream.read(&mut buffer).await.expect("read request");
+    let escaped = content_json.replace('"', "\\\"");
+    let body = format!(
+        "data: {{\"choices\":[{{\"delta\":{{\"content\":\"{escaped}\"}}}}]}}\n\ndata: [DONE]\n\n"
+    );
+    let response = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    stream
+        .write_all(response.as_bytes())
+        .await
+        .expect("write scripted response");
+    stream.flush().await.expect("flush scripted response");
+}
+
+async fn run_minimal_openai_mock_server_n(listener: TcpListener, n: usize) {
+    let done_body = concat!(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"{\\\"state\\\":\\\"done\\\",\\\"decision\\\":\\\"done\\\"}\"}}]}\n\n",
+        "data: [DONE]\n\n"
+    );
+    let response = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+        done_body.len(),
+        done_body
+    );
+    for _ in 0..n {
+        let (mut stream, _) = listener.accept().await.expect("accept mock provider request");
+        let mut buffer = vec![0_u8; 16 * 1024];
+        let _ = stream.read(&mut buffer).await.expect("read request");
+        stream.write_all(response.as_bytes()).await.expect("write scripted response");
+        stream.flush().await.expect("flush scripted response");
+    }
+}
+
 fn make_orchestrator_route_override_plan(step_id: usize) -> BossPlan {
     use rust_agent::core::boss_state::{BossPlan, BossPlanStep, BossPlanStepStatus};
     BossPlan {
@@ -183,6 +222,36 @@ fn make_orchestrator_route_override_plan(step_id: usize) -> BossPlan {
         auto_sequence: true,
         ..Default::default()
     }
+}
+
+/// Write a models.toml with a `worker-override` profile pointing to `base_url`
+/// into `<dir>/.claude/models.toml`. Returns the dir path for cleanup.
+fn write_worker_override_models_toml(dir: &std::path::Path, base_url: &str) {
+    let claude_dir = dir.join(".claude");
+    std::fs::create_dir_all(&claude_dir).unwrap();
+    std::fs::write(
+        claude_dir.join("models.toml"),
+        format!(
+            r#"active = "default"
+[profiles.default]
+provider_id = "test"
+protocol = "openai_compatible"
+compatibility_profile = "openai_compatible"
+base_url = "{base_url}"
+model = "test-model"
+auth_strategy = "none"
+
+[profiles.worker-override]
+provider_id = "worker-override-provider"
+protocol = "openai_compatible"
+compatibility_profile = "openai_compatible"
+base_url = "{base_url}"
+model = "worker-override-model"
+auth_strategy = "none"
+"#
+        ),
+    )
+    .unwrap();
 }
 
 fn boss_step(id: usize, description: &str) -> BossPlanStep {
@@ -6776,9 +6845,6 @@ fn t27_4_max_iterations_reached_when_always_continue() {
 
 #[tokio::test]
 async fn report_progress_includes_lism_routed_metadata_for_completed_step() {
-    use rust_agent::service::api::client::ModelProviderClient;
-    use rust_agent::service::api::streaming::StreamEvent;
-
     let task_manager = Arc::new(TaskManager::default());
     let (coordinator, plan_path) = coordinator_with_plan(
         boss_plan(vec![boss_step(0, "LisM routed metadata")]),
@@ -6786,50 +6852,24 @@ async fn report_progress_includes_lism_routed_metadata_for_completed_step() {
     )
     .await;
 
-    let done_json = r#"{"state":"done","decision":"done"}"#;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(run_minimal_openai_mock_server(listener));
+
+    let config_dir = std::env::temp_dir().join("lism_report_metadata_test");
+    write_worker_override_models_toml(&config_dir, &format!("http://{addr}"));
+
     let mut app = (*app_state_with_tasks("lism-report-session", task_manager.clone())).clone();
     app.permission_context.set_lism_enabled(true);
-    app.permission_context.inherited_active_model_snapshot = Some(
-        rust_agent::state::active_model_runtime::ActiveModelRuntimeSnapshot {
-            config: rust_agent::service::api::client::ModelProviderConfig {
-                provider_id: "scripted".into(),
-                protocol: rust_agent::service::api::client::ProviderProtocol::OpenAICompatible,
-                compatibility_profile: rust_agent::service::api::client::ProviderCompatibilityProfileKind::OpenAICompatible,
-                base_url: "http://localhost".into(),
-                auth_strategy: rust_agent::service::api::client::ProviderAuthStrategy::NoAuth,
-                api_key: None,
-                api_key_env: None,
-                chat_completions_path: "/v1/chat/completions".into(),
-                model_id: "scripted-lism".into(),
-                timeout: rust_agent::service::api::client::ProviderTimeout {
-                    request_timeout_ms: 1_000,
-                    stream_timeout_ms: 1_000,
-                },
-                retry_policy: rust_agent::service::api::retry::RetryPolicy {
-                    max_attempts: 1,
-                    initial_backoff_ms: 0,
-                    max_backoff_ms: 0,
-                },
-                pricing: rust_agent::service::api::client::ModelPricing::default(),
-                proxy_url: None,
-                no_proxy: None,
-                ca_bundle_path: None,
-            },
-            client: ModelProviderClient::with_scripted_turns(vec![
-                vec![StreamEvent::TextDelta(done_json.into())],
-            ]),
-            active_profile_name: None,
-            source: rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
-            summary: rust_agent::state::app_state::ActiveModelProviderSummary {
-                provider_id: "scripted".into(),
-                protocol: "OpenAICompatible".into(),
-                compatibility_profile: "OpenAICompatible".into(),
-                base_url_host: "localhost".into(),
-                model: "scripted-lism".into(),
-                auth_status: "test".into(),
-            },
-        },
-    );
+    app.permission_context.inherited_active_model_snapshot = Some(make_inherited_runtime_snapshot_with_scripted_turns(vec![]));
+    app.session = Some(rust_agent::history::session::SessionSnapshot {
+        session_id: rust_agent::history::session::SessionId("lism-report-session".into()),
+        surface: rust_agent::bootstrap::InteractionSurface::Cli,
+        session_mode: rust_agent::bootstrap::SessionMode::Headless,
+        cwd: config_dir.to_string_lossy().to_string(),
+        last_turn_at: None,
+        prompt_seed: None,
+    });
     let app_state = Arc::new(app);
 
     let _ = coordinator.advance_plan(&app_state).await.unwrap();
@@ -6845,7 +6885,9 @@ async fn report_progress_includes_lism_routed_metadata_for_completed_step() {
         })
     );
 
+    server.await.expect("mock provider server finished");
     let _ = std::fs::remove_file(plan_path);
+    let _ = std::fs::remove_dir_all(config_dir);
 }
 
 #[tokio::test]
@@ -6872,60 +6914,33 @@ async fn report_progress_does_not_fill_routed_metadata_for_non_lism_path() {
 
 #[tokio::test]
 async fn lism_enabled_boss_completed_step_auto_advances_to_next_step() {
-    use rust_agent::service::api::client::ModelProviderClient;
-    use rust_agent::service::api::streaming::StreamEvent;
-
     let (coordinator, plan_path) = coordinator_with_plan(
         boss_plan(vec![boss_step(0, "LisM first"), boss_step(1, "LisM second")]),
         "test_boss_lism_auto_advance.json",
     )
     .await;
 
-    let done_json = r#"{"state":"done","decision":"done"}"#;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    // serve 2 connections — one per step
+    let server = tokio::spawn(async move {
+        run_minimal_openai_mock_server_n(listener, 2).await;
+    });
+
+    let config_dir = std::env::temp_dir().join("lism_auto_advance_test");
+    write_worker_override_models_toml(&config_dir, &format!("http://{addr}"));
+
     let mut app = (*app_state_with_tasks("lism-auto-advance-session", Arc::new(TaskManager::default()))).clone();
     app.permission_context.set_lism_enabled(true);
-    app.permission_context.inherited_active_model_snapshot = Some(
-        rust_agent::state::active_model_runtime::ActiveModelRuntimeSnapshot {
-            config: rust_agent::service::api::client::ModelProviderConfig {
-                provider_id: "scripted".into(),
-                protocol: rust_agent::service::api::client::ProviderProtocol::OpenAICompatible,
-                compatibility_profile: rust_agent::service::api::client::ProviderCompatibilityProfileKind::OpenAICompatible,
-                base_url: "http://localhost".into(),
-                auth_strategy: rust_agent::service::api::client::ProviderAuthStrategy::NoAuth,
-                api_key: None,
-                api_key_env: None,
-                chat_completions_path: "/v1/chat/completions".into(),
-                model_id: "scripted-lism".into(),
-                timeout: rust_agent::service::api::client::ProviderTimeout {
-                    request_timeout_ms: 1_000,
-                    stream_timeout_ms: 1_000,
-                },
-                retry_policy: rust_agent::service::api::retry::RetryPolicy {
-                    max_attempts: 1,
-                    initial_backoff_ms: 0,
-                    max_backoff_ms: 0,
-                },
-                pricing: rust_agent::service::api::client::ModelPricing::default(),
-                proxy_url: None,
-                no_proxy: None,
-                ca_bundle_path: None,
-            },
-            client: ModelProviderClient::with_scripted_turns(vec![
-                vec![StreamEvent::TextDelta(done_json.into())],
-                vec![StreamEvent::TextDelta(done_json.into())],
-            ]),
-            active_profile_name: None,
-            source: rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
-            summary: rust_agent::state::app_state::ActiveModelProviderSummary {
-                provider_id: "scripted".into(),
-                protocol: "OpenAICompatible".into(),
-                compatibility_profile: "OpenAICompatible".into(),
-                base_url_host: "localhost".into(),
-                model: "scripted-lism".into(),
-                auth_status: "test".into(),
-            },
-        },
-    );
+    app.permission_context.inherited_active_model_snapshot = Some(make_inherited_runtime_snapshot_with_scripted_turns(vec![]));
+    app.session = Some(rust_agent::history::session::SessionSnapshot {
+        session_id: rust_agent::history::session::SessionId("lism-auto-advance-session".into()),
+        surface: rust_agent::bootstrap::InteractionSurface::Cli,
+        session_mode: rust_agent::bootstrap::SessionMode::Headless,
+        cwd: config_dir.to_string_lossy().to_string(),
+        last_turn_at: None,
+        prompt_seed: None,
+    });
     let app_state = Arc::new(app);
 
     let _ = coordinator.advance_plan(&app_state).await.unwrap();
@@ -6936,69 +6951,42 @@ async fn lism_enabled_boss_completed_step_auto_advances_to_next_step() {
     assert_eq!(plan.steps[1].status, BossPlanStepStatus::Completed);
     assert!(plan.steps[1].completed, "second step should auto-complete via existing auto-advance contract");
 
+    server.await.expect("mock provider server finished");
     let _ = std::fs::remove_file(plan_path);
+    let _ = std::fs::remove_dir_all(config_dir);
 }
 
 #[tokio::test]
 async fn lism_enabled_boss_outcomes_are_persisted_for_reload() {
-    use rust_agent::service::api::client::ModelProviderClient;
-    use rust_agent::service::api::streaming::StreamEvent;
-
     let (coordinator_ok, plan_path_ok) = coordinator_with_plan(
         boss_plan(vec![boss_step(0, "LisM persisted complete")]),
         "test_boss_lism_persist_complete.json",
     )
     .await;
 
-    let done_json = r#"{"state":"done","decision":"done"}"#;
+    let listener_ok = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr_ok = listener_ok.local_addr().unwrap();
+    let server_ok = tokio::spawn(run_minimal_openai_mock_server(listener_ok));
+    let config_dir_ok = std::env::temp_dir().join("lism_persist_ok_test");
+    write_worker_override_models_toml(&config_dir_ok, &format!("http://{addr_ok}"));
+
     let mut app_ok = (*app_state_with_tasks("lism-persist-complete", Arc::new(TaskManager::default()))).clone();
     app_ok.permission_context.set_lism_enabled(true);
-    app_ok.permission_context.inherited_active_model_snapshot = Some(
-        rust_agent::state::active_model_runtime::ActiveModelRuntimeSnapshot {
-            config: rust_agent::service::api::client::ModelProviderConfig {
-                provider_id: "scripted".into(),
-                protocol: rust_agent::service::api::client::ProviderProtocol::OpenAICompatible,
-                compatibility_profile: rust_agent::service::api::client::ProviderCompatibilityProfileKind::OpenAICompatible,
-                base_url: "http://localhost".into(),
-                auth_strategy: rust_agent::service::api::client::ProviderAuthStrategy::NoAuth,
-                api_key: None,
-                api_key_env: None,
-                chat_completions_path: "/v1/chat/completions".into(),
-                model_id: "scripted-lism".into(),
-                timeout: rust_agent::service::api::client::ProviderTimeout {
-                    request_timeout_ms: 1_000,
-                    stream_timeout_ms: 1_000,
-                },
-                retry_policy: rust_agent::service::api::retry::RetryPolicy {
-                    max_attempts: 1,
-                    initial_backoff_ms: 0,
-                    max_backoff_ms: 0,
-                },
-                pricing: rust_agent::service::api::client::ModelPricing::default(),
-                proxy_url: None,
-                no_proxy: None,
-                ca_bundle_path: None,
-            },
-            client: ModelProviderClient::with_scripted_turns(vec![
-                vec![StreamEvent::TextDelta(done_json.into())],
-            ]),
-            active_profile_name: None,
-            source: rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
-            summary: rust_agent::state::app_state::ActiveModelProviderSummary {
-                provider_id: "scripted".into(),
-                protocol: "OpenAICompatible".into(),
-                compatibility_profile: "OpenAICompatible".into(),
-                base_url_host: "localhost".into(),
-                model: "scripted-lism".into(),
-                auth_status: "test".into(),
-            },
-        },
-    );
+    app_ok.permission_context.inherited_active_model_snapshot = Some(make_inherited_runtime_snapshot_with_scripted_turns(vec![]));
+    app_ok.session = Some(rust_agent::history::session::SessionSnapshot {
+        session_id: rust_agent::history::session::SessionId("lism-persist-complete".into()),
+        surface: rust_agent::bootstrap::InteractionSurface::Cli,
+        session_mode: rust_agent::bootstrap::SessionMode::Headless,
+        cwd: config_dir_ok.to_string_lossy().to_string(),
+        last_turn_at: None,
+        prompt_seed: None,
+    });
     let app_ok = Arc::new(app_ok);
     let _ = coordinator_ok.advance_plan(&app_ok).await.unwrap();
     let persisted_ok = load_plan(&plan_path_ok).await.unwrap();
     assert_eq!(persisted_ok.steps[0].status, BossPlanStepStatus::Completed);
     assert!(persisted_ok.steps[0].completed);
+    server_ok.await.expect("mock provider server finished");
 
     let (coordinator_fail, plan_path_fail) = coordinator_with_plan(
         boss_plan(vec![boss_step(0, "LisM persisted fail")]),
@@ -7007,49 +6995,23 @@ async fn lism_enabled_boss_outcomes_are_persisted_for_reload() {
     .await;
 
     let reject_json = r#"{"state":"blocked","decision":"reject","next_action":{"action_type":"reject","args":{"reason":"state frame output does not satisfy acceptance"}}}"#;
+    let listener_fail = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr_fail = listener_fail.local_addr().unwrap();
+    let server_fail = tokio::spawn(run_mock_server_with_json_content(listener_fail, reject_json.to_string()));
+    let config_dir_fail = std::env::temp_dir().join("lism_persist_fail_test");
+    write_worker_override_models_toml(&config_dir_fail, &format!("http://{addr_fail}"));
+
     let mut app_fail = (*app_state_with_tasks("lism-persist-fail", Arc::new(TaskManager::default()))).clone();
     app_fail.permission_context.set_lism_enabled(true);
-    app_fail.permission_context.inherited_active_model_snapshot = Some(
-        rust_agent::state::active_model_runtime::ActiveModelRuntimeSnapshot {
-            config: rust_agent::service::api::client::ModelProviderConfig {
-                provider_id: "scripted".into(),
-                protocol: rust_agent::service::api::client::ProviderProtocol::OpenAICompatible,
-                compatibility_profile: rust_agent::service::api::client::ProviderCompatibilityProfileKind::OpenAICompatible,
-                base_url: "http://localhost".into(),
-                auth_strategy: rust_agent::service::api::client::ProviderAuthStrategy::NoAuth,
-                api_key: None,
-                api_key_env: None,
-                chat_completions_path: "/v1/chat/completions".into(),
-                model_id: "scripted-lism".into(),
-                timeout: rust_agent::service::api::client::ProviderTimeout {
-                    request_timeout_ms: 1_000,
-                    stream_timeout_ms: 1_000,
-                },
-                retry_policy: rust_agent::service::api::retry::RetryPolicy {
-                    max_attempts: 1,
-                    initial_backoff_ms: 0,
-                    max_backoff_ms: 0,
-                },
-                pricing: rust_agent::service::api::client::ModelPricing::default(),
-                proxy_url: None,
-                no_proxy: None,
-                ca_bundle_path: None,
-            },
-            client: ModelProviderClient::with_scripted_turns(vec![
-                vec![StreamEvent::TextDelta(reject_json.into())],
-            ]),
-            active_profile_name: None,
-            source: rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
-            summary: rust_agent::state::app_state::ActiveModelProviderSummary {
-                provider_id: "scripted".into(),
-                protocol: "OpenAICompatible".into(),
-                compatibility_profile: "OpenAICompatible".into(),
-                base_url_host: "localhost".into(),
-                model: "scripted-lism".into(),
-                auth_status: "test".into(),
-            },
-        },
-    );
+    app_fail.permission_context.inherited_active_model_snapshot = Some(make_inherited_runtime_snapshot_with_scripted_turns(vec![]));
+    app_fail.session = Some(rust_agent::history::session::SessionSnapshot {
+        session_id: rust_agent::history::session::SessionId("lism-persist-fail".into()),
+        surface: rust_agent::bootstrap::InteractionSurface::Cli,
+        session_mode: rust_agent::bootstrap::SessionMode::Headless,
+        cwd: config_dir_fail.to_string_lossy().to_string(),
+        last_turn_at: None,
+        prompt_seed: None,
+    });
     let app_fail = Arc::new(app_fail);
     let _ = coordinator_fail.advance_plan(&app_fail).await.unwrap();
     let persisted_fail = load_plan(&plan_path_fail).await.unwrap();
@@ -7058,9 +7020,12 @@ async fn lism_enabled_boss_outcomes_are_persisted_for_reload() {
         persisted_fail.steps[0].last_review_summary.as_deref(),
         Some("state frame output does not satisfy acceptance")
     );
+    server_fail.await.expect("mock provider server finished");
 
     let _ = std::fs::remove_file(plan_path_ok);
     let _ = std::fs::remove_file(plan_path_fail);
+    let _ = std::fs::remove_dir_all(config_dir_ok);
+    let _ = std::fs::remove_dir_all(config_dir_fail);
 }
 
 #[tokio::test]
@@ -7139,59 +7104,30 @@ fn t27_7_1_routed_frame_executor_b_executing_carries_expected_model_route() {
 
 #[tokio::test]
 async fn lism_enabled_boss_advance_plan_marks_step_completed_via_state_frame_path() {
-    use rust_agent::service::api::client::ModelProviderClient;
-    use rust_agent::service::api::streaming::StreamEvent;
-
     let (coordinator, plan_path) = coordinator_with_plan(
         boss_plan(vec![boss_step(0, "LisM state-frame step")]),
         "test_boss_lism_completed.json",
     )
     .await;
 
-    let done_json = r#"{"state":"done","decision":"done"}"#;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(run_minimal_openai_mock_server(listener));
+
+    let config_dir = std::env::temp_dir().join("lism_completed_test");
+    write_worker_override_models_toml(&config_dir, &format!("http://{addr}"));
+
     let mut app = (*app_state_with_tasks("lism-complete-session", Arc::new(TaskManager::default()))).clone();
     app.permission_context.set_lism_enabled(true);
-    app.permission_context.inherited_active_model_snapshot = Some(
-        rust_agent::state::active_model_runtime::ActiveModelRuntimeSnapshot {
-            config: rust_agent::service::api::client::ModelProviderConfig {
-                provider_id: "scripted".into(),
-                protocol: rust_agent::service::api::client::ProviderProtocol::OpenAICompatible,
-                compatibility_profile: rust_agent::service::api::client::ProviderCompatibilityProfileKind::OpenAICompatible,
-                base_url: "http://localhost".into(),
-                auth_strategy: rust_agent::service::api::client::ProviderAuthStrategy::NoAuth,
-                api_key: None,
-                api_key_env: None,
-                chat_completions_path: "/v1/chat/completions".into(),
-                model_id: "scripted-lism".into(),
-                timeout: rust_agent::service::api::client::ProviderTimeout {
-                    request_timeout_ms: 1_000,
-                    stream_timeout_ms: 1_000,
-                },
-                retry_policy: rust_agent::service::api::retry::RetryPolicy {
-                    max_attempts: 1,
-                    initial_backoff_ms: 0,
-                    max_backoff_ms: 0,
-                },
-                pricing: rust_agent::service::api::client::ModelPricing::default(),
-                proxy_url: None,
-                no_proxy: None,
-                ca_bundle_path: None,
-            },
-            client: ModelProviderClient::with_scripted_turns(vec![
-                vec![StreamEvent::TextDelta(done_json.into())],
-            ]),
-            active_profile_name: None,
-            source: rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
-            summary: rust_agent::state::app_state::ActiveModelProviderSummary {
-                provider_id: "scripted".into(),
-                protocol: "OpenAICompatible".into(),
-                compatibility_profile: "OpenAICompatible".into(),
-                base_url_host: "localhost".into(),
-                model: "scripted-lism".into(),
-                auth_status: "test".into(),
-            },
-        },
-    );
+    app.permission_context.inherited_active_model_snapshot = Some(make_inherited_runtime_snapshot_with_scripted_turns(vec![]));
+    app.session = Some(rust_agent::history::session::SessionSnapshot {
+        session_id: rust_agent::history::session::SessionId("lism-complete-session".into()),
+        surface: rust_agent::bootstrap::InteractionSurface::Cli,
+        session_mode: rust_agent::bootstrap::SessionMode::Headless,
+        cwd: config_dir.to_string_lossy().to_string(),
+        last_turn_at: None,
+        prompt_seed: None,
+    });
     let app_state = Arc::new(app);
 
     let result = coordinator.advance_plan(&app_state).await.unwrap();
@@ -7205,14 +7141,13 @@ async fn lism_enabled_boss_advance_plan_marks_step_completed_via_state_frame_pat
     assert_eq!(step.status, BossPlanStepStatus::Completed);
     assert!(step.completed);
 
+    server.await.expect("mock provider server finished");
     let _ = std::fs::remove_file(plan_path);
+    let _ = std::fs::remove_dir_all(config_dir);
 }
 
 #[tokio::test]
 async fn lism_enabled_boss_advance_plan_marks_step_failed_with_reason() {
-    use rust_agent::service::api::client::ModelProviderClient;
-    use rust_agent::service::api::streaming::StreamEvent;
-
     let (coordinator, plan_path) = coordinator_with_plan(
         boss_plan(vec![boss_step(0, "LisM failing step")]),
         "test_boss_lism_failed.json",
@@ -7220,49 +7155,24 @@ async fn lism_enabled_boss_advance_plan_marks_step_failed_with_reason() {
     .await;
 
     let reject_json = r#"{"state":"blocked","decision":"reject","next_action":{"action_type":"reject","args":{"reason":"state frame output does not satisfy acceptance"}}}"#;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(run_mock_server_with_json_content(listener, reject_json.to_string()));
+
+    let config_dir = std::env::temp_dir().join("lism_failed_test");
+    write_worker_override_models_toml(&config_dir, &format!("http://{addr}"));
+
     let mut app = (*app_state_with_tasks("lism-fail-session", Arc::new(TaskManager::default()))).clone();
     app.permission_context.set_lism_enabled(true);
-    app.permission_context.inherited_active_model_snapshot = Some(
-        rust_agent::state::active_model_runtime::ActiveModelRuntimeSnapshot {
-            config: rust_agent::service::api::client::ModelProviderConfig {
-                provider_id: "scripted".into(),
-                protocol: rust_agent::service::api::client::ProviderProtocol::OpenAICompatible,
-                compatibility_profile: rust_agent::service::api::client::ProviderCompatibilityProfileKind::OpenAICompatible,
-                base_url: "http://localhost".into(),
-                auth_strategy: rust_agent::service::api::client::ProviderAuthStrategy::NoAuth,
-                api_key: None,
-                api_key_env: None,
-                chat_completions_path: "/v1/chat/completions".into(),
-                model_id: "scripted-lism".into(),
-                timeout: rust_agent::service::api::client::ProviderTimeout {
-                    request_timeout_ms: 1_000,
-                    stream_timeout_ms: 1_000,
-                },
-                retry_policy: rust_agent::service::api::retry::RetryPolicy {
-                    max_attempts: 1,
-                    initial_backoff_ms: 0,
-                    max_backoff_ms: 0,
-                },
-                pricing: rust_agent::service::api::client::ModelPricing::default(),
-                proxy_url: None,
-                no_proxy: None,
-                ca_bundle_path: None,
-            },
-            client: ModelProviderClient::with_scripted_turns(vec![
-                vec![StreamEvent::TextDelta(reject_json.into())],
-            ]),
-            active_profile_name: None,
-            source: rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
-            summary: rust_agent::state::app_state::ActiveModelProviderSummary {
-                provider_id: "scripted".into(),
-                protocol: "OpenAICompatible".into(),
-                compatibility_profile: "OpenAICompatible".into(),
-                base_url_host: "localhost".into(),
-                model: "scripted-lism".into(),
-                auth_status: "test".into(),
-            },
-        },
-    );
+    app.permission_context.inherited_active_model_snapshot = Some(make_inherited_runtime_snapshot_with_scripted_turns(vec![]));
+    app.session = Some(rust_agent::history::session::SessionSnapshot {
+        session_id: rust_agent::history::session::SessionId("lism-fail-session".into()),
+        surface: rust_agent::bootstrap::InteractionSurface::Cli,
+        session_mode: rust_agent::bootstrap::SessionMode::Headless,
+        cwd: config_dir.to_string_lossy().to_string(),
+        last_turn_at: None,
+        prompt_seed: None,
+    });
     let app_state = Arc::new(app);
 
     let result = coordinator.advance_plan(&app_state).await.unwrap();
@@ -7281,7 +7191,9 @@ async fn lism_enabled_boss_advance_plan_marks_step_failed_with_reason() {
         Some("state frame output does not satisfy acceptance")
     );
 
+    server.await.expect("mock provider server finished");
     let _ = std::fs::remove_file(plan_path);
+    let _ = std::fs::remove_dir_all(config_dir);
 }
 
 fn make_plan_with_step(step_id: usize, description: &str, acceptance: Vec<String>) -> rust_agent::core::boss_state::BossPlan {
@@ -7322,7 +7234,6 @@ async fn t27_5_runtime_override_live_seam_uses_resolved_snapshot_client() {
         StepOutcome, StepRuntimeResolutionContext, build_routed_state_frame_with_model_route,
         run_routed_step_with_runtime,
     };
-    use rust_agent::core::state_frame_model_router::ModelRoute;
 
     let inherited = make_inherited_runtime_snapshot_with_scripted_turns(vec![]);
     let listener = TcpListener::bind("127.0.0.1:0")
@@ -7332,14 +7243,9 @@ async fn t27_5_runtime_override_live_seam_uses_resolved_snapshot_client() {
     let server = tokio::spawn(run_minimal_openai_mock_server(listener));
     let registry = make_step_model_registry_with_base_url(&format!("http://{}", addr));
     let plan = make_orchestrator_route_override_plan(0);
+    // router produces provider_profile_id=Some("worker-override") for (Worker, Executing, M)
     let routed = build_routed_state_frame_with_model_route(&plan, BossStage::Execution, 0, ActorRole::Worker);
-    let routed = rust_agent::core::state_frame_orchestrator::RoutedStateFrame {
-        frame: routed.frame,
-        model_route: ModelRoute {
-            tier: routed.model_route.tier,
-            provider_profile_id: Some("worker-override".into()),
-        },
-    };
+    assert_eq!(routed.model_route.provider_profile_id.as_deref(), Some("worker-override"));
 
     let runtime = StepRuntimeResolutionContext {
         inherited_snapshot: &inherited,
@@ -7366,7 +7272,6 @@ fn t27_5_runtime_override_missing_registry_fails_step_without_mutating_parent_sn
     use rust_agent::core::state_frame_orchestrator::{
         StepRuntimeResolutionContext, build_routed_state_frame_with_model_route,
     };
-    use rust_agent::core::state_frame_model_router::ModelRoute;
 
     let rt = tokio::runtime::Runtime::new().unwrap();
     let inherited = make_inherited_runtime_snapshot_with_scripted_turns(vec![]);
@@ -7374,14 +7279,9 @@ fn t27_5_runtime_override_missing_registry_fails_step_without_mutating_parent_sn
     let original_source = inherited.source.clone();
     let original_config = inherited.config.clone();
     let plan = make_orchestrator_route_override_plan(0);
+    // router produces worker-override for (Worker, Executing, M)
     let routed = build_routed_state_frame_with_model_route(&plan, BossStage::Execution, 0, ActorRole::Worker);
-    let routed = rust_agent::core::state_frame_orchestrator::RoutedStateFrame {
-        frame: routed.frame,
-        model_route: ModelRoute {
-            tier: routed.model_route.tier,
-            provider_profile_id: Some("worker-override".into()),
-        },
-    };
+    assert_eq!(routed.model_route.provider_profile_id.as_deref(), Some("worker-override"));
 
     let runtime = StepRuntimeResolutionContext {
         inherited_snapshot: &inherited,
@@ -8078,103 +7978,47 @@ fn t27_7_1_uncovered_combination_uses_effort_default() {
 // ── T27.8 Boss production-path runtime wiring ─────────────────────────────
 
 #[tokio::test]
-async fn t27_8_lism_boss_production_path_no_registry_uses_inherited_snapshot() {
-    use rust_agent::service::api::client::ModelProviderClient;
-    use rust_agent::service::api::streaming::StreamEvent;
-
+async fn t27_8_lism_boss_production_path_no_registry_step_fails_with_override_error() {
+    // Router now produces worker-override for (Worker, Executing, M).
+    // When no registry is available, advance_plan must return an error — not silently fall back.
     let (coordinator, plan_path) = coordinator_with_plan(
         boss_plan(vec![boss_step(0, "runtime wiring no registry")]),
         "test_boss_t278_no_registry.json",
     )
     .await;
 
-    let done_json = r#"{"state":"done","decision":"done"}"#;
     let mut app = (*app_state_with_tasks("t278-no-registry", Arc::new(TaskManager::default()))).clone();
     app.permission_context.set_lism_enabled(true);
     // session is None → cwd defaults to "." → no models.toml → registry is None
-    // route has provider_profile_id = None → inherited snapshot is used
-    app.permission_context.inherited_active_model_snapshot = Some(
-        rust_agent::state::active_model_runtime::ActiveModelRuntimeSnapshot {
-            config: rust_agent::service::api::client::ModelProviderConfig {
-                provider_id: "scripted".into(),
-                protocol: rust_agent::service::api::client::ProviderProtocol::OpenAICompatible,
-                compatibility_profile: rust_agent::service::api::client::ProviderCompatibilityProfileKind::OpenAICompatible,
-                base_url: "http://localhost".into(),
-                auth_strategy: rust_agent::service::api::client::ProviderAuthStrategy::NoAuth,
-                api_key: None,
-                api_key_env: None,
-                chat_completions_path: "/v1/chat/completions".into(),
-                model_id: "scripted-t278".into(),
-                timeout: rust_agent::service::api::client::ProviderTimeout {
-                    request_timeout_ms: 1_000,
-                    stream_timeout_ms: 1_000,
-                },
-                retry_policy: rust_agent::service::api::retry::RetryPolicy {
-                    max_attempts: 1,
-                    initial_backoff_ms: 0,
-                    max_backoff_ms: 0,
-                },
-                pricing: rust_agent::service::api::client::ModelPricing::default(),
-                proxy_url: None,
-                no_proxy: None,
-                ca_bundle_path: None,
-            },
-            client: ModelProviderClient::with_scripted_turns(vec![
-                vec![StreamEvent::TextDelta(done_json.into())],
-            ]),
-            active_profile_name: Some("inherited-t278".into()),
-            source: ActiveModelProfileSource::BootstrapDefault,
-            summary: ActiveModelProviderSummary {
-                provider_id: "scripted".into(),
-                protocol: "OpenAICompatible".into(),
-                compatibility_profile: "OpenAICompatible".into(),
-                base_url_host: "localhost".into(),
-                model: "scripted-t278".into(),
-                auth_status: "test".into(),
-            },
-        },
-    );
+    // router produces worker-override → resolver requires registry → must error
+    app.permission_context.inherited_active_model_snapshot = Some(make_inherited_runtime_snapshot_with_scripted_turns(vec![]));
     let app_state = Arc::new(app);
 
-    let _ = coordinator.advance_plan(&app_state).await.unwrap();
-
-    let guard = coordinator.plan.read().await;
-    let plan = guard.as_ref().unwrap();
-    assert_eq!(plan.steps[0].status, BossPlanStepStatus::Completed);
+    let result = coordinator.advance_plan(&app_state).await;
+    assert!(result.is_err(), "missing registry with override should return error");
+    assert!(
+        result.unwrap_err().to_string().contains("model profile registry is unavailable"),
+        "error should mention registry unavailable"
+    );
 
     let _ = std::fs::remove_file(plan_path);
 }
 
 #[tokio::test]
-async fn t27_8_lism_boss_production_path_with_registry_on_disk_uses_inherited_when_no_override() {
-    use rust_agent::service::api::client::ModelProviderClient;
-    use rust_agent::service::api::streaming::StreamEvent;
-
+async fn t27_8_lism_boss_production_path_with_registry_on_disk_uses_worker_override_profile() {
     let (coordinator, plan_path) = coordinator_with_plan(
         boss_plan(vec![boss_step(0, "runtime wiring with registry")]),
         "test_boss_t278_with_registry.json",
     )
     .await;
 
-    // Write a minimal models.toml to a temp dir so the registry loads successfully
-    let config_dir = std::env::temp_dir().join("t278_registry_test");
-    let claude_dir = config_dir.join(".claude");
-    std::fs::create_dir_all(&claude_dir).unwrap();
-    std::fs::write(
-        claude_dir.join("models.toml"),
-        r#"active = "default"
-[profiles.default]
-provider_id = "test"
-protocol = "openai_compatible"
-compatibility_profile = "openai_compatible"
-base_url = "http://localhost"
-model = "test-model"
-auth_strategy = "none"
-"#,
-    )
-    .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(run_minimal_openai_mock_server(listener));
 
-    let done_json = r#"{"state":"done","decision":"done"}"#;
+    let config_dir = std::env::temp_dir().join("t278_registry_test");
+    write_worker_override_models_toml(&config_dir, &format!("http://{addr}"));
+
     let mut app = (*app_state_with_tasks("t278-with-registry", Arc::new(TaskManager::default()))).clone();
     app.permission_context.set_lism_enabled(true);
     app.session = Some(rust_agent::history::session::SessionSnapshot {
@@ -8185,48 +8029,8 @@ auth_strategy = "none"
         last_turn_at: None,
         prompt_seed: None,
     });
-    // route has provider_profile_id = None → inherited snapshot is used even with registry present
-    app.permission_context.inherited_active_model_snapshot = Some(
-        rust_agent::state::active_model_runtime::ActiveModelRuntimeSnapshot {
-            config: rust_agent::service::api::client::ModelProviderConfig {
-                provider_id: "scripted".into(),
-                protocol: rust_agent::service::api::client::ProviderProtocol::OpenAICompatible,
-                compatibility_profile: rust_agent::service::api::client::ProviderCompatibilityProfileKind::OpenAICompatible,
-                base_url: "http://localhost".into(),
-                auth_strategy: rust_agent::service::api::client::ProviderAuthStrategy::NoAuth,
-                api_key: None,
-                api_key_env: None,
-                chat_completions_path: "/v1/chat/completions".into(),
-                model_id: "scripted-t278-reg".into(),
-                timeout: rust_agent::service::api::client::ProviderTimeout {
-                    request_timeout_ms: 1_000,
-                    stream_timeout_ms: 1_000,
-                },
-                retry_policy: rust_agent::service::api::retry::RetryPolicy {
-                    max_attempts: 1,
-                    initial_backoff_ms: 0,
-                    max_backoff_ms: 0,
-                },
-                pricing: rust_agent::service::api::client::ModelPricing::default(),
-                proxy_url: None,
-                no_proxy: None,
-                ca_bundle_path: None,
-            },
-            client: ModelProviderClient::with_scripted_turns(vec![
-                vec![StreamEvent::TextDelta(done_json.into())],
-            ]),
-            active_profile_name: Some("inherited-t278-reg".into()),
-            source: ActiveModelProfileSource::BootstrapDefault,
-            summary: ActiveModelProviderSummary {
-                provider_id: "scripted".into(),
-                protocol: "OpenAICompatible".into(),
-                compatibility_profile: "OpenAICompatible".into(),
-                base_url_host: "localhost".into(),
-                model: "scripted-t278-reg".into(),
-                auth_status: "test".into(),
-            },
-        },
-    );
+    // inherited has empty scripted turns — override profile (mock server) is used instead
+    app.permission_context.inherited_active_model_snapshot = Some(make_inherited_runtime_snapshot_with_scripted_turns(vec![]));
     let app_state = Arc::new(app);
 
     let _ = coordinator.advance_plan(&app_state).await.unwrap();
@@ -8235,6 +8039,7 @@ auth_strategy = "none"
     let plan = guard.as_ref().unwrap();
     assert_eq!(plan.steps[0].status, BossPlanStepStatus::Completed);
 
+    server.await.expect("mock provider server finished");
     let _ = std::fs::remove_file(plan_path);
     let _ = std::fs::remove_dir_all(config_dir);
 }
@@ -8266,18 +8071,16 @@ async fn t27_8_lism_boss_production_path_missing_inherited_snapshot_returns_erro
 // ── T27.9 Boss production-path override contract ──────────────────────────
 //
 // These tests verify the override contract at the orchestrator seam that
-// advance_plan() calls. The router currently always returns provider_profile_id=None
-// (v1 static mapping), so the override path is exercised by constructing a
-// RoutedStateFrame with a patched ModelRoute — the same seam advance_plan uses.
+// advance_plan() calls. The router now produces provider_profile_id=Some("worker-override")
+// for (Worker, Executing, M) — no manual ModelRoute patching needed.
 
 #[tokio::test]
 async fn t27_9_boss_production_path_override_hit_uses_resolved_runtime_not_inherited() {
     use rust_agent::core::boss_state::BossStage;
     use rust_agent::core::state_frame::ActorRole;
     use rust_agent::core::state_frame_loop::DecisionLoopConfig;
-    use rust_agent::core::state_frame_model_router::ModelRoute;
     use rust_agent::core::state_frame_orchestrator::{
-        RoutedStateFrame, StepOutcome, StepRuntimeResolutionContext,
+        StepOutcome, StepRuntimeResolutionContext,
         build_routed_state_frame_with_model_route, run_routed_step_with_runtime,
     };
 
@@ -8291,20 +8094,18 @@ async fn t27_9_boss_production_path_override_hit_uses_resolved_runtime_not_inher
     let registry = make_step_model_registry_with_base_url(&format!("http://{}", addr));
     let plan = make_orchestrator_route_override_plan(0);
 
-    let base_routed = build_routed_state_frame_with_model_route(
+    // router produces provider_profile_id=Some("worker-override") for (Worker, Executing, M)
+    let routed = build_routed_state_frame_with_model_route(
         &plan,
         BossStage::Execution,
         0,
         ActorRole::Worker,
     );
-    // patch provider_profile_id to simulate what the router will produce once extended
-    let routed = RoutedStateFrame {
-        frame: base_routed.frame,
-        model_route: ModelRoute {
-            tier: base_routed.model_route.tier,
-            provider_profile_id: Some("worker-override".into()),
-        },
-    };
+    assert_eq!(
+        routed.model_route.provider_profile_id.as_deref(),
+        Some("worker-override"),
+        "router must produce worker-override for this combination"
+    );
 
     let runtime = StepRuntimeResolutionContext {
         inherited_snapshot: &inherited,
@@ -8332,28 +8133,25 @@ async fn t27_9_boss_production_path_override_missing_registry_step_fails_with_ob
     use rust_agent::core::boss_state::BossStage;
     use rust_agent::core::state_frame::ActorRole;
     use rust_agent::core::state_frame_loop::DecisionLoopConfig;
-    use rust_agent::core::state_frame_model_router::ModelRoute;
     use rust_agent::core::state_frame_orchestrator::{
-        RoutedStateFrame, StepRuntimeResolutionContext,
+        StepRuntimeResolutionContext,
         build_routed_state_frame_with_model_route, run_routed_step_with_runtime,
     };
 
     let inherited = make_inherited_runtime_snapshot_with_scripted_turns(vec![]);
     let plan = make_orchestrator_route_override_plan(0);
 
-    let base_routed = build_routed_state_frame_with_model_route(
+    let routed = build_routed_state_frame_with_model_route(
         &plan,
         BossStage::Execution,
         0,
         ActorRole::Worker,
     );
-    let routed = RoutedStateFrame {
-        frame: base_routed.frame,
-        model_route: ModelRoute {
-            tier: base_routed.model_route.tier,
-            provider_profile_id: Some("worker-override".into()),
-        },
-    };
+    assert_eq!(
+        routed.model_route.provider_profile_id.as_deref(),
+        Some("worker-override"),
+        "router must produce worker-override for this combination"
+    );
 
     let runtime = StepRuntimeResolutionContext {
         inherited_snapshot: &inherited,
@@ -8379,9 +8177,8 @@ async fn t27_9_boss_production_path_override_rejected_decision_step_fails_with_o
     use rust_agent::core::boss_state::BossStage;
     use rust_agent::core::state_frame::ActorRole;
     use rust_agent::core::state_frame_loop::DecisionLoopConfig;
-    use rust_agent::core::state_frame_model_router::ModelRoute;
     use rust_agent::core::state_frame_orchestrator::{
-        RoutedStateFrame, StepOutcome, StepRuntimeResolutionContext,
+        StepOutcome, StepRuntimeResolutionContext,
         build_routed_state_frame_with_model_route, run_routed_step_with_runtime,
     };
 
@@ -8394,19 +8191,17 @@ async fn t27_9_boss_production_path_override_rejected_decision_step_fails_with_o
     let registry = make_step_model_registry_with_base_url(&format!("http://{}", addr));
     let plan = make_orchestrator_route_override_plan(0);
 
-    let base_routed = build_routed_state_frame_with_model_route(
+    let routed = build_routed_state_frame_with_model_route(
         &plan,
         BossStage::Execution,
         0,
         ActorRole::Worker,
     );
-    let routed = RoutedStateFrame {
-        frame: base_routed.frame,
-        model_route: ModelRoute {
-            tier: base_routed.model_route.tier,
-            provider_profile_id: Some("worker-override".into()),
-        },
-    };
+    assert_eq!(
+        routed.model_route.provider_profile_id.as_deref(),
+        Some("worker-override"),
+        "router must produce worker-override for this combination"
+    );
 
     let runtime = StepRuntimeResolutionContext {
         inherited_snapshot: &inherited,

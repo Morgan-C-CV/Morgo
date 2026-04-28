@@ -10,7 +10,8 @@ pub enum ModelTier {
 }
 
 /// Result of static model-tier routing.
-/// `provider_profile_id` is intentionally `None` in v1 — runtime lookup is deferred.
+/// `provider_profile_id` is `Some` only for combinations with an explicit profile rule;
+/// all other combinations remain `None` (runtime inherits the session snapshot).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelRoute {
     pub tier: ModelTier,
@@ -45,6 +46,58 @@ pub fn route_model_tier(
 
     ModelRoute {
         tier,
-        provider_profile_id: None,
+        provider_profile_id: match (role, state, tier) {
+            (ActorRole::Worker, AgentState::Executing, ModelTier::Medium) => {
+                Some("worker-override".into())
+            }
+            _ => None,
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn worker_executing_medium_produces_worker_override_profile() {
+        let route = route_model_tier(EffortLevel::M, ActorRole::Worker, AgentState::Executing);
+        assert_eq!(route.tier, ModelTier::Medium);
+        assert_eq!(route.provider_profile_id.as_deref(), Some("worker-override"));
+    }
+
+    #[test]
+    fn executor_b_executing_medium_stays_none() {
+        let route = route_model_tier(EffortLevel::M, ActorRole::ExecutorB, AgentState::Executing);
+        assert_eq!(route.tier, ModelTier::Medium);
+        assert_eq!(route.provider_profile_id, None);
+    }
+
+    #[test]
+    fn designer_a_planning_low_stays_none() {
+        let route = route_model_tier(EffortLevel::L, ActorRole::DesignerA, AgentState::Planning);
+        assert_eq!(route.tier, ModelTier::Medium); // clamped
+        assert_eq!(route.provider_profile_id, None);
+    }
+
+    #[test]
+    fn verifier_verifying_low_stays_none() {
+        let route = route_model_tier(EffortLevel::L, ActorRole::Verifier, AgentState::Verifying);
+        assert_eq!(route.tier, ModelTier::Medium); // clamped
+        assert_eq!(route.provider_profile_id, None);
+    }
+
+    #[test]
+    fn summarizer_executing_high_stays_none() {
+        let route = route_model_tier(EffortLevel::H, ActorRole::Summarizer, AgentState::Executing);
+        assert_eq!(route.tier, ModelTier::Medium); // capped
+        assert_eq!(route.provider_profile_id, None);
+    }
+
+    #[test]
+    fn worker_correcting_high_stays_none() {
+        let route = route_model_tier(EffortLevel::H, ActorRole::Worker, AgentState::Correcting);
+        assert_eq!(route.tier, ModelTier::High);
+        assert_eq!(route.provider_profile_id, None);
     }
 }
