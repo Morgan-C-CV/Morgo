@@ -3,7 +3,6 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use serde::Deserialize;
-use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 use tokio::time::timeout;
 
@@ -12,6 +11,7 @@ use crate::tool::definition::{
     PermissionApprovalMetadata, PermissionDecision, Tool, ToolCall, ToolMetadata, ToolResult,
 };
 
+pub mod clamped_reader;
 pub mod command_helpers;
 pub mod path_validation;
 pub mod permissions;
@@ -20,6 +20,9 @@ pub mod sandbox;
 pub mod scanner;
 pub mod security;
 pub mod sed_validation;
+
+use clamped_reader::{ClampedOutput, clamped_to_string, read_clamped};
+use sandbox::ClampedProcessOutput;
 
 use crate::tool::classifier::auto_classifier::{ClassifierDecision, classify_bash_command};
 use command_helpers::{command_matches_rule, normalized_command_variants};
@@ -344,7 +347,7 @@ async fn run_background_process(
     cwd: &std::path::Path,
     policy: SandboxPolicy,
     timeout_ms: u64,
-) -> anyhow::Result<std::process::Output> {
+) -> anyhow::Result<ClampedProcessOutput> {
     let mut process = Command::new("/bin/sh");
     process
         .arg("-lc")
@@ -359,42 +362,24 @@ async fn run_background_process(
         .spawn()
         .map_err(|error| anyhow::anyhow!("failed to spawn background bash command: {error}"))?;
 
-    let stdout_task = child.stdout.take().map(|mut stdout| {
-        tokio::spawn(async move {
-            let mut buffer = Vec::new();
-            let _ = stdout.read_to_end(&mut buffer).await;
-            buffer
-        })
-    });
-    let stderr_task = child.stderr.take().map(|mut stderr| {
-        tokio::spawn(async move {
-            let mut buffer = Vec::new();
-            let _ = stderr.read_to_end(&mut buffer).await;
-            buffer
-        })
-    });
+    let stdout_task = child.stdout.take().map(|stdout| tokio::spawn(read_clamped(stdout)));
+    let stderr_task = child.stderr.take().map(|stderr| tokio::spawn(read_clamped(stderr)));
 
     let status = timeout(Duration::from_millis(timeout_ms), child.wait())
         .await
         .map_err(|_| anyhow::anyhow!("bash command timed out after {timeout_ms}ms"))??;
+
+    let empty = || ClampedOutput { head: vec![], tail: vec![], truncated: false, total_bytes_read: 0 };
     let stdout = match stdout_task {
-        Some(task) => task
-            .await
-            .map_err(|error| anyhow::anyhow!("stdout join failed: {error}"))?,
-        None => Vec::new(),
+        Some(task) => task.await.map_err(|e| anyhow::anyhow!("stdout join failed: {e}"))?,
+        None => empty(),
     };
     let stderr = match stderr_task {
-        Some(task) => task
-            .await
-            .map_err(|error| anyhow::anyhow!("stderr join failed: {error}"))?,
-        None => Vec::new(),
+        Some(task) => task.await.map_err(|e| anyhow::anyhow!("stderr join failed: {e}"))?,
+        None => empty(),
     };
 
-    Ok(std::process::Output {
-        status,
-        stdout,
-        stderr,
-    })
+    Ok(ClampedProcessOutput { status, stdout, stderr })
 }
 
 fn format_output_background(
@@ -402,7 +387,7 @@ fn format_output_background(
     command: &str,
     cwd: &std::path::Path,
     policy: SandboxPolicy,
-    output: std::process::Output,
+    output: ClampedProcessOutput,
 ) -> String {
     let temp_input = BashInput {
         command: command.to_string(),
@@ -428,12 +413,12 @@ fn resolve_cwd(permissions: &ToolPermissionContext) -> anyhow::Result<PathBuf> {
 
 fn format_output(
     input: &BashInput,
-    output: std::process::Output,
+    output: ClampedProcessOutput,
     cwd: &std::path::Path,
     policy: SandboxPolicy,
 ) -> String {
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stdout = clamped_to_string(output.stdout).trim().to_string();
+    let stderr = clamped_to_string(output.stderr).trim().to_string();
     let status = output
         .status
         .code()
