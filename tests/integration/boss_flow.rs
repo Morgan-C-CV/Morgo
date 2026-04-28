@@ -6821,6 +6821,32 @@ async fn lism_enabled_boss_outcomes_are_persisted_for_reload() {
     let _ = std::fs::remove_file(plan_path_fail);
 }
 
+#[tokio::test]
+async fn legacy_boss_auto_advance_still_completes_next_step_after_completion() {
+    let (coordinator, plan_path) = coordinator_with_plan(
+        boss_plan(vec![boss_step(0, "legacy first"), boss_step(1, "legacy second")]),
+        "test_boss_legacy_auto_advance_contract.json",
+    )
+    .await;
+
+    {
+        let mut guard = coordinator.plan.write().await;
+        let plan = guard.as_mut().unwrap();
+        plan.steps[0].completed = true;
+        plan.steps[0].status = BossPlanStepStatus::Completed;
+    }
+
+    let app_state = app_state_with_tasks("legacy-auto-advance-session", Arc::new(TaskManager::default()));
+    let result = coordinator.advance_plan(&app_state).await.unwrap();
+    assert!(result.is_some(), "legacy path should still continue dispatch after a completed step");
+
+    let guard = coordinator.plan.read().await;
+    let plan = guard.as_ref().unwrap();
+    assert_eq!(plan.steps[1].status, BossPlanStepStatus::Running);
+
+    let _ = std::fs::remove_file(plan_path);
+}
+
 // ── T27.5 StateFrame orchestrator seam ───────────────────────────────────
 
 #[tokio::test]
