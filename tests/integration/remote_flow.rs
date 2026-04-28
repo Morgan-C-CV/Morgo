@@ -1712,7 +1712,7 @@ fn make_actor_app_state(
             model: "test".into(),
             auth_status: "none".into(),
         },
-        active_session_id: "actor-test-session".into(),
+        active_session_id: "actor-test-session".to_string(),
         session_store: Some(Arc::new(InMemorySessionStore::default())),
         session: None,
         history: None,
@@ -1732,11 +1732,11 @@ fn r3_remote_actor_record_created_on_first_request() {
     let app_state = make_actor_app_state(audit_log, store.clone());
 
     let input = NormalizedInput::from_remote_raw(
-        "sess-1".into(),
-        "actor-1".into(),
+        "sess-1".to_string(),
+        "actor-1".to_string(),
         true,
         false,
-        "hello".into(),
+        "hello".to_string(),
     );
 
     rust_agent::interaction::remote::upsert_remote_actor_for_test(&app_state, &input);
@@ -1755,20 +1755,20 @@ fn r3_remote_actor_record_resumed_on_second_request() {
     let app_state = make_actor_app_state(audit_log, store.clone());
 
     let input = NormalizedInput::from_remote_raw(
-        "sess-2".into(),
-        "actor-2".into(),
+        "sess-2".to_string(),
+        "actor-2".to_string(),
         false,
         true,
-        "first".into(),
+        "first".to_string(),
     );
     rust_agent::interaction::remote::upsert_remote_actor_for_test(&app_state, &input);
 
     let input2 = NormalizedInput::from_remote_raw(
-        "sess-2".into(),
-        "actor-2".into(),
+        "sess-2".to_string(),
+        "actor-2".to_string(),
         false,
         true,
-        "second".into(),
+        "second".to_string(),
     );
     rust_agent::interaction::remote::upsert_remote_actor_for_test(&app_state, &input2);
 
@@ -1784,11 +1784,11 @@ fn r3_remote_actor_lifecycle_audit_events_recorded() {
     let app_state = make_actor_app_state(audit_log.clone(), store.clone());
 
     let input = NormalizedInput::from_remote_raw(
-        "sess-3".into(),
-        "actor-3".into(),
+        "sess-3".to_string(),
+        "actor-3".to_string(),
         true,
         false,
-        "msg".into(),
+        "msg".to_string(),
     );
     rust_agent::interaction::remote::upsert_remote_actor_for_test(&app_state, &input);
     rust_agent::interaction::remote::upsert_remote_actor_for_test(&app_state, &input);
@@ -1821,11 +1821,11 @@ fn r3_remote_actor_store_file_backed_round_trip() {
         let audit_log = Arc::new(std::sync::Mutex::new(AuditLog::default()));
         let app_state = make_actor_app_state(audit_log, Arc::new(store));
         let input = NormalizedInput::from_remote_raw(
-            "sess-4".into(),
-            "actor-4".into(),
+            "sess-4".to_string(),
+            "actor-4".to_string(),
             true,
             true,
-            "persist".into(),
+            "persist".to_string(),
         );
         rust_agent::interaction::remote::upsert_remote_actor_for_test(&app_state, &input);
     }

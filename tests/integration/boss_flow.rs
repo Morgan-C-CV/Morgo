@@ -366,6 +366,7 @@ fn app_state_with_tasks(active_session_id: &str, task_manager: Arc<TaskManager>)
         cancellation_token: tokio_util::sync::CancellationToken::new(),
         subagent_limiter: None,
         boss_coordinator: None,
+        remote_actor_store: None,
     })
 }
 
@@ -4387,6 +4388,7 @@ async fn t22_2_b_session_fallback_when_task_manager_absent() {
         cancellation_token: tokio_util::sync::CancellationToken::new(),
         subagent_limiter: None,
         boss_coordinator: None,
+        remote_actor_store: None,
     });
 
     let result = coordinator.advance_plan(&app_state).await;
