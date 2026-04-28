@@ -2594,6 +2594,7 @@ fn drain_remote_notifications_maps_structured_payloads() {
         cancellation_token: tokio_util::sync::CancellationToken::new(),
         subagent_limiter: None,
         boss_coordinator: None,
+        remote_actor_store: None,
     };
     let mut approval = Notification::approval_required(
         "remote-session",
@@ -2723,6 +2724,7 @@ fn drain_remote_task_update_notifications_preserve_task_type() {
         cancellation_token: tokio_util::sync::CancellationToken::new(),
         subagent_limiter: None,
         boss_coordinator: None,
+        remote_actor_store: None,
     };
     let mut notification = Notification::task_update(
         "remote-session",

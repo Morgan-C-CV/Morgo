@@ -558,6 +558,7 @@ async fn router_route_surfaces_strict_unknown_command_as_denied_result() {
         cancellation_token: tokio_util::sync::CancellationToken::new(),
         subagent_limiter: None,
         boss_coordinator: None,
+        remote_actor_store: None,
     };
     let result = router
         .route(
@@ -621,6 +622,7 @@ async fn status_command_shows_active_model_summary_without_secret_leak() {
         cancellation_token: tokio_util::sync::CancellationToken::new(),
         subagent_limiter: None,
         boss_coordinator: None,
+        remote_actor_store: None,
     };
 
     let result = router
@@ -1205,6 +1207,7 @@ async fn prompt_command_with_model_invocation_disabled_never_enters_query_engine
         cancellation_token: tokio_util::sync::CancellationToken::new(),
         subagent_limiter: None,
         boss_coordinator: None,
+        remote_actor_store: None,
     };
 
     let result = router
@@ -1271,6 +1274,7 @@ async fn router_compact_route_enters_query_engine_with_builtin_prompt() {
         cancellation_token: tokio_util::sync::CancellationToken::new(),
         subagent_limiter: None,
         boss_coordinator: None,
+        remote_actor_store: None,
     };
 
     let result = router
@@ -1354,6 +1358,7 @@ async fn router_cost_route_returns_local_message_without_entering_query_engine()
         cancellation_token: tokio_util::sync::CancellationToken::new(),
         subagent_limiter: None,
         boss_coordinator: None,
+        remote_actor_store: None,
     };
 
     let result = router
@@ -1423,6 +1428,7 @@ async fn cli_repl_handles_multiple_inputs_in_sequence() {
         cancellation_token: tokio_util::sync::CancellationToken::new(),
         subagent_limiter: None,
         boss_coordinator: None,
+        remote_actor_store: None,
     };
     let engine =
         rust_agent::core::engine::QueryEngine::new(rust_agent::core::context::QueryContext {
@@ -1506,6 +1512,7 @@ async fn cli_repl_surfaces_task_events_for_active_session() {
         cancellation_token: tokio_util::sync::CancellationToken::new(),
         subagent_limiter: None,
         boss_coordinator: None,
+        remote_actor_store: None,
     };
     let task = manager.create(
         "queued task",
@@ -1612,6 +1619,7 @@ async fn cli_repl_persists_history_for_local_and_query_turns() {
         cancellation_token: tokio_util::sync::CancellationToken::new(),
         subagent_limiter: None,
         boss_coordinator: None,
+        remote_actor_store: None,
     };
     let engine =
         rust_agent::core::engine::QueryEngine::new(rust_agent::core::context::QueryContext {
@@ -1732,6 +1740,7 @@ async fn remote_handler_preserves_remote_actor_and_session_for_query_flow() {
         cancellation_token: tokio_util::sync::CancellationToken::new(),
         subagent_limiter: None,
         boss_coordinator: None,
+        remote_actor_store: None,
     };
     let runtime_plugin_state = RuntimePluginState::new(build_runtime_plugin_snapshot(&app_state));
     app_state.permission_context = app_state
@@ -1892,6 +1901,7 @@ async fn cli_repl_uses_next_turn_plugin_snapshot_after_reload_updates_manifest_s
         cancellation_token: tokio_util::sync::CancellationToken::new(),
         subagent_limiter: None,
         boss_coordinator: None,
+        remote_actor_store: None,
     };
 
     let initial_snapshot = build_runtime_plugin_snapshot(&app_state);
@@ -2051,6 +2061,7 @@ async fn cli_repl_uses_next_turn_plugin_snapshot_after_reload_removes_deleted_pl
         cancellation_token: tokio_util::sync::CancellationToken::new(),
         subagent_limiter: None,
         boss_coordinator: None,
+        remote_actor_store: None,
     };
 
     let initial_snapshot = build_runtime_plugin_snapshot(&app_state);
@@ -2185,6 +2196,7 @@ async fn cli_repl_applies_disable_and_enable_only_on_next_turn_boundaries() {
         cancellation_token: tokio_util::sync::CancellationToken::new(),
         subagent_limiter: None,
         boss_coordinator: None,
+        remote_actor_store: None,
     };
 
     let initial_snapshot = build_runtime_plugin_snapshot(&app_state);
@@ -2419,6 +2431,7 @@ async fn remote_handler_uses_next_turn_plugin_snapshot_after_reload_removes_dele
         cancellation_token: tokio_util::sync::CancellationToken::new(),
         subagent_limiter: None,
         boss_coordinator: None,
+        remote_actor_store: None,
     };
 
     let initial_snapshot = build_runtime_plugin_snapshot(&app_state);
@@ -2558,6 +2571,7 @@ async fn cli_repl_persists_denied_turns() {
         cancellation_token: tokio_util::sync::CancellationToken::new(),
         subagent_limiter: None,
         boss_coordinator: None,
+        remote_actor_store: None,
     };
     let engine =
         rust_agent::core::engine::QueryEngine::new(rust_agent::core::context::QueryContext {
@@ -2653,6 +2667,7 @@ async fn router_approves_pending_plan_mode_request() {
         cancellation_token: tokio_util::sync::CancellationToken::new(),
         subagent_limiter: None,
         boss_coordinator: None,
+        remote_actor_store: None,
     };
 
     let result = router
@@ -2734,6 +2749,7 @@ async fn router_denies_pending_request_without_session_approval() {
         cancellation_token: tokio_util::sync::CancellationToken::new(),
         subagent_limiter: None,
         boss_coordinator: None,
+        remote_actor_store: None,
     };
 
     let result = router
@@ -2820,6 +2836,7 @@ async fn approval_replay_uses_runtime_tool_registry() {
         cancellation_token: tokio_util::sync::CancellationToken::new(),
         subagent_limiter: None,
         boss_coordinator: None,
+        remote_actor_store: None,
     };
 
     let result = router
@@ -2902,6 +2919,7 @@ async fn permissions_command_reports_session_permission_state() {
         cancellation_token: tokio_util::sync::CancellationToken::new(),
         subagent_limiter: None,
         boss_coordinator: None,
+        remote_actor_store: None,
     };
 
     let result = router
@@ -2973,6 +2991,7 @@ async fn plan_command_reports_inactive_status() {
         cancellation_token: tokio_util::sync::CancellationToken::new(),
         subagent_limiter: None,
         boss_coordinator: None,
+        remote_actor_store: None,
     };
 
     let result = router
@@ -3042,6 +3061,7 @@ async fn plan_command_enter_requests_approval_before_switching_mode() {
         cancellation_token: tokio_util::sync::CancellationToken::new(),
         subagent_limiter: None,
         boss_coordinator: None,
+        remote_actor_store: None,
     };
 
     let result = router
@@ -3126,6 +3146,7 @@ async fn plan_command_exit_requests_approval_and_approval_exits_mode() {
         cancellation_token: tokio_util::sync::CancellationToken::new(),
         subagent_limiter: None,
         boss_coordinator: None,
+        remote_actor_store: None,
     };
 
     let request = router
@@ -3254,6 +3275,7 @@ async fn plan_command_handles_status_noop_and_denied_exit() {
         cancellation_token: tokio_util::sync::CancellationToken::new(),
         subagent_limiter: None,
         boss_coordinator: None,
+        remote_actor_store: None,
     };
 
     let status = router
@@ -3442,6 +3464,7 @@ async fn plan_command_handles_status_noop_and_denied_exit() {
         cancellation_token: tokio_util::sync::CancellationToken::new(),
         subagent_limiter: None,
         boss_coordinator: None,
+        remote_actor_store: None,
     };
     let denied = router
         .route(
@@ -3507,6 +3530,7 @@ async fn permissions_command_mutates_mode_and_rule_lists() {
         cancellation_token: tokio_util::sync::CancellationToken::new(),
         subagent_limiter: None,
         boss_coordinator: None,
+        remote_actor_store: None,
     };
 
     let mode_result = router

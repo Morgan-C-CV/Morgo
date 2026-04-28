@@ -209,6 +209,7 @@ fn test_context_with_turns(
             cancellation_token: tokio_util::sync::CancellationToken::new(),
             subagent_limiter: None,
             boss_coordinator: None,
+            remote_actor_store: None,
         },
         tool_registry,
         api_client: ModelProviderClient::with_scripted_turns(turns),
@@ -1122,6 +1123,7 @@ async fn query_loop_stop_hook_can_prevent_continuation() {
             cancellation_token: tokio_util::sync::CancellationToken::new(),
             subagent_limiter: None,
             boss_coordinator: None,
+            remote_actor_store: None,
         },
         tool_registry: ToolRegistry::new(),
         api_client: ModelProviderClient::with_scripted_turns(vec![vec![
@@ -1219,6 +1221,7 @@ async fn query_loop_respects_pre_tool_hook_denial() {
             cancellation_token: tokio_util::sync::CancellationToken::new(),
             subagent_limiter: None,
             boss_coordinator: None,
+            remote_actor_store: None,
         },
         tool_registry: registry,
         api_client: ModelProviderClient::with_scripted_turns(vec![vec![
@@ -1334,6 +1337,7 @@ async fn query_loop_runs_permission_request_hook_before_tool_execution() {
             cancellation_token: tokio_util::sync::CancellationToken::new(),
             subagent_limiter: None,
             boss_coordinator: None,
+            remote_actor_store: None,
         },
         tool_registry: registry,
         api_client: ModelProviderClient::with_scripted_turns(vec![vec![
@@ -1441,6 +1445,7 @@ async fn query_loop_stop_hook_blocking_continues_with_follow_up_turn() {
             cancellation_token: tokio_util::sync::CancellationToken::new(),
             subagent_limiter: None,
             boss_coordinator: None,
+            remote_actor_store: None,
         },
         tool_registry: ToolRegistry::new(),
         api_client: ModelProviderClient::with_scripted_turns(vec![
@@ -1557,6 +1562,7 @@ async fn query_loop_uses_subagent_stop_hook_for_subagent_context() {
             cancellation_token: tokio_util::sync::CancellationToken::new(),
             subagent_limiter: None,
             boss_coordinator: None,
+            remote_actor_store: None,
         },
         tool_registry: ToolRegistry::new(),
         api_client: ModelProviderClient::with_scripted_turns(vec![vec![
@@ -1720,6 +1726,7 @@ async fn engine_drains_internal_task_events() {
             cancellation_token: tokio_util::sync::CancellationToken::new(),
             subagent_limiter: None,
             boss_coordinator: None,
+            remote_actor_store: None,
         },
         tool_registry: ToolRegistry::new(),
         api_client: ModelProviderClient::default(),
@@ -1814,6 +1821,7 @@ async fn worker_query_loop_consumes_mailbox_messages() {
             cancellation_token: tokio_util::sync::CancellationToken::new(),
             subagent_limiter: None,
             boss_coordinator: None,
+            remote_actor_store: None,
         },
         tool_registry: ToolRegistry::new(),
         api_client: ModelProviderClient::with_scripted_turns(vec![
@@ -1927,6 +1935,7 @@ async fn subagent_context_inherits_parent_tools_and_hooks() {
             cancellation_token: tokio_util::sync::CancellationToken::new(),
             subagent_limiter: None,
             boss_coordinator: None,
+            remote_actor_store: None,
         },
         tool_registry: parent_tool_registry.clone(),
         api_client: ModelProviderClient::default(),
@@ -2071,6 +2080,7 @@ async fn subagent_context_inherits_active_model_snapshot_without_sharing_handle(
             cancellation_token: tokio_util::sync::CancellationToken::new(),
             subagent_limiter: None,
             boss_coordinator: None,
+            remote_actor_store: None,
         },
         tool_registry: ToolRegistry::new(),
         api_client: ModelProviderClient::default(),
@@ -2218,6 +2228,7 @@ async fn updated_runtime_snapshot_applies_only_to_next_turn_and_new_subagents() 
         cancellation_token: tokio_util::sync::CancellationToken::new(),
         subagent_limiter: None,
         boss_coordinator: None,
+        remote_actor_store: None,
     };
     let base_engine = QueryEngine::new(QueryContext {
         app_state: app_state.clone(),
@@ -2384,6 +2395,7 @@ async fn subagent_context_does_not_inherit_session_memory_when_disabled() {
             cancellation_token: tokio_util::sync::CancellationToken::new(),
             subagent_limiter: None,
             boss_coordinator: None,
+            remote_actor_store: None,
         },
         tool_registry: ToolRegistry::new(),
         api_client: ModelProviderClient::default(),
@@ -2493,6 +2505,7 @@ async fn subagent_context_reanchors_and_bounds_nested_memory_lineage() {
             cancellation_token: tokio_util::sync::CancellationToken::new(),
             subagent_limiter: None,
             boss_coordinator: None,
+            remote_actor_store: None,
         },
         tool_registry: ToolRegistry::new(),
         api_client: ModelProviderClient::default(),
@@ -2739,6 +2752,7 @@ async fn coordinator_waits_for_group_barrier_before_synthesis_follow_up() {
             cancellation_token: tokio_util::sync::CancellationToken::new(),
             subagent_limiter: None,
             boss_coordinator: None,
+            remote_actor_store: None,
         },
         tool_registry: ToolRegistry::new(),
         api_client: ModelProviderClient::with_scripted_turns(vec![
@@ -2880,6 +2894,7 @@ async fn coordinator_gates_finalization_until_verification_finishes() {
             cancellation_token: tokio_util::sync::CancellationToken::new(),
             subagent_limiter: None,
             boss_coordinator: None,
+            remote_actor_store: None,
         },
         tool_registry: ToolRegistry::new(),
         api_client: ModelProviderClient::with_scripted_turns(vec![
@@ -3032,6 +3047,7 @@ async fn coordinator_surfaces_verification_failure_and_missing_verification_risk
             cancellation_token: tokio_util::sync::CancellationToken::new(),
             subagent_limiter: None,
             boss_coordinator: None,
+            remote_actor_store: None,
         },
         tool_registry: ToolRegistry::new(),
         api_client: ModelProviderClient::with_scripted_turns(vec![
@@ -3798,6 +3814,7 @@ async fn submit_turn_distinguishes_stop_hook_prevented_and_blocking_runtime_even
             cancellation_token: tokio_util::sync::CancellationToken::new(),
             subagent_limiter: None,
             boss_coordinator: None,
+            remote_actor_store: None,
         },
         tool_registry: ToolRegistry::new(),
         api_client: ModelProviderClient::with_scripted_turns(vec![vec![
@@ -3868,6 +3885,7 @@ async fn submit_turn_distinguishes_stop_hook_prevented_and_blocking_runtime_even
             cancellation_token: tokio_util::sync::CancellationToken::new(),
             subagent_limiter: None,
             boss_coordinator: None,
+            remote_actor_store: None,
         },
         tool_registry: ToolRegistry::new(),
         api_client: ModelProviderClient::with_scripted_turns(vec![

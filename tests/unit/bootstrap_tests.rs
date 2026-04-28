@@ -1536,6 +1536,7 @@ fn app_state_store_notifies_subscribers_after_committed_update() {
         cancellation_token: tokio_util::sync::CancellationToken::new(),
         subagent_limiter: None,
         boss_coordinator: None,
+        remote_actor_store: None,
     };
     let store = AppStateStore::new(app_state);
     let observed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -1606,6 +1607,7 @@ fn app_state_classifies_runtime_visible_changes() {
         cancellation_token: tokio_util::sync::CancellationToken::new(),
         subagent_limiter: None,
         boss_coordinator: None,
+        remote_actor_store: None,
     };
     let mut current = AppState {
         surface: previous.surface,
@@ -1638,6 +1640,7 @@ fn app_state_classifies_runtime_visible_changes() {
         cancellation_token: tokio_util::sync::CancellationToken::new(),
         subagent_limiter: None,
         boss_coordinator: None,
+        remote_actor_store: None,
     };
     current.bind_surface_session(
         InteractionSurface::Remote,
@@ -1986,6 +1989,7 @@ fn augment_prompt_depends_on_input_state_without_mutating_store() {
         cancellation_token: tokio_util::sync::CancellationToken::new(),
         subagent_limiter: None,
         boss_coordinator: None,
+        remote_actor_store: None,
     };
     let store = AppStateStore::new(app_state.clone());
     let before = store.generation();
@@ -2300,6 +2304,7 @@ fn persist_current_session_state_commits_all_fields_in_one_record_write() {
         cancellation_token: tokio_util::sync::CancellationToken::new(),
         subagent_limiter: None,
         boss_coordinator: None,
+        remote_actor_store: None,
     };
 
     assert_eq!(app_state.persist_current_session_state(), Ok(()));
@@ -2410,6 +2415,7 @@ fn persist_resolved_session_state_commits_all_fields_in_one_record_write() {
         cancellation_token: tokio_util::sync::CancellationToken::new(),
         subagent_limiter: None,
         boss_coordinator: None,
+        remote_actor_store: None,
     };
 
     let resolved = rust_agent::history::resume::ResolvedSessionState {
@@ -2647,6 +2653,7 @@ fn finalize_runtime_state_is_single_writeback_entrypoint() {
         cancellation_token: tokio_util::sync::CancellationToken::new(),
         subagent_limiter: None,
         boss_coordinator: None,
+        remote_actor_store: None,
     };
     let prompts = runtime.augment_prompts(&prompt_state, &bundle);
     let finalized = runtime.finalize_runtime_state(
