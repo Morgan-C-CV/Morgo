@@ -2240,6 +2240,55 @@ impl BossCoordinator {
     ) -> anyhow::Result<String> {
         self.build_step_spawn_payload(step_id, parent_session_id, b_actor_id).await
     }
+
+    pub async fn repair_replan_step(
+        &self,
+        step_id: usize,
+        patched_description: String,
+        patched_objective: Option<String>,
+        patched_acceptance: Vec<String>,
+    ) -> anyhow::Result<()> {
+        let plan_path = {
+            self.status
+                .read()
+                .await
+                .planning_file
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("No planning file configured"))?
+        };
+
+        {
+            let mut plan_guard = self.plan.write().await;
+            let plan = plan_guard
+                .as_mut()
+                .ok_or_else(|| anyhow::anyhow!("No plan loaded"))?;
+            let step = plan
+                .steps
+                .iter_mut()
+                .find(|step| step.id == step_id)
+                .ok_or_else(|| anyhow::anyhow!("Unknown boss step {step_id}"))?;
+
+            if step.status != BossPlanStepStatus::ReplanRequired {
+                anyhow::bail!(
+                    "Boss step {} is not awaiting replanning (current status: {:?})",
+                    step_id,
+                    step.status
+                );
+            }
+
+            step.description = patched_description;
+            step.objective = patched_objective;
+            step.acceptance = patched_acceptance;
+            step.status = BossPlanStepStatus::Pending;
+            step.completed = false;
+            step.worker_task_id = None;
+            step.review_task_id = None;
+            step.attempt_count = 0;
+        }
+
+        self.update_current_step(Some(step_id)).await;
+        self.save_plan_with_session(std::path::Path::new(&plan_path)).await
+    }
 }
 
 #[cfg(test)]

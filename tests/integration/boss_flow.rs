@@ -2113,6 +2113,72 @@ async fn boss_a_replan_step_does_not_redispatch_b_and_is_distinct_from_rejected(
     let _ = std::fs::remove_file(plan_path);
 }
 
+#[tokio::test]
+async fn repair_replan_step_restores_pending_and_requires_manual_advance() {
+    let (coordinator, plan_path) = coordinator_with_plan(
+        boss_plan(vec![boss_step(0, "Original step")]),
+        "test_boss_replan_repair.json",
+    )
+    .await;
+
+    {
+        let mut guard = coordinator.plan.write().await;
+        let plan = guard.as_mut().unwrap();
+        plan.steps[0].status = BossPlanStepStatus::ReplanRequired;
+        plan.steps[0].attempt_count = 2;
+        plan.steps[0].worker_task_id = Some("old-b-task".into());
+        plan.steps[0].review_task_id = Some("old-review-task".into());
+        plan.steps[0].last_review_summary = Some("Current step needs strategy rewrite".into());
+        plan.steps[0].last_correction = Some("replan required: split implementation from validation".into());
+    }
+
+    coordinator
+        .repair_replan_step(
+            0,
+            "Patched step".into(),
+            Some("Patched objective".into()),
+            vec!["patched acceptance a".into(), "patched acceptance b".into()],
+        )
+        .await
+        .unwrap();
+
+    {
+        let guard = coordinator.plan.read().await;
+        let step = &guard.as_ref().unwrap().steps[0];
+        assert_eq!(step.status, BossPlanStepStatus::Pending);
+        assert!(!step.completed);
+        assert_eq!(step.description, "Patched step");
+        assert_eq!(step.objective.as_deref(), Some("Patched objective"));
+        assert_eq!(
+            step.acceptance,
+            vec!["patched acceptance a".to_string(), "patched acceptance b".to_string()]
+        );
+        assert_eq!(step.attempt_count, 0);
+        assert!(step.worker_task_id.is_none());
+        assert!(step.review_task_id.is_none());
+        assert_eq!(
+            step.last_review_summary.as_deref(),
+            Some("Current step needs strategy rewrite")
+        );
+        assert_eq!(
+            step.last_correction.as_deref(),
+            Some("replan required: split implementation from validation")
+        );
+    }
+
+    let persisted = load_plan(&plan_path).await.unwrap();
+    let persisted_step = &persisted.steps[0];
+    assert_eq!(persisted_step.status, BossPlanStepStatus::Pending);
+    assert_eq!(persisted_step.description, "Patched step");
+    assert_eq!(persisted_step.attempt_count, 0);
+
+    let app_state = app_state_with_tasks("parent-session-repair", Arc::new(TaskManager::default()));
+    let payload = coordinator.advance_plan(&app_state).await.unwrap();
+    assert!(payload.is_some(), "step should only resume after explicit advance_plan call");
+
+    let _ = std::fs::remove_file(plan_path);
+}
+
 // --- T16.6.G.5: BossRuntimeHost assembly layer ---
 
 #[tokio::test]
