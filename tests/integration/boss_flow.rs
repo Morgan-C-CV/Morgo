@@ -2160,10 +2160,7 @@ async fn repair_replan_step_restores_pending_and_requires_manual_advance() {
             step.last_review_summary.as_deref(),
             Some("Current step needs strategy rewrite")
         );
-        assert_eq!(
-            step.last_correction.as_deref(),
-            Some("replan required: split implementation from validation")
-        );
+        assert!(step.last_correction.is_none());
     }
 
     let persisted = load_plan(&plan_path).await.unwrap();
@@ -2175,6 +2172,47 @@ async fn repair_replan_step_restores_pending_and_requires_manual_advance() {
     let app_state = app_state_with_tasks("parent-session-repair", Arc::new(TaskManager::default()));
     let payload = coordinator.advance_plan(&app_state).await.unwrap();
     assert!(payload.is_some(), "step should only resume after explicit advance_plan call");
+
+    let _ = std::fs::remove_file(plan_path);
+}
+
+#[tokio::test]
+async fn repaired_step_redispatch_payload_does_not_carry_old_replan_reason() {
+    let (coordinator, plan_path) = coordinator_with_plan(
+        boss_plan(vec![boss_step(0, "Original step")]),
+        "test_boss_replan_payload_cleanup.json",
+    )
+    .await;
+
+    {
+        let mut guard = coordinator.plan.write().await;
+        let plan = guard.as_mut().unwrap();
+        plan.steps[0].status = BossPlanStepStatus::ReplanRequired;
+        plan.steps[0].last_review_summary = Some("Current step needs strategy rewrite".into());
+        plan.steps[0].last_correction = Some("replan required: split implementation from validation".into());
+    }
+
+    coordinator
+        .repair_replan_step(
+            0,
+            "Patched step".into(),
+            Some("Patched objective".into()),
+            vec!["patched acceptance a".into()],
+        )
+        .await
+        .unwrap();
+
+    let app_state = app_state_with_tasks("parent-session-repair-payload", Arc::new(TaskManager::default()));
+    let payload = coordinator
+        .advance_plan(&app_state)
+        .await
+        .unwrap()
+        .expect("step should redispatch after explicit advance_plan");
+
+    assert!(!payload.contains("replan required:"));
+    assert!(!payload.contains("split implementation from validation"));
+    assert!(payload.contains("Patched objective"));
+    assert!(payload.contains("patched acceptance a"));
 
     let _ = std::fs::remove_file(plan_path);
 }

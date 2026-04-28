@@ -2290,6 +2290,7 @@ impl BossCoordinator {
             step.worker_task_id = None;
             step.review_task_id = None;
             step.attempt_count = 0;
+            step.last_correction = None;
         }
 
         self.update_current_step(Some(step_id)).await;
