@@ -1277,6 +1277,12 @@ impl BossCoordinator {
                 }
             }
         };
+        if matches!(decision, crate::core::boss_actor_runtime::ReviewDecision::ReplanStep { .. }) {
+            let plan_path = self.status.read().await.planning_file.clone();
+            if let Some(path) = plan_path {
+                self.save_plan_with_session(std::path::Path::new(&path)).await?;
+            }
+        }
         if should_auto_advance {
             let next_step = self.plan.read().await.as_ref().and_then(|p| next_unfinished_step_id(p));
             self.update_current_step(next_step).await;

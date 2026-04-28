@@ -2179,6 +2179,67 @@ async fn repair_replan_step_restores_pending_and_requires_manual_advance() {
     let _ = std::fs::remove_file(plan_path);
 }
 
+#[tokio::test]
+async fn replan_required_is_persisted_and_repairable_after_reload() {
+    let (coordinator, plan_path) = coordinator_with_plan(
+        boss_plan(vec![boss_step(0, "Original step")]),
+        "test_boss_replan_persist.json",
+    )
+    .await;
+
+    // Force state-only fallback path so the provided review signal is interpreted directly.
+    *coordinator.actor_registry.write().await = None;
+
+    coordinator
+        .on_review_event(
+            0,
+            false,
+            "Current step needs strategy rewrite",
+            Some("REPLAN_STEP. REASON: split implementation from validation"),
+        )
+        .await
+        .unwrap();
+
+    let persisted = load_plan(&plan_path).await.unwrap();
+    let persisted_step = &persisted.steps[0];
+    assert_eq!(persisted_step.status, BossPlanStepStatus::ReplanRequired);
+    assert_eq!(
+        persisted_step.last_review_summary.as_deref(),
+        Some("Current step needs strategy rewrite")
+    );
+    assert_eq!(
+        persisted_step.last_correction.as_deref(),
+        Some("replan required: split implementation from validation")
+    );
+
+    let restored = BossCoordinator::restore_or_init(&plan_path).await.unwrap();
+    restored
+        .repair_replan_step(
+            0,
+            "Patched step after reload".into(),
+            Some("Patched objective after reload".into()),
+            vec!["patched acceptance after reload".into()],
+        )
+        .await
+        .unwrap();
+
+    let repaired = load_plan(&plan_path).await.unwrap();
+    let repaired_step = &repaired.steps[0];
+    assert_eq!(repaired_step.status, BossPlanStepStatus::Pending);
+    assert_eq!(repaired_step.description, "Patched step after reload");
+    assert_eq!(
+        repaired_step.objective.as_deref(),
+        Some("Patched objective after reload")
+    );
+    assert_eq!(
+        repaired_step.acceptance,
+        vec!["patched acceptance after reload".to_string()]
+    );
+    assert_eq!(repaired_step.attempt_count, 0);
+
+    let _ = std::fs::remove_file(plan_path);
+}
+
 // --- T16.6.G.5: BossRuntimeHost assembly layer ---
 
 #[tokio::test]
