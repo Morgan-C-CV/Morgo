@@ -136,6 +136,26 @@ async fn run_minimal_openai_mock_server(listener: TcpListener) {
     stream.flush().await.expect("flush scripted response");
 }
 
+async fn run_minimal_openai_mock_server_rejected(listener: TcpListener) {
+    let (mut stream, _) = listener.accept().await.expect("accept mock provider request");
+    let mut buffer = vec![0_u8; 16 * 1024];
+    let _ = stream.read(&mut buffer).await.expect("read request");
+    let body = concat!(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"{\\\"state\\\":\\\"rejected\\\",\\\"reason\\\":\\\"override-provider-rejected\\\"}\"}}]}\n\n",
+        "data: [DONE]\n\n"
+    );
+    let response = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    stream
+        .write_all(response.as_bytes())
+        .await
+        .expect("write scripted response");
+    stream.flush().await.expect("flush scripted response");
+}
+
 fn make_orchestrator_route_override_plan(step_id: usize) -> BossPlan {
     use rust_agent::core::boss_state::{BossPlan, BossPlanStep, BossPlanStepStatus};
     BossPlan {
@@ -8241,4 +8261,175 @@ async fn t27_8_lism_boss_production_path_missing_inherited_snapshot_returns_erro
     );
 
     let _ = std::fs::remove_file(plan_path);
+}
+
+// ── T27.9 Boss production-path override contract ──────────────────────────
+//
+// These tests verify the override contract at the orchestrator seam that
+// advance_plan() calls. The router currently always returns provider_profile_id=None
+// (v1 static mapping), so the override path is exercised by constructing a
+// RoutedStateFrame with a patched ModelRoute — the same seam advance_plan uses.
+
+#[tokio::test]
+async fn t27_9_boss_production_path_override_hit_uses_resolved_runtime_not_inherited() {
+    use rust_agent::core::boss_state::BossStage;
+    use rust_agent::core::state_frame::ActorRole;
+    use rust_agent::core::state_frame_loop::DecisionLoopConfig;
+    use rust_agent::core::state_frame_model_router::ModelRoute;
+    use rust_agent::core::state_frame_orchestrator::{
+        RoutedStateFrame, StepOutcome, StepRuntimeResolutionContext,
+        build_routed_state_frame_with_model_route, run_routed_step_with_runtime,
+    };
+
+    // inherited has empty scripted turns — if it were used, the loop would fail
+    let inherited = make_inherited_runtime_snapshot_with_scripted_turns(vec![]);
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind mock provider listener");
+    let addr = listener.local_addr().expect("listener addr");
+    let server = tokio::spawn(run_minimal_openai_mock_server(listener));
+    let registry = make_step_model_registry_with_base_url(&format!("http://{}", addr));
+    let plan = make_orchestrator_route_override_plan(0);
+
+    let base_routed = build_routed_state_frame_with_model_route(
+        &plan,
+        BossStage::Execution,
+        0,
+        ActorRole::Worker,
+    );
+    // patch provider_profile_id to simulate what the router will produce once extended
+    let routed = RoutedStateFrame {
+        frame: base_routed.frame,
+        model_route: ModelRoute {
+            tier: base_routed.model_route.tier,
+            provider_profile_id: Some("worker-override".into()),
+        },
+    };
+
+    let runtime = StepRuntimeResolutionContext {
+        inherited_snapshot: &inherited,
+        model_registry: Some(&registry),
+        observability: rust_agent::service::observability::ServiceObservabilityTracker::default(),
+    };
+
+    let outcome = run_routed_step_with_runtime(routed, DecisionLoopConfig::default(), runtime)
+        .await
+        .expect("override seam should succeed");
+
+    assert!(
+        matches!(outcome, StepOutcome::Completed),
+        "override hit should complete via resolved runtime"
+    );
+    // parent snapshot must not be mutated
+    assert_eq!(inherited.active_profile_name.as_deref(), Some("inherited-fast"));
+    assert_eq!(inherited.config.provider_id, "scripted");
+
+    server.await.expect("mock provider server finished");
+}
+
+#[tokio::test]
+async fn t27_9_boss_production_path_override_missing_registry_step_fails_with_observable_reason() {
+    use rust_agent::core::boss_state::BossStage;
+    use rust_agent::core::state_frame::ActorRole;
+    use rust_agent::core::state_frame_loop::DecisionLoopConfig;
+    use rust_agent::core::state_frame_model_router::ModelRoute;
+    use rust_agent::core::state_frame_orchestrator::{
+        RoutedStateFrame, StepRuntimeResolutionContext,
+        build_routed_state_frame_with_model_route, run_routed_step_with_runtime,
+    };
+
+    let inherited = make_inherited_runtime_snapshot_with_scripted_turns(vec![]);
+    let plan = make_orchestrator_route_override_plan(0);
+
+    let base_routed = build_routed_state_frame_with_model_route(
+        &plan,
+        BossStage::Execution,
+        0,
+        ActorRole::Worker,
+    );
+    let routed = RoutedStateFrame {
+        frame: base_routed.frame,
+        model_route: ModelRoute {
+            tier: base_routed.model_route.tier,
+            provider_profile_id: Some("worker-override".into()),
+        },
+    };
+
+    let runtime = StepRuntimeResolutionContext {
+        inherited_snapshot: &inherited,
+        model_registry: None, // registry missing → must fail, not silently fall back
+        observability: rust_agent::service::observability::ServiceObservabilityTracker::default(),
+    };
+
+    let error = run_routed_step_with_runtime(routed, DecisionLoopConfig::default(), runtime)
+        .await
+        .expect_err("missing registry should return error");
+
+    assert!(
+        error.to_string().contains("model profile registry is unavailable"),
+        "error reason must be observable: {error}"
+    );
+    // parent snapshot must not be mutated
+    assert_eq!(inherited.active_profile_name.as_deref(), Some("inherited-fast"));
+    assert_eq!(inherited.config.provider_id, "scripted");
+}
+
+#[tokio::test]
+async fn t27_9_boss_production_path_override_rejected_decision_step_fails_with_observable_reason() {
+    use rust_agent::core::boss_state::BossStage;
+    use rust_agent::core::state_frame::ActorRole;
+    use rust_agent::core::state_frame_loop::DecisionLoopConfig;
+    use rust_agent::core::state_frame_model_router::ModelRoute;
+    use rust_agent::core::state_frame_orchestrator::{
+        RoutedStateFrame, StepOutcome, StepRuntimeResolutionContext,
+        build_routed_state_frame_with_model_route, run_routed_step_with_runtime,
+    };
+
+    let inherited = make_inherited_runtime_snapshot_with_scripted_turns(vec![]);
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind mock provider listener");
+    let addr = listener.local_addr().expect("listener addr");
+    let server = tokio::spawn(run_minimal_openai_mock_server_rejected(listener));
+    let registry = make_step_model_registry_with_base_url(&format!("http://{}", addr));
+    let plan = make_orchestrator_route_override_plan(0);
+
+    let base_routed = build_routed_state_frame_with_model_route(
+        &plan,
+        BossStage::Execution,
+        0,
+        ActorRole::Worker,
+    );
+    let routed = RoutedStateFrame {
+        frame: base_routed.frame,
+        model_route: ModelRoute {
+            tier: base_routed.model_route.tier,
+            provider_profile_id: Some("worker-override".into()),
+        },
+    };
+
+    let runtime = StepRuntimeResolutionContext {
+        inherited_snapshot: &inherited,
+        model_registry: Some(&registry),
+        observability: rust_agent::service::observability::ServiceObservabilityTracker::default(),
+    };
+
+    let outcome = run_routed_step_with_runtime(routed, DecisionLoopConfig::default(), runtime)
+        .await
+        .expect("seam should return outcome, not error");
+
+    match outcome {
+        StepOutcome::Failed { reason } => {
+            assert!(
+                !reason.is_empty(),
+                "failure reason must be observable, got empty string"
+            );
+        }
+        StepOutcome::Completed => panic!("expected Failed outcome, got Completed"),
+    }
+    // parent snapshot must not be mutated
+    assert_eq!(inherited.active_profile_name.as_deref(), Some("inherited-fast"));
+    assert_eq!(inherited.config.provider_id, "scripted");
+
+    server.await.expect("mock provider server finished");
 }
