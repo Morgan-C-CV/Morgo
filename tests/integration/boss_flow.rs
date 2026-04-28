@@ -6846,6 +6846,37 @@ async fn legacy_boss_auto_advance_still_completes_next_step_after_completion() {
     let _ = std::fs::remove_file(plan_path);
 }
 
+#[test]
+fn t27_6_build_routed_state_frame_executor_b_executing_uses_executor_edit_route() {
+    use rust_agent::core::state_frame::ActorRole;
+    use rust_agent::core::state_frame_orchestrator::build_routed_state_frame;
+    use rust_agent::core::boss_state::BossStage;
+
+    let plan = make_plan_with_step(0, "execute", vec!["criterion".into()]);
+    let frame = build_routed_state_frame(&plan, BossStage::Execution, 0, ActorRole::ExecutorB);
+
+    assert_eq!(frame.toolset_id.as_deref(), Some("executor-edit"));
+    assert!(frame.allowed_actions.iter().any(|a| a == "edit_file"));
+    assert!(frame.allowed_actions.iter().any(|a| a == "run_test"));
+}
+
+#[test]
+fn t27_6_build_routed_state_frame_blocked_and_done_clear_tools_and_actions() {
+    use rust_agent::core::state_frame::ActorRole;
+    use rust_agent::core::state_frame_orchestrator::build_routed_state_frame;
+    use rust_agent::core::boss_state::{BossPlanStepStatus, BossStage};
+
+    let blocked_plan = make_t278_plan(vec![make_t278_step(0, BossPlanStepStatus::ReplanRequired, false, vec![])]);
+    let blocked_frame = build_routed_state_frame(&blocked_plan, BossStage::Execution, 0, ActorRole::DesignerA);
+    assert_eq!(blocked_frame.toolset_id, None);
+    assert!(blocked_frame.allowed_actions.is_empty());
+
+    let done_plan = make_t278_plan(vec![make_t278_step(0, BossPlanStepStatus::Completed, true, vec![])]);
+    let done_frame = build_routed_state_frame(&done_plan, BossStage::Execution, 0, ActorRole::Worker);
+    assert_eq!(done_frame.toolset_id, None);
+    assert!(done_frame.allowed_actions.is_empty());
+}
+
 // ── T27.5 StateFrame orchestrator seam ───────────────────────────────────
 
 #[tokio::test]
