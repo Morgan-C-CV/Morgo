@@ -17,7 +17,7 @@ use rust_agent::interaction::dispatcher::NotificationDispatcher;
 use rust_agent::interaction::envelope::NormalizedInput;
 use rust_agent::interaction::notification::{Notification, NotificationTarget};
 use rust_agent::interaction::remote::{
-    RemoteEventPayload, RemoteRequest, RemoteResponseMeta, RemoteResponseOutcome,
+    RemoteEventPayload, RemoteRequest, RemoteResponseOutcome,
     drain_remote_notifications, handle_remote_request,
 };
 use rust_agent::interaction::telegram::gateway::TelegramGateway;

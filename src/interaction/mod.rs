@@ -7,3 +7,4 @@ pub mod remote_actor;
 pub mod router;
 pub mod telegram;
 pub mod view;
+pub mod web;

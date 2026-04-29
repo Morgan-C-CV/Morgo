@@ -8,6 +8,8 @@ mod plugin_flow;
 mod remote_flow;
 #[path = "skills_visibility.rs"]
 mod skills_visibility;
+#[path = "web_flow.rs"]
+mod web_flow;
 
 #[tokio::test]
 async fn startup_trace_contains_detect_surface_phase() {
