@@ -89,6 +89,7 @@ mod tests {
             proxy_url: None,
             no_proxy: None,
             ca_bundle_path: None,
+            max_tokens_param: None,
         };
         ActiveModelRuntimeSnapshot {
             config: config.clone(),

@@ -573,6 +573,37 @@ fn r1_4_conclude_inconclusive_when_only_one_arm() {
 }
 
 #[test]
+fn r1_4_conclude_inconclusive_when_usage_signal_is_missing() {
+    let sink = LisMAbSampleSink::in_memory();
+    let report_without_usage = make_report(2, 2, 0, 0, 0);
+
+    for i in 0..3 {
+        sink.record_run(
+            format!("on-{i}"),
+            true,
+            &report_without_usage,
+            BossTestRunOutcome::Completed,
+            0,
+        );
+        sink.record_run(
+            format!("off-{i}"),
+            false,
+            &report_without_usage,
+            BossTestRunOutcome::Completed,
+            0,
+        );
+    }
+
+    let summary = sink.summarize();
+    assert_eq!(summary.cache_hit_ratio_delta(), None);
+    assert_eq!(summary.cost_delta_micros(), 0);
+
+    let conclusion = LisMRolloutConclusion::from_summary_defaults(&summary);
+    assert_eq!(conclusion.recommendation, LisMPolicyRecommendation::Inconclusive);
+    assert!(conclusion.reason.contains("No measurable cache or cost signal"));
+}
+
+#[test]
 fn r1_4_conclude_serde_round_trip() {
     let sink = make_two_arm_sink(80, 40, 1000, 3000, 3);
     let summary = sink.summarize();

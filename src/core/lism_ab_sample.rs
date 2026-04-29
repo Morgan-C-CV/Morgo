@@ -68,6 +68,8 @@ impl LisMAbSummary {
     /// Thresholds:
     /// - `cache_delta_threshold`: minimum positive delta to count as "LisM helps cache"
     /// - `cost_penalty_threshold_micros`: maximum cost increase before recommending ForceOff
+    /// If enough runs exist but neither arm reports cache/cost/tokens-saved data,
+    /// the result is still inconclusive: completion parity alone is not a rollout signal.
     pub fn derive_rollout_conclusion(
         &self,
         min_runs_per_arm: usize,
@@ -93,6 +95,24 @@ impl LisMAbSummary {
 
         let cache_delta = self.cache_hit_ratio_delta();
         let cost_delta = self.cost_delta_micros();
+
+        let no_cache_signal = cache_delta.is_none();
+        let no_cost_signal = cost_delta == 0
+            && self.on_avg_cost_micros_usd == 0
+            && self.off_avg_cost_micros_usd == 0;
+        let no_saved_token_signal =
+            self.on_avg_tokens_saved == 0 && self.off_avg_tokens_saved == 0;
+
+        if no_cache_signal && no_cost_signal && no_saved_token_signal {
+            return LisMRolloutConclusion {
+                recommendation: LisMPolicyRecommendation::Inconclusive,
+                reason: "No measurable cache or cost signal: both arms have enough runs, but cache_hit_ratio is unavailable and cost/tokens_saved are zero; collect usage metadata before changing rollout policy".into(),
+                cache_hit_ratio_delta: cache_delta,
+                cost_delta_micros: cost_delta,
+                on_completion_rate: self.on_completion_rate,
+                off_completion_rate: self.off_completion_rate,
+            };
+        }
 
         // Hard penalty: LisM significantly degrades cache OR costs much more → ForceOff
         let cache_hurts = cache_delta.map_or(false, |d| d < -cache_delta_threshold);

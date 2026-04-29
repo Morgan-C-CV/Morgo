@@ -644,6 +644,7 @@ auth_strategy = "none"
             proxy_url: None,
             no_proxy: None,
             ca_bundle_path: None,
+            max_tokens_param: None,
         };
         let view = build_model_profile_display_view("test-profile", &spec)
             .expect("display view should build");

@@ -742,6 +742,7 @@ impl ProviderAdapter for AnthropicAdapter {
             "model": normalized_request_model(config),
             "messages": [normalized_request_message(input)],
             "stream": normalized_request_stream_flag(&profile)?,
+            "stream_options": {"include_usage": true},
             "max_tokens": options.max_tokens,
         });
         if let Some(temperature) = options.temperature {
@@ -806,6 +807,7 @@ impl ProviderAdapter for OpenAICompatibleAdapter {
             "model": normalized_request_model(config),
             "messages": [{"role": "user", "content": message_content}],
             "stream": normalized_request_stream_flag(&profile)?,
+            "stream_options": {"include_usage": true},
         });
         let max_tokens_key = config.max_tokens_param.as_deref().unwrap_or("max_tokens");
         payload[max_tokens_key] = json!(options.max_tokens);
@@ -1262,14 +1264,13 @@ impl<'a> OpenAICompatibleStreamParser<'a> {
             .ok_or_else(|| self.protocol_error("openai-compatible event missing choices"))?;
 
         if choices.is_empty() {
-            let finish_reason = payload.get("finish_reason").and_then(Value::as_str);
             let has_error = payload.get("error").is_some();
-            let usage_only_terminal_chunk = finish_reason.is_none()
-                && !has_error
-                && payload.get("usage").is_some()
-                && payload
-                    .as_object()
-                    .is_some_and(|object| object.keys().all(|key| matches!(key.as_str(), "id" | "object" | "created" | "model" | "system_fingerprint" | "usage" | "choices")));
+            // OpenAI sends a final usage-only chunk with empty choices when stream_options.include_usage=true.
+            // Real usage terminals have no top-level finish_reason (it was already in a prior choices entry).
+            // Chunks with both empty choices and a top-level finish_reason are a protocol anomaly.
+            let finish_reason_absent = payload.get("finish_reason").is_none_or(Value::is_null);
+            let usage_only_terminal_chunk =
+                !has_error && finish_reason_absent && payload.get("usage").is_some();
             if usage_only_terminal_chunk {
                 return Ok(());
             }
@@ -1936,13 +1937,22 @@ fn normalize_usage(usage: &Value, _default_model: &str) -> NormalizedUsage {
             .or_else(|| usage.get("cacheWriteTokens"))
             .and_then(Value::as_u64)
             .map(|value| value as usize),
+        // OpenAI Chat Completions: cached_tokens lives inside prompt_tokens_details.
+        // Anthropic-style flat fields (cache_read_input_tokens etc.) are kept as fallback.
         cache_read_input_tokens: usage
-            .get("cache_read_input_tokens")
-            .or_else(|| usage.get("cacheReadInputTokens"))
-            .or_else(|| usage.get("cache_read_tokens"))
-            .or_else(|| usage.get("cacheReadTokens"))
+            .get("prompt_tokens_details")
+            .and_then(|d| d.get("cached_tokens"))
             .and_then(Value::as_u64)
-            .map(|value| value as usize),
+            .map(|v| v as usize)
+            .or_else(|| {
+                usage
+                    .get("cache_read_input_tokens")
+                    .or_else(|| usage.get("cacheReadInputTokens"))
+                    .or_else(|| usage.get("cache_read_tokens"))
+                    .or_else(|| usage.get("cacheReadTokens"))
+                    .and_then(Value::as_u64)
+                    .map(|value| value as usize)
+            }),
         total_tokens: usage
             .get("total_tokens")
             .or_else(|| usage.get("totalTokens"))
@@ -3110,6 +3120,45 @@ mod tests {
         );
         assert_eq!(total_only.input_tokens, 13);
         assert_eq!(total_only.output_tokens, 0);
+    }
+
+    #[test]
+    fn parse_usage_reads_openai_nested_cached_tokens() {
+        // OpenAI Chat Completions puts cache hits inside prompt_tokens_details.cached_tokens.
+        let usage = parse_usage(
+            &serde_json::json!({
+                "prompt_tokens": 120,
+                "completion_tokens": 30,
+                "prompt_tokens_details": {
+                    "cached_tokens": 80,
+                    "audio_tokens": 0
+                },
+                "completion_tokens_details": {
+                    "reasoning_tokens": 0
+                }
+            }),
+            "gpt-5.4",
+        );
+        assert_eq!(usage.input_tokens, 120);
+        assert_eq!(usage.output_tokens, 30);
+        assert_eq!(usage.cache_read_input_tokens, 80);
+        assert_eq!(usage.cache_creation_input_tokens, 0);
+    }
+
+    #[test]
+    fn parse_usage_flat_cache_fields_still_work_as_fallback() {
+        // Anthropic-style flat fields must remain valid when nested path is absent.
+        let usage = parse_usage(
+            &serde_json::json!({
+                "input_tokens": 50,
+                "output_tokens": 10,
+                "cache_creation_input_tokens": 5,
+                "cache_read_input_tokens": 3,
+            }),
+            "claude-3",
+        );
+        assert_eq!(usage.cache_read_input_tokens, 3);
+        assert_eq!(usage.cache_creation_input_tokens, 5);
     }
 
     #[test]
