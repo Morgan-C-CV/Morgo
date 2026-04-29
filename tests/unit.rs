@@ -64,3 +64,5 @@ mod visibility_plugin_tests;
 mod skills_visibility_tests;
 #[path = "unit/plugin_diagnostics_tests.rs"]
 mod plugin_diagnostics_tests;
+#[path = "unit/boss_test_readiness_tests.rs"]
+mod boss_test_readiness_tests;
