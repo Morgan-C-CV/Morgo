@@ -171,6 +171,8 @@ fn make_drill_report(completed: bool, cost_micros: u64) -> BossReportPayload {
             total_input_tokens: 1000,
             total_output_tokens: 200,
             estimated_cost_micros_usd: cost_micros,
+            total_original_chars: 0,
+            total_sent_chars: 0,
         }),
         lism_policy: BossLisMPolicy::Inherit,
     }

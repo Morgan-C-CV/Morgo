@@ -227,6 +227,12 @@ pub struct BossObservabilitySummary {
     /// Estimated cost in micros USD across all routed steps (v1 stub: always 0).
     #[serde(default)]
     pub estimated_cost_micros_usd: u64,
+    /// Original outbound prompt/message chars before compression, when known.
+    #[serde(default)]
+    pub total_original_chars: usize,
+    /// Actual outbound prompt/message chars after compression/context assembly, when known.
+    #[serde(default)]
+    pub total_sent_chars: usize,
 }
 
 impl BossObservabilitySummary {
@@ -299,7 +305,7 @@ impl BossReportPayload {
                 .map(|r| format!("{:.1}%", r * 100.0))
                 .unwrap_or_else(|| "-".into());
             lines.push(format!(
-                "  summary: routed={} override_hits={} cache_r={} cache_w={} hit_ratio={} tokens_saved={} input={} output={} cost_micros_usd={} fallback={} mismatch={} tiers={:?}",
+                "  summary: routed={} override_hits={} cache_r={} cache_w={} hit_ratio={} tokens_saved={} input={} output={} chars={}/{} cost_micros_usd={} fallback={} mismatch={} tiers={:?}",
                 s.total_steps_routed,
                 s.override_hit_count,
                 s.total_cache_read_tokens,
@@ -308,6 +314,8 @@ impl BossReportPayload {
                 s.estimated_tokens_saved(),
                 s.total_input_tokens,
                 s.total_output_tokens,
+                s.total_sent_chars,
+                s.total_original_chars,
                 s.estimated_cost_micros_usd,
                 s.total_fallback_count,
                 s.total_projection_mismatch_count,

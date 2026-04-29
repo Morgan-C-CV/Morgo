@@ -56,6 +56,8 @@ fn make_report(
             total_input_tokens: cache_read + cache_write,
             total_output_tokens: 0,
             estimated_cost_micros_usd: cost_micros,
+            total_original_chars: 0,
+            total_sent_chars: 0,
         })
     } else {
         None
@@ -73,6 +75,31 @@ fn make_report(
         observability_summary,
         lism_policy: BossLisMPolicy::Inherit,
     }
+}
+
+fn make_report_with_usage(
+    total_steps: usize,
+    completed_steps: usize,
+    input_tokens: usize,
+    output_tokens: usize,
+    sent_chars: usize,
+) -> BossReportPayload {
+    let mut report = make_report(total_steps, completed_steps, 0, 0, 0);
+    report.observability_summary = Some(BossObservabilitySummary {
+        total_steps_routed: total_steps,
+        total_cache_read_tokens: 0,
+        total_cache_write_tokens: 0,
+        total_fallback_count: 0,
+        total_projection_mismatch_count: 0,
+        override_hit_count: 0,
+        model_tier_counts: Default::default(),
+        total_input_tokens: input_tokens,
+        total_output_tokens: output_tokens,
+        estimated_cost_micros_usd: 0,
+        total_original_chars: sent_chars,
+        total_sent_chars: sent_chars,
+    });
+    report
 }
 
 // ── basic record collection ───────────────────────────────────────────────────
@@ -137,6 +164,20 @@ fn r1_1_record_extracts_cost_and_tokens_saved() {
     let records = sink.records();
     assert_eq!(records[0].cost_micros_usd, 2500);
     assert_eq!(records[0].estimated_tokens_saved, 800);
+}
+
+#[test]
+fn r1_1_record_extracts_usage_and_prompt_size_fields() {
+    let sink = LisMAbSampleSink::in_memory();
+    let report = make_report_with_usage(2, 2, 1234, 56, 7890);
+
+    sink.record_run("usage-run", true, &report, BossTestRunOutcome::Completed, 0);
+
+    let record = &sink.records()[0];
+    assert_eq!(record.total_input_tokens, 1234);
+    assert_eq!(record.total_output_tokens, 56);
+    assert_eq!(record.sent_prompt_chars, 7890);
+    assert_eq!(record.original_prompt_chars, 7890);
 }
 
 #[test]
@@ -718,8 +759,40 @@ fn r1_4_conclude_inconclusive_when_usage_signal_is_missing() {
     assert!(
         conclusion
             .reason
-            .contains("No measurable cache or cost signal")
+            .contains("No measurable cache, cost, token, or prompt-size signal")
     );
+}
+
+#[test]
+fn r1_4_conclude_force_on_when_input_tokens_drop_without_cache_data() {
+    let sink = LisMAbSampleSink::in_memory();
+
+    for i in 0..3 {
+        let on_report = make_report_with_usage(1, 1, 600, 20, 2400);
+        sink.record_run(
+            format!("on-{i}"),
+            true,
+            &on_report,
+            BossTestRunOutcome::Completed,
+            0,
+        );
+        let off_report = make_report_with_usage(1, 1, 1400, 20, 5600);
+        sink.record_run(
+            format!("off-{i}"),
+            false,
+            &off_report,
+            BossTestRunOutcome::Completed,
+            0,
+        );
+    }
+
+    let summary = sink.summarize();
+    assert_eq!(summary.input_token_delta(), -800);
+    assert_eq!(summary.sent_prompt_char_delta(), -3200);
+
+    let conclusion = LisMRolloutConclusion::from_summary_defaults(&summary);
+    assert_eq!(conclusion.recommendation, LisMPolicyRecommendation::ForceOn);
+    assert!(conclusion.reason.contains("reduces input tokens"));
 }
 
 #[test]

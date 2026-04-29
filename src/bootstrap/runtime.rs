@@ -1841,28 +1841,34 @@ fn print_lism_ab_summary(
     println!("=======================");
     println!("Total records : {total_records}");
     println!(
-        "LisM ON       : {} runs | completion {:.2} | avg cache_hit_ratio {} | avg cost {}μ | avg tokens_saved {}",
+        "LisM ON       : {} runs | completion {:.2} | avg input {} | avg output {} | avg cache_hit_ratio {} | avg cost {}μ | avg tokens_saved {} | avg sent_chars {}",
         summary.on_runs,
         summary
             .on_completion_rate
             .map_or_else(|| "n/a".into(), |r| format!("{:.2}", r)),
+        summary.on_avg_input_tokens,
+        summary.on_avg_output_tokens,
         summary
             .on_avg_cache_hit_ratio
             .map_or_else(|| "n/a".into(), |r| format!("{:.3}", r)),
         summary.on_avg_cost_micros_usd,
         summary.on_avg_tokens_saved,
+        summary.on_avg_sent_prompt_chars,
     );
     println!(
-        "LisM OFF      : {} runs | completion {:.2} | avg cache_hit_ratio {} | avg cost {}μ | avg tokens_saved {}",
+        "LisM OFF      : {} runs | completion {:.2} | avg input {} | avg output {} | avg cache_hit_ratio {} | avg cost {}μ | avg tokens_saved {} | avg sent_chars {}",
         summary.off_runs,
         summary
             .off_completion_rate
             .map_or_else(|| "n/a".into(), |r| format!("{:.2}", r)),
+        summary.off_avg_input_tokens,
+        summary.off_avg_output_tokens,
         summary
             .off_avg_cache_hit_ratio
             .map_or_else(|| "n/a".into(), |r| format!("{:.3}", r)),
         summary.off_avg_cost_micros_usd,
         summary.off_avg_tokens_saved,
+        summary.off_avg_sent_prompt_chars,
     );
     if summary.has_both_arms() {
         println!("---");
@@ -1883,6 +1889,11 @@ fn print_lism_ab_summary(
         println!(
             "Δ cost             : {:+}μ ({})",
             cost_delta, cost_direction
+        );
+        println!("Δ input tokens     : {:+}", summary.input_token_delta());
+        println!(
+            "Δ sent chars       : {:+}",
+            summary.sent_prompt_char_delta()
         );
     } else {
         println!("--- (only one arm has data; cannot compute delta)");

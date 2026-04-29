@@ -66,6 +66,8 @@ fn make_report(
             total_input_tokens: 0,
             total_output_tokens: 0,
             estimated_cost_micros_usd: cost_micros,
+            total_original_chars: 0,
+            total_sent_chars: 0,
         })
     } else {
         None
