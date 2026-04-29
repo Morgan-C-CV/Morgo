@@ -16,3 +16,5 @@ mod filesystem_policy_flow;
 mod provider_api_mock;
 #[path = "integration/provider_smoke.rs"]
 mod provider_smoke;
+#[path = "integration/beta_drill.rs"]
+mod beta_drill;
