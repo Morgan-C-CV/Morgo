@@ -33,6 +33,29 @@ fn collect_text(events: Vec<StreamEvent>) -> String {
         .collect()
 }
 
+const STATE_DECISION_INSTRUCTION: &str = "\
+You are an AI agent operating in StateFrame mode. \
+Read the StateFrame JSON below and respond ONLY with valid StateDecision JSON.\n\
+\n\
+StateDecision schema:\n\
+{\n\
+  \"state\": \"<one of: planning, executing, reviewing, correcting, verifying, blocked, done>\",\n\
+  \"decision\": \"<one of: continue, request_context, call_tool, handoff, accept, reject, done>\",\n\
+  \"next_action\": null,\n\
+  \"needed_context\": [],\n\
+  \"state_patch\": {},\n\
+  \"confidence\": 0.9,\n\
+  \"escalate\": false\n\
+}\n\
+\n\
+Rules:\n\
+- Use \"decision\": \"done\" when the objective is complete\n\
+- Use \"decision\": \"continue\" to proceed with more work\n\
+- The \"decision\" field MUST be one of the exact string values above — never use free text\n\
+- Respond with JSON only, no prose or explanation\n\
+\n\
+StateFrame:";
+
 /// Run a stateless JSON decision loop.
 ///
 /// Each iteration:
@@ -48,7 +71,7 @@ pub async fn run_decision_loop(
     config: DecisionLoopConfig,
 ) -> anyhow::Result<LoopOutcome> {
     for _iter in 0..config.max_iterations {
-        let prompt = frame.to_prompt_segment().content;
+        let prompt = format!("{}\n{}", STATE_DECISION_INSTRUCTION, frame.to_prompt_segment().content);
         let events = client.stream_message(&Message::user(prompt)).await;
         let mut text = collect_text(events);
 

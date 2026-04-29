@@ -1815,6 +1815,17 @@ impl BossCoordinator {
                             }
                             let next_step = self.plan.read().await.as_ref().and_then(|p| next_unfinished_step_id(p));
                             self.update_current_step(next_step).await;
+                            if next_step.is_none() {
+                                if self.get_stage().await != BossStage::Completed {
+                                    self.transition_to(BossStage::Completed).await?;
+                                }
+                                let run_id = self.current_run_id().await;
+                                let lism_enabled = effective_lism_enabled(
+                                    self.lism_policy().await,
+                                    app_state.permission_context.lism_enabled(),
+                                );
+                                self.emit_lism_sample(&run_id, lism_enabled, BossTestRunOutcome::Completed, 0).await;
+                            }
                             return Ok(Some(format!(
                                 "LisM executed boss step {} to completion.",
                                 step_id
