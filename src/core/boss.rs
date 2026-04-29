@@ -1414,6 +1414,15 @@ impl BossCoordinator {
         };
 
         if !has_a_callbacks {
+            let designer_a_state = {
+                let guard = self.actor_registry.read().await;
+                guard.as_ref().map(|registry| registry.designer_a.state.clone())
+            };
+            if let Some(a_state) = designer_a_state {
+                let mut a_state = a_state.write().await;
+                a_state.status = BossActorStatus::Active;
+                a_state.current_step = Some(step_id);
+            }
             self.apply_review_verdict(step_id, &decision).await?;
         }
 
