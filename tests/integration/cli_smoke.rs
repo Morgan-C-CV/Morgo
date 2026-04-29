@@ -8,6 +8,8 @@ mod plugin_flow;
 mod remote_flow;
 #[path = "skills_visibility.rs"]
 mod skills_visibility;
+#[path = "telegram_transport_flow.rs"]
+mod telegram_transport_flow;
 #[path = "web_flow.rs"]
 mod web_flow;
 
