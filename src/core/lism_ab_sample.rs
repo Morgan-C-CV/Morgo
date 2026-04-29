@@ -100,8 +100,7 @@ impl LisMAbSummary {
         let no_cost_signal = cost_delta == 0
             && self.on_avg_cost_micros_usd == 0
             && self.off_avg_cost_micros_usd == 0;
-        let no_saved_token_signal =
-            self.on_avg_tokens_saved == 0 && self.off_avg_tokens_saved == 0;
+        let no_saved_token_signal = self.on_avg_tokens_saved == 0 && self.off_avg_tokens_saved == 0;
 
         if no_cache_signal && no_cost_signal && no_saved_token_signal {
             return LisMRolloutConclusion {
@@ -122,7 +121,8 @@ impl LisMAbSummary {
             let reason = if cache_hurts && cost_penalty_exceeded {
                 format!(
                     "LisM degrades cache hit ratio ({:+.3}) and increases cost ({:+}μ); recommend ForceOff",
-                    cache_delta.unwrap_or(0.0), cost_delta
+                    cache_delta.unwrap_or(0.0),
+                    cost_delta
                 )
             } else if cache_hurts {
                 format!(
@@ -154,7 +154,8 @@ impl LisMAbSummary {
                 recommendation: LisMPolicyRecommendation::ForceOn,
                 reason: format!(
                     "LisM improves cache hit ratio ({:+.3}) and reduces cost ({:+}μ); recommend ForceOn",
-                    cache_delta.unwrap_or(0.0), cost_delta
+                    cache_delta.unwrap_or(0.0),
+                    cost_delta
                 ),
                 cache_hit_ratio_delta: cache_delta,
                 cost_delta_micros: cost_delta,
@@ -309,7 +310,13 @@ impl LisMAbSampleSink {
         outcome: BossTestRunOutcome,
         pending_approval_count: usize,
     ) {
-        let record = build_ab_record(run_id.into(), lism_enabled, report, outcome, pending_approval_count);
+        let record = build_ab_record(
+            run_id.into(),
+            lism_enabled,
+            report,
+            outcome,
+            pending_approval_count,
+        );
         self.push(record);
     }
 
@@ -321,7 +328,9 @@ impl LisMAbSampleSink {
 
     /// Load records from the JSONL file at `path` (for post-run analysis).
     pub fn load_records(path: impl AsRef<Path>) -> Vec<LisMAbSampleRecord> {
-        let Ok(file) = File::open(path) else { return vec![] };
+        let Ok(file) = File::open(path) else {
+            return vec![];
+        };
         BufReader::new(file)
             .lines()
             .filter_map(|line| line.ok())
@@ -353,7 +362,9 @@ pub fn new_shared_ab_sink() -> SharedLisMAbSampleSink {
     Arc::new(LisMAbSampleSink::in_memory())
 }
 
-pub fn new_shared_ab_sink_with_path(path: impl AsRef<Path>) -> anyhow::Result<SharedLisMAbSampleSink> {
+pub fn new_shared_ab_sink_with_path(
+    path: impl AsRef<Path>,
+) -> anyhow::Result<SharedLisMAbSampleSink> {
     Ok(Arc::new(LisMAbSampleSink::with_jsonl_path(path)?))
 }
 
@@ -368,9 +379,16 @@ fn build_ab_record(
 ) -> LisMAbSampleRecord {
     let obs = report.observability_summary.as_ref();
     let total_steps = report.total_steps.unwrap_or(0);
-    let completed_steps = report.steps.iter().filter(|s| {
-        matches!(s.status, crate::core::boss_state::BossPlanStepStatus::Completed)
-    }).count();
+    let completed_steps = report
+        .steps
+        .iter()
+        .filter(|s| {
+            matches!(
+                s.status,
+                crate::core::boss_state::BossPlanStepStatus::Completed
+            )
+        })
+        .count();
 
     LisMAbSampleRecord {
         run_id,
@@ -432,6 +450,9 @@ fn completion_rate(records: &[&LisMAbSampleRecord]) -> Option<f64> {
     if records.is_empty() {
         return None;
     }
-    let completed = records.iter().filter(|r| r.outcome == BossTestRunOutcome::Completed).count();
+    let completed = records
+        .iter()
+        .filter(|r| r.outcome == BossTestRunOutcome::Completed)
+        .count();
     Some(completed as f64 / records.len() as f64)
 }

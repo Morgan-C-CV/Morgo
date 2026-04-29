@@ -1,7 +1,9 @@
 use crate::bootstrap::model_profiles::ModelProfileRegistry;
 use crate::core::boss_state::{BossPlan, BossStage};
 use crate::core::state_frame::{ActorRole, StateFrame};
-use crate::core::state_frame_loop::{DecisionLoopConfig, LoopOutcome, LoopUsage, run_decision_loop};
+use crate::core::state_frame_loop::{
+    DecisionLoopConfig, LoopOutcome, LoopUsage, run_decision_loop,
+};
 use crate::core::state_frame_model_resolver::resolve_step_model;
 use crate::core::state_frame_model_router::{ModelRoute, route_model_tier};
 use crate::core::state_frame_projection::project_state_frame;
@@ -85,7 +87,12 @@ pub async fn run_step_with_state_frame_and_runtime<'a>(
 ) -> anyhow::Result<StepOutcome> {
     let routed = build_routed_state_frame_with_model_route(plan, stage, step_id, role);
     let resolved = resolve_routed_step_runtime(routed, runtime)?;
-    let outcome = run_decision_loop(&resolved.resolved_snapshot.client, resolved.routed.frame, config).await?;
+    let outcome = run_decision_loop(
+        &resolved.resolved_snapshot.client,
+        resolved.routed.frame,
+        config,
+    )
+    .await?;
     Ok(map_loop_outcome(outcome))
 }
 
@@ -111,7 +118,12 @@ pub async fn run_routed_step_with_runtime<'a>(
     runtime: StepRuntimeResolutionContext<'a>,
 ) -> anyhow::Result<StepOutcome> {
     let resolved = resolve_routed_step_runtime(routed, runtime)?;
-    let outcome = run_decision_loop(&resolved.resolved_snapshot.client, resolved.routed.frame, config).await?;
+    let outcome = run_decision_loop(
+        &resolved.resolved_snapshot.client,
+        resolved.routed.frame,
+        config,
+    )
+    .await?;
     Ok(map_loop_outcome(outcome))
 }
 

@@ -3,7 +3,7 @@ use std::process::Stdio;
 
 use tokio::process::Command;
 
-use crate::tool::builtin::bash::clamped_reader::{read_clamped, ClampedOutput};
+use crate::tool::builtin::bash::clamped_reader::{ClampedOutput, read_clamped};
 use crate::tool::builtin::bash::readonly_validation::is_read_only_command;
 use crate::tool::builtin::bash::security::{contains_destructive_pattern, contains_shell_operator};
 
@@ -62,7 +62,12 @@ pub async fn execute_with_sandbox(
         .await
         .map_err(|e| anyhow::anyhow!("failed to wait for bash command: {e}"))?;
 
-    let empty = || ClampedOutput { head: vec![], tail: vec![], truncated: false, total_bytes_read: 0 };
+    let empty = || ClampedOutput {
+        head: vec![],
+        tail: vec![],
+        truncated: false,
+        total_bytes_read: 0,
+    };
     let stdout = match stdout_task {
         Some(t) => t.await.map_err(|e| anyhow::anyhow!("stdout join: {e}"))?,
         None => empty(),
@@ -72,7 +77,11 @@ pub async fn execute_with_sandbox(
         None => empty(),
     };
 
-    Ok(ClampedProcessOutput { status, stdout, stderr })
+    Ok(ClampedProcessOutput {
+        status,
+        stdout,
+        stderr,
+    })
 }
 
 fn build_execution_plan(policy: SandboxPolicy) -> SandboxExecutionPlan {

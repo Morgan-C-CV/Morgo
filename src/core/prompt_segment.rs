@@ -69,7 +69,12 @@ impl PromptSegment {
     pub fn new(id: impl Into<String>, kind: PromptSegmentKind, content: impl Into<String>) -> Self {
         let content = content.into();
         let fingerprint = PromptSegmentFingerprint::compute(kind, &content);
-        Self { id: id.into(), kind, content, fingerprint }
+        Self {
+            id: id.into(),
+            kind,
+            content,
+            fingerprint,
+        }
     }
 
     pub fn is_cacheable(&self) -> bool {
@@ -100,7 +105,11 @@ impl PromptAssembly {
     /// Assemble all segments into a single string, joining with newlines.
     /// This is the fallback path — identical to the existing string-join behavior.
     pub fn assemble(&self) -> String {
-        self.segments.iter().map(|s| s.content.as_str()).collect::<Vec<_>>().join("\n")
+        self.segments
+            .iter()
+            .map(|s| s.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     /// Fingerprint of the stable (cacheable) prefix only.
@@ -114,7 +123,11 @@ impl PromptAssembly {
                 any = true;
             }
         }
-        if any { Some(PromptSegmentFingerprint(hasher.finish())) } else { None }
+        if any {
+            Some(PromptSegmentFingerprint(hasher.finish()))
+        } else {
+            None
+        }
     }
 }
 
@@ -122,9 +135,14 @@ impl PromptAssembly {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PrefixStabilityResult {
     /// Cacheable prefix fingerprint is unchanged — cache is valid.
-    Stable { fingerprint: Option<PromptSegmentFingerprint> },
+    Stable {
+        fingerprint: Option<PromptSegmentFingerprint>,
+    },
     /// Cacheable prefix fingerprint changed unexpectedly — cache must be invalidated.
-    Unstable { prev: Option<PromptSegmentFingerprint>, current: Option<PromptSegmentFingerprint> },
+    Unstable {
+        prev: Option<PromptSegmentFingerprint>,
+        current: Option<PromptSegmentFingerprint>,
+    },
 }
 
 /// Compare the current assembly's stable prefix fingerprint against a previously recorded value.
@@ -135,8 +153,13 @@ pub fn check_prefix_stability(
 ) -> PrefixStabilityResult {
     let current = assembly.stable_prefix_fingerprint();
     if current == prev_fingerprint {
-        PrefixStabilityResult::Stable { fingerprint: current }
+        PrefixStabilityResult::Stable {
+            fingerprint: current,
+        }
     } else {
-        PrefixStabilityResult::Unstable { prev: prev_fingerprint, current }
+        PrefixStabilityResult::Unstable {
+            prev: prev_fingerprint,
+            current,
+        }
     }
 }

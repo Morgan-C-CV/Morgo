@@ -1,25 +1,32 @@
 use std::sync::Arc;
 
-use rust_agent::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
 use rust_agent::bootstrap::model_profiles::parse_model_profiles_registry;
-use rust_agent::core::boss::{BossCoordinator, load_plan, save_plan, trim_context_payload, assemble_summarized_payload, B_CONTEXT_TRIM_THRESHOLD, B_CONTEXT_KEEP_CHARS};
-use rust_agent::core::boss_context_brief::{BossContextBrief, BossContextStrategy, BossStateFrame, assemble_brief_prompt};
-use rust_agent::core::boss_state::{CompressionStrategy, ContextMode};
-use rust_agent::core::prompt_budget::{evaluate_prompt_budget, BudgetDecision, PromptCacheCapability, ProviderProfile};
-use rust_agent::core::prompt_cache_adapter::apply_cache_control;
-use rust_agent::core::prompt_segment::{PromptAssembly, PromptSegment, PromptSegmentKind};
+use rust_agent::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
+use rust_agent::core::boss::{
+    B_CONTEXT_KEEP_CHARS, B_CONTEXT_TRIM_THRESHOLD, BossCoordinator, assemble_summarized_payload,
+    load_plan, save_plan, trim_context_payload,
+};
 use rust_agent::core::boss_actor_runtime::{
     BossActorRegistry, DesignerARuntime, ExecutionFn, ExecutorBRuntime, SpecReviewFn,
+};
+use rust_agent::core::boss_context_brief::{
+    BossContextBrief, BossContextStrategy, BossStateFrame, assemble_brief_prompt,
 };
 use rust_agent::core::boss_runtime::BossRuntimeHost;
 use rust_agent::core::boss_state::{
     BossActorRole, BossActorStatus, BossControlRequest, BossControlResponse, BossPlan,
     BossPlanStep, BossPlanStepStatus, BossStage, BossStopStage,
 };
+use rust_agent::core::boss_state::{CompressionStrategy, ContextMode};
 use rust_agent::core::concurrency::{
     BossBudgetDecision, MemoryPressureLevel, evaluate_boss_budget,
 };
 use rust_agent::core::context::SubagentConfig;
+use rust_agent::core::prompt_budget::{
+    BudgetDecision, PromptCacheCapability, ProviderProfile, evaluate_prompt_budget,
+};
+use rust_agent::core::prompt_cache_adapter::apply_cache_control;
+use rust_agent::core::prompt_segment::{PromptAssembly, PromptSegment, PromptSegmentKind};
 use rust_agent::cost::tracker::CostTracker;
 use rust_agent::history::session::{
     InMemorySessionStore, SessionHistory, SessionHistoryEntry, SessionId, SessionSnapshot,
@@ -48,7 +55,8 @@ fn make_inherited_runtime_snapshot_with_scripted_turns(
         config: rust_agent::service::api::client::ModelProviderConfig {
             provider_id: "scripted".into(),
             protocol: rust_agent::service::api::client::ProviderProtocol::OpenAICompatible,
-            compatibility_profile: rust_agent::service::api::client::ProviderCompatibilityProfileKind::OpenAICompatible,
+            compatibility_profile:
+                rust_agent::service::api::client::ProviderCompatibilityProfileKind::OpenAICompatible,
             base_url: "http://localhost".into(),
             auth_strategy: rust_agent::service::api::client::ProviderAuthStrategy::NoAuth,
             api_key: None,
@@ -72,7 +80,9 @@ fn make_inherited_runtime_snapshot_with_scripted_turns(
             prompt_cache_key: None,
             prompt_cache_retention: None,
         },
-        client: rust_agent::service::api::client::ModelProviderClient::with_scripted_turns(scripted_turns),
+        client: rust_agent::service::api::client::ModelProviderClient::with_scripted_turns(
+            scripted_turns,
+        ),
         active_profile_name: Some("inherited-fast".into()),
         source: ActiveModelProfileSource::ModelsToml,
         summary: ActiveModelProviderSummary {
@@ -89,9 +99,8 @@ fn make_inherited_runtime_snapshot_with_scripted_turns(
 fn make_step_model_registry_with_base_url(
     override_base_url: &str,
 ) -> rust_agent::bootstrap::model_profiles::ModelProfileRegistry {
-    parse_model_profiles_registry(
-        &format!(
-            r#"
+    parse_model_profiles_registry(&format!(
+        r#"
 active = "default"
 
 [profiles.default]
@@ -110,8 +119,7 @@ base_url = "{override_base_url}"
 model = "override-model"
 auth_strategy = "none"
 "#
-        ),
-    )
+    ))
     .expect("registry should parse")
 }
 
@@ -120,7 +128,10 @@ fn make_step_model_registry() -> rust_agent::bootstrap::model_profiles::ModelPro
 }
 
 async fn run_minimal_openai_mock_server(listener: TcpListener) {
-    let (mut stream, _) = listener.accept().await.expect("accept mock provider request");
+    let (mut stream, _) = listener
+        .accept()
+        .await
+        .expect("accept mock provider request");
     let mut buffer = vec![0_u8; 16 * 1024];
     let _ = stream.read(&mut buffer).await.expect("read request");
     let body = concat!(
@@ -140,7 +151,10 @@ async fn run_minimal_openai_mock_server(listener: TcpListener) {
 }
 
 async fn run_minimal_openai_mock_server_rejected(listener: TcpListener) {
-    let (mut stream, _) = listener.accept().await.expect("accept mock provider request");
+    let (mut stream, _) = listener
+        .accept()
+        .await
+        .expect("accept mock provider request");
     let mut buffer = vec![0_u8; 16 * 1024];
     let _ = stream.read(&mut buffer).await.expect("read request");
     let body = concat!(
@@ -160,7 +174,10 @@ async fn run_minimal_openai_mock_server_rejected(listener: TcpListener) {
 }
 
 async fn run_mock_server_with_json_content(listener: TcpListener, content_json: String) {
-    let (mut stream, _) = listener.accept().await.expect("accept mock provider request");
+    let (mut stream, _) = listener
+        .accept()
+        .await
+        .expect("accept mock provider request");
     let mut buffer = vec![0_u8; 16 * 1024];
     let _ = stream.read(&mut buffer).await.expect("read request");
     let escaped = content_json.replace('"', "\\\"");
@@ -190,10 +207,16 @@ async fn run_minimal_openai_mock_server_n(listener: TcpListener, n: usize) {
         done_body
     );
     for _ in 0..n {
-        let (mut stream, _) = listener.accept().await.expect("accept mock provider request");
+        let (mut stream, _) = listener
+            .accept()
+            .await
+            .expect("accept mock provider request");
         let mut buffer = vec![0_u8; 16 * 1024];
         let _ = stream.read(&mut buffer).await.expect("read request");
-        stream.write_all(response.as_bytes()).await.expect("write scripted response");
+        stream
+            .write_all(response.as_bytes())
+            .await
+            .expect("write scripted response");
         stream.flush().await.expect("flush scripted response");
     }
 }
@@ -445,17 +468,19 @@ async fn report_interrupt_includes_active_children_and_attempt_review_summary() 
         let snapshot = session.as_mut().unwrap();
         snapshot.executor_b.task_id = Some("task-b".into());
         snapshot.executor_b.status = BossActorStatus::Active;
-        snapshot.active_children.push(rust_agent::core::boss_state::BossActorHandle {
-            actor_id: "boss-plan-alpha-child-1".into(),
-            session_id: "boss-plan-alpha-child-1".into(),
-            role: BossActorRole::ImplementChild,
-            status: BossActorStatus::Active,
-            task_id: Some("task-child".into()),
-            last_snapshot: None,
-            lineage_depth: 1,
-            mailbox_id: None,
-            cancel_id: None,
-        });
+        snapshot
+            .active_children
+            .push(rust_agent::core::boss_state::BossActorHandle {
+                actor_id: "boss-plan-alpha-child-1".into(),
+                session_id: "boss-plan-alpha-child-1".into(),
+                role: BossActorRole::ImplementChild,
+                status: BossActorStatus::Active,
+                task_id: Some("task-child".into()),
+                last_snapshot: None,
+                lineage_depth: 1,
+                mailbox_id: None,
+                cancel_id: None,
+            });
     }
 
     let task = task_manager.create_with_type(
@@ -478,17 +503,26 @@ async fn report_interrupt_includes_active_children_and_attempt_review_summary() 
     }
 
     let report = coordinator.report_progress(&task_manager).await.unwrap();
-    assert!(matches!(report.stage, BossStage::Execution | BossStage::Documentation));
+    assert!(matches!(
+        report.stage,
+        BossStage::Execution | BossStage::Documentation
+    ));
     assert_eq!(report.executor_b.status, BossActorStatus::Active);
     assert_eq!(report.active_children.len(), 1);
-    assert_eq!(report.active_children[0].role, BossActorRole::ImplementChild);
+    assert_eq!(
+        report.active_children[0].role,
+        BossActorRole::ImplementChild
+    );
     assert_eq!(report.steps.len(), 1);
     assert_eq!(report.steps[0].attempt_count, 2);
     assert_eq!(
         report.steps[0].last_review_summary.as_deref(),
         Some("A review: tighten edge-case handling")
     );
-    assert_eq!(report.steps[0].worker_task_id.as_deref(), Some(task.id.as_str()));
+    assert_eq!(
+        report.steps[0].worker_task_id.as_deref(),
+        Some(task.id.as_str())
+    );
 
     let _ = std::fs::remove_file(plan_path);
 }
@@ -708,12 +742,7 @@ async fn report_payload_uses_historystore_derived_summary() {
             },
         ],
     };
-    let app_state = app_state_with_history(
-        "history-session",
-        task_manager.clone(),
-        store,
-        history,
-    );
+    let app_state = app_state_with_history("history-session", task_manager.clone(), store, history);
     let (coordinator, plan_path) = coordinator_with_plan(
         boss_plan(vec![boss_step(0, "History-backed step")]),
         "test_boss_historystore_report.json",
@@ -805,7 +834,10 @@ async fn coordinators_with_same_plan_id_do_not_collide_in_runtime_registry() {
 
     let key_a = coordinator_a.current_runtime_key().await.unwrap();
     let key_b = coordinator_b.current_runtime_key().await.unwrap();
-    assert_ne!(key_a, key_b, "same plan_id coordinators must have distinct runtime keys");
+    assert_ne!(
+        key_a, key_b,
+        "same plan_id coordinators must have distinct runtime keys"
+    );
 
     let response_a = coordinator_a
         .handle_control_request(BossControlRequest::Report, &task_manager, &dispatcher)
@@ -846,7 +878,10 @@ async fn old_runtime_is_shutdown_and_unavailable_after_rebind() {
     let response = coordinator
         .handle_control_request(BossControlRequest::Report, &task_manager, &dispatcher)
         .await;
-    assert!(response.is_ok(), "new runtime must accept requests after rebind");
+    assert!(
+        response.is_ok(),
+        "new runtime must accept requests after rebind"
+    );
 
     let _ = std::fs::remove_file(plan_path);
 }
@@ -867,7 +902,11 @@ async fn runtime_owner_shutdown_makes_runtime_unaddressable() {
 
     coordinator.shutdown_runtime_owner();
 
-    assert!(coordinator.runtime_is_closed_for_testing(&runtime_key).await);
+    assert!(
+        coordinator
+            .runtime_is_closed_for_testing(&runtime_key)
+            .await
+    );
     assert!(!coordinator.has_control_runtime().await);
     assert!(
         coordinator
@@ -895,11 +934,18 @@ async fn shutdown_all_runtimes_allows_fresh_bootstrap_after_cleanup() {
     let runtime_key = coordinator.current_runtime_key().await.unwrap();
     coordinator.shutdown_all_runtime_instances();
 
-    assert!(coordinator.runtime_is_closed_for_testing(&runtime_key).await);
+    assert!(
+        coordinator
+            .runtime_is_closed_for_testing(&runtime_key)
+            .await
+    );
     let response = coordinator
         .handle_control_request(BossControlRequest::Report, &task_manager, &dispatcher)
         .await;
-    assert!(response.is_ok(), "cleanup-only shutdown must allow fresh bootstrap");
+    assert!(
+        response.is_ok(),
+        "cleanup-only shutdown must allow fresh bootstrap"
+    );
 
     let _ = std::fs::remove_file(plan_path);
 }
@@ -931,7 +977,10 @@ async fn shutdown_owner_does_not_block_fresh_coordinator_with_fresh_owner() {
     let response = fresh_coordinator
         .handle_control_request(BossControlRequest::Report, &task_manager, &dispatcher)
         .await;
-    assert!(response.is_ok(), "fresh owner must remain usable after another owner shuts down");
+    assert!(
+        response.is_ok(),
+        "fresh owner must remain usable after another owner shuts down"
+    );
 
     let _ = std::fs::remove_file(closed_path);
     let _ = std::fs::remove_file(fresh_path);
@@ -1256,9 +1305,21 @@ async fn boss_actor_registry_tracks_a_b_and_children() {
 
     let snapshot4 = coordinator.actor_registry_snapshot().await;
     assert_eq!(snapshot4.len(), 5, "A + B + 3 children");
-    assert!(snapshot4.iter().any(|h| h.role == BossActorRole::ReviewChild));
-    assert!(snapshot4.iter().any(|h| h.role == BossActorRole::ImplementChild));
-    assert!(snapshot4.iter().any(|h| h.role == BossActorRole::VerifyChild));
+    assert!(
+        snapshot4
+            .iter()
+            .any(|h| h.role == BossActorRole::ReviewChild)
+    );
+    assert!(
+        snapshot4
+            .iter()
+            .any(|h| h.role == BossActorRole::ImplementChild)
+    );
+    assert!(
+        snapshot4
+            .iter()
+            .any(|h| h.role == BossActorRole::VerifyChild)
+    );
 
     // All three child roles must report is_child() == true.
     let children: Vec<_> = snapshot4.iter().filter(|h| h.role.is_child()).collect();
@@ -1275,13 +1336,19 @@ async fn boss_actor_registry_tracks_a_b_and_children() {
 #[test]
 fn boss_b_executor_b_context_is_boss_executor_b() {
     let ctx = ToolAssemblyContext::executor_b(InteractionSurface::Cli, SessionMode::Headless);
-    assert!(ctx.is_boss_executor_b(), "executor_b context must report is_boss_executor_b");
+    assert!(
+        ctx.is_boss_executor_b(),
+        "executor_b context must report is_boss_executor_b"
+    );
 }
 
 #[test]
 fn boss_worker_context_is_not_boss_executor_b() {
     let ctx = ToolAssemblyContext::worker(InteractionSurface::Cli, SessionMode::Headless);
-    assert!(!ctx.is_boss_executor_b(), "plain worker must not report is_boss_executor_b");
+    assert!(
+        !ctx.is_boss_executor_b(),
+        "plain worker must not report is_boss_executor_b"
+    );
 }
 
 #[test]
@@ -1316,7 +1383,12 @@ fn subagent_limiter_enforces_total_and_role_caps_under_memory_pressure() {
     }
 
     assert!(matches!(
-        evaluate_boss_budget(&tasks, WorkerRole::Implement, 1, MemoryPressureLevel::Normal),
+        evaluate_boss_budget(
+            &tasks,
+            WorkerRole::Implement,
+            1,
+            MemoryPressureLevel::Normal
+        ),
         BossBudgetDecision::Queue { .. }
     ));
 }
@@ -1470,14 +1542,21 @@ async fn execution_reuses_persistent_b_instead_of_fresh_worker_per_step() {
         .unwrap()
         .expect("step 1 should dispatch");
 
-    assert!(payload1.contains("\"step_id\":1"), "spawn payload must carry step_id");
+    assert!(
+        payload1.contains("\"step_id\":1"),
+        "spawn payload must carry step_id"
+    );
     assert!(
         payload1.contains("\"reuse_strategy\":\"running_only\""),
         "spawn payload must use running_only reuse strategy"
     );
 
     let tasks_after_step1 = task_manager.list();
-    assert_eq!(tasks_after_step1.len(), 1, "exactly one B task spawned for step 1");
+    assert_eq!(
+        tasks_after_step1.len(),
+        1,
+        "exactly one B task spawned for step 1"
+    );
     let b_task_id = tasks_after_step1[0].id.clone();
 
     // B's actor id is deterministically derived from the plan id.
@@ -1521,7 +1600,10 @@ async fn execution_reuses_persistent_b_instead_of_fresh_worker_per_step() {
         "continue payload must target the existing B task"
     );
     assert_eq!(v2["step_id"], 2, "continue payload must carry step_id 2");
-    assert!(v2["reuse_strategy"].is_null(), "continue payload must NOT have reuse_strategy");
+    assert!(
+        v2["reuse_strategy"].is_null(),
+        "continue payload must NOT have reuse_strategy"
+    );
 
     // Critically: still only one task in the manager — no new task was spawned.
     let tasks_after_step2 = task_manager.list();
@@ -1592,7 +1674,11 @@ async fn boss_advance_plan_uses_continue_payload_when_b_is_running() {
     assert_eq!(v["step_acceptance"][0], "acceptance 1");
 
     // No new task created.
-    assert_eq!(task_manager.list().len(), 1, "no new task — B was reused via Continue");
+    assert_eq!(
+        task_manager.list().len(),
+        1,
+        "no new task — B was reused via Continue"
+    );
 
     let _ = std::fs::remove_file(plan_path);
 }
@@ -1643,15 +1729,24 @@ async fn boss_b_receives_step_context_via_continue_or_mailbox() {
         .unwrap();
 
     let vc: serde_json::Value = serde_json::from_str(&continue_payload).unwrap();
-    assert_eq!(vc["task_id"], "b-task-42", "continue payload must target B's task id");
+    assert_eq!(
+        vc["task_id"], "b-task-42",
+        "continue payload must target B's task id"
+    );
     assert_eq!(vc["step_id"], 0);
     assert_eq!(vc["boss_plan_id"], "plan-alpha");
     assert_eq!(vc["step_objective"], "objective 0");
     assert_eq!(vc["step_acceptance"][0], "acceptance 0");
     assert_eq!(vc["parent_session_id"], "parent-ctx-session");
     // Continue payload must NOT have reuse_strategy or task field.
-    assert!(vc["reuse_strategy"].is_null(), "continue payload must not have reuse_strategy");
-    assert!(vc["task"].is_null(), "continue payload must not have task field");
+    assert!(
+        vc["reuse_strategy"].is_null(),
+        "continue payload must not have reuse_strategy"
+    );
+    assert!(
+        vc["task"].is_null(),
+        "continue payload must not have task field"
+    );
 
     let _ = std::fs::remove_file(plan_path);
 }
@@ -1673,8 +1768,14 @@ fn boss_b_spawns_children_with_child_policy_and_depth() {
         phase: BossStage::Execution,
     };
     assert_eq!(child_policy.lineage_depth, 1, "child must be at depth 1");
-    assert!(!child_policy.may_spawn(), "ImplementChild must not be allowed to spawn");
-    assert!(child_policy.actor_role.is_child(), "ImplementChild must be classified as child");
+    assert!(
+        !child_policy.may_spawn(),
+        "ImplementChild must not be allowed to spawn"
+    );
+    assert!(
+        child_policy.actor_role.is_child(),
+        "ImplementChild must be classified as child"
+    );
 
     // Verify all three child roles are blocked from spawning.
     for role in [
@@ -1687,11 +1788,19 @@ fn boss_b_spawns_children_with_child_policy_and_depth() {
             lineage_depth: 1,
             phase: BossStage::Execution,
         };
-        assert!(!p.may_spawn(), "{} must not be allowed to spawn", role.as_str());
+        assert!(
+            !p.may_spawn(),
+            "{} must not be allowed to spawn",
+            role.as_str()
+        );
     }
 
     // boss_actor_id recorded on task must encode role and depth.
-    let boss_actor_id = format!("{}:depth={}", child_policy.actor_role.as_str(), child_policy.lineage_depth);
+    let boss_actor_id = format!(
+        "{}:depth={}",
+        child_policy.actor_role.as_str(),
+        child_policy.lineage_depth
+    );
     assert_eq!(boss_actor_id, "implement_child:depth=1");
 }
 
@@ -1803,7 +1912,10 @@ async fn boss_b_fans_out_children_and_fans_in_summary() {
 
     // Verify group_summary returns a summary for B's group.
     let summary = task_manager.group_summary(&b_task_id);
-    assert!(summary.is_some(), "group_summary must return a summary when all children complete");
+    assert!(
+        summary.is_some(),
+        "group_summary must return a summary when all children complete"
+    );
 
     // Simulate the group fan-in event arriving at the coordinator.
     let fan_in_event = TaskEvent {
@@ -1838,7 +1950,10 @@ async fn boss_b_fans_out_children_and_fans_in_summary() {
         BossPlanStepStatus::Reviewing,
         "fan-in event must mark the step as Reviewing (pending A's review)"
     );
-    assert!(!step.completed, "step.completed must be false until A accepts");
+    assert!(
+        !step.completed,
+        "step.completed must be false until A accepts"
+    );
 
     let _ = std::fs::remove_file(plan_path);
 }
@@ -2004,7 +2119,10 @@ async fn user_feedback_reopens_documentation_loop_before_execution() {
         .await
         .unwrap();
 
-    assert!(!confirmed, "non-confirmation input must not enter execution");
+    assert!(
+        !confirmed,
+        "non-confirmation input must not enter execution"
+    );
     assert_eq!(coordinator.get_stage().await, BossStage::Documentation);
 
     let plan_guard = coordinator.plan.read().await;
@@ -2039,7 +2157,10 @@ fn boss_spawned_b_runtime_has_executor_policy_and_agent_tool() {
 
     // Assemble with executor_b context — Agent must be visible.
     let b_ctx = ToolAssemblyContext::executor_b(InteractionSurface::Cli, SessionMode::Headless);
-    assert!(b_ctx.is_boss_executor_b(), "executor_b context must report is_boss_executor_b");
+    assert!(
+        b_ctx.is_boss_executor_b(),
+        "executor_b context must report is_boss_executor_b"
+    );
 
     let b_registry = registry.assemble(b_ctx);
     let b_tools: Vec<_> = b_registry.all_metadata();
@@ -2143,8 +2264,15 @@ async fn boss_a_review_accepts_diff_before_step_completion() {
     {
         let guard = coordinator.plan.read().await;
         let step = &guard.as_ref().unwrap().steps[0];
-        assert_eq!(step.status, BossPlanStepStatus::Reviewing, "fan-in must enter Reviewing");
-        assert!(!step.completed, "step must not be completed before A accepts");
+        assert_eq!(
+            step.status,
+            BossPlanStepStatus::Reviewing,
+            "fan-in must enter Reviewing"
+        );
+        assert!(
+            !step.completed,
+            "step must not be completed before A accepts"
+        );
     }
 
     // A accepts — step must move to Completed.
@@ -2155,9 +2283,19 @@ async fn boss_a_review_accepts_diff_before_step_completion() {
 
     let guard = coordinator.plan.read().await;
     let step = &guard.as_ref().unwrap().steps[0];
-    assert_eq!(step.status, BossPlanStepStatus::Completed, "A accept must complete the step");
-    assert!(step.completed, "step.completed must be true after A accepts");
-    assert_eq!(step.last_review_summary.as_deref(), Some("LGTM, all acceptance criteria met"));
+    assert_eq!(
+        step.status,
+        BossPlanStepStatus::Completed,
+        "A accept must complete the step"
+    );
+    assert!(
+        step.completed,
+        "step.completed must be true after A accepts"
+    );
+    assert_eq!(
+        step.last_review_summary.as_deref(),
+        Some("LGTM, all acceptance criteria met")
+    );
 
     let _ = std::fs::remove_file(plan_path);
 }
@@ -2195,9 +2333,19 @@ async fn boss_a_review_rejects_and_sends_correction_to_b() {
 
     let guard = coordinator.plan.read().await;
     let step = &guard.as_ref().unwrap().steps[0];
-    assert_eq!(step.status, BossPlanStepStatus::Rejected, "A reject must set Rejected status");
-    assert!(!step.completed, "step must not be completed after rejection");
-    assert_eq!(step.attempt_count, 1, "attempt_count must increment on rejection");
+    assert_eq!(
+        step.status,
+        BossPlanStepStatus::Rejected,
+        "A reject must set Rejected status"
+    );
+    assert!(
+        !step.completed,
+        "step must not be completed after rejection"
+    );
+    assert_eq!(
+        step.attempt_count, 1,
+        "attempt_count must increment on rejection"
+    );
     assert_eq!(
         step.last_correction.as_deref(),
         Some("Add error handling for the edge case in section 3")
@@ -2249,7 +2397,10 @@ async fn boss_step_fails_only_after_retry_budget_exhausted() {
     }
 
     // First rejection — attempt_count = 1, still under budget (2).
-    coordinator.on_task_event(&fan_in_event("b-task-budget")).await.unwrap();
+    coordinator
+        .on_task_event(&fan_in_event("b-task-budget"))
+        .await
+        .unwrap();
     coordinator
         .on_review_event(0, false, "Not good enough", Some("Fix it"))
         .await
@@ -2258,7 +2409,11 @@ async fn boss_step_fails_only_after_retry_budget_exhausted() {
     {
         let guard = coordinator.plan.read().await;
         let step = &guard.as_ref().unwrap().steps[0];
-        assert_eq!(step.status, BossPlanStepStatus::Rejected, "first rejection must be Rejected");
+        assert_eq!(
+            step.status,
+            BossPlanStepStatus::Rejected,
+            "first rejection must be Rejected"
+        );
         assert_eq!(step.attempt_count, 1);
     }
 
@@ -2282,7 +2437,10 @@ async fn boss_step_fails_only_after_retry_budget_exhausted() {
         BossPlanStepStatus::Failed,
         "step must be Failed after retry budget exhausted"
     );
-    assert_eq!(step.attempt_count, 2, "attempt_count must equal retry_budget");
+    assert_eq!(
+        step.attempt_count, 2,
+        "attempt_count must equal retry_budget"
+    );
     assert!(!step.completed, "failed step must not be marked completed");
 
     let _ = std::fs::remove_file(plan_path);
@@ -2339,7 +2497,9 @@ async fn boss_a_replan_step_does_not_redispatch_b_and_is_distinct_from_rejected(
     let payload = coordinator.advance_plan(&app_state).await.unwrap();
     assert_eq!(
         payload.as_deref(),
-        Some("Boss step 0 requires replanning before execution can continue. Reason: split implementation from validation")
+        Some(
+            "Boss step 0 requires replanning before execution can continue. Reason: split implementation from validation"
+        )
     );
 
     let report = coordinator.report_progress(&task_manager).await.unwrap();
@@ -2380,7 +2540,8 @@ async fn repair_replan_step_restores_pending_and_requires_manual_advance() {
         plan.steps[0].worker_task_id = Some("old-b-task".into());
         plan.steps[0].review_task_id = Some("old-review-task".into());
         plan.steps[0].last_review_summary = Some("Current step needs strategy rewrite".into());
-        plan.steps[0].last_correction = Some("replan required: split implementation from validation".into());
+        plan.steps[0].last_correction =
+            Some("replan required: split implementation from validation".into());
     }
 
     coordinator
@@ -2402,7 +2563,10 @@ async fn repair_replan_step_restores_pending_and_requires_manual_advance() {
         assert_eq!(step.objective.as_deref(), Some("Patched objective"));
         assert_eq!(
             step.acceptance,
-            vec!["patched acceptance a".to_string(), "patched acceptance b".to_string()]
+            vec![
+                "patched acceptance a".to_string(),
+                "patched acceptance b".to_string()
+            ]
         );
         assert_eq!(step.attempt_count, 0);
         assert!(step.worker_task_id.is_none());
@@ -2422,7 +2586,10 @@ async fn repair_replan_step_restores_pending_and_requires_manual_advance() {
 
     let app_state = app_state_with_tasks("parent-session-repair", Arc::new(TaskManager::default()));
     let payload = coordinator.advance_plan(&app_state).await.unwrap();
-    assert!(payload.is_some(), "step should only resume after explicit advance_plan call");
+    assert!(
+        payload.is_some(),
+        "step should only resume after explicit advance_plan call"
+    );
 
     let _ = std::fs::remove_file(plan_path);
 }
@@ -2440,7 +2607,8 @@ async fn repaired_step_redispatch_payload_does_not_carry_old_replan_reason() {
         let plan = guard.as_mut().unwrap();
         plan.steps[0].status = BossPlanStepStatus::ReplanRequired;
         plan.steps[0].last_review_summary = Some("Current step needs strategy rewrite".into());
-        plan.steps[0].last_correction = Some("replan required: split implementation from validation".into());
+        plan.steps[0].last_correction =
+            Some("replan required: split implementation from validation".into());
     }
 
     coordinator
@@ -2453,7 +2621,10 @@ async fn repaired_step_redispatch_payload_does_not_carry_old_replan_reason() {
         .await
         .unwrap();
 
-    let app_state = app_state_with_tasks("parent-session-repair-payload", Arc::new(TaskManager::default()));
+    let app_state = app_state_with_tasks(
+        "parent-session-repair-payload",
+        Arc::new(TaskManager::default()),
+    );
     let payload = coordinator
         .advance_plan(&app_state)
         .await
@@ -2582,7 +2753,10 @@ async fn runtime_host_owner_survives_rebind_and_restart() {
     let response = coordinator
         .handle_control_request(BossControlRequest::Report, &task_manager, &dispatcher)
         .await;
-    assert!(response.is_ok(), "control request must succeed after rebind via host");
+    assert!(
+        response.is_ok(),
+        "control request must succeed after rebind via host"
+    );
 
     coordinator.shutdown_runtime_owner();
     coordinator.restart_runtime_owner();
@@ -2590,7 +2764,10 @@ async fn runtime_host_owner_survives_rebind_and_restart() {
     let response2 = coordinator
         .handle_control_request(BossControlRequest::Report, &task_manager, &dispatcher)
         .await;
-    assert!(response2.is_ok(), "control request must succeed after owner restart via host");
+    assert!(
+        response2.is_ok(),
+        "control request must succeed after owner restart via host"
+    );
 }
 
 // --- T16.6.H: Boss actor runtime mailbox seam ---
@@ -2614,18 +2791,32 @@ async fn restore_bootstraps_actor_runtimes_that_are_addressable() {
 
     // Actor registry must be bootstrapped after restore.
     let registry_guard = coordinator.actor_registry.read().await;
-    let registry = registry_guard.as_ref().expect("actor registry must be bootstrapped after restore");
+    let registry = registry_guard
+        .as_ref()
+        .expect("actor registry must be bootstrapped after restore");
 
     // Both mailboxes must be open and addressable.
-    assert!(!registry.a_mailbox().is_closed(), "A mailbox must be open after restore");
-    assert!(!registry.b_mailbox().is_closed(), "B mailbox must be open after restore");
+    assert!(
+        !registry.a_mailbox().is_closed(),
+        "A mailbox must be open after restore"
+    );
+    assert!(
+        !registry.b_mailbox().is_closed(),
+        "B mailbox must be open after restore"
+    );
 
     // Send a command to A and verify it processes without error.
-    let event = registry.a_mailbox().request(DesignerACommand::Plan {
-        plan_id: "plan-h-restore".into(),
-        document_spec: "spec".into(),
-    }).await;
-    assert!(event.is_ok(), "A mailbox must accept Plan command after restore");
+    let event = registry
+        .a_mailbox()
+        .request(DesignerACommand::Plan {
+            plan_id: "plan-h-restore".into(),
+            document_spec: "spec".into(),
+        })
+        .await;
+    assert!(
+        event.is_ok(),
+        "A mailbox must accept Plan command after restore"
+    );
 
     let _ = std::fs::remove_file(&plan_path);
 }
@@ -2651,16 +2842,21 @@ async fn advance_plan_dispatches_step_through_b_mailbox() {
     let event = {
         let registry_guard = coordinator.actor_registry.read().await;
         let registry = registry_guard.as_ref().unwrap();
-        registry.b_mailbox().request(ExecutorBCommand::DispatchStep {
-            step_id: 1,
-            payload: "test-payload".into(),
-        }).await
+        registry
+            .b_mailbox()
+            .request(ExecutorBCommand::DispatchStep {
+                step_id: 1,
+                payload: "test-payload".into(),
+            })
+            .await
     };
 
     assert!(event.is_ok(), "B mailbox must accept DispatchStep command");
     let event = event.unwrap();
     match event {
-        rust_agent::core::boss_actor_runtime::BossActorEvent::StepDispatched { step_id, .. } => {
+        rust_agent::core::boss_actor_runtime::BossActorEvent::StepDispatched {
+            step_id, ..
+        } => {
             assert_eq!(step_id, 1, "dispatched step_id must match");
         }
         other => panic!("expected StepDispatched, got {:?}", other),
@@ -2670,7 +2866,11 @@ async fn advance_plan_dispatches_step_through_b_mailbox() {
     let registry_guard = coordinator.actor_registry.read().await;
     let registry = registry_guard.as_ref().unwrap();
     let b_status = registry.executor_b.status().await;
-    assert_eq!(b_status, ActorStatus::Active, "B must be Active after DispatchStep");
+    assert_eq!(
+        b_status,
+        ActorStatus::Active,
+        "B must be Active after DispatchStep"
+    );
 
     let _ = std::fs::remove_file(&plan_path);
 }
@@ -2694,14 +2894,20 @@ async fn stop_sends_stop_command_to_actor_mailboxes() {
     {
         let registry_guard = coordinator.actor_registry.read().await;
         let registry = registry_guard.as_ref().unwrap();
-        let _ = registry.a_mailbox().send(DesignerACommand::Plan {
-            plan_id: "plan-h-stop".into(),
-            document_spec: "spec".into(),
-        }).await;
-        let _ = registry.b_mailbox().send(ExecutorBCommand::DispatchStep {
-            step_id: 1,
-            payload: "payload".into(),
-        }).await;
+        let _ = registry
+            .a_mailbox()
+            .send(DesignerACommand::Plan {
+                plan_id: "plan-h-stop".into(),
+                document_spec: "spec".into(),
+            })
+            .await;
+        let _ = registry
+            .b_mailbox()
+            .send(ExecutorBCommand::DispatchStep {
+                step_id: 1,
+                payload: "payload".into(),
+            })
+            .await;
     }
     // Give the actor loops a tick to process.
     tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
@@ -2722,8 +2928,14 @@ async fn stop_sends_stop_command_to_actor_mailboxes() {
     // After Stop, both mailboxes must be closed.
     let registry_guard = coordinator.actor_registry.read().await;
     let registry = registry_guard.as_ref().unwrap();
-    assert!(registry.a_mailbox().is_closed(), "A mailbox must be closed after Stop");
-    assert!(registry.b_mailbox().is_closed(), "B mailbox must be closed after Stop");
+    assert!(
+        registry.a_mailbox().is_closed(),
+        "A mailbox must be closed after Stop"
+    );
+    assert!(
+        registry.b_mailbox().is_closed(),
+        "B mailbox must be closed after Stop"
+    );
 
     let _ = std::fs::remove_file(&plan_path);
 }
@@ -2751,7 +2963,9 @@ async fn advance_plan_sends_dispatch_to_b_mailbox_and_b_state_is_active() {
 
     // B's actor state must be Active — proves the mailbox handler ran before advance_plan returned.
     let registry_guard = coordinator.actor_registry.read().await;
-    let registry = registry_guard.as_ref().expect("actor registry must exist after advance_plan");
+    let registry = registry_guard
+        .as_ref()
+        .expect("actor registry must exist after advance_plan");
     let b_status = registry.executor_b.status().await;
     assert_eq!(
         b_status,
@@ -2782,11 +2996,16 @@ async fn on_review_event_sends_review_to_a_mailbox_and_a_state_reflects_step() {
         p.steps[0].worker_task_id = Some("b-task-h1".into());
     }
 
-    coordinator.on_review_event(0, true, "LGTM", None).await.unwrap();
+    coordinator
+        .on_review_event(0, true, "LGTM", None)
+        .await
+        .unwrap();
 
     // A's actor state must reflect the reviewed step — proves mailbox handler ran before plan mutation.
     let registry_guard = coordinator.actor_registry.read().await;
-    let registry = registry_guard.as_ref().expect("actor registry must exist after on_review_event");
+    let registry = registry_guard
+        .as_ref()
+        .expect("actor registry must exist after on_review_event");
     let a_state = registry.designer_a.state.read().await;
     assert_eq!(
         a_state.current_step,
@@ -2799,7 +3018,11 @@ async fn on_review_event_sends_review_to_a_mailbox_and_a_state_reflects_step() {
     // Plan state must also be updated correctly.
     let plan_guard = coordinator.plan.read().await;
     let step = &plan_guard.as_ref().unwrap().steps[0];
-    assert_eq!(step.status, BossPlanStepStatus::Completed, "step must be Completed after accepted review");
+    assert_eq!(
+        step.status,
+        BossPlanStepStatus::Completed,
+        "step must be Completed after accepted review"
+    );
     assert!(step.completed, "step.completed must be true");
 
     let _ = std::fs::remove_file(&plan_path);
@@ -2902,7 +3125,11 @@ async fn advance_plan_does_not_call_invoke_agent_tool_directly_after_h2() {
     let app_state = app_state_with_tasks("session-h2-no-inline", task_manager.clone());
 
     let result = coordinator.advance_plan(&app_state).await;
-    assert!(result.is_ok(), "advance_plan must succeed without inline tool call: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "advance_plan must succeed without inline tool call: {:?}",
+        result
+    );
 
     tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
 
@@ -2934,8 +3161,16 @@ async fn b_runtime_callback_fires_for_continue_step_as_well() {
     coordinator.advance_plan(&app_state).await.unwrap();
     tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
 
-    let first_payload = coordinator.status.read().await.last_b_dispatch_payload.clone();
-    assert!(first_payload.is_some(), "first dispatch must record payload");
+    let first_payload = coordinator
+        .status
+        .read()
+        .await
+        .last_b_dispatch_payload
+        .clone();
+    assert!(
+        first_payload.is_some(),
+        "first dispatch must record payload"
+    );
 
     {
         let mut guard = coordinator.session.write().await;
@@ -2955,8 +3190,16 @@ async fn b_runtime_callback_fires_for_continue_step_as_well() {
     coordinator.advance_plan(&app_state).await.unwrap();
     tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
 
-    let second_payload = coordinator.status.read().await.last_b_dispatch_payload.clone();
-    assert!(second_payload.is_some(), "ContinueStep must also record payload via B's callback");
+    let second_payload = coordinator
+        .status
+        .read()
+        .await
+        .last_b_dispatch_payload
+        .clone();
+    assert!(
+        second_payload.is_some(),
+        "ContinueStep must also record payload via B's callback"
+    );
     assert_ne!(
         first_payload, second_payload,
         "second dispatch payload must differ from first"
@@ -3061,9 +3304,17 @@ async fn finalize_documentation_loop_routes_through_a_mailbox() {
         .unwrap();
 
     // has_a_callbacks must be true — A callbacks were wired, not the coordinator fallback.
-    let has_a_callbacks = coordinator.actor_registry.read().await
-        .as_ref().map(|r| r.has_a_callbacks).unwrap_or(false);
-    assert!(has_a_callbacks, "finalize_documentation_loop must wire A callbacks (has_a_callbacks == true)");
+    let has_a_callbacks = coordinator
+        .actor_registry
+        .read()
+        .await
+        .as_ref()
+        .map(|r| r.has_a_callbacks)
+        .unwrap_or(false);
+    assert!(
+        has_a_callbacks,
+        "finalize_documentation_loop must wire A callbacks (has_a_callbacks == true)"
+    );
 
     // A's mailbox handler must have updated A's internal stage to WaitingForApproval.
     let a_stage = {
@@ -3117,9 +3368,17 @@ async fn handle_user_approval_routes_through_a_mailbox_and_a_drives_stage_transi
     assert!(approved, "Y input must return approved=true");
 
     // has_a_callbacks must be true — A callbacks were wired, not the coordinator fallback.
-    let has_a_callbacks = coordinator.actor_registry.read().await
-        .as_ref().map(|r| r.has_a_callbacks).unwrap_or(false);
-    assert!(has_a_callbacks, "handle_user_approval must wire A callbacks (has_a_callbacks == true)");
+    let has_a_callbacks = coordinator
+        .actor_registry
+        .read()
+        .await
+        .as_ref()
+        .map(|r| r.has_a_callbacks)
+        .unwrap_or(false);
+    assert!(
+        has_a_callbacks,
+        "handle_user_approval must wire A callbacks (has_a_callbacks == true)"
+    );
 
     // A's mailbox handler must have updated A's internal stage to Execution.
     let a_stage = {
@@ -3161,15 +3420,23 @@ async fn bootstrap_with_app_state_produces_full_registry_in_one_shot() {
     let task_manager = Arc::new(TaskManager::default());
     let app_state = app_state_with_tasks("session-h4-oneshot", task_manager.clone());
 
-    coordinator.bootstrap_actor_registry_with_app_state(&app_state).await;
+    coordinator
+        .bootstrap_actor_registry_with_app_state(&app_state)
+        .await;
 
     let (has_exec, has_a) = {
         let guard = coordinator.actor_registry.read().await;
         let r = guard.as_ref().unwrap();
         (r.has_executor, r.has_a_callbacks)
     };
-    assert!(has_exec, "bootstrap_actor_registry_with_app_state must set has_executor");
-    assert!(has_a, "bootstrap_actor_registry_with_app_state must set has_a_callbacks");
+    assert!(
+        has_exec,
+        "bootstrap_actor_registry_with_app_state must set has_executor"
+    );
+    assert!(
+        has_a,
+        "bootstrap_actor_registry_with_app_state must set has_a_callbacks"
+    );
 
     let _ = std::fs::remove_file(&plan_path);
 }
@@ -3233,7 +3500,9 @@ async fn restore_then_bootstrap_with_app_state_is_immediately_ready() {
     let task_manager = Arc::new(TaskManager::default());
     let app_state = app_state_with_tasks("session-h4-restore", task_manager.clone());
 
-    coordinator.bootstrap_actor_registry_with_app_state(&app_state).await;
+    coordinator
+        .bootstrap_actor_registry_with_app_state(&app_state)
+        .await;
 
     let b_ptr_before = {
         let guard = coordinator.actor_registry.read().await;
@@ -3277,10 +3546,9 @@ async fn restore_or_init_with_app_state_produces_full_registry_immediately() {
     let task_manager = Arc::new(TaskManager::default());
     let app_state = app_state_with_tasks("session-h5-full", task_manager.clone());
 
-    let coordinator =
-        BossCoordinator::restore_or_init_with_app_state(&plan_path, &app_state)
-            .await
-            .unwrap();
+    let coordinator = BossCoordinator::restore_or_init_with_app_state(&plan_path, &app_state)
+        .await
+        .unwrap();
 
     // Registry must be full immediately — no lazy upgrade required.
     let (has_exec, has_a) = {
@@ -3288,8 +3556,14 @@ async fn restore_or_init_with_app_state_produces_full_registry_immediately() {
         let r = guard.as_ref().unwrap();
         (r.has_executor, r.has_a_callbacks)
     };
-    assert!(has_exec, "restore_or_init_with_app_state must produce has_executor=true");
-    assert!(has_a, "restore_or_init_with_app_state must produce has_a_callbacks=true");
+    assert!(
+        has_exec,
+        "restore_or_init_with_app_state must produce has_executor=true"
+    );
+    assert!(
+        has_a,
+        "restore_or_init_with_app_state must produce has_a_callbacks=true"
+    );
 
     let _ = std::fs::remove_file(&plan_path);
 }
@@ -3310,10 +3584,9 @@ async fn advance_plan_after_full_restore_does_not_replace_registry() {
     let task_manager = Arc::new(TaskManager::default());
     let app_state = app_state_with_tasks("session-h5-advance", task_manager.clone());
 
-    let coordinator =
-        BossCoordinator::restore_or_init_with_app_state(&plan_path, &app_state)
-            .await
-            .unwrap();
+    let coordinator = BossCoordinator::restore_or_init_with_app_state(&plan_path, &app_state)
+        .await
+        .unwrap();
 
     let b_ptr_before = {
         let guard = coordinator.actor_registry.read().await;
@@ -3352,10 +3625,9 @@ async fn finalize_documentation_loop_after_full_restore_does_not_replace_registr
     let task_manager = Arc::new(TaskManager::default());
     let app_state = app_state_with_tasks("session-h5-finalize", task_manager.clone());
 
-    let coordinator =
-        BossCoordinator::restore_or_init_with_app_state(&plan_path, &app_state)
-            .await
-            .unwrap();
+    let coordinator = BossCoordinator::restore_or_init_with_app_state(&plan_path, &app_state)
+        .await
+        .unwrap();
 
     let a_ptr_before = {
         let guard = coordinator.actor_registry.read().await;
@@ -3395,15 +3667,23 @@ async fn production_assembly_produces_full_registry() {
     let runtime_owner = Arc::new(BossRuntimeOwner::default());
     let coordinator = Arc::new(BossCoordinator::new_with_runtime_owner(runtime_owner));
 
-    coordinator.bootstrap_actor_registry_with_app_state(&app_state).await;
+    coordinator
+        .bootstrap_actor_registry_with_app_state(&app_state)
+        .await;
 
     let (has_exec, has_a) = {
         let guard = coordinator.actor_registry.read().await;
         let r = guard.as_ref().unwrap();
         (r.has_executor, r.has_a_callbacks)
     };
-    assert!(has_exec, "production assembly must produce has_executor=true");
-    assert!(has_a, "production assembly must produce has_a_callbacks=true");
+    assert!(
+        has_exec,
+        "production assembly must produce has_executor=true"
+    );
+    assert!(
+        has_a,
+        "production assembly must produce has_a_callbacks=true"
+    );
 }
 
 /// After production assembly bootstrap, advance_plan does not trigger a mode upgrade.
@@ -3435,7 +3715,9 @@ async fn advance_plan_after_production_assembly_does_not_upgrade_registry() {
         status.stage = rust_agent::core::boss_state::BossStage::Execution;
     }
 
-    coordinator.bootstrap_actor_registry_with_app_state(&app_state).await;
+    coordinator
+        .bootstrap_actor_registry_with_app_state(&app_state)
+        .await;
 
     let b_ptr_before = {
         let guard = coordinator.actor_registry.read().await;
@@ -3486,7 +3768,9 @@ async fn finalize_documentation_loop_after_production_assembly_does_not_upgrade_
         status.planning_file = Some(plan_path.to_string_lossy().into_owned());
     }
 
-    coordinator.bootstrap_actor_registry_with_app_state(&app_state).await;
+    coordinator
+        .bootstrap_actor_registry_with_app_state(&app_state)
+        .await;
 
     let a_ptr_before = {
         let guard = coordinator.actor_registry.read().await;
@@ -3526,17 +3810,28 @@ async fn h7_new_with_runtime_owner_is_state_only_before_bootstrap() {
 
     // Before bootstrap: no registry at all.
     let has_registry = coordinator.actor_registry.read().await.is_some();
-    assert!(!has_registry, "new_with_runtime_owner must not pre-populate registry");
+    assert!(
+        !has_registry,
+        "new_with_runtime_owner must not pre-populate registry"
+    );
 
     // After bootstrap_actor_registry_with_app_state: full mode.
     let task_manager = Arc::new(TaskManager::default());
     let app_state = app_state_with_tasks("session-h7-new", task_manager);
-    coordinator.bootstrap_actor_registry_with_app_state(&app_state).await;
+    coordinator
+        .bootstrap_actor_registry_with_app_state(&app_state)
+        .await;
 
     let guard = coordinator.actor_registry.read().await;
     let registry = guard.as_ref().unwrap();
-    assert!(registry.has_executor, "h7: has_executor must be true after bootstrap");
-    assert!(registry.has_a_callbacks, "h7: has_a_callbacks must be true after bootstrap");
+    assert!(
+        registry.has_executor,
+        "h7: has_executor must be true after bootstrap"
+    );
+    assert!(
+        registry.has_a_callbacks,
+        "h7: has_a_callbacks must be true after bootstrap"
+    );
 }
 
 /// bootstrap_actor_registry is pub(crate): calling it produces a state-only registry.
@@ -3550,8 +3845,14 @@ async fn h7_bootstrap_actor_registry_is_state_only() {
 
     let guard = coordinator.actor_registry.read().await;
     let registry = guard.as_ref().unwrap();
-    assert!(!registry.has_executor, "h7: state-only bootstrap must not set has_executor");
-    assert!(!registry.has_a_callbacks, "h7: state-only bootstrap must not set has_a_callbacks");
+    assert!(
+        !registry.has_executor,
+        "h7: state-only bootstrap must not set has_executor"
+    );
+    assert!(
+        !registry.has_a_callbacks,
+        "h7: state-only bootstrap must not set has_a_callbacks"
+    );
 }
 
 /// Production assembly contract: new_with_runtime_owner + bootstrap_actor_registry_with_app_state
@@ -3565,7 +3866,9 @@ async fn h7_production_assembly_is_full_mode_and_idempotent() {
     let task_manager = Arc::new(TaskManager::default());
     let app_state = app_state_with_tasks("session-h7-prod", task_manager);
 
-    coordinator.bootstrap_actor_registry_with_app_state(&app_state).await;
+    coordinator
+        .bootstrap_actor_registry_with_app_state(&app_state)
+        .await;
 
     let ptr_first = {
         let guard = coordinator.actor_registry.read().await;
@@ -3573,18 +3876,26 @@ async fn h7_production_assembly_is_full_mode_and_idempotent() {
     };
 
     // Second call must be a no-op — registry identity must be stable.
-    coordinator.bootstrap_actor_registry_with_app_state(&app_state).await;
+    coordinator
+        .bootstrap_actor_registry_with_app_state(&app_state)
+        .await;
 
     let ptr_second = {
         let guard = coordinator.actor_registry.read().await;
         Arc::as_ptr(&guard.as_ref().unwrap().executor_b.state) as usize
     };
 
-    assert_eq!(ptr_first, ptr_second, "h7: second bootstrap call must not replace registry");
+    assert_eq!(
+        ptr_first, ptr_second,
+        "h7: second bootstrap call must not replace registry"
+    );
 
     let guard = coordinator.actor_registry.read().await;
     let registry = guard.as_ref().unwrap();
-    assert!(registry.has_executor && registry.has_a_callbacks, "h7: production assembly must be full mode");
+    assert!(
+        registry.has_executor && registry.has_a_callbacks,
+        "h7: production assembly must be full mode"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -3603,8 +3914,14 @@ async fn h8_new_with_app_state_is_full_mode() {
 
     let guard = coordinator.actor_registry.read().await;
     let registry = guard.as_ref().unwrap();
-    assert!(registry.has_executor, "h8: new_with_app_state must set has_executor");
-    assert!(registry.has_a_callbacks, "h8: new_with_app_state must set has_a_callbacks");
+    assert!(
+        registry.has_executor,
+        "h8: new_with_app_state must set has_executor"
+    );
+    assert!(
+        registry.has_a_callbacks,
+        "h8: new_with_app_state must set has_a_callbacks"
+    );
 }
 
 /// restore_or_init_with_app_state produces a full-mode registry immediately.
@@ -3618,13 +3935,20 @@ async fn h8_restore_or_init_with_app_state_is_full_mode() {
     let app_state = app_state_with_tasks("session-h8-restore", task_manager);
 
     // No file — falls back to fresh coordinator.
-    let coordinator =
-        BossCoordinator::restore_or_init_with_app_state(&plan_path, &app_state).await.unwrap();
+    let coordinator = BossCoordinator::restore_or_init_with_app_state(&plan_path, &app_state)
+        .await
+        .unwrap();
 
     let guard = coordinator.actor_registry.read().await;
     let registry = guard.as_ref().unwrap();
-    assert!(registry.has_executor, "h8: restore_or_init_with_app_state must set has_executor");
-    assert!(registry.has_a_callbacks, "h8: restore_or_init_with_app_state must set has_a_callbacks");
+    assert!(
+        registry.has_executor,
+        "h8: restore_or_init_with_app_state must set has_executor"
+    );
+    assert!(
+        registry.has_a_callbacks,
+        "h8: restore_or_init_with_app_state must set has_a_callbacks"
+    );
 }
 
 /// new_with_app_state and restore_or_init_with_app_state are the only paths that produce
@@ -3638,7 +3962,10 @@ async fn h8_new_with_runtime_owner_alone_is_not_full_mode() {
 
     // No bootstrap call — registry must be absent.
     let has_registry = coordinator.actor_registry.read().await.is_some();
-    assert!(!has_registry, "h8: new_with_runtime_owner alone must not produce a registry");
+    assert!(
+        !has_registry,
+        "h8: new_with_runtime_owner alone must not produce a registry"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -3657,8 +3984,14 @@ async fn h9_host_build_coordinator_is_full_mode() {
 
     let guard = coordinator.actor_registry.read().await;
     let registry = guard.as_ref().unwrap();
-    assert!(registry.has_executor, "h9: host.build_coordinator must set has_executor");
-    assert!(registry.has_a_callbacks, "h9: host.build_coordinator must set has_a_callbacks");
+    assert!(
+        registry.has_executor,
+        "h9: host.build_coordinator must set has_executor"
+    );
+    assert!(
+        registry.has_a_callbacks,
+        "h9: host.build_coordinator must set has_a_callbacks"
+    );
 }
 
 /// BossRuntimeHost::bootstrap_coordinator brings an existing coordinator to full mode.
@@ -3679,8 +4012,14 @@ async fn h9_host_bootstrap_coordinator_brings_existing_to_full_mode() {
 
     let guard = coordinator.actor_registry.read().await;
     let registry = guard.as_ref().unwrap();
-    assert!(registry.has_executor, "h9: host.bootstrap_coordinator must set has_executor");
-    assert!(registry.has_a_callbacks, "h9: host.bootstrap_coordinator must set has_a_callbacks");
+    assert!(
+        registry.has_executor,
+        "h9: host.bootstrap_coordinator must set has_executor"
+    );
+    assert!(
+        registry.has_a_callbacks,
+        "h9: host.bootstrap_coordinator must set has_a_callbacks"
+    );
 }
 
 /// bootstrap_coordinator is idempotent — calling it twice does not replace the registry.
@@ -3705,7 +4044,10 @@ async fn h9_host_bootstrap_coordinator_is_idempotent() {
         Arc::as_ptr(&guard.as_ref().unwrap().executor_b.state) as usize
     };
 
-    assert_eq!(ptr_first, ptr_second, "h9: bootstrap_coordinator must be idempotent");
+    assert_eq!(
+        ptr_first, ptr_second,
+        "h9: bootstrap_coordinator must be idempotent"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -3723,12 +4065,21 @@ async fn h10_host_restore_or_init_coordinator_fresh_is_full_mode() {
     let task_manager = Arc::new(TaskManager::default());
     let app_state = app_state_with_tasks("session-h10-fresh", task_manager);
 
-    let coordinator = host.restore_or_init_coordinator(&plan_path, &app_state).await.unwrap();
+    let coordinator = host
+        .restore_or_init_coordinator(&plan_path, &app_state)
+        .await
+        .unwrap();
 
     let guard = coordinator.actor_registry.read().await;
     let registry = guard.as_ref().unwrap();
-    assert!(registry.has_executor, "h10: restore_or_init_coordinator (fresh) must set has_executor");
-    assert!(registry.has_a_callbacks, "h10: restore_or_init_coordinator (fresh) must set has_a_callbacks");
+    assert!(
+        registry.has_executor,
+        "h10: restore_or_init_coordinator (fresh) must set has_executor"
+    );
+    assert!(
+        registry.has_a_callbacks,
+        "h10: restore_or_init_coordinator (fresh) must set has_a_callbacks"
+    );
 }
 
 /// host.restore_or_init_coordinator uses the host's BossRuntimeOwner (not a throwaway one).
@@ -3743,7 +4094,10 @@ async fn h10_host_restore_or_init_coordinator_uses_host_owner() {
     let task_manager = Arc::new(TaskManager::default());
     let app_state = app_state_with_tasks("session-h10-owner", task_manager);
 
-    let coordinator = host.restore_or_init_coordinator(&plan_path, &app_state).await.unwrap();
+    let coordinator = host
+        .restore_or_init_coordinator(&plan_path, &app_state)
+        .await
+        .unwrap();
 
     // Direct owner identity assertion: coordinator must hold the same BossRuntimeOwner Arc as host.
     assert_eq!(
@@ -3766,7 +4120,10 @@ async fn h10_host_api_triad_all_produce_full_mode() {
     let c1 = host.build_coordinator(&app_state).await;
     let g1 = c1.actor_registry.read().await;
     let r1 = g1.as_ref().unwrap();
-    assert!(r1.has_executor && r1.has_a_callbacks, "h10: build_coordinator must be full-mode");
+    assert!(
+        r1.has_executor && r1.has_a_callbacks,
+        "h10: build_coordinator must be full-mode"
+    );
     drop(g1);
 
     // bootstrap_coordinator
@@ -3775,16 +4132,25 @@ async fn h10_host_api_triad_all_produce_full_mode() {
     host.bootstrap_coordinator(&c2, &app_state).await;
     let g2 = c2.actor_registry.read().await;
     let r2 = g2.as_ref().unwrap();
-    assert!(r2.has_executor && r2.has_a_callbacks, "h10: bootstrap_coordinator must be full-mode");
+    assert!(
+        r2.has_executor && r2.has_a_callbacks,
+        "h10: bootstrap_coordinator must be full-mode"
+    );
     drop(g2);
 
     // restore_or_init_coordinator
     let plan_path = std::env::temp_dir().join("h10_triad_plan.json");
     let _ = std::fs::remove_file(&plan_path);
-    let c3 = host.restore_or_init_coordinator(&plan_path, &app_state).await.unwrap();
+    let c3 = host
+        .restore_or_init_coordinator(&plan_path, &app_state)
+        .await
+        .unwrap();
     let g3 = c3.actor_registry.read().await;
     let r3 = g3.as_ref().unwrap();
-    assert!(r3.has_executor && r3.has_a_callbacks, "h10: restore_or_init_coordinator must be full-mode");
+    assert!(
+        r3.has_executor && r3.has_a_callbacks,
+        "h10: restore_or_init_coordinator must be full-mode"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -3820,7 +4186,10 @@ async fn h10_1_restore_or_init_coordinator_uses_host_owner_direct() {
     let task_manager = Arc::new(TaskManager::default());
     let app_state = app_state_with_tasks("session-h10-1-restore", task_manager);
 
-    let coordinator = host.restore_or_init_coordinator(&plan_path, &app_state).await.unwrap();
+    let coordinator = host
+        .restore_or_init_coordinator(&plan_path, &app_state)
+        .await
+        .unwrap();
 
     assert_eq!(
         host.owner_ptr(),
@@ -3842,28 +4211,41 @@ async fn t22_1_review_fn_initializes_a_session_id() {
     let task_manager = Arc::new(TaskManager::default());
     let app_state = app_state_with_tasks("session-t22-1-review", task_manager);
 
-    coordinator.bootstrap_actor_registry_with_app_state(&app_state).await;
-    coordinator.ensure_actor_session("t22-1-review", BossStage::Execution).await;
+    coordinator
+        .bootstrap_actor_registry_with_app_state(&app_state)
+        .await;
+    coordinator
+        .ensure_actor_session("t22-1-review", BossStage::Execution)
+        .await;
 
     // Record the deterministic placeholder before any callback fires.
     let placeholder = {
         let guard = coordinator.session.read().await;
-        guard.as_ref().map(|s| s.designer_a.session_id.clone()).unwrap_or_default()
+        guard
+            .as_ref()
+            .map(|s| s.designer_a.session_id.clone())
+            .unwrap_or_default()
     };
-    assert!(placeholder.starts_with("boss-"), "pre-condition: session_id must be deterministic placeholder");
+    assert!(
+        placeholder.starts_with("boss-"),
+        "pre-condition: session_id must be deterministic placeholder"
+    );
 
     // Fire ReviewFn via A mailbox.
     {
         let guard = coordinator.actor_registry.read().await;
         if let Some(registry) = guard.as_ref() {
-            let _ = registry.a_mailbox().send(
-                rust_agent::core::boss_actor_runtime::DesignerACommand::Review {
-                    step_id: 0,
-                    accepted: true,
-                    summary: "looks good".into(),
-                    correction: None,
-                }
-            ).await;
+            let _ = registry
+                .a_mailbox()
+                .send(
+                    rust_agent::core::boss_actor_runtime::DesignerACommand::Review {
+                        step_id: 0,
+                        accepted: true,
+                        summary: "looks good".into(),
+                        correction: None,
+                    },
+                )
+                .await;
         }
     }
     // Give the actor loop time to process.
@@ -3871,17 +4253,40 @@ async fn t22_1_review_fn_initializes_a_session_id() {
 
     let after = {
         let guard = coordinator.session.read().await;
-        guard.as_ref().map(|s| s.designer_a.session_id.clone()).unwrap_or_default()
+        guard
+            .as_ref()
+            .map(|s| s.designer_a.session_id.clone())
+            .unwrap_or_default()
     };
-    assert_ne!(after, placeholder, "t22.1: ReviewFn must update designer_a.session_id from placeholder");
-    assert!(!after.is_empty(), "t22.1: designer_a.session_id must be non-empty after ReviewFn");
+    assert_ne!(
+        after, placeholder,
+        "t22.1: ReviewFn must update designer_a.session_id from placeholder"
+    );
+    assert!(
+        !after.is_empty(),
+        "t22.1: designer_a.session_id must be non-empty after ReviewFn"
+    );
 
     // Verify send_to_a_session was called with a review message.
-    let dispatch_msg = coordinator.status.read().await.last_a_dispatch_message.clone();
-    assert!(dispatch_msg.is_some(), "t22.1: last_a_dispatch_message must be set after ReviewFn");
+    let dispatch_msg = coordinator
+        .status
+        .read()
+        .await
+        .last_a_dispatch_message
+        .clone();
+    assert!(
+        dispatch_msg.is_some(),
+        "t22.1: last_a_dispatch_message must be set after ReviewFn"
+    );
     let msg = dispatch_msg.unwrap();
-    assert!(msg.contains("step 0"), "t22.1: dispatch message must reference step id");
-    assert!(msg.contains("accepted"), "t22.1: dispatch message must contain verdict");
+    assert!(
+        msg.contains("step 0"),
+        "t22.1: dispatch message must reference step id"
+    );
+    assert!(
+        msg.contains("accepted"),
+        "t22.1: dispatch message must contain verdict"
+    );
 }
 
 /// After DocumentationFn fires, designer_a.session_id must no longer be the deterministic placeholder.
@@ -3893,40 +4298,73 @@ async fn t22_1_doc_fn_initializes_a_session_id() {
     let task_manager = Arc::new(TaskManager::default());
     let app_state = app_state_with_tasks("session-t22-1-doc", task_manager);
 
-    coordinator.bootstrap_actor_registry_with_app_state(&app_state).await;
-    coordinator.ensure_actor_session("t22-1-doc", BossStage::Execution).await;
+    coordinator
+        .bootstrap_actor_registry_with_app_state(&app_state)
+        .await;
+    coordinator
+        .ensure_actor_session("t22-1-doc", BossStage::Execution)
+        .await;
 
     let placeholder = {
         let guard = coordinator.session.read().await;
-        guard.as_ref().map(|s| s.designer_a.session_id.clone()).unwrap_or_default()
+        guard
+            .as_ref()
+            .map(|s| s.designer_a.session_id.clone())
+            .unwrap_or_default()
     };
-    assert!(placeholder.starts_with("boss-"), "pre-condition: session_id must be deterministic placeholder");
+    assert!(
+        placeholder.starts_with("boss-"),
+        "pre-condition: session_id must be deterministic placeholder"
+    );
 
     // Fire DocumentationFn via A mailbox.
     {
         let guard = coordinator.actor_registry.read().await;
         if let Some(registry) = guard.as_ref() {
-            let _ = registry.a_mailbox().send(
-                rust_agent::core::boss_actor_runtime::DesignerACommand::FinalizeDocumentation {
-                    signal: "finalize".into(),
-                }
-            ).await;
+            let _ = registry
+                .a_mailbox()
+                .send(
+                    rust_agent::core::boss_actor_runtime::DesignerACommand::FinalizeDocumentation {
+                        signal: "finalize".into(),
+                    },
+                )
+                .await;
         }
     }
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
     let after = {
         let guard = coordinator.session.read().await;
-        guard.as_ref().map(|s| s.designer_a.session_id.clone()).unwrap_or_default()
+        guard
+            .as_ref()
+            .map(|s| s.designer_a.session_id.clone())
+            .unwrap_or_default()
     };
-    assert_ne!(after, placeholder, "t22.1: DocumentationFn must update designer_a.session_id from placeholder");
-    assert!(!after.is_empty(), "t22.1: designer_a.session_id must be non-empty after DocumentationFn");
+    assert_ne!(
+        after, placeholder,
+        "t22.1: DocumentationFn must update designer_a.session_id from placeholder"
+    );
+    assert!(
+        !after.is_empty(),
+        "t22.1: designer_a.session_id must be non-empty after DocumentationFn"
+    );
 
     // Verify send_to_a_session was called with a documentation signal message.
-    let dispatch_msg = coordinator.status.read().await.last_a_dispatch_message.clone();
-    assert!(dispatch_msg.is_some(), "t22.1: last_a_dispatch_message must be set after DocumentationFn");
+    let dispatch_msg = coordinator
+        .status
+        .read()
+        .await
+        .last_a_dispatch_message
+        .clone();
+    assert!(
+        dispatch_msg.is_some(),
+        "t22.1: last_a_dispatch_message must be set after DocumentationFn"
+    );
     let msg = dispatch_msg.unwrap();
-    assert!(msg.contains("finalize"), "t22.1: dispatch message must contain the documentation signal");
+    assert!(
+        msg.contains("finalize"),
+        "t22.1: dispatch message must contain the documentation signal"
+    );
 }
 
 /// ensure_a_session is idempotent: second call must not change the session_id.
@@ -3938,18 +4376,25 @@ async fn t22_1_ensure_a_session_is_idempotent() {
     let task_manager = Arc::new(TaskManager::default());
     let app_state = app_state_with_tasks("session-t22-1-idem", task_manager);
 
-    coordinator.bootstrap_actor_registry_with_app_state(&app_state).await;
-    coordinator.ensure_actor_session("t22-1-idem", BossStage::Execution).await;
+    coordinator
+        .bootstrap_actor_registry_with_app_state(&app_state)
+        .await;
+    coordinator
+        .ensure_actor_session("t22-1-idem", BossStage::Execution)
+        .await;
 
     // Fire DocumentationFn twice.
     for _ in 0..2 {
         let guard = coordinator.actor_registry.read().await;
         if let Some(registry) = guard.as_ref() {
-            let _ = registry.a_mailbox().send(
-                rust_agent::core::boss_actor_runtime::DesignerACommand::FinalizeDocumentation {
-                    signal: "finalize".into(),
-                }
-            ).await;
+            let _ = registry
+                .a_mailbox()
+                .send(
+                    rust_agent::core::boss_actor_runtime::DesignerACommand::FinalizeDocumentation {
+                        signal: "finalize".into(),
+                    },
+                )
+                .await;
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
@@ -3957,13 +4402,27 @@ async fn t22_1_ensure_a_session_is_idempotent() {
     // Both calls should have produced the same session_id (idempotent).
     let session_id = {
         let guard = coordinator.session.read().await;
-        guard.as_ref().map(|s| s.designer_a.session_id.clone()).unwrap_or_default()
+        guard
+            .as_ref()
+            .map(|s| s.designer_a.session_id.clone())
+            .unwrap_or_default()
     };
     // The session_id must be a real task id (not the placeholder) and stable.
-    assert!(!session_id.starts_with("boss-"), "t22.1: session_id must be a real task id after idempotent calls");
+    assert!(
+        !session_id.starts_with("boss-"),
+        "t22.1: session_id must be a real task id after idempotent calls"
+    );
     // The last dispatch message must be set (second call still sends to A session).
-    let dispatch_msg = coordinator.status.read().await.last_a_dispatch_message.clone();
-    assert!(dispatch_msg.is_some(), "t22.1: last_a_dispatch_message must be set after idempotent calls");
+    let dispatch_msg = coordinator
+        .status
+        .read()
+        .await
+        .last_a_dispatch_message
+        .clone();
+    assert!(
+        dispatch_msg.is_some(),
+        "t22.1: last_a_dispatch_message must be set after idempotent calls"
+    );
 }
 
 // ── T22.1.B: parse_a_review_decision unit tests ─────────────────────────────
@@ -3990,7 +4449,8 @@ fn t22_1b_parse_a_review_decision_reject_with_correction() {
         decision,
         rust_agent::core::boss_actor_runtime::ReviewDecision::Correct { .. }
     ));
-    let rust_agent::core::boss_actor_runtime::ReviewDecision::Correct { correction, .. } = decision else {
+    let rust_agent::core::boss_actor_runtime::ReviewDecision::Correct { correction, .. } = decision
+    else {
         unreachable!();
     };
     assert_eq!(
@@ -4006,7 +4466,8 @@ fn t22_1b_parse_a_review_decision_replan_step() {
         "REPLAN_STEP. REASON: step mixes migration and validation and must be split",
         "review summary",
     );
-    let rust_agent::core::boss_actor_runtime::ReviewDecision::ReplanStep { reason, .. } = decision else {
+    let rust_agent::core::boss_actor_runtime::ReviewDecision::ReplanStep { reason, .. } = decision
+    else {
         panic!("expected ReplanStep decision");
     };
     assert_eq!(
@@ -4043,7 +4504,9 @@ async fn t22_1b_review_fn_falls_back_to_coordinator_verdict_when_a_unavailable()
         "t22_1b_fallback_strong.json",
     )
     .await;
-    coordinator.bootstrap_actor_registry_with_app_state(&app_state).await;
+    coordinator
+        .bootstrap_actor_registry_with_app_state(&app_state)
+        .await;
 
     {
         let mut guard = coordinator.plan.write().await;
@@ -4070,8 +4533,15 @@ async fn t22_1b_review_fn_falls_back_to_coordinator_verdict_when_a_unavailable()
 
     let guard = coordinator.plan.read().await;
     let step = &guard.as_ref().unwrap().steps[0];
-    assert_eq!(step.status, BossPlanStepStatus::Completed, "fallback must use coordinator verdict (accepted=true → Completed)");
-    assert!(step.completed, "step.completed must be true on fallback accept");
+    assert_eq!(
+        step.status,
+        BossPlanStepStatus::Completed,
+        "fallback must use coordinator verdict (accepted=true → Completed)"
+    );
+    assert!(
+        step.completed,
+        "step.completed must be true on fallback accept"
+    );
 
     let _ = std::fs::remove_file(plan_path);
 }
@@ -4089,7 +4559,9 @@ async fn t22_1b_review_fn_uses_a_verdict_when_a_responds_accept() {
         "t22_1b_a_accept.json",
     )
     .await;
-    coordinator.bootstrap_actor_registry_with_app_state(&app_state).await;
+    coordinator
+        .bootstrap_actor_registry_with_app_state(&app_state)
+        .await;
 
     {
         let mut guard = coordinator.plan.write().await;
@@ -4132,8 +4604,15 @@ async fn t22_1b_review_fn_uses_a_verdict_when_a_responds_accept() {
         .unwrap();
     let guard = coordinator.plan.read().await;
     let step = &guard.as_ref().unwrap().steps[0];
-    assert_eq!(step.status, BossPlanStepStatus::Completed, "A ACCEPT must complete the step even when coordinator says rejected");
-    assert!(step.completed, "step.completed must be true after A accepts");
+    assert_eq!(
+        step.status,
+        BossPlanStepStatus::Completed,
+        "A ACCEPT must complete the step even when coordinator says rejected"
+    );
+    assert!(
+        step.completed,
+        "step.completed must be true after A accepts"
+    );
 
     let _ = std::fs::remove_file(plan_path);
 }
@@ -4151,7 +4630,9 @@ async fn t22_1b_review_fn_uses_a_verdict_when_a_responds_reject() {
         "t22_1b_a_reject.json",
     )
     .await;
-    coordinator.bootstrap_actor_registry_with_app_state(&app_state).await;
+    coordinator
+        .bootstrap_actor_registry_with_app_state(&app_state)
+        .await;
 
     {
         let mut guard = coordinator.plan.write().await;
@@ -4184,7 +4665,10 @@ async fn t22_1b_review_fn_uses_a_verdict_when_a_responds_reject() {
     let aid = fake_a_task.id.clone();
     tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        tm.append_output(&aid, "REJECT: output incomplete. CORRECTION: add retry logic for transient failures\n");
+        tm.append_output(
+            &aid,
+            "REJECT: output incomplete. CORRECTION: add retry logic for transient failures\n",
+        );
     });
 
     // Coordinator says accepted=true — A's REJECT must override to Rejected.
@@ -4195,9 +4679,19 @@ async fn t22_1b_review_fn_uses_a_verdict_when_a_responds_reject() {
 
     let guard = coordinator.plan.read().await;
     let step = &guard.as_ref().unwrap().steps[0];
-    assert_eq!(step.status, BossPlanStepStatus::Rejected, "A REJECT must set Rejected status even when coordinator says accepted");
-    assert!(!step.completed, "step must not be completed after A rejects");
-    assert_eq!(step.attempt_count, 1, "attempt_count must increment on rejection");
+    assert_eq!(
+        step.status,
+        BossPlanStepStatus::Rejected,
+        "A REJECT must set Rejected status even when coordinator says accepted"
+    );
+    assert!(
+        !step.completed,
+        "step must not be completed after A rejects"
+    );
+    assert_eq!(
+        step.attempt_count, 1,
+        "attempt_count must increment on rejection"
+    );
     assert_eq!(
         step.last_correction.as_deref(),
         Some("add retry logic for transient failures"),
@@ -4231,14 +4725,24 @@ async fn t22_2_b_session_id_is_non_placeholder_after_first_dispatch() {
     let app_state = app_state_with_tasks("session-t22-2-first", task_manager.clone());
 
     let placeholder = format!("boss-{plan_id}-b");
-    assert_eq!(coordinator.b_session_id().await, placeholder, "session_id must start as placeholder");
+    assert_eq!(
+        coordinator.b_session_id().await,
+        placeholder,
+        "session_id must start as placeholder"
+    );
 
     coordinator.advance_plan(&app_state).await.unwrap();
     tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
     let session_id_after = coordinator.b_session_id().await;
-    assert_ne!(session_id_after, placeholder, "session_id must be non-placeholder after first dispatch");
-    assert!(!session_id_after.is_empty(), "session_id must not be empty after first dispatch");
+    assert_ne!(
+        session_id_after, placeholder,
+        "session_id must be non-placeholder after first dispatch"
+    );
+    assert!(
+        !session_id_after.is_empty(),
+        "session_id must not be empty after first dispatch"
+    );
 
     let _ = std::fs::remove_file(&plan_path);
 }
@@ -4283,7 +4787,10 @@ async fn t22_2_two_dispatches_reuse_same_b_session_id() {
     tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
     let session_id_after_first = coordinator.b_session_id().await;
-    assert_eq!(session_id_after_first, b_task_id, "first dispatch must keep the pre-seeded B session id");
+    assert_eq!(
+        session_id_after_first, b_task_id,
+        "first dispatch must keep the pre-seeded B session id"
+    );
 
     // Advance plan state so step 0 is complete.
     {
@@ -4322,10 +4829,15 @@ async fn t22_2_record_b_session_id_writes_back_to_session() {
 
     let coordinator = BossCoordinator::restore_or_init(&plan_path).await.unwrap();
 
-    coordinator.record_b_session_id_pub("real-task-abc123").await;
+    coordinator
+        .record_b_session_id_pub("real-task-abc123")
+        .await;
 
     assert_eq!(coordinator.b_session_id().await, "real-task-abc123");
-    assert_eq!(coordinator.b_task_id().await.as_deref(), Some("real-task-abc123"));
+    assert_eq!(
+        coordinator.b_task_id().await.as_deref(),
+        Some("real-task-abc123")
+    );
 
     let _ = std::fs::remove_file(&plan_path);
 }
@@ -4360,20 +4872,26 @@ async fn t22_2_b_session_fallback_when_task_manager_absent() {
         worker_role: None,
         permission_context,
         command_registry: None,
-        runtime_tool_registry: Some(Arc::new(RwLock::new(rust_agent::tool::registry::ToolRegistry::new()))),
+        runtime_tool_registry: Some(Arc::new(RwLock::new(
+            rust_agent::tool::registry::ToolRegistry::new(),
+        ))),
         skill_registry: None,
         mcp_runtime: None,
         plugin_load_result: None,
         cost_tracker: rust_agent::cost::tracker::CostTracker::default(),
-        service_observability_tracker: rust_agent::service::observability::ServiceObservabilityTracker::default(),
+        service_observability_tracker:
+            rust_agent::service::observability::ServiceObservabilityTracker::default(),
         notification_dispatcher: rust_agent::interaction::dispatcher::NotificationDispatcher::new(
             rust_agent::interaction::telegram::gateway::TelegramGateway::default(),
         ),
-        audit_log: Arc::new(std::sync::Mutex::new(rust_agent::security::audit::AuditLog::default())),
+        audit_log: Arc::new(std::sync::Mutex::new(
+            rust_agent::security::audit::AuditLog::default(),
+        )),
         startup_trace: Vec::new(),
         active_model_runtime: None,
         active_model_profile_name: None,
-        active_model_profile_source: rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
+        active_model_profile_source:
+            rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
         active_model_provider_summary: rust_agent::state::app_state::ActiveModelProviderSummary {
             provider_id: "default-provider".into(),
             protocol: "Anthropic".into(),
@@ -4416,7 +4934,10 @@ async fn t22_3_documentation_b_reviewer_returns_feedback() {
 
     let spec_review_fn: SpecReviewFn = Arc::new(|spec: String| {
         Box::pin(async move {
-            Ok(format!("FEEDBACK: spec '{}' is missing error handling", spec))
+            Ok(format!(
+                "FEEDBACK: spec '{}' is missing error handling",
+                spec
+            ))
         })
     });
 
@@ -4431,8 +4952,14 @@ async fn t22_3_documentation_b_reviewer_returns_feedback() {
 
     match event {
         BossActorEvent::SpecReviewed { feedback } => {
-            assert!(feedback.contains("FEEDBACK:"), "B must return FEEDBACK: prefix, got: {feedback}");
-            assert!(feedback.contains("missing error handling"), "B must include spec content, got: {feedback}");
+            assert!(
+                feedback.contains("FEEDBACK:"),
+                "B must return FEEDBACK: prefix, got: {feedback}"
+            );
+            assert!(
+                feedback.contains("missing error handling"),
+                "B must include spec content, got: {feedback}"
+            );
         }
         other => panic!("expected SpecReviewed, got {other:?}"),
     }
@@ -4456,9 +4983,7 @@ async fn t22_3_finalize_documentation_loop_uses_b_reviewer_feedback() {
     let spec_review_fn: SpecReviewFn = Arc::new(|_spec: String| {
         Box::pin(async move { Ok("FEEDBACK: needs more detail on auth flow".to_string()) })
     });
-    let exec_fn: ExecutionFn = Arc::new(|payload: String| {
-        Box::pin(async move { Ok(payload) })
-    });
+    let exec_fn: ExecutionFn = Arc::new(|payload: String| Box::pin(async move { Ok(payload) }));
     let registry = BossActorRegistry {
         designer_a: DesignerARuntime::spawn(),
         executor_b: ExecutorBRuntime::spawn_with_callbacks(Some(exec_fn), Some(spec_review_fn)),
@@ -4595,7 +5120,8 @@ async fn t22_3_production_path_doc_b_reviewer_via_ask_b_session() {
         loop {
             let messages = tm_for_b.drain_mailbox(&b_id_for_loop);
             for msg in messages {
-                let feedback = format!("FEEDBACK: B reviewed spec — {msg} needs auth error handling");
+                let feedback =
+                    format!("FEEDBACK: B reviewed spec — {msg} needs auth error handling");
                 tm_for_b.append_output(&b_id_for_loop, &feedback);
             }
             tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
@@ -4606,7 +5132,9 @@ async fn t22_3_production_path_doc_b_reviewer_via_ask_b_session() {
     coordinator.record_b_session_id_pub(&b_task_id).await;
 
     // Wire the production callbacks (build_spec_review_fn uses ask_b_session).
-    coordinator.bootstrap_actor_registry_with_app_state(&app_state).await;
+    coordinator
+        .bootstrap_actor_registry_with_app_state(&app_state)
+        .await;
 
     // finalize with empty review_feedback — B must supply it via ask_b_session.
     coordinator
@@ -4621,7 +5149,12 @@ async fn t22_3_production_path_doc_b_reviewer_via_ask_b_session() {
         .unwrap();
 
     let plan_guard = coordinator.plan.read().await;
-    let stored_feedback = plan_guard.as_ref().unwrap().review_feedback.clone().unwrap_or_default();
+    let stored_feedback = plan_guard
+        .as_ref()
+        .unwrap()
+        .review_feedback
+        .clone()
+        .unwrap_or_default();
     assert!(
         stored_feedback.contains("FEEDBACK:"),
         "B's real feedback must be stored, got: {stored_feedback}"
@@ -4655,7 +5188,9 @@ async fn t22_3_production_path_exec_b_creates_child_task_via_agent_tool() {
     let app_state = app_state_with_tasks("session-t22-3-prod-exec", task_manager.clone());
 
     // Wire the production exec_fn (build_exec_fn → invoke_agent_tool_with_task_id).
-    coordinator.bootstrap_actor_registry_with_app_state(&app_state).await;
+    coordinator
+        .bootstrap_actor_registry_with_app_state(&app_state)
+        .await;
 
     let tasks_before = task_manager.list().len();
 
@@ -4684,7 +5219,10 @@ async fn t22_3_production_path_exec_b_creates_child_task_via_agent_tool() {
     // B's session_id must be non-placeholder after exec_fn fires.
     let b_session = coordinator.b_session_id().await;
     let placeholder = format!("boss-{plan_id}-b");
-    assert_ne!(b_session, placeholder, "B session_id must be real after exec_fn fires");
+    assert_ne!(
+        b_session, placeholder,
+        "B session_id must be real after exec_fn fires"
+    );
 
     let _ = std::fs::remove_file(&plan_path);
 }
@@ -4946,7 +5484,9 @@ async fn t23_draft_spec_empty_triggers_a_draft() {
         let mut guard = coordinator.auto_advance_app_state.write().await;
         *guard = Some(app_state.clone());
     }
-    coordinator.bootstrap_actor_registry_with_app_state(&app_state).await;
+    coordinator
+        .bootstrap_actor_registry_with_app_state(&app_state)
+        .await;
 
     coordinator
         .finalize_documentation_loop("", "", "no revision needed", "final spec", "pseudo code")
@@ -4954,7 +5494,12 @@ async fn t23_draft_spec_empty_triggers_a_draft() {
         .unwrap();
 
     let plan_guard = coordinator.plan.read().await;
-    let stored_draft = plan_guard.as_ref().unwrap().draft_spec.clone().unwrap_or_default();
+    let stored_draft = plan_guard
+        .as_ref()
+        .unwrap()
+        .draft_spec
+        .clone()
+        .unwrap_or_default();
     assert!(
         !stored_draft.is_empty(),
         "plan.draft_spec must be non-empty after A drafts it"
@@ -4996,7 +5541,12 @@ async fn t23_draft_spec_nonempty_skips_a_draft() {
         .unwrap();
 
     let plan_guard = coordinator.plan.read().await;
-    let stored_draft = plan_guard.as_ref().unwrap().draft_spec.clone().unwrap_or_default();
+    let stored_draft = plan_guard
+        .as_ref()
+        .unwrap()
+        .draft_spec
+        .clone()
+        .unwrap_or_default();
     assert_eq!(
         stored_draft, "pre-existing spec content",
         "plan.draft_spec must preserve the caller-supplied value"
@@ -5087,7 +5637,10 @@ async fn t23_production_path_a_draft_via_ask_a_session() {
         .await
         .unwrap();
 
-    assert!(!draft.is_empty(), "draft_spec_with_a must return non-empty spec");
+    assert!(
+        !draft.is_empty(),
+        "draft_spec_with_a must return non-empty spec"
+    );
     assert!(
         draft.contains("REST API") || draft.contains("spec"),
         "draft must contain A's response, got: {draft}"
@@ -5117,12 +5670,20 @@ async fn t24_session_snapshot_persisted_on_save_plan() {
     coordinator.record_b_session_id_pub("real-b-task-002").await;
 
     coordinator
-        .finalize_documentation_loop("some spec", "LGTM", "no revision", "final spec", "pseudo code")
+        .finalize_documentation_loop(
+            "some spec",
+            "LGTM",
+            "no revision",
+            "final spec",
+            "pseudo code",
+        )
         .await
         .unwrap();
 
     let loaded = load_plan(&plan_path).await.unwrap();
-    let snap = loaded.session_snapshot.expect("session_snapshot must be present after save");
+    let snap = loaded
+        .session_snapshot
+        .expect("session_snapshot must be present after save");
     assert_eq!(snap.designer_a.task_id.as_deref(), Some("real-a-task-001"));
     assert_eq!(snap.executor_b.task_id.as_deref(), Some("real-b-task-002"));
 
@@ -5150,10 +5711,23 @@ async fn t24_restore_uses_persisted_session_snapshot() {
 
     let c2 = BossCoordinator::restore_or_init(&plan_path).await.unwrap();
     let session = c2.session.read().await;
-    let s = session.as_ref().expect("session must be present after restore");
-    assert_eq!(s.designer_a.task_id.as_deref(), Some("a-task-persist-001"), "A task_id must survive restart");
-    assert_eq!(s.executor_b.task_id.as_deref(), Some("b-task-persist-002"), "B task_id must survive restart");
-    assert_eq!(s.designer_a.session_id, "a-task-persist-001", "A session_id must survive restart");
+    let s = session
+        .as_ref()
+        .expect("session must be present after restore");
+    assert_eq!(
+        s.designer_a.task_id.as_deref(),
+        Some("a-task-persist-001"),
+        "A task_id must survive restart"
+    );
+    assert_eq!(
+        s.executor_b.task_id.as_deref(),
+        Some("b-task-persist-002"),
+        "B task_id must survive restart"
+    );
+    assert_eq!(
+        s.designer_a.session_id, "a-task-persist-001",
+        "A session_id must survive restart"
+    );
 
     let _ = std::fs::remove_file(&plan_path);
 }
@@ -5175,10 +5749,18 @@ async fn t24_restore_fallback_when_no_snapshot() {
 
     let coordinator = BossCoordinator::restore_or_init(&plan_path).await.unwrap();
     let session = coordinator.session.read().await;
-    let s = session.as_ref().expect("session must be present after restore");
-    assert_eq!(s.designer_a.session_id, "boss-t24-no-snap-a", "fallback session_id must be deterministic placeholder");
+    let s = session
+        .as_ref()
+        .expect("session must be present after restore");
+    assert_eq!(
+        s.designer_a.session_id, "boss-t24-no-snap-a",
+        "fallback session_id must be deterministic placeholder"
+    );
     assert_eq!(s.executor_b.session_id, "boss-t24-no-snap-b");
-    assert!(s.designer_a.task_id.is_none(), "task_id must be None on fallback");
+    assert!(
+        s.designer_a.task_id.is_none(),
+        "task_id must be None on fallback"
+    );
 
     let _ = std::fs::remove_file(&plan_path);
 }
@@ -5196,7 +5778,8 @@ async fn t24_stale_task_id_does_not_panic_on_restore() {
     save_plan(&plan, &plan_path).await.unwrap();
 
     let c1 = BossCoordinator::restore_or_init(&plan_path).await.unwrap();
-    c1.record_a_session_id_pub("stale-task-id-does-not-exist").await;
+    c1.record_a_session_id_pub("stale-task-id-does-not-exist")
+        .await;
     c1.finalize_documentation_loop("spec", "LGTM", "no revision", "final spec", "pseudo")
         .await
         .unwrap();
@@ -5231,7 +5814,10 @@ fn t25_trim_triggered_when_payload_exceeds_threshold() {
     let keep = 40usize;
     let payload = "x".repeat(200);
     let result = trim_context_payload(&payload, threshold, keep);
-    assert!(result.len() < payload.len(), "trimmed result should be shorter");
+    assert!(
+        result.len() < payload.len(),
+        "trimmed result should be shorter"
+    );
     let lines: Vec<&str> = result.splitn(2, '\n').collect();
     assert_eq!(lines.len(), 2);
     assert!(lines[1].len() <= keep);
@@ -5246,7 +5832,8 @@ fn t25_trim_notice_inserted_at_head() {
     let result = trim_context_payload(&payload, threshold, keep);
     let first_line = result.lines().next().unwrap_or("");
     assert!(
-        first_line.starts_with("[trimmed earlier context:") && first_line.contains("chars omitted]"),
+        first_line.starts_with("[trimmed earlier context:")
+            && first_line.contains("chars omitted]"),
         "notice line must match fixed format, got: {first_line}"
     );
 }
@@ -5277,11 +5864,18 @@ async fn t25_trim_does_not_persist_to_plan_or_snapshot() {
     save_plan(&plan, &plan_path).await.unwrap();
 
     let large_payload = "context_data_".repeat(10_000);
-    let _trimmed = trim_context_payload(&large_payload, B_CONTEXT_TRIM_THRESHOLD, B_CONTEXT_KEEP_CHARS);
+    let _trimmed = trim_context_payload(
+        &large_payload,
+        B_CONTEXT_TRIM_THRESHOLD,
+        B_CONTEXT_KEEP_CHARS,
+    );
 
     let reloaded = load_plan(&plan_path).await.unwrap();
     assert_eq!(reloaded.plan_id, "t25-no-persist");
-    assert!(reloaded.session_snapshot.is_none(), "session_snapshot must not be written by trim");
+    assert!(
+        reloaded.session_snapshot.is_none(),
+        "session_snapshot must not be written by trim"
+    );
 
     let _ = std::fs::remove_file(&plan_path);
 }
@@ -5292,8 +5886,14 @@ async fn t25_trim_does_not_persist_to_plan_or_snapshot() {
 #[test]
 fn t25_2_summary_replaces_old_context_format() {
     let result = assemble_summarized_payload("SUMMARY_TEXT", "recent tail content");
-    assert!(result.starts_with("[summary: SUMMARY_TEXT]"), "must start with summary notice");
-    assert!(result.contains("recent tail content"), "must contain recent tail");
+    assert!(
+        result.starts_with("[summary: SUMMARY_TEXT]"),
+        "must start with summary notice"
+    );
+    assert!(
+        result.contains("recent tail content"),
+        "must contain recent tail"
+    );
 }
 
 /// T25.2.2: Recent tail is preserved verbatim in the assembled payload.
@@ -5303,7 +5903,10 @@ fn t25_2_summary_result_contains_recent_tail() {
     let result = assemble_summarized_payload("any summary", recent);
     let lines: Vec<&str> = result.splitn(2, '\n').collect();
     assert_eq!(lines.len(), 2);
-    assert_eq!(lines[1], recent, "second line must be the exact recent tail");
+    assert_eq!(
+        lines[1], recent,
+        "second line must be the exact recent tail"
+    );
 }
 
 /// T25.2.3: When A is unavailable (no A session seeded), ask_b_session falls back to trim.
@@ -5328,7 +5931,10 @@ fn t25_2_no_summarize_when_payload_below_threshold() {
     let short = "short payload".to_string();
     // trim_context_payload is the gate — below threshold returns unchanged.
     let result = trim_context_payload(&short, B_CONTEXT_TRIM_THRESHOLD, B_CONTEXT_KEEP_CHARS);
-    assert_eq!(result, short, "payload below threshold must be returned unchanged");
+    assert_eq!(
+        result, short,
+        "payload below threshold must be returned unchanged"
+    );
 }
 
 /// T25.2.5: summarize path does not persist to BossPlan or session_snapshot.
@@ -5348,7 +5954,10 @@ async fn t25_2_summarize_does_not_persist_to_plan_or_snapshot() {
 
     let reloaded = load_plan(&plan_path).await.unwrap();
     assert_eq!(reloaded.plan_id, "t25-2-no-persist");
-    assert!(reloaded.session_snapshot.is_none(), "session_snapshot must not be written by summarize");
+    assert!(
+        reloaded.session_snapshot.is_none(),
+        "session_snapshot must not be written by summarize"
+    );
 
     let _ = std::fs::remove_file(&plan_path);
 }
@@ -5398,12 +6007,21 @@ async fn t25_2_production_path_summarize_success_via_ask_b_session() {
 
     // Build an oversized payload (> B_CONTEXT_TRIM_THRESHOLD).
     let oversized = "context_data_".repeat(B_CONTEXT_TRIM_THRESHOLD / 12 + 1);
-    assert!(oversized.len() > B_CONTEXT_TRIM_THRESHOLD, "payload must exceed threshold for this test");
+    assert!(
+        oversized.len() > B_CONTEXT_TRIM_THRESHOLD,
+        "payload must exceed threshold for this test"
+    );
 
     let _ = coordinator.ask_b_session_pub(&app_state, oversized).await;
 
     // T26.6: stateless summarize has no active_model_runtime in test → fallback to trim.
-    let sent = coordinator.status.read().await.last_b_ask_message.clone().unwrap_or_default();
+    let sent = coordinator
+        .status
+        .read()
+        .await
+        .last_b_ask_message
+        .clone()
+        .unwrap_or_default();
     assert!(
         sent.starts_with("[trimmed earlier context:"),
         "T26.6 stateless path: no active_model_runtime → fallback trim, got: {sent:.80}"
@@ -5458,7 +6076,13 @@ async fn t25_2_production_path_fallback_to_trim_when_a_unavailable() {
 
     let _ = coordinator.ask_b_session_pub(&app_state, oversized).await;
 
-    let sent = coordinator.status.read().await.last_b_ask_message.clone().unwrap_or_default();
+    let sent = coordinator
+        .status
+        .read()
+        .await
+        .last_b_ask_message
+        .clone()
+        .unwrap_or_default();
     assert!(
         sent.starts_with("[trimmed earlier context:"),
         "fallback path: outbound message must start with '[trimmed earlier context:', got: {sent:.80}"
@@ -5481,7 +6105,11 @@ fn t26_1_same_content_produces_stable_fingerprint() {
 #[test]
 fn t26_1_content_change_changes_fingerprint() {
     let a = PromptSegment::new("sys", PromptSegmentKind::StaticSystem, "hello world");
-    let b = PromptSegment::new("sys", PromptSegmentKind::StaticSystem, "hello world CHANGED");
+    let b = PromptSegment::new(
+        "sys",
+        PromptSegmentKind::StaticSystem,
+        "hello world CHANGED",
+    );
     assert_ne!(a.fingerprint, b.fingerprint);
 }
 
@@ -5497,11 +6125,23 @@ fn t26_1_kind_change_changes_fingerprint() {
 #[test]
 fn t26_1_dynamic_segment_excluded_from_stable_prefix_fingerprint() {
     let mut assembly_static_only = PromptAssembly::new();
-    assembly_static_only.push(PromptSegment::new("sys", PromptSegmentKind::StaticSystem, "system"));
+    assembly_static_only.push(PromptSegment::new(
+        "sys",
+        PromptSegmentKind::StaticSystem,
+        "system",
+    ));
 
     let mut assembly_with_dynamic = PromptAssembly::new();
-    assembly_with_dynamic.push(PromptSegment::new("sys", PromptSegmentKind::StaticSystem, "system"));
-    assembly_with_dynamic.push(PromptSegment::new("sf", PromptSegmentKind::StateFrame, "dynamic state"));
+    assembly_with_dynamic.push(PromptSegment::new(
+        "sys",
+        PromptSegmentKind::StaticSystem,
+        "system",
+    ));
+    assembly_with_dynamic.push(PromptSegment::new(
+        "sf",
+        PromptSegmentKind::StateFrame,
+        "dynamic state",
+    ));
 
     assert_eq!(
         assembly_static_only.stable_prefix_fingerprint(),
@@ -5513,14 +6153,35 @@ fn t26_1_dynamic_segment_excluded_from_stable_prefix_fingerprint() {
 /// T26.1.5: PromptAssembly::assemble() matches the existing string-join fallback.
 #[test]
 fn t26_1_assembly_fallback_matches_existing_string_join() {
-    let parts = ["system prompt", "tools prompt", "context prompt", "user input"];
+    let parts = [
+        "system prompt",
+        "tools prompt",
+        "context prompt",
+        "user input",
+    ];
     let expected = parts.join("\n");
 
     let mut assembly = PromptAssembly::new();
-    assembly.push(PromptSegment::new("sys", PromptSegmentKind::StaticSystem, parts[0]));
-    assembly.push(PromptSegment::new("tools", PromptSegmentKind::ToolSchema, parts[1]));
-    assembly.push(PromptSegment::new("ctx", PromptSegmentKind::ProjectContext, parts[2]));
-    assembly.push(PromptSegment::new("user", PromptSegmentKind::DynamicEvidence, parts[3]));
+    assembly.push(PromptSegment::new(
+        "sys",
+        PromptSegmentKind::StaticSystem,
+        parts[0],
+    ));
+    assembly.push(PromptSegment::new(
+        "tools",
+        PromptSegmentKind::ToolSchema,
+        parts[1],
+    ));
+    assembly.push(PromptSegment::new(
+        "ctx",
+        PromptSegmentKind::ProjectContext,
+        parts[2],
+    ));
+    assembly.push(PromptSegment::new(
+        "user",
+        PromptSegmentKind::DynamicEvidence,
+        parts[3],
+    ));
 
     assert_eq!(assembly.assemble(), expected);
 }
@@ -5560,8 +6221,14 @@ fn t26_4_brief_renders_to_actor_brief_segment() {
     let seg = brief.to_prompt_segment();
     assert_eq!(seg.kind, PromptSegmentKind::ActorBrief);
     assert!(seg.is_cacheable(), "ActorBrief segment must be cacheable");
-    assert!(seg.content.contains("implement the feature"), "content must include objective");
-    assert!(seg.content.contains("tests pass"), "content must include acceptance");
+    assert!(
+        seg.content.contains("implement the feature"),
+        "content must include objective"
+    );
+    assert!(
+        seg.content.contains("tests pass"),
+        "content must include acceptance"
+    );
 }
 
 /// T26.4.2: BossStateFrame renders to StateFrame segment (non-cacheable).
@@ -5570,8 +6237,14 @@ fn t26_4_state_frame_renders_to_non_cacheable_segment() {
     let frame = make_frame(1);
     let seg = frame.to_prompt_segment();
     assert_eq!(seg.kind, PromptSegmentKind::StateFrame);
-    assert!(!seg.is_cacheable(), "StateFrame segment must not be cacheable");
-    assert!(seg.content.contains("write tests"), "content must include open_items");
+    assert!(
+        !seg.is_cacheable(),
+        "StateFrame segment must not be cacheable"
+    );
+    assert!(
+        seg.content.contains("write tests"),
+        "content must include open_items"
+    );
 }
 
 /// T26.4.3: Brief fingerprint is stable; state_frame change does not affect it.
@@ -5621,9 +6294,18 @@ fn t26_4_assembly_output_contains_brief_and_state_frame() {
     let brief = make_brief(BossContextStrategy::Brief);
     let frame = make_frame(1);
     let prompt = assemble_brief_prompt(&brief, &frame);
-    assert!(prompt.contains("implement the feature"), "prompt must contain objective");
-    assert!(prompt.contains("write tests"), "prompt must contain open_items");
-    assert!(prompt.contains("return a unified diff"), "prompt must contain output hint");
+    assert!(
+        prompt.contains("implement the feature"),
+        "prompt must contain objective"
+    );
+    assert!(
+        prompt.contains("write tests"),
+        "prompt must contain open_items"
+    );
+    assert!(
+        prompt.contains("return a unified diff"),
+        "prompt must contain output hint"
+    );
 }
 
 /// T26.4.6: build_b_step_payload uses brief/state_frame (inherit_context: false).
@@ -5640,12 +6322,24 @@ async fn t26_4_dispatch_payload_uses_brief_not_full_inherit() {
     save_plan(&plan, &plan_path).await.unwrap();
 
     let coordinator = BossCoordinator::restore_or_init(&plan_path).await.unwrap();
-    let payload = coordinator.build_b_step_payload_pub(0, "parent-session", "b-actor").await.unwrap();
+    let payload = coordinator
+        .build_b_step_payload_pub(0, "parent-session", "b-actor")
+        .await
+        .unwrap();
     let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
 
-    assert_eq!(v["inherit_context"], false, "default dispatch must use inherit_context: false");
-    assert_eq!(v["context_strategy"], "brief", "default dispatch must use brief strategy");
-    assert!(v["task"].as_str().unwrap_or("").contains("objective 0"), "task must contain objective");
+    assert_eq!(
+        v["inherit_context"], false,
+        "default dispatch must use inherit_context: false"
+    );
+    assert_eq!(
+        v["context_strategy"], "brief",
+        "default dispatch must use brief strategy"
+    );
+    assert!(
+        v["task"].as_str().unwrap_or("").contains("objective 0"),
+        "task must contain objective"
+    );
 
     let _ = std::fs::remove_file(&plan_path);
 }
@@ -5653,14 +6347,23 @@ async fn t26_4_dispatch_payload_uses_brief_not_full_inherit() {
 // ── T26.5: Provider-aware token budget gate ───────────────────────────────────
 
 fn tight_profile() -> ProviderProfile {
-    ProviderProfile { context_window: 100, output_reserve: 10, cache_min_size: 64, prompt_cache: PromptCacheCapability::Unsupported }
+    ProviderProfile {
+        context_window: 100,
+        output_reserve: 10,
+        cache_min_size: 64,
+        prompt_cache: PromptCacheCapability::Unsupported,
+    }
 }
 
 /// T26.5.1: Prompt within budget → Pass.
 #[test]
 fn t26_5_pass_when_prompt_within_budget() {
     let mut assembly = PromptAssembly::new();
-    assembly.push(PromptSegment::new("sys", PromptSegmentKind::StaticSystem, "short"));
+    assembly.push(PromptSegment::new(
+        "sys",
+        PromptSegmentKind::StaticSystem,
+        "short",
+    ));
     let (_, decision) = evaluate_prompt_budget(&assembly, &ProviderProfile::default());
     assert_eq!(decision, BudgetDecision::Pass);
 }
@@ -5671,9 +6374,17 @@ fn t26_5_degrade_when_dynamic_suffix_exceeds_budget() {
     let profile = tight_profile(); // 100 tokens available - 10 reserve = 90 tokens
     let mut assembly = PromptAssembly::new();
     // Static prefix: 10 chars ≈ 3 tokens (within budget)
-    assembly.push(PromptSegment::new("sys", PromptSegmentKind::StaticSystem, "0123456789"));
+    assembly.push(PromptSegment::new(
+        "sys",
+        PromptSegmentKind::StaticSystem,
+        "0123456789",
+    ));
     // Dynamic suffix: 400 chars ≈ 115 tokens (pushes total over 90)
-    assembly.push(PromptSegment::new("sf", PromptSegmentKind::StateFrame, "x".repeat(400)));
+    assembly.push(PromptSegment::new(
+        "sf",
+        PromptSegmentKind::StateFrame,
+        "x".repeat(400),
+    ));
     let (_, decision) = evaluate_prompt_budget(&assembly, &profile);
     assert!(
         matches!(decision, BudgetDecision::Degrade { .. }),
@@ -5687,7 +6398,11 @@ fn t26_5_reject_when_static_prefix_exceeds_budget() {
     let profile = tight_profile(); // 90 tokens available
     let mut assembly = PromptAssembly::new();
     // Static prefix: 500 chars ≈ 143 tokens (exceeds 90)
-    assembly.push(PromptSegment::new("sys", PromptSegmentKind::StaticSystem, "s".repeat(500)));
+    assembly.push(PromptSegment::new(
+        "sys",
+        PromptSegmentKind::StaticSystem,
+        "s".repeat(500),
+    ));
     let (_, decision) = evaluate_prompt_budget(&assembly, &profile);
     assert!(
         matches!(decision, BudgetDecision::Reject { .. }),
@@ -5699,10 +6414,18 @@ fn t26_5_reject_when_static_prefix_exceeds_budget() {
 #[test]
 fn t26_5_evaluate_is_pure_function_no_side_effects() {
     let mut assembly = PromptAssembly::new();
-    assembly.push(PromptSegment::new("sys", PromptSegmentKind::StaticSystem, "hello"));
+    assembly.push(PromptSegment::new(
+        "sys",
+        PromptSegmentKind::StaticSystem,
+        "hello",
+    ));
     let content_before = assembly.segments()[0].content.clone();
     let _ = evaluate_prompt_budget(&assembly, &ProviderProfile::default());
-    assert_eq!(assembly.segments()[0].content, content_before, "assembly must not be modified");
+    assert_eq!(
+        assembly.segments()[0].content,
+        content_before,
+        "assembly must not be modified"
+    );
 }
 
 /// T26.5.5: Degrade from budget gate triggers summarize path in ask_b_session.
@@ -5735,7 +6458,9 @@ async fn t26_5_degrade_budget_triggers_compression_in_ask_b_session() {
     let b_id = b_task_id.clone();
     task_manager.launch(&b_task_id, "", async move {
         loop {
-            for _ in tm.drain_mailbox(&b_id) { tm.append_output(&b_id, "B_ACK"); }
+            for _ in tm.drain_mailbox(&b_id) {
+                tm.append_output(&b_id, "B_ACK");
+            }
             tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
         }
     });
@@ -5743,9 +6468,17 @@ async fn t26_5_degrade_budget_triggers_compression_in_ask_b_session() {
 
     // 750k chars ≈ 214k tokens > 192k available → Degrade → T25/T25.2 compression.
     let oversized = "x".repeat(750_000);
-    let _ = coordinator.ask_b_session_pub(&app_state, oversized.clone()).await;
+    let _ = coordinator
+        .ask_b_session_pub(&app_state, oversized.clone())
+        .await;
 
-    let sent = coordinator.status.read().await.last_b_ask_message.clone().unwrap_or_default();
+    let sent = coordinator
+        .status
+        .read()
+        .await
+        .last_b_ask_message
+        .clone()
+        .unwrap_or_default();
     assert!(
         sent.len() < oversized.len(),
         "ask_b_session must compress the payload when budget gate returns Degrade"
@@ -5781,7 +6514,11 @@ fn t26_2_unsupported_is_type_default() {
 #[test]
 fn t26_2_cache_capability_is_pure_metadata() {
     let mut assembly = PromptAssembly::new();
-    assembly.push(PromptSegment::new("sys", PromptSegmentKind::StaticSystem, "hello world"));
+    assembly.push(PromptSegment::new(
+        "sys",
+        PromptSegmentKind::StaticSystem,
+        "hello world",
+    ));
 
     let profile_unsupported = ProviderProfile {
         prompt_cache: PromptCacheCapability::Unsupported,
@@ -5825,10 +6562,21 @@ fn make_payload() -> serde_json::Value {
 #[test]
 fn t26_3_anthropic_ephemeral_injects_system_cache_control() {
     let mut assembly = PromptAssembly::new();
-    assembly.push(PromptSegment::new("sys", PromptSegmentKind::StaticSystem, "system content"));
-    assembly.push(PromptSegment::new("dyn", PromptSegmentKind::DynamicEvidence, "dynamic content"));
+    assembly.push(PromptSegment::new(
+        "sys",
+        PromptSegmentKind::StaticSystem,
+        "system content",
+    ));
+    assembly.push(PromptSegment::new(
+        "dyn",
+        PromptSegmentKind::DynamicEvidence,
+        "dynamic content",
+    ));
 
-    let profile = ProviderProfile { prompt_cache: PromptCacheCapability::AnthropicEphemeral, ..ProviderProfile::default() };
+    let profile = ProviderProfile {
+        prompt_cache: PromptCacheCapability::AnthropicEphemeral,
+        ..ProviderProfile::default()
+    };
     let mut payload = make_payload();
     apply_cache_control(&assembly, &profile, &mut payload);
 
@@ -5843,28 +6591,60 @@ fn t26_3_anthropic_ephemeral_injects_system_cache_control() {
 #[test]
 fn t26_3_only_last_cacheable_block_gets_cache_control() {
     let mut assembly = PromptAssembly::new();
-    assembly.push(PromptSegment::new("s1", PromptSegmentKind::StaticSystem, "first"));
-    assembly.push(PromptSegment::new("s2", PromptSegmentKind::ActorBrief, "second"));
-    assembly.push(PromptSegment::new("dyn", PromptSegmentKind::DynamicEvidence, "dynamic"));
+    assembly.push(PromptSegment::new(
+        "s1",
+        PromptSegmentKind::StaticSystem,
+        "first",
+    ));
+    assembly.push(PromptSegment::new(
+        "s2",
+        PromptSegmentKind::ActorBrief,
+        "second",
+    ));
+    assembly.push(PromptSegment::new(
+        "dyn",
+        PromptSegmentKind::DynamicEvidence,
+        "dynamic",
+    ));
 
-    let profile = ProviderProfile { prompt_cache: PromptCacheCapability::AnthropicEphemeral, ..ProviderProfile::default() };
+    let profile = ProviderProfile {
+        prompt_cache: PromptCacheCapability::AnthropicEphemeral,
+        ..ProviderProfile::default()
+    };
     let mut payload = make_payload();
     apply_cache_control(&assembly, &profile, &mut payload);
 
     let blocks = payload["system"].as_array().unwrap();
     assert_eq!(blocks.len(), 2);
-    assert!(blocks[0].get("cache_control").is_none(), "first block must not have cache_control");
-    assert_eq!(blocks[1]["cache_control"]["type"], "ephemeral", "last block must have cache_control");
+    assert!(
+        blocks[0].get("cache_control").is_none(),
+        "first block must not have cache_control"
+    );
+    assert_eq!(
+        blocks[1]["cache_control"]["type"], "ephemeral",
+        "last block must have cache_control"
+    );
 }
 
 /// T26.3.3: Dynamic segments go to messages[0].content, not system.
 #[test]
 fn t26_3_dynamic_segments_go_to_messages_not_system() {
     let mut assembly = PromptAssembly::new();
-    assembly.push(PromptSegment::new("sys", PromptSegmentKind::StaticSystem, "system"));
-    assembly.push(PromptSegment::new("ev", PromptSegmentKind::DynamicEvidence, "evidence"));
+    assembly.push(PromptSegment::new(
+        "sys",
+        PromptSegmentKind::StaticSystem,
+        "system",
+    ));
+    assembly.push(PromptSegment::new(
+        "ev",
+        PromptSegmentKind::DynamicEvidence,
+        "evidence",
+    ));
 
-    let profile = ProviderProfile { prompt_cache: PromptCacheCapability::AnthropicEphemeral, ..ProviderProfile::default() };
+    let profile = ProviderProfile {
+        prompt_cache: PromptCacheCapability::AnthropicEphemeral,
+        ..ProviderProfile::default()
+    };
     let mut payload = make_payload();
     apply_cache_control(&assembly, &profile, &mut payload);
 
@@ -5874,8 +6654,12 @@ fn t26_3_dynamic_segments_go_to_messages_not_system() {
     assert_eq!(blocks.len(), 1);
     assert_eq!(blocks[0]["text"], "evidence");
     // system must not contain the dynamic segment
-    let system_texts: Vec<_> = payload["system"].as_array().unwrap()
-        .iter().map(|b| b["text"].as_str().unwrap_or("")).collect();
+    let system_texts: Vec<_> = payload["system"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| b["text"].as_str().unwrap_or(""))
+        .collect();
     assert!(!system_texts.contains(&"evidence"));
 }
 
@@ -5883,23 +6667,40 @@ fn t26_3_dynamic_segments_go_to_messages_not_system() {
 #[test]
 fn t26_3_unsupported_profile_is_noop() {
     let mut assembly = PromptAssembly::new();
-    assembly.push(PromptSegment::new("sys", PromptSegmentKind::StaticSystem, "system"));
+    assembly.push(PromptSegment::new(
+        "sys",
+        PromptSegmentKind::StaticSystem,
+        "system",
+    ));
 
-    let profile = ProviderProfile { prompt_cache: PromptCacheCapability::Unsupported, ..ProviderProfile::default() };
+    let profile = ProviderProfile {
+        prompt_cache: PromptCacheCapability::Unsupported,
+        ..ProviderProfile::default()
+    };
     let original = make_payload();
     let mut payload = original.clone();
     apply_cache_control(&assembly, &profile, &mut payload);
 
-    assert_eq!(payload, original, "Unsupported must leave payload unchanged");
+    assert_eq!(
+        payload, original,
+        "Unsupported must leave payload unchanged"
+    );
 }
 
 /// T26.3.5: ManualNone profile leaves payload unchanged.
 #[test]
 fn t26_3_manual_none_is_noop() {
     let mut assembly = PromptAssembly::new();
-    assembly.push(PromptSegment::new("sys", PromptSegmentKind::StaticSystem, "system"));
+    assembly.push(PromptSegment::new(
+        "sys",
+        PromptSegmentKind::StaticSystem,
+        "system",
+    ));
 
-    let profile = ProviderProfile { prompt_cache: PromptCacheCapability::ManualNone, ..ProviderProfile::default() };
+    let profile = ProviderProfile {
+        prompt_cache: PromptCacheCapability::ManualNone,
+        ..ProviderProfile::default()
+    };
     let original = make_payload();
     let mut payload = original.clone();
     apply_cache_control(&assembly, &profile, &mut payload);
@@ -5911,13 +6712,23 @@ fn t26_3_manual_none_is_noop() {
 #[test]
 fn t26_3_no_cacheable_segments_leaves_system_absent() {
     let mut assembly = PromptAssembly::new();
-    assembly.push(PromptSegment::new("ev", PromptSegmentKind::DynamicEvidence, "only dynamic"));
+    assembly.push(PromptSegment::new(
+        "ev",
+        PromptSegmentKind::DynamicEvidence,
+        "only dynamic",
+    ));
 
-    let profile = ProviderProfile { prompt_cache: PromptCacheCapability::AnthropicEphemeral, ..ProviderProfile::default() };
+    let profile = ProviderProfile {
+        prompt_cache: PromptCacheCapability::AnthropicEphemeral,
+        ..ProviderProfile::default()
+    };
     let mut payload = make_payload();
     apply_cache_control(&assembly, &profile, &mut payload);
 
-    assert!(payload.get("system").is_none(), "no cacheable segments → system field must be absent");
+    assert!(
+        payload.get("system").is_none(),
+        "no cacheable segments → system field must be absent"
+    );
 }
 
 // ── T26.6: A/B context isolation ─────────────────────────────────────────────
@@ -5994,7 +6805,8 @@ async fn t26_6_stateless_summarize_does_not_write_a_session_history() {
     let coordinator = BossCoordinator::restore_or_init(&plan_path).await.unwrap();
     let unique_dir = std::env::temp_dir().join("t26_6_stateless_no_a_write_output");
     let task_manager = Arc::new(TaskManager::new_with_output_root(unique_dir));
-    let app_state = app_state_with_tasks("session-t26-6-stateless-no-a-write", task_manager.clone());
+    let app_state =
+        app_state_with_tasks("session-t26-6-stateless-no-a-write", task_manager.clone());
 
     // Pre-set sentinel.
     {
@@ -6078,7 +6890,9 @@ async fn t26_6_fallback_to_trim_when_stateless_summarize_fails() {
 
     let oversized = "TRIM_FALLBACK_MARKER ".repeat(B_CONTEXT_TRIM_THRESHOLD / 19 + 1);
     assert!(oversized.len() > B_CONTEXT_TRIM_THRESHOLD);
-    let _ = coordinator.ask_b_session_pub(&app_state, oversized.clone()).await;
+    let _ = coordinator
+        .ask_b_session_pub(&app_state, oversized.clone())
+        .await;
 
     let guard = coordinator.status.read().await;
     let sent = guard.last_b_ask_message.as_deref().unwrap_or("");
@@ -6146,7 +6960,15 @@ async fn t26_6_b_context_summary_uses_stateless_path() {
 
 // ── T26.7: Cache observability ────────────────────────────────────────────────
 
-async fn setup_coordinator_with_b_session(plan_id: &str, output_dir_name: &str) -> (BossCoordinator, std::path::PathBuf, Arc<TaskManager>, Arc<AppState>) {
+async fn setup_coordinator_with_b_session(
+    plan_id: &str,
+    output_dir_name: &str,
+) -> (
+    BossCoordinator,
+    std::path::PathBuf,
+    Arc<TaskManager>,
+    Arc<AppState>,
+) {
     let plan_path = std::env::temp_dir().join(format!("{plan_id}.json"));
     let plan = BossPlan {
         plan_id: plan_id.into(),
@@ -6195,7 +7017,10 @@ async fn t26_7_no_compression_records_none_strategy() {
     let _ = coordinator.ask_b_session_pub(&app_state, short_msg).await;
 
     let guard = coordinator.status.read().await;
-    let metrics = guard.last_step_metrics.as_ref().expect("last_step_metrics must be set");
+    let metrics = guard
+        .last_step_metrics
+        .as_ref()
+        .expect("last_step_metrics must be set");
     assert_eq!(metrics.compression_strategy, CompressionStrategy::None);
     assert_eq!(metrics.original_chars, original_len);
     assert_eq!(metrics.sent_chars, original_len);
@@ -6215,10 +7040,16 @@ async fn t26_7_trim_path_records_trimmed_strategy() {
     let _ = coordinator.ask_b_session_pub(&app_state, oversized).await;
 
     let guard = coordinator.status.read().await;
-    let metrics = guard.last_step_metrics.as_ref().expect("last_step_metrics must be set");
+    let metrics = guard
+        .last_step_metrics
+        .as_ref()
+        .expect("last_step_metrics must be set");
     assert_eq!(metrics.compression_strategy, CompressionStrategy::Trimmed);
     assert_eq!(metrics.original_chars, original_len);
-    assert!(metrics.sent_chars < original_len, "sent_chars must be less than original after trim");
+    assert!(
+        metrics.sent_chars < original_len,
+        "sent_chars must be less than original after trim"
+    );
 
     let _ = std::fs::remove_file(&plan_path);
 }
@@ -6229,10 +7060,15 @@ async fn t26_7_brief_context_mode_recorded() {
     let (coordinator, plan_path, _, app_state) =
         setup_coordinator_with_b_session("t26-7-brief", "t26_7_brief_output").await;
 
-    let _ = coordinator.ask_b_session_pub(&app_state, "hello".to_string()).await;
+    let _ = coordinator
+        .ask_b_session_pub(&app_state, "hello".to_string())
+        .await;
 
     let guard = coordinator.status.read().await;
-    let metrics = guard.last_step_metrics.as_ref().expect("last_step_metrics must be set");
+    let metrics = guard
+        .last_step_metrics
+        .as_ref()
+        .expect("last_step_metrics must be set");
     assert_eq!(metrics.context_mode, ContextMode::Brief);
 
     let _ = std::fs::remove_file(&plan_path);
@@ -6248,7 +7084,10 @@ async fn t26_7_metrics_original_chars_matches_input_length() {
     let _ = coordinator.ask_b_session_pub(&app_state, msg).await;
 
     let guard = coordinator.status.read().await;
-    let metrics = guard.last_step_metrics.as_ref().expect("last_step_metrics must be set");
+    let metrics = guard
+        .last_step_metrics
+        .as_ref()
+        .expect("last_step_metrics must be set");
     assert_eq!(metrics.original_chars, 42);
 
     let _ = std::fs::remove_file(&plan_path);
@@ -6258,7 +7097,10 @@ async fn t26_7_metrics_original_chars_matches_input_length() {
 #[test]
 fn t26_7_metrics_none_before_first_dispatch() {
     let status = rust_agent::core::boss_state::BossStatus::default();
-    assert!(status.last_step_metrics.is_none(), "last_step_metrics must be None before first dispatch");
+    assert!(
+        status.last_step_metrics.is_none(),
+        "last_step_metrics must be None before first dispatch"
+    );
 }
 
 // ── T26.8: Production-path tests ─────────────────────────────────────────────
@@ -6267,19 +7109,46 @@ fn t26_7_metrics_none_before_first_dispatch() {
 #[test]
 fn t26_8_stable_prefix_fingerprint_stable_across_dispatches() {
     let mut assembly = PromptAssembly::new();
-    assembly.push(PromptSegment::new("sys", PromptSegmentKind::StaticSystem, "system prompt"));
-    assembly.push(PromptSegment::new("brief", PromptSegmentKind::ActorBrief, "actor brief"));
-    assembly.push(PromptSegment::new("dyn", PromptSegmentKind::DynamicEvidence, "dynamic content"));
+    assembly.push(PromptSegment::new(
+        "sys",
+        PromptSegmentKind::StaticSystem,
+        "system prompt",
+    ));
+    assembly.push(PromptSegment::new(
+        "brief",
+        PromptSegmentKind::ActorBrief,
+        "actor brief",
+    ));
+    assembly.push(PromptSegment::new(
+        "dyn",
+        PromptSegmentKind::DynamicEvidence,
+        "dynamic content",
+    ));
 
     let fp1 = assembly.stable_prefix_fingerprint();
     let fp2 = assembly.stable_prefix_fingerprint();
-    assert_eq!(fp1, fp2, "stable_prefix_fingerprint must be deterministic across calls");
+    assert_eq!(
+        fp1, fp2,
+        "stable_prefix_fingerprint must be deterministic across calls"
+    );
 
     // Changing dynamic content must not change the stable prefix fingerprint.
     let mut assembly2 = PromptAssembly::new();
-    assembly2.push(PromptSegment::new("sys", PromptSegmentKind::StaticSystem, "system prompt"));
-    assembly2.push(PromptSegment::new("brief", PromptSegmentKind::ActorBrief, "actor brief"));
-    assembly2.push(PromptSegment::new("dyn", PromptSegmentKind::DynamicEvidence, "DIFFERENT dynamic content"));
+    assembly2.push(PromptSegment::new(
+        "sys",
+        PromptSegmentKind::StaticSystem,
+        "system prompt",
+    ));
+    assembly2.push(PromptSegment::new(
+        "brief",
+        PromptSegmentKind::ActorBrief,
+        "actor brief",
+    ));
+    assembly2.push(PromptSegment::new(
+        "dyn",
+        PromptSegmentKind::DynamicEvidence,
+        "DIFFERENT dynamic content",
+    ));
 
     assert_eq!(
         assembly.stable_prefix_fingerprint(),
@@ -6301,11 +7170,20 @@ async fn t26_8_child_worker_payload_uses_brief_not_full_inherit() {
     save_plan(&plan, &plan_path).await.unwrap();
 
     let coordinator = BossCoordinator::restore_or_init(&plan_path).await.unwrap();
-    let payload = coordinator.build_b_step_payload_pub(0, "parent-session", "b-actor").await.unwrap();
+    let payload = coordinator
+        .build_b_step_payload_pub(0, "parent-session", "b-actor")
+        .await
+        .unwrap();
     let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
 
-    assert_eq!(v["inherit_context"], false, "child worker must not inherit full context");
-    assert_eq!(v["context_strategy"], "brief", "child worker must use brief context strategy");
+    assert_eq!(
+        v["inherit_context"], false,
+        "child worker must not inherit full context"
+    );
+    assert_eq!(
+        v["context_strategy"], "brief",
+        "child worker must use brief context strategy"
+    );
 
     let _ = std::fs::remove_file(&plan_path);
 }
@@ -6314,10 +7192,21 @@ async fn t26_8_child_worker_payload_uses_brief_not_full_inherit() {
 #[test]
 fn t26_8_unsupported_provider_noop_in_production_path() {
     let mut assembly = PromptAssembly::new();
-    assembly.push(PromptSegment::new("sys", PromptSegmentKind::StaticSystem, "system"));
-    assembly.push(PromptSegment::new("dyn", PromptSegmentKind::DynamicEvidence, "dynamic"));
+    assembly.push(PromptSegment::new(
+        "sys",
+        PromptSegmentKind::StaticSystem,
+        "system",
+    ));
+    assembly.push(PromptSegment::new(
+        "dyn",
+        PromptSegmentKind::DynamicEvidence,
+        "dynamic",
+    ));
 
-    let profile = ProviderProfile { prompt_cache: PromptCacheCapability::Unsupported, ..ProviderProfile::default() };
+    let profile = ProviderProfile {
+        prompt_cache: PromptCacheCapability::Unsupported,
+        ..ProviderProfile::default()
+    };
     let original = serde_json::json!({
         "model": "claude-3-5-sonnet",
         "messages": [{"role": "user", "content": [{"type": "text", "text": "hello"}]}],
@@ -6326,7 +7215,10 @@ fn t26_8_unsupported_provider_noop_in_production_path() {
     let mut payload = original.clone();
     apply_cache_control(&assembly, &profile, &mut payload);
 
-    assert_eq!(payload, original, "Unsupported provider must leave payload unchanged in production path");
+    assert_eq!(
+        payload, original,
+        "Unsupported provider must leave payload unchanged in production path"
+    );
 }
 
 /// T26.8.4: BossStepMetrics has cache token fields defaulting to 0 before B actor reports usage.
@@ -6335,30 +7227,57 @@ async fn t26_8_cache_token_fields_default_to_zero_before_b_reports() {
     let (coordinator, plan_path, _, app_state) =
         setup_coordinator_with_b_session("t26-8-cache-tokens", "t26_8_cache_tokens_output").await;
 
-    let _ = coordinator.ask_b_session_pub(&app_state, "hello".to_string()).await;
+    let _ = coordinator
+        .ask_b_session_pub(&app_state, "hello".to_string())
+        .await;
 
     let guard = coordinator.status.read().await;
-    let metrics = guard.last_step_metrics.as_ref().expect("last_step_metrics must be set");
-    assert_eq!(metrics.cache_creation_tokens, 0, "cache_creation_tokens must default to 0 before B actor reports");
-    assert_eq!(metrics.cache_read_tokens, 0, "cache_read_tokens must default to 0 before B actor reports");
+    let metrics = guard
+        .last_step_metrics
+        .as_ref()
+        .expect("last_step_metrics must be set");
+    assert_eq!(
+        metrics.cache_creation_tokens, 0,
+        "cache_creation_tokens must default to 0 before B actor reports"
+    );
+    assert_eq!(
+        metrics.cache_read_tokens, 0,
+        "cache_read_tokens must default to 0 before B actor reports"
+    );
 
     let _ = std::fs::remove_file(&plan_path);
 }
 
 // ── T26.9: Cache stability guard ─────────────────────────────────────────────
 
-use rust_agent::core::prompt_segment::{check_prefix_stability, PrefixStabilityResult};
+use rust_agent::core::prompt_segment::{PrefixStabilityResult, check_prefix_stability};
 
 /// T26.9.1: StateFrame change does not affect stable prefix fingerprint.
 #[test]
 fn t26_9_state_frame_change_does_not_affect_prefix_fingerprint() {
     let mut a1 = PromptAssembly::new();
-    a1.push(PromptSegment::new("sys", PromptSegmentKind::StaticSystem, "system"));
-    a1.push(PromptSegment::new("sf", PromptSegmentKind::StateFrame, "step 1"));
+    a1.push(PromptSegment::new(
+        "sys",
+        PromptSegmentKind::StaticSystem,
+        "system",
+    ));
+    a1.push(PromptSegment::new(
+        "sf",
+        PromptSegmentKind::StateFrame,
+        "step 1",
+    ));
 
     let mut a2 = PromptAssembly::new();
-    a2.push(PromptSegment::new("sys", PromptSegmentKind::StaticSystem, "system"));
-    a2.push(PromptSegment::new("sf", PromptSegmentKind::StateFrame, "step 2 CHANGED"));
+    a2.push(PromptSegment::new(
+        "sys",
+        PromptSegmentKind::StaticSystem,
+        "system",
+    ));
+    a2.push(PromptSegment::new(
+        "sf",
+        PromptSegmentKind::StateFrame,
+        "step 2 CHANGED",
+    ));
 
     assert_eq!(
         a1.stable_prefix_fingerprint(),
@@ -6371,12 +7290,28 @@ fn t26_9_state_frame_change_does_not_affect_prefix_fingerprint() {
 #[test]
 fn t26_9_tool_output_does_not_affect_prefix_fingerprint() {
     let mut a1 = PromptAssembly::new();
-    a1.push(PromptSegment::new("brief", PromptSegmentKind::ActorBrief, "actor brief"));
-    a1.push(PromptSegment::new("trace", PromptSegmentKind::DynamicEvidence, "tool output v1"));
+    a1.push(PromptSegment::new(
+        "brief",
+        PromptSegmentKind::ActorBrief,
+        "actor brief",
+    ));
+    a1.push(PromptSegment::new(
+        "trace",
+        PromptSegmentKind::DynamicEvidence,
+        "tool output v1",
+    ));
 
     let mut a2 = PromptAssembly::new();
-    a2.push(PromptSegment::new("brief", PromptSegmentKind::ActorBrief, "actor brief"));
-    a2.push(PromptSegment::new("trace", PromptSegmentKind::DynamicEvidence, "tool output v2 CHANGED"));
+    a2.push(PromptSegment::new(
+        "brief",
+        PromptSegmentKind::ActorBrief,
+        "actor brief",
+    ));
+    a2.push(PromptSegment::new(
+        "trace",
+        PromptSegmentKind::DynamicEvidence,
+        "tool output v2 CHANGED",
+    ));
 
     assert_eq!(
         a1.stable_prefix_fingerprint(),
@@ -6389,12 +7324,20 @@ fn t26_9_tool_output_does_not_affect_prefix_fingerprint() {
 #[test]
 fn t26_9_cacheable_change_triggers_unstable() {
     let mut a1 = PromptAssembly::new();
-    a1.push(PromptSegment::new("sys", PromptSegmentKind::StaticSystem, "original system"));
+    a1.push(PromptSegment::new(
+        "sys",
+        PromptSegmentKind::StaticSystem,
+        "original system",
+    ));
 
     let prev_fp = a1.stable_prefix_fingerprint();
 
     let mut a2 = PromptAssembly::new();
-    a2.push(PromptSegment::new("sys", PromptSegmentKind::StaticSystem, "CHANGED system"));
+    a2.push(PromptSegment::new(
+        "sys",
+        PromptSegmentKind::StaticSystem,
+        "CHANGED system",
+    ));
 
     let result = check_prefix_stability(prev_fp, &a2);
     assert!(
@@ -6407,14 +7350,30 @@ fn t26_9_cacheable_change_triggers_unstable() {
 #[test]
 fn t26_9_stable_when_only_dynamic_changes() {
     let mut a1 = PromptAssembly::new();
-    a1.push(PromptSegment::new("sys", PromptSegmentKind::StaticSystem, "system"));
-    a1.push(PromptSegment::new("dyn", PromptSegmentKind::DynamicEvidence, "dynamic v1"));
+    a1.push(PromptSegment::new(
+        "sys",
+        PromptSegmentKind::StaticSystem,
+        "system",
+    ));
+    a1.push(PromptSegment::new(
+        "dyn",
+        PromptSegmentKind::DynamicEvidence,
+        "dynamic v1",
+    ));
 
     let prev_fp = a1.stable_prefix_fingerprint();
 
     let mut a2 = PromptAssembly::new();
-    a2.push(PromptSegment::new("sys", PromptSegmentKind::StaticSystem, "system"));
-    a2.push(PromptSegment::new("dyn", PromptSegmentKind::DynamicEvidence, "dynamic v2 CHANGED"));
+    a2.push(PromptSegment::new(
+        "sys",
+        PromptSegmentKind::StaticSystem,
+        "system",
+    ));
+    a2.push(PromptSegment::new(
+        "dyn",
+        PromptSegmentKind::DynamicEvidence,
+        "dynamic v2 CHANGED",
+    ));
 
     let result = check_prefix_stability(prev_fp, &a2);
     assert!(
@@ -6429,11 +7388,19 @@ async fn t26_9_instability_recorded_in_step_metrics() {
     let (coordinator, plan_path, _, app_state) =
         setup_coordinator_with_b_session("t26-9-instability", "t26_9_instability_output").await;
 
-    let _ = coordinator.ask_b_session_pub(&app_state, "hello".to_string()).await;
+    let _ = coordinator
+        .ask_b_session_pub(&app_state, "hello".to_string())
+        .await;
 
     let guard = coordinator.status.read().await;
-    let metrics = guard.last_step_metrics.as_ref().expect("last_step_metrics must be set");
-    assert!(!metrics.cache_prefix_instability, "cache_prefix_instability must default to false");
+    let metrics = guard
+        .last_step_metrics
+        .as_ref()
+        .expect("last_step_metrics must be set");
+    assert!(
+        !metrics.cache_prefix_instability,
+        "cache_prefix_instability must default to false"
+    );
 
     let _ = std::fs::remove_file(&plan_path);
 }
@@ -6442,7 +7409,9 @@ async fn t26_9_instability_recorded_in_step_metrics() {
 
 #[test]
 fn t27_2_state_frame_serializes_and_deserializes() {
-    use rust_agent::core::state_frame::{ActorRole, AgentState, EffortLevel, StateBudget, StateFrame};
+    use rust_agent::core::state_frame::{
+        ActorRole, AgentState, EffortLevel, StateBudget, StateFrame,
+    };
 
     let frame = StateFrame {
         role: ActorRole::ExecutorB,
@@ -6456,7 +7425,12 @@ fn t27_2_state_frame_serializes_and_deserializes() {
         toolset_id: Some("minimal-edit".into()),
         skillset_id: None,
         required_output_schema: Some("state_decision_v1".into()),
-        budget: StateBudget { effort: EffortLevel::M, max_input_tokens: 50_000, max_tool_calls: 10, max_wall_time_ms: 0 },
+        budget: StateBudget {
+            effort: EffortLevel::M,
+            max_input_tokens: 50_000,
+            max_tool_calls: 10,
+            max_wall_time_ms: 0,
+        },
     };
 
     let json = serde_json::to_string(&frame).expect("serialize");
@@ -6492,7 +7466,11 @@ fn t27_2_state_decision_invalid_json_returns_repair_needed() {
 
     let bad = r#"{ "state": "executing", "decision": }"#;
     let err = validate_state_decision(bad).expect_err("should fail");
-    assert!(err.reason.contains("JSON parse error"), "reason: {}", err.reason);
+    assert!(
+        err.reason.contains("JSON parse error"),
+        "reason: {}",
+        err.reason
+    );
     assert_eq!(err.raw_json, bad);
 }
 
@@ -6508,8 +7486,8 @@ fn t27_2_default_effort_is_m() {
 
 #[test]
 fn t27_2_state_frame_to_prompt_segment_is_non_cacheable() {
-    use rust_agent::core::state_frame::{ActorRole, AgentState, StateFrame, StateBudget};
     use rust_agent::core::prompt_segment::PromptSegmentKind;
+    use rust_agent::core::state_frame::{ActorRole, AgentState, StateBudget, StateFrame};
 
     let frame = StateFrame {
         role: ActorRole::Worker,
@@ -6528,8 +7506,14 @@ fn t27_2_state_frame_to_prompt_segment_is_non_cacheable() {
 
     let seg = frame.to_prompt_segment();
     assert_eq!(seg.kind, PromptSegmentKind::StateFrame);
-    assert!(!seg.is_cacheable(), "StateFrame segment must not be cacheable");
-    assert!(seg.content.contains("planning"), "content should include state");
+    assert!(
+        !seg.is_cacheable(),
+        "StateFrame segment must not be cacheable"
+    );
+    assert!(
+        seg.content.contains("planning"),
+        "content should include state"
+    );
 }
 
 // ── T27.3 StateFrame projection ───────────────────────────────────────────
@@ -6557,7 +7541,10 @@ fn t27_3_documentation_stage_maps_to_planning_state() {
     assert!(frame.open_items.is_empty());
     assert!(frame.blocked_items.is_empty());
     assert_eq!(frame.allowed_actions, vec!["read_file", "write_spec"]);
-    assert_eq!(frame.required_output_schema.as_deref(), Some("state_decision_v1"));
+    assert_eq!(
+        frame.required_output_schema.as_deref(),
+        Some("state_decision_v1")
+    );
 }
 
 #[test]
@@ -6653,7 +7640,12 @@ fn t27_3_completed_steps_go_into_accepted_summary() {
     let frame = project_state_frame(&plan, BossStage::Execution, Some(1), ActorRole::Worker);
     assert_eq!(frame.accepted_summary, vec!["step zero done"]);
     // current step must NOT appear in accepted_summary
-    assert!(!frame.accepted_summary.iter().any(|s| s.contains("step one")));
+    assert!(
+        !frame
+            .accepted_summary
+            .iter()
+            .any(|s| s.contains("step one"))
+    );
 }
 
 #[test]
@@ -6673,7 +7665,12 @@ fn t27_3_waiting_for_approval_maps_to_blocked_with_blocked_item() {
         ..Default::default()
     };
 
-    let frame = project_state_frame(&plan, BossStage::WaitingForApproval, None, ActorRole::DesignerA);
+    let frame = project_state_frame(
+        &plan,
+        BossStage::WaitingForApproval,
+        None,
+        ActorRole::DesignerA,
+    );
     assert_eq!(frame.state, AgentState::Blocked);
     assert_eq!(frame.blocked_items, vec!["waiting for user approval"]);
     assert!(frame.allowed_actions.is_empty());
@@ -6708,16 +7705,16 @@ fn t27_3_projected_frame_is_non_cacheable_segment() {
 
 #[test]
 fn t27_4_done_decision_terminates_loop() {
-    use rust_agent::core::state_frame::{ActorRole, AgentState, StateFrame, StateBudget};
+    use rust_agent::core::state_frame::{ActorRole, AgentState, StateBudget, StateFrame};
     use rust_agent::core::state_frame_loop::{DecisionLoopConfig, LoopOutcome, run_decision_loop};
     use rust_agent::service::api::client::ModelProviderClient;
     use rust_agent::service::api::streaming::StreamEvent;
 
     let rt = tokio::runtime::Runtime::new().unwrap();
     let done_json = r#"{"state":"done","decision":"done","confidence":1.0}"#;
-    let client = ModelProviderClient::with_scripted_turns(vec![
-        vec![StreamEvent::TextDelta(done_json.into())],
-    ]);
+    let client = ModelProviderClient::with_scripted_turns(vec![vec![StreamEvent::TextDelta(
+        done_json.into(),
+    )]]);
     let frame = StateFrame {
         role: ActorRole::Worker,
         state: AgentState::Executing,
@@ -6732,14 +7729,25 @@ fn t27_4_done_decision_terminates_loop() {
         required_output_schema: Some("state_decision_v1".into()),
         budget: StateBudget::default(),
     };
-    let outcome = rt.block_on(run_decision_loop(&client, frame, DecisionLoopConfig::default()))
+    let outcome = rt
+        .block_on(run_decision_loop(
+            &client,
+            frame,
+            DecisionLoopConfig::default(),
+        ))
         .expect("loop should not error");
-    assert!(matches!(outcome, LoopOutcome::Done { final_state: AgentState::Done, .. }));
+    assert!(matches!(
+        outcome,
+        LoopOutcome::Done {
+            final_state: AgentState::Done,
+            ..
+        }
+    ));
 }
 
 #[test]
 fn t27_4_continue_decision_advances_state() {
-    use rust_agent::core::state_frame::{ActorRole, AgentState, StateFrame, StateBudget};
+    use rust_agent::core::state_frame::{ActorRole, AgentState, StateBudget, StateFrame};
     use rust_agent::core::state_frame_loop::{DecisionLoopConfig, LoopOutcome, run_decision_loop};
     use rust_agent::service::api::client::ModelProviderClient;
     use rust_agent::service::api::streaming::StreamEvent;
@@ -6766,23 +7774,28 @@ fn t27_4_continue_decision_advances_state() {
         required_output_schema: None,
         budget: StateBudget::default(),
     };
-    let outcome = rt.block_on(run_decision_loop(&client, frame, DecisionLoopConfig::default()))
+    let outcome = rt
+        .block_on(run_decision_loop(
+            &client,
+            frame,
+            DecisionLoopConfig::default(),
+        ))
         .expect("loop should not error");
     assert!(matches!(outcome, LoopOutcome::Done { .. }));
 }
 
 #[test]
 fn t27_4_reject_decision_returns_rejected_outcome() {
-    use rust_agent::core::state_frame::{ActorRole, AgentState, StateFrame, StateBudget};
+    use rust_agent::core::state_frame::{ActorRole, AgentState, StateBudget, StateFrame};
     use rust_agent::core::state_frame_loop::{DecisionLoopConfig, LoopOutcome, run_decision_loop};
     use rust_agent::service::api::client::ModelProviderClient;
     use rust_agent::service::api::streaming::StreamEvent;
 
     let rt = tokio::runtime::Runtime::new().unwrap();
     let reject_json = r#"{"state":"blocked","decision":"reject","next_action":{"action_type":"reject","args":{"reason":"acceptance criteria not met"}}}"#;
-    let client = ModelProviderClient::with_scripted_turns(vec![
-        vec![StreamEvent::TextDelta(reject_json.into())],
-    ]);
+    let client = ModelProviderClient::with_scripted_turns(vec![vec![StreamEvent::TextDelta(
+        reject_json.into(),
+    )]]);
     let frame = StateFrame {
         role: ActorRole::Verifier,
         state: AgentState::Verifying,
@@ -6797,7 +7810,12 @@ fn t27_4_reject_decision_returns_rejected_outcome() {
         required_output_schema: None,
         budget: StateBudget::default(),
     };
-    let outcome = rt.block_on(run_decision_loop(&client, frame, DecisionLoopConfig::default()))
+    let outcome = rt
+        .block_on(run_decision_loop(
+            &client,
+            frame,
+            DecisionLoopConfig::default(),
+        ))
         .expect("loop should not error");
     match outcome {
         LoopOutcome::Rejected { reason } => {
@@ -6809,7 +7827,7 @@ fn t27_4_reject_decision_returns_rejected_outcome() {
 
 #[test]
 fn t27_4_invalid_json_triggers_repair_then_done() {
-    use rust_agent::core::state_frame::{ActorRole, AgentState, StateFrame, StateBudget};
+    use rust_agent::core::state_frame::{ActorRole, AgentState, StateBudget, StateFrame};
     use rust_agent::core::state_frame_loop::{DecisionLoopConfig, LoopOutcome, run_decision_loop};
     use rust_agent::service::api::client::ModelProviderClient;
     use rust_agent::service::api::streaming::StreamEvent;
@@ -6836,15 +7854,22 @@ fn t27_4_invalid_json_triggers_repair_then_done() {
         required_output_schema: None,
         budget: StateBudget::default(),
     };
-    let config = DecisionLoopConfig { max_iterations: 3, repair_budget: 2 };
-    let outcome = rt.block_on(run_decision_loop(&client, frame, config))
+    let config = DecisionLoopConfig {
+        max_iterations: 3,
+        repair_budget: 2,
+    };
+    let outcome = rt
+        .block_on(run_decision_loop(&client, frame, config))
         .expect("loop should not error");
-    assert!(matches!(outcome, LoopOutcome::Done { .. }), "expected Done after repair, got {outcome:?}");
+    assert!(
+        matches!(outcome, LoopOutcome::Done { .. }),
+        "expected Done after repair, got {outcome:?}"
+    );
 }
 
 #[test]
 fn t27_4_max_iterations_reached_when_always_continue() {
-    use rust_agent::core::state_frame::{ActorRole, AgentState, StateFrame, StateBudget};
+    use rust_agent::core::state_frame::{ActorRole, AgentState, StateBudget, StateFrame};
     use rust_agent::core::state_frame_loop::{DecisionLoopConfig, LoopOutcome, run_decision_loop};
     use rust_agent::service::api::client::ModelProviderClient;
     use rust_agent::service::api::streaming::StreamEvent;
@@ -6871,11 +7896,20 @@ fn t27_4_max_iterations_reached_when_always_continue() {
         required_output_schema: None,
         budget: StateBudget::default(),
     };
-    let config = DecisionLoopConfig { max_iterations: 3, repair_budget: 1 };
-    let outcome = rt.block_on(run_decision_loop(&client, frame, config))
+    let config = DecisionLoopConfig {
+        max_iterations: 3,
+        repair_budget: 1,
+    };
+    let outcome = rt
+        .block_on(run_decision_loop(&client, frame, config))
         .expect("loop should not error");
     assert!(
-        matches!(outcome, LoopOutcome::MaxIterationsReached { last_state: AgentState::Executing }),
+        matches!(
+            outcome,
+            LoopOutcome::MaxIterationsReached {
+                last_state: AgentState::Executing
+            }
+        ),
         "expected MaxIterationsReached, got {outcome:?}"
     );
 }
@@ -6898,7 +7932,8 @@ async fn report_progress_includes_lism_routed_metadata_for_completed_step() {
 
     let mut app = (*app_state_with_tasks("lism-report-session", task_manager.clone())).clone();
     app.permission_context.set_lism_enabled(true);
-    app.permission_context.inherited_active_model_snapshot = Some(make_inherited_runtime_snapshot_with_scripted_turns(vec![]));
+    app.permission_context.inherited_active_model_snapshot =
+        Some(make_inherited_runtime_snapshot_with_scripted_turns(vec![]));
     app.session = Some(rust_agent::history::session::SessionSnapshot {
         session_id: rust_agent::history::session::SessionId("lism-report-session".into()),
         surface: rust_agent::bootstrap::InteractionSurface::Cli,
@@ -6913,12 +7948,18 @@ async fn report_progress_includes_lism_routed_metadata_for_completed_step() {
     let report = coordinator.report_progress(&task_manager).await.unwrap();
 
     assert_eq!(report.steps.len(), 1);
-    let meta = report.steps[0].routed_metadata.as_ref().expect("routed_metadata must be set for LisM step");
+    let meta = report.steps[0]
+        .routed_metadata
+        .as_ref()
+        .expect("routed_metadata must be set for LisM step");
     assert_eq!(meta.toolset_id.as_deref(), Some("worker-minimal"));
     assert_eq!(meta.skillset_id, None);
     assert_eq!(meta.model_tier.as_deref(), Some("medium"));
     assert_eq!(meta.provider_profile_id.as_deref(), Some("worker-override"));
-    assert!(meta.state_frame_size.unwrap_or(0) > 0, "state_frame_size must be non-zero");
+    assert!(
+        meta.state_frame_size.unwrap_or(0) > 0,
+        "state_frame_size must be non-zero"
+    );
     assert_eq!(meta.cache_read_tokens, Some(0));
     assert_eq!(meta.cache_write_tokens, Some(0));
     assert_eq!(meta.fallback_count, Some(0));
@@ -6992,10 +8033,16 @@ async fn t27_r1_worker_override_hit_report_shows_routed_metadata() {
         .as_ref()
         .expect("routed_metadata must be populated for worker-override hit");
 
-    assert_eq!(meta.provider_profile_id.as_deref(), Some("worker-override"),
-        "provider_profile_id must reflect the router-produced override");
+    assert_eq!(
+        meta.provider_profile_id.as_deref(),
+        Some("worker-override"),
+        "provider_profile_id must reflect the router-produced override"
+    );
     assert_eq!(meta.model_tier.as_deref(), Some("medium"));
-    assert!(meta.state_frame_size.unwrap_or(0) > 0, "state_frame_size must be non-zero");
+    assert!(
+        meta.state_frame_size.unwrap_or(0) > 0,
+        "state_frame_size must be non-zero"
+    );
     assert_eq!(meta.fallback_count, Some(0));
     assert_eq!(meta.projection_mismatch_count, Some(0));
     assert_eq!(meta.cache_read_tokens, Some(0));
@@ -7048,8 +8095,18 @@ async fn t27_r1_report_observability_summary_aggregates_routed_steps() {
         .expect("observability_summary must be Some when LisM steps are routed");
 
     assert_eq!(summary.total_steps_routed, 2);
-    assert_eq!(summary.override_hit_count, 2, "both steps use worker-override profile");
-    assert_eq!(summary.model_tier_counts.get("medium").copied().unwrap_or(0), 2);
+    assert_eq!(
+        summary.override_hit_count, 2,
+        "both steps use worker-override profile"
+    );
+    assert_eq!(
+        summary
+            .model_tier_counts
+            .get("medium")
+            .copied()
+            .unwrap_or(0),
+        2
+    );
     assert_eq!(summary.total_fallback_count, 0);
     assert_eq!(summary.total_projection_mismatch_count, 0);
 
@@ -7113,11 +8170,17 @@ async fn t27_r1_lism_status_shows_summary_line() {
 
     // Simulate /LisM status by reading the snapshot directly.
     let metadata = coordinator.routed_step_metadata_snapshot().await;
-    assert!(!metadata.is_empty(), "metadata must be populated after advance_plan");
+    assert!(
+        !metadata.is_empty(),
+        "metadata must be populated after advance_plan"
+    );
 
     // Verify the summary line would contain total_steps_routed: 1.
     let total_routed = metadata.values().count();
-    let override_hits = metadata.values().filter(|m| m.provider_profile_id.is_some()).count();
+    let override_hits = metadata
+        .values()
+        .filter(|m| m.provider_profile_id.is_some())
+        .count();
     assert_eq!(total_routed, 1);
     assert_eq!(override_hits, 1);
 
@@ -7144,7 +8207,9 @@ async fn t27_r1_cache_hit_ratio_computed_correctly() {
         total_cache_write_tokens: 100,
         ..Default::default()
     };
-    let ratio = summary.cache_hit_ratio().expect("ratio must be Some when tokens > 0");
+    let ratio = summary
+        .cache_hit_ratio()
+        .expect("ratio must be Some when tokens > 0");
     assert!((ratio - 0.75).abs() < 1e-9, "expected 0.75, got {ratio}");
     assert_eq!(summary.estimated_tokens_saved(), 300);
 }
@@ -7157,7 +8222,9 @@ async fn t27_r1_cache_hit_ratio_zero_reads() {
         total_cache_write_tokens: 500,
         ..Default::default()
     };
-    let ratio = summary.cache_hit_ratio().expect("ratio must be Some when write > 0");
+    let ratio = summary
+        .cache_hit_ratio()
+        .expect("ratio must be Some when write > 0");
     assert!((ratio - 0.0).abs() < 1e-9, "expected 0.0, got {ratio}");
     assert_eq!(summary.estimated_tokens_saved(), 0);
 }
@@ -7200,12 +8267,23 @@ async fn t27_r1_observability_summary_aggregates_token_fields() {
     coordinator.advance_plan(&app_state).await.unwrap();
 
     let report = coordinator.report_progress(&task_manager).await.unwrap();
-    let summary = report.observability_summary.expect("summary must be Some after LisM steps");
+    let summary = report
+        .observability_summary
+        .expect("summary must be Some after LisM steps");
 
     // v1 stubs: input/output are 0, but fields must be present and aggregated.
-    assert_eq!(summary.total_input_tokens, 0, "v1 stub: input_tokens always 0");
-    assert_eq!(summary.total_output_tokens, 0, "v1 stub: output_tokens always 0");
-    assert_eq!(summary.estimated_cost_micros_usd, 0, "v1 stub: cost always 0");
+    assert_eq!(
+        summary.total_input_tokens, 0,
+        "v1 stub: input_tokens always 0"
+    );
+    assert_eq!(
+        summary.total_output_tokens, 0,
+        "v1 stub: output_tokens always 0"
+    );
+    assert_eq!(
+        summary.estimated_cost_micros_usd, 0,
+        "v1 stub: cost always 0"
+    );
     assert_eq!(summary.total_steps_routed, 2);
 
     server.await.expect("mock server finished");
@@ -7215,11 +8293,11 @@ async fn t27_r1_observability_summary_aggregates_token_fields() {
 
 #[tokio::test]
 async fn t27_r1_format_report_includes_hit_ratio_and_tokens_saved() {
-    use rust_agent::core::boss_state::{
-        BossActorHandle, BossActorRole, BossObservabilitySummary, BossReportPayload,
-        BossStage, BossStepReport, BossStepRoutedMetadata,
-    };
     use rust_agent::core::boss_state::BossPlanStepStatus;
+    use rust_agent::core::boss_state::{
+        BossActorHandle, BossActorRole, BossObservabilitySummary, BossReportPayload, BossStage,
+        BossStepReport, BossStepRoutedMetadata,
+    };
 
     let summary = BossObservabilitySummary {
         total_steps_routed: 1,
@@ -7268,10 +8346,22 @@ async fn t27_r1_format_report_includes_hit_ratio_and_tokens_saved() {
     };
 
     let report = payload.format_report();
-    assert!(report.contains("hit_ratio=80.0%"), "expected hit_ratio in report, got: {report}");
-    assert!(report.contains("tokens_saved=400"), "expected tokens_saved in report, got: {report}");
-    assert!(report.contains("input=0"), "expected input= in report, got: {report}");
-    assert!(report.contains("output=0"), "expected output= in report, got: {report}");
+    assert!(
+        report.contains("hit_ratio=80.0%"),
+        "expected hit_ratio in report, got: {report}"
+    );
+    assert!(
+        report.contains("tokens_saved=400"),
+        "expected tokens_saved in report, got: {report}"
+    );
+    assert!(
+        report.contains("input=0"),
+        "expected input= in report, got: {report}"
+    );
+    assert!(
+        report.contains("output=0"),
+        "expected output= in report, got: {report}"
+    );
 }
 
 // ── BossLisMPolicy precedence tests ─────────────────────────────────────────
@@ -7309,7 +8399,10 @@ async fn t27_r1_boss_lism_policy_inherit_follows_session_toggle() {
     // policy = Inherit (default), session = on → LisM path
     coordinator.advance_plan(&app_state).await.unwrap();
     let report = coordinator.report_progress(&task_manager).await.unwrap();
-    assert_eq!(report.lism_policy, rust_agent::core::boss_state::BossLisMPolicy::Inherit);
+    assert_eq!(
+        report.lism_policy,
+        rust_agent::core::boss_state::BossLisMPolicy::Inherit
+    );
     assert!(
         report.steps[0].routed_metadata.is_some(),
         "Inherit+session_on must use LisM path"
@@ -7358,7 +8451,10 @@ async fn t27_r1_boss_lism_policy_force_on_ignores_session_off() {
 
     coordinator.advance_plan(&app_state).await.unwrap();
     let report = coordinator.report_progress(&task_manager).await.unwrap();
-    assert_eq!(report.lism_policy, rust_agent::core::boss_state::BossLisMPolicy::ForceOn);
+    assert_eq!(
+        report.lism_policy,
+        rust_agent::core::boss_state::BossLisMPolicy::ForceOn
+    );
     assert!(
         report.steps[0].routed_metadata.is_some(),
         "ForceOn must use LisM path even when session toggle is off"
@@ -7391,7 +8487,10 @@ async fn t27_r1_boss_lism_policy_force_off_ignores_session_on() {
 
     coordinator.advance_plan(&app_state).await.unwrap();
     let report = coordinator.report_progress(&task_manager).await.unwrap();
-    assert_eq!(report.lism_policy, rust_agent::core::boss_state::BossLisMPolicy::ForceOff);
+    assert_eq!(
+        report.lism_policy,
+        rust_agent::core::boss_state::BossLisMPolicy::ForceOff
+    );
     assert!(
         report.steps[0].routed_metadata.is_none(),
         "ForceOff must use non-LisM path even when session toggle is on"
@@ -7414,21 +8513,30 @@ async fn t27_r1_report_lism_policy_field_reflects_coordinator_policy() {
 
     // Default: Inherit
     let report = coordinator.report_progress(&task_manager).await.unwrap();
-    assert_eq!(report.lism_policy, rust_agent::core::boss_state::BossLisMPolicy::Inherit);
+    assert_eq!(
+        report.lism_policy,
+        rust_agent::core::boss_state::BossLisMPolicy::Inherit
+    );
 
     // Set ForceOn
     coordinator
         .set_lism_policy(rust_agent::core::boss_state::BossLisMPolicy::ForceOn)
         .await;
     let report = coordinator.report_progress(&task_manager).await.unwrap();
-    assert_eq!(report.lism_policy, rust_agent::core::boss_state::BossLisMPolicy::ForceOn);
+    assert_eq!(
+        report.lism_policy,
+        rust_agent::core::boss_state::BossLisMPolicy::ForceOn
+    );
 
     // Set ForceOff
     coordinator
         .set_lism_policy(rust_agent::core::boss_state::BossLisMPolicy::ForceOff)
         .await;
     let report = coordinator.report_progress(&task_manager).await.unwrap();
-    assert_eq!(report.lism_policy, rust_agent::core::boss_state::BossLisMPolicy::ForceOff);
+    assert_eq!(
+        report.lism_policy,
+        rust_agent::core::boss_state::BossLisMPolicy::ForceOff
+    );
 
     let _ = std::fs::remove_file(plan_path);
     let _ = app_state;
@@ -7556,7 +8664,10 @@ async fn r2_missing_registry_lism_path_errors_on_profile_override() {
 #[tokio::test]
 async fn lism_enabled_boss_completed_step_auto_advances_to_next_step() {
     let (coordinator, plan_path) = coordinator_with_plan(
-        boss_plan(vec![boss_step(0, "LisM first"), boss_step(1, "LisM second")]),
+        boss_plan(vec![
+            boss_step(0, "LisM first"),
+            boss_step(1, "LisM second"),
+        ]),
         "test_boss_lism_auto_advance.json",
     )
     .await;
@@ -7571,9 +8682,14 @@ async fn lism_enabled_boss_completed_step_auto_advances_to_next_step() {
     let config_dir = std::env::temp_dir().join("lism_auto_advance_test");
     write_worker_override_models_toml(&config_dir, &format!("http://{addr}"));
 
-    let mut app = (*app_state_with_tasks("lism-auto-advance-session", Arc::new(TaskManager::default()))).clone();
+    let mut app = (*app_state_with_tasks(
+        "lism-auto-advance-session",
+        Arc::new(TaskManager::default()),
+    ))
+    .clone();
     app.permission_context.set_lism_enabled(true);
-    app.permission_context.inherited_active_model_snapshot = Some(make_inherited_runtime_snapshot_with_scripted_turns(vec![]));
+    app.permission_context.inherited_active_model_snapshot =
+        Some(make_inherited_runtime_snapshot_with_scripted_turns(vec![]));
     app.session = Some(rust_agent::history::session::SessionSnapshot {
         session_id: rust_agent::history::session::SessionId("lism-auto-advance-session".into()),
         surface: rust_agent::bootstrap::InteractionSurface::Cli,
@@ -7590,7 +8706,10 @@ async fn lism_enabled_boss_completed_step_auto_advances_to_next_step() {
     let plan = guard.as_ref().unwrap();
     assert_eq!(plan.steps[0].status, BossPlanStepStatus::Completed);
     assert_eq!(plan.steps[1].status, BossPlanStepStatus::Completed);
-    assert!(plan.steps[1].completed, "second step should auto-complete via existing auto-advance contract");
+    assert!(
+        plan.steps[1].completed,
+        "second step should auto-complete via existing auto-advance contract"
+    );
 
     server.await.expect("mock provider server finished");
     let _ = std::fs::remove_file(plan_path);
@@ -7611,9 +8730,11 @@ async fn lism_enabled_boss_outcomes_are_persisted_for_reload() {
     let config_dir_ok = std::env::temp_dir().join("lism_persist_ok_test");
     write_worker_override_models_toml(&config_dir_ok, &format!("http://{addr_ok}"));
 
-    let mut app_ok = (*app_state_with_tasks("lism-persist-complete", Arc::new(TaskManager::default()))).clone();
+    let mut app_ok =
+        (*app_state_with_tasks("lism-persist-complete", Arc::new(TaskManager::default()))).clone();
     app_ok.permission_context.set_lism_enabled(true);
-    app_ok.permission_context.inherited_active_model_snapshot = Some(make_inherited_runtime_snapshot_with_scripted_turns(vec![]));
+    app_ok.permission_context.inherited_active_model_snapshot =
+        Some(make_inherited_runtime_snapshot_with_scripted_turns(vec![]));
     app_ok.session = Some(rust_agent::history::session::SessionSnapshot {
         session_id: rust_agent::history::session::SessionId("lism-persist-complete".into()),
         surface: rust_agent::bootstrap::InteractionSurface::Cli,
@@ -7638,13 +8759,18 @@ async fn lism_enabled_boss_outcomes_are_persisted_for_reload() {
     let reject_json = r#"{"state":"blocked","decision":"reject","next_action":{"action_type":"reject","args":{"reason":"state frame output does not satisfy acceptance"}}}"#;
     let listener_fail = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr_fail = listener_fail.local_addr().unwrap();
-    let server_fail = tokio::spawn(run_mock_server_with_json_content(listener_fail, reject_json.to_string()));
+    let server_fail = tokio::spawn(run_mock_server_with_json_content(
+        listener_fail,
+        reject_json.to_string(),
+    ));
     let config_dir_fail = std::env::temp_dir().join("lism_persist_fail_test");
     write_worker_override_models_toml(&config_dir_fail, &format!("http://{addr_fail}"));
 
-    let mut app_fail = (*app_state_with_tasks("lism-persist-fail", Arc::new(TaskManager::default()))).clone();
+    let mut app_fail =
+        (*app_state_with_tasks("lism-persist-fail", Arc::new(TaskManager::default()))).clone();
     app_fail.permission_context.set_lism_enabled(true);
-    app_fail.permission_context.inherited_active_model_snapshot = Some(make_inherited_runtime_snapshot_with_scripted_turns(vec![]));
+    app_fail.permission_context.inherited_active_model_snapshot =
+        Some(make_inherited_runtime_snapshot_with_scripted_turns(vec![]));
     app_fail.session = Some(rust_agent::history::session::SessionSnapshot {
         session_id: rust_agent::history::session::SessionId("lism-persist-fail".into()),
         surface: rust_agent::bootstrap::InteractionSurface::Cli,
@@ -7672,7 +8798,10 @@ async fn lism_enabled_boss_outcomes_are_persisted_for_reload() {
 #[tokio::test]
 async fn legacy_boss_auto_advance_still_completes_next_step_after_completion() {
     let (coordinator, plan_path) = coordinator_with_plan(
-        boss_plan(vec![boss_step(0, "legacy first"), boss_step(1, "legacy second")]),
+        boss_plan(vec![
+            boss_step(0, "legacy first"),
+            boss_step(1, "legacy second"),
+        ]),
         "test_boss_legacy_auto_advance_contract.json",
     )
     .await;
@@ -7684,9 +8813,15 @@ async fn legacy_boss_auto_advance_still_completes_next_step_after_completion() {
         plan.steps[0].status = BossPlanStepStatus::Completed;
     }
 
-    let app_state = app_state_with_tasks("legacy-auto-advance-session", Arc::new(TaskManager::default()));
+    let app_state = app_state_with_tasks(
+        "legacy-auto-advance-session",
+        Arc::new(TaskManager::default()),
+    );
     let result = coordinator.advance_plan(&app_state).await.unwrap();
-    assert!(result.is_some(), "legacy path should still continue dispatch after a completed step");
+    assert!(
+        result.is_some(),
+        "legacy path should still continue dispatch after a completed step"
+    );
 
     let guard = coordinator.plan.read().await;
     let plan = guard.as_ref().unwrap();
@@ -7697,9 +8832,9 @@ async fn legacy_boss_auto_advance_still_completes_next_step_after_completion() {
 
 #[test]
 fn t27_6_build_routed_state_frame_executor_b_executing_uses_executor_edit_route() {
+    use rust_agent::core::boss_state::BossStage;
     use rust_agent::core::state_frame::ActorRole;
     use rust_agent::core::state_frame_orchestrator::build_routed_state_frame;
-    use rust_agent::core::boss_state::BossStage;
 
     let plan = make_plan_with_step(0, "execute", vec!["criterion".into()]);
     let frame = build_routed_state_frame(&plan, BossStage::Execution, 0, ActorRole::ExecutorB);
@@ -7711,30 +8846,51 @@ fn t27_6_build_routed_state_frame_executor_b_executing_uses_executor_edit_route(
 
 #[test]
 fn t27_6_build_routed_state_frame_blocked_and_done_clear_tools_and_actions() {
+    use rust_agent::core::boss_state::{BossPlanStepStatus, BossStage};
     use rust_agent::core::state_frame::ActorRole;
     use rust_agent::core::state_frame_orchestrator::build_routed_state_frame;
-    use rust_agent::core::boss_state::{BossPlanStepStatus, BossStage};
 
-    let blocked_plan = make_t278_plan(vec![make_t278_step(0, BossPlanStepStatus::Pending, false, vec![])]);
-    let blocked_frame = build_routed_state_frame(&blocked_plan, BossStage::WaitingForApproval, 0, ActorRole::DesignerA);
+    let blocked_plan = make_t278_plan(vec![make_t278_step(
+        0,
+        BossPlanStepStatus::Pending,
+        false,
+        vec![],
+    )]);
+    let blocked_frame = build_routed_state_frame(
+        &blocked_plan,
+        BossStage::WaitingForApproval,
+        0,
+        ActorRole::DesignerA,
+    );
     assert_eq!(blocked_frame.toolset_id, None);
     assert!(blocked_frame.allowed_actions.is_empty());
 
-    let done_plan = make_t278_plan(vec![make_t278_step(0, BossPlanStepStatus::Completed, true, vec![])]);
-    let done_frame = build_routed_state_frame(&done_plan, BossStage::Completed, 0, ActorRole::Worker);
+    let done_plan = make_t278_plan(vec![make_t278_step(
+        0,
+        BossPlanStepStatus::Completed,
+        true,
+        vec![],
+    )]);
+    let done_frame =
+        build_routed_state_frame(&done_plan, BossStage::Completed, 0, ActorRole::Worker);
     assert_eq!(done_frame.toolset_id, None);
     assert!(done_frame.allowed_actions.is_empty());
 }
 
 #[test]
 fn t27_7_1_routed_frame_executor_b_executing_carries_expected_model_route() {
+    use rust_agent::core::boss_state::BossStage;
     use rust_agent::core::state_frame::ActorRole;
     use rust_agent::core::state_frame_model_router::ModelTier;
     use rust_agent::core::state_frame_orchestrator::build_routed_state_frame_with_model_route;
-    use rust_agent::core::boss_state::BossStage;
 
     let plan = make_plan_with_step(0, "execute", vec!["criterion".into()]);
-    let routed = build_routed_state_frame_with_model_route(&plan, BossStage::Execution, 0, ActorRole::ExecutorB);
+    let routed = build_routed_state_frame_with_model_route(
+        &plan,
+        BossStage::Execution,
+        0,
+        ActorRole::ExecutorB,
+    );
 
     assert_eq!(routed.frame.toolset_id.as_deref(), Some("executor-edit"));
     assert_eq!(routed.model_route.tier, ModelTier::Medium);
@@ -7758,9 +8914,11 @@ async fn lism_enabled_boss_advance_plan_marks_step_completed_via_state_frame_pat
     let config_dir = std::env::temp_dir().join("lism_completed_test");
     write_worker_override_models_toml(&config_dir, &format!("http://{addr}"));
 
-    let mut app = (*app_state_with_tasks("lism-complete-session", Arc::new(TaskManager::default()))).clone();
+    let mut app =
+        (*app_state_with_tasks("lism-complete-session", Arc::new(TaskManager::default()))).clone();
     app.permission_context.set_lism_enabled(true);
-    app.permission_context.inherited_active_model_snapshot = Some(make_inherited_runtime_snapshot_with_scripted_turns(vec![]));
+    app.permission_context.inherited_active_model_snapshot =
+        Some(make_inherited_runtime_snapshot_with_scripted_turns(vec![]));
     app.session = Some(rust_agent::history::session::SessionSnapshot {
         session_id: rust_agent::history::session::SessionId("lism-complete-session".into()),
         surface: rust_agent::bootstrap::InteractionSurface::Cli,
@@ -7798,14 +8956,19 @@ async fn lism_enabled_boss_advance_plan_marks_step_failed_with_reason() {
     let reject_json = r#"{"state":"blocked","decision":"reject","next_action":{"action_type":"reject","args":{"reason":"state frame output does not satisfy acceptance"}}}"#;
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let server = tokio::spawn(run_mock_server_with_json_content(listener, reject_json.to_string()));
+    let server = tokio::spawn(run_mock_server_with_json_content(
+        listener,
+        reject_json.to_string(),
+    ));
 
     let config_dir = std::env::temp_dir().join("lism_failed_test");
     write_worker_override_models_toml(&config_dir, &format!("http://{addr}"));
 
-    let mut app = (*app_state_with_tasks("lism-fail-session", Arc::new(TaskManager::default()))).clone();
+    let mut app =
+        (*app_state_with_tasks("lism-fail-session", Arc::new(TaskManager::default()))).clone();
     app.permission_context.set_lism_enabled(true);
-    app.permission_context.inherited_active_model_snapshot = Some(make_inherited_runtime_snapshot_with_scripted_turns(vec![]));
+    app.permission_context.inherited_active_model_snapshot =
+        Some(make_inherited_runtime_snapshot_with_scripted_turns(vec![]));
     app.session = Some(rust_agent::history::session::SessionSnapshot {
         session_id: rust_agent::history::session::SessionId("lism-fail-session".into()),
         surface: rust_agent::bootstrap::InteractionSurface::Cli,
@@ -7837,7 +9000,11 @@ async fn lism_enabled_boss_advance_plan_marks_step_failed_with_reason() {
     let _ = std::fs::remove_dir_all(config_dir);
 }
 
-fn make_plan_with_step(step_id: usize, description: &str, acceptance: Vec<String>) -> rust_agent::core::boss_state::BossPlan {
+fn make_plan_with_step(
+    step_id: usize,
+    description: &str,
+    acceptance: Vec<String>,
+) -> rust_agent::core::boss_state::BossPlan {
     use rust_agent::core::boss_state::{BossPlan, BossPlanStep, BossPlanStepStatus};
     BossPlan {
         plan_id: format!("p-t275-{step_id}"),
@@ -7885,8 +9052,16 @@ async fn t27_5_runtime_override_live_seam_uses_resolved_snapshot_client() {
     let registry = make_step_model_registry_with_base_url(&format!("http://{}", addr));
     let plan = make_orchestrator_route_override_plan(0);
     // router produces provider_profile_id=Some("worker-override") for (Worker, Executing, M)
-    let routed = build_routed_state_frame_with_model_route(&plan, BossStage::Execution, 0, ActorRole::Worker);
-    assert_eq!(routed.model_route.provider_profile_id.as_deref(), Some("worker-override"));
+    let routed = build_routed_state_frame_with_model_route(
+        &plan,
+        BossStage::Execution,
+        0,
+        ActorRole::Worker,
+    );
+    assert_eq!(
+        routed.model_route.provider_profile_id.as_deref(),
+        Some("worker-override")
+    );
 
     let runtime = StepRuntimeResolutionContext {
         inherited_snapshot: &inherited,
@@ -7899,8 +9074,14 @@ async fn t27_5_runtime_override_live_seam_uses_resolved_snapshot_client() {
         .expect("runtime-aware seam should succeed");
 
     assert!(matches!(outcome, StepOutcome::Completed { .. }));
-    assert!(inherited.client.is_scripted(), "parent snapshot should remain scripted");
-    assert_eq!(inherited.active_profile_name.as_deref(), Some("inherited-fast"));
+    assert!(
+        inherited.client.is_scripted(),
+        "parent snapshot should remain scripted"
+    );
+    assert_eq!(
+        inherited.active_profile_name.as_deref(),
+        Some("inherited-fast")
+    );
 
     server.await.expect("mock provider server finished");
 }
@@ -7921,8 +9102,16 @@ fn t27_5_runtime_override_missing_registry_fails_step_without_mutating_parent_sn
     let original_config = inherited.config.clone();
     let plan = make_orchestrator_route_override_plan(0);
     // router produces worker-override for (Worker, Executing, M)
-    let routed = build_routed_state_frame_with_model_route(&plan, BossStage::Execution, 0, ActorRole::Worker);
-    assert_eq!(routed.model_route.provider_profile_id.as_deref(), Some("worker-override"));
+    let routed = build_routed_state_frame_with_model_route(
+        &plan,
+        BossStage::Execution,
+        0,
+        ActorRole::Worker,
+    );
+    assert_eq!(
+        routed.model_route.provider_profile_id.as_deref(),
+        Some("worker-override")
+    );
 
     let runtime = StepRuntimeResolutionContext {
         inherited_snapshot: &inherited,
@@ -7930,13 +9119,21 @@ fn t27_5_runtime_override_missing_registry_fails_step_without_mutating_parent_sn
         observability: rust_agent::service::observability::ServiceObservabilityTracker::default(),
     };
 
-    let error = rt.block_on(rust_agent::core::state_frame_orchestrator::run_routed_step_with_runtime(
-        routed,
-        DecisionLoopConfig::default(),
-        runtime,
-    )).expect_err("missing registry should fail");
+    let error = rt
+        .block_on(
+            rust_agent::core::state_frame_orchestrator::run_routed_step_with_runtime(
+                routed,
+                DecisionLoopConfig::default(),
+                runtime,
+            ),
+        )
+        .expect_err("missing registry should fail");
 
-    assert!(error.to_string().contains("model profile registry is unavailable"));
+    assert!(
+        error
+            .to_string()
+            .contains("model profile registry is unavailable")
+    );
     assert_eq!(inherited.active_profile_name, original_profile);
     assert_eq!(inherited.source, original_source);
     assert_eq!(inherited.config, original_config);
@@ -7947,10 +9144,10 @@ fn t27_5_runtime_override_unknown_profile_fails_step_without_mutating_parent_sna
     use rust_agent::core::boss_state::BossStage;
     use rust_agent::core::state_frame::ActorRole;
     use rust_agent::core::state_frame_loop::DecisionLoopConfig;
+    use rust_agent::core::state_frame_model_router::ModelRoute;
     use rust_agent::core::state_frame_orchestrator::{
         StepRuntimeResolutionContext, build_routed_state_frame_with_model_route,
     };
-    use rust_agent::core::state_frame_model_router::ModelRoute;
 
     let rt = tokio::runtime::Runtime::new().unwrap();
     let inherited = make_inherited_runtime_snapshot_with_scripted_turns(vec![]);
@@ -7959,7 +9156,12 @@ fn t27_5_runtime_override_unknown_profile_fails_step_without_mutating_parent_sna
     let original_config = inherited.config.clone();
     let registry = make_step_model_registry();
     let plan = make_orchestrator_route_override_plan(0);
-    let routed = build_routed_state_frame_with_model_route(&plan, BossStage::Execution, 0, ActorRole::Worker);
+    let routed = build_routed_state_frame_with_model_route(
+        &plan,
+        BossStage::Execution,
+        0,
+        ActorRole::Worker,
+    );
     let routed = rust_agent::core::state_frame_orchestrator::RoutedStateFrame {
         frame: routed.frame,
         model_route: ModelRoute {
@@ -7974,13 +9176,21 @@ fn t27_5_runtime_override_unknown_profile_fails_step_without_mutating_parent_sna
         observability: rust_agent::service::observability::ServiceObservabilityTracker::default(),
     };
 
-    let error = rt.block_on(rust_agent::core::state_frame_orchestrator::run_routed_step_with_runtime(
-        routed,
-        DecisionLoopConfig::default(),
-        runtime,
-    )).expect_err("unknown profile should fail");
+    let error = rt
+        .block_on(
+            rust_agent::core::state_frame_orchestrator::run_routed_step_with_runtime(
+                routed,
+                DecisionLoopConfig::default(),
+                runtime,
+            ),
+        )
+        .expect_err("unknown profile should fail");
 
-    assert!(error.to_string().contains("failed to resolve step model profile 'missing-profile'"));
+    assert!(
+        error
+            .to_string()
+            .contains("failed to resolve step model profile 'missing-profile'")
+    );
     assert_eq!(inherited.active_profile_name, original_profile);
     assert_eq!(inherited.source, original_source);
     assert_eq!(inherited.config, original_config);
@@ -7997,14 +9207,20 @@ fn t27_5_done_loop_outcome_maps_to_completed() {
 
     let rt = tokio::runtime::Runtime::new().unwrap();
     let done_json = r#"{"state":"done","decision":"done"}"#;
-    let client = ModelProviderClient::with_scripted_turns(vec![
-        vec![StreamEvent::TextDelta(done_json.into())],
-    ]);
+    let client = ModelProviderClient::with_scripted_turns(vec![vec![StreamEvent::TextDelta(
+        done_json.into(),
+    )]]);
     let plan = make_plan_with_step(0, "implement feature", vec!["tests pass".into()]);
-    let outcome = rt.block_on(run_step_with_state_frame(
-        &client, &plan, BossStage::Execution, 0, ActorRole::Worker,
-        DecisionLoopConfig::default(),
-    )).expect("should not error");
+    let outcome = rt
+        .block_on(run_step_with_state_frame(
+            &client,
+            &plan,
+            BossStage::Execution,
+            0,
+            ActorRole::Worker,
+            DecisionLoopConfig::default(),
+        ))
+        .expect("should not error");
     assert!(matches!(outcome, StepOutcome::Completed { .. }));
 }
 
@@ -8019,14 +9235,20 @@ fn t27_5_rejected_loop_outcome_maps_to_failed_with_reason() {
 
     let rt = tokio::runtime::Runtime::new().unwrap();
     let reject_json = r#"{"state":"blocked","decision":"reject","next_action":{"action_type":"reject","args":{"reason":"output does not meet criteria"}}}"#;
-    let client = ModelProviderClient::with_scripted_turns(vec![
-        vec![StreamEvent::TextDelta(reject_json.into())],
-    ]);
+    let client = ModelProviderClient::with_scripted_turns(vec![vec![StreamEvent::TextDelta(
+        reject_json.into(),
+    )]]);
     let plan = make_plan_with_step(1, "verify output", vec![]);
-    let outcome = rt.block_on(run_step_with_state_frame(
-        &client, &plan, BossStage::Execution, 1, ActorRole::Verifier,
-        DecisionLoopConfig::default(),
-    )).expect("should not error");
+    let outcome = rt
+        .block_on(run_step_with_state_frame(
+            &client,
+            &plan,
+            BossStage::Execution,
+            1,
+            ActorRole::Verifier,
+            DecisionLoopConfig::default(),
+        ))
+        .expect("should not error");
     match outcome {
         StepOutcome::Failed { reason } => assert!(reason.contains("output does not meet criteria")),
         other => panic!("expected Failed, got {other:?}"),
@@ -8049,12 +9271,24 @@ fn t27_5_max_iterations_maps_to_failed() {
         vec![StreamEvent::TextDelta(continue_json.into())],
     ]);
     let plan = make_plan_with_step(2, "never finishes", vec![]);
-    let config = DecisionLoopConfig { max_iterations: 2, repair_budget: 1 };
-    let outcome = rt.block_on(run_step_with_state_frame(
-        &client, &plan, BossStage::Execution, 2, ActorRole::Worker, config,
-    )).expect("should not error");
+    let config = DecisionLoopConfig {
+        max_iterations: 2,
+        repair_budget: 1,
+    };
+    let outcome = rt
+        .block_on(run_step_with_state_frame(
+            &client,
+            &plan,
+            BossStage::Execution,
+            2,
+            ActorRole::Worker,
+            config,
+        ))
+        .expect("should not error");
     match outcome {
-        StepOutcome::Failed { reason } => assert!(reason.contains("max iterations"), "reason: {reason}"),
+        StepOutcome::Failed { reason } => {
+            assert!(reason.contains("max iterations"), "reason: {reason}")
+        }
         other => panic!("expected Failed, got {other:?}"),
     }
 }
@@ -8076,20 +9310,35 @@ fn t27_5_repair_exhausted_maps_to_failed() {
         vec![StreamEvent::TextDelta(bad_json.into())],
     ]);
     let plan = make_plan_with_step(3, "bad model output", vec![]);
-    let config = DecisionLoopConfig { max_iterations: 3, repair_budget: 1 };
-    let outcome = rt.block_on(run_step_with_state_frame(
-        &client, &plan, BossStage::Execution, 3, ActorRole::Worker, config,
-    )).expect("should not error");
+    let config = DecisionLoopConfig {
+        max_iterations: 3,
+        repair_budget: 1,
+    };
+    let outcome = rt
+        .block_on(run_step_with_state_frame(
+            &client,
+            &plan,
+            BossStage::Execution,
+            3,
+            ActorRole::Worker,
+            config,
+        ))
+        .expect("should not error");
     match outcome {
-        StepOutcome::Failed { reason } => assert!(reason.contains("repair exhausted"), "reason: {reason}"),
+        StepOutcome::Failed { reason } => {
+            assert!(reason.contains("repair exhausted"), "reason: {reason}")
+        }
         other => panic!("expected Failed, got {other:?}"),
     }
 }
 
 // ── T27.6 Toolset / skillset router ──────────────────────────────────────
 
-fn make_state_frame(role: rust_agent::core::state_frame::ActorRole, state: rust_agent::core::state_frame::AgentState) -> rust_agent::core::state_frame::StateFrame {
-    use rust_agent::core::state_frame::{StateFrame, StateBudget};
+fn make_state_frame(
+    role: rust_agent::core::state_frame::ActorRole,
+    state: rust_agent::core::state_frame::AgentState,
+) -> rust_agent::core::state_frame::StateFrame {
+    use rust_agent::core::state_frame::{StateBudget, StateFrame};
     StateFrame {
         role,
         state,
@@ -8147,11 +9396,23 @@ fn t27_6_blocked_state_clears_all_actions_for_any_role() {
     use rust_agent::core::state_frame::{ActorRole, AgentState};
     use rust_agent::core::state_frame_router::route_toolset;
 
-    for role in [ActorRole::DesignerA, ActorRole::ExecutorB, ActorRole::Worker, ActorRole::Verifier, ActorRole::Summarizer] {
+    for role in [
+        ActorRole::DesignerA,
+        ActorRole::ExecutorB,
+        ActorRole::Worker,
+        ActorRole::Verifier,
+        ActorRole::Summarizer,
+    ] {
         let frame = make_state_frame(role, AgentState::Blocked);
         let route = route_toolset(&frame);
-        assert!(route.toolset_id.is_none(), "role {role:?} blocked should have no toolset");
-        assert!(route.allowed_actions.is_empty(), "role {role:?} blocked should have no actions");
+        assert!(
+            route.toolset_id.is_none(),
+            "role {role:?} blocked should have no toolset"
+        );
+        assert!(
+            route.allowed_actions.is_empty(),
+            "role {role:?} blocked should have no actions"
+        );
     }
 }
 
@@ -8241,19 +9502,14 @@ fn t27_7_build_accepted_archive_excludes_current_step() {
 fn t27_7_retain_open_items_filters_already_satisfied_criteria() {
     use rust_agent::core::state_frame_archive::{AcceptedItem, retain_open_items};
 
-    let archive = vec![
-        AcceptedItem {
-            step_id: 0,
-            description: "step 0".into(),
-            acceptance_criteria: vec!["tests pass".into(), "no regressions".into()],
-        },
-    ];
+    let archive = vec![AcceptedItem {
+        step_id: 0,
+        description: "step 0".into(),
+        acceptance_criteria: vec!["tests pass".into(), "no regressions".into()],
+    }];
 
     // "tests pass" is already in archive → should be filtered out
-    let open = retain_open_items(
-        &["tests pass".into(), "add documentation".into()],
-        &archive,
-    );
+    let open = retain_open_items(&["tests pass".into(), "add documentation".into()], &archive);
     assert_eq!(open, vec!["add documentation"]);
 }
 
@@ -8310,8 +9566,16 @@ fn t27_7_projection_uses_archive_for_accepted_summary() {
     let frame = project_state_frame(&plan, BossStage::Execution, Some(2), ActorRole::Worker);
     // steps 0 and 1 are completed and not current → both in accepted_summary
     assert_eq!(frame.accepted_summary.len(), 2);
-    assert!(frame.accepted_summary.contains(&"step 0 description".to_string()));
-    assert!(frame.accepted_summary.contains(&"step 1 description".to_string()));
+    assert!(
+        frame
+            .accepted_summary
+            .contains(&"step 0 description".to_string())
+    );
+    assert!(
+        frame
+            .accepted_summary
+            .contains(&"step 1 description".to_string())
+    );
     // current step 2 must NOT appear in accepted_summary
     assert!(!frame.accepted_summary.iter().any(|s| s.contains("step 2")));
 }
@@ -8373,7 +9637,9 @@ fn t27_7_open_items_excludes_criteria_already_in_archive() {
 
 // ── T27.8 Production-path tests ───────────────────────────────────────────
 
-fn make_t278_plan(steps: Vec<rust_agent::core::boss_state::BossPlanStep>) -> rust_agent::core::boss_state::BossPlan {
+fn make_t278_plan(
+    steps: Vec<rust_agent::core::boss_state::BossPlanStep>,
+) -> rust_agent::core::boss_state::BossPlan {
     rust_agent::core::boss_state::BossPlan {
         plan_id: "p-t278".into(),
         task_description: "production path test".into(),
@@ -8386,7 +9652,12 @@ fn make_t278_plan(steps: Vec<rust_agent::core::boss_state::BossPlanStep>) -> rus
     }
 }
 
-fn make_t278_step(id: usize, status: rust_agent::core::boss_state::BossPlanStepStatus, completed: bool, acceptance: Vec<String>) -> rust_agent::core::boss_state::BossPlanStep {
+fn make_t278_step(
+    id: usize,
+    status: rust_agent::core::boss_state::BossPlanStepStatus,
+    completed: bool,
+    acceptance: Vec<String>,
+) -> rust_agent::core::boss_state::BossPlanStep {
     rust_agent::core::boss_state::BossPlanStep {
         id,
         description: format!("step {id}"),
@@ -8407,23 +9678,26 @@ fn make_t278_step(id: usize, status: rust_agent::core::boss_state::BossPlanStepS
 
 #[test]
 fn t27_8_full_pipeline_project_route_loop_done() {
-    use rust_agent::core::boss_state::{BossStage, BossPlanStepStatus};
+    use rust_agent::core::boss_state::{BossPlanStepStatus, BossStage};
     use rust_agent::core::state_frame::ActorRole;
+    use rust_agent::core::state_frame_loop::{DecisionLoopConfig, LoopOutcome, run_decision_loop};
     use rust_agent::core::state_frame_projection::project_state_frame;
     use rust_agent::core::state_frame_router::{apply_route, route_toolset};
-    use rust_agent::core::state_frame_loop::{DecisionLoopConfig, LoopOutcome, run_decision_loop};
     use rust_agent::service::api::client::ModelProviderClient;
     use rust_agent::service::api::streaming::StreamEvent;
 
     let rt = tokio::runtime::Runtime::new().unwrap();
     let done_json = r#"{"state":"done","decision":"done","confidence":0.95}"#;
-    let client = ModelProviderClient::with_scripted_turns(vec![
-        vec![StreamEvent::TextDelta(done_json.into())],
-    ]);
+    let client = ModelProviderClient::with_scripted_turns(vec![vec![StreamEvent::TextDelta(
+        done_json.into(),
+    )]]);
 
-    let plan = make_t278_plan(vec![
-        make_t278_step(0, BossPlanStepStatus::Running, false, vec!["write tests".into()]),
-    ]);
+    let plan = make_t278_plan(vec![make_t278_step(
+        0,
+        BossPlanStepStatus::Running,
+        false,
+        vec!["write tests".into()],
+    )]);
 
     // Full pipeline: project → route → loop
     let mut frame = project_state_frame(&plan, BossStage::Execution, Some(0), ActorRole::Worker);
@@ -8434,29 +9708,47 @@ fn t27_8_full_pipeline_project_route_loop_done() {
     assert_eq!(frame.toolset_id.as_deref(), Some("worker-minimal"));
     assert!(frame.allowed_actions.contains(&"edit_file".to_string()));
 
-    let outcome = rt.block_on(run_decision_loop(&client, frame, DecisionLoopConfig::default()))
+    let outcome = rt
+        .block_on(run_decision_loop(
+            &client,
+            frame,
+            DecisionLoopConfig::default(),
+        ))
         .expect("loop should not error");
-    assert!(matches!(outcome, LoopOutcome::Done { .. }), "expected Done, got {outcome:?}");
+    assert!(
+        matches!(outcome, LoopOutcome::Done { .. }),
+        "expected Done, got {outcome:?}"
+    );
 }
 
 #[test]
 fn t27_8_archive_retention_affects_loop_input() {
-    use rust_agent::core::boss_state::{BossStage, BossPlanStepStatus};
+    use rust_agent::core::boss_state::{BossPlanStepStatus, BossStage};
     use rust_agent::core::state_frame::ActorRole;
-    use rust_agent::core::state_frame_projection::project_state_frame;
     use rust_agent::core::state_frame_loop::{DecisionLoopConfig, LoopOutcome, run_decision_loop};
+    use rust_agent::core::state_frame_projection::project_state_frame;
     use rust_agent::service::api::client::ModelProviderClient;
     use rust_agent::service::api::streaming::StreamEvent;
 
     let rt = tokio::runtime::Runtime::new().unwrap();
     let done_json = r#"{"state":"done","decision":"done"}"#;
-    let client = ModelProviderClient::with_scripted_turns(vec![
-        vec![StreamEvent::TextDelta(done_json.into())],
-    ]);
+    let client = ModelProviderClient::with_scripted_turns(vec![vec![StreamEvent::TextDelta(
+        done_json.into(),
+    )]]);
 
     let plan = make_t278_plan(vec![
-        make_t278_step(0, BossPlanStepStatus::Completed, true, vec!["shared criterion".into()]),
-        make_t278_step(1, BossPlanStepStatus::Running, false, vec!["shared criterion".into(), "new criterion".into()]),
+        make_t278_step(
+            0,
+            BossPlanStepStatus::Completed,
+            true,
+            vec!["shared criterion".into()],
+        ),
+        make_t278_step(
+            1,
+            BossPlanStepStatus::Running,
+            false,
+            vec!["shared criterion".into(), "new criterion".into()],
+        ),
     ]);
 
     let frame = project_state_frame(&plan, BossStage::Execution, Some(1), ActorRole::Worker);
@@ -8467,32 +9759,45 @@ fn t27_8_archive_retention_affects_loop_input() {
     assert!(frame.accepted_summary.contains(&"step 0".to_string()));
     assert!(!frame.accepted_summary.iter().any(|s| s.contains("step 1")));
 
-    let outcome = rt.block_on(run_decision_loop(&client, frame, DecisionLoopConfig::default()))
+    let outcome = rt
+        .block_on(run_decision_loop(
+            &client,
+            frame,
+            DecisionLoopConfig::default(),
+        ))
         .expect("loop should not error");
     assert!(matches!(outcome, LoopOutcome::Done { .. }));
 }
 
 #[test]
 fn t27_8_blocked_route_produces_empty_actions_loop_still_runs() {
-    use rust_agent::core::boss_state::{BossStage, BossPlanStepStatus};
+    use rust_agent::core::boss_state::{BossPlanStepStatus, BossStage};
     use rust_agent::core::state_frame::ActorRole;
+    use rust_agent::core::state_frame_loop::{DecisionLoopConfig, LoopOutcome, run_decision_loop};
     use rust_agent::core::state_frame_projection::project_state_frame;
     use rust_agent::core::state_frame_router::{apply_route, route_toolset};
-    use rust_agent::core::state_frame_loop::{DecisionLoopConfig, LoopOutcome, run_decision_loop};
     use rust_agent::service::api::client::ModelProviderClient;
     use rust_agent::service::api::streaming::StreamEvent;
 
     let rt = tokio::runtime::Runtime::new().unwrap();
     let done_json = r#"{"state":"done","decision":"done"}"#;
-    let client = ModelProviderClient::with_scripted_turns(vec![
-        vec![StreamEvent::TextDelta(done_json.into())],
-    ]);
+    let client = ModelProviderClient::with_scripted_turns(vec![vec![StreamEvent::TextDelta(
+        done_json.into(),
+    )]]);
 
-    let plan = make_t278_plan(vec![
-        make_t278_step(0, BossPlanStepStatus::Running, false, vec![]),
-    ]);
+    let plan = make_t278_plan(vec![make_t278_step(
+        0,
+        BossPlanStepStatus::Running,
+        false,
+        vec![],
+    )]);
 
-    let mut frame = project_state_frame(&plan, BossStage::WaitingForApproval, Some(0), ActorRole::DesignerA);
+    let mut frame = project_state_frame(
+        &plan,
+        BossStage::WaitingForApproval,
+        Some(0),
+        ActorRole::DesignerA,
+    );
     let route = route_toolset(&frame);
     apply_route(&mut frame, route);
 
@@ -8502,17 +9807,22 @@ fn t27_8_blocked_route_produces_empty_actions_loop_still_runs() {
     assert_eq!(frame.blocked_items, vec!["waiting for user approval"]);
 
     // Loop still runs and terminates cleanly
-    let outcome = rt.block_on(run_decision_loop(&client, frame, DecisionLoopConfig::default()))
+    let outcome = rt
+        .block_on(run_decision_loop(
+            &client,
+            frame,
+            DecisionLoopConfig::default(),
+        ))
         .expect("loop should not error");
     assert!(matches!(outcome, LoopOutcome::Done { .. }));
 }
 
 #[test]
 fn t27_8_repair_path_in_full_pipeline() {
-    use rust_agent::core::boss_state::{BossStage, BossPlanStepStatus};
+    use rust_agent::core::boss_state::{BossPlanStepStatus, BossStage};
     use rust_agent::core::state_frame::ActorRole;
-    use rust_agent::core::state_frame_projection::project_state_frame;
     use rust_agent::core::state_frame_loop::{DecisionLoopConfig, LoopOutcome, run_decision_loop};
+    use rust_agent::core::state_frame_projection::project_state_frame;
     use rust_agent::service::api::client::ModelProviderClient;
     use rust_agent::service::api::streaming::StreamEvent;
 
@@ -8525,20 +9835,30 @@ fn t27_8_repair_path_in_full_pipeline() {
         vec![StreamEvent::TextDelta(done_json.into())],
     ]);
 
-    let plan = make_t278_plan(vec![
-        make_t278_step(0, BossPlanStepStatus::Running, false, vec![]),
-    ]);
+    let plan = make_t278_plan(vec![make_t278_step(
+        0,
+        BossPlanStepStatus::Running,
+        false,
+        vec![],
+    )]);
 
     let frame = project_state_frame(&plan, BossStage::Execution, Some(0), ActorRole::ExecutorB);
-    let config = DecisionLoopConfig { max_iterations: 3, repair_budget: 2 };
-    let outcome = rt.block_on(run_decision_loop(&client, frame, config))
+    let config = DecisionLoopConfig {
+        max_iterations: 3,
+        repair_budget: 2,
+    };
+    let outcome = rt
+        .block_on(run_decision_loop(&client, frame, config))
         .expect("loop should not error");
-    assert!(matches!(outcome, LoopOutcome::Done { .. }), "expected Done after repair, got {outcome:?}");
+    assert!(
+        matches!(outcome, LoopOutcome::Done { .. }),
+        "expected Done after repair, got {outcome:?}"
+    );
 }
 
 #[test]
 fn t27_8_run_step_with_state_frame_end_to_end() {
-    use rust_agent::core::boss_state::{BossStage, BossPlanStepStatus};
+    use rust_agent::core::boss_state::{BossPlanStepStatus, BossStage};
     use rust_agent::core::state_frame::ActorRole;
     use rust_agent::core::state_frame_loop::DecisionLoopConfig;
     use rust_agent::core::state_frame_orchestrator::{StepOutcome, run_step_with_state_frame};
@@ -8547,24 +9867,43 @@ fn t27_8_run_step_with_state_frame_end_to_end() {
 
     let rt = tokio::runtime::Runtime::new().unwrap();
     let done_json = r#"{"state":"done","decision":"done","confidence":1.0}"#;
-    let client = ModelProviderClient::with_scripted_turns(vec![
-        vec![StreamEvent::TextDelta(done_json.into())],
-    ]);
+    let client = ModelProviderClient::with_scripted_turns(vec![vec![StreamEvent::TextDelta(
+        done_json.into(),
+    )]]);
 
     let plan = make_t278_plan(vec![
-        make_t278_step(0, BossPlanStepStatus::Completed, true, vec!["criterion A".into()]),
-        make_t278_step(1, BossPlanStepStatus::Running, false, vec!["criterion A".into(), "criterion B".into()]),
+        make_t278_step(
+            0,
+            BossPlanStepStatus::Completed,
+            true,
+            vec!["criterion A".into()],
+        ),
+        make_t278_step(
+            1,
+            BossPlanStepStatus::Running,
+            false,
+            vec!["criterion A".into(), "criterion B".into()],
+        ),
     ]);
 
     // run_step_with_state_frame uses project_state_frame internally:
     // - archive filters "criterion A" from open_items (already in step 0)
     // - only "criterion B" remains open
-    let outcome = rt.block_on(run_step_with_state_frame(
-        &client, &plan, BossStage::Execution, 1, ActorRole::Worker,
-        DecisionLoopConfig::default(),
-    )).expect("should not error");
+    let outcome = rt
+        .block_on(run_step_with_state_frame(
+            &client,
+            &plan,
+            BossStage::Execution,
+            1,
+            ActorRole::Worker,
+            DecisionLoopConfig::default(),
+        ))
+        .expect("should not error");
 
-    assert!(matches!(outcome, StepOutcome::Completed { .. }), "expected Completed, got {outcome:?}");
+    assert!(
+        matches!(outcome, StepOutcome::Completed { .. }),
+        "expected Completed, got {outcome:?}"
+    );
 }
 
 // ── T27.7.1 Model tier router ─────────────────────────────────────────────
@@ -8628,17 +9967,25 @@ async fn t27_8_lism_boss_production_path_no_registry_step_fails_with_override_er
     )
     .await;
 
-    let mut app = (*app_state_with_tasks("t278-no-registry", Arc::new(TaskManager::default()))).clone();
+    let mut app =
+        (*app_state_with_tasks("t278-no-registry", Arc::new(TaskManager::default()))).clone();
     app.permission_context.set_lism_enabled(true);
     // session is None → cwd defaults to "." → no models.toml → registry is None
     // router produces worker-override → resolver requires registry → must error
-    app.permission_context.inherited_active_model_snapshot = Some(make_inherited_runtime_snapshot_with_scripted_turns(vec![]));
+    app.permission_context.inherited_active_model_snapshot =
+        Some(make_inherited_runtime_snapshot_with_scripted_turns(vec![]));
     let app_state = Arc::new(app);
 
     let result = coordinator.advance_plan(&app_state).await;
-    assert!(result.is_err(), "missing registry with override should return error");
     assert!(
-        result.unwrap_err().to_string().contains("model profile registry is unavailable"),
+        result.is_err(),
+        "missing registry with override should return error"
+    );
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("model profile registry is unavailable"),
         "error should mention registry unavailable"
     );
 
@@ -8660,7 +10007,8 @@ async fn t27_8_lism_boss_production_path_with_registry_on_disk_uses_worker_overr
     let config_dir = std::env::temp_dir().join("t278_registry_test");
     write_worker_override_models_toml(&config_dir, &format!("http://{addr}"));
 
-    let mut app = (*app_state_with_tasks("t278-with-registry", Arc::new(TaskManager::default()))).clone();
+    let mut app =
+        (*app_state_with_tasks("t278-with-registry", Arc::new(TaskManager::default()))).clone();
     app.permission_context.set_lism_enabled(true);
     app.session = Some(rust_agent::history::session::SessionSnapshot {
         session_id: rust_agent::history::session::SessionId("t278-with-registry".into()),
@@ -8671,7 +10019,8 @@ async fn t27_8_lism_boss_production_path_with_registry_on_disk_uses_worker_overr
         prompt_seed: None,
     });
     // inherited has empty scripted turns — override profile (mock server) is used instead
-    app.permission_context.inherited_active_model_snapshot = Some(make_inherited_runtime_snapshot_with_scripted_turns(vec![]));
+    app.permission_context.inherited_active_model_snapshot =
+        Some(make_inherited_runtime_snapshot_with_scripted_turns(vec![]));
     let app_state = Arc::new(app);
 
     let _ = coordinator.advance_plan(&app_state).await.unwrap();
@@ -8693,16 +10042,23 @@ async fn t27_8_lism_boss_production_path_missing_inherited_snapshot_returns_erro
     )
     .await;
 
-    let mut app = (*app_state_with_tasks("t278-missing-snapshot", Arc::new(TaskManager::default()))).clone();
+    let mut app =
+        (*app_state_with_tasks("t278-missing-snapshot", Arc::new(TaskManager::default()))).clone();
     app.permission_context.set_lism_enabled(true);
     // inherited_active_model_snapshot is None → boss.rs should return an error
     app.permission_context.inherited_active_model_snapshot = None;
     let app_state = Arc::new(app);
 
     let result = coordinator.advance_plan(&app_state).await;
-    assert!(result.is_err(), "missing inherited snapshot should return error");
     assert!(
-        result.unwrap_err().to_string().contains("active model snapshot"),
+        result.is_err(),
+        "missing inherited snapshot should return error"
+    );
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("active model snapshot"),
         "error should mention active model snapshot"
     );
 
@@ -8721,8 +10077,8 @@ async fn t27_9_boss_production_path_override_hit_uses_resolved_runtime_not_inher
     use rust_agent::core::state_frame::ActorRole;
     use rust_agent::core::state_frame_loop::DecisionLoopConfig;
     use rust_agent::core::state_frame_orchestrator::{
-        StepOutcome, StepRuntimeResolutionContext,
-        build_routed_state_frame_with_model_route, run_routed_step_with_runtime,
+        StepOutcome, StepRuntimeResolutionContext, build_routed_state_frame_with_model_route,
+        run_routed_step_with_runtime,
     };
 
     // inherited has empty scripted turns — if it were used, the loop would fail
@@ -8763,7 +10119,10 @@ async fn t27_9_boss_production_path_override_hit_uses_resolved_runtime_not_inher
         "override hit should complete via resolved runtime"
     );
     // parent snapshot must not be mutated
-    assert_eq!(inherited.active_profile_name.as_deref(), Some("inherited-fast"));
+    assert_eq!(
+        inherited.active_profile_name.as_deref(),
+        Some("inherited-fast")
+    );
     assert_eq!(inherited.config.provider_id, "scripted");
 
     server.await.expect("mock provider server finished");
@@ -8775,8 +10134,8 @@ async fn t27_9_boss_production_path_override_missing_registry_step_fails_with_ob
     use rust_agent::core::state_frame::ActorRole;
     use rust_agent::core::state_frame_loop::DecisionLoopConfig;
     use rust_agent::core::state_frame_orchestrator::{
-        StepRuntimeResolutionContext,
-        build_routed_state_frame_with_model_route, run_routed_step_with_runtime,
+        StepRuntimeResolutionContext, build_routed_state_frame_with_model_route,
+        run_routed_step_with_runtime,
     };
 
     let inherited = make_inherited_runtime_snapshot_with_scripted_turns(vec![]);
@@ -8805,11 +10164,16 @@ async fn t27_9_boss_production_path_override_missing_registry_step_fails_with_ob
         .expect_err("missing registry should return error");
 
     assert!(
-        error.to_string().contains("model profile registry is unavailable"),
+        error
+            .to_string()
+            .contains("model profile registry is unavailable"),
         "error reason must be observable: {error}"
     );
     // parent snapshot must not be mutated
-    assert_eq!(inherited.active_profile_name.as_deref(), Some("inherited-fast"));
+    assert_eq!(
+        inherited.active_profile_name.as_deref(),
+        Some("inherited-fast")
+    );
     assert_eq!(inherited.config.provider_id, "scripted");
 }
 
@@ -8819,8 +10183,8 @@ async fn t27_9_boss_production_path_override_rejected_decision_step_fails_with_o
     use rust_agent::core::state_frame::ActorRole;
     use rust_agent::core::state_frame_loop::DecisionLoopConfig;
     use rust_agent::core::state_frame_orchestrator::{
-        StepOutcome, StepRuntimeResolutionContext,
-        build_routed_state_frame_with_model_route, run_routed_step_with_runtime,
+        StepOutcome, StepRuntimeResolutionContext, build_routed_state_frame_with_model_route,
+        run_routed_step_with_runtime,
     };
 
     let inherited = make_inherited_runtime_snapshot_with_scripted_turns(vec![]);
@@ -8864,7 +10228,10 @@ async fn t27_9_boss_production_path_override_rejected_decision_step_fails_with_o
         StepOutcome::Completed { .. } => panic!("expected Failed outcome, got Completed"),
     }
     // parent snapshot must not be mutated
-    assert_eq!(inherited.active_profile_name.as_deref(), Some("inherited-fast"));
+    assert_eq!(
+        inherited.active_profile_name.as_deref(),
+        Some("inherited-fast")
+    );
     assert_eq!(inherited.config.provider_id, "scripted");
 
     server.await.expect("mock provider server finished");

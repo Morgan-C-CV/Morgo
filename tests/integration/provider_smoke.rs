@@ -143,8 +143,8 @@ async fn smoke_openai_direct() {
         no_proxy: None,
         ca_bundle_path: None,
         max_tokens_param: None,
-            prompt_cache_key: None,
-            prompt_cache_retention: None,
+        prompt_cache_key: None,
+        prompt_cache_retention: None,
     };
 
     run_smoke(config, "smoke_openai_direct").await;
@@ -187,8 +187,8 @@ async fn smoke_gemini_openai_compatible() {
         no_proxy: None,
         ca_bundle_path: None,
         max_tokens_param: None,
-            prompt_cache_key: None,
-            prompt_cache_retention: None,
+        prompt_cache_key: None,
+        prompt_cache_retention: None,
     };
 
     run_smoke(config, "smoke_gemini_openai_compatible").await;
@@ -230,8 +230,8 @@ async fn smoke_kimi_openai_compatible() {
         no_proxy: None,
         ca_bundle_path: None,
         max_tokens_param: None,
-            prompt_cache_key: None,
-            prompt_cache_retention: None,
+        prompt_cache_key: None,
+        prompt_cache_retention: None,
     };
 
     run_smoke(config, "smoke_kimi_openai_compatible").await;
@@ -273,8 +273,8 @@ async fn smoke_deepseek_openai_compatible() {
         no_proxy: None,
         ca_bundle_path: None,
         max_tokens_param: None,
-            prompt_cache_key: None,
-            prompt_cache_retention: None,
+        prompt_cache_key: None,
+        prompt_cache_retention: None,
     };
 
     run_smoke(config, "smoke_deepseek_openai_compatible").await;
@@ -291,8 +291,8 @@ async fn smoke_ollama_local_no_auth() {
             return;
         }
     };
-    let model = std::env::var("RUST_AGENT_SMOKE_OLLAMA_MODEL")
-        .unwrap_or_else(|_| "llama3.2".into());
+    let model =
+        std::env::var("RUST_AGENT_SMOKE_OLLAMA_MODEL").unwrap_or_else(|_| "llama3.2".into());
 
     let config = ModelProviderConfig {
         provider_id: "ollama".into(),
@@ -318,8 +318,8 @@ async fn smoke_ollama_local_no_auth() {
         no_proxy: None,
         ca_bundle_path: None,
         max_tokens_param: None,
-            prompt_cache_key: None,
-            prompt_cache_retention: None,
+        prompt_cache_key: None,
+        prompt_cache_retention: None,
     };
 
     run_smoke(config, "smoke_ollama_local_no_auth").await;

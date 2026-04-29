@@ -1,33 +1,48 @@
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
-use tokio::sync::{mpsc, oneshot, RwLock};
+use tokio::sync::{RwLock, mpsc, oneshot};
 
 use crate::core::boss_state::{BossActorRole, BossActorStatus, BossStage};
 
 /// Callback type for B's execution side effect.
 /// Takes the step payload string, returns the tool invocation result.
-pub type ExecutionFn =
-    Arc<dyn Fn(String) -> Pin<Box<dyn Future<Output = anyhow::Result<String>> + Send>> + Send + Sync>;
+pub type ExecutionFn = Arc<
+    dyn Fn(String) -> Pin<Box<dyn Future<Output = anyhow::Result<String>> + Send>> + Send + Sync,
+>;
 
 /// Callback type for B's spec review side effect (Documentation stage).
 /// Takes the spec string, returns B's review feedback.
-pub type SpecReviewFn =
-    Arc<dyn Fn(String) -> Pin<Box<dyn Future<Output = anyhow::Result<String>> + Send>> + Send + Sync>;
+pub type SpecReviewFn = Arc<
+    dyn Fn(String) -> Pin<Box<dyn Future<Output = anyhow::Result<String>> + Send>> + Send + Sync,
+>;
 
 /// Callback type for A's review side effect.
 /// Takes (step_id, accepted, summary, correction) — drives plan mutation + auto-advance.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReviewDecision {
-    Accept { summary: String },
-    Correct { summary: String, correction: Option<String> },
-    ReplanStep { summary: String, reason: String },
+    Accept {
+        summary: String,
+    },
+    Correct {
+        summary: String,
+        correction: Option<String>,
+    },
+    ReplanStep {
+        summary: String,
+        reason: String,
+    },
 }
 
 pub type ReviewFn = Arc<
-    dyn Fn(usize, bool, String, Option<String>) -> Pin<Box<dyn Future<Output = anyhow::Result<ReviewDecision>> + Send>>
+    dyn Fn(
+            usize,
+            bool,
+            String,
+            Option<String>,
+        ) -> Pin<Box<dyn Future<Output = anyhow::Result<ReviewDecision>> + Send>>
         + Send
         + Sync,
 >;
@@ -45,9 +60,17 @@ pub type DocumentationFn =
 #[derive(Debug)]
 pub enum DesignerACommand {
     /// Deliver a plan document for A to review.
-    Plan { plan_id: String, document_spec: String },
+    Plan {
+        plan_id: String,
+        document_spec: String,
+    },
     /// Ask A to review a completed step output.
-    Review { step_id: usize, accepted: bool, summary: String, correction: Option<String> },
+    Review {
+        step_id: usize,
+        accepted: bool,
+        summary: String,
+        correction: Option<String>,
+    },
     /// Finalize the documentation loop — A drives the transition to WaitingForApproval.
     FinalizeDocumentation { signal: String },
     /// User approval input — A drives the stage transition to Execution (or back to Documentation).
@@ -64,7 +87,11 @@ pub enum ExecutorBCommand {
     /// Dispatch a new step to B (spawn or continue).
     DispatchStep { step_id: usize, payload: String },
     /// Continue an in-progress step with updated context.
-    ContinueStep { step_id: usize, task_id: String, payload: String },
+    ContinueStep {
+        step_id: usize,
+        task_id: String,
+        payload: String,
+    },
     /// Ask B to review a spec document (Documentation stage).
     ReviewSpec { spec: String },
     /// Stop B's runtime.
@@ -77,13 +104,32 @@ pub enum ExecutorBCommand {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BossActorEvent {
-    StatusChanged { role: BossActorRole, status: BossActorStatus },
-    StepDispatched { step_id: usize, task_id: String },
-    ReviewComplete { step_id: usize, accepted: bool, summary: String, decision: ReviewDecision },
-    DocumentationAdvanced { signal: String },
-    ApprovalHandled { approved: bool },
-    SpecReviewed { feedback: String },
-    Stopped { role: BossActorRole },
+    StatusChanged {
+        role: BossActorRole,
+        status: BossActorStatus,
+    },
+    StepDispatched {
+        step_id: usize,
+        task_id: String,
+    },
+    ReviewComplete {
+        step_id: usize,
+        accepted: bool,
+        summary: String,
+        decision: ReviewDecision,
+    },
+    DocumentationAdvanced {
+        signal: String,
+    },
+    ApprovalHandled {
+        approved: bool,
+    },
+    SpecReviewed {
+        feedback: String,
+    },
+    Stopped {
+        role: BossActorRole,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -122,7 +168,10 @@ impl DesignerAMailbox {
             anyhow::bail!("designer_a mailbox is closed");
         }
         self.tx
-            .send(DesignerAEnvelope { command, respond_to: None })
+            .send(DesignerAEnvelope {
+                command,
+                respond_to: None,
+            })
             .await
             .map_err(|_| anyhow::anyhow!("designer_a mailbox send failed"))
     }
@@ -133,10 +182,14 @@ impl DesignerAMailbox {
         }
         let (tx, rx) = oneshot::channel();
         self.tx
-            .send(DesignerAEnvelope { command, respond_to: Some(tx) })
+            .send(DesignerAEnvelope {
+                command,
+                respond_to: Some(tx),
+            })
             .await
             .map_err(|_| anyhow::anyhow!("designer_a mailbox send failed"))?;
-        rx.await.map_err(|_| anyhow::anyhow!("designer_a mailbox receive failed"))
+        rx.await
+            .map_err(|_| anyhow::anyhow!("designer_a mailbox receive failed"))
     }
 }
 
@@ -150,7 +203,10 @@ impl ExecutorBMailbox {
             anyhow::bail!("executor_b mailbox is closed");
         }
         self.tx
-            .send(ExecutorBEnvelope { command, respond_to: None })
+            .send(ExecutorBEnvelope {
+                command,
+                respond_to: None,
+            })
             .await
             .map_err(|_| anyhow::anyhow!("executor_b mailbox send failed"))
     }
@@ -161,10 +217,14 @@ impl ExecutorBMailbox {
         }
         let (tx, rx) = oneshot::channel();
         self.tx
-            .send(ExecutorBEnvelope { command, respond_to: Some(tx) })
+            .send(ExecutorBEnvelope {
+                command,
+                respond_to: Some(tx),
+            })
             .await
             .map_err(|_| anyhow::anyhow!("executor_b mailbox send failed"))?;
-        rx.await.map_err(|_| anyhow::anyhow!("executor_b mailbox receive failed"))
+        rx.await
+            .map_err(|_| anyhow::anyhow!("executor_b mailbox receive failed"))
     }
 }
 
@@ -271,9 +331,13 @@ impl ExecutorBRuntime {
 
         let join = tokio::spawn(async move {
             while let Some(envelope) = rx.recv().await {
-                let event =
-                    handle_executor_b_command(envelope.command, &state_loop, exec_fn.as_ref(), spec_review_fn.as_ref())
-                        .await;
+                let event = handle_executor_b_command(
+                    envelope.command,
+                    &state_loop,
+                    exec_fn.as_ref(),
+                    spec_review_fn.as_ref(),
+                )
+                .await;
                 if let Some(respond_to) = envelope.respond_to {
                     let _ = respond_to.send(event.clone());
                 }
@@ -321,7 +385,12 @@ async fn handle_designer_a_command(
                 status: BossActorStatus::Active,
             }
         }
-        DesignerACommand::Review { step_id, accepted, summary, correction } => {
+        DesignerACommand::Review {
+            step_id,
+            accepted,
+            summary,
+            correction,
+        } => {
             {
                 let mut s = state.write().await;
                 s.status = BossActorStatus::Active;
@@ -376,7 +445,11 @@ async fn handle_designer_a_command(
             let approved = input.trim().to_uppercase() == "Y" || input.trim().is_empty();
             {
                 let mut s = state.write().await;
-                s.stage = if approved { BossStage::Execution } else { BossStage::Documentation };
+                s.stage = if approved {
+                    BossStage::Execution
+                } else {
+                    BossStage::Documentation
+                };
             }
             if let Some(f) = doc_fn {
                 let _ = f(input).await;
@@ -394,7 +467,9 @@ async fn handle_designer_a_command(
         DesignerACommand::Stop => {
             let mut s = state.write().await;
             s.status = BossActorStatus::Suspended;
-            BossActorEvent::Stopped { role: BossActorRole::DesignerA }
+            BossActorEvent::Stopped {
+                role: BossActorRole::DesignerA,
+            }
         }
     }
 }
@@ -421,7 +496,11 @@ async fn handle_executor_b_command(
                 task_id: format!("b-task-step-{step_id}"),
             }
         }
-        ExecutorBCommand::ContinueStep { step_id, task_id, payload } => {
+        ExecutorBCommand::ContinueStep {
+            step_id,
+            task_id,
+            payload,
+        } => {
             {
                 let mut s = state.write().await;
                 s.current_step = Some(step_id);
@@ -446,7 +525,9 @@ async fn handle_executor_b_command(
         ExecutorBCommand::Stop => {
             let mut s = state.write().await;
             s.status = BossActorStatus::Suspended;
-            BossActorEvent::Stopped { role: BossActorRole::ExecutorB }
+            BossActorEvent::Stopped {
+                role: BossActorRole::ExecutorB,
+            }
         }
     }
 }

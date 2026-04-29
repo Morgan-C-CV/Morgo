@@ -21,7 +21,11 @@ impl ApprovalDecision {
     }
 
     pub fn from_bool(approved: bool) -> Self {
-        if approved { Self::Approved } else { Self::Denied }
+        if approved {
+            Self::Approved
+        } else {
+            Self::Denied
+        }
     }
 }
 
@@ -177,10 +181,7 @@ pub struct BossStepApprovalGate {
 }
 
 impl BossStepApprovalGate {
-    pub fn new(
-        step_id: impl Into<String>,
-        pending: &PendingApproval,
-    ) -> Self {
+    pub fn new(step_id: impl Into<String>, pending: &PendingApproval) -> Self {
         Self {
             step_id: step_id.into(),
             tool_name: pending.tool_name.clone(),
@@ -211,11 +212,16 @@ pub enum BossStepApprovalOutcome {
 
 impl BossStepApprovalOutcome {
     pub fn approved(step_id: impl Into<String>) -> Self {
-        Self::Approved { step_id: step_id.into() }
+        Self::Approved {
+            step_id: step_id.into(),
+        }
     }
 
     pub fn denied(step_id: impl Into<String>, reason: impl Into<String>) -> Self {
-        Self::Denied { step_id: step_id.into(), reason: reason.into() }
+        Self::Denied {
+            step_id: step_id.into(),
+            reason: reason.into(),
+        }
     }
 
     pub fn as_str(&self) -> &'static str {

@@ -5,10 +5,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use rust_agent::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
 use rust_agent::command::builtin::help::HelpCommand;
+use rust_agent::command::builtin::lism::LisMCommand;
 use rust_agent::command::builtin::permissions::PermissionsCommand;
 use rust_agent::command::builtin::plugins::{PluginSlashCommand, PluginsCommand};
 use rust_agent::command::builtin::skills::{SkillSlashCommand, SkillsCommand};
-use rust_agent::command::builtin::lism::LisMCommand;
 use rust_agent::command::builtin::status::StatusCommand;
 use rust_agent::command::builtin::tasks::TasksCommand;
 use rust_agent::command::registry::CommandRegistry;
@@ -2088,8 +2088,12 @@ async fn lism_command_explain_lists_available_building_blocks_and_deferred_items
     assert!(text.contains("StateFrame schema and StateDecision validation"));
     assert!(text.contains("BossPlan -> StateFrame projection"));
     assert!(text.contains("Stateless JSON decision loop"));
-    assert!(text.contains("Toolset / skillset router is attached to the live LisM -> /boss production path"));
-    assert!(text.contains("Model-tier router and provider_profile_id routing are connected to the production path"));
+    assert!(text.contains(
+        "Toolset / skillset router is attached to the live LisM -> /boss production path"
+    ));
+    assert!(text.contains(
+        "Model-tier router and provider_profile_id routing are connected to the production path"
+    ));
     assert!(text.contains("Per-step routed metadata"));
 }
 

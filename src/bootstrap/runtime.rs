@@ -8,19 +8,19 @@ use clap::Parser;
 
 use crate::bootstrap::config_root::resolve_config_root;
 use crate::bootstrap::model_profiles::load_active_model_profile_from_root;
-use crate::bootstrap::setup::SetupContext;
 use crate::bootstrap::proxy_env::resolve_proxy_env_contract;
+use crate::bootstrap::setup::SetupContext;
 use crate::bootstrap::{BootstrapPhase, BootstrapState, InteractionSurface, SessionMode};
 use crate::command::registry::CommandRegistry;
 use crate::core::boss::BossCoordinator;
+use crate::core::boss::save_plan;
 use crate::core::boss_runtime::BossRuntimeHost;
 use crate::core::boss_state::BossLisMPolicy;
+use crate::core::boss_state::{BossPlan, BossPlanStep, BossPlanStepStatus};
 use crate::core::context::QueryContext;
 use crate::core::engine::QueryEngine;
 use crate::core::lism_ab_sample::LisMAbSampleSink;
 use crate::core::lism_ab_sample::LisMRolloutConclusion;
-use crate::core::boss_state::{BossPlan, BossPlanStep, BossPlanStepStatus};
-use crate::core::boss::save_plan;
 use crate::cost::tracker::CostTracker;
 use crate::history::resume::{
     ResolvedSessionState, RestoreRequest, RestoreSource, resolve_session_state,
@@ -630,12 +630,24 @@ impl RuntimeBootstrap {
                         break;
                     }
                     // Also exit on terminal failure so we don't waste the timeout.
-                    let step_failed = if let Some(task_manager) = app_arc.permission_context.task_manager.as_ref() {
+                    let step_failed = if let Some(task_manager) =
+                        app_arc.permission_context.task_manager.as_ref()
+                    {
                         let b_task_id = boss.b_task_id().await;
                         if let Some(tid) = b_task_id {
-                            matches!(task_manager.status(&tid), Some(crate::task::types::TaskStatus::Failed | crate::task::types::TaskStatus::Killed))
-                        } else { false }
-                    } else { false };
+                            matches!(
+                                task_manager.status(&tid),
+                                Some(
+                                    crate::task::types::TaskStatus::Failed
+                                        | crate::task::types::TaskStatus::Killed
+                                )
+                            )
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    };
                     if step_failed {
                         println!("[boss-task] step task failed/killed — stopping poll");
                         break;
@@ -648,8 +660,14 @@ impl RuntimeBootstrap {
                     if tick % 20 == 0 {
                         let b_task_id = boss.b_task_id().await;
                         if let Some(tid) = b_task_id {
-                            if let Some(task_manager) = app_arc.permission_context.task_manager.as_ref() {
-                                println!("[boss-task] b_task {} status: {:?}", tid, task_manager.status(&tid));
+                            if let Some(task_manager) =
+                                app_arc.permission_context.task_manager.as_ref()
+                            {
+                                println!(
+                                    "[boss-task] b_task {} status: {:?}",
+                                    tid,
+                                    task_manager.status(&tid)
+                                );
                             }
                         }
                         println!("[boss-task] still waiting, stage: {:?}", stage);
@@ -660,9 +678,16 @@ impl RuntimeBootstrap {
                 if let Some(task_manager) = app_arc.permission_context.task_manager.as_ref() {
                     // Print B task output to diagnose failures.
                     if let Some(b_id) = boss.b_task_id().await {
-                        println!("[boss-task] b_task {} status: {:?}", b_id, task_manager.status(&b_id));
+                        println!(
+                            "[boss-task] b_task {} status: {:?}",
+                            b_id,
+                            task_manager.status(&b_id)
+                        );
                         if let Some(slice) = task_manager.get_output(&b_id, 0) {
-                            println!("[boss-task] b_task output (first 500 chars): {:?}", &slice.content[..slice.content.len().min(500)]);
+                            println!(
+                                "[boss-task] b_task output (first 500 chars): {:?}",
+                                &slice.content[..slice.content.len().min(500)]
+                            );
                         }
                     }
                     if let Ok(report) = boss.report_progress(task_manager).await {
@@ -898,7 +923,8 @@ impl RuntimeBootstrap {
         let runtime_tool_registry = Arc::new(RwLock::new(coordinator_tools.clone()));
 
         let boss_runtime_host = BossRuntimeHost::new();
-        let mut boss_coordinator = BossCoordinator::new_with_runtime_owner(boss_runtime_host.owner());
+        let mut boss_coordinator =
+            BossCoordinator::new_with_runtime_owner(boss_runtime_host.owner());
 
         // Wire LisM A/B sample sink if requested via CLI.
         if let Some(path) = &self.cli.lism_ab_sample {
@@ -950,15 +976,11 @@ impl RuntimeBootstrap {
         if let Some(policy) = filesystem_policy.clone() {
             permission_context = permission_context.with_filesystem_policy(policy);
         }
-        if let Some(cap_config) = self
-            .load_workspace_capability_config()
-            .unwrap_or_else(|e| {
-                tracing::warn!("failed to load workspace capability config: {e}");
-                None
-            })
-        {
-            permission_context =
-                permission_context.with_workspace_capability(Arc::new(cap_config));
+        if let Some(cap_config) = self.load_workspace_capability_config().unwrap_or_else(|e| {
+            tracing::warn!("failed to load workspace capability config: {e}");
+            None
+        }) {
+            permission_context = permission_context.with_workspace_capability(Arc::new(cap_config));
         }
         let last_activity_ts = Arc::new(std::sync::atomic::AtomicU64::new(
             SystemTime::now()
@@ -1098,15 +1120,11 @@ impl RuntimeBootstrap {
         if let Some(policy) = initialize_bundle.filesystem_policy.clone() {
             permission_context = permission_context.with_filesystem_policy(policy);
         }
-        if let Some(cap_config) = self
-            .load_workspace_capability_config()
-            .unwrap_or_else(|e| {
-                tracing::warn!("failed to load workspace capability config: {e}");
-                None
-            })
-        {
-            permission_context =
-                permission_context.with_workspace_capability(Arc::new(cap_config));
+        if let Some(cap_config) = self.load_workspace_capability_config().unwrap_or_else(|e| {
+            tracing::warn!("failed to load workspace capability config: {e}");
+            None
+        }) {
+            permission_context = permission_context.with_workspace_capability(Arc::new(cap_config));
         }
         let last_activity_ts = Arc::new(std::sync::atomic::AtomicU64::new(
             SystemTime::now()
@@ -1815,35 +1833,57 @@ fn parse_lism_policy(s: &str) -> BossLisMPolicy {
     }
 }
 
-fn print_lism_ab_summary(summary: &crate::core::lism_ab_sample::LisMAbSummary, total_records: usize) {
+fn print_lism_ab_summary(
+    summary: &crate::core::lism_ab_sample::LisMAbSummary,
+    total_records: usize,
+) {
     println!("LisM A/B Sample Summary");
     println!("=======================");
     println!("Total records : {total_records}");
     println!(
         "LisM ON       : {} runs | completion {:.2} | avg cache_hit_ratio {} | avg cost {}μ | avg tokens_saved {}",
         summary.on_runs,
-        summary.on_completion_rate.map_or_else(|| "n/a".into(), |r| format!("{:.2}", r)),
-        summary.on_avg_cache_hit_ratio.map_or_else(|| "n/a".into(), |r| format!("{:.3}", r)),
+        summary
+            .on_completion_rate
+            .map_or_else(|| "n/a".into(), |r| format!("{:.2}", r)),
+        summary
+            .on_avg_cache_hit_ratio
+            .map_or_else(|| "n/a".into(), |r| format!("{:.3}", r)),
         summary.on_avg_cost_micros_usd,
         summary.on_avg_tokens_saved,
     );
     println!(
         "LisM OFF      : {} runs | completion {:.2} | avg cache_hit_ratio {} | avg cost {}μ | avg tokens_saved {}",
         summary.off_runs,
-        summary.off_completion_rate.map_or_else(|| "n/a".into(), |r| format!("{:.2}", r)),
-        summary.off_avg_cache_hit_ratio.map_or_else(|| "n/a".into(), |r| format!("{:.3}", r)),
+        summary
+            .off_completion_rate
+            .map_or_else(|| "n/a".into(), |r| format!("{:.2}", r)),
+        summary
+            .off_avg_cache_hit_ratio
+            .map_or_else(|| "n/a".into(), |r| format!("{:.3}", r)),
         summary.off_avg_cost_micros_usd,
         summary.off_avg_tokens_saved,
     );
     if summary.has_both_arms() {
         println!("---");
         if let Some(delta) = summary.cache_hit_ratio_delta() {
-            let direction = if delta > 0.0 { "↑ LisM improves" } else { "↓ LisM degrades" };
+            let direction = if delta > 0.0 {
+                "↑ LisM improves"
+            } else {
+                "↓ LisM degrades"
+            };
             println!("Δ cache_hit_ratio  : {:+.3} ({})", delta, direction);
         }
         let cost_delta = summary.cost_delta_micros();
-        let cost_direction = if cost_delta < 0 { "↓ LisM saves" } else { "↑ LisM costs more" };
-        println!("Δ cost             : {:+}μ ({})", cost_delta, cost_direction);
+        let cost_direction = if cost_delta < 0 {
+            "↓ LisM saves"
+        } else {
+            "↑ LisM costs more"
+        };
+        println!(
+            "Δ cost             : {:+}μ ({})",
+            cost_delta, cost_direction
+        );
     } else {
         println!("--- (only one arm has data; cannot compute delta)");
     }

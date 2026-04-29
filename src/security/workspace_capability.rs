@@ -99,7 +99,8 @@ impl WorkspaceCapabilityConfig {
                 }
             }
         }
-        best.map(|(scope, _)| scope.max_tier).unwrap_or(self.global_max_tier)
+        best.map(|(scope, _)| scope.max_tier)
+            .unwrap_or(self.global_max_tier)
     }
 
     pub fn load_from_json(json: &str) -> anyhow::Result<Self> {
@@ -143,15 +144,24 @@ pub struct CommandCapabilityRequirement {
 
 impl CommandCapabilityRequirement {
     pub fn read() -> Self {
-        Self { required_tier: CapabilityTier::Read, reason: CapabilityRequirementReason::ReadOnlyCommand }
+        Self {
+            required_tier: CapabilityTier::Read,
+            reason: CapabilityRequirementReason::ReadOnlyCommand,
+        }
     }
 
     pub fn write() -> Self {
-        Self { required_tier: CapabilityTier::Write, reason: CapabilityRequirementReason::WorkspaceWrite }
+        Self {
+            required_tier: CapabilityTier::Write,
+            reason: CapabilityRequirementReason::WorkspaceWrite,
+        }
     }
 
     pub fn admin_bash(reason: CapabilityRequirementReason) -> Self {
-        Self { required_tier: CapabilityTier::AdminBash, reason }
+        Self {
+            required_tier: CapabilityTier::AdminBash,
+            reason,
+        }
     }
 }
 
@@ -200,13 +210,21 @@ impl CapabilityCheckOutcome {
     pub fn render_line(&self) -> String {
         match self {
             Self::Allowed => "capability_check: allowed".into(),
-            Self::RequiresApproval { required_tier, allowed_tier, reason } => format!(
+            Self::RequiresApproval {
+                required_tier,
+                allowed_tier,
+                reason,
+            } => format!(
                 "capability_check: requires_approval required={} allowed={} reason={}",
                 required_tier.as_str(),
                 allowed_tier.as_str(),
                 reason.as_str(),
             ),
-            Self::Denied { required_tier, allowed_tier, reason } => format!(
+            Self::Denied {
+                required_tier,
+                allowed_tier,
+                reason,
+            } => format!(
                 "capability_check: denied required={} allowed={} reason={}",
                 required_tier.as_str(),
                 allowed_tier.as_str(),
@@ -259,9 +277,19 @@ pub fn requirement_from_policy(
     }
     if policy.requires_escalation {
         // Pick the most specific reason from escalation_reasons
-        let reason = if policy.escalation_reasons.iter().any(|r| r.contains("destructive")) {
+        let reason = if policy
+            .escalation_reasons
+            .iter()
+            .any(|r| r.contains("destructive"))
+        {
             CapabilityRequirementReason::DestructivePattern
-        } else if policy.escalation_reasons.iter().any(|r| r.contains("shell_operator") || r.starts_with("pipe") || r.starts_with("redirect") || r.starts_with("subshell") || r.starts_with("background")) {
+        } else if policy.escalation_reasons.iter().any(|r| {
+            r.contains("shell_operator")
+                || r.starts_with("pipe")
+                || r.starts_with("redirect")
+                || r.starts_with("subshell")
+                || r.starts_with("background")
+        }) {
             CapabilityRequirementReason::ShellOperator
         } else if !policy.path_safe {
             CapabilityRequirementReason::OutOfScopePath

@@ -43,9 +43,15 @@ pub enum TelegramUpdateIntake {
     /// Update normalized successfully — ready for runtime dispatch.
     Accepted(TelegramInboundEnvelope),
     /// Update is structurally valid but has no dispatchable content (e.g. no text).
-    Skipped { update_id: u64, reason: &'static str },
+    Skipped {
+        update_id: u64,
+        reason: &'static str,
+    },
     /// Update is missing required fields.
-    Malformed { update_id: u64, reason: &'static str },
+    Malformed {
+        update_id: u64,
+        reason: &'static str,
+    },
 }
 
 /// Full response from `handle_telegram_update`.

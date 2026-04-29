@@ -108,7 +108,11 @@ fn r4_3_contract_satisfied_when_all_resources_available() {
 
 #[test]
 fn r4_3_contract_not_satisfied_when_skill_missing() {
-    let contract = make_contract(0, vec![WorkflowStepResourceRef::skill("unknown-skill")], vec![]);
+    let contract = make_contract(
+        0,
+        vec![WorkflowStepResourceRef::skill("unknown-skill")],
+        vec![],
+    );
     let avail = make_availability();
     assert!(!contract.is_satisfied_by(&avail));
 }
@@ -131,7 +135,10 @@ fn r4_3_contract_satisfied_for_unassigned_step() {
 fn r4_3_contract_has_resource_of_kind() {
     let contract = make_contract(
         0,
-        vec![WorkflowStepResourceRef::skill("deploy"), WorkflowStepResourceRef::mcp("github")],
+        vec![
+            WorkflowStepResourceRef::skill("deploy"),
+            WorkflowStepResourceRef::mcp("github"),
+        ],
         vec![],
     );
     assert!(contract.has_resource_of_kind(WorkflowStepKind::Skill));
@@ -143,7 +150,10 @@ fn r4_3_contract_has_resource_of_kind() {
 fn r4_3_contract_resource_names_for_kind() {
     let contract = make_contract(
         0,
-        vec![WorkflowStepResourceRef::skill("deploy"), WorkflowStepResourceRef::skill("review")],
+        vec![
+            WorkflowStepResourceRef::skill("deploy"),
+            WorkflowStepResourceRef::skill("review"),
+        ],
         vec![],
     );
     let names = contract.resource_names_for_kind(WorkflowStepKind::Skill);
@@ -226,7 +236,11 @@ fn r4_3_blocked_by_upstream_failure() {
 
 #[test]
 fn r4_3_blocked_when_resource_not_available() {
-    let contract = make_contract(0, vec![WorkflowStepResourceRef::skill("missing-skill")], vec![]);
+    let contract = make_contract(
+        0,
+        vec![WorkflowStepResourceRef::skill("missing-skill")],
+        vec![],
+    );
     let state = WorkflowStepState::default();
     let avail = make_availability();
 
@@ -256,7 +270,10 @@ fn r4_3_multiple_blockers_collected() {
 #[test]
 fn r4_3_step_blocker_as_str_values() {
     assert_eq!(
-        WorkflowStepBlocker::DependencyNotCompleted { pending_step_ids: vec![1] }.as_str(),
+        WorkflowStepBlocker::DependencyNotCompleted {
+            pending_step_ids: vec![1]
+        }
+        .as_str(),
         "dependency_not_completed"
     );
     assert_eq!(
@@ -267,15 +284,20 @@ fn r4_3_step_blocker_as_str_values() {
         "resource_not_available"
     );
     assert_eq!(
-        WorkflowStepBlocker::UpstreamFailure { failed_step_ids: vec![0] }.as_str(),
+        WorkflowStepBlocker::UpstreamFailure {
+            failed_step_ids: vec![0]
+        }
+        .as_str(),
         "upstream_failure"
     );
 }
 
 #[test]
 fn r4_3_step_blocker_render_line_includes_values() {
-    let line =
-        WorkflowStepBlocker::DependencyNotCompleted { pending_step_ids: vec![3, 4] }.render_line();
+    let line = WorkflowStepBlocker::DependencyNotCompleted {
+        pending_step_ids: vec![3, 4],
+    }
+    .render_line();
     assert!(line.contains("3"));
     assert!(line.contains("4"));
 }
@@ -336,7 +358,8 @@ fn r4_3_state_output_for_step_found() {
 
 #[test]
 fn r4_3_step_output_produces_tag() {
-    let output = WorkflowStepOutput::success(0, vec!["diff".to_string(), "test_report".to_string()], None);
+    let output =
+        WorkflowStepOutput::success(0, vec!["diff".to_string(), "test_report".to_string()], None);
     assert!(output.produces_tag("diff"));
     assert!(output.produces_tag("test_report"));
     assert!(!output.produces_tag("deploy_log"));
@@ -346,11 +369,26 @@ fn r4_3_step_output_produces_tag() {
 
 #[test]
 fn r4_3_observation_kind_as_str_values() {
-    assert_eq!(WorkflowObservationKind::SkillConflict.as_str(), "skill_conflict");
-    assert_eq!(WorkflowObservationKind::PluginBlocked.as_str(), "plugin_blocked");
-    assert_eq!(WorkflowObservationKind::McpUnavailable.as_str(), "mcp_unavailable");
-    assert_eq!(WorkflowObservationKind::RetryBudgetExhausted.as_str(), "retry_budget_exhausted");
-    assert_eq!(WorkflowObservationKind::ApprovalGate.as_str(), "approval_gate");
+    assert_eq!(
+        WorkflowObservationKind::SkillConflict.as_str(),
+        "skill_conflict"
+    );
+    assert_eq!(
+        WorkflowObservationKind::PluginBlocked.as_str(),
+        "plugin_blocked"
+    );
+    assert_eq!(
+        WorkflowObservationKind::McpUnavailable.as_str(),
+        "mcp_unavailable"
+    );
+    assert_eq!(
+        WorkflowObservationKind::RetryBudgetExhausted.as_str(),
+        "retry_budget_exhausted"
+    );
+    assert_eq!(
+        WorkflowObservationKind::ApprovalGate.as_str(),
+        "approval_gate"
+    );
     assert_eq!(WorkflowObservationKind::Info.as_str(), "info");
 }
 
@@ -396,7 +434,11 @@ fn r4_3_handoff_state_includes_only_dep_outputs() {
     // Step 3 depends on steps 1 and 2 only (not step 0)
     let contract = make_contract(3, vec![], vec![1, 2]);
 
-    let all_outputs = vec![succeeded_output(0), succeeded_output(1), succeeded_output(2)];
+    let all_outputs = vec![
+        succeeded_output(0),
+        succeeded_output(1),
+        succeeded_output(2),
+    ];
     let all_obs = vec![];
 
     let handoff = build_handoff_state(&all_outputs, &all_obs, &contract);

@@ -271,8 +271,12 @@ impl BossReportPayload {
         lines.push(format!(
             "stage={:?} step={}/{} ",
             self.stage,
-            self.current_step.map(|n| n.to_string()).unwrap_or_else(|| "-".into()),
-            self.total_steps.map(|n| n.to_string()).unwrap_or_else(|| "-".into()),
+            self.current_step
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "-".into()),
+            self.total_steps
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "-".into()),
         ));
         for step in &self.steps {
             let m = step.routed_metadata.as_ref();
@@ -290,7 +294,8 @@ impl BossReportPayload {
             ));
         }
         if let Some(s) = &self.observability_summary {
-            let hit_ratio = s.cache_hit_ratio()
+            let hit_ratio = s
+                .cache_hit_ratio()
                 .map(|r| format!("{:.1}%", r * 100.0))
                 .unwrap_or_else(|| "-".into());
             lines.push(format!(
@@ -456,7 +461,11 @@ pub struct BossActorHandle {
 }
 
 impl BossActorHandle {
-    pub fn new(actor_id: impl Into<String>, session_id: impl Into<String>, role: BossActorRole) -> Self {
+    pub fn new(
+        actor_id: impl Into<String>,
+        session_id: impl Into<String>,
+        role: BossActorRole,
+    ) -> Self {
         Self {
             actor_id: actor_id.into(),
             session_id: session_id.into(),

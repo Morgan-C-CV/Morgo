@@ -31,7 +31,10 @@ fn r0_2_approval_decision_as_str() {
 
 #[test]
 fn r0_2_approval_decision_from_bool() {
-    assert_eq!(ApprovalDecision::from_bool(true), ApprovalDecision::Approved);
+    assert_eq!(
+        ApprovalDecision::from_bool(true),
+        ApprovalDecision::Approved
+    );
     assert_eq!(ApprovalDecision::from_bool(false), ApprovalDecision::Denied);
 }
 
@@ -98,11 +101,8 @@ fn r0_2_approval_surface_from_interaction_surface() {
 #[test]
 fn r0_2_resolution_record_from_pending_approved() {
     let pending = make_pending("Bash", Some("capability_escalation"));
-    let record = ApprovalResolutionRecord::new(
-        &pending,
-        ApprovalDecision::Approved,
-        ApprovalSurface::Cli,
-    );
+    let record =
+        ApprovalResolutionRecord::new(&pending, ApprovalDecision::Approved, ApprovalSurface::Cli);
     assert_eq!(record.tool_name, "Bash");
     assert_eq!(record.decision, ApprovalDecision::Approved);
     assert_eq!(record.surface, ApprovalSurface::Cli);

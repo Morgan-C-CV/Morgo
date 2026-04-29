@@ -1,5 +1,5 @@
 use crate::core::boss_state::{BossPlan, BossStage};
-use crate::core::state_frame::{ActorRole, AgentState, StateFrame, StateBudget};
+use crate::core::state_frame::{ActorRole, AgentState, StateBudget, StateFrame};
 use crate::core::state_frame_archive::{
     archive_to_summary, build_accepted_archive, retain_blocked_items, retain_open_items,
 };
@@ -92,4 +92,3 @@ pub fn project_state_frame(
         budget: StateBudget::default(),
     }
 }
-

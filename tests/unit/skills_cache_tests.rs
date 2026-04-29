@@ -1,9 +1,7 @@
 use std::fs;
 use std::time::Duration;
 
-use rust_agent::skills::cache::{
-    SkillCachePolicy, SkillInvalidationReason, SkillRuntimeCache,
-};
+use rust_agent::skills::cache::{SkillCachePolicy, SkillInvalidationReason, SkillRuntimeCache};
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -39,12 +37,19 @@ fn r4_1_initial_load_generation_is_1() {
     make_skill_dir(&dir, "alpha", "alpha content");
 
     let mut cache = SkillRuntimeCache::default();
-    assert_eq!(cache.generation(), 0, "generation should be 0 before first load");
+    assert_eq!(
+        cache.generation(),
+        0,
+        "generation should be 0 before first load"
+    );
 
     let (entry, reloaded) = cache.load_or_reload(dir.path()).unwrap();
     assert!(reloaded, "first load should be reported as reloaded");
     assert_eq!(entry.generation, 1);
-    assert!(entry.invalidation_reason.is_none(), "initial load has no invalidation reason");
+    assert!(
+        entry.invalidation_reason.is_none(),
+        "initial load has no invalidation reason"
+    );
     assert!(!entry.result.skills.is_empty());
 }
 
@@ -57,7 +62,10 @@ fn r4_1_second_load_same_fingerprint_returns_cached() {
     cache.load_or_reload(dir.path()).unwrap();
 
     let (entry, reloaded) = cache.load_or_reload(dir.path()).unwrap();
-    assert!(!reloaded, "second load with same fingerprint should not reload");
+    assert!(
+        !reloaded,
+        "second load with same fingerprint should not reload"
+    );
     assert_eq!(entry.generation, 1, "generation should stay at 1");
 }
 
@@ -184,7 +192,10 @@ fn r4_1_no_ttl_does_not_expire_without_file_change() {
     std::thread::sleep(Duration::from_millis(1));
 
     let (entry, reloaded) = cache.load_or_reload(dir.path()).unwrap();
-    assert!(!reloaded, "no-TTL cache should not expire without file change");
+    assert!(
+        !reloaded,
+        "no-TTL cache should not expire without file change"
+    );
     assert_eq!(entry.generation, 1);
 }
 
@@ -263,12 +274,21 @@ fn r4_1_last_invalidation_reason_reflects_most_recent_reload() {
 
 #[test]
 fn r4_1_invalidation_reason_as_str_values() {
-    assert_eq!(SkillInvalidationReason::FileChanged.as_str(), "file_changed");
-    assert_eq!(SkillInvalidationReason::ConfigChanged.as_str(), "config_changed");
+    assert_eq!(
+        SkillInvalidationReason::FileChanged.as_str(),
+        "file_changed"
+    );
+    assert_eq!(
+        SkillInvalidationReason::ConfigChanged.as_str(),
+        "config_changed"
+    );
     assert_eq!(
         SkillInvalidationReason::RuntimeSnapshotSwitch.as_str(),
         "runtime_snapshot_switch"
     );
-    assert_eq!(SkillInvalidationReason::ExplicitReload.as_str(), "explicit_reload");
+    assert_eq!(
+        SkillInvalidationReason::ExplicitReload.as_str(),
+        "explicit_reload"
+    );
     assert_eq!(SkillInvalidationReason::TtlExpired.as_str(), "ttl_expired");
 }

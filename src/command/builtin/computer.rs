@@ -15,7 +15,9 @@ impl Command for ComputerCommand {
     fn metadata(&self) -> CommandMetadata {
         CommandMetadata {
             name: "computer".into(),
-            description: "CLI-only computer control with observation-first, explicitly commanded actions".into(),
+            description:
+                "CLI-only computer control with observation-first, explicitly commanded actions"
+                    .into(),
             source: CommandSource::Builtin,
             category: "system".into(),
             command_type: CommandType::Local,
@@ -74,8 +76,7 @@ impl Command for ComputerCommand {
                 }
             }
             "stop" => Ok(CommandResult::Message(
-                "no active computer-use session; stop is currently a no-op control command"
-                    .into(),
+                "no active computer-use session; stop is currently a no-op control command".into(),
             )),
             _ => Ok(CommandResult::Message(usage())),
         }

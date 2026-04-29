@@ -10,7 +10,11 @@ use crate::core::prompt_segment::PromptAssembly;
 /// Dynamic segments → `messages[0].content` array (replaces the existing entry).
 /// If there are no cacheable segments the payload is left unchanged.
 pub fn apply_anthropic_cache_control(assembly: &PromptAssembly, payload: &mut Value) {
-    let cacheable: Vec<_> = assembly.segments().iter().filter(|s| s.is_cacheable()).collect();
+    let cacheable: Vec<_> = assembly
+        .segments()
+        .iter()
+        .filter(|s| s.is_cacheable())
+        .collect();
     if cacheable.is_empty() {
         return;
     }
@@ -45,9 +49,15 @@ pub fn apply_anthropic_cache_control(assembly: &PromptAssembly, payload: &mut Va
 ///
 /// Pure function — does not modify `assembly` or `profile`.
 /// `Unsupported`, `ManualNone`, and `OpenAICompatiblePrefix` are no-ops in v1.
-pub fn apply_cache_control(assembly: &PromptAssembly, profile: &ProviderProfile, payload: &mut Value) {
+pub fn apply_cache_control(
+    assembly: &PromptAssembly,
+    profile: &ProviderProfile,
+    payload: &mut Value,
+) {
     match profile.prompt_cache {
-        PromptCacheCapability::AnthropicEphemeral => apply_anthropic_cache_control(assembly, payload),
+        PromptCacheCapability::AnthropicEphemeral => {
+            apply_anthropic_cache_control(assembly, payload)
+        }
         PromptCacheCapability::Unsupported
         | PromptCacheCapability::ManualNone
         | PromptCacheCapability::OpenAICompatiblePrefix => {}

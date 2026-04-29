@@ -22,11 +22,7 @@ pub struct ModelRoute {
 ///
 /// Pure static mapping — no runtime lookup, no provider config reads, no side effects.
 /// Role/state rules may clamp or raise the effort-derived tier according to explicit safety/cost rules.
-pub fn route_model_tier(
-    effort: EffortLevel,
-    role: ActorRole,
-    state: AgentState,
-) -> ModelRoute {
+pub fn route_model_tier(effort: EffortLevel, role: ActorRole, state: AgentState) -> ModelRoute {
     let base = match effort {
         EffortLevel::L => ModelTier::Low,
         EffortLevel::M => ModelTier::Medium,
@@ -63,7 +59,10 @@ mod tests {
     fn worker_executing_medium_produces_worker_override_profile() {
         let route = route_model_tier(EffortLevel::M, ActorRole::Worker, AgentState::Executing);
         assert_eq!(route.tier, ModelTier::Medium);
-        assert_eq!(route.provider_profile_id.as_deref(), Some("worker-override"));
+        assert_eq!(
+            route.provider_profile_id.as_deref(),
+            Some("worker-override")
+        );
     }
 
     #[test]

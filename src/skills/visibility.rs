@@ -176,5 +176,8 @@ pub fn resolve_skill_visibility(skills: Vec<SkillDefinition>, cwd: &Path) -> Ski
         decisions.push(SkillActivationDecision::Active(winner));
     }
 
-    SkillVisibilityResult { decisions, conflicts }
+    SkillVisibilityResult {
+        decisions,
+        conflicts,
+    }
 }

@@ -130,10 +130,7 @@ impl RemoteActorStore {
     /// Upsert actor record. Returns `true` if this is a newly created actor.
     pub fn upsert(&self, mut incoming: RemoteActorRecord) -> bool {
         let key = actor_key(&incoming.session_id, &incoming.actor_id);
-        let mut records = self
-            .records
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut records = self.records.write().unwrap_or_else(|e| e.into_inner());
 
         let is_new = if let Some(existing) = records.get(&key) {
             incoming.created_at = existing.created_at.clone();

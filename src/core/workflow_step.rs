@@ -44,7 +44,11 @@ pub struct WorkflowStepResourceRef {
 
 impl WorkflowStepResourceRef {
     pub fn skill(name: impl Into<String>) -> Self {
-        Self { kind: WorkflowStepKind::Skill, name: name.into(), sub_name: None }
+        Self {
+            kind: WorkflowStepKind::Skill,
+            name: name.into(),
+            sub_name: None,
+        }
     }
 
     pub fn plugin(name: impl Into<String>, sub_name: impl Into<String>) -> Self {
@@ -56,7 +60,11 @@ impl WorkflowStepResourceRef {
     }
 
     pub fn mcp(server_name: impl Into<String>) -> Self {
-        Self { kind: WorkflowStepKind::Mcp, name: server_name.into(), sub_name: None }
+        Self {
+            kind: WorkflowStepKind::Mcp,
+            name: server_name.into(),
+            sub_name: None,
+        }
     }
 
     pub fn render_line(&self) -> String {
@@ -166,7 +174,8 @@ impl WorkflowResourceAvailability {
     }
 
     pub fn with_mcp(mut self, names: impl IntoIterator<Item = impl Into<String>>) -> Self {
-        self.mcp_server_names.extend(names.into_iter().map(Into::into));
+        self.mcp_server_names
+            .extend(names.into_iter().map(Into::into));
         self
     }
 }
@@ -187,11 +196,21 @@ pub struct WorkflowStepOutput {
 
 impl WorkflowStepOutput {
     pub fn success(step_id: usize, tags: Vec<String>, summary: Option<String>) -> Self {
-        Self { step_id, produced_tags: tags, result_summary: summary, succeeded: true }
+        Self {
+            step_id,
+            produced_tags: tags,
+            result_summary: summary,
+            succeeded: true,
+        }
     }
 
     pub fn failure(step_id: usize) -> Self {
-        Self { step_id, produced_tags: vec![], result_summary: None, succeeded: false }
+        Self {
+            step_id,
+            produced_tags: vec![],
+            result_summary: None,
+            succeeded: false,
+        }
     }
 
     pub fn produces_tag(&self, tag: &str) -> bool {
@@ -278,7 +297,12 @@ impl WorkflowObservationKind {
 
 impl WorkflowStepObservation {
     pub fn render_line(&self) -> String {
-        format!("step={} [{}] {}", self.step_id, self.kind.as_str(), self.message)
+        format!(
+            "step={} [{}] {}",
+            self.step_id,
+            self.kind.as_str(),
+            self.message
+        )
     }
 }
 
@@ -431,5 +455,8 @@ pub fn build_handoff_state(
         .cloned()
         .collect();
 
-    WorkflowStepState { completed_outputs, observations }
+    WorkflowStepState {
+        completed_outputs,
+        observations,
+    }
 }

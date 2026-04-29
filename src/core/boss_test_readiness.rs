@@ -188,8 +188,14 @@ impl<'a> BossTestReadinessGate<'a> {
 #[derive(Debug, Clone, PartialEq)]
 pub enum BossRollbackTrigger {
     McpFailureOccurred,
-    CostLimitExceeded { actual_micros_usd: u64, limit_micros_usd: u64 },
-    CacheHitRatioBelowThreshold { actual: f64, threshold: f64 },
+    CostLimitExceeded {
+        actual_micros_usd: u64,
+        limit_micros_usd: u64,
+    },
+    CacheHitRatioBelowThreshold {
+        actual: f64,
+        threshold: f64,
+    },
     PendingApprovalRequired,
 }
 
@@ -206,11 +212,16 @@ impl BossRollbackTrigger {
     pub fn render_line(&self) -> String {
         match self {
             Self::McpFailureOccurred => "mcp_failure_occurred".to_string(),
-            Self::CostLimitExceeded { actual_micros_usd, limit_micros_usd } => {
+            Self::CostLimitExceeded {
+                actual_micros_usd,
+                limit_micros_usd,
+            } => {
                 format!("cost_limit_exceeded: actual={actual_micros_usd} limit={limit_micros_usd}")
             }
             Self::CacheHitRatioBelowThreshold { actual, threshold } => {
-                format!("cache_hit_ratio_below_threshold: actual={actual:.3} threshold={threshold:.3}")
+                format!(
+                    "cache_hit_ratio_below_threshold: actual={actual:.3} threshold={threshold:.3}"
+                )
             }
             Self::PendingApprovalRequired => "pending_approval_required".to_string(),
         }

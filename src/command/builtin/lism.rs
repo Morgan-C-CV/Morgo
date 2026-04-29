@@ -45,7 +45,10 @@ impl Command for LisMCommand {
             }
             "status" => {
                 let enabled = permissions.lism_enabled();
-                let base = format!("LisM status: {}", if enabled { "enabled" } else { "disabled" });
+                let base = format!(
+                    "LisM status: {}",
+                    if enabled { "enabled" } else { "disabled" }
+                );
                 if let Some(coordinator) = app_state.boss_coordinator.as_ref() {
                     let metadata = coordinator.routed_step_metadata_snapshot().await;
                     if metadata.is_empty() {
@@ -65,7 +68,9 @@ impl Command for LisMCommand {
                         for id in step_ids {
                             let m = &metadata[&id];
                             total_routed += 1;
-                            if m.provider_profile_id.is_some() { override_hits += 1; }
+                            if m.provider_profile_id.is_some() {
+                                override_hits += 1;
+                            }
                             total_cache_r += m.cache_read_tokens.unwrap_or(0);
                             total_cache_w += m.cache_write_tokens.unwrap_or(0);
                             total_fallback += m.fallback_count.unwrap_or(0);

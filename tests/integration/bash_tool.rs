@@ -16,7 +16,10 @@ async fn output_within_limit_is_not_truncated() {
     assert!(!out.truncated);
     assert_eq!(out.total_bytes_read, data.len());
     let s = clamped_to_string(out);
-    assert!(!s.contains("[... output truncated:"), "unexpected truncation marker");
+    assert!(
+        !s.contains("[... output truncated:"),
+        "unexpected truncation marker"
+    );
     assert_eq!(s.len(), data.len());
 }
 
@@ -28,7 +31,10 @@ async fn large_stdout_is_truncated_at_limit() {
     assert!(out.truncated);
     assert!(out.total_bytes_read > MAX_OUTPUT_BYTES);
     let s = clamped_to_string(out);
-    assert!(s.contains("[... output truncated:"), "truncation marker missing");
+    assert!(
+        s.contains("[... output truncated:"),
+        "truncation marker missing"
+    );
     // head preserved
     assert!(s.starts_with('A'));
 }
@@ -118,13 +124,9 @@ async fn hostile_yes_command_does_not_oom() {
     let cwd = std::env::temp_dir();
     // yes produces infinite output; head -c limits it to 10 MiB at the shell level,
     // but our clamped reader must stop at MAX_OUTPUT_BYTES regardless.
-    let result = execute_with_sandbox(
-        "yes | head -c 10485760",
-        &cwd,
-        SandboxPolicy::Disabled,
-    )
-    .await
-    .expect("execute_with_sandbox failed");
+    let result = execute_with_sandbox("yes | head -c 10485760", &cwd, SandboxPolicy::Disabled)
+        .await
+        .expect("execute_with_sandbox failed");
 
     // We must have read at least MAX_OUTPUT_BYTES and clamped it
     assert!(

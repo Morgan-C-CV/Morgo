@@ -4,7 +4,7 @@ use rust_agent::skills::types::{
     SkillDefinition, SkillExecutionContext, SkillSource, SkillWorkflowExecution,
 };
 use rust_agent::skills::visibility::{
-    resolve_skill_visibility, SkillActivationDecision, SkillConflictRecord, SkillPrecedence,
+    SkillActivationDecision, SkillConflictRecord, SkillPrecedence, resolve_skill_visibility,
 };
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -183,12 +183,14 @@ fn r4_2_deeper_filesystem_shadows_shallower_on_name_collision() {
     let active = result.active_skills();
     assert_eq!(active.len(), 1);
     // deeper scope wins — file_path contains /project/app/
-    assert!(active[0]
-        .file_path
-        .as_ref()
-        .unwrap()
-        .to_string_lossy()
-        .contains("/project/app/"));
+    assert!(
+        active[0]
+            .file_path
+            .as_ref()
+            .unwrap()
+            .to_string_lossy()
+            .contains("/project/app/")
+    );
 
     assert_eq!(result.conflicts.len(), 1);
 }
@@ -207,7 +209,11 @@ fn r4_2_shadowed_decision_recorded_in_decisions() {
         .filter(|d| matches!(d, SkillActivationDecision::Shadowed { .. }))
         .collect();
     assert_eq!(shadowed.len(), 1);
-    if let SkillActivationDecision::Shadowed { skill, winner_source } = &shadowed[0] {
+    if let SkillActivationDecision::Shadowed {
+        skill,
+        winner_source,
+    } = &shadowed[0]
+    {
         assert_eq!(skill.source, SkillSource::Bundled);
         assert_eq!(*winner_source, SkillSource::User);
     }
@@ -258,10 +264,12 @@ fn r4_2_all_hidden_same_name_leaves_no_active() {
     assert!(result.active_skills().is_empty());
     assert!(result.conflicts.is_empty());
     assert_eq!(result.decisions.len(), 2);
-    assert!(result
-        .decisions
-        .iter()
-        .all(|d| matches!(d, SkillActivationDecision::Disabled(_))));
+    assert!(
+        result
+            .decisions
+            .iter()
+            .all(|d| matches!(d, SkillActivationDecision::Disabled(_)))
+    );
 }
 
 // ── SkillVisibilityResult helpers ─────────────────────────────────────────────

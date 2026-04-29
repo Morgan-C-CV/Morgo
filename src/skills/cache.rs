@@ -70,7 +70,11 @@ pub struct SkillCacheEntry {
 }
 
 impl SkillCacheEntry {
-    fn new(result: SkillLoadResult, generation: u64, reason: Option<SkillInvalidationReason>) -> Self {
+    fn new(
+        result: SkillLoadResult,
+        generation: u64,
+        reason: Option<SkillInvalidationReason>,
+    ) -> Self {
         Self {
             result,
             generation,
@@ -140,10 +144,7 @@ impl SkillRuntimeCache {
     /// - the filesystem fingerprint changed (detected by `SkillLoaderCache`)
     ///
     /// Returns `(entry, reloaded)`.
-    pub fn load_or_reload(
-        &mut self,
-        root: &Path,
-    ) -> anyhow::Result<(&SkillCacheEntry, bool)> {
+    pub fn load_or_reload(&mut self, root: &Path) -> anyhow::Result<(&SkillCacheEntry, bool)> {
         // Check TTL expiry — if expired, mark as pending invalidation
         if let Some(entry) = &self.entry {
             if entry.is_expired(&self.policy) && self.pending_invalidation.is_none() {

@@ -223,7 +223,8 @@ impl McpRuntime {
             }
         }
 
-        Err(last_error.unwrap_or_else(|| anyhow::anyhow!("reconnect_with_backoff: no attempts made")))
+        Err(last_error
+            .unwrap_or_else(|| anyhow::anyhow!("reconnect_with_backoff: no attempts made")))
     }
 
     pub async fn connect(&self, server: &str) -> anyhow::Result<McpServerState> {
@@ -1279,7 +1280,10 @@ mod tests {
             .await;
         let elapsed = start.elapsed();
 
-        assert!(result.is_err(), "should fail for governance-required server");
+        assert!(
+            result.is_err(),
+            "should fail for governance-required server"
+        );
         // With 3 attempts and 50ms initial backoff, retrying would take ~150ms.
         // Non-retryable should exit immediately (< 30ms).
         assert!(

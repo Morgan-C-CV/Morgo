@@ -244,10 +244,7 @@ impl ToolPermissionContext {
         self.filesystem_policy.clone()
     }
 
-    pub fn with_workspace_capability(
-        mut self,
-        config: Arc<WorkspaceCapabilityConfig>,
-    ) -> Self {
+    pub fn with_workspace_capability(mut self, config: Arc<WorkspaceCapabilityConfig>) -> Self {
         self.workspace_capability = Some(config);
         self
     }
@@ -270,7 +267,10 @@ impl ToolPermissionContext {
     }
 
     pub fn lism_enabled(&self) -> bool {
-        self.lism_mode.read().map(|enabled| *enabled).unwrap_or(false)
+        self.lism_mode
+            .read()
+            .map(|enabled| *enabled)
+            .unwrap_or(false)
     }
 
     pub fn set_lism_enabled(&self, enabled: bool) {

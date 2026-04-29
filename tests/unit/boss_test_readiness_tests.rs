@@ -19,7 +19,9 @@ fn ptr_empty_allowlist_permits_everything() {
 #[test]
 fn ptr_populated_allowlist_permits_listed_items() {
     let mut allowlist = BossTestAllowlist::default();
-    allowlist.provider_profiles.insert("claude-sonnet".to_string());
+    allowlist
+        .provider_profiles
+        .insert("claude-sonnet".to_string());
     allowlist.skill_names.insert("deploy".to_string());
     allowlist.mcp_server_names.insert("github".to_string());
 
@@ -45,9 +47,15 @@ fn ptr_gate_admits_when_all_allowlists_empty() {
 #[test]
 fn ptr_gate_admits_when_all_items_in_allowlist() {
     let mut policy = BossTestAdmissionPolicy::default();
-    policy.allowlist.provider_profiles.insert("claude-sonnet".to_string());
+    policy
+        .allowlist
+        .provider_profiles
+        .insert("claude-sonnet".to_string());
     policy.allowlist.skill_names.insert("deploy".to_string());
-    policy.allowlist.mcp_server_names.insert("github".to_string());
+    policy
+        .allowlist
+        .mcp_server_names
+        .insert("github".to_string());
 
     let gate = BossTestReadinessGate::new(&policy);
     let result = gate.check(Some("claude-sonnet"), &["deploy"], &["github"]);
@@ -57,7 +65,10 @@ fn ptr_gate_admits_when_all_items_in_allowlist() {
 #[test]
 fn ptr_gate_denies_unlisted_provider() {
     let mut policy = BossTestAdmissionPolicy::default();
-    policy.allowlist.provider_profiles.insert("claude-sonnet".to_string());
+    policy
+        .allowlist
+        .provider_profiles
+        .insert("claude-sonnet".to_string());
 
     let gate = BossTestReadinessGate::new(&policy);
     let result = gate.check(Some("gpt-4"), &[], &[]);
@@ -91,7 +102,10 @@ fn ptr_gate_denies_unlisted_skill() {
 #[test]
 fn ptr_gate_denies_unlisted_mcp_server() {
     let mut policy = BossTestAdmissionPolicy::default();
-    policy.allowlist.mcp_server_names.insert("github".to_string());
+    policy
+        .allowlist
+        .mcp_server_names
+        .insert("github".to_string());
 
     let gate = BossTestReadinessGate::new(&policy);
     let result = gate.check(None, &[], &["jira"]);
@@ -107,7 +121,10 @@ fn ptr_gate_denies_unlisted_mcp_server() {
 #[test]
 fn ptr_gate_collects_multiple_deny_reasons() {
     let mut policy = BossTestAdmissionPolicy::default();
-    policy.allowlist.provider_profiles.insert("claude-sonnet".to_string());
+    policy
+        .allowlist
+        .provider_profiles
+        .insert("claude-sonnet".to_string());
     policy.allowlist.skill_names.insert("deploy".to_string());
 
     let gate = BossTestReadinessGate::new(&policy);
@@ -121,7 +138,10 @@ fn ptr_gate_collects_multiple_deny_reasons() {
 #[test]
 fn ptr_gate_no_provider_check_when_none() {
     let mut policy = BossTestAdmissionPolicy::default();
-    policy.allowlist.provider_profiles.insert("claude-sonnet".to_string());
+    policy
+        .allowlist
+        .provider_profiles
+        .insert("claude-sonnet".to_string());
 
     let gate = BossTestReadinessGate::new(&policy);
     // provider = None means "no provider specified" — skip provider check
@@ -134,15 +154,24 @@ fn ptr_gate_no_provider_check_when_none() {
 #[test]
 fn ptr_deny_reason_as_str_values() {
     assert_eq!(
-        BossAdmissionDenyReason::ProviderNotAllowlisted { profile_id: "x".into() }.as_str(),
+        BossAdmissionDenyReason::ProviderNotAllowlisted {
+            profile_id: "x".into()
+        }
+        .as_str(),
         "provider_not_allowlisted"
     );
     assert_eq!(
-        BossAdmissionDenyReason::SkillNotAllowlisted { skill_name: "x".into() }.as_str(),
+        BossAdmissionDenyReason::SkillNotAllowlisted {
+            skill_name: "x".into()
+        }
+        .as_str(),
         "skill_not_allowlisted"
     );
     assert_eq!(
-        BossAdmissionDenyReason::McpServerNotAllowlisted { server_name: "x".into() }.as_str(),
+        BossAdmissionDenyReason::McpServerNotAllowlisted {
+            server_name: "x".into()
+        }
+        .as_str(),
         "mcp_server_not_allowlisted"
     );
 }
@@ -173,7 +202,10 @@ fn ptr_mcp_failure_trigger_when_enabled() {
     };
     let triggers = evaluate_rollback_triggers(&policy, true, 0, None, false);
     assert_eq!(triggers.len(), 1);
-    assert!(matches!(triggers[0], BossRollbackTrigger::McpFailureOccurred));
+    assert!(matches!(
+        triggers[0],
+        BossRollbackTrigger::McpFailureOccurred
+    ));
 }
 
 #[test]
@@ -256,7 +288,10 @@ fn ptr_pending_approval_trigger_when_enabled() {
     };
     let triggers = evaluate_rollback_triggers(&policy, false, 0, None, true);
     assert_eq!(triggers.len(), 1);
-    assert!(matches!(triggers[0], BossRollbackTrigger::PendingApprovalRequired));
+    assert!(matches!(
+        triggers[0],
+        BossRollbackTrigger::PendingApprovalRequired
+    ));
 }
 
 #[test]
@@ -275,14 +310,24 @@ fn ptr_multiple_triggers_collected() {
 
 #[test]
 fn ptr_rollback_trigger_as_str_values() {
-    assert_eq!(BossRollbackTrigger::McpFailureOccurred.as_str(), "mcp_failure_occurred");
     assert_eq!(
-        BossRollbackTrigger::CostLimitExceeded { actual_micros_usd: 0, limit_micros_usd: 0 }
-            .as_str(),
+        BossRollbackTrigger::McpFailureOccurred.as_str(),
+        "mcp_failure_occurred"
+    );
+    assert_eq!(
+        BossRollbackTrigger::CostLimitExceeded {
+            actual_micros_usd: 0,
+            limit_micros_usd: 0
+        }
+        .as_str(),
         "cost_limit_exceeded"
     );
     assert_eq!(
-        BossRollbackTrigger::CacheHitRatioBelowThreshold { actual: 0.0, threshold: 0.0 }.as_str(),
+        BossRollbackTrigger::CacheHitRatioBelowThreshold {
+            actual: 0.0,
+            threshold: 0.0
+        }
+        .as_str(),
         "cache_hit_ratio_below_threshold"
     );
     assert_eq!(
@@ -366,14 +411,20 @@ fn ptr_run_outcome_as_str_values() {
 #[test]
 fn ptr_admission_policy_serde_round_trip() {
     let mut policy = BossTestAdmissionPolicy::default();
-    policy.allowlist.provider_profiles.insert("claude-sonnet".to_string());
+    policy
+        .allowlist
+        .provider_profiles
+        .insert("claude-sonnet".to_string());
     policy.rollback.abort_on_mcp_failure = true;
     policy.rollback.max_cost_micros_usd = 5_000;
 
     let json = serde_json::to_string(&policy).unwrap();
     let restored: BossTestAdmissionPolicy = serde_json::from_str(&json).unwrap();
 
-    assert_eq!(restored.allowlist.provider_profiles, policy.allowlist.provider_profiles);
+    assert_eq!(
+        restored.allowlist.provider_profiles,
+        policy.allowlist.provider_profiles
+    );
     assert_eq!(restored.rollback.abort_on_mcp_failure, true);
     assert_eq!(restored.rollback.max_cost_micros_usd, 5_000);
 }

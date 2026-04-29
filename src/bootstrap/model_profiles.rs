@@ -640,7 +640,11 @@ auth_strategy = "none"
         let error = resolve_model_profile_from_registry(&registry, "nonexistent")
             .expect_err("unknown profile should fail");
 
-        assert!(error.to_string().contains("model profile 'nonexistent' was not found"));
+        assert!(
+            error
+                .to_string()
+                .contains("model profile 'nonexistent' was not found")
+        );
     }
 
     #[test]

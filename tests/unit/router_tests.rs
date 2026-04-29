@@ -82,8 +82,8 @@ fn app_state_with_session_root(root: &std::path::Path) -> AppState {
         no_proxy: None,
         ca_bundle_path: None,
         max_tokens_param: None,
-            prompt_cache_key: None,
-            prompt_cache_retention: None,
+        prompt_cache_key: None,
+        prompt_cache_retention: None,
     };
     let runtime_snapshot = ActiveModelRuntimeSnapshot {
         config: config.clone(),
@@ -4408,7 +4408,9 @@ async fn computer_stop_returns_noop_control_contract_message() {
     let output = router.route(&input, &app_state).await.unwrap();
     if let RouteExecution::CommandResult(CommandResult::Message(msg)) = output {
         assert!(
-            msg.contains("no active computer-use session; stop is currently a no-op control command"),
+            msg.contains(
+                "no active computer-use session; stop is currently a no-op control command"
+            ),
             "unexpected stop message: {msg}"
         );
     } else {

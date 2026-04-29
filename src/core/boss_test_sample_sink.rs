@@ -235,6 +235,8 @@ pub fn new_shared_sink() -> SharedBossTestSampleSink {
     Arc::new(BossTestSampleSink::in_memory())
 }
 
-pub fn new_shared_sink_with_path(path: impl AsRef<Path>) -> anyhow::Result<SharedBossTestSampleSink> {
+pub fn new_shared_sink_with_path(
+    path: impl AsRef<Path>,
+) -> anyhow::Result<SharedBossTestSampleSink> {
     Ok(Arc::new(BossTestSampleSink::with_jsonl_path(path)?))
 }

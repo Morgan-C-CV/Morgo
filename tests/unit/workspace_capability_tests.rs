@@ -51,7 +51,10 @@ fn r0_1_effective_tier_falls_back_to_global_when_no_scopes() {
         escalate_to_pending_approval: true,
         audit_capability_decisions: false,
     };
-    assert_eq!(config.effective_max_tier(Path::new("/any/path")), CapabilityTier::Write);
+    assert_eq!(
+        config.effective_max_tier(Path::new("/any/path")),
+        CapabilityTier::Write
+    );
 }
 
 #[test]
@@ -140,11 +143,17 @@ fn r0_1_check_requires_approval_when_tier_exceeded_and_escalation_on() {
         escalate_to_pending_approval: true,
         audit_capability_decisions: false,
     };
-    let req = CommandCapabilityRequirement::admin_bash(CapabilityRequirementReason::DestructivePattern);
+    let req =
+        CommandCapabilityRequirement::admin_bash(CapabilityRequirementReason::DestructivePattern);
     let outcome = check_bash_capability(&req, &config, Path::new("/project"));
     assert!(outcome.requires_approval());
     assert_eq!(outcome.as_str(), "requires_approval");
-    if let CapabilityCheckOutcome::RequiresApproval { required_tier, allowed_tier, reason } = outcome {
+    if let CapabilityCheckOutcome::RequiresApproval {
+        required_tier,
+        allowed_tier,
+        reason,
+    } = outcome
+    {
         assert_eq!(required_tier, CapabilityTier::AdminBash);
         assert_eq!(allowed_tier, CapabilityTier::Write);
         assert_eq!(reason, CapabilityRequirementReason::DestructivePattern);
@@ -226,7 +235,8 @@ fn r0_1_requirement_from_policy_read_only_command() {
 
 #[test]
 fn r0_1_requirement_from_policy_destructive_is_admin_bash() {
-    let policy = evaluate_bash_policy_with_context("rm -rf /tmp/test", std::path::Path::new("/tmp"), None);
+    let policy =
+        evaluate_bash_policy_with_context("rm -rf /tmp/test", std::path::Path::new("/tmp"), None);
     let req = requirement_from_policy(&policy);
     assert_eq!(req.required_tier, CapabilityTier::AdminBash);
     assert_eq!(req.reason, CapabilityRequirementReason::DestructivePattern);

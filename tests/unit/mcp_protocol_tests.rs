@@ -3,8 +3,7 @@ use std::collections::BTreeMap;
 use rust_agent::service::mcp::client::{McpClient, RoutingMcpClient};
 use rust_agent::service::mcp::runtime::McpRuntime;
 use rust_agent::service::mcp::types::{
-    McpAction, McpCapabilities, McpFailureCode, McpRequest, McpServerConfig,
-    McpTransportKind,
+    McpAction, McpCapabilities, McpFailureCode, McpRequest, McpServerConfig, McpTransportKind,
 };
 use serde_json::json;
 
@@ -150,8 +149,13 @@ while True:
     };
 
     let client = RoutingMcpClient::default();
-    let error = client.connect(&config).await.expect_err("connect should fail");
-    assert!(error.to_string().contains("Content-Length") || error.to_string().contains("invalid digit"));
+    let error = client
+        .connect(&config)
+        .await
+        .expect_err("connect should fail");
+    assert!(
+        error.to_string().contains("Content-Length") || error.to_string().contains("invalid digit")
+    );
 }
 
 #[tokio::test]
@@ -212,7 +216,10 @@ while True:
     };
 
     let client = RoutingMcpClient::default();
-    let error = client.connect(&config).await.expect_err("connect should fail");
+    let error = client
+        .connect(&config)
+        .await
+        .expect_err("connect should fail");
     assert!(error.to_string().contains("id mismatch"));
 }
 
@@ -279,7 +286,10 @@ while True:
         ca_bundle_path: None,
     };
 
-    let runtime = McpRuntime::new(std::sync::Arc::new(RoutingMcpClient::default()), vec![config]);
+    let runtime = McpRuntime::new(
+        std::sync::Arc::new(RoutingMcpClient::default()),
+        vec![config],
+    );
     let error = runtime
         .dispatch(McpRequest {
             action: McpAction::ListTools,

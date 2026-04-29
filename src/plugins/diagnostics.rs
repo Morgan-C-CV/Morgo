@@ -1,8 +1,10 @@
 use crate::plugins::types::{
-    PluginCapability, PluginDiagnostic, PluginDiagnosticSeverity, PluginDefinition,
+    PluginCapability, PluginDefinition, PluginDiagnostic, PluginDiagnosticSeverity,
     PluginLifecycleState, PluginLoadResult,
 };
-use crate::skills::visibility::{SkillActivationDecision, SkillConflictRecord, SkillVisibilityResult};
+use crate::skills::visibility::{
+    SkillActivationDecision, SkillConflictRecord, SkillVisibilityResult,
+};
 
 // ── Capability block reasons ──────────────────────────────────────────────────
 
@@ -220,7 +222,11 @@ impl PluginDiagnosticReport {
 pub fn build_capability_record(plugin: &PluginDefinition) -> PluginCapabilityRecord {
     PluginCapabilityRecord {
         plugin_name: plugin.name.clone(),
-        commands: capability_status(plugin, PluginCapability::Commands, plugin.activation.commands),
+        commands: capability_status(
+            plugin,
+            PluginCapability::Commands,
+            plugin.activation.commands,
+        ),
         tools: capability_status(plugin, PluginCapability::Tools, plugin.activation.tools),
         hooks: capability_status(plugin, PluginCapability::Hooks, plugin.activation.hooks),
     }
@@ -245,7 +251,9 @@ fn capability_status(
     if active_count == 0 {
         return PluginCapabilityStatus::Blocked(CapabilityBlockReason::NoActiveItems);
     }
-    PluginCapabilityStatus::Active { item_count: active_count }
+    PluginCapabilityStatus::Active {
+        item_count: active_count,
+    }
 }
 
 /// Build a `PluginDiagnosticReport` from a `PluginLoadResult` and optional skill visibility.

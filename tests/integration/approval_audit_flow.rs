@@ -11,7 +11,9 @@ use rust_agent::interaction::telegram::gateway::TelegramGateway;
 use rust_agent::plan::manager::PlanManager;
 use rust_agent::security::audit::{AuditEvent, AuditLog};
 use rust_agent::state::app_state::{AppState, RuntimeRole};
-use rust_agent::state::permission_context::{PendingApproval, PermissionMode, ToolPermissionContext};
+use rust_agent::state::permission_context::{
+    PendingApproval, PermissionMode, ToolPermissionContext,
+};
 use rust_agent::task::manager::TaskManager;
 use rust_agent::tool::registry::ToolRegistry;
 use tokio::sync::RwLock;
@@ -78,16 +80,18 @@ fn make_app_state(surface: InteractionSurface, audit_root: Option<PathBuf>) -> A
 }
 
 fn set_pending(app_state: &AppState, tool_name: &str, code: Option<&str>) {
-    app_state.permission_context.set_pending_approval(Some(PendingApproval {
-        tool_name: tool_name.to_string(),
-        tool_input: r#"{"command":"rm -rf /tmp/test"}"#.to_string(),
-        message: format!("bash command requires approval [{tool_name}]"),
-        code: code.map(str::to_string),
-        summary: Some("Bash pending approval".into()),
-        detail: Some("destructive pattern detected".into()),
-        approval_kind: Some("tool_permission".into()),
-        escalation_reasons: vec!["destructive_pattern".into()],
-    }));
+    app_state
+        .permission_context
+        .set_pending_approval(Some(PendingApproval {
+            tool_name: tool_name.to_string(),
+            tool_input: r#"{"command":"rm -rf /tmp/test"}"#.to_string(),
+            message: format!("bash command requires approval [{tool_name}]"),
+            code: code.map(str::to_string),
+            summary: Some("Bash pending approval".into()),
+            detail: Some("destructive pattern detected".into()),
+            approval_kind: Some("tool_permission".into()),
+            escalation_reasons: vec!["destructive_pattern".into()],
+        }));
 }
 
 fn audit_events(app_state: &AppState) -> Vec<AuditEvent> {
@@ -104,9 +108,9 @@ async fn r0_3_deny_emits_approval_resolved_audit_event() {
     app_state.resolve_pending_approval(false).await.unwrap();
 
     let events = audit_events(&app_state);
-    let approval_event = events.iter().find(|e| {
-        matches!(e, AuditEvent::ApprovalResolved { .. })
-    });
+    let approval_event = events
+        .iter()
+        .find(|e| matches!(e, AuditEvent::ApprovalResolved { .. }));
     assert!(approval_event.is_some(), "expected ApprovalResolved event");
     if let Some(AuditEvent::ApprovalResolved {
         tool_name,
@@ -138,10 +142,13 @@ async fn r0_3_approve_emits_approval_resolved_audit_event() {
     let _ = app_state.resolve_pending_approval(true).await;
 
     let events = audit_events(&app_state);
-    let approval_event = events.iter().find(|e| {
-        matches!(e, AuditEvent::ApprovalResolved { decision, .. } if decision == "approved")
-    });
-    assert!(approval_event.is_some(), "expected ApprovalResolved approved event");
+    let approval_event = events.iter().find(
+        |e| matches!(e, AuditEvent::ApprovalResolved { decision, .. } if decision == "approved"),
+    );
+    assert!(
+        approval_event.is_some(),
+        "expected ApprovalResolved approved event"
+    );
 }
 
 // ── approval audit: surface is recorded correctly ─────────────────────────────
@@ -154,10 +161,13 @@ async fn r0_3_telegram_surface_recorded_in_audit() {
     app_state.resolve_pending_approval(false).await.unwrap();
 
     let events = audit_events(&app_state);
-    let approval_event = events.iter().find(|e| {
-        matches!(e, AuditEvent::ApprovalResolved { surface, .. } if surface == "telegram")
-    });
-    assert!(approval_event.is_some(), "expected telegram surface in audit");
+    let approval_event = events.iter().find(
+        |e| matches!(e, AuditEvent::ApprovalResolved { surface, .. } if surface == "telegram"),
+    );
+    assert!(
+        approval_event.is_some(),
+        "expected telegram surface in audit"
+    );
 }
 
 #[tokio::test]
@@ -168,9 +178,9 @@ async fn r0_3_remote_surface_recorded_in_audit() {
     app_state.resolve_pending_approval(false).await.unwrap();
 
     let events = audit_events(&app_state);
-    let approval_event = events.iter().find(|e| {
-        matches!(e, AuditEvent::ApprovalResolved { surface, .. } if surface == "remote")
-    });
+    let approval_event = events
+        .iter()
+        .find(|e| matches!(e, AuditEvent::ApprovalResolved { surface, .. } if surface == "remote"));
     assert!(approval_event.is_some(), "expected remote surface in audit");
 }
 
@@ -179,22 +189,27 @@ async fn r0_3_remote_surface_recorded_in_audit() {
 #[tokio::test]
 async fn r0_3_escalation_reasons_preserved_in_audit() {
     let app_state = make_app_state(InteractionSurface::Cli, None);
-    app_state.permission_context.set_pending_approval(Some(PendingApproval {
-        tool_name: "Bash".to_string(),
-        tool_input: "{}".to_string(),
-        message: "requires approval".to_string(),
-        code: None,
-        summary: None,
-        detail: None,
-        approval_kind: None,
-        escalation_reasons: vec!["destructive_pattern".into(), "shell_operator".into()],
-    }));
+    app_state
+        .permission_context
+        .set_pending_approval(Some(PendingApproval {
+            tool_name: "Bash".to_string(),
+            tool_input: "{}".to_string(),
+            message: "requires approval".to_string(),
+            code: None,
+            summary: None,
+            detail: None,
+            approval_kind: None,
+            escalation_reasons: vec!["destructive_pattern".into(), "shell_operator".into()],
+        }));
 
     app_state.resolve_pending_approval(false).await.unwrap();
 
     let events = audit_events(&app_state);
-    if let Some(AuditEvent::ApprovalResolved { escalation_reasons, .. }) =
-        events.iter().find(|e| matches!(e, AuditEvent::ApprovalResolved { .. }))
+    if let Some(AuditEvent::ApprovalResolved {
+        escalation_reasons, ..
+    }) = events
+        .iter()
+        .find(|e| matches!(e, AuditEvent::ApprovalResolved { .. }))
     {
         assert!(escalation_reasons.contains(&"destructive_pattern".to_string()));
         assert!(escalation_reasons.contains(&"shell_operator".to_string()));
@@ -211,14 +226,20 @@ async fn r0_3_no_pending_approval_emits_no_audit_event() {
     // No pending approval set
 
     let result = app_state.resolve_pending_approval(false).await.unwrap();
-    assert!(matches!(result, rust_agent::command::types::CommandResult::Denied(_)));
+    assert!(matches!(
+        result,
+        rust_agent::command::types::CommandResult::Denied(_)
+    ));
 
     let events = audit_events(&app_state);
     let approval_events: Vec<_> = events
         .iter()
         .filter(|e| matches!(e, AuditEvent::ApprovalResolved { .. }))
         .collect();
-    assert!(approval_events.is_empty(), "no audit event expected when no pending approval");
+    assert!(
+        approval_events.is_empty(),
+        "no audit event expected when no pending approval"
+    );
 }
 
 // ── approval audit: AuditRecord shape ────────────────────────────────────────
@@ -287,7 +308,11 @@ async fn r0_3_both_approve_and_deny_persist_to_same_jsonl() {
         .iter()
         .filter(|r| r.event_kind == "approval_resolved")
         .collect();
-    assert_eq!(approval_records.len(), 2, "expected 2 approval_resolved records");
+    assert_eq!(
+        approval_records.len(),
+        2,
+        "expected 2 approval_resolved records"
+    );
 
     let denied = approval_records.iter().find(|r| r.outcome == "denied");
     let approved = approval_records.iter().find(|r| r.outcome == "approved");

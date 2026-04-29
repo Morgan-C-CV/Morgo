@@ -74,7 +74,11 @@ impl BossContextBrief {
             lines.push(format!("allowed_tools: {}", self.allowed_tools.join(", ")));
         }
         lines.push(format!("parent_session_id: {}", self.parent_session_id));
-        PromptSegment::new("actor_brief", PromptSegmentKind::ActorBrief, lines.join("\n"))
+        PromptSegment::new(
+            "actor_brief",
+            PromptSegmentKind::ActorBrief,
+            lines.join("\n"),
+        )
     }
 }
 
@@ -98,12 +102,19 @@ impl BossStateFrame {
             }
         }
         if !self.allowed_actions.is_empty() {
-            lines.push(format!("allowed_actions: {}", self.allowed_actions.join(", ")));
+            lines.push(format!(
+                "allowed_actions: {}",
+                self.allowed_actions.join(", ")
+            ));
         }
         if let Some(hint) = &self.required_output_hint {
             lines.push(format!("required_output: {hint}"));
         }
-        PromptSegment::new("state_frame", PromptSegmentKind::StateFrame, lines.join("\n"))
+        PromptSegment::new(
+            "state_frame",
+            PromptSegmentKind::StateFrame,
+            lines.join("\n"),
+        )
     }
 }
 

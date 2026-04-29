@@ -4,13 +4,11 @@
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use rust_agent::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
 use rust_agent::core::boss::{BossCoordinator, save_plan};
-use rust_agent::core::boss_state::{
-    BossPlan, BossPlanStep, BossPlanStepStatus, BossStage,
-};
+use rust_agent::core::boss_state::{BossPlan, BossPlanStep, BossPlanStepStatus, BossStage};
 use rust_agent::core::boss_test_readiness::BossTestRunOutcome;
 use rust_agent::core::lism_ab_sample::{LisMAbSampleSink, new_shared_ab_sink};
-use rust_agent::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
 use rust_agent::cost::tracker::CostTracker;
 use rust_agent::history::session::InMemorySessionStore;
 use rust_agent::interaction::dispatcher::NotificationDispatcher;
@@ -165,7 +163,10 @@ async fn r1_2_plan_complete_records_completed_sample() {
     let app_state = make_app_state("session-complete-test");
 
     let msg = coordinator.advance_plan(&app_state).await.unwrap();
-    assert!(msg.as_deref().unwrap_or("").contains("complete"), "expected completion message");
+    assert!(
+        msg.as_deref().unwrap_or("").contains("complete"),
+        "expected completion message"
+    );
     assert_eq!(coordinator.get_stage().await, BossStage::Completed);
 
     // LisM A/B sink should have one record
@@ -231,7 +232,9 @@ async fn r1_2_terminal_failure_records_aborted_sample() {
 
     let msg = coordinator.advance_plan(&app_state).await.unwrap();
     assert!(
-        msg.as_deref().unwrap_or("").contains("terminal step failure"),
+        msg.as_deref()
+            .unwrap_or("")
+            .contains("terminal step failure"),
         "expected terminal failure message"
     );
 
@@ -379,7 +382,9 @@ async fn r1_2_sink_summary_after_completed_and_aborted_runs() {
     // Both runs have lism_enabled=false (default session has no LisM)
     assert_eq!(summary.off_runs, 2);
     assert_eq!(summary.on_runs, 0);
-    let rate = summary.off_completion_rate.expect("completion rate should be Some");
+    let rate = summary
+        .off_completion_rate
+        .expect("completion rate should be Some");
     // 1 completed, 1 aborted → 0.5
     assert!((rate - 0.5).abs() < 1e-9);
 

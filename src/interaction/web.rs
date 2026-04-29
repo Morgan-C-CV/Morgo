@@ -1,7 +1,6 @@
 use crate::core::engine::QueryEngine;
 use crate::interaction::remote::{
-    RemoteRequest, RemoteResponse, RemoteResponseMeta, RemoteResponseOutcome,
-    handle_remote_request,
+    RemoteRequest, RemoteResponse, RemoteResponseMeta, RemoteResponseOutcome, handle_remote_request,
 };
 use crate::interaction::router::CommandRouter;
 use crate::state::app_state::AppState;

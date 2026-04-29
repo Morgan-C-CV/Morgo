@@ -83,7 +83,10 @@ pub enum BudgetDecision {
 
 /// Estimate token budget for a prompt assembly and return a dispatch decision.
 /// Pure function — does not modify `assembly`, BossPlan, or session_snapshot.
-pub fn evaluate_prompt_budget(assembly: &PromptAssembly, profile: &ProviderProfile) -> (BudgetEstimate, BudgetDecision) {
+pub fn evaluate_prompt_budget(
+    assembly: &PromptAssembly,
+    profile: &ProviderProfile,
+) -> (BudgetEstimate, BudgetDecision) {
     let static_chars: usize = assembly
         .segments()
         .iter()
@@ -131,7 +134,7 @@ pub fn evaluate_prompt_budget(assembly: &PromptAssembly, profile: &ProviderProfi
 /// Convenience: evaluate a raw message string against the default provider profile.
 /// Used by `ask_b_session` before the T25/T25.2 trim/summarize path.
 pub fn evaluate_message_budget(message: &str) -> BudgetDecision {
-    use crate::core::prompt_segment::{PromptSegment};
+    use crate::core::prompt_segment::PromptSegment;
     let mut assembly = PromptAssembly::new();
     assembly.push(PromptSegment::new(
         "message",

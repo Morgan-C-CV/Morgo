@@ -10,8 +10,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rust_agent::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
 use rust_agent::command::registry::CommandRegistry;
 use rust_agent::core::boss_state::{
-    BossActorHandle, BossActorRole, BossLisMPolicy, BossObservabilitySummary,
-    BossPlanStepStatus, BossReportPayload, BossStage, BossStepReport,
+    BossActorHandle, BossActorRole, BossLisMPolicy, BossObservabilitySummary, BossPlanStepStatus,
+    BossReportPayload, BossStage, BossStepReport,
 };
 use rust_agent::core::boss_test_readiness::{BossRollbackPolicy, BossTestRunOutcome};
 use rust_agent::core::boss_test_sample_sink::BossTestSampleSink;
@@ -25,7 +25,9 @@ use rust_agent::security::workspace_capability::{CapabilityTier, WorkspaceCapabi
 use rust_agent::state::app_state::{
     ActiveModelProfileSource, ActiveModelProviderSummary, AppState, RuntimeRole,
 };
-use rust_agent::state::permission_context::{PendingApproval, PermissionMode, ToolPermissionContext};
+use rust_agent::state::permission_context::{
+    PendingApproval, PermissionMode, ToolPermissionContext,
+};
 use rust_agent::task::manager::TaskManager;
 use rust_agent::tool::registry::ToolRegistry;
 use tokio::sync::RwLock;
@@ -99,20 +101,24 @@ fn make_app_state_with_capability(
 }
 
 fn set_bash_pending(app_state: &AppState, code: &str) {
-    app_state.permission_context.set_pending_approval(Some(PendingApproval {
-        tool_name: "Bash".to_string(),
-        tool_input: r#"{"command":"rm -rf /project/dist"}"#.to_string(),
-        message: format!("bash command requires approval [{}]", code),
-        code: Some(code.to_string()),
-        summary: Some("Bash pending approval".into()),
-        detail: Some("command requires admin_bash capability but workspace allows write".into()),
-        approval_kind: Some("capability_escalation".into()),
-        escalation_reasons: vec![
-            "capability.required=admin_bash".into(),
-            "capability.allowed=write".into(),
-            "capability.reason=destructive_pattern".into(),
-        ],
-    }));
+    app_state
+        .permission_context
+        .set_pending_approval(Some(PendingApproval {
+            tool_name: "Bash".to_string(),
+            tool_input: r#"{"command":"rm -rf /project/dist"}"#.to_string(),
+            message: format!("bash command requires approval [{}]", code),
+            code: Some(code.to_string()),
+            summary: Some("Bash pending approval".into()),
+            detail: Some(
+                "command requires admin_bash capability but workspace allows write".into(),
+            ),
+            approval_kind: Some("capability_escalation".into()),
+            escalation_reasons: vec![
+                "capability.required=admin_bash".into(),
+                "capability.allowed=write".into(),
+                "capability.reason=destructive_pattern".into(),
+            ],
+        }));
 }
 
 fn audit_approval_events(app_state: &AppState) -> Vec<AuditEvent> {
@@ -188,7 +194,14 @@ async fn r0_drill_tui_pending_approval_yes_emits_approved_audit() {
 
     let events = audit_approval_events(&app_state);
     assert_eq!(events.len(), 1);
-    if let AuditEvent::ApprovalResolved { decision, surface, tool_name, code, .. } = &events[0] {
+    if let AuditEvent::ApprovalResolved {
+        decision,
+        surface,
+        tool_name,
+        code,
+        ..
+    } = &events[0]
+    {
         assert_eq!(decision, "approved");
         assert_eq!(surface, "cli");
         assert_eq!(tool_name, "Bash");
@@ -341,7 +354,9 @@ async fn r0_drill_boss_capability_approved_records_completed_sample_with_cache_r
     assert_eq!(sample.pending_approval_count, 1);
     assert_eq!(sample.cost_micros_usd, 2000);
     // cache_hit_ratio = 600 / (600+400) = 0.6
-    let ratio = sample.cache_hit_ratio.expect("cache_hit_ratio should be Some");
+    let ratio = sample
+        .cache_hit_ratio
+        .expect("cache_hit_ratio should be Some");
     assert!((ratio - 0.6).abs() < 1e-9);
 
     let events = audit_approval_events(&app_state);

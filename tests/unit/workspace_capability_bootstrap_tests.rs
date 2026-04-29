@@ -72,7 +72,7 @@ fn r0_4_load_from_json_defaults_for_missing_optional_fields() {
     assert_eq!(config.global_max_tier, CapabilityTier::Write);
     assert!(config.scopes.is_empty());
     assert!(config.escalate_to_pending_approval); // default_true
-    assert!(!config.audit_capability_decisions);  // default false
+    assert!(!config.audit_capability_decisions); // default false
 }
 
 // ── beta_deny_by_default preset ───────────────────────────────────────────────
@@ -157,7 +157,10 @@ fn r0_4_beta_deny_by_default_config_blocks_write_with_approval() {
     let config = WorkspaceCapabilityConfig::beta_deny_by_default();
     let req = CommandCapabilityRequirement::write();
     let outcome = check_bash_capability(&req, &config, std::path::Path::new("/project"));
-    assert!(outcome.requires_approval(), "write should require approval in beta preset");
+    assert!(
+        outcome.requires_approval(),
+        "write should require approval in beta preset"
+    );
 }
 
 #[test]
@@ -169,7 +172,10 @@ fn r0_4_beta_deny_by_default_config_allows_read() {
     let config = WorkspaceCapabilityConfig::beta_deny_by_default();
     let req = CommandCapabilityRequirement::read();
     let outcome = check_bash_capability(&req, &config, std::path::Path::new("/project"));
-    assert!(outcome.is_allowed(), "read should be allowed in beta preset");
+    assert!(
+        outcome.is_allowed(),
+        "read should be allowed in beta preset"
+    );
 }
 
 #[test]
@@ -179,7 +185,11 @@ fn r0_4_beta_deny_by_default_config_admin_bash_requires_approval() {
     };
 
     let config = WorkspaceCapabilityConfig::beta_deny_by_default();
-    let req = CommandCapabilityRequirement::admin_bash(CapabilityRequirementReason::DestructivePattern);
+    let req =
+        CommandCapabilityRequirement::admin_bash(CapabilityRequirementReason::DestructivePattern);
     let outcome = check_bash_capability(&req, &config, std::path::Path::new("/project"));
-    assert!(outcome.requires_approval(), "admin_bash should require approval in beta preset");
+    assert!(
+        outcome.requires_approval(),
+        "admin_bash should require approval in beta preset"
+    );
 }

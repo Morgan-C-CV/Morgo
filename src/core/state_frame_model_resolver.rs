@@ -1,8 +1,6 @@
 use anyhow::Context;
 
-use crate::bootstrap::model_profiles::{
-    ModelProfileRegistry, resolve_model_profile_from_registry,
-};
+use crate::bootstrap::model_profiles::{ModelProfileRegistry, resolve_model_profile_from_registry};
 use crate::core::state_frame_model_router::ModelRoute;
 use crate::service::observability::ServiceObservabilityTracker;
 use crate::state::active_model_runtime::ActiveModelRuntimeSnapshot;
@@ -40,8 +38,7 @@ pub fn resolve_step_model(
     })?;
     let resolved = resolve_model_profile_from_registry(registry, profile_name)
         .with_context(|| format!("failed to resolve step model profile '{profile_name}'"))?;
-    let snapshot =
-        ActiveModelRuntimeSnapshot::from_resolved_profile(&resolved, observability);
+    let snapshot = ActiveModelRuntimeSnapshot::from_resolved_profile(&resolved, observability);
 
     Ok(ResolvedStepModel {
         snapshot,
@@ -57,8 +54,8 @@ mod tests {
     use crate::bootstrap::model_profiles::parse_model_profiles_registry;
     use crate::core::state_frame_model_router::{ModelRoute, ModelTier};
     use crate::service::api::client::{
-        ModelPricing, ModelProviderConfig, ProviderAuthStrategy,
-        ProviderCompatibilityProfileKind, ProviderProtocol, ProviderTimeout,
+        ModelPricing, ModelProviderConfig, ProviderAuthStrategy, ProviderCompatibilityProfileKind,
+        ProviderProtocol, ProviderTimeout,
     };
     use crate::service::api::retry::RetryPolicy;
     use crate::service::observability::ServiceObservabilityTracker;
@@ -155,7 +152,10 @@ retry_max_backoff_ms = 100
         )
         .expect("resolver should succeed");
 
-        assert!(matches!(resolved.resolution, StepModelResolution::Inherited));
+        assert!(matches!(
+            resolved.resolution,
+            StepModelResolution::Inherited
+        ));
         assert_eq!(resolved.snapshot.config, inherited.config);
         assert_eq!(
             resolved.snapshot.active_profile_name,
@@ -187,12 +187,18 @@ retry_max_backoff_ms = 100
                 profile_name: "high-tier".into(),
             }
         );
-        assert_eq!(resolved.snapshot.active_profile_name.as_deref(), Some("high-tier"));
+        assert_eq!(
+            resolved.snapshot.active_profile_name.as_deref(),
+            Some("high-tier")
+        );
         assert_eq!(resolved.snapshot.config.provider_id, "anthropic");
         assert_eq!(resolved.snapshot.config.model_id, "claude-sonnet-4-6");
         assert_eq!(resolved.snapshot.summary.provider_id, "anthropic");
         assert_eq!(resolved.snapshot.summary.model, "claude-sonnet-4-6");
-        assert_eq!(inherited.active_profile_name.as_deref(), Some("inherited-fast"));
+        assert_eq!(
+            inherited.active_profile_name.as_deref(),
+            Some("inherited-fast")
+        );
     }
 
     #[test]
@@ -211,9 +217,11 @@ retry_max_backoff_ms = 100
         )
         .expect_err("resolver should fail");
 
-        assert!(error
-            .to_string()
-            .contains("model profile registry is unavailable"));
+        assert!(
+            error
+                .to_string()
+                .contains("model profile registry is unavailable")
+        );
     }
 
     #[test]
@@ -233,8 +241,10 @@ retry_max_backoff_ms = 100
         )
         .expect_err("resolver should fail");
 
-        assert!(error
-            .to_string()
-            .contains("failed to resolve step model profile 'missing-profile'"));
+        assert!(
+            error
+                .to_string()
+                .contains("failed to resolve step model profile 'missing-profile'")
+        );
     }
 }

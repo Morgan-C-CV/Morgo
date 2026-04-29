@@ -117,7 +117,13 @@ fn make_bound_gateway(user_id: &str, bot_id: &str, chat_id: &str) -> TelegramGat
     }])
 }
 
-fn make_update(update_id: u64, bot_id: &str, user_id: &str, chat_id: &str, text: &str) -> TelegramUpdate {
+fn make_update(
+    update_id: u64,
+    bot_id: &str,
+    user_id: &str,
+    chat_id: &str,
+    text: &str,
+) -> TelegramUpdate {
     TelegramUpdate {
         update_id,
         bot_id: bot_id.into(),
@@ -161,7 +167,13 @@ fn r3_4_normalize_skipped_when_no_message() {
     };
     let intake = normalize_telegram_update(&update);
     assert!(
-        matches!(intake, TelegramUpdateIntake::Skipped { reason: "no_message", .. }),
+        matches!(
+            intake,
+            TelegramUpdateIntake::Skipped {
+                reason: "no_message",
+                ..
+            }
+        ),
         "expected Skipped(no_message), got {intake:?}"
     );
 }
@@ -183,7 +195,13 @@ fn r3_4_normalize_skipped_when_no_text() {
     };
     let intake = normalize_telegram_update(&update);
     assert!(
-        matches!(intake, TelegramUpdateIntake::Skipped { reason: "no_text", .. }),
+        matches!(
+            intake,
+            TelegramUpdateIntake::Skipped {
+                reason: "no_text",
+                ..
+            }
+        ),
         "expected Skipped(no_text), got {intake:?}"
     );
 }
@@ -202,7 +220,13 @@ fn r3_4_normalize_malformed_when_no_from() {
     };
     let intake = normalize_telegram_update(&update);
     assert!(
-        matches!(intake, TelegramUpdateIntake::Malformed { reason: "missing_from", .. }),
+        matches!(
+            intake,
+            TelegramUpdateIntake::Malformed {
+                reason: "missing_from",
+                ..
+            }
+        ),
         "expected Malformed(missing_from), got {intake:?}"
     );
 }
@@ -367,6 +391,9 @@ async fn r3_4_authorized_response_contains_primary_text() {
     {
         assert_eq!(primary_text, "the answer");
     } else {
-        panic!("expected Dispatched(Authorized), got {:?}", response.outcome);
+        panic!(
+            "expected Dispatched(Authorized), got {:?}",
+            response.outcome
+        );
     }
 }

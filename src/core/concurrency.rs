@@ -252,8 +252,9 @@ pub fn evaluate_boss_budget(
 
     if pressure == MemoryPressureLevel::Critical && matches!(role, WorkerRole::Research) {
         return BossBudgetDecision::Deny {
-            reason: "boss budget denied: critical memory pressure blocks low-priority research children"
-                .into(),
+            reason:
+                "boss budget denied: critical memory pressure blocks low-priority research children"
+                    .into(),
         };
     }
 
@@ -290,7 +291,8 @@ pub fn evaluate_boss_budget(
         };
     }
 
-    if pressure == MemoryPressureLevel::Warning && matches!(role, WorkerRole::Research | WorkerRole::Verify)
+    if pressure == MemoryPressureLevel::Warning
+        && matches!(role, WorkerRole::Research | WorkerRole::Verify)
     {
         return BossBudgetDecision::Queue {
             reason: format!(
@@ -335,7 +337,12 @@ mod tests {
             manager.set_boss_actor_id(&task.id, Some(format!("implement_child:depth={index}")));
         }
 
-        match evaluate_boss_budget(&manager, WorkerRole::Research, 1, MemoryPressureLevel::Normal) {
+        match evaluate_boss_budget(
+            &manager,
+            WorkerRole::Research,
+            1,
+            MemoryPressureLevel::Normal,
+        ) {
             BossBudgetDecision::Queue { reason } => {
                 assert!(reason.contains("role cap"));
             }
@@ -353,7 +360,12 @@ mod tests {
             manager.set_boss_actor_id(&task.id, Some(format!("implement_child:depth={index}")));
         }
 
-        match evaluate_boss_budget(&manager, WorkerRole::Implement, 1, MemoryPressureLevel::Normal) {
+        match evaluate_boss_budget(
+            &manager,
+            WorkerRole::Implement,
+            1,
+            MemoryPressureLevel::Normal,
+        ) {
             BossBudgetDecision::Queue { reason } => {
                 assert!(reason.contains("total cap"));
             }
@@ -365,14 +377,24 @@ mod tests {
     fn boss_budget_blocks_low_priority_children_when_pressure_is_critical() {
         let manager = TaskManager::default();
 
-        match evaluate_boss_budget(&manager, WorkerRole::Research, 1, MemoryPressureLevel::Critical) {
+        match evaluate_boss_budget(
+            &manager,
+            WorkerRole::Research,
+            1,
+            MemoryPressureLevel::Critical,
+        ) {
             BossBudgetDecision::Deny { reason } => {
                 assert!(reason.contains("critical memory pressure"));
             }
             other => panic!("expected Deny for research under critical pressure, got {other:?}"),
         }
 
-        match evaluate_boss_budget(&manager, WorkerRole::Verify, 1, MemoryPressureLevel::Critical) {
+        match evaluate_boss_budget(
+            &manager,
+            WorkerRole::Verify,
+            1,
+            MemoryPressureLevel::Critical,
+        ) {
             BossBudgetDecision::Queue { reason } => {
                 assert!(reason.contains("preserves implement capacity"));
             }
@@ -380,13 +402,22 @@ mod tests {
         }
 
         assert_eq!(
-            evaluate_boss_budget(&manager, WorkerRole::Implement, 1, MemoryPressureLevel::Critical),
+            evaluate_boss_budget(
+                &manager,
+                WorkerRole::Implement,
+                1,
+                MemoryPressureLevel::Critical
+            ),
             BossBudgetDecision::Allow
         );
         assert!(matches!(
-            evaluate_boss_budget(&manager, WorkerRole::Implement, 2, MemoryPressureLevel::Normal),
+            evaluate_boss_budget(
+                &manager,
+                WorkerRole::Implement,
+                2,
+                MemoryPressureLevel::Normal
+            ),
             BossBudgetDecision::Deny { .. }
         ));
     }
-
 }

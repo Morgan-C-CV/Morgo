@@ -6,12 +6,12 @@ use serde::Deserialize;
 use tokio::process::Command;
 use tokio::time::timeout;
 
+use crate::security::workspace_capability::{
+    CapabilityCheckOutcome, check_bash_capability, requirement_from_policy,
+};
 use crate::state::permission_context::{PermissionMode, ToolPermissionContext};
 use crate::tool::definition::{
     PermissionApprovalMetadata, PermissionDecision, Tool, ToolCall, ToolMetadata, ToolResult,
-};
-use crate::security::workspace_capability::{
-    check_bash_capability, requirement_from_policy, CapabilityCheckOutcome,
 };
 
 pub mod clamped_reader;
@@ -196,7 +196,11 @@ impl Tool for BashTool {
                 let outcome = check_bash_capability(&requirement, &cap_config, &cwd);
                 match outcome {
                     CapabilityCheckOutcome::Allowed => {}
-                    CapabilityCheckOutcome::RequiresApproval { required_tier, allowed_tier, reason } => {
+                    CapabilityCheckOutcome::RequiresApproval {
+                        required_tier,
+                        allowed_tier,
+                        reason,
+                    } => {
                         return bash_ask(
                             "capability_escalation",
                             &format!(
@@ -212,7 +216,11 @@ impl Tool for BashTool {
                             ],
                         );
                     }
-                    CapabilityCheckOutcome::Denied { required_tier, allowed_tier, reason } => {
+                    CapabilityCheckOutcome::Denied {
+                        required_tier,
+                        allowed_tier,
+                        reason,
+                    } => {
                         return PermissionDecision::Deny {
                             message: format!(
                                 "bash command denied [capability_denied]: requires {} but workspace allows {}; reason={}",
@@ -401,24 +409,43 @@ async fn run_background_process(
         .spawn()
         .map_err(|error| anyhow::anyhow!("failed to spawn background bash command: {error}"))?;
 
-    let stdout_task = child.stdout.take().map(|stdout| tokio::spawn(read_clamped(stdout)));
-    let stderr_task = child.stderr.take().map(|stderr| tokio::spawn(read_clamped(stderr)));
+    let stdout_task = child
+        .stdout
+        .take()
+        .map(|stdout| tokio::spawn(read_clamped(stdout)));
+    let stderr_task = child
+        .stderr
+        .take()
+        .map(|stderr| tokio::spawn(read_clamped(stderr)));
 
     let status = timeout(Duration::from_millis(timeout_ms), child.wait())
         .await
         .map_err(|_| anyhow::anyhow!("bash command timed out after {timeout_ms}ms"))??;
 
-    let empty = || ClampedOutput { head: vec![], tail: vec![], truncated: false, total_bytes_read: 0 };
+    let empty = || ClampedOutput {
+        head: vec![],
+        tail: vec![],
+        truncated: false,
+        total_bytes_read: 0,
+    };
     let stdout = match stdout_task {
-        Some(task) => task.await.map_err(|e| anyhow::anyhow!("stdout join failed: {e}"))?,
+        Some(task) => task
+            .await
+            .map_err(|e| anyhow::anyhow!("stdout join failed: {e}"))?,
         None => empty(),
     };
     let stderr = match stderr_task {
-        Some(task) => task.await.map_err(|e| anyhow::anyhow!("stderr join failed: {e}"))?,
+        Some(task) => task
+            .await
+            .map_err(|e| anyhow::anyhow!("stderr join failed: {e}"))?,
         None => empty(),
     };
 
-    Ok(ClampedProcessOutput { status, stdout, stderr })
+    Ok(ClampedProcessOutput {
+        status,
+        stdout,
+        stderr,
+    })
 }
 
 fn format_output_background(

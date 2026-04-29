@@ -416,7 +416,10 @@ impl TaskManager {
     }
 
     pub fn force_kill(&self, id: &str, dispatcher: &NotificationDispatcher) -> bool {
-        let is_active = matches!(self.status(id), Some(TaskStatus::Pending | TaskStatus::Running));
+        let is_active = matches!(
+            self.status(id),
+            Some(TaskStatus::Pending | TaskStatus::Running)
+        );
         if !is_active {
             return false;
         }

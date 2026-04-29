@@ -613,7 +613,10 @@ fn r2_mcp_server_config_proxy_fields_round_trip_serde() {
         args: vec![],
         env: BTreeMap::new(),
         transport: McpTransportKind::StdioProcess,
-        governance: McpServerGovernanceConfig { review_required: false, notes: None },
+        governance: McpServerGovernanceConfig {
+            review_required: false,
+            notes: None,
+        },
         connect_timeout_ms: 5_000,
         proxy_url: Some("http://proxy.corp:3128".into()),
         no_proxy: Some("localhost,127.0.0.1".into()),
@@ -625,7 +628,10 @@ fn r2_mcp_server_config_proxy_fields_round_trip_serde() {
 
     assert_eq!(decoded.proxy_url.as_deref(), Some("http://proxy.corp:3128"));
     assert_eq!(decoded.no_proxy.as_deref(), Some("localhost,127.0.0.1"));
-    assert_eq!(decoded.ca_bundle_path.as_deref(), Some("/etc/ssl/corp-ca.pem"));
+    assert_eq!(
+        decoded.ca_bundle_path.as_deref(),
+        Some("/etc/ssl/corp-ca.pem")
+    );
 }
 
 #[test]
@@ -647,7 +653,10 @@ fn r2_build_mcp_http_client_returns_ok_with_no_proxy_config() {
         args: vec![],
         env: BTreeMap::new(),
         transport: McpTransportKind::StdioProcess,
-        governance: McpServerGovernanceConfig { review_required: false, notes: None },
+        governance: McpServerGovernanceConfig {
+            review_required: false,
+            notes: None,
+        },
         connect_timeout_ms: 5_000,
         proxy_url: None,
         no_proxy: None,
@@ -655,7 +664,10 @@ fn r2_build_mcp_http_client_returns_ok_with_no_proxy_config() {
     };
 
     let result = rust_agent::service::mcp::client::build_mcp_http_client(&config);
-    assert!(result.is_ok(), "build_mcp_http_client must succeed with no proxy config");
+    assert!(
+        result.is_ok(),
+        "build_mcp_http_client must succeed with no proxy config"
+    );
 }
 
 #[test]
@@ -667,7 +679,10 @@ fn r2_build_mcp_http_client_returns_ok_with_valid_proxy_url() {
         args: vec![],
         env: BTreeMap::new(),
         transport: McpTransportKind::StdioProcess,
-        governance: McpServerGovernanceConfig { review_required: false, notes: None },
+        governance: McpServerGovernanceConfig {
+            review_required: false,
+            notes: None,
+        },
         connect_timeout_ms: 5_000,
         proxy_url: Some("http://proxy.corp:3128".into()),
         no_proxy: Some("localhost".into()),
@@ -675,7 +690,10 @@ fn r2_build_mcp_http_client_returns_ok_with_valid_proxy_url() {
     };
 
     let result = rust_agent::service::mcp::client::build_mcp_http_client(&config);
-    assert!(result.is_ok(), "build_mcp_http_client must succeed with valid proxy URL");
+    assert!(
+        result.is_ok(),
+        "build_mcp_http_client must succeed with valid proxy URL"
+    );
 }
 
 #[test]
@@ -687,7 +705,10 @@ fn r2_build_mcp_http_client_errors_on_missing_ca_bundle_path() {
         args: vec![],
         env: BTreeMap::new(),
         transport: McpTransportKind::StdioProcess,
-        governance: McpServerGovernanceConfig { review_required: false, notes: None },
+        governance: McpServerGovernanceConfig {
+            review_required: false,
+            notes: None,
+        },
         connect_timeout_ms: 5_000,
         proxy_url: None,
         no_proxy: None,
@@ -695,7 +716,10 @@ fn r2_build_mcp_http_client_errors_on_missing_ca_bundle_path() {
     };
 
     let result = rust_agent::service::mcp::client::build_mcp_http_client(&config);
-    assert!(result.is_err(), "build_mcp_http_client must fail when CA bundle path does not exist");
+    assert!(
+        result.is_err(),
+        "build_mcp_http_client must fail when CA bundle path does not exist"
+    );
     let msg = result.unwrap_err().to_string();
     assert!(
         msg.contains("failed to read MCP CA bundle"),

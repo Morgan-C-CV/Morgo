@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 
 use rust_agent::plugins::diagnostics::{
-    build_capability_record, build_diagnostic_report, CapabilityBlockReason,
-    PluginCapabilityStatus, PluginDiagnosticReport,
+    CapabilityBlockReason, PluginCapabilityStatus, PluginDiagnosticReport, build_capability_record,
+    build_diagnostic_report,
 };
 use rust_agent::plugins::types::{
     PluginActivationSummary, PluginApplyStatus, PluginCapability, PluginConfigSource,
@@ -57,7 +57,11 @@ fn active_plugin(name: &str, commands: usize, tools: usize, hooks: usize) -> Plu
             PluginCapability::Tools,
             PluginCapability::Hooks,
         ],
-        PluginActivationSummary { commands, tools, hooks },
+        PluginActivationSummary {
+            commands,
+            tools,
+            hooks,
+        },
     )
 }
 
@@ -125,12 +129,18 @@ fn r4_4_block_reason_as_str_values() {
         CapabilityBlockReason::GovernanceDisabled { reason: None }.as_str(),
         "governance_disabled"
     );
-    assert_eq!(CapabilityBlockReason::LifecycleError.as_str(), "lifecycle_error");
+    assert_eq!(
+        CapabilityBlockReason::LifecycleError.as_str(),
+        "lifecycle_error"
+    );
     assert_eq!(
         CapabilityBlockReason::CapabilityNotDeclared.as_str(),
         "capability_not_declared"
     );
-    assert_eq!(CapabilityBlockReason::NoActiveItems.as_str(), "no_active_items");
+    assert_eq!(
+        CapabilityBlockReason::NoActiveItems.as_str(),
+        "no_active_items"
+    );
 }
 
 #[test]
@@ -139,7 +149,10 @@ fn r4_4_block_reason_render_line_includes_reason_text() {
         reason: Some("security policy".to_string()),
     }
     .render_line();
-    assert!(line.contains("security policy"), "render_line should include reason text");
+    assert!(
+        line.contains("security policy"),
+        "render_line should include reason text"
+    );
 }
 
 // ── build_capability_record ───────────────────────────────────────────────────
@@ -171,9 +184,8 @@ fn r4_4_governance_disabled_blocks_all_capabilities() {
     assert!(!record.tools.is_active());
     assert!(!record.any_active());
 
-    if let PluginCapabilityStatus::Blocked(CapabilityBlockReason::GovernanceDisabled {
-        reason,
-    }) = &record.commands
+    if let PluginCapabilityStatus::Blocked(CapabilityBlockReason::GovernanceDisabled { reason }) =
+        &record.commands
     {
         assert_eq!(reason.as_deref(), Some("admin disabled"));
     } else {
@@ -202,7 +214,11 @@ fn r4_4_undeclared_capability_is_blocked_not_declared() {
         true,
         None,
         vec![PluginCapability::Tools],
-        PluginActivationSummary { commands: 0, tools: 2, hooks: 0 },
+        PluginActivationSummary {
+            commands: 0,
+            tools: 2,
+            hooks: 0,
+        },
     );
     let record = build_capability_record(&plugin);
 
@@ -222,7 +238,11 @@ fn r4_4_declared_but_zero_active_items_is_no_active_items() {
         true,
         None,
         vec![PluginCapability::Commands],
-        PluginActivationSummary { commands: 0, tools: 0, hooks: 0 },
+        PluginActivationSummary {
+            commands: 0,
+            tools: 0,
+            hooks: 0,
+        },
     );
     let record = build_capability_record(&plugin);
 
@@ -393,7 +413,10 @@ fn r4_4_render_lines_includes_per_plugin_lines() {
     let report = build_diagnostic_report(&load_result, None);
     let lines = report.render_lines();
 
-    assert!(lines.iter().any(|l| l.contains("ci")), "should include plugin line");
+    assert!(
+        lines.iter().any(|l| l.contains("ci")),
+        "should include plugin line"
+    );
 }
 
 #[test]

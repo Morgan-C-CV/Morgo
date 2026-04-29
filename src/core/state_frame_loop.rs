@@ -13,7 +13,10 @@ pub struct DecisionLoopConfig {
 
 impl Default for DecisionLoopConfig {
     fn default() -> Self {
-        Self { max_iterations: 5, repair_budget: 2 }
+        Self {
+            max_iterations: 5,
+            repair_budget: 2,
+        }
     }
 }
 
@@ -28,10 +31,20 @@ pub struct LoopUsage {
 
 #[derive(Debug, Clone)]
 pub enum LoopOutcome {
-    Done { final_state: AgentState, usage: LoopUsage },
-    Rejected { reason: String },
-    MaxIterationsReached { last_state: AgentState },
-    RepairExhausted { raw_json: String, reason: String },
+    Done {
+        final_state: AgentState,
+        usage: LoopUsage,
+    },
+    Rejected {
+        reason: String,
+    },
+    MaxIterationsReached {
+        last_state: AgentState,
+    },
+    RepairExhausted {
+        raw_json: String,
+        reason: String,
+    },
 }
 
 /// Collect text and token usage from a stream of events.
@@ -93,7 +106,11 @@ pub async fn run_decision_loop(
     let mut total_usage = LoopUsage::default();
 
     for _iter in 0..config.max_iterations {
-        let prompt = format!("{}\n{}", STATE_DECISION_INSTRUCTION, frame.to_prompt_segment().content);
+        let prompt = format!(
+            "{}\n{}",
+            STATE_DECISION_INSTRUCTION,
+            frame.to_prompt_segment().content
+        );
         let events = client.stream_message(&Message::user(prompt)).await;
         let (text, iter_usage) = collect_text_and_usage(events);
         total_usage.input_tokens += iter_usage.input_tokens;
@@ -115,8 +132,7 @@ pub async fn run_decision_loop(
                          Please respond with valid StateDecision JSON only.",
                         last_repair.reason, last_repair.raw_json
                     );
-                    let repair_events =
-                        client.stream_message(&Message::user(repair_prompt)).await;
+                    let repair_events = client.stream_message(&Message::user(repair_prompt)).await;
                     let (repaired_text, repair_usage) = collect_text_and_usage(repair_events);
                     total_usage.input_tokens += repair_usage.input_tokens;
                     total_usage.output_tokens += repair_usage.output_tokens;
@@ -144,7 +160,10 @@ pub async fn run_decision_loop(
 
         match decision.decision {
             DecisionKind::Done => {
-                return Ok(LoopOutcome::Done { final_state: decision.state, usage: total_usage });
+                return Ok(LoopOutcome::Done {
+                    final_state: decision.state,
+                    usage: total_usage,
+                });
             }
             DecisionKind::Reject => {
                 let reason = decision
@@ -163,7 +182,9 @@ pub async fn run_decision_loop(
             DecisionKind::RequestContext => {
                 // Append requested context keys with prefix to distinguish from real evidence.
                 for key in &decision.needed_context {
-                    frame.recent_evidence.push(format!("requested_context: {key}"));
+                    frame
+                        .recent_evidence
+                        .push(format!("requested_context: {key}"));
                 }
                 frame.state = decision.state;
             }
@@ -174,5 +195,7 @@ pub async fn run_decision_loop(
         }
     }
 
-    Ok(LoopOutcome::MaxIterationsReached { last_state: frame.state })
+    Ok(LoopOutcome::MaxIterationsReached {
+        last_state: frame.state,
+    })
 }

@@ -2,8 +2,8 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rust_agent::core::boss_state::{
-    BossActorHandle, BossActorRole, BossLisMPolicy, BossObservabilitySummary,
-    BossPlanStepStatus, BossReportPayload, BossStage, BossStepReport,
+    BossActorHandle, BossActorRole, BossLisMPolicy, BossObservabilitySummary, BossPlanStepStatus,
+    BossReportPayload, BossStage, BossStepReport,
 };
 use rust_agent::core::boss_test_readiness::BossTestRunOutcome;
 use rust_agent::core::lism_ab_sample::{
@@ -91,7 +91,13 @@ fn r1_1_record_run_adds_record_with_correct_lism_flag() {
     let report = make_report(3, 3, 600, 400, 1000);
 
     sink.record_run("run-on-1", true, &report, BossTestRunOutcome::Completed, 0);
-    sink.record_run("run-off-1", false, &report, BossTestRunOutcome::Completed, 0);
+    sink.record_run(
+        "run-off-1",
+        false,
+        &report,
+        BossTestRunOutcome::Completed,
+        0,
+    );
 
     assert_eq!(sink.record_count(), 2);
     let records = sink.records();
@@ -187,7 +193,13 @@ fn r1_1_summarize_both_arms_has_both_arms_true() {
     let sink = LisMAbSampleSink::in_memory();
     let report = make_report(1, 1, 600, 400, 1000);
     sink.record_run("run-on-1", true, &report, BossTestRunOutcome::Completed, 0);
-    sink.record_run("run-off-1", false, &report, BossTestRunOutcome::Completed, 0);
+    sink.record_run(
+        "run-off-1",
+        false,
+        &report,
+        BossTestRunOutcome::Completed,
+        0,
+    );
 
     let summary = sink.summarize();
     assert!(summary.has_both_arms());
@@ -202,11 +214,21 @@ fn r1_1_summarize_avg_cache_hit_ratio_computed_per_arm() {
     let off_report = make_report(1, 1, 200, 800, 0);
 
     sink.record_run("on-1", true, &on_report, BossTestRunOutcome::Completed, 0);
-    sink.record_run("off-1", false, &off_report, BossTestRunOutcome::Completed, 0);
+    sink.record_run(
+        "off-1",
+        false,
+        &off_report,
+        BossTestRunOutcome::Completed,
+        0,
+    );
 
     let summary = sink.summarize();
-    let on_ratio = summary.on_avg_cache_hit_ratio.expect("on ratio should be Some");
-    let off_ratio = summary.off_avg_cache_hit_ratio.expect("off ratio should be Some");
+    let on_ratio = summary
+        .on_avg_cache_hit_ratio
+        .expect("on ratio should be Some");
+    let off_ratio = summary
+        .off_avg_cache_hit_ratio
+        .expect("off ratio should be Some");
     assert!((on_ratio - 0.6).abs() < 1e-9);
     assert!((off_ratio - 0.2).abs() < 1e-9);
 }
@@ -218,11 +240,22 @@ fn r1_1_summarize_cache_hit_ratio_delta_positive_means_lism_helps() {
     let off_report = make_report(1, 1, 300, 700, 0); // ratio = 0.3
 
     sink.record_run("on-1", true, &on_report, BossTestRunOutcome::Completed, 0);
-    sink.record_run("off-1", false, &off_report, BossTestRunOutcome::Completed, 0);
+    sink.record_run(
+        "off-1",
+        false,
+        &off_report,
+        BossTestRunOutcome::Completed,
+        0,
+    );
 
     let summary = sink.summarize();
-    let delta = summary.cache_hit_ratio_delta().expect("delta should be Some");
-    assert!(delta > 0.0, "positive delta means LisM improves cache hit ratio");
+    let delta = summary
+        .cache_hit_ratio_delta()
+        .expect("delta should be Some");
+    assert!(
+        delta > 0.0,
+        "positive delta means LisM improves cache hit ratio"
+    );
     assert!((delta - 0.5).abs() < 1e-9);
 }
 
@@ -233,7 +266,13 @@ fn r1_1_summarize_avg_cost_computed_per_arm() {
     let off_report = make_report(1, 1, 0, 0, 3000);
 
     sink.record_run("on-1", true, &on_report, BossTestRunOutcome::Completed, 0);
-    sink.record_run("off-1", false, &off_report, BossTestRunOutcome::Completed, 0);
+    sink.record_run(
+        "off-1",
+        false,
+        &off_report,
+        BossTestRunOutcome::Completed,
+        0,
+    );
 
     let summary = sink.summarize();
     assert_eq!(summary.on_avg_cost_micros_usd, 1000);
@@ -255,8 +294,12 @@ fn r1_1_summarize_completion_rate_computed_per_arm() {
     sink.record_run("off-2", false, &report, BossTestRunOutcome::Aborted, 0);
 
     let summary = sink.summarize();
-    let on_rate = summary.on_completion_rate.expect("on completion rate should be Some");
-    let off_rate = summary.off_completion_rate.expect("off completion rate should be Some");
+    let on_rate = summary
+        .on_completion_rate
+        .expect("on completion rate should be Some");
+    let off_rate = summary
+        .off_completion_rate
+        .expect("off completion rate should be Some");
     assert!((on_rate - 2.0 / 3.0).abs() < 1e-9);
     assert!((off_rate - 0.5).abs() < 1e-9);
 }
@@ -270,7 +313,13 @@ fn r1_1_summarize_avg_tokens_saved_computed_per_arm() {
     let off_report = make_report(1, 1, 100, 900, 0);
 
     sink.record_run("on-1", true, &on_report, BossTestRunOutcome::Completed, 0);
-    sink.record_run("off-1", false, &off_report, BossTestRunOutcome::Completed, 0);
+    sink.record_run(
+        "off-1",
+        false,
+        &off_report,
+        BossTestRunOutcome::Completed,
+        0,
+    );
 
     let summary = sink.summarize();
     assert_eq!(summary.on_avg_tokens_saved, 800);
@@ -287,12 +336,20 @@ fn r1_1_summarize_multi_run_averages_correctly() {
     sink.record_run("on-2", true, &on_b, BossTestRunOutcome::Completed, 0);
 
     let off_report = make_report(1, 1, 200, 800, 2000);
-    sink.record_run("off-1", false, &off_report, BossTestRunOutcome::Completed, 0);
+    sink.record_run(
+        "off-1",
+        false,
+        &off_report,
+        BossTestRunOutcome::Completed,
+        0,
+    );
 
     let summary = sink.summarize();
     assert_eq!(summary.on_runs, 2);
     assert_eq!(summary.off_runs, 1);
-    let on_ratio = summary.on_avg_cache_hit_ratio.expect("on ratio should be Some");
+    let on_ratio = summary
+        .on_avg_cache_hit_ratio
+        .expect("on ratio should be Some");
     assert!((on_ratio - 0.7).abs() < 1e-9);
     assert_eq!(summary.on_avg_cost_micros_usd, 2000); // (1000+3000)/2
 }
@@ -306,7 +363,13 @@ fn r1_1_jsonl_sink_persists_records_to_disk() {
     let report = make_report(2, 2, 600, 400, 1500);
 
     sink.record_run("run-on-1", true, &report, BossTestRunOutcome::Completed, 0);
-    sink.record_run("run-off-1", false, &report, BossTestRunOutcome::Completed, 1);
+    sink.record_run(
+        "run-off-1",
+        false,
+        &report,
+        BossTestRunOutcome::Completed,
+        1,
+    );
 
     let loaded = LisMAbSampleSink::load_records(&path);
     assert_eq!(loaded.len(), 2);
@@ -433,7 +496,13 @@ fn r1_3_push_record_then_summarize_matches_direct_record_run() {
     // Direct recording path.
     let sink_direct = LisMAbSampleSink::in_memory();
     sink_direct.record_run("on-1", true, &report_on, BossTestRunOutcome::Completed, 0);
-    sink_direct.record_run("off-1", false, &report_off, BossTestRunOutcome::Completed, 0);
+    sink_direct.record_run(
+        "off-1",
+        false,
+        &report_off,
+        BossTestRunOutcome::Completed,
+        0,
+    );
 
     // Import path (simulates --lism-ab-summarize loading JSONL records).
     let sink_import = LisMAbSampleSink::in_memory();
@@ -445,8 +514,14 @@ fn r1_3_push_record_then_summarize_matches_direct_record_run() {
     let s_import = sink_import.summarize();
     assert_eq!(s_direct.on_runs, s_import.on_runs);
     assert_eq!(s_direct.off_runs, s_import.off_runs);
-    assert_eq!(s_direct.on_avg_cost_micros_usd, s_import.on_avg_cost_micros_usd);
-    assert_eq!(s_direct.off_avg_cost_micros_usd, s_import.off_avg_cost_micros_usd);
+    assert_eq!(
+        s_direct.on_avg_cost_micros_usd,
+        s_import.on_avg_cost_micros_usd
+    );
+    assert_eq!(
+        s_direct.off_avg_cost_micros_usd,
+        s_import.off_avg_cost_micros_usd
+    );
     assert_eq!(
         s_direct.on_avg_cache_hit_ratio.map(|v| (v * 1000.0) as u64),
         s_import.on_avg_cache_hit_ratio.map(|v| (v * 1000.0) as u64),
@@ -481,7 +556,7 @@ fn r1_3_load_records_then_push_into_sink_matches_summarize() {
 // ── Rollout conclusion (R1 slice 4) ───────────────────────────────────────────
 
 fn make_two_arm_sink(
-    on_cache_ratio_pct: u64,  // e.g. 80 → 0.8
+    on_cache_ratio_pct: u64, // e.g. 80 → 0.8
     off_cache_ratio_pct: u64,
     on_cost: u64,
     off_cost: u64,
@@ -496,9 +571,21 @@ fn make_two_arm_sink(
 
     for i in 0..runs_per_arm {
         let on_report = make_report(2, 2, on_read, on_write, on_cost);
-        sink.record_run(format!("on-{i}"), true, &on_report, BossTestRunOutcome::Completed, 0);
+        sink.record_run(
+            format!("on-{i}"),
+            true,
+            &on_report,
+            BossTestRunOutcome::Completed,
+            0,
+        );
         let off_report = make_report(2, 2, off_read, off_write, off_cost);
-        sink.record_run(format!("off-{i}"), false, &off_report, BossTestRunOutcome::Completed, 0);
+        sink.record_run(
+            format!("off-{i}"),
+            false,
+            &off_report,
+            BossTestRunOutcome::Completed,
+            0,
+        );
     }
     sink
 }
@@ -512,9 +599,14 @@ fn r1_4_conclude_force_on_when_lism_clearly_helps() {
     let summary = sink.summarize();
     let conclusion = LisMRolloutConclusion::from_summary_defaults(&summary);
     assert_eq!(conclusion.recommendation, LisMPolicyRecommendation::ForceOn);
-    let delta = conclusion.cache_hit_ratio_delta.expect("delta should be Some");
+    let delta = conclusion
+        .cache_hit_ratio_delta
+        .expect("delta should be Some");
     assert!(delta > 0.0, "cache delta should be positive");
-    assert!(conclusion.cost_delta_micros < 0, "cost delta should be negative (LisM saves)");
+    assert!(
+        conclusion.cost_delta_micros < 0,
+        "cost delta should be negative (LisM saves)"
+    );
 }
 
 #[test]
@@ -524,8 +616,13 @@ fn r1_4_conclude_force_off_when_lism_hurts_cache() {
     let sink = make_two_arm_sink(30, 70, 2000, 2000, 3);
     let summary = sink.summarize();
     let conclusion = LisMRolloutConclusion::from_summary_defaults(&summary);
-    assert_eq!(conclusion.recommendation, LisMPolicyRecommendation::ForceOff);
-    let delta = conclusion.cache_hit_ratio_delta.expect("delta should be Some");
+    assert_eq!(
+        conclusion.recommendation,
+        LisMPolicyRecommendation::ForceOff
+    );
+    let delta = conclusion
+        .cache_hit_ratio_delta
+        .expect("delta should be Some");
     assert!(delta < 0.0, "cache delta should be negative");
 }
 
@@ -535,7 +632,10 @@ fn r1_4_conclude_force_off_when_cost_penalty_exceeded() {
     let sink = make_two_arm_sink(60, 60, 700_000, 100_000, 3);
     let summary = sink.summarize();
     let conclusion = LisMRolloutConclusion::from_summary_defaults(&summary);
-    assert_eq!(conclusion.recommendation, LisMPolicyRecommendation::ForceOff);
+    assert_eq!(
+        conclusion.recommendation,
+        LisMPolicyRecommendation::ForceOff
+    );
     assert!(conclusion.cost_delta_micros > 500_000);
 }
 
@@ -555,7 +655,10 @@ fn r1_4_conclude_inconclusive_with_insufficient_data() {
     let sink = make_two_arm_sink(80, 40, 1000, 3000, 2);
     let summary = sink.summarize();
     let conclusion = LisMRolloutConclusion::from_summary_defaults(&summary);
-    assert_eq!(conclusion.recommendation, LisMPolicyRecommendation::Inconclusive);
+    assert_eq!(
+        conclusion.recommendation,
+        LisMPolicyRecommendation::Inconclusive
+    );
     assert!(conclusion.reason.contains("Insufficient data"));
 }
 
@@ -565,11 +668,20 @@ fn r1_4_conclude_inconclusive_when_only_one_arm() {
     let report = make_report(1, 1, 600, 400, 1000);
     // Only on-arm records
     for i in 0..5 {
-        sink.record_run(format!("on-{i}"), true, &report, BossTestRunOutcome::Completed, 0);
+        sink.record_run(
+            format!("on-{i}"),
+            true,
+            &report,
+            BossTestRunOutcome::Completed,
+            0,
+        );
     }
     let summary = sink.summarize();
     let conclusion = LisMRolloutConclusion::from_summary_defaults(&summary);
-    assert_eq!(conclusion.recommendation, LisMPolicyRecommendation::Inconclusive);
+    assert_eq!(
+        conclusion.recommendation,
+        LisMPolicyRecommendation::Inconclusive
+    );
 }
 
 #[test]
@@ -599,8 +711,15 @@ fn r1_4_conclude_inconclusive_when_usage_signal_is_missing() {
     assert_eq!(summary.cost_delta_micros(), 0);
 
     let conclusion = LisMRolloutConclusion::from_summary_defaults(&summary);
-    assert_eq!(conclusion.recommendation, LisMPolicyRecommendation::Inconclusive);
-    assert!(conclusion.reason.contains("No measurable cache or cost signal"));
+    assert_eq!(
+        conclusion.recommendation,
+        LisMPolicyRecommendation::Inconclusive
+    );
+    assert!(
+        conclusion
+            .reason
+            .contains("No measurable cache or cost signal")
+    );
 }
 
 #[test]
@@ -610,7 +729,8 @@ fn r1_4_conclude_serde_round_trip() {
     let conclusion = LisMRolloutConclusion::from_summary_defaults(&summary);
 
     let json = serde_json::to_string(&conclusion).expect("serialize should succeed");
-    let loaded: LisMRolloutConclusion = serde_json::from_str(&json).expect("deserialize should succeed");
+    let loaded: LisMRolloutConclusion =
+        serde_json::from_str(&json).expect("deserialize should succeed");
     assert_eq!(loaded.recommendation, conclusion.recommendation);
     assert_eq!(loaded.cost_delta_micros, conclusion.cost_delta_micros);
 }

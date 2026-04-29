@@ -13,7 +13,10 @@ pub struct AcceptedItem {
 ///
 /// Only `Completed` steps are included. The current step (if any) is excluded
 /// so it does not appear in both `accepted_summary` and `open_items`.
-pub fn build_accepted_archive(plan: &BossPlan, current_step_id: Option<usize>) -> Vec<AcceptedItem> {
+pub fn build_accepted_archive(
+    plan: &BossPlan,
+    current_step_id: Option<usize>,
+) -> Vec<AcceptedItem> {
     let exclude = current_step_id.unwrap_or(usize::MAX);
     plan.steps
         .iter()
@@ -30,10 +33,7 @@ pub fn build_accepted_archive(plan: &BossPlan, current_step_id: Option<usize>) -
 ///
 /// A criterion is considered satisfied if it appears verbatim in any archived item's
 /// `acceptance_criteria`. This prevents already-met criteria from re-appearing as open items.
-pub fn retain_open_items(
-    step_acceptance: &[String],
-    archive: &[AcceptedItem],
-) -> Vec<String> {
+pub fn retain_open_items(step_acceptance: &[String], archive: &[AcceptedItem]) -> Vec<String> {
     let satisfied: std::collections::HashSet<&str> = archive
         .iter()
         .flat_map(|a| a.acceptance_criteria.iter().map(|s| s.as_str()))

@@ -17,8 +17,8 @@ use rust_agent::interaction::dispatcher::NotificationDispatcher;
 use rust_agent::interaction::envelope::NormalizedInput;
 use rust_agent::interaction::notification::{Notification, NotificationTarget};
 use rust_agent::interaction::remote::{
-    RemoteEventPayload, RemoteRequest, RemoteResponseOutcome,
-    drain_remote_notifications, handle_remote_request,
+    RemoteEventPayload, RemoteRequest, RemoteResponseOutcome, drain_remote_notifications,
+    handle_remote_request,
 };
 use rust_agent::interaction::telegram::gateway::TelegramGateway;
 use rust_agent::plan::manager::PlanManager;
@@ -1842,7 +1842,9 @@ fn r3_remote_actor_store_file_backed_round_trip() {
 
     // Reload from same path
     let store2 = RemoteActorStore::file_backed(root);
-    let record = store2.get("sess-4", "actor-4").expect("record must survive reload");
+    let record = store2
+        .get("sess-4", "actor-4")
+        .expect("record must survive reload");
     assert_eq!(record.request_count, 1);
     assert!(record.is_authenticated);
     assert!(record.from_trusted_surface);
@@ -1897,7 +1899,9 @@ fn r3_actor_snapshot_returns_none_when_store_absent() {
     };
 
     assert!(
-        app_state.actor_snapshot("any-session", "any-actor").is_none(),
+        app_state
+            .actor_snapshot("any-session", "any-actor")
+            .is_none(),
         "actor_snapshot must return None when remote_actor_store is absent"
     );
 }
@@ -1951,10 +1955,7 @@ fn make_r3_2_app_state(store: Option<Arc<RemoteActorStore>>) -> AppState {
     }
 }
 
-fn make_r3_2_engine(
-    app_state: &AppState,
-    reply: &str,
-) -> rust_agent::core::engine::QueryEngine {
+fn make_r3_2_engine(app_state: &AppState, reply: &str) -> rust_agent::core::engine::QueryEngine {
     use rust_agent::service::api::streaming::{StopReason, StreamEvent};
     rust_agent::core::engine::QueryEngine::new(rust_agent::core::context::QueryContext {
         app_state: app_state.clone(),
@@ -2008,16 +2009,14 @@ async fn r3_2_response_meta_denied_outcome_on_unauthorized_request() {
     let app_state = make_r3_2_app_state(None);
     let router = rust_agent::interaction::router::CommandRouter::new(
         Arc::new(CommandRegistry::new()),
-        Box::new(
-            DefaultSurfaceAuthorizer::default().with_remote_policy(
-                rust_agent::security::authorizer::SurfaceAdmissionPolicy {
-                    allowlisted_actors: ["allowed-only".to_string()].into_iter().collect(),
-                    max_requests_per_window: None,
-                    window_seconds: 60,
-                    abuse_denial_threshold: None,
-                },
-            ),
-        ),
+        Box::new(DefaultSurfaceAuthorizer::default().with_remote_policy(
+            rust_agent::security::authorizer::SurfaceAdmissionPolicy {
+                allowlisted_actors: ["allowed-only".to_string()].into_iter().collect(),
+                max_requests_per_window: None,
+                window_seconds: 60,
+                abuse_denial_threshold: None,
+            },
+        )),
     );
     let engine = make_r3_2_engine(&app_state, "should not reach");
 
@@ -2071,8 +2070,8 @@ async fn r3_2_response_meta_request_count_increments() {
 
 #[tokio::test]
 async fn r3_2_response_meta_has_pending_approval_set() {
-    use rust_agent::state::permission_context::PendingApproval;
     use rust_agent::service::api::streaming::{StopReason, StreamEvent};
+    use rust_agent::state::permission_context::PendingApproval;
 
     let store = Arc::new(RemoteActorStore::in_memory());
     let mut app_state = make_r3_2_app_state(Some(store));
@@ -2094,8 +2093,8 @@ async fn r3_2_response_meta_has_pending_approval_set() {
         Arc::new(CommandRegistry::new()),
         Box::new(DefaultSurfaceAuthorizer::default()),
     );
-    let engine = rust_agent::core::engine::QueryEngine::new(
-        rust_agent::core::context::QueryContext {
+    let engine =
+        rust_agent::core::engine::QueryEngine::new(rust_agent::core::context::QueryContext {
             app_state: app_state.clone(),
             tool_registry: ToolRegistry::new().register(Arc::new(BashTool)),
             api_client: rust_agent::service::api::client::ModelProviderClient::with_scripted_turns(
@@ -2120,8 +2119,7 @@ async fn r3_2_response_meta_has_pending_approval_set() {
             system_prompt: "test".into(),
             tools_prompt: "test".into(),
             context_prompt: "test".into(),
-        },
-    );
+        });
 
     let response = handle_remote_request(
         &router,

@@ -38,7 +38,8 @@ pub struct BossRuntimeOwner {
 impl BossRuntimeOwner {
     pub fn global() -> Arc<Self> {
         static OWNER: OnceLock<Arc<BossRuntimeOwner>> = OnceLock::new();
-        OWNER.get_or_init(|| Arc::new(BossRuntimeOwner::default()))
+        OWNER
+            .get_or_init(|| Arc::new(BossRuntimeOwner::default()))
             .clone()
     }
 
@@ -101,7 +102,10 @@ impl BossRuntimeOwner {
 
     pub fn fresh_runtime_key(&self, plan_id: &str) -> String {
         static NEXT_RUNTIME_ID: AtomicU64 = AtomicU64::new(1);
-        format!("{plan_id}::runtime-{}", NEXT_RUNTIME_ID.fetch_add(1, Ordering::SeqCst))
+        format!(
+            "{plan_id}::runtime-{}",
+            NEXT_RUNTIME_ID.fetch_add(1, Ordering::SeqCst)
+        )
     }
 }
 
@@ -150,7 +154,9 @@ impl BossRuntimeHost {
         coordinator: &Arc<BossCoordinator>,
         app_state: &Arc<crate::state::app_state::AppState>,
     ) {
-        coordinator.bootstrap_actor_registry_with_app_state(app_state).await;
+        coordinator
+            .bootstrap_actor_registry_with_app_state(app_state)
+            .await;
     }
 
     /// Restore a coordinator from a persisted plan file, or create a fresh one if the file
@@ -163,7 +169,9 @@ impl BossRuntimeHost {
     ) -> anyhow::Result<Arc<BossCoordinator>> {
         let coordinator =
             BossCoordinator::restore_or_init_with_owner(path, self.owner.clone()).await?;
-        coordinator.bootstrap_actor_registry_with_app_state(app_state).await;
+        coordinator
+            .bootstrap_actor_registry_with_app_state(app_state)
+            .await;
         Ok(Arc::new(coordinator))
     }
 }

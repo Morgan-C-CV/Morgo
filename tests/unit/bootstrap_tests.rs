@@ -84,8 +84,8 @@ fn test_model_provider_config() -> ModelProviderConfig {
         no_proxy: None,
         ca_bundle_path: None,
         max_tokens_param: None,
-            prompt_cache_key: None,
-            prompt_cache_retention: None,
+        prompt_cache_key: None,
+        prompt_cache_retention: None,
     }
 }
 
@@ -671,10 +671,10 @@ api_key_env = "OPENAI_API_KEY"
         attachments: Vec::new(),
         surface: "cli".into(),
         lism_ab_sample: None,
-    lism_ab_conclude: None,
-    lism_ab_summarize: None,
-    lism_policy: None,
-    boss_task: None,
+        lism_ab_conclude: None,
+        lism_ab_summarize: None,
+        lism_policy: None,
+        boss_task: None,
     });
     let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::InitOnly, false);
     state.current_cwd = root;
@@ -728,10 +728,10 @@ fn bootstrap_models_toml_missing_file_falls_back_to_existing_bootstrap_defaults(
         attachments: Vec::new(),
         surface: "cli".into(),
         lism_ab_sample: None,
-    lism_ab_conclude: None,
-    lism_ab_summarize: None,
-    lism_policy: None,
-    boss_task: None,
+        lism_ab_conclude: None,
+        lism_ab_summarize: None,
+        lism_policy: None,
+        boss_task: None,
     });
     let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::InitOnly, false);
     state.current_cwd = root;
@@ -795,10 +795,10 @@ api_key_env = "OPENAI_API_KEY"
         attachments: Vec::new(),
         surface: "cli".into(),
         lism_ab_sample: None,
-    lism_ab_conclude: None,
-    lism_ab_summarize: None,
-    lism_policy: None,
-    boss_task: None,
+        lism_ab_conclude: None,
+        lism_ab_summarize: None,
+        lism_policy: None,
+        boss_task: None,
     });
     let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::InitOnly, false);
     state.current_cwd = root;
@@ -858,10 +858,10 @@ api_key_env = "OPENAI_API_KEY"
         attachments: Vec::new(),
         surface: "cli".into(),
         lism_ab_sample: None,
-    lism_ab_conclude: None,
-    lism_ab_summarize: None,
-    lism_policy: None,
-    boss_task: None,
+        lism_ab_conclude: None,
+        lism_ab_summarize: None,
+        lism_policy: None,
+        boss_task: None,
     });
     let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::InitOnly, false);
     state.current_cwd = root;
@@ -1017,10 +1017,10 @@ api_key_env = "OPENAI_API_KEY"
         attachments: Vec::new(),
         surface: "cli".into(),
         lism_ab_sample: None,
-    lism_ab_conclude: None,
-    lism_ab_summarize: None,
-    lism_policy: None,
-    boss_task: None,
+        lism_ab_conclude: None,
+        lism_ab_summarize: None,
+        lism_policy: None,
+        boss_task: None,
     });
     let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::InitOnly, false);
     state.current_cwd = root;
@@ -1071,10 +1071,10 @@ fn bootstrap_infers_openai_family_provider_contract_from_env() {
         attachments: Vec::new(),
         surface: "cli".into(),
         lism_ab_sample: None,
-    lism_ab_conclude: None,
-    lism_ab_summarize: None,
-    lism_policy: None,
-    boss_task: None,
+        lism_ab_conclude: None,
+        lism_ab_summarize: None,
+        lism_policy: None,
+        boss_task: None,
     });
     let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::InitOnly, false);
     state.current_cwd = std::env::current_dir().expect("cwd available");
@@ -1140,10 +1140,10 @@ auth_strategy = "none"
         attachments: Vec::new(),
         surface: "cli".into(),
         lism_ab_sample: None,
-    lism_ab_conclude: None,
-    lism_ab_summarize: None,
-    lism_policy: None,
-    boss_task: None,
+        lism_ab_conclude: None,
+        lism_ab_summarize: None,
+        lism_policy: None,
+        boss_task: None,
     });
     let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::InitOnly, false);
     state.current_cwd = root;
@@ -1182,10 +1182,10 @@ fn bootstrap_rejects_unknown_provider_without_explicit_contract() {
         attachments: Vec::new(),
         surface: "cli".into(),
         lism_ab_sample: None,
-    lism_ab_conclude: None,
-    lism_ab_summarize: None,
-    lism_policy: None,
-    boss_task: None,
+        lism_ab_conclude: None,
+        lism_ab_summarize: None,
+        lism_policy: None,
+        boss_task: None,
     });
     let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::InitOnly, false);
     state.current_cwd = std::env::current_dir().expect("cwd available");
@@ -1228,10 +1228,10 @@ fn bootstrap_uses_default_chat_completions_path_when_env_unset() {
         attachments: Vec::new(),
         surface: "cli".into(),
         lism_ab_sample: None,
-    lism_ab_conclude: None,
-    lism_ab_summarize: None,
-    lism_policy: None,
-    boss_task: None,
+        lism_ab_conclude: None,
+        lism_ab_summarize: None,
+        lism_policy: None,
+        boss_task: None,
     });
     let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::InitOnly, false);
     state.current_cwd = std::env::current_dir().expect("cwd available");
@@ -1285,10 +1285,10 @@ fn bootstrap_accepts_custom_chat_completions_path_for_custom_provider() {
         attachments: Vec::new(),
         surface: "cli".into(),
         lism_ab_sample: None,
-    lism_ab_conclude: None,
-    lism_ab_summarize: None,
-    lism_policy: None,
-    boss_task: None,
+        lism_ab_conclude: None,
+        lism_ab_summarize: None,
+        lism_policy: None,
+        boss_task: None,
     });
     let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::InitOnly, false);
     state.current_cwd = std::env::current_dir().expect("cwd available");
@@ -1343,10 +1343,10 @@ fn bootstrap_rejects_invalid_chat_completions_path_env() {
         attachments: Vec::new(),
         surface: "cli".into(),
         lism_ab_sample: None,
-    lism_ab_conclude: None,
-    lism_ab_summarize: None,
-    lism_policy: None,
-    boss_task: None,
+        lism_ab_conclude: None,
+        lism_ab_summarize: None,
+        lism_policy: None,
+        boss_task: None,
     });
     let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::InitOnly, false);
     state.current_cwd = std::env::current_dir().expect("cwd available");
@@ -1390,10 +1390,10 @@ fn bootstrap_provider_alias_matrix(
         attachments: Vec::new(),
         surface: "cli".into(),
         lism_ab_sample: None,
-    lism_ab_conclude: None,
-    lism_ab_summarize: None,
-    lism_policy: None,
-    boss_task: None,
+        lism_ab_conclude: None,
+        lism_ab_summarize: None,
+        lism_policy: None,
+        boss_task: None,
     });
     let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::InitOnly, false);
     state.current_cwd = std::env::current_dir().expect("cwd available");
@@ -1997,10 +1997,10 @@ fn augment_prompt_depends_on_input_state_without_mutating_store() {
         attachments: Vec::new(),
         surface: "cli".into(),
         lism_ab_sample: None,
-    lism_ab_conclude: None,
-    lism_ab_summarize: None,
-    lism_policy: None,
-    boss_task: None,
+        lism_ab_conclude: None,
+        lism_ab_summarize: None,
+        lism_policy: None,
+        boss_task: None,
     })
     .with_provider_config(test_model_provider_config());
     let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::Headless, false);
@@ -2142,10 +2142,10 @@ fn gate_user_access_matches_cli_remote_and_telegram_expectations() {
         attachments: Vec::new(),
         surface: "cli".into(),
         lism_ab_sample: None,
-    lism_ab_conclude: None,
-    lism_ab_summarize: None,
-    lism_policy: None,
-    boss_task: None,
+        lism_ab_conclude: None,
+        lism_ab_summarize: None,
+        lism_policy: None,
+        boss_task: None,
     })
     .with_provider_config(test_model_provider_config());
 
@@ -2661,10 +2661,10 @@ fn finalize_runtime_state_is_single_writeback_entrypoint() {
         attachments: Vec::new(),
         surface: "cli".into(),
         lism_ab_sample: None,
-    lism_ab_conclude: None,
-    lism_ab_summarize: None,
-    lism_policy: None,
-    boss_task: None,
+        lism_ab_conclude: None,
+        lism_ab_summarize: None,
+        lism_policy: None,
+        boss_task: None,
     })
     .with_provider_config(test_model_provider_config());
     let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::Headless, false);
@@ -2804,10 +2804,10 @@ async fn runtime_continue_session_uses_restored_snapshot() {
         attachments: Vec::new(),
         surface: "cli".into(),
         lism_ab_sample: None,
-    lism_ab_conclude: None,
-    lism_ab_summarize: None,
-    lism_policy: None,
-    boss_task: None,
+        lism_ab_conclude: None,
+        lism_ab_summarize: None,
+        lism_policy: None,
+        boss_task: None,
     })
     .with_provider_config(test_model_provider_config())
     .with_session_store(store);
@@ -2842,10 +2842,10 @@ async fn runtime_resume_prefers_restored_surface_and_mode() {
         attachments: Vec::new(),
         surface: "cli".into(),
         lism_ab_sample: None,
-    lism_ab_conclude: None,
-    lism_ab_summarize: None,
-    lism_policy: None,
-    boss_task: None,
+        lism_ab_conclude: None,
+        lism_ab_summarize: None,
+        lism_policy: None,
+        boss_task: None,
     })
     .with_provider_config(test_model_provider_config())
     .with_session_store(store);
@@ -2870,10 +2870,10 @@ fn initialize_runtime_tracks_surface_mode_visibility_matrix() {
         attachments: Vec::new(),
         surface: "cli".into(),
         lism_ab_sample: None,
-    lism_ab_conclude: None,
-    lism_ab_summarize: None,
-    lism_policy: None,
-    boss_task: None,
+        lism_ab_conclude: None,
+        lism_ab_summarize: None,
+        lism_policy: None,
+        boss_task: None,
     })
     .with_provider_config(test_model_provider_config());
 
@@ -2968,10 +2968,10 @@ async fn runtime_resume_keeps_restored_surface_visibility_contract() {
         attachments: Vec::new(),
         surface: "cli".into(),
         lism_ab_sample: None,
-    lism_ab_conclude: None,
-    lism_ab_summarize: None,
-    lism_policy: None,
-    boss_task: None,
+        lism_ab_conclude: None,
+        lism_ab_summarize: None,
+        lism_policy: None,
+        boss_task: None,
     })
     .with_provider_config(test_model_provider_config())
     .with_session_store(store.clone());
@@ -3063,10 +3063,10 @@ async fn runtime_restores_persisted_task_list_for_resumed_session() {
         attachments: Vec::new(),
         surface: "cli".into(),
         lism_ab_sample: None,
-    lism_ab_conclude: None,
-    lism_ab_summarize: None,
-    lism_policy: None,
-    boss_task: None,
+        lism_ab_conclude: None,
+        lism_ab_summarize: None,
+        lism_policy: None,
+        boss_task: None,
     })
     .with_provider_config(test_model_provider_config())
     .with_session_store(store);
@@ -3131,10 +3131,10 @@ async fn runtime_continue_restores_from_file_backed_store_across_instances() {
         attachments: Vec::new(),
         surface: "cli".into(),
         lism_ab_sample: None,
-    lism_ab_conclude: None,
-    lism_ab_summarize: None,
-    lism_policy: None,
-    boss_task: None,
+        lism_ab_conclude: None,
+        lism_ab_summarize: None,
+        lism_policy: None,
+        boss_task: None,
     })
     .with_provider_config(test_model_provider_config())
     .with_session_store(store_b);
@@ -3163,10 +3163,10 @@ async fn runtime_initializes_fresh_session_record_in_store() {
         attachments: Vec::new(),
         surface: "cli".into(),
         lism_ab_sample: None,
-    lism_ab_conclude: None,
-    lism_ab_summarize: None,
-    lism_policy: None,
-    boss_task: None,
+        lism_ab_conclude: None,
+        lism_ab_summarize: None,
+        lism_policy: None,
+        boss_task: None,
     })
     .with_provider_config(test_model_provider_config())
     .with_session_store(store.clone());
@@ -3907,10 +3907,10 @@ fn proxy_env_var_is_read_into_config() {
         attachments: Vec::new(),
         surface: "cli".into(),
         lism_ab_sample: None,
-    lism_ab_conclude: None,
-    lism_ab_summarize: None,
-    lism_policy: None,
-    boss_task: None,
+        lism_ab_conclude: None,
+        lism_ab_summarize: None,
+        lism_policy: None,
+        boss_task: None,
     });
     let config = runtime
         .build_model_provider_config_from_env_for_test()
@@ -3942,10 +3942,10 @@ fn no_proxy_env_var_is_read_into_config() {
         attachments: Vec::new(),
         surface: "cli".into(),
         lism_ab_sample: None,
-    lism_ab_conclude: None,
-    lism_ab_summarize: None,
-    lism_policy: None,
-    boss_task: None,
+        lism_ab_conclude: None,
+        lism_ab_summarize: None,
+        lism_policy: None,
+        boss_task: None,
     });
     let config = runtime
         .build_model_provider_config_from_env_for_test()
@@ -3973,10 +3973,10 @@ fn ca_bundle_env_var_is_read_into_config() {
         attachments: Vec::new(),
         surface: "cli".into(),
         lism_ab_sample: None,
-    lism_ab_conclude: None,
-    lism_ab_summarize: None,
-    lism_policy: None,
-    boss_task: None,
+        lism_ab_conclude: None,
+        lism_ab_summarize: None,
+        lism_policy: None,
+        boss_task: None,
     });
     let config = runtime
         .build_model_provider_config_from_env_for_test()
@@ -4006,10 +4006,10 @@ fn no_proxy_env_unset_leaves_field_none() {
         attachments: Vec::new(),
         surface: "cli".into(),
         lism_ab_sample: None,
-    lism_ab_conclude: None,
-    lism_ab_summarize: None,
-    lism_policy: None,
-    boss_task: None,
+        lism_ab_conclude: None,
+        lism_ab_summarize: None,
+        lism_policy: None,
+        boss_task: None,
     });
     let config = runtime
         .build_model_provider_config_from_env_for_test()
@@ -4136,8 +4136,14 @@ fn rust_agent_proxy_env_overrides_system_env() {
     apply_proxy_env_scenario(ProxyEnvScenario::DualLayerProxyEnv);
 
     let resolution = rust_agent::bootstrap::proxy_env::resolve_proxy_env_contract();
-    assert_eq!(resolution.source, rust_agent::bootstrap::proxy_env::ProxySource::RustAgentEnv);
-    assert_eq!(resolution.proxy_url.as_deref(), Some("http://rust-agent-proxy:3128"));
+    assert_eq!(
+        resolution.source,
+        rust_agent::bootstrap::proxy_env::ProxySource::RustAgentEnv
+    );
+    assert_eq!(
+        resolution.proxy_url.as_deref(),
+        Some("http://rust-agent-proxy:3128")
+    );
     assert_eq!(resolution.no_proxy.as_deref(), Some("rust-agent.local"));
 }
 
@@ -4159,15 +4165,18 @@ fn https_proxy_falls_back_when_rust_agent_proxy_unset() {
         attachments: Vec::new(),
         surface: "cli".into(),
         lism_ab_sample: None,
-    lism_ab_conclude: None,
-    lism_ab_summarize: None,
-    lism_policy: None,
-    boss_task: None,
+        lism_ab_conclude: None,
+        lism_ab_summarize: None,
+        lism_policy: None,
+        boss_task: None,
     });
     let config = runtime
         .build_model_provider_config_from_env_for_test()
         .expect("config should build");
-    assert_eq!(config.proxy_url.as_deref(), Some("http://system-https-proxy:8443"));
+    assert_eq!(
+        config.proxy_url.as_deref(),
+        Some("http://system-https-proxy:8443")
+    );
     assert_eq!(config.no_proxy.as_deref(), Some("example.local"));
 }
 
@@ -4179,8 +4188,14 @@ fn http_proxy_used_when_https_proxy_missing() {
     set_env_var("HTTP_PROXY", "http://system-http-proxy:8080");
 
     let resolution = rust_agent::bootstrap::proxy_env::resolve_proxy_env_contract();
-    assert_eq!(resolution.source, rust_agent::bootstrap::proxy_env::ProxySource::SystemEnv);
-    assert_eq!(resolution.proxy_url.as_deref(), Some("http://system-http-proxy:8080"));
+    assert_eq!(
+        resolution.source,
+        rust_agent::bootstrap::proxy_env::ProxySource::SystemEnv
+    );
+    assert_eq!(
+        resolution.proxy_url.as_deref(),
+        Some("http://system-http-proxy:8080")
+    );
     assert!(resolution.no_proxy.is_none());
 }
 
@@ -4202,10 +4217,10 @@ fn webfetch_uses_same_proxy_resolution_contract() {
         attachments: Vec::new(),
         surface: "cli".into(),
         lism_ab_sample: None,
-    lism_ab_conclude: None,
-    lism_ab_summarize: None,
-    lism_policy: None,
-    boss_task: None,
+        lism_ab_conclude: None,
+        lism_ab_summarize: None,
+        lism_policy: None,
+        boss_task: None,
     });
     let config = runtime
         .build_model_provider_config_from_env_for_test()
@@ -4226,6 +4241,9 @@ fn no_proxy_resolution_tracks_selected_proxy_source() {
     set_env_var("NO_PROXY", "system.local");
 
     let resolution = rust_agent::bootstrap::proxy_env::resolve_proxy_env_contract();
-    assert_eq!(resolution.source, rust_agent::bootstrap::proxy_env::ProxySource::RustAgentEnv);
+    assert_eq!(
+        resolution.source,
+        rust_agent::bootstrap::proxy_env::ProxySource::RustAgentEnv
+    );
     assert_eq!(resolution.no_proxy.as_deref(), Some("rust-agent.local"));
 }

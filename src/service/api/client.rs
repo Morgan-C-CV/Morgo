@@ -530,7 +530,9 @@ fn build_reqwest_client(config: &ModelProviderConfig) -> reqwest::Client {
     build_reqwest_client_with_result(config).unwrap_or_else(|_| reqwest::Client::new())
 }
 
-fn build_reqwest_client_with_result(config: &ModelProviderConfig) -> anyhow::Result<reqwest::Client> {
+fn build_reqwest_client_with_result(
+    config: &ModelProviderConfig,
+) -> anyhow::Result<reqwest::Client> {
     use crate::bootstrap::proxy_env::resolve_proxy_env_contract;
 
     let mut builder = reqwest::Client::builder();
@@ -1263,8 +1265,14 @@ impl<'a> OpenAICompatibleStreamParser<'a> {
                     .get("message")
                     .and_then(Value::as_str)
                     .unwrap_or("unknown provider error");
-                let error_type = error.get("type").and_then(Value::as_str).unwrap_or("unknown");
-                let error_code = error.get("code").and_then(Value::as_str).unwrap_or("unknown");
+                let error_type = error
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown");
+                let error_code = error
+                    .get("code")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown");
                 return Err(ApiError::invalid_response(format!(
                     "provider returned error envelope in openai-compatible stream: message={message}, type={error_type}, code={error_code}",
                 )));

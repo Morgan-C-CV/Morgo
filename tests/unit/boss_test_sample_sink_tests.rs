@@ -4,9 +4,7 @@ use rust_agent::core::boss_state::{
     BossActorHandle, BossActorRole, BossActorStatus, BossLisMPolicy, BossObservabilitySummary,
     BossPlanStepStatus, BossReportPayload, BossStage, BossStepReport, BossStepRoutedMetadata,
 };
-use rust_agent::core::boss_test_readiness::{
-    BossRollbackPolicy, BossTestRunOutcome,
-};
+use rust_agent::core::boss_test_readiness::{BossRollbackPolicy, BossTestRunOutcome};
 use rust_agent::core::boss_test_sample_sink::{BossTestSampleSink, new_shared_sink};
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -208,8 +206,14 @@ fn ptr2_rollback_triggers_populated_when_policy_fires() {
     sink.record_run_rolled_back("r", &report, &policy, vec![], vec![], 1, 0);
 
     let r = &sink.records()[0];
-    assert!(r.rollback_triggers.contains(&"cost_limit_exceeded".to_string()));
-    assert!(r.rollback_triggers.contains(&"mcp_failure_occurred".to_string()));
+    assert!(
+        r.rollback_triggers
+            .contains(&"cost_limit_exceeded".to_string())
+    );
+    assert!(
+        r.rollback_triggers
+            .contains(&"mcp_failure_occurred".to_string())
+    );
 }
 
 #[test]
@@ -299,7 +303,11 @@ fn ptr2_jsonl_sink_appends_across_instances() {
     }
 
     let content = fs::read_to_string(&path).unwrap();
-    assert_eq!(content.lines().count(), 2, "should have 2 lines after two instances");
+    assert_eq!(
+        content.lines().count(),
+        2,
+        "should have 2 lines after two instances"
+    );
 }
 
 #[test]

@@ -337,8 +337,10 @@ fn parse_agent_request(input: &str) -> anyhow::Result<AgentRequest> {
         }
         if let Some(task) = request.task {
             let role = parse_worker_role(request.role.as_deref())?;
-            let boss_actor_policy =
-                parse_boss_actor_policy(request.boss_actor_role.as_deref(), request.boss_lineage_depth)?;
+            let boss_actor_policy = parse_boss_actor_policy(
+                request.boss_actor_role.as_deref(),
+                request.boss_lineage_depth,
+            )?;
             return Ok(AgentRequest::Spawn(SpawnAgentRequest {
                 task,
                 role,
@@ -446,7 +448,8 @@ fn parse_worker_phase(
     }
 }
 
-fn parse_reuse_strategy(value: Option<&str>, role: WorkerRole) -> anyhow::Result<ReuseStrategy> {    match value {
+fn parse_reuse_strategy(value: Option<&str>, role: WorkerRole) -> anyhow::Result<ReuseStrategy> {
+    match value {
         Some("running_only") => Ok(ReuseStrategy::RunningOnly),
         Some("fresh") => Ok(ReuseStrategy::Fresh),
         Some(other) => anyhow::bail!("unknown reuse strategy: {other}"),

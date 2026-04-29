@@ -103,12 +103,11 @@ impl QueryContext {
         let tool_registry = if permission_context.boss_actor_policy.is_some() {
             use crate::bootstrap::InteractionSurface;
             use crate::bootstrap::SessionMode;
-            self.tool_registry.assemble(
-                crate::tool::registry::ToolAssemblyContext::executor_b(
+            self.tool_registry
+                .assemble(crate::tool::registry::ToolAssemblyContext::executor_b(
                     InteractionSurface::Cli,
                     SessionMode::Headless,
-                ),
-            )
+                ))
         } else {
             self.tool_registry
                 .assemble_worker_registry(config.allowed_tools.as_deref())

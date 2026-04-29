@@ -1,31 +1,33 @@
-use crate::core::boss_test_readiness::BossTestRunOutcome;
-use crate::core::lism_ab_sample::SharedLisMAbSampleSink;
-use crate::core::boss_state::{
-    BossActorHandle, BossActorStatus, BossControlRequest, BossControlResponse, BossPlan,
-    BossPlanStep, BossPlanStepStatus, BossLisMPolicy, BossObservabilitySummary,
-    BossReportPayload, BossSession, BossStage, BossStatus, BossStepMetrics, BossStepReport,
-    BossStepRoutedMetadata, BossStopOutcome, BossStopStage, CompressionStrategy, ContextMode,
-};
-use crate::core::boss_context_brief::{BossContextBrief, BossContextStrategy, BossStateFrame, assemble_brief_prompt};
-use crate::core::prompt_budget::{evaluate_message_budget, BudgetDecision};
-use crate::core::state_frame::ActorRole;
 use crate::bootstrap::config_root::resolve_config_root;
 use crate::bootstrap::model_profiles::load_model_profiles_registry_from_root;
+use crate::core::boss_actor_runtime::{
+    BossActorEvent, BossActorRegistry, DesignerACommand, ExecutorBCommand,
+};
+use crate::core::boss_context_brief::{
+    BossContextBrief, BossContextStrategy, BossStateFrame, assemble_brief_prompt,
+};
+use crate::core::boss_runtime::{BossControlRuntime, BossRuntimeOwner};
+use crate::core::boss_state::{
+    BossActorHandle, BossActorStatus, BossControlRequest, BossControlResponse, BossLisMPolicy,
+    BossObservabilitySummary, BossPlan, BossPlanStep, BossPlanStepStatus, BossReportPayload,
+    BossSession, BossStage, BossStatus, BossStepMetrics, BossStepReport, BossStepRoutedMetadata,
+    BossStopOutcome, BossStopStage, CompressionStrategy, ContextMode,
+};
+use crate::core::boss_test_readiness::BossTestRunOutcome;
+use crate::core::lism_ab_sample::SharedLisMAbSampleSink;
+use crate::core::prompt_budget::{BudgetDecision, evaluate_message_budget};
+use crate::core::state_frame::ActorRole;
 use crate::core::state_frame_loop::DecisionLoopConfig;
 use crate::core::state_frame_model_router::ModelTier;
 use crate::core::state_frame_orchestrator::{
     StepOutcome, StepRuntimeResolutionContext, build_routed_state_frame_with_model_route,
     run_routed_step_with_runtime,
 };
+use crate::history::session::SessionHistory;
 use crate::interaction::dispatcher::NotificationDispatcher;
 use crate::task::manager::TaskManager;
 use crate::task::types::{TaskEvent, TaskStatus};
 use crate::tool::definition::{Tool, ToolCall};
-use crate::core::boss_runtime::{BossControlRuntime, BossRuntimeOwner};
-use crate::core::boss_actor_runtime::{
-    BossActorEvent, BossActorRegistry, DesignerACommand, ExecutorBCommand,
-};
-use crate::history::session::SessionHistory;
 use serde_json::json;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -117,7 +119,10 @@ impl BossCoordinator {
     #[doc(hidden)]
     pub async fn b_session_id(&self) -> String {
         let guard = self.session.read().await;
-        guard.as_ref().map(|s| s.executor_b.session_id.clone()).unwrap_or_default()
+        guard
+            .as_ref()
+            .map(|s| s.executor_b.session_id.clone())
+            .unwrap_or_default()
     }
 
     /// Test-only seam: reads `executor_b.task_id` for assertion in tests.
@@ -135,7 +140,9 @@ impl BossCoordinator {
         app_state: &Arc<crate::state::app_state::AppState>,
     ) -> Self {
         let coordinator = Self::new_with_runtime_owner(runtime_owner);
-        coordinator.bootstrap_actor_registry_with_app_state(app_state).await;
+        coordinator
+            .bootstrap_actor_registry_with_app_state(app_state)
+            .await;
         coordinator
     }
 
@@ -238,7 +245,8 @@ impl BossCoordinator {
             .await
             .clone()
             .ok_or_else(|| anyhow::anyhow!("boss control runtime key unavailable"))?;
-        let runtime = self.runtime_owner
+        let runtime = self
+            .runtime_owner
             .get_runtime(&key)
             .ok_or_else(|| anyhow::anyhow!("boss control runtime unavailable"))?;
         runtime.request(request, tasks, dispatcher).await
@@ -278,7 +286,9 @@ impl BossCoordinator {
     ) -> anyhow::Result<Self> {
         let coordinator =
             Self::restore_or_init_with_owner(path, Arc::new(BossRuntimeOwner::default())).await?;
-        coordinator.bootstrap_actor_registry_with_app_state(app_state).await;
+        coordinator
+            .bootstrap_actor_registry_with_app_state(app_state)
+            .await;
         Ok(coordinator)
     }
 
@@ -384,7 +394,10 @@ impl BossCoordinator {
     ) {
         let already_full = {
             let guard = self.actor_registry.read().await;
-            guard.as_ref().map(|r| r.has_executor && r.has_a_callbacks).unwrap_or(false)
+            guard
+                .as_ref()
+                .map(|r| r.has_executor && r.has_a_callbacks)
+                .unwrap_or(false)
         };
         if already_full {
             return;
@@ -399,7 +412,10 @@ impl BossCoordinator {
         let review_fn = Self::build_review_fn(self);
         let doc_fn = Self::build_doc_fn(self, app_state);
         let registry = crate::core::boss_actor_runtime::bootstrap_with_all_callbacks(
-            exec_fn, spec_review_fn, review_fn, doc_fn,
+            exec_fn,
+            spec_review_fn,
+            review_fn,
+            doc_fn,
         );
         let mut guard = self.actor_registry.write().await;
         if let Some(old) = guard.take() {
@@ -501,10 +517,13 @@ impl BossCoordinator {
         }
         let is_placeholder = {
             let guard = self.session.read().await;
-            guard.as_ref().map(|s| {
-                let placeholder = format!("boss-{}-b", s.plan_id);
-                s.executor_b.session_id == placeholder || s.executor_b.session_id.is_empty()
-            }).unwrap_or(true)
+            guard
+                .as_ref()
+                .map(|s| {
+                    let placeholder = format!("boss-{}-b", s.plan_id);
+                    s.executor_b.session_id == placeholder || s.executor_b.session_id.is_empty()
+                })
+                .unwrap_or(true)
         };
         if !is_placeholder {
             return;
@@ -513,64 +532,72 @@ impl BossCoordinator {
         let parent_session_id = app_state.active_session_id.clone();
         let b_actor_id = {
             let guard = self.session.read().await;
-            guard.as_ref()
+            guard
+                .as_ref()
                 .map(|s| s.executor_b.actor_id.clone())
                 .unwrap_or_else(|| "boss-unknown-b".into())
         };
-        let payload = match self.build_step_spawn_payload(step_id, &parent_session_id, &b_actor_id).await {
+        let payload = match self
+            .build_step_spawn_payload(step_id, &parent_session_id, &b_actor_id)
+            .await
+        {
             Ok(p) => p,
             Err(_) => return,
         };
 
-        if let Ok(task_id) = self.invoke_agent_tool_with_task_id(app_state, &payload).await {
+        if let Ok(task_id) = self
+            .invoke_agent_tool_with_task_id(app_state, &payload)
+            .await
+        {
             self.record_b_session_id(&task_id).await;
         }
     }
 
     fn build_review_fn(coordinator: &Self) -> crate::core::boss_actor_runtime::ReviewFn {
         let c = coordinator.clone_for_runtime();
-        Arc::new(move |step_id, accepted, summary: String, correction: Option<String>| {
-            let c = c.clone_for_runtime();
-            Box::pin(async move {
-                let app_state = {
-                    let guard = c.auto_advance_app_state.read().await;
-                    guard.clone()
-                };
-                if let Some(app) = app_state {
-                    c.ensure_a_session(&app).await;
-                    let verdict_hint = if accepted { "accepted" } else { "rejected" };
-                    let msg = match correction.as_deref() {
-                        Some(corr) => format!(
-                            "Review step {step_id}: coordinator verdict={verdict_hint}. Summary: {summary}. Correction: {corr}. Please respond with ACCEPT, REJECT, or REPLAN_STEP. If REJECT include CORRECTION: <your correction>. If REPLAN_STEP include REASON: <why this step needs replanning>."
-                        ),
-                        None => format!(
-                            "Review step {step_id}: coordinator verdict={verdict_hint}. Summary: {summary}. Please respond with ACCEPT, REJECT, or REPLAN_STEP. If REJECT include CORRECTION: <your correction>. If REPLAN_STEP include REASON: <why this step needs replanning>."
-                        ),
+        Arc::new(
+            move |step_id, accepted, summary: String, correction: Option<String>| {
+                let c = c.clone_for_runtime();
+                Box::pin(async move {
+                    let app_state = {
+                        let guard = c.auto_advance_app_state.read().await;
+                        guard.clone()
                     };
-                    match c.ask_a_session(&app, msg).await {
-                        Ok(response) => {
-                            let decision = Self::parse_a_review_decision(&response, &summary);
-                            c.apply_review_verdict(step_id, &decision).await?;
-                            return Ok(decision);
+                    if let Some(app) = app_state {
+                        c.ensure_a_session(&app).await;
+                        let verdict_hint = if accepted { "accepted" } else { "rejected" };
+                        let msg = match correction.as_deref() {
+                            Some(corr) => format!(
+                                "Review step {step_id}: coordinator verdict={verdict_hint}. Summary: {summary}. Correction: {corr}. Please respond with ACCEPT, REJECT, or REPLAN_STEP. If REJECT include CORRECTION: <your correction>. If REPLAN_STEP include REASON: <why this step needs replanning>."
+                            ),
+                            None => format!(
+                                "Review step {step_id}: coordinator verdict={verdict_hint}. Summary: {summary}. Please respond with ACCEPT, REJECT, or REPLAN_STEP. If REJECT include CORRECTION: <your correction>. If REPLAN_STEP include REASON: <why this step needs replanning>."
+                            ),
+                        };
+                        match c.ask_a_session(&app, msg).await {
+                            Ok(response) => {
+                                let decision = Self::parse_a_review_decision(&response, &summary);
+                                c.apply_review_verdict(step_id, &decision).await?;
+                                return Ok(decision);
+                            }
+                            Err(_) => {}
                         }
-                        Err(_) => {
+                    }
+                    let decision = if accepted {
+                        crate::core::boss_actor_runtime::ReviewDecision::Accept {
+                            summary: summary.clone(),
                         }
-                    }
-                }
-                let decision = if accepted {
-                    crate::core::boss_actor_runtime::ReviewDecision::Accept {
-                        summary: summary.clone(),
-                    }
-                } else {
-                    crate::core::boss_actor_runtime::ReviewDecision::Correct {
-                        summary: summary.clone(),
-                        correction,
-                    }
-                };
-                c.apply_review_verdict(step_id, &decision).await?;
-                Ok(decision)
-            })
-        })
+                    } else {
+                        crate::core::boss_actor_runtime::ReviewDecision::Correct {
+                            summary: summary.clone(),
+                            correction,
+                        }
+                    };
+                    c.apply_review_verdict(step_id, &decision).await?;
+                    Ok(decision)
+                })
+            },
+        )
     }
 
     fn build_doc_fn(
@@ -591,11 +618,17 @@ impl BossCoordinator {
                     Ok(response) => {
                         let decision = Self::parse_a_review_decision(&response, &signal);
                         match decision {
-                            crate::core::boss_actor_runtime::ReviewDecision::Accept { .. } => signal.clone(),
-                            crate::core::boss_actor_runtime::ReviewDecision::Correct { correction, .. } => {
-                                correction.unwrap_or_else(|| signal.clone())
+                            crate::core::boss_actor_runtime::ReviewDecision::Accept { .. } => {
+                                signal.clone()
                             }
-                            crate::core::boss_actor_runtime::ReviewDecision::ReplanStep { reason, .. } => reason,
+                            crate::core::boss_actor_runtime::ReviewDecision::Correct {
+                                correction,
+                                ..
+                            } => correction.unwrap_or_else(|| signal.clone()),
+                            crate::core::boss_actor_runtime::ReviewDecision::ReplanStep {
+                                reason,
+                                ..
+                            } => reason,
                         }
                     }
                     Err(_) => signal.clone(),
@@ -613,7 +646,8 @@ impl BossCoordinator {
         app_state: &Arc<crate::state::app_state::AppState>,
     ) {
         // Prefer the full bootstrap — wires A and B in one shot.
-        self.bootstrap_actor_registry_with_app_state(app_state).await;
+        self.bootstrap_actor_registry_with_app_state(app_state)
+            .await;
     }
 
     /// Ensure actor runtimes exist; bootstrap if not yet initialized.
@@ -644,7 +678,8 @@ impl BossCoordinator {
         &self,
         app_state: &Arc<crate::state::app_state::AppState>,
     ) {
-        self.bootstrap_actor_registry_with_app_state(app_state).await;
+        self.bootstrap_actor_registry_with_app_state(app_state)
+            .await;
     }
 
     /// Returns a point-in-time snapshot of all tracked actor handles (A, B, and children).
@@ -725,7 +760,10 @@ impl BossCoordinator {
         let draft_spec = if draft_spec.is_empty() {
             let task_description = {
                 let guard = self.plan.read().await;
-                guard.as_ref().map(|p| p.task_description.clone()).unwrap_or_default()
+                guard
+                    .as_ref()
+                    .map(|p| p.task_description.clone())
+                    .unwrap_or_default()
             };
             let app_state = self.auto_advance_app_state.read().await.clone();
             effective_draft_spec = if let Some(app) = app_state {
@@ -746,12 +784,17 @@ impl BossCoordinator {
             if let Some(registry) = registry_guard.as_ref() {
                 let mailbox = registry.b_mailbox().clone();
                 drop(registry_guard);
-                match mailbox.request(crate::core::boss_actor_runtime::ExecutorBCommand::ReviewSpec {
-                    spec: draft_spec.to_string(),
-                }).await {
-                    Ok(crate::core::boss_actor_runtime::BossActorEvent::SpecReviewed { feedback }) => {
-                        Some(feedback)
-                    }
+                match mailbox
+                    .request(
+                        crate::core::boss_actor_runtime::ExecutorBCommand::ReviewSpec {
+                            spec: draft_spec.to_string(),
+                        },
+                    )
+                    .await
+                {
+                    Ok(crate::core::boss_actor_runtime::BossActorEvent::SpecReviewed {
+                        feedback,
+                    }) => Some(feedback),
                     _ => None,
                 }
             } else {
@@ -790,14 +833,22 @@ impl BossCoordinator {
 
         // Send FinalizeDocumentation to A mailbox — A's handler drives the stage transition.
         if let Some(registry) = self.actor_registry.read().await.as_ref() {
-            let _ = registry.a_mailbox().request(DesignerACommand::FinalizeDocumentation {
-                signal: "finalize".to_string(),
-            }).await;
+            let _ = registry
+                .a_mailbox()
+                .request(DesignerACommand::FinalizeDocumentation {
+                    signal: "finalize".to_string(),
+                })
+                .await;
         }
 
         // Fallback: if A's callback is not wired, coordinator transitions directly.
-        let has_a_callbacks = self.actor_registry.read().await
-            .as_ref().map(|r| r.has_a_callbacks).unwrap_or(false);
+        let has_a_callbacks = self
+            .actor_registry
+            .read()
+            .await
+            .as_ref()
+            .map(|r| r.has_a_callbacks)
+            .unwrap_or(false);
         if !has_a_callbacks {
             self.transition_to(BossStage::WaitingForApproval).await?;
         }
@@ -874,9 +925,13 @@ impl BossCoordinator {
         // Wire A's callbacks via auto path (uses stored auto_advance_app_state).
         self.ensure_actor_registry_with_a_callbacks_auto().await;
         let a_approved = if let Some(registry) = self.actor_registry.read().await.as_ref() {
-            match registry.a_mailbox().request(DesignerACommand::UserApproval {
-                input: user_input.to_string(),
-            }).await {
+            match registry
+                .a_mailbox()
+                .request(DesignerACommand::UserApproval {
+                    input: user_input.to_string(),
+                })
+                .await
+            {
                 Ok(BossActorEvent::ApprovalHandled { approved: a }) => a,
                 _ => approved,
             }
@@ -885,8 +940,13 @@ impl BossCoordinator {
         };
 
         // Fallback: if A's callback is not wired, coordinator transitions directly.
-        let has_a_callbacks = self.actor_registry.read().await
-            .as_ref().map(|r| r.has_a_callbacks).unwrap_or(false);
+        let has_a_callbacks = self
+            .actor_registry
+            .read()
+            .await
+            .as_ref()
+            .map(|r| r.has_a_callbacks)
+            .unwrap_or(false);
         if !has_a_callbacks {
             if a_approved {
                 self.transition_to(BossStage::Execution).await?;
@@ -915,9 +975,9 @@ impl BossCoordinator {
         dispatcher: &NotificationDispatcher,
     ) -> anyhow::Result<BossControlResponse> {
         match request {
-            BossControlRequest::Report => {
-                Ok(BossControlResponse::Report(self.report_progress(tasks).await?))
-            }
+            BossControlRequest::Report => Ok(BossControlResponse::Report(
+                self.report_progress(tasks).await?,
+            )),
             BossControlRequest::Stop {
                 requester_session_id,
                 deadline_ms,
@@ -1073,7 +1133,8 @@ impl BossCoordinator {
                     summary.total_cache_read_tokens += m.cache_read_tokens.unwrap_or(0);
                     summary.total_cache_write_tokens += m.cache_write_tokens.unwrap_or(0);
                     summary.total_fallback_count += m.fallback_count.unwrap_or(0);
-                    summary.total_projection_mismatch_count += m.projection_mismatch_count.unwrap_or(0);
+                    summary.total_projection_mismatch_count +=
+                        m.projection_mismatch_count.unwrap_or(0);
                     summary.total_input_tokens += m.input_tokens.unwrap_or(0);
                     summary.total_output_tokens += m.output_tokens.unwrap_or(0);
                     if m.provider_profile_id.is_some() {
@@ -1113,9 +1174,17 @@ impl BossCoordinator {
         outcome: BossTestRunOutcome,
         pending_approval_count: usize,
     ) {
-        let Some(sink) = &self.lism_ab_sink else { return };
+        let Some(sink) = &self.lism_ab_sink else {
+            return;
+        };
         let report = self.build_lism_sample_report().await;
-        sink.record_run(run_id, lism_enabled, &report, outcome, pending_approval_count);
+        sink.record_run(
+            run_id,
+            lism_enabled,
+            &report,
+            outcome,
+            pending_approval_count,
+        );
     }
     pub async fn report_progress(&self, tasks: &TaskManager) -> anyhow::Result<BossReportPayload> {
         let status = self.status.read().await.clone();
@@ -1141,9 +1210,12 @@ impl BossCoordinator {
                             None
                         },
                         blocker_reason: if step.status == BossPlanStepStatus::ReplanRequired {
-                            step.last_correction
-                                .as_deref()
-                                .map(|value| value.strip_prefix("replan required: ").unwrap_or(value).to_string())
+                            step.last_correction.as_deref().map(|value| {
+                                value
+                                    .strip_prefix("replan required: ")
+                                    .unwrap_or(value)
+                                    .to_string()
+                            })
                         } else {
                             None
                         },
@@ -1159,7 +1231,8 @@ impl BossCoordinator {
             .as_ref()
             .and_then(|app_state| history_summary_from_app_state(app_state))
             .unwrap_or_else(|| {
-                tasks.list()
+                tasks
+                    .list()
                     .into_iter()
                     .filter(|task| task.boss_actor_id.is_some())
                     .map(|task| format!("{}:{:?}", task.id, task.status))
@@ -1174,7 +1247,8 @@ impl BossCoordinator {
                     summary.total_cache_read_tokens += m.cache_read_tokens.unwrap_or(0);
                     summary.total_cache_write_tokens += m.cache_write_tokens.unwrap_or(0);
                     summary.total_fallback_count += m.fallback_count.unwrap_or(0);
-                    summary.total_projection_mismatch_count += m.projection_mismatch_count.unwrap_or(0);
+                    summary.total_projection_mismatch_count +=
+                        m.projection_mismatch_count.unwrap_or(0);
                     summary.total_input_tokens += m.input_tokens.unwrap_or(0);
                     summary.total_output_tokens += m.output_tokens.unwrap_or(0);
                     if m.provider_profile_id.is_some() {
@@ -1217,13 +1291,16 @@ impl BossCoordinator {
             session
                 .as_ref()
                 .map(|snapshot| {
-                    tasks.list()
+                    tasks
+                        .list()
                         .into_iter()
                         .filter(|task| {
                             task.owner.session_id == requester_session_id
                                 && task.boss_actor_id.is_some()
-                                && (snapshot.executor_b.task_id.as_deref() == Some(task.id.as_str())
-                                    || snapshot.designer_a.task_id.as_deref() == Some(task.id.as_str())
+                                && (snapshot.executor_b.task_id.as_deref()
+                                    == Some(task.id.as_str())
+                                    || snapshot.designer_a.task_id.as_deref()
+                                        == Some(task.id.as_str())
                                     || task
                                         .boss_actor_id
                                         .as_deref()
@@ -1244,7 +1321,12 @@ impl BossCoordinator {
 
         let mut pending_after_cancel = tracked_task_ids
             .iter()
-            .filter(|task_id| matches!(tasks.status(task_id), Some(TaskStatus::Pending | TaskStatus::Running)))
+            .filter(|task_id| {
+                matches!(
+                    tasks.status(task_id),
+                    Some(TaskStatus::Pending | TaskStatus::Running)
+                )
+            })
             .cloned()
             .collect::<Vec<_>>();
 
@@ -1254,7 +1336,10 @@ impl BossCoordinator {
             pending_after_cancel = tracked_task_ids
                 .iter()
                 .filter(|task_id| {
-                    matches!(tasks.status(task_id), Some(TaskStatus::Pending | TaskStatus::Running))
+                    matches!(
+                        tasks.status(task_id),
+                        Some(TaskStatus::Pending | TaskStatus::Running)
+                    )
                 })
                 .cloned()
                 .collect::<Vec<_>>();
@@ -1300,11 +1385,7 @@ impl BossCoordinator {
     /// Abort A's and B's LLM session tasks by their stored task_id.
     /// Uses force_kill (no session ownership check) because these tasks are owned by the
     /// coordinator's session, not the requester's session.
-    async fn abort_a_b_sessions(
-        &self,
-        tasks: &TaskManager,
-        dispatcher: &NotificationDispatcher,
-    ) {
+    async fn abort_a_b_sessions(&self, tasks: &TaskManager, dispatcher: &NotificationDispatcher) {
         let (a_task_id, b_task_id) = {
             let guard = self.session.read().await;
             let (a, b) = guard
@@ -1331,9 +1412,10 @@ impl BossCoordinator {
                 let Some(plan) = plan_guard.as_mut() else {
                     return Ok(());
                 };
-                let step = plan.steps.iter_mut().find(|s| {
-                    s.worker_task_id.as_deref() == Some(group_id.as_str())
-                });
+                let step = plan
+                    .steps
+                    .iter_mut()
+                    .find(|s| s.worker_task_id.as_deref() == Some(group_id.as_str()));
                 if let Some(step) = step {
                     let step_id = step.id;
                     match event.status {
@@ -1341,11 +1423,18 @@ impl BossCoordinator {
                             // Fan-in complete — enter Reviewing, not Completed.
                             // A review gate must accept before the step advances.
                             step.status = BossPlanStepStatus::Reviewing;
-                            tracing::info!("BossPlan: Step {} fan-in complete, entering Reviewing", step_id);
+                            tracing::info!(
+                                "BossPlan: Step {} fan-in complete, entering Reviewing",
+                                step_id
+                            );
                         }
                         TaskStatus::Failed | TaskStatus::Killed => {
                             step.status = BossPlanStepStatus::Failed;
-                            tracing::warn!("BossPlan: Step {} fan-in failed via group {}", step_id, group_id);
+                            tracing::warn!(
+                                "BossPlan: Step {} fan-in failed via group {}",
+                                step_id,
+                                group_id
+                            );
                         }
                         _ => {}
                     }
@@ -1427,8 +1516,13 @@ impl BossCoordinator {
     ) -> anyhow::Result<()> {
         self.ensure_actor_registry_with_a_callbacks_auto().await;
 
-        let has_a_callbacks = self.actor_registry.read().await
-            .as_ref().map(|r| r.has_a_callbacks).unwrap_or(false);
+        let has_a_callbacks = self
+            .actor_registry
+            .read()
+            .await
+            .as_ref()
+            .map(|r| r.has_a_callbacks)
+            .unwrap_or(false);
 
         let fallback_decision = if accepted {
             crate::core::boss_actor_runtime::ReviewDecision::Accept {
@@ -1457,12 +1551,15 @@ impl BossCoordinator {
             None
         };
         let decision = if let Some(a_mailbox) = a_mailbox {
-            match a_mailbox.request(DesignerACommand::Review {
-                step_id,
-                accepted,
-                summary: review_summary.to_string(),
-                correction: correction.map(str::to_string),
-            }).await {
+            match a_mailbox
+                .request(DesignerACommand::Review {
+                    step_id,
+                    accepted,
+                    summary: review_summary.to_string(),
+                    correction: correction.map(str::to_string),
+                })
+                .await
+            {
                 Ok(BossActorEvent::ReviewComplete { decision, .. }) => decision,
                 _ => fallback_decision,
             }
@@ -1473,7 +1570,9 @@ impl BossCoordinator {
         if !has_a_callbacks {
             let designer_a_state = {
                 let guard = self.actor_registry.read().await;
-                guard.as_ref().map(|registry| registry.designer_a.state.clone())
+                guard
+                    .as_ref()
+                    .map(|registry| registry.designer_a.state.clone())
             };
             if let Some(a_state) = designer_a_state {
                 let mut a_state = a_state.write().await;
@@ -1495,8 +1594,12 @@ impl BossCoordinator {
     ) -> anyhow::Result<()> {
         let should_auto_advance = {
             let mut plan_guard = self.plan.write().await;
-            let Some(plan) = plan_guard.as_mut() else { return Ok(()); };
-            let Some(step) = plan.steps.iter_mut().find(|s| s.id == step_id) else { return Ok(()); };
+            let Some(plan) = plan_guard.as_mut() else {
+                return Ok(());
+            };
+            let Some(step) = plan.steps.iter_mut().find(|s| s.id == step_id) else {
+                return Ok(());
+            };
             match decision {
                 crate::core::boss_actor_runtime::ReviewDecision::Accept { summary } => {
                     step.last_review_summary = Some(summary.clone());
@@ -1505,7 +1608,10 @@ impl BossCoordinator {
                     step.last_correction = None;
                     true
                 }
-                crate::core::boss_actor_runtime::ReviewDecision::Correct { summary, correction } => {
+                crate::core::boss_actor_runtime::ReviewDecision::Correct {
+                    summary,
+                    correction,
+                } => {
                     step.last_review_summary = Some(summary.clone());
                     step.attempt_count += 1;
                     if step.attempt_count >= step.retry_budget {
@@ -1524,14 +1630,23 @@ impl BossCoordinator {
                 }
             }
         };
-        if matches!(decision, crate::core::boss_actor_runtime::ReviewDecision::ReplanStep { .. }) {
+        if matches!(
+            decision,
+            crate::core::boss_actor_runtime::ReviewDecision::ReplanStep { .. }
+        ) {
             let plan_path = self.status.read().await.planning_file.clone();
             if let Some(path) = plan_path {
-                self.save_plan_with_session(std::path::Path::new(&path)).await?;
+                self.save_plan_with_session(std::path::Path::new(&path))
+                    .await?;
             }
         }
         if should_auto_advance {
-            let next_step = self.plan.read().await.as_ref().and_then(|p| next_unfinished_step_id(p));
+            let next_step = self
+                .plan
+                .read()
+                .await
+                .as_ref()
+                .and_then(|p| next_unfinished_step_id(p));
             self.update_current_step(next_step).await;
             self.maybe_auto_advance_after_completion().await?;
         }
@@ -1691,7 +1806,12 @@ impl BossCoordinator {
                     step.id,
                     step.last_correction
                         .as_deref()
-                        .map(|value| value.strip_prefix("replan required: ").unwrap_or(value).to_string())
+                        .map(|value| {
+                            value
+                                .strip_prefix("replan required: ")
+                                .unwrap_or(value)
+                                .to_string()
+                        })
                         .unwrap_or_else(|| "current step requires replanning".to_string()),
                 ))
             } else {
@@ -1710,7 +1830,8 @@ impl BossCoordinator {
                     self.lism_policy().await,
                     app_state.permission_context.lism_enabled(),
                 );
-                self.emit_lism_sample(&run_id, lism_enabled, BossTestRunOutcome::Completed, 0).await;
+                self.emit_lism_sample(&run_id, lism_enabled, BossTestRunOutcome::Completed, 0)
+                    .await;
                 Ok(Some(
                     "Boss plan complete; no further steps to dispatch.".into(),
                 ))
@@ -1721,7 +1842,8 @@ impl BossCoordinator {
                     self.lism_policy().await,
                     app_state.permission_context.lism_enabled(),
                 );
-                self.emit_lism_sample(&run_id, lism_enabled, BossTestRunOutcome::Aborted, 0).await;
+                self.emit_lism_sample(&run_id, lism_enabled, BossTestRunOutcome::Aborted, 0)
+                    .await;
                 Ok(Some(
                     "Boss plan stopped after a terminal step failure; auto-advance halted.".into(),
                 ))
@@ -1738,7 +1860,10 @@ impl BossCoordinator {
             Some(AdvanceOutcome::Dispatch(step_id)) => {
                 self.update_current_step(Some(step_id)).await;
 
-                if effective_lism_enabled(self.lism_policy().await, app_state.permission_context.lism_enabled()) {
+                if effective_lism_enabled(
+                    self.lism_policy().await,
+                    app_state.permission_context.lism_enabled(),
+                ) {
                     let (outcome, routed_metadata) = {
                         let plan_guard = self.plan.read().await;
                         let plan = plan_guard
@@ -1748,14 +1873,17 @@ impl BossCoordinator {
                             .permission_context
                             .inherited_active_model_snapshot
                             .as_ref()
-                            .ok_or_else(|| anyhow::anyhow!("LisM boss path requires an active model snapshot"))?;
+                            .ok_or_else(|| {
+                                anyhow::anyhow!("LisM boss path requires an active model snapshot")
+                            })?;
                         let routed = build_routed_state_frame_with_model_route(
                             plan,
                             BossStage::Execution,
                             step_id,
                             ActorRole::Worker,
                         );
-                        let state_frame_size = serde_json::to_string(&routed.frame).map(|s| s.len()).ok();
+                        let state_frame_size =
+                            serde_json::to_string(&routed.frame).map(|s| s.len()).ok();
                         let mut routed_metadata = BossStepRoutedMetadata {
                             toolset_id: routed.frame.toolset_id.clone(),
                             skillset_id: routed.frame.skillset_id.clone(),
@@ -1774,9 +1902,9 @@ impl BossCoordinator {
                             .as_ref()
                             .map(|s| std::path::Path::new(s.cwd.as_str()).to_path_buf())
                             .unwrap_or_else(|| std::path::PathBuf::from("."));
-                        let model_registry = resolve_config_root(&cwd)
-                            .ok()
-                            .and_then(|root| load_model_profiles_registry_from_root(&root).ok().flatten());
+                        let model_registry = resolve_config_root(&cwd).ok().and_then(|root| {
+                            load_model_profiles_registry_from_root(&root).ok().flatten()
+                        });
                         let runtime = StepRuntimeResolutionContext {
                             inherited_snapshot,
                             model_registry: model_registry.as_ref(),
@@ -1812,14 +1940,22 @@ impl BossCoordinator {
                                     .steps
                                     .iter_mut()
                                     .find(|step| step.id == step_id)
-                                    .ok_or_else(|| anyhow::anyhow!("Unknown boss step {step_id}"))?;
+                                    .ok_or_else(|| {
+                                        anyhow::anyhow!("Unknown boss step {step_id}")
+                                    })?;
                                 step.completed = true;
                                 step.status = BossPlanStepStatus::Completed;
                             }
                             if let Some(path) = self.status.read().await.planning_file.clone() {
-                                self.save_plan_with_session(std::path::Path::new(&path)).await?;
+                                self.save_plan_with_session(std::path::Path::new(&path))
+                                    .await?;
                             }
-                            let next_step = self.plan.read().await.as_ref().and_then(|p| next_unfinished_step_id(p));
+                            let next_step = self
+                                .plan
+                                .read()
+                                .await
+                                .as_ref()
+                                .and_then(|p| next_unfinished_step_id(p));
                             self.update_current_step(next_step).await;
                             if next_step.is_none() {
                                 if self.get_stage().await != BossStage::Completed {
@@ -1830,7 +1966,13 @@ impl BossCoordinator {
                                     self.lism_policy().await,
                                     app_state.permission_context.lism_enabled(),
                                 );
-                                self.emit_lism_sample(&run_id, lism_enabled, BossTestRunOutcome::Completed, 0).await;
+                                self.emit_lism_sample(
+                                    &run_id,
+                                    lism_enabled,
+                                    BossTestRunOutcome::Completed,
+                                    0,
+                                )
+                                .await;
                             }
                             return Ok(Some(format!(
                                 "LisM executed boss step {} to completion.",
@@ -1848,13 +1990,16 @@ impl BossCoordinator {
                                     .steps
                                     .iter_mut()
                                     .find(|step| step.id == step_id)
-                                    .ok_or_else(|| anyhow::anyhow!("Unknown boss step {step_id}"))?;
+                                    .ok_or_else(|| {
+                                        anyhow::anyhow!("Unknown boss step {step_id}")
+                                    })?;
                                 step.completed = false;
                                 step.status = BossPlanStepStatus::Failed;
                                 step.last_review_summary = Some(reason_clone.clone());
                             }
                             if let Some(path) = self.status.read().await.planning_file.clone() {
-                                self.save_plan_with_session(std::path::Path::new(&path)).await?;
+                                self.save_plan_with_session(std::path::Path::new(&path))
+                                    .await?;
                             }
                             return Ok(Some(format!(
                                 "LisM failed boss step {}: {}",
@@ -1864,12 +2009,17 @@ impl BossCoordinator {
                     }
                 }
 
-                let tasks = app_state.permission_context.task_manager.as_ref()
+                let tasks = app_state
+                    .permission_context
+                    .task_manager
+                    .as_ref()
                     .ok_or_else(|| anyhow::anyhow!("task manager not configured"))?;
 
                 let running_b = {
                     let guard = self.session.read().await;
-                    guard.as_ref().and_then(|s| self.find_running_b_task_id(s, tasks))
+                    guard
+                        .as_ref()
+                        .and_then(|s| self.find_running_b_task_id(s, tasks))
                 };
 
                 let payload = if let Some(b_task_id) = running_b {
@@ -1877,20 +2027,25 @@ impl BossCoordinator {
                         .build_step_continue_payload(step_id, &b_task_id, &parent_session_id)
                         .await?;
 
-                    self.bootstrap_actor_registry_with_app_state(app_state).await;
+                    self.bootstrap_actor_registry_with_app_state(app_state)
+                        .await;
                     if let Some(registry) = self.actor_registry.read().await.as_ref() {
-                        let _ = registry.b_mailbox().request(ExecutorBCommand::ContinueStep {
-                            step_id,
-                            task_id: b_task_id.clone(),
-                            payload: continue_payload.clone(),
-                        }).await;
+                        let _ = registry
+                            .b_mailbox()
+                            .request(ExecutorBCommand::ContinueStep {
+                                step_id,
+                                task_id: b_task_id.clone(),
+                                payload: continue_payload.clone(),
+                            })
+                            .await;
                     }
 
                     continue_payload
                 } else {
                     let b_actor_id = {
                         let guard = self.session.read().await;
-                        guard.as_ref()
+                        guard
+                            .as_ref()
                             .map(|s| s.executor_b.actor_id.clone())
                             .unwrap_or_else(|| "boss-unknown-b".into())
                     };
@@ -1898,12 +2053,16 @@ impl BossCoordinator {
                         .build_step_spawn_payload(step_id, &parent_session_id, &b_actor_id)
                         .await?;
 
-                    self.bootstrap_actor_registry_with_app_state(app_state).await;
+                    self.bootstrap_actor_registry_with_app_state(app_state)
+                        .await;
                     if let Some(registry) = self.actor_registry.read().await.as_ref() {
-                        let _ = registry.b_mailbox().request(ExecutorBCommand::DispatchStep {
-                            step_id,
-                            payload: spawn_payload.clone(),
-                        }).await;
+                        let _ = registry
+                            .b_mailbox()
+                            .request(ExecutorBCommand::DispatchStep {
+                                step_id,
+                                payload: spawn_payload.clone(),
+                            })
+                            .await;
                     }
 
                     let records = tasks.list();
@@ -1952,8 +2111,14 @@ impl BossCoordinator {
                     plan.auto_sequence
                         && plan.steps.iter().any(|step| step.completed)
                         && !plan.steps.iter().all(|step| step.completed)
-                        && !plan.steps.iter().any(|step| step.status.is_terminal_failure())
-                        && !plan.steps.iter().any(|step| step.status == BossPlanStepStatus::Running)
+                        && !plan
+                            .steps
+                            .iter()
+                            .any(|step| step.status.is_terminal_failure())
+                        && !plan
+                            .steps
+                            .iter()
+                            .any(|step| step.status == BossPlanStepStatus::Running)
                         && next_runnable_step(plan).is_some()
                 })
             };
@@ -2081,7 +2246,9 @@ impl BossCoordinator {
         app_state: &Arc<crate::state::app_state::AppState>,
         payload: &str,
     ) -> anyhow::Result<()> {
-        self.invoke_agent_tool_with_task_id(app_state, payload).await.map(|_| ())
+        self.invoke_agent_tool_with_task_id(app_state, payload)
+            .await
+            .map(|_| ())
     }
 
     /// Like `invoke_agent_tool` but returns the spawned task id extracted from the result text.
@@ -2139,10 +2306,13 @@ impl BossCoordinator {
         // Check if already initialized to a real session id (not the deterministic placeholder).
         let placeholder = {
             let guard = self.session.read().await;
-            guard.as_ref().map(|s| {
-                let placeholder = format!("boss-{}-a", s.plan_id);
-                s.designer_a.session_id == placeholder || s.designer_a.session_id.is_empty()
-            }).unwrap_or(true)
+            guard
+                .as_ref()
+                .map(|s| {
+                    let placeholder = format!("boss-{}-a", s.plan_id);
+                    s.designer_a.session_id == placeholder || s.designer_a.session_id.is_empty()
+                })
+                .unwrap_or(true)
         };
         if !placeholder {
             return;
@@ -2153,7 +2323,10 @@ impl BossCoordinator {
             Err(_) => return,
         };
 
-        if let Ok(task_id) = self.invoke_agent_tool_with_task_id(app_state, &payload).await {
+        if let Ok(task_id) = self
+            .invoke_agent_tool_with_task_id(app_state, &payload)
+            .await
+        {
             let mut guard = self.session.write().await;
             if let Some(session) = guard.as_mut() {
                 session.designer_a.session_id = task_id.clone();
@@ -2166,10 +2339,17 @@ impl BossCoordinator {
     /// Send a message to A's running LLM session via AgentTool Continue.
     /// Requires `ensure_a_session` to have been called first so `designer_a.session_id` is real.
     /// Fire-and-forget: enqueues the message into A's mailbox; does not wait for A's reply.
-    async fn send_to_a_session(&self, app_state: &Arc<crate::state::app_state::AppState>, message: String) {
+    async fn send_to_a_session(
+        &self,
+        app_state: &Arc<crate::state::app_state::AppState>,
+        message: String,
+    ) {
         let task_id = {
             let guard = self.session.read().await;
-            guard.as_ref().map(|s| s.designer_a.session_id.clone()).unwrap_or_default()
+            guard
+                .as_ref()
+                .map(|s| s.designer_a.session_id.clone())
+                .unwrap_or_default()
         };
         if task_id.is_empty() {
             return;
@@ -2192,7 +2372,10 @@ impl BossCoordinator {
     ) -> anyhow::Result<String> {
         let task_id = {
             let guard = self.session.read().await;
-            guard.as_ref().map(|s| s.designer_a.session_id.clone()).unwrap_or_default()
+            guard
+                .as_ref()
+                .map(|s| s.designer_a.session_id.clone())
+                .unwrap_or_default()
         };
         if task_id.is_empty() {
             anyhow::bail!("A session not initialized");
@@ -2345,7 +2528,10 @@ impl BossCoordinator {
     ) -> anyhow::Result<String> {
         let task_id = {
             let guard = self.session.read().await;
-            guard.as_ref().map(|s| s.executor_b.session_id.clone()).unwrap_or_default()
+            guard
+                .as_ref()
+                .map(|s| s.executor_b.session_id.clone())
+                .unwrap_or_default()
         };
         if task_id.is_empty() {
             anyhow::bail!("B session not initialized");
@@ -2377,8 +2563,14 @@ impl BossCoordinator {
             let old_part = &message[..split];
             let recent_tail = &message[split..];
             match self.summarize_context_stateless(app_state, old_part).await {
-                Ok(summary) => (assemble_summarized_payload(&summary, recent_tail), CompressionStrategy::Summarized),
-                Err(_) => (trim_context_payload(&message, B_CONTEXT_TRIM_THRESHOLD, B_CONTEXT_KEEP_CHARS), CompressionStrategy::Trimmed),
+                Ok(summary) => (
+                    assemble_summarized_payload(&summary, recent_tail),
+                    CompressionStrategy::Summarized,
+                ),
+                Err(_) => (
+                    trim_context_payload(&message, B_CONTEXT_TRIM_THRESHOLD, B_CONTEXT_KEEP_CHARS),
+                    CompressionStrategy::Trimmed,
+                ),
             }
         } else {
             (message, CompressionStrategy::None)
@@ -2399,7 +2591,10 @@ impl BossCoordinator {
             });
         }
 
-        let offset_before = tasks.get_output(&task_id, 0).map(|s| s.next_offset).unwrap_or(0);
+        let offset_before = tasks
+            .get_output(&task_id, 0)
+            .map(|s| s.next_offset)
+            .unwrap_or(0);
 
         let tasks_clone = tasks.clone();
         let task_id_clone = task_id.clone();
@@ -2429,10 +2624,17 @@ impl BossCoordinator {
     }
 
     /// Fire-and-forget: send a message to B's running LLM session without waiting for a reply.
-    async fn send_to_b_session(&self, app_state: &Arc<crate::state::app_state::AppState>, message: String) {
+    async fn send_to_b_session(
+        &self,
+        app_state: &Arc<crate::state::app_state::AppState>,
+        message: String,
+    ) {
         let task_id = {
             let guard = self.session.read().await;
-            guard.as_ref().map(|s| s.executor_b.session_id.clone()).unwrap_or_default()
+            guard
+                .as_ref()
+                .map(|s| s.executor_b.session_id.clone())
+                .unwrap_or_default()
         };
         if task_id.is_empty() {
             return;
@@ -2446,7 +2648,13 @@ impl BossCoordinator {
         &self,
         app_state: &Arc<crate::state::app_state::AppState>,
     ) -> anyhow::Result<String> {
-        let plan_id = self.plan.read().await.as_ref().map(|p| p.plan_id.clone()).unwrap_or_default();
+        let plan_id = self
+            .plan
+            .read()
+            .await
+            .as_ref()
+            .map(|p| p.plan_id.clone())
+            .unwrap_or_default();
         let parent_session_id = app_state.active_session_id.clone();
         Ok(json!({
             "task": format!("Designer A review session for plan {plan_id}"),
@@ -2493,7 +2701,6 @@ enum AdvanceOutcome {
     NoRunnableStep,
 }
 
-
 fn model_tier_label(tier: ModelTier) -> &'static str {
     match tier {
         ModelTier::Low => "low",
@@ -2522,8 +2729,7 @@ fn next_runnable_step(plan: &BossPlan) -> Option<&BossPlanStep> {
         !step.completed
             && matches!(
                 step.status,
-                BossPlanStepStatus::Pending
-                    | BossPlanStepStatus::Rejected
+                BossPlanStepStatus::Pending | BossPlanStepStatus::Rejected
             )
     })
 }
@@ -2664,7 +2870,8 @@ impl BossCoordinator {
         parent_session_id: &str,
         b_actor_id: &str,
     ) -> anyhow::Result<String> {
-        self.build_step_spawn_payload(step_id, parent_session_id, b_actor_id).await
+        self.build_step_spawn_payload(step_id, parent_session_id, b_actor_id)
+            .await
     }
 
     pub async fn repair_replan_step(
@@ -2714,7 +2921,8 @@ impl BossCoordinator {
         }
 
         self.update_current_step(Some(step_id)).await;
-        self.save_plan_with_session(std::path::Path::new(&plan_path)).await
+        self.save_plan_with_session(std::path::Path::new(&plan_path))
+            .await
     }
 }
 
