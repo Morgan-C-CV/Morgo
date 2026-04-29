@@ -1,5 +1,7 @@
 #![allow(unused_must_use)]
 
+#[path = "integration/approval_audit_flow.rs"]
+mod approval_audit_flow;
 #[path = "integration/bash_tool.rs"]
 mod bash_tool;
 #[path = "integration/boss_flow.rs"]

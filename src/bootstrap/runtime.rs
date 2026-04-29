@@ -51,6 +51,7 @@ use crate::plugins::types::{
 use crate::security::audit::AuditLog;
 use crate::security::authorizer::{AuthDecision, DefaultSurfaceAuthorizer, SurfaceAuthorizer};
 use crate::security::filesystem_policy::FilesystemPolicy;
+use crate::security::workspace_capability::WorkspaceCapabilityConfig;
 use crate::service::api::client::{
     ModelPricing, ModelProviderClient, ModelProviderConfig, ProviderAuthStrategy,
     ProviderCompatibilityProfileKind, ProviderProtocol, ProviderTimeout, validate_provider_config,
@@ -790,6 +791,16 @@ impl RuntimeBootstrap {
         if let Some(policy) = filesystem_policy.clone() {
             permission_context = permission_context.with_filesystem_policy(policy);
         }
+        if let Some(cap_config) = self
+            .load_workspace_capability_config()
+            .unwrap_or_else(|e| {
+                tracing::warn!("failed to load workspace capability config: {e}");
+                None
+            })
+        {
+            permission_context =
+                permission_context.with_workspace_capability(Arc::new(cap_config));
+        }
         let last_activity_ts = Arc::new(std::sync::atomic::AtomicU64::new(
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -927,6 +938,16 @@ impl RuntimeBootstrap {
         }
         if let Some(policy) = initialize_bundle.filesystem_policy.clone() {
             permission_context = permission_context.with_filesystem_policy(policy);
+        }
+        if let Some(cap_config) = self
+            .load_workspace_capability_config()
+            .unwrap_or_else(|e| {
+                tracing::warn!("failed to load workspace capability config: {e}");
+                None
+            })
+        {
+            permission_context =
+                permission_context.with_workspace_capability(Arc::new(cap_config));
         }
         let last_activity_ts = Arc::new(std::sync::atomic::AtomicU64::new(
             SystemTime::now()
@@ -1162,6 +1183,73 @@ impl RuntimeBootstrap {
             return Ok(None);
         }
         FilesystemPolicy::load_from_path(&path).map(Some)
+    }
+
+    fn load_workspace_capability_config(
+        &self,
+    ) -> anyhow::Result<Option<WorkspaceCapabilityConfig>> {
+        // Explicit path override via env var.
+        if let Ok(raw_path) = std::env::var("RUST_AGENT_WORKSPACE_CAPABILITY_CONFIG") {
+            let trimmed = raw_path.trim();
+            if trimmed.is_empty() {
+                anyhow::bail!("RUST_AGENT_WORKSPACE_CAPABILITY_CONFIG is set but empty");
+            }
+            let path = std::path::PathBuf::from(trimmed);
+            if !path.is_absolute() {
+                anyhow::bail!(
+                    "RUST_AGENT_WORKSPACE_CAPABILITY_CONFIG must be an absolute path: {}",
+                    path.display()
+                );
+            }
+            let json = std::fs::read_to_string(&path).map_err(|e| {
+                anyhow::anyhow!(
+                    "failed to read workspace capability config at {}: {e}",
+                    path.display()
+                )
+            })?;
+            return WorkspaceCapabilityConfig::load_from_json(&json).map(Some);
+        }
+
+        // Beta deny-by-default preset when env flag is set.
+        if std::env::var("RUST_AGENT_BETA_DENY_BY_DEFAULT")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+        {
+            return Ok(Some(WorkspaceCapabilityConfig::beta_deny_by_default()));
+        }
+
+        // Look for workspace-capability.json in config root or ~/.claude/.
+        let config_dir = if let Ok(raw) = std::env::var("RUST_AGENT_CONFIG_ROOT") {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                anyhow::bail!("RUST_AGENT_CONFIG_ROOT is set but empty");
+            }
+            let p = std::path::PathBuf::from(trimmed);
+            if !p.is_absolute() {
+                anyhow::bail!(
+                    "RUST_AGENT_CONFIG_ROOT must be an absolute path, got: {}",
+                    p.display()
+                );
+            }
+            p
+        } else {
+            let Some(home) = std::env::var_os("HOME") else {
+                return Ok(None);
+            };
+            std::path::PathBuf::from(home).join(".claude")
+        };
+
+        let path = config_dir.join("workspace-capability.json");
+        if !path.exists() {
+            return Ok(None);
+        }
+        let json = std::fs::read_to_string(&path).map_err(|e| {
+            anyhow::anyhow!(
+                "failed to read workspace capability config at {}: {e}",
+                path.display()
+            )
+        })?;
+        WorkspaceCapabilityConfig::load_from_json(&json).map(Some)
     }
 
     fn build_model_provider_config(

@@ -74,3 +74,5 @@ mod boss_test_sample_sink_tests;
 mod workflow_step_tests;
 #[path = "unit/workspace_capability_tests.rs"]
 mod workspace_capability_tests;
+#[path = "unit/workspace_capability_bootstrap_tests.rs"]
+mod workspace_capability_bootstrap_tests;

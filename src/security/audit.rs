@@ -69,6 +69,16 @@ pub enum AuditEvent {
         actor_id: String,
         request_count: u64,
     },
+    ApprovalResolved {
+        tool_name: String,
+        decision: String,
+        surface: String,
+        session_id: Option<String>,
+        actor_id: Option<String>,
+        code: Option<String>,
+        approval_kind: Option<String>,
+        escalation_reasons: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -284,6 +294,24 @@ impl AuditRecord {
                 notification_kind: None,
                 channel: None,
                 outcome: "resumed".into(),
+                event,
+            },
+            AuditEvent::ApprovalResolved {
+                decision,
+                surface,
+                session_id,
+                actor_id,
+                ..
+            } => Self {
+                timestamp,
+                event_kind: "approval_resolved".into(),
+                session_id: session_id.clone(),
+                actor_id: actor_id.clone(),
+                surface: Some(surface.clone()),
+                request_id: None,
+                notification_kind: None,
+                channel: None,
+                outcome: decision.clone(),
                 event,
             },
         }

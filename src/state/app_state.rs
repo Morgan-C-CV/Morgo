@@ -24,7 +24,8 @@ use crate::history::session::{
     SessionStore, SessionStoreWriteError,
 };
 use crate::interaction::dispatcher::NotificationDispatcher;
-use crate::security::audit::AuditLog;
+use crate::security::audit::{AuditEvent, AuditLog};
+use crate::security::approval_protocol::{ApprovalDecision, ApprovalSurface};
 use crate::state::active_model_runtime::ActiveModelRuntime;
 use crate::state::permission_context::ToolPermissionContext;
 
@@ -345,8 +346,28 @@ impl AppState {
             ));
         };
 
+        let decision = ApprovalDecision::from_bool(approved);
+        let surface = ApprovalSurface::from_interaction_surface(self.surface);
+
+        let emit_audit = |decision: ApprovalDecision| {
+            self.audit_log
+                .lock()
+                .expect("audit log poisoned")
+                .record(AuditEvent::ApprovalResolved {
+                    tool_name: pending.tool_name.clone(),
+                    decision: decision.as_str().to_string(),
+                    surface: surface.as_str().to_string(),
+                    session_id: Some(self.active_session_id.clone()),
+                    actor_id: None,
+                    code: pending.code.clone(),
+                    approval_kind: pending.approval_kind.clone(),
+                    escalation_reasons: pending.escalation_reasons.clone(),
+                });
+        };
+
         if !approved {
             self.permission_context.set_pending_approval(None);
+            emit_audit(decision);
             return Ok(CommandResult::Message(format!(
                 "Denied approval for {}",
                 pending.tool_name
@@ -360,6 +381,7 @@ impl AppState {
                     &pending.tool_input,
                 );
                 self.permission_context.set_pending_approval(None);
+                emit_audit(decision);
                 Ok(CommandResult::Message(message))
             }
             "ExitPlanMode" => {
@@ -368,24 +390,26 @@ impl AppState {
                     &pending.tool_input,
                 )?;
                 self.permission_context.set_pending_approval(None);
+                emit_audit(decision);
                 Ok(CommandResult::Message(message))
             }
             tool_name => {
-                let registry = self
+                let registry_result = self
                     .runtime_tool_registry
                     .as_ref()
                     .ok_or_else(|| {
                         anyhow::anyhow!("runtime tool registry unavailable for approval")
-                    })?
-                    .read()
-                    .await;
+                    });
+                // Emit audit before any fallible operation so approve is always recorded.
+                self.permission_context.set_pending_approval(None);
+                emit_audit(decision);
+                let registry = registry_result?.read().await;
                 let result = registry
                     .invoke_with_approval(
                         &ToolCall::new(tool_name, pending.tool_input.clone()),
                         &self.permission_context,
                     )
                     .await?;
-                self.permission_context.set_pending_approval(None);
                 match result {
                     ToolResult::Text(text) => Ok(CommandResult::Message(text)),
                     ToolResult::Denied(reason) => Ok(CommandResult::Denied(reason)),
