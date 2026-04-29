@@ -267,6 +267,7 @@ async fn query_loop_records_usage_events_into_cost_tracker() {
     );
     let report = context.app_state.cost_tracker.format_report();
     assert!(report.contains("model default-model -> requests: 1"));
+    assert!(!report.contains("model unknown ->"));
     assert!(report.contains("cache_creation_input_tokens: 10"));
     assert!(report.contains("cache_read_input_tokens: 5"));
 }
@@ -299,12 +300,14 @@ async fn query_loop_uses_latest_usage_without_double_counting() {
 
     assert_eq!(result.state, QueryLoopState::Completed);
     let snapshot = context.app_state.cost_tracker.snapshot();
-    assert_eq!(snapshot.requests, 2);
+    assert_eq!(snapshot.requests, 1);
+    assert_eq!(snapshot.input_tokens, 101);
     assert_eq!(snapshot.output_tokens, 24);
     assert_eq!(snapshot.cache_creation_input_tokens, 2);
     assert_eq!(snapshot.cache_read_input_tokens, 1);
     let report = context.app_state.cost_tracker.format_report();
     assert!(report.contains("model default-model -> requests: 1"));
+    assert!(!report.contains("model unknown ->"));
     assert!(report.contains("input_tokens: 101"));
     assert!(report.contains("output_tokens: 24"));
     assert!(report.contains("cache_creation_input_tokens: 2"));
@@ -316,6 +319,40 @@ async fn query_loop_uses_latest_usage_without_double_counting() {
             .filter(|event| matches!(event, EngineEvent::Notice { kind, .. } if kind == &"usage"))
             .count(),
         1
+    );
+}
+
+#[tokio::test]
+async fn query_loop_records_usage_emitted_after_terminal_stop() {
+    let context = test_context(vec![
+        StreamEvent::MessageStart,
+        StreamEvent::TextDelta("openai usage-only tail".into()),
+        StreamEvent::MessageStop {
+            stop_reason: StopReason::EndTurn,
+        },
+        StreamEvent::Usage(UsageEvent {
+            model: "gpt-5-mini-2025-08-07".into(),
+            input_tokens: 2048,
+            output_tokens: 64,
+            cache_creation_input_tokens: 1024,
+            cache_read_input_tokens: 1536,
+        }),
+    ]);
+
+    let result = run_query_loop(&context, Message::user("track post-stop usage")).await;
+
+    assert_eq!(result.state, QueryLoopState::Completed);
+    let snapshot = context.app_state.cost_tracker.snapshot();
+    assert_eq!(snapshot.requests, 1);
+    assert_eq!(snapshot.input_tokens, 2048);
+    assert_eq!(snapshot.output_tokens, 64);
+    assert_eq!(snapshot.cache_creation_input_tokens, 1024);
+    assert_eq!(snapshot.cache_read_input_tokens, 1536);
+    assert!(
+        result
+            .events
+            .iter()
+            .any(|event| matches!(event, EngineEvent::Notice { kind, .. } if kind == &"usage"))
     );
 }
 

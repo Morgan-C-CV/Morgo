@@ -299,10 +299,6 @@ fn prepare_turn(
         token_estimate: prepared_prompt.len(),
         prompt: prepared_prompt,
     };
-    context
-        .app_state
-        .cost_tracker
-        .record_model_usage("unknown", prepared.token_estimate, 0, 0, 0);
 
     if let Some(max_budget_input_tokens) = params.max_budget_input_tokens {
         if prepared.token_estimate >= max_budget_input_tokens {
@@ -574,6 +570,7 @@ async fn consume_model_stream(
     let mut aggregated_text = String::new();
     let mut pending_tool_use: Option<(String, String)> = None;
     let mut pending_usage: Option<crate::service::api::streaming::UsageEvent> = None;
+    let mut terminal_stop_reason: Option<StopReason> = None;
 
     for event in stream_events {
         match event {
@@ -592,137 +589,9 @@ async fn consume_model_stream(
             StreamEvent::Usage(usage) => {
                 pending_usage = Some(usage);
             }
-            StreamEvent::MessageStop { stop_reason } => match stop_reason {
-                StopReason::EndTurn => {
-                    if let Some(usage) = pending_usage.take() {
-                        record_usage_notice(context, &mut engine_events, usage);
-                    }
-                    if !aggregated_text.is_empty() {
-                        let message = Message::assistant(aggregated_text.clone());
-                        engine_events.push(EngineEvent::MessageCommitted(message.clone()));
-                        state.messages.push(message);
-                    }
-                    if context.is_subagent() {
-                        return TurnOutcome {
-                            state: state.clone(),
-                            events: engine_events,
-                            decision: TurnDecision::AwaitMailbox,
-                        };
-                    }
-                    return TurnOutcome {
-                        state: state.clone(),
-                        events: engine_events,
-                        decision: TurnDecision::FinalizeNormalTurn(state.clone()),
-                    };
-                }
-                StopReason::ToolUse => {
-                    if let Some(usage) = pending_usage.take() {
-                        record_usage_notice(context, &mut engine_events, usage);
-                    }
-                    if !aggregated_text.is_empty() {
-                        let message = Message::assistant(aggregated_text.clone());
-                        engine_events.push(EngineEvent::MessageCommitted(message.clone()));
-                        state.messages.push(message);
-                    }
-                    let Some((tool_name, tool_input)) = pending_tool_use.take() else {
-                        let message = "tool stop without tool payload";
-                        let error_message = Message::assistant(format!("stream error: {message}"));
-                        engine_events.push(EngineEvent::MessageCommitted(error_message.clone()));
-                        state.messages.push(error_message);
-                        return TurnOutcome {
-                            state: state.clone(),
-                            events: engine_events,
-                            decision: TurnDecision::Return(
-                                state.clone(),
-                                Terminal::ModelError {
-                                    message: message.into(),
-                                    code: Some(ServiceFailureCode::ApiStreamProtocol),
-                                },
-                            ),
-                        };
-                    };
-                    let tool_outcome =
-                        execute_tool_phase(context, state, engine_events, tool_name, tool_input)
-                            .await;
-                    return tool_outcome;
-                }
-                StopReason::MaxTokens => {
-                    if let Some(usage) = pending_usage.take() {
-                        record_usage_notice(context, &mut engine_events, usage);
-                    }
-                    if !aggregated_text.is_empty() {
-                        let message = Message::assistant(aggregated_text.clone());
-                        engine_events.push(EngineEvent::MessageCommitted(message.clone()));
-                        state.messages.push(message);
-                    }
-                    if state.max_output_tokens_override.is_none() {
-                        state.max_output_tokens_override = Some(8_192);
-                        engine_events.push(EngineEvent::Notice {
-                            kind: "recovery",
-                            message: "escalating max output tokens after model stop".into(),
-                            code: None,
-                            service_failure: None,
-                        });
-                        return TurnOutcome {
-                            state: state.clone(),
-                            events: engine_events,
-                            decision: TurnDecision::ContinueWith(
-                                Message::user(
-                                    "Please continue and finish the response after max output token escalation.",
-                                ),
-                                Continue::MaxOutputTokensEscalate,
-                            ),
-                        };
-                    }
-                    if state.max_output_tokens_recovery_count < max_output_tokens_recovery_limit {
-                        state.max_output_tokens_recovery_count += 1;
-                        engine_events.push(EngineEvent::Notice {
-                            kind: "recovery",
-                            message: "continuing after max output token interruption".into(),
-                            code: None,
-                            service_failure: None,
-                        });
-                        return TurnOutcome {
-                            state: state.clone(),
-                            events: engine_events,
-                            decision: TurnDecision::ContinueWith(
-                                Message::user(
-                                    "Please continue from where you were interrupted due to max output tokens.",
-                                ),
-                                Continue::MaxOutputTokensRecovery,
-                            ),
-                        };
-                    }
-                    return TurnOutcome {
-                        state: state.clone(),
-                        events: engine_events,
-                        decision: TurnDecision::Return(state.clone(), Terminal::AbortedStreaming),
-                    };
-                }
-                StopReason::Error => {
-                    if !aggregated_text.is_empty() {
-                        let message = Message::assistant(aggregated_text.clone());
-                        engine_events.push(EngineEvent::MessageCommitted(message.clone()));
-                        state.messages.push(message);
-                    }
-                    let stop_error = synthetic_stop_reason_error(state.transition.as_ref());
-                    if !should_attempt_stream_recovery(&stop_error) {
-                        let code = classify_service_failure_code(&stop_error);
-                        return TurnOutcome {
-                            state: state.clone(),
-                            events: engine_events,
-                            decision: TurnDecision::Return(
-                                state.clone(),
-                                Terminal::ModelError {
-                                    message: stop_error.message,
-                                    code: Some(code),
-                                },
-                            ),
-                        };
-                    }
-                    return continue_after_stream_error(context, state, engine_events, stop_error);
-                }
-            },
+            StreamEvent::MessageStop { stop_reason } => {
+                terminal_stop_reason = Some(stop_reason);
+            }
             StreamEvent::Error(error) => {
                 if let Some(usage) = pending_usage.take() {
                     record_usage_notice(context, &mut engine_events, usage);
@@ -751,6 +620,113 @@ async fn consume_model_stream(
 
     if let Some(usage) = pending_usage.take() {
         record_usage_notice(context, &mut engine_events, usage);
+    }
+
+    if !aggregated_text.is_empty() {
+        let message = Message::assistant(aggregated_text.clone());
+        engine_events.push(EngineEvent::MessageCommitted(message.clone()));
+        state.messages.push(message);
+    }
+
+    match terminal_stop_reason {
+        Some(StopReason::EndTurn) => {
+            if context.is_subagent() {
+                return TurnOutcome {
+                    state: state.clone(),
+                    events: engine_events,
+                    decision: TurnDecision::AwaitMailbox,
+                };
+            }
+            return TurnOutcome {
+                state: state.clone(),
+                events: engine_events,
+                decision: TurnDecision::FinalizeNormalTurn(state.clone()),
+            };
+        }
+        Some(StopReason::ToolUse) => {
+            let Some((tool_name, tool_input)) = pending_tool_use.take() else {
+                let message = "tool stop without tool payload";
+                let error_message = Message::assistant(format!("stream error: {message}"));
+                engine_events.push(EngineEvent::MessageCommitted(error_message.clone()));
+                state.messages.push(error_message);
+                return TurnOutcome {
+                    state: state.clone(),
+                    events: engine_events,
+                    decision: TurnDecision::Return(
+                        state.clone(),
+                        Terminal::ModelError {
+                            message: message.into(),
+                            code: Some(ServiceFailureCode::ApiStreamProtocol),
+                        },
+                    ),
+                };
+            };
+            return execute_tool_phase(context, state, engine_events, tool_name, tool_input).await;
+        }
+        Some(StopReason::MaxTokens) => {
+            if state.max_output_tokens_override.is_none() {
+                state.max_output_tokens_override = Some(8_192);
+                engine_events.push(EngineEvent::Notice {
+                    kind: "recovery",
+                    message: "escalating max output tokens after model stop".into(),
+                    code: None,
+                    service_failure: None,
+                });
+                return TurnOutcome {
+                    state: state.clone(),
+                    events: engine_events,
+                    decision: TurnDecision::ContinueWith(
+                        Message::user(
+                            "Please continue and finish the response after max output token escalation.",
+                        ),
+                        Continue::MaxOutputTokensEscalate,
+                    ),
+                };
+            }
+            if state.max_output_tokens_recovery_count < max_output_tokens_recovery_limit {
+                state.max_output_tokens_recovery_count += 1;
+                engine_events.push(EngineEvent::Notice {
+                    kind: "recovery",
+                    message: "continuing after max output token interruption".into(),
+                    code: None,
+                    service_failure: None,
+                });
+                return TurnOutcome {
+                    state: state.clone(),
+                    events: engine_events,
+                    decision: TurnDecision::ContinueWith(
+                        Message::user(
+                            "Please continue from where you were interrupted due to max output tokens.",
+                        ),
+                        Continue::MaxOutputTokensRecovery,
+                    ),
+                };
+            }
+            return TurnOutcome {
+                state: state.clone(),
+                events: engine_events,
+                decision: TurnDecision::Return(state.clone(), Terminal::AbortedStreaming),
+            };
+        }
+        Some(StopReason::Error) => {
+            let stop_error = synthetic_stop_reason_error(state.transition.as_ref());
+            if !should_attempt_stream_recovery(&stop_error) {
+                let code = classify_service_failure_code(&stop_error);
+                return TurnOutcome {
+                    state: state.clone(),
+                    events: engine_events,
+                    decision: TurnDecision::Return(
+                        state.clone(),
+                        Terminal::ModelError {
+                            message: stop_error.message,
+                            code: Some(code),
+                        },
+                    ),
+                };
+            }
+            return continue_after_stream_error(context, state, engine_events, stop_error);
+        }
+        None => {}
     }
 
     TurnOutcome {
