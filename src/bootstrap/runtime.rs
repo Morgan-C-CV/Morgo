@@ -18,6 +18,7 @@ use crate::core::boss_state::BossLisMPolicy;
 use crate::core::context::QueryContext;
 use crate::core::engine::QueryEngine;
 use crate::core::lism_ab_sample::LisMAbSampleSink;
+use crate::core::lism_ab_sample::LisMRolloutConclusion;
 use crate::cost::tracker::CostTracker;
 use crate::history::resume::{
     ResolvedSessionState, RestoreRequest, RestoreSource, resolve_session_state,
@@ -267,6 +268,9 @@ pub struct BootstrapCli {
     /// Read a LisM A/B JSONL sample file and print an A/B summary, then exit.
     #[arg(long, value_name = "PATH")]
     pub lism_ab_summarize: Option<String>,
+    /// Like --lism-ab-summarize but also prints the rollout policy conclusion.
+    #[arg(long, value_name = "PATH")]
+    pub lism_ab_conclude: Option<String>,
     /// Override the boss LisM policy for this run. One of: inherit, force-on, force-off.
     #[arg(long, value_name = "POLICY")]
     pub lism_policy: Option<String>,
@@ -287,6 +291,7 @@ impl Default for BootstrapCli {
             attachments: Vec::new(),
             lism_ab_sample: None,
             lism_ab_summarize: None,
+            lism_ab_conclude: None,
             lism_policy: None,
         }
     }
@@ -412,6 +417,25 @@ impl RuntimeBootstrap {
             }
             let summary = sink.summarize();
             print_lism_ab_summary(&summary, records.len());
+            return Ok(());
+        }
+
+        // Early-exit: print A/B summary + rollout conclusion.
+        if let Some(path) = &self.cli.lism_ab_conclude {
+            let records = LisMAbSampleSink::load_records(path);
+            if records.is_empty() {
+                println!("No LisM A/B sample records found at: {path}");
+                return Ok(());
+            }
+            let sink = LisMAbSampleSink::in_memory();
+            for rec in &records {
+                sink.push_record(rec.clone());
+            }
+            let summary = sink.summarize();
+            print_lism_ab_summary(&summary, records.len());
+            println!();
+            let conclusion = LisMRolloutConclusion::from_summary_defaults(&summary);
+            print!("{conclusion}");
             return Ok(());
         }
 

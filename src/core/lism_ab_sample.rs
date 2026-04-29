@@ -61,6 +61,160 @@ impl LisMAbSummary {
     pub fn cost_delta_micros(&self) -> i64 {
         self.on_avg_cost_micros_usd as i64 - self.off_avg_cost_micros_usd as i64
     }
+
+    /// Derive a rollout conclusion from the summary data.
+    ///
+    /// Requires at least `min_runs_per_arm` in each arm to produce a non-Inconclusive result.
+    /// Thresholds:
+    /// - `cache_delta_threshold`: minimum positive delta to count as "LisM helps cache"
+    /// - `cost_penalty_threshold_micros`: maximum cost increase before recommending ForceOff
+    pub fn derive_rollout_conclusion(
+        &self,
+        min_runs_per_arm: usize,
+        cache_delta_threshold: f64,
+        cost_penalty_threshold_micros: u64,
+    ) -> LisMRolloutConclusion {
+        if !self.has_both_arms()
+            || self.on_runs < min_runs_per_arm
+            || self.off_runs < min_runs_per_arm
+        {
+            return LisMRolloutConclusion {
+                recommendation: LisMPolicyRecommendation::Inconclusive,
+                reason: format!(
+                    "Insufficient data: {} on-runs and {} off-runs (min {} per arm required)",
+                    self.on_runs, self.off_runs, min_runs_per_arm
+                ),
+                cache_hit_ratio_delta: self.cache_hit_ratio_delta(),
+                cost_delta_micros: self.cost_delta_micros(),
+                on_completion_rate: self.on_completion_rate,
+                off_completion_rate: self.off_completion_rate,
+            };
+        }
+
+        let cache_delta = self.cache_hit_ratio_delta();
+        let cost_delta = self.cost_delta_micros();
+
+        // Hard penalty: LisM significantly degrades cache OR costs much more → ForceOff
+        let cache_hurts = cache_delta.map_or(false, |d| d < -cache_delta_threshold);
+        let cost_penalty_exceeded = cost_delta > cost_penalty_threshold_micros as i64;
+
+        if cache_hurts || cost_penalty_exceeded {
+            let reason = if cache_hurts && cost_penalty_exceeded {
+                format!(
+                    "LisM degrades cache hit ratio ({:+.3}) and increases cost ({:+}μ); recommend ForceOff",
+                    cache_delta.unwrap_or(0.0), cost_delta
+                )
+            } else if cache_hurts {
+                format!(
+                    "LisM degrades cache hit ratio ({:+.3}); recommend ForceOff",
+                    cache_delta.unwrap_or(0.0)
+                )
+            } else {
+                format!(
+                    "LisM increases cost beyond threshold ({:+}μ > {}μ); recommend ForceOff",
+                    cost_delta, cost_penalty_threshold_micros
+                )
+            };
+            return LisMRolloutConclusion {
+                recommendation: LisMPolicyRecommendation::ForceOff,
+                reason,
+                cache_hit_ratio_delta: cache_delta,
+                cost_delta_micros: cost_delta,
+                on_completion_rate: self.on_completion_rate,
+                off_completion_rate: self.off_completion_rate,
+            };
+        }
+
+        // Clear benefit: LisM improves cache AND does not increase cost → ForceOn
+        let cache_helps = cache_delta.map_or(false, |d| d > cache_delta_threshold);
+        let cost_neutral_or_better = cost_delta <= 0;
+
+        if cache_helps && cost_neutral_or_better {
+            return LisMRolloutConclusion {
+                recommendation: LisMPolicyRecommendation::ForceOn,
+                reason: format!(
+                    "LisM improves cache hit ratio ({:+.3}) and reduces cost ({:+}μ); recommend ForceOn",
+                    cache_delta.unwrap_or(0.0), cost_delta
+                ),
+                cache_hit_ratio_delta: cache_delta,
+                cost_delta_micros: cost_delta,
+                on_completion_rate: self.on_completion_rate,
+                off_completion_rate: self.off_completion_rate,
+            };
+        }
+
+        // Mixed or noisy signal → keep session-level Inherit
+        LisMRolloutConclusion {
+            recommendation: LisMPolicyRecommendation::Inherit,
+            reason: format!(
+                "Mixed signal: cache delta {}, cost delta {}μ — keep per-session Inherit policy",
+                cache_delta.map_or("n/a".into(), |d| format!("{:+.3}", d)),
+                cost_delta
+            ),
+            cache_hit_ratio_delta: cache_delta,
+            cost_delta_micros: cost_delta,
+            on_completion_rate: self.on_completion_rate,
+            off_completion_rate: self.off_completion_rate,
+        }
+    }
+}
+
+// ── Rollout conclusion ────────────────────────────────────────────────────────
+
+/// Policy recommendation derived from A/B sample data.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LisMPolicyRecommendation {
+    /// Not enough data in both arms to make a call.
+    Inconclusive,
+    /// LisM clearly helps — recommend setting `BossLisMPolicy::ForceOn` globally.
+    ForceOn,
+    /// LisM clearly hurts — recommend setting `BossLisMPolicy::ForceOff` globally.
+    ForceOff,
+    /// Signal is mixed or within noise — keep `BossLisMPolicy::Inherit` (per-session decision).
+    Inherit,
+}
+
+/// Structured output of the A/B rollout analysis.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LisMRolloutConclusion {
+    pub recommendation: LisMPolicyRecommendation,
+    pub reason: String,
+    pub cache_hit_ratio_delta: Option<f64>,
+    pub cost_delta_micros: i64,
+    pub on_completion_rate: Option<f64>,
+    pub off_completion_rate: Option<f64>,
+}
+
+impl LisMRolloutConclusion {
+    /// Default thresholds for a standard evaluation.
+    /// - min 3 runs per arm
+    /// - cache delta threshold: 0.05 (5 pp)
+    /// - cost penalty threshold: 500_000μ (0.50 USD)
+    pub fn from_summary_defaults(summary: &LisMAbSummary) -> Self {
+        summary.derive_rollout_conclusion(3, 0.05, 500_000)
+    }
+}
+
+impl std::fmt::Display for LisMRolloutConclusion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let rec = match &self.recommendation {
+            LisMPolicyRecommendation::Inconclusive => "INCONCLUSIVE",
+            LisMPolicyRecommendation::ForceOn => "RECOMMEND: ForceOn",
+            LisMPolicyRecommendation::ForceOff => "RECOMMEND: ForceOff",
+            LisMPolicyRecommendation::Inherit => "RECOMMEND: Inherit (no change)",
+        };
+        writeln!(f, "Rollout Conclusion: {rec}")?;
+        writeln!(f, "  Reason           : {}", self.reason)?;
+        if let Some(d) = self.cache_hit_ratio_delta {
+            writeln!(f, "  Δ cache_hit_ratio: {:+.3}", d)?;
+        }
+        writeln!(f, "  Δ cost           : {:+}μ", self.cost_delta_micros)?;
+        if let (Some(on), Some(off)) = (self.on_completion_rate, self.off_completion_rate) {
+            writeln!(f, "  completion on/off: {:.2} / {:.2}", on, off)?;
+        }
+        Ok(())
+    }
 }
 
 // ── Sink ──────────────────────────────────────────────────────────────────────

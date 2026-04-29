@@ -137,6 +137,7 @@ async fn plugin_runtime_exposes_command_hook_tool_and_diagnostics() {
         attachments: Vec::new(),
         surface: "cli".into(),
         lism_ab_sample: None,
+    lism_ab_conclude: None,
     lism_ab_summarize: None,
     lism_policy: None,
     })

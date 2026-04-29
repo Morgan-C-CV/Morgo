@@ -6,7 +6,9 @@ use rust_agent::core::boss_state::{
     BossPlanStepStatus, BossReportPayload, BossStage, BossStepReport,
 };
 use rust_agent::core::boss_test_readiness::BossTestRunOutcome;
-use rust_agent::core::lism_ab_sample::{LisMAbSampleSink, new_shared_ab_sink};
+use rust_agent::core::lism_ab_sample::{
+    LisMAbSampleSink, LisMPolicyRecommendation, LisMRolloutConclusion, new_shared_ab_sink,
+};
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -474,4 +476,129 @@ fn r1_3_load_records_then_push_into_sink_matches_summarize() {
     assert_eq!(summary.on_avg_cost_micros_usd, 2000);
 
     let _ = std::fs::remove_file(path);
+}
+
+// ── Rollout conclusion (R1 slice 4) ───────────────────────────────────────────
+
+fn make_two_arm_sink(
+    on_cache_ratio_pct: u64,  // e.g. 80 → 0.8
+    off_cache_ratio_pct: u64,
+    on_cost: u64,
+    off_cost: u64,
+    runs_per_arm: usize,
+) -> LisMAbSampleSink {
+    let sink = LisMAbSampleSink::in_memory();
+    let total = 100usize;
+    let on_read = on_cache_ratio_pct as usize;
+    let on_write = total - on_read;
+    let off_read = off_cache_ratio_pct as usize;
+    let off_write = total - off_read;
+
+    for i in 0..runs_per_arm {
+        let on_report = make_report(2, 2, on_read, on_write, on_cost);
+        sink.record_run(format!("on-{i}"), true, &on_report, BossTestRunOutcome::Completed, 0);
+        let off_report = make_report(2, 2, off_read, off_write, off_cost);
+        sink.record_run(format!("off-{i}"), false, &off_report, BossTestRunOutcome::Completed, 0);
+    }
+    sink
+}
+
+#[test]
+fn r1_4_conclude_force_on_when_lism_clearly_helps() {
+    // LisM ON: 80% cache hit, cost 1000μ
+    // LisM OFF: 40% cache hit, cost 3000μ
+    // Δcache = +0.4 > 0.05 threshold; Δcost = -2000μ < 0 → ForceOn
+    let sink = make_two_arm_sink(80, 40, 1000, 3000, 3);
+    let summary = sink.summarize();
+    let conclusion = LisMRolloutConclusion::from_summary_defaults(&summary);
+    assert_eq!(conclusion.recommendation, LisMPolicyRecommendation::ForceOn);
+    let delta = conclusion.cache_hit_ratio_delta.expect("delta should be Some");
+    assert!(delta > 0.0, "cache delta should be positive");
+    assert!(conclusion.cost_delta_micros < 0, "cost delta should be negative (LisM saves)");
+}
+
+#[test]
+fn r1_4_conclude_force_off_when_lism_hurts_cache() {
+    // LisM ON: 30% cache hit (much worse); cost neutral
+    // Δcache = -0.4 < -0.05 → ForceOff
+    let sink = make_two_arm_sink(30, 70, 2000, 2000, 3);
+    let summary = sink.summarize();
+    let conclusion = LisMRolloutConclusion::from_summary_defaults(&summary);
+    assert_eq!(conclusion.recommendation, LisMPolicyRecommendation::ForceOff);
+    let delta = conclusion.cache_hit_ratio_delta.expect("delta should be Some");
+    assert!(delta < 0.0, "cache delta should be negative");
+}
+
+#[test]
+fn r1_4_conclude_force_off_when_cost_penalty_exceeded() {
+    // Cache neutral (both 60%), but LisM costs 600_000μ more (> 500_000μ threshold)
+    let sink = make_two_arm_sink(60, 60, 700_000, 100_000, 3);
+    let summary = sink.summarize();
+    let conclusion = LisMRolloutConclusion::from_summary_defaults(&summary);
+    assert_eq!(conclusion.recommendation, LisMPolicyRecommendation::ForceOff);
+    assert!(conclusion.cost_delta_micros > 500_000);
+}
+
+#[test]
+fn r1_4_conclude_inherit_when_signal_mixed() {
+    // Cache improves slightly (within noise), cost is neutral → Inherit
+    let sink = make_two_arm_sink(62, 60, 1000, 1000, 3);
+    let summary = sink.summarize();
+    let conclusion = LisMRolloutConclusion::from_summary_defaults(&summary);
+    // Δcache = 0.02 < 0.05 threshold, Δcost = 0 → neither ForceOn nor ForceOff
+    assert_eq!(conclusion.recommendation, LisMPolicyRecommendation::Inherit);
+}
+
+#[test]
+fn r1_4_conclude_inconclusive_with_insufficient_data() {
+    // Only 2 runs per arm, min_runs_per_arm = 3 → Inconclusive
+    let sink = make_two_arm_sink(80, 40, 1000, 3000, 2);
+    let summary = sink.summarize();
+    let conclusion = LisMRolloutConclusion::from_summary_defaults(&summary);
+    assert_eq!(conclusion.recommendation, LisMPolicyRecommendation::Inconclusive);
+    assert!(conclusion.reason.contains("Insufficient data"));
+}
+
+#[test]
+fn r1_4_conclude_inconclusive_when_only_one_arm() {
+    let sink = LisMAbSampleSink::in_memory();
+    let report = make_report(1, 1, 600, 400, 1000);
+    // Only on-arm records
+    for i in 0..5 {
+        sink.record_run(format!("on-{i}"), true, &report, BossTestRunOutcome::Completed, 0);
+    }
+    let summary = sink.summarize();
+    let conclusion = LisMRolloutConclusion::from_summary_defaults(&summary);
+    assert_eq!(conclusion.recommendation, LisMPolicyRecommendation::Inconclusive);
+}
+
+#[test]
+fn r1_4_conclude_serde_round_trip() {
+    let sink = make_two_arm_sink(80, 40, 1000, 3000, 3);
+    let summary = sink.summarize();
+    let conclusion = LisMRolloutConclusion::from_summary_defaults(&summary);
+
+    let json = serde_json::to_string(&conclusion).expect("serialize should succeed");
+    let loaded: LisMRolloutConclusion = serde_json::from_str(&json).expect("deserialize should succeed");
+    assert_eq!(loaded.recommendation, conclusion.recommendation);
+    assert_eq!(loaded.cost_delta_micros, conclusion.cost_delta_micros);
+}
+
+#[test]
+fn r1_4_conclude_display_contains_recommendation_and_reason() {
+    let sink = make_two_arm_sink(80, 40, 1000, 3000, 3);
+    let summary = sink.summarize();
+    let conclusion = LisMRolloutConclusion::from_summary_defaults(&summary);
+    let output = format!("{conclusion}");
+    assert!(output.contains("ForceOn"), "display should mention ForceOn");
+    assert!(output.contains("cache"), "display should mention cache");
+}
+
+#[test]
+fn r1_4_conclude_custom_thresholds_force_on_at_low_threshold() {
+    // With threshold = 0.01, even a tiny 0.02 delta should trigger ForceOn
+    let sink = make_two_arm_sink(62, 60, 1000, 1000, 3);
+    let summary = sink.summarize();
+    let conclusion = summary.derive_rollout_conclusion(3, 0.01, 500_000);
+    assert_eq!(conclusion.recommendation, LisMPolicyRecommendation::ForceOn);
 }

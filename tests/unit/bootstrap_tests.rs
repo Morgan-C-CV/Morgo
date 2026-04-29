@@ -51,6 +51,7 @@ fn runtime_for_surface(surface: &str, interactive: bool, init_only: bool) -> Run
         attachments: Vec::new(),
         surface: surface.into(),
         lism_ab_sample: None,
+    lism_ab_conclude: None,
     lism_ab_summarize: None,
     lism_policy: None,
     })
@@ -666,6 +667,7 @@ api_key_env = "OPENAI_API_KEY"
         attachments: Vec::new(),
         surface: "cli".into(),
         lism_ab_sample: None,
+    lism_ab_conclude: None,
     lism_ab_summarize: None,
     lism_policy: None,
     });
@@ -721,6 +723,7 @@ fn bootstrap_models_toml_missing_file_falls_back_to_existing_bootstrap_defaults(
         attachments: Vec::new(),
         surface: "cli".into(),
         lism_ab_sample: None,
+    lism_ab_conclude: None,
     lism_ab_summarize: None,
     lism_policy: None,
     });
@@ -786,6 +789,7 @@ api_key_env = "OPENAI_API_KEY"
         attachments: Vec::new(),
         surface: "cli".into(),
         lism_ab_sample: None,
+    lism_ab_conclude: None,
     lism_ab_summarize: None,
     lism_policy: None,
     });
@@ -847,6 +851,7 @@ api_key_env = "OPENAI_API_KEY"
         attachments: Vec::new(),
         surface: "cli".into(),
         lism_ab_sample: None,
+    lism_ab_conclude: None,
     lism_ab_summarize: None,
     lism_policy: None,
     });
@@ -1004,6 +1009,7 @@ api_key_env = "OPENAI_API_KEY"
         attachments: Vec::new(),
         surface: "cli".into(),
         lism_ab_sample: None,
+    lism_ab_conclude: None,
     lism_ab_summarize: None,
     lism_policy: None,
     });
@@ -1056,6 +1062,7 @@ fn bootstrap_infers_openai_family_provider_contract_from_env() {
         attachments: Vec::new(),
         surface: "cli".into(),
         lism_ab_sample: None,
+    lism_ab_conclude: None,
     lism_ab_summarize: None,
     lism_policy: None,
     });
@@ -1123,6 +1130,7 @@ auth_strategy = "none"
         attachments: Vec::new(),
         surface: "cli".into(),
         lism_ab_sample: None,
+    lism_ab_conclude: None,
     lism_ab_summarize: None,
     lism_policy: None,
     });
@@ -1163,6 +1171,7 @@ fn bootstrap_rejects_unknown_provider_without_explicit_contract() {
         attachments: Vec::new(),
         surface: "cli".into(),
         lism_ab_sample: None,
+    lism_ab_conclude: None,
     lism_ab_summarize: None,
     lism_policy: None,
     });
@@ -1207,6 +1216,7 @@ fn bootstrap_uses_default_chat_completions_path_when_env_unset() {
         attachments: Vec::new(),
         surface: "cli".into(),
         lism_ab_sample: None,
+    lism_ab_conclude: None,
     lism_ab_summarize: None,
     lism_policy: None,
     });
@@ -1262,6 +1272,7 @@ fn bootstrap_accepts_custom_chat_completions_path_for_custom_provider() {
         attachments: Vec::new(),
         surface: "cli".into(),
         lism_ab_sample: None,
+    lism_ab_conclude: None,
     lism_ab_summarize: None,
     lism_policy: None,
     });
@@ -1318,6 +1329,7 @@ fn bootstrap_rejects_invalid_chat_completions_path_env() {
         attachments: Vec::new(),
         surface: "cli".into(),
         lism_ab_sample: None,
+    lism_ab_conclude: None,
     lism_ab_summarize: None,
     lism_policy: None,
     });
@@ -1363,6 +1375,7 @@ fn bootstrap_provider_alias_matrix(
         attachments: Vec::new(),
         surface: "cli".into(),
         lism_ab_sample: None,
+    lism_ab_conclude: None,
     lism_ab_summarize: None,
     lism_policy: None,
     });
@@ -1968,6 +1981,7 @@ fn augment_prompt_depends_on_input_state_without_mutating_store() {
         attachments: Vec::new(),
         surface: "cli".into(),
         lism_ab_sample: None,
+    lism_ab_conclude: None,
     lism_ab_summarize: None,
     lism_policy: None,
     })
@@ -2111,6 +2125,7 @@ fn gate_user_access_matches_cli_remote_and_telegram_expectations() {
         attachments: Vec::new(),
         surface: "cli".into(),
         lism_ab_sample: None,
+    lism_ab_conclude: None,
     lism_ab_summarize: None,
     lism_policy: None,
     })
@@ -2628,6 +2643,7 @@ fn finalize_runtime_state_is_single_writeback_entrypoint() {
         attachments: Vec::new(),
         surface: "cli".into(),
         lism_ab_sample: None,
+    lism_ab_conclude: None,
     lism_ab_summarize: None,
     lism_policy: None,
     })
@@ -2769,6 +2785,7 @@ async fn runtime_continue_session_uses_restored_snapshot() {
         attachments: Vec::new(),
         surface: "cli".into(),
         lism_ab_sample: None,
+    lism_ab_conclude: None,
     lism_ab_summarize: None,
     lism_policy: None,
     })
@@ -2805,6 +2822,7 @@ async fn runtime_resume_prefers_restored_surface_and_mode() {
         attachments: Vec::new(),
         surface: "cli".into(),
         lism_ab_sample: None,
+    lism_ab_conclude: None,
     lism_ab_summarize: None,
     lism_policy: None,
     })
@@ -2831,6 +2849,7 @@ fn initialize_runtime_tracks_surface_mode_visibility_matrix() {
         attachments: Vec::new(),
         surface: "cli".into(),
         lism_ab_sample: None,
+    lism_ab_conclude: None,
     lism_ab_summarize: None,
     lism_policy: None,
     })
@@ -2927,6 +2946,7 @@ async fn runtime_resume_keeps_restored_surface_visibility_contract() {
         attachments: Vec::new(),
         surface: "cli".into(),
         lism_ab_sample: None,
+    lism_ab_conclude: None,
     lism_ab_summarize: None,
     lism_policy: None,
     })
@@ -3020,6 +3040,7 @@ async fn runtime_restores_persisted_task_list_for_resumed_session() {
         attachments: Vec::new(),
         surface: "cli".into(),
         lism_ab_sample: None,
+    lism_ab_conclude: None,
     lism_ab_summarize: None,
     lism_policy: None,
     })
@@ -3086,6 +3107,7 @@ async fn runtime_continue_restores_from_file_backed_store_across_instances() {
         attachments: Vec::new(),
         surface: "cli".into(),
         lism_ab_sample: None,
+    lism_ab_conclude: None,
     lism_ab_summarize: None,
     lism_policy: None,
     })
@@ -3116,6 +3138,7 @@ async fn runtime_initializes_fresh_session_record_in_store() {
         attachments: Vec::new(),
         surface: "cli".into(),
         lism_ab_sample: None,
+    lism_ab_conclude: None,
     lism_ab_summarize: None,
     lism_policy: None,
     })
@@ -3858,6 +3881,7 @@ fn proxy_env_var_is_read_into_config() {
         attachments: Vec::new(),
         surface: "cli".into(),
         lism_ab_sample: None,
+    lism_ab_conclude: None,
     lism_ab_summarize: None,
     lism_policy: None,
     });
@@ -3891,6 +3915,7 @@ fn no_proxy_env_var_is_read_into_config() {
         attachments: Vec::new(),
         surface: "cli".into(),
         lism_ab_sample: None,
+    lism_ab_conclude: None,
     lism_ab_summarize: None,
     lism_policy: None,
     });
@@ -3920,6 +3945,7 @@ fn ca_bundle_env_var_is_read_into_config() {
         attachments: Vec::new(),
         surface: "cli".into(),
         lism_ab_sample: None,
+    lism_ab_conclude: None,
     lism_ab_summarize: None,
     lism_policy: None,
     });
@@ -3951,6 +3977,7 @@ fn no_proxy_env_unset_leaves_field_none() {
         attachments: Vec::new(),
         surface: "cli".into(),
         lism_ab_sample: None,
+    lism_ab_conclude: None,
     lism_ab_summarize: None,
     lism_policy: None,
     });
@@ -4102,6 +4129,7 @@ fn https_proxy_falls_back_when_rust_agent_proxy_unset() {
         attachments: Vec::new(),
         surface: "cli".into(),
         lism_ab_sample: None,
+    lism_ab_conclude: None,
     lism_ab_summarize: None,
     lism_policy: None,
     });
@@ -4143,6 +4171,7 @@ fn webfetch_uses_same_proxy_resolution_contract() {
         attachments: Vec::new(),
         surface: "cli".into(),
         lism_ab_sample: None,
+    lism_ab_conclude: None,
     lism_ab_summarize: None,
     lism_policy: None,
     });
