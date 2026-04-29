@@ -137,9 +137,10 @@ async fn plugin_runtime_exposes_command_hook_tool_and_diagnostics() {
         attachments: Vec::new(),
         surface: "cli".into(),
         lism_ab_sample: None,
-    lism_ab_conclude: None,
-    lism_ab_summarize: None,
-    lism_policy: None,
+        lism_ab_conclude: None,
+        lism_ab_summarize: None,
+        lism_policy: None,
+        boss_task: None,
     })
     .with_session_store(session_store)
     .with_provider_config(test_model_provider_config());

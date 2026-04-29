@@ -548,8 +548,14 @@ fn build_parent_query_context(permissions: ToolPermissionContext) -> QueryContex
         cost_tracker: CostTracker::default(),
         service_observability_tracker:
             crate::service::observability::ServiceObservabilityTracker::default(),
-        notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default())
-            .with_hook_registry(hook_registry.clone()),
+        notification_dispatcher: {
+            let mut nd = NotificationDispatcher::new(TelegramGateway::default())
+                .with_hook_registry(hook_registry.clone());
+            if let Some(boss) = permissions.boss_coordinator.clone() {
+                nd = nd.with_boss_coordinator(boss);
+            }
+            nd
+        },
         audit_log: std::sync::Arc::new(std::sync::Mutex::new(AuditLog::default())),
         startup_trace: Vec::new(),
         active_model_runtime: inherited_active_model_snapshot
