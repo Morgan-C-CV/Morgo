@@ -8,6 +8,7 @@ pub mod boss_test_readiness;
 pub mod boss_test_sample_sink;
 pub mod concurrency;
 pub mod context;
+pub mod lism_ab_sample;
 pub mod engine;
 pub mod events;
 pub mod housekeeping;
