@@ -18,3 +18,5 @@ mod provider_api_mock;
 mod provider_smoke;
 #[path = "integration/beta_drill.rs"]
 mod beta_drill;
+#[path = "integration/lism_ab_boss_flow.rs"]
+mod lism_ab_boss_flow;

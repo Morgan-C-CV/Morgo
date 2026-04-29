@@ -1,3 +1,5 @@
+use crate::core::boss_test_readiness::BossTestRunOutcome;
+use crate::core::lism_ab_sample::SharedLisMAbSampleSink;
 use crate::core::boss_state::{
     BossActorHandle, BossActorStatus, BossControlRequest, BossControlResponse, BossPlan,
     BossPlanStep, BossPlanStepStatus, BossLisMPolicy, BossObservabilitySummary,
@@ -45,6 +47,7 @@ pub struct BossCoordinator {
     runtime_key: Arc<RwLock<Option<String>>>,
     runtime_owner: Arc<BossRuntimeOwner>,
     lism_policy: Arc<RwLock<BossLisMPolicy>>,
+    lism_ab_sink: Option<SharedLisMAbSampleSink>,
 }
 
 impl BossCoordinator {
@@ -67,6 +70,7 @@ impl BossCoordinator {
             runtime_key: Arc::new(RwLock::new(None)),
             runtime_owner,
             lism_policy: Arc::new(RwLock::new(BossLisMPolicy::Inherit)),
+            lism_ab_sink: None,
         }
     }
 
@@ -251,6 +255,7 @@ impl BossCoordinator {
             runtime_key: self.runtime_key.clone(),
             runtime_owner: self.runtime_owner.clone(),
             lism_policy: self.lism_policy.clone(),
+            lism_ab_sink: self.lism_ab_sink.clone(),
         }
     }
 
@@ -937,6 +942,117 @@ impl BossCoordinator {
         *self.lism_policy.read().await
     }
 
+    /// Attach a LisM A/B sample sink. Call before the first `advance_plan`.
+    pub fn with_lism_ab_sink(mut self, sink: SharedLisMAbSampleSink) -> Self {
+        self.lism_ab_sink = Some(sink);
+        self
+    }
+
+    /// Attach a LisM A/B sample sink in place (for post-construction wiring).
+    pub fn set_lism_ab_sink(&mut self, sink: SharedLisMAbSampleSink) {
+        self.lism_ab_sink = Some(sink);
+    }
+
+    /// Accessor for the LisM A/B sink — callers can record rolled_back outcomes.
+    pub fn lism_ab_sink(&self) -> Option<&SharedLisMAbSampleSink> {
+        self.lism_ab_sink.as_ref()
+    }
+
+    /// Stable run identifier derived from plan_id, or a timestamp fallback.
+    async fn current_run_id(&self) -> String {
+        self.session
+            .read()
+            .await
+            .as_ref()
+            .map(|s| s.plan_id.clone())
+            .unwrap_or_else(|| {
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| format!("boss-run-{}", d.as_millis()))
+                    .unwrap_or_else(|_| "boss-run-unknown".to_string())
+            })
+    }
+
+    /// Build a `BossReportPayload` snapshot suitable for LisM sampling.
+    /// Does not require a `TaskManager` — history_summary is left empty.
+    async fn build_lism_sample_report(&self) -> BossReportPayload {
+        let status = self.status.read().await.clone();
+        let session = self.session.read().await.clone();
+        let plan = self.plan.read().await.clone();
+        let routed_step_metadata = self.routed_step_metadata.read().await.clone();
+        let empty_session = BossSession::from_plan_id("unknown", status.stage);
+        let session = session.unwrap_or(empty_session);
+        let steps = plan
+            .as_ref()
+            .map(|plan| {
+                plan.steps
+                    .iter()
+                    .map(|step| BossStepReport {
+                        id: step.id,
+                        status: step.status,
+                        worker_task_id: step.worker_task_id.clone(),
+                        attempt_count: step.attempt_count,
+                        last_review_summary: step.last_review_summary.clone(),
+                        action_required: None,
+                        blocker_reason: None,
+                        routed_metadata: routed_step_metadata.get(&step.id).cloned(),
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        let observability_summary = if steps.iter().any(|s| s.routed_metadata.is_some()) {
+            let mut summary = BossObservabilitySummary::default();
+            for step in &steps {
+                if let Some(m) = &step.routed_metadata {
+                    summary.total_steps_routed += 1;
+                    summary.total_cache_read_tokens += m.cache_read_tokens.unwrap_or(0);
+                    summary.total_cache_write_tokens += m.cache_write_tokens.unwrap_or(0);
+                    summary.total_fallback_count += m.fallback_count.unwrap_or(0);
+                    summary.total_projection_mismatch_count += m.projection_mismatch_count.unwrap_or(0);
+                    summary.total_input_tokens += m.input_tokens.unwrap_or(0);
+                    summary.total_output_tokens += m.output_tokens.unwrap_or(0);
+                    if m.provider_profile_id.is_some() {
+                        summary.override_hit_count += 1;
+                    }
+                    if let Some(tier) = &m.model_tier {
+                        *summary.model_tier_counts.entry(tier.clone()).or_insert(0) += 1;
+                    }
+                    summary.estimated_cost_micros_usd += 0; // v1 stub
+                }
+            }
+            Some(summary)
+        } else {
+            None
+        };
+
+        BossReportPayload {
+            stage: status.stage,
+            current_step: status.current_step,
+            total_steps: status.total_steps,
+            designer_a: session.designer_a,
+            executor_b: session.executor_b,
+            active_children: session.active_children,
+            steps,
+            history_summary: vec![],
+            observability_summary,
+            lism_policy: self.lism_policy().await,
+        }
+    }
+
+    /// Fire-and-forget: record a LisM A/B sample if a sink is configured.
+    /// Never blocks the main flow; failures are logged as warnings.
+    async fn emit_lism_sample(
+        &self,
+        run_id: &str,
+        lism_enabled: bool,
+        outcome: BossTestRunOutcome,
+        pending_approval_count: usize,
+    ) {
+        let Some(sink) = &self.lism_ab_sink else { return };
+        let report = self.build_lism_sample_report().await;
+        sink.record_run(run_id, lism_enabled, &report, outcome, pending_approval_count);
+    }
     pub async fn report_progress(&self, tasks: &TaskManager) -> anyhow::Result<BossReportPayload> {
         let status = self.status.read().await.clone();
         let session = self.session.read().await.clone();
@@ -1513,14 +1629,30 @@ impl BossCoordinator {
         match next_action {
             Some(AdvanceOutcome::PlanComplete) => {
                 self.update_current_step(None).await;
-                self.transition_to(BossStage::Completed).await?;
+                if self.get_stage().await != BossStage::Completed {
+                    self.transition_to(BossStage::Completed).await?;
+                }
+                let run_id = self.current_run_id().await;
+                let lism_enabled = effective_lism_enabled(
+                    self.lism_policy().await,
+                    app_state.permission_context.lism_enabled(),
+                );
+                self.emit_lism_sample(&run_id, lism_enabled, BossTestRunOutcome::Completed, 0).await;
                 Ok(Some(
                     "Boss plan complete; no further steps to dispatch.".into(),
                 ))
             }
-            Some(AdvanceOutcome::TerminalFailure) => Ok(Some(
-                "Boss plan stopped after a terminal step failure; auto-advance halted.".into(),
-            )),
+            Some(AdvanceOutcome::TerminalFailure) => {
+                let run_id = self.current_run_id().await;
+                let lism_enabled = effective_lism_enabled(
+                    self.lism_policy().await,
+                    app_state.permission_context.lism_enabled(),
+                );
+                self.emit_lism_sample(&run_id, lism_enabled, BossTestRunOutcome::Aborted, 0).await;
+                Ok(Some(
+                    "Boss plan stopped after a terminal step failure; auto-advance halted.".into(),
+                ))
+            }
             Some(AdvanceOutcome::ApprovalBarrier(step_id)) => {
                 self.update_step_status(step_id, BossPlanStepStatus::WaitingForApproval)
                     .await?;
