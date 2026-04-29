@@ -147,6 +147,7 @@ pub struct ModelProviderConfig {
     pub proxy_url: Option<String>,
     pub no_proxy: Option<String>,
     pub ca_bundle_path: Option<String>,
+    pub max_tokens_param: Option<String>,
 }
 
 /// Redact userinfo (password) from a proxy URL for safe display in logs/warnings.
@@ -197,6 +198,7 @@ impl Default for ModelProviderConfig {
             proxy_url: None,
             no_proxy: None,
             ca_bundle_path: None,
+            max_tokens_param: None,
         }
     }
 }
@@ -804,8 +806,9 @@ impl ProviderAdapter for OpenAICompatibleAdapter {
             "model": normalized_request_model(config),
             "messages": [{"role": "user", "content": message_content}],
             "stream": normalized_request_stream_flag(&profile)?,
-            "max_tokens": options.max_tokens,
         });
+        let max_tokens_key = config.max_tokens_param.as_deref().unwrap_or("max_tokens");
+        payload[max_tokens_key] = json!(options.max_tokens);
         if let Some(temperature) = options.temperature {
             payload["temperature"] = json!(temperature);
         }
@@ -2119,6 +2122,7 @@ mod tests {
             proxy_url: None,
             no_proxy: None,
             ca_bundle_path: None,
+            max_tokens_param: None,
         }
     }
 

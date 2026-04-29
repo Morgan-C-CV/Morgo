@@ -37,6 +37,8 @@ pub struct ModelProfileSpec {
     pub proxy_url: Option<String>,
     pub no_proxy: Option<String>,
     pub ca_bundle_path: Option<String>,
+    #[serde(default)]
+    pub max_tokens_param: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -249,6 +251,7 @@ impl ModelProfileSpec {
             proxy_url: self.proxy_url.clone(),
             no_proxy: self.no_proxy.clone(),
             ca_bundle_path: self.ca_bundle_path.clone(),
+            max_tokens_param: self.max_tokens_param.clone(),
         };
         Ok(config)
     }

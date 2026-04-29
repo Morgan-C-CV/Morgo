@@ -1477,6 +1477,7 @@ impl RuntimeBootstrap {
             ca_bundle_path: std::env::var("RUST_AGENT_CA_BUNDLE")
                 .ok()
                 .filter(|v| !v.trim().is_empty()),
+            max_tokens_param: None,
         })
     }
 
