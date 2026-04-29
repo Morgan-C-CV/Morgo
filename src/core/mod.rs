@@ -5,6 +5,7 @@ pub mod boss_context_brief;
 pub mod boss_runtime;
 pub mod boss_state;
 pub mod boss_test_readiness;
+pub mod boss_test_sample_sink;
 pub mod concurrency;
 pub mod context;
 pub mod engine;
