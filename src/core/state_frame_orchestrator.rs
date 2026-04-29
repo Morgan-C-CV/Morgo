@@ -1,7 +1,7 @@
 use crate::bootstrap::model_profiles::ModelProfileRegistry;
 use crate::core::boss_state::{BossPlan, BossStage};
 use crate::core::state_frame::{ActorRole, StateFrame};
-use crate::core::state_frame_loop::{DecisionLoopConfig, LoopOutcome, run_decision_loop};
+use crate::core::state_frame_loop::{DecisionLoopConfig, LoopOutcome, LoopUsage, run_decision_loop};
 use crate::core::state_frame_model_resolver::resolve_step_model;
 use crate::core::state_frame_model_router::{ModelRoute, route_model_tier};
 use crate::core::state_frame_projection::project_state_frame;
@@ -13,7 +13,7 @@ use crate::state::active_model_runtime::ActiveModelRuntimeSnapshot;
 /// Outcome of a single step execution via the StateFrame orchestrator seam.
 #[derive(Debug, Clone)]
 pub enum StepOutcome {
-    Completed,
+    Completed { usage: LoopUsage },
     Failed { reason: String },
 }
 
@@ -117,7 +117,7 @@ pub async fn run_routed_step_with_runtime<'a>(
 
 fn map_loop_outcome(outcome: LoopOutcome) -> StepOutcome {
     match outcome {
-        LoopOutcome::Done { .. } => StepOutcome::Completed,
+        LoopOutcome::Done { usage, .. } => StepOutcome::Completed { usage },
         LoopOutcome::Rejected { reason } => StepOutcome::Failed { reason },
         LoopOutcome::MaxIterationsReached { last_state } => StepOutcome::Failed {
             reason: format!("max iterations reached; last state: {last_state:?}"),

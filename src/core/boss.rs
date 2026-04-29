@@ -1756,7 +1756,7 @@ impl BossCoordinator {
                             ActorRole::Worker,
                         );
                         let state_frame_size = serde_json::to_string(&routed.frame).map(|s| s.len()).ok();
-                        let routed_metadata = BossStepRoutedMetadata {
+                        let mut routed_metadata = BossStepRoutedMetadata {
                             toolset_id: routed.frame.toolset_id.clone(),
                             skillset_id: routed.frame.skillset_id.clone(),
                             model_tier: Some(model_tier_label(routed.model_route.tier).to_string()),
@@ -1788,6 +1788,12 @@ impl BossCoordinator {
                             runtime,
                         )
                         .await?;
+                        if let StepOutcome::Completed { ref usage } = outcome {
+                            routed_metadata.input_tokens = Some(usage.input_tokens);
+                            routed_metadata.output_tokens = Some(usage.output_tokens);
+                            routed_metadata.cache_read_tokens = Some(usage.cache_read_tokens);
+                            routed_metadata.cache_write_tokens = Some(usage.cache_write_tokens);
+                        }
                         (outcome, routed_metadata)
                     };
                     {
@@ -1796,7 +1802,7 @@ impl BossCoordinator {
                     }
 
                     match outcome {
-                        StepOutcome::Completed => {
+                        StepOutcome::Completed { .. } => {
                             {
                                 let mut plan_guard = self.plan.write().await;
                                 let plan = plan_guard

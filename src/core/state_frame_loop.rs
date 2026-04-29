@@ -17,20 +17,40 @@ impl Default for DecisionLoopConfig {
     }
 }
 
+/// Token usage accumulated across all LLM calls in a decision loop run.
+#[derive(Debug, Clone, Default)]
+pub struct LoopUsage {
+    pub input_tokens: usize,
+    pub output_tokens: usize,
+    pub cache_read_tokens: usize,
+    pub cache_write_tokens: usize,
+}
+
 #[derive(Debug, Clone)]
 pub enum LoopOutcome {
-    Done { final_state: AgentState },
+    Done { final_state: AgentState, usage: LoopUsage },
     Rejected { reason: String },
     MaxIterationsReached { last_state: AgentState },
     RepairExhausted { raw_json: String, reason: String },
 }
 
-/// Collect text from a stream of events.
-fn collect_text(events: Vec<StreamEvent>) -> String {
-    events
-        .into_iter()
-        .filter_map(|e| if let StreamEvent::TextDelta(t) = e { Some(t) } else { None })
-        .collect()
+/// Collect text and token usage from a stream of events.
+fn collect_text_and_usage(events: Vec<StreamEvent>) -> (String, LoopUsage) {
+    let mut text = String::new();
+    let mut usage = LoopUsage::default();
+    for event in events {
+        match event {
+            StreamEvent::TextDelta(t) => text.push_str(&t),
+            StreamEvent::Usage(u) => {
+                usage.input_tokens += u.input_tokens;
+                usage.output_tokens += u.output_tokens;
+                usage.cache_read_tokens += u.cache_read_input_tokens;
+                usage.cache_write_tokens += u.cache_creation_input_tokens;
+            }
+            _ => {}
+        }
+    }
+    (text, usage)
 }
 
 const STATE_DECISION_INSTRUCTION: &str = "\
@@ -70,10 +90,16 @@ pub async fn run_decision_loop(
     mut frame: StateFrame,
     config: DecisionLoopConfig,
 ) -> anyhow::Result<LoopOutcome> {
+    let mut total_usage = LoopUsage::default();
+
     for _iter in 0..config.max_iterations {
         let prompt = format!("{}\n{}", STATE_DECISION_INSTRUCTION, frame.to_prompt_segment().content);
         let events = client.stream_message(&Message::user(prompt)).await;
-        let mut text = collect_text(events);
+        let (text, iter_usage) = collect_text_and_usage(events);
+        total_usage.input_tokens += iter_usage.input_tokens;
+        total_usage.output_tokens += iter_usage.output_tokens;
+        total_usage.cache_read_tokens += iter_usage.cache_read_tokens;
+        total_usage.cache_write_tokens += iter_usage.cache_write_tokens;
 
         // Repair loop: retry on JSON parse failure.
         let decision = match validate_state_decision(&text) {
@@ -91,7 +117,11 @@ pub async fn run_decision_loop(
                     );
                     let repair_events =
                         client.stream_message(&Message::user(repair_prompt)).await;
-                    let repaired_text = collect_text(repair_events);
+                    let (repaired_text, repair_usage) = collect_text_and_usage(repair_events);
+                    total_usage.input_tokens += repair_usage.input_tokens;
+                    total_usage.output_tokens += repair_usage.output_tokens;
+                    total_usage.cache_read_tokens += repair_usage.cache_read_tokens;
+                    total_usage.cache_write_tokens += repair_usage.cache_write_tokens;
                     match validate_state_decision(&repaired_text) {
                         Ok(d) => {
                             resolved = Some(d);
@@ -114,7 +144,7 @@ pub async fn run_decision_loop(
 
         match decision.decision {
             DecisionKind::Done => {
-                return Ok(LoopOutcome::Done { final_state: decision.state });
+                return Ok(LoopOutcome::Done { final_state: decision.state, usage: total_usage });
             }
             DecisionKind::Reject => {
                 let reason = decision

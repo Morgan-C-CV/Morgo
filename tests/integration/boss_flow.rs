@@ -68,6 +68,7 @@ fn make_inherited_runtime_snapshot_with_scripted_turns(
             proxy_url: None,
             no_proxy: None,
             ca_bundle_path: None,
+            max_tokens_param: None,
         },
         client: rust_agent::service::api::client::ModelProviderClient::with_scripted_turns(scripted_turns),
         active_profile_name: Some("inherited-fast".into()),
@@ -6731,7 +6732,7 @@ fn t27_4_done_decision_terminates_loop() {
     };
     let outcome = rt.block_on(run_decision_loop(&client, frame, DecisionLoopConfig::default()))
         .expect("loop should not error");
-    assert!(matches!(outcome, LoopOutcome::Done { final_state: AgentState::Done }));
+    assert!(matches!(outcome, LoopOutcome::Done { final_state: AgentState::Done, .. }));
 }
 
 #[test]
@@ -7895,7 +7896,7 @@ async fn t27_5_runtime_override_live_seam_uses_resolved_snapshot_client() {
         .await
         .expect("runtime-aware seam should succeed");
 
-    assert!(matches!(outcome, StepOutcome::Completed));
+    assert!(matches!(outcome, StepOutcome::Completed { .. }));
     assert!(inherited.client.is_scripted(), "parent snapshot should remain scripted");
     assert_eq!(inherited.active_profile_name.as_deref(), Some("inherited-fast"));
 
@@ -8002,7 +8003,7 @@ fn t27_5_done_loop_outcome_maps_to_completed() {
         &client, &plan, BossStage::Execution, 0, ActorRole::Worker,
         DecisionLoopConfig::default(),
     )).expect("should not error");
-    assert!(matches!(outcome, StepOutcome::Completed));
+    assert!(matches!(outcome, StepOutcome::Completed { .. }));
 }
 
 #[test]
@@ -8561,7 +8562,7 @@ fn t27_8_run_step_with_state_frame_end_to_end() {
         DecisionLoopConfig::default(),
     )).expect("should not error");
 
-    assert!(matches!(outcome, StepOutcome::Completed), "expected Completed, got {outcome:?}");
+    assert!(matches!(outcome, StepOutcome::Completed { .. }), "expected Completed, got {outcome:?}");
 }
 
 // ── T27.7.1 Model tier router ─────────────────────────────────────────────
@@ -8756,7 +8757,7 @@ async fn t27_9_boss_production_path_override_hit_uses_resolved_runtime_not_inher
         .expect("override seam should succeed");
 
     assert!(
-        matches!(outcome, StepOutcome::Completed),
+        matches!(outcome, StepOutcome::Completed { .. }),
         "override hit should complete via resolved runtime"
     );
     // parent snapshot must not be mutated
@@ -8858,7 +8859,7 @@ async fn t27_9_boss_production_path_override_rejected_decision_step_fails_with_o
                 "failure reason must be observable, got empty string"
             );
         }
-        StepOutcome::Completed => panic!("expected Failed outcome, got Completed"),
+        StepOutcome::Completed { .. } => panic!("expected Failed outcome, got Completed"),
     }
     // parent snapshot must not be mutated
     assert_eq!(inherited.active_profile_name.as_deref(), Some("inherited-fast"));

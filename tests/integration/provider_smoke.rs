@@ -142,6 +142,7 @@ async fn smoke_openai_direct() {
         proxy_url: None,
         no_proxy: None,
         ca_bundle_path: None,
+        max_tokens_param: None,
     };
 
     run_smoke(config, "smoke_openai_direct").await;
@@ -183,6 +184,7 @@ async fn smoke_gemini_openai_compatible() {
         proxy_url: None,
         no_proxy: None,
         ca_bundle_path: None,
+        max_tokens_param: None,
     };
 
     run_smoke(config, "smoke_gemini_openai_compatible").await;
@@ -223,6 +225,7 @@ async fn smoke_kimi_openai_compatible() {
         proxy_url: None,
         no_proxy: None,
         ca_bundle_path: None,
+        max_tokens_param: None,
     };
 
     run_smoke(config, "smoke_kimi_openai_compatible").await;
@@ -263,6 +266,7 @@ async fn smoke_deepseek_openai_compatible() {
         proxy_url: None,
         no_proxy: None,
         ca_bundle_path: None,
+        max_tokens_param: None,
     };
 
     run_smoke(config, "smoke_deepseek_openai_compatible").await;
@@ -305,6 +309,7 @@ async fn smoke_ollama_local_no_auth() {
         proxy_url: None,
         no_proxy: None,
         ca_bundle_path: None,
+        max_tokens_param: None,
     };
 
     run_smoke(config, "smoke_ollama_local_no_auth").await;
