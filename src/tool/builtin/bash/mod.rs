@@ -10,6 +10,9 @@ use crate::state::permission_context::{PermissionMode, ToolPermissionContext};
 use crate::tool::definition::{
     PermissionApprovalMetadata, PermissionDecision, Tool, ToolCall, ToolMetadata, ToolResult,
 };
+use crate::security::workspace_capability::{
+    check_bash_capability, requirement_from_policy, CapabilityCheckOutcome,
+};
 
 pub mod clamped_reader;
 pub mod command_helpers;
@@ -187,11 +190,47 @@ impl Tool for BashTool {
         }
 
         if policy.requires_escalation {
-            return bash_ask(
-                "policy_escalation",
-                &format_policy_warning(&policy),
-                policy.escalation_reasons.clone(),
-            );
+            // If a WorkspaceCapabilityConfig is present, route through it.
+            if let Some(cap_config) = permissions.workspace_capability() {
+                let requirement = requirement_from_policy(&policy);
+                let outcome = check_bash_capability(&requirement, &cap_config, &cwd);
+                match outcome {
+                    CapabilityCheckOutcome::Allowed => {}
+                    CapabilityCheckOutcome::RequiresApproval { required_tier, allowed_tier, reason } => {
+                        return bash_ask(
+                            "capability_escalation",
+                            &format!(
+                                "command requires {} capability but workspace allows {}; reason={}",
+                                required_tier.as_str(),
+                                allowed_tier.as_str(),
+                                reason.as_str(),
+                            ),
+                            vec![
+                                format!("capability.required={}", required_tier.as_str()),
+                                format!("capability.allowed={}", allowed_tier.as_str()),
+                                format!("capability.reason={}", reason.as_str()),
+                            ],
+                        );
+                    }
+                    CapabilityCheckOutcome::Denied { required_tier, allowed_tier, reason } => {
+                        return PermissionDecision::Deny {
+                            message: format!(
+                                "bash command denied [capability_denied]: requires {} but workspace allows {}; reason={}",
+                                required_tier.as_str(),
+                                allowed_tier.as_str(),
+                                reason.as_str(),
+                            ),
+                            reason: crate::tool::definition::PermissionDecisionReason::Safety,
+                        };
+                    }
+                }
+            } else {
+                return bash_ask(
+                    "policy_escalation",
+                    &format_policy_warning(&policy),
+                    policy.escalation_reasons.clone(),
+                );
+            }
         }
 
         PermissionDecision::Allow

@@ -11,6 +11,7 @@ use crate::plan::manager::PlanManager;
 use crate::plugins::runtime_state::RuntimePluginState;
 use crate::security::authorizer::SurfaceAdmissionPolicy;
 use crate::security::filesystem_policy::FilesystemPolicy;
+use crate::security::workspace_capability::WorkspaceCapabilityConfig;
 use crate::service::mcp::runtime::McpRuntime;
 use crate::skills::registry::SkillRegistry;
 use crate::state::active_model_runtime::ActiveModelRuntimeSnapshot;
@@ -91,6 +92,7 @@ pub struct ToolPermissionContext {
     pub notification_dispatcher: Option<NotificationDispatcher>,
     pub pending_approval: Arc<RwLock<Option<PendingApproval>>>,
     pub filesystem_policy: Option<Arc<FilesystemPolicy>>,
+    pub workspace_capability: Option<Arc<WorkspaceCapabilityConfig>>,
     pub subagent_scripted_turns: Option<Vec<Vec<crate::service::api::streaming::StreamEvent>>>,
     pub inherited_tool_registry: Option<ToolRegistry>,
     pub inherited_hook_registry: Option<HookRegistry>,
@@ -127,6 +129,7 @@ impl ToolPermissionContext {
             notification_dispatcher: None,
             pending_approval: Arc::new(RwLock::new(None)),
             filesystem_policy: None,
+            workspace_capability: None,
             subagent_scripted_turns: None,
             inherited_tool_registry: None,
             inherited_hook_registry: None,
@@ -239,6 +242,18 @@ impl ToolPermissionContext {
 
     pub fn filesystem_policy(&self) -> Option<Arc<FilesystemPolicy>> {
         self.filesystem_policy.clone()
+    }
+
+    pub fn with_workspace_capability(
+        mut self,
+        config: Arc<WorkspaceCapabilityConfig>,
+    ) -> Self {
+        self.workspace_capability = Some(config);
+        self
+    }
+
+    pub fn workspace_capability(&self) -> Option<Arc<WorkspaceCapabilityConfig>> {
+        self.workspace_capability.clone()
     }
 
     pub fn mode(&self) -> PermissionMode {
