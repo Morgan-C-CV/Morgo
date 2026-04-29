@@ -25,3 +25,4 @@ pub mod state_frame_model_resolver;
 pub mod state_frame_orchestrator;
 pub mod state_frame_projection;
 pub mod state_frame_router;
+pub mod workflow_step;

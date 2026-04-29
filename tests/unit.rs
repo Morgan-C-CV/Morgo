@@ -68,3 +68,5 @@ mod plugin_diagnostics_tests;
 mod boss_test_readiness_tests;
 #[path = "unit/boss_test_sample_sink_tests.rs"]
 mod boss_test_sample_sink_tests;
+#[path = "unit/workflow_step_tests.rs"]
+mod workflow_step_tests;
