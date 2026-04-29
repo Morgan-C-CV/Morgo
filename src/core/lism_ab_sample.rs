@@ -197,20 +197,22 @@ impl LisMAbSummary {
             };
         }
 
-        // Clear benefit: LisM improves cache AND does not increase cost → ForceOn
+        // Clear benefit: LisM improves cache or input volume, while any cost increase stays
+        // below the configured hard penalty threshold.
         let cache_helps = cache_delta.map_or(false, |d| d > cache_delta_threshold);
-        let cost_neutral_or_better = cost_delta <= 0;
+        let cost_within_penalty = cost_delta <= cost_penalty_threshold_micros as i64;
         let input_delta = self.input_token_delta();
         let input_token_saves = !no_input_signal && input_delta < -128;
         let cache_not_hurt = !cache_hurts;
 
-        if cache_helps && cost_neutral_or_better {
+        if cache_helps && cost_within_penalty {
             return LisMRolloutConclusion {
                 recommendation: LisMPolicyRecommendation::ForceOn,
                 reason: format!(
-                    "LisM improves cache hit ratio ({:+.3}) and reduces cost ({:+}μ); recommend ForceOn",
+                    "LisM improves cache hit ratio ({:+.3}) and keeps cost delta within threshold ({:+}μ <= {}μ); recommend ForceOn",
                     cache_delta.unwrap_or(0.0),
-                    cost_delta
+                    cost_delta,
+                    cost_penalty_threshold_micros
                 ),
                 cache_hit_ratio_delta: cache_delta,
                 cost_delta_micros: cost_delta,
@@ -221,12 +223,12 @@ impl LisMAbSummary {
             };
         }
 
-        if input_token_saves && cache_not_hurt && cost_neutral_or_better {
+        if input_token_saves && cache_not_hurt && cost_within_penalty {
             return LisMRolloutConclusion {
                 recommendation: LisMPolicyRecommendation::ForceOn,
                 reason: format!(
-                    "LisM reduces input tokens ({:+}) without measurable cache/cost regression; recommend ForceOn",
-                    input_delta
+                    "LisM reduces input tokens ({:+}) and keeps cost delta within threshold ({:+}μ <= {}μ); recommend ForceOn",
+                    input_delta, cost_delta, cost_penalty_threshold_micros
                 ),
                 cache_hit_ratio_delta: cache_delta,
                 cost_delta_micros: cost_delta,

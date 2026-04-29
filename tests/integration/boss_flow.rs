@@ -8338,6 +8338,7 @@ async fn t27_r1_format_report_includes_hit_ratio_and_tokens_saved() {
                 projection_mismatch_count: Some(0),
                 input_tokens: Some(0),
                 output_tokens: Some(0),
+                estimated_cost_micros_usd: Some(0),
             }),
         }],
         history_summary: vec![],

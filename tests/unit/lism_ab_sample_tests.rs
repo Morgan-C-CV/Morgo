@@ -796,6 +796,48 @@ fn r1_4_conclude_force_on_when_input_tokens_drop_without_cache_data() {
 }
 
 #[test]
+fn r1_4_conclude_force_on_when_input_tokens_drop_and_cost_delta_within_threshold() {
+    let sink = LisMAbSampleSink::in_memory();
+
+    for i in 0..3 {
+        let mut on_report = make_report_with_usage(1, 1, 363, 210, 0);
+        on_report
+            .observability_summary
+            .as_mut()
+            .expect("usage summary")
+            .estimated_cost_micros_usd = 7_489;
+        sink.record_run(
+            format!("on-{i}"),
+            true,
+            &on_report,
+            BossTestRunOutcome::Completed,
+            0,
+        );
+        let mut off_report = make_report_with_usage(1, 1, 2443, 0, 0);
+        off_report
+            .observability_summary
+            .as_mut()
+            .expect("usage summary")
+            .estimated_cost_micros_usd = 7_329;
+        sink.record_run(
+            format!("off-{i}"),
+            false,
+            &off_report,
+            BossTestRunOutcome::Completed,
+            0,
+        );
+    }
+
+    let summary = sink.summarize();
+    assert_eq!(summary.input_token_delta(), -2080);
+    assert_eq!(summary.cost_delta_micros(), 160);
+
+    let conclusion = LisMRolloutConclusion::from_summary_defaults(&summary);
+    assert_eq!(conclusion.recommendation, LisMPolicyRecommendation::ForceOn);
+    assert!(conclusion.reason.contains("within threshold"));
+}
+
+#[test]
 fn r1_4_conclude_serde_round_trip() {
     let sink = make_two_arm_sink(80, 40, 1000, 3000, 3);
     let summary = sink.summarize();

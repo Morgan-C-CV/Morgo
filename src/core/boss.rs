@@ -26,7 +26,7 @@ use crate::core::state_frame_orchestrator::{
 use crate::history::session::SessionHistory;
 use crate::interaction::dispatcher::NotificationDispatcher;
 use crate::task::manager::TaskManager;
-use crate::task::types::{TaskEvent, TaskStatus};
+use crate::task::types::{TaskEvent, TaskStatus, TaskUsageSummary};
 use crate::tool::definition::{Tool, ToolCall};
 use serde_json::json;
 use std::sync::Arc;
@@ -1097,9 +1097,75 @@ impl BossCoordinator {
             })
     }
 
+    fn add_task_usage_to_observability(
+        summary: &mut BossObservabilitySummary,
+        usage: &TaskUsageSummary,
+    ) {
+        summary.total_input_tokens += usage.input_tokens;
+        summary.total_output_tokens += usage.output_tokens;
+        summary.total_cache_read_tokens += usage.cache_read_input_tokens;
+        summary.total_cache_write_tokens += usage.cache_creation_input_tokens;
+        summary.estimated_cost_micros_usd += usage.estimated_cost_micros_usd;
+    }
+
+    fn build_observability_summary(
+        steps: &[BossStepReport],
+        tasks: Option<&TaskManager>,
+        step_metrics: Option<&BossStepMetrics>,
+    ) -> Option<BossObservabilitySummary> {
+        let mut summary = BossObservabilitySummary::default();
+        let mut has_observability = false;
+
+        for step in steps {
+            if let Some(m) = &step.routed_metadata {
+                has_observability = true;
+                summary.total_steps_routed += 1;
+                summary.total_cache_read_tokens += m.cache_read_tokens.unwrap_or(0);
+                summary.total_cache_write_tokens += m.cache_write_tokens.unwrap_or(0);
+                summary.total_fallback_count += m.fallback_count.unwrap_or(0);
+                summary.total_projection_mismatch_count +=
+                    m.projection_mismatch_count.unwrap_or(0);
+                summary.total_input_tokens += m.input_tokens.unwrap_or(0);
+                summary.total_output_tokens += m.output_tokens.unwrap_or(0);
+                summary.estimated_cost_micros_usd += m.estimated_cost_micros_usd.unwrap_or(0);
+                if m.provider_profile_id.is_some() {
+                    summary.override_hit_count += 1;
+                }
+                if let Some(tier) = &m.model_tier {
+                    *summary.model_tier_counts.entry(tier.clone()).or_insert(0) += 1;
+                }
+                continue;
+            }
+
+            let Some(task_usage) = step
+                .worker_task_id
+                .as_deref()
+                .and_then(|task_id| tasks.and_then(|tasks| tasks.get(task_id)))
+                .and_then(|task| task.usage)
+            else {
+                continue;
+            };
+            if !task_usage.is_empty() {
+                has_observability = true;
+                Self::add_task_usage_to_observability(&mut summary, &task_usage);
+            }
+        }
+
+        if let Some(metrics) = step_metrics {
+            has_observability = true;
+            summary.total_original_chars += metrics.original_chars;
+            summary.total_sent_chars += metrics.sent_chars;
+            summary.total_cache_read_tokens += metrics.cache_read_tokens;
+            summary.total_cache_write_tokens += metrics.cache_creation_tokens;
+        }
+
+        has_observability.then_some(summary)
+    }
+
     /// Build a `BossReportPayload` snapshot suitable for LisM sampling.
-    /// Does not require a `TaskManager` — history_summary is left empty.
-    async fn build_lism_sample_report(&self) -> BossReportPayload {
+    /// `tasks` is optional so LisM direct execution can still report routed metadata,
+    /// while full-context worker runs can contribute persisted task usage.
+    async fn build_lism_sample_report(&self, tasks: Option<&TaskManager>) -> BossReportPayload {
         let status = self.status.read().await.clone();
         let session = self.session.read().await.clone();
         let plan = self.plan.read().await.clone();
@@ -1127,37 +1193,7 @@ impl BossCoordinator {
 
         let step_metrics = status.last_step_metrics.clone();
         let observability_summary =
-            if steps.iter().any(|s| s.routed_metadata.is_some()) || step_metrics.is_some() {
-                let mut summary = BossObservabilitySummary::default();
-                for step in &steps {
-                    if let Some(m) = &step.routed_metadata {
-                        summary.total_steps_routed += 1;
-                        summary.total_cache_read_tokens += m.cache_read_tokens.unwrap_or(0);
-                        summary.total_cache_write_tokens += m.cache_write_tokens.unwrap_or(0);
-                        summary.total_fallback_count += m.fallback_count.unwrap_or(0);
-                        summary.total_projection_mismatch_count +=
-                            m.projection_mismatch_count.unwrap_or(0);
-                        summary.total_input_tokens += m.input_tokens.unwrap_or(0);
-                        summary.total_output_tokens += m.output_tokens.unwrap_or(0);
-                        if m.provider_profile_id.is_some() {
-                            summary.override_hit_count += 1;
-                        }
-                        if let Some(tier) = &m.model_tier {
-                            *summary.model_tier_counts.entry(tier.clone()).or_insert(0) += 1;
-                        }
-                        summary.estimated_cost_micros_usd += 0; // v1 stub
-                    }
-                }
-                if let Some(metrics) = &step_metrics {
-                    summary.total_original_chars += metrics.original_chars;
-                    summary.total_sent_chars += metrics.sent_chars;
-                    summary.total_cache_read_tokens += metrics.cache_read_tokens;
-                    summary.total_cache_write_tokens += metrics.cache_creation_tokens;
-                }
-                Some(summary)
-            } else {
-                None
-            };
+            Self::build_observability_summary(&steps, tasks, step_metrics.as_ref());
 
         BossReportPayload {
             stage: status.stage,
@@ -1185,7 +1221,13 @@ impl BossCoordinator {
         let Some(sink) = &self.lism_ab_sink else {
             return;
         };
-        let report = self.build_lism_sample_report().await;
+        let task_manager = self
+            .auto_advance_app_state
+            .read()
+            .await
+            .as_ref()
+            .and_then(|app_state| app_state.permission_context.task_manager.clone());
+        let report = self.build_lism_sample_report(task_manager.as_deref()).await;
         sink.record_run(
             run_id,
             lism_enabled,
@@ -1249,36 +1291,7 @@ impl BossCoordinator {
 
         let step_metrics = status.last_step_metrics.clone();
         let observability_summary =
-            if steps.iter().any(|s| s.routed_metadata.is_some()) || step_metrics.is_some() {
-                let mut summary = BossObservabilitySummary::default();
-                for step in &steps {
-                    if let Some(m) = &step.routed_metadata {
-                        summary.total_steps_routed += 1;
-                        summary.total_cache_read_tokens += m.cache_read_tokens.unwrap_or(0);
-                        summary.total_cache_write_tokens += m.cache_write_tokens.unwrap_or(0);
-                        summary.total_fallback_count += m.fallback_count.unwrap_or(0);
-                        summary.total_projection_mismatch_count +=
-                            m.projection_mismatch_count.unwrap_or(0);
-                        summary.total_input_tokens += m.input_tokens.unwrap_or(0);
-                        summary.total_output_tokens += m.output_tokens.unwrap_or(0);
-                        if m.provider_profile_id.is_some() {
-                            summary.override_hit_count += 1;
-                        }
-                        if let Some(tier) = &m.model_tier {
-                            *summary.model_tier_counts.entry(tier.clone()).or_insert(0) += 1;
-                        }
-                    }
-                }
-                if let Some(metrics) = &step_metrics {
-                    summary.total_original_chars += metrics.original_chars;
-                    summary.total_sent_chars += metrics.sent_chars;
-                    summary.total_cache_read_tokens += metrics.cache_read_tokens;
-                    summary.total_cache_write_tokens += metrics.cache_creation_tokens;
-                }
-                Some(summary)
-            } else {
-                None
-            };
+            Self::build_observability_summary(&steps, Some(tasks), step_metrics.as_ref());
 
         Ok(BossReportPayload {
             stage: status.stage,
@@ -1912,6 +1925,7 @@ impl BossCoordinator {
                             projection_mismatch_count: Some(0),
                             input_tokens: Some(0),
                             output_tokens: Some(0),
+                            estimated_cost_micros_usd: Some(0),
                         };
                         let cwd = app_state
                             .session
@@ -1937,6 +1951,8 @@ impl BossCoordinator {
                             routed_metadata.output_tokens = Some(usage.output_tokens);
                             routed_metadata.cache_read_tokens = Some(usage.cache_read_tokens);
                             routed_metadata.cache_write_tokens = Some(usage.cache_write_tokens);
+                            routed_metadata.estimated_cost_micros_usd =
+                                Some(usage.estimated_cost_micros_usd);
                         }
                         (outcome, routed_metadata)
                     };

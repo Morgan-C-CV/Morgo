@@ -250,6 +250,8 @@ pub struct TaskRecord {
     pub output_file: String,
     pub output_offset: usize,
     pub delivery: TaskDeliveryState,
+    /// Final provider usage for this task, if the worker reported it.
+    pub usage: Option<TaskUsageSummary>,
     /// Actor id of the boss actor that spawned this task, if any.
     pub boss_actor_id: Option<String>,
 }

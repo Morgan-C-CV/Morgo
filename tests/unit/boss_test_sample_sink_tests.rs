@@ -47,6 +47,7 @@ fn make_report(
                     projection_mismatch_count: None,
                     input_tokens: None,
                     output_tokens: None,
+                    estimated_cost_micros_usd: None,
                 })
             } else {
                 None

@@ -18,7 +18,7 @@ use rust_agent::state::app_state::{
 };
 use rust_agent::state::permission_context::{PermissionMode, ToolPermissionContext};
 use rust_agent::task::manager::TaskManager;
-use rust_agent::task::types::{TaskEvent, TaskOwner, TaskStatus, TaskType};
+use rust_agent::task::types::{TaskEvent, TaskOwner, TaskStatus, TaskType, TaskUsageSummary};
 use rust_agent::tool::registry::ToolRegistry;
 use tokio::sync::RwLock;
 
@@ -88,6 +88,13 @@ fn pending_plan_with_failed_step(plan_id: &str) -> BossPlan {
 
 fn make_app_state(session_id: &str) -> Arc<AppState> {
     let task_manager = Arc::new(TaskManager::default());
+    make_app_state_with_task_manager(session_id, task_manager)
+}
+
+fn make_app_state_with_task_manager(
+    session_id: &str,
+    task_manager: Arc<TaskManager>,
+) -> Arc<AppState> {
     let permission_context = ToolPermissionContext::new(PermissionMode::Default)
         .with_task_manager(task_manager)
         .with_active_session_id(session_id)
@@ -174,6 +181,52 @@ async fn r1_2_plan_complete_records_completed_sample() {
     let records = sink.records();
     assert_eq!(records[0].outcome, BossTestRunOutcome::Completed);
     assert_eq!(records[0].run_id, "plan-complete-test");
+
+    let _ = std::fs::remove_file(plan_path);
+}
+
+#[tokio::test]
+async fn r1_2_plan_complete_records_full_context_worker_usage() {
+    let plan_path = unique_plan_path("plan-full-context-usage");
+    let sink = new_shared_ab_sink();
+    let task_manager = Arc::new(TaskManager::default());
+    let dispatcher = NotificationDispatcher::new(TelegramGateway::default());
+    let task = task_manager.create_with_type(
+        "full-context worker",
+        TaskType::Generic,
+        "session-full-context-usage",
+        InteractionSurface::Cli,
+    );
+    task_manager.complete_with_usage(
+        &task.id,
+        &dispatcher,
+        Some(TaskUsageSummary {
+            requests: 1,
+            input_tokens: 1200,
+            output_tokens: 90,
+            cache_creation_input_tokens: 256,
+            cache_read_input_tokens: 512,
+            estimated_cost_micros_usd: 345,
+        }),
+    );
+
+    let mut plan = all_completed_plan("plan-full-context-usage-test", 1);
+    plan.steps[0].worker_task_id = Some(task.id.clone());
+    let coordinator = coordinator_with_sink(plan, &plan_path, sink.clone()).await;
+    let app_state =
+        make_app_state_with_task_manager("session-full-context-usage", task_manager.clone());
+
+    coordinator.advance_plan(&app_state).await.unwrap();
+
+    let records = sink.records();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].total_input_tokens, 1200);
+    assert_eq!(records[0].total_output_tokens, 90);
+    assert_eq!(records[0].cache_read_tokens, 512);
+    assert_eq!(records[0].cache_write_tokens, 256);
+    assert_eq!(records[0].cost_micros_usd, 345);
+    assert_eq!(records[0].estimated_tokens_saved, 512);
+    assert_eq!(records[0].cache_hit_ratio, Some(512.0 / (512.0 + 256.0)));
 
     let _ = std::fs::remove_file(plan_path);
 }

@@ -115,6 +115,7 @@ impl TaskManager {
                 notified: false,
                 notification: None,
             },
+            usage: None,
             boss_actor_id: None,
         };
         store.tasks.push(task.clone());
@@ -672,6 +673,7 @@ impl TaskManager {
                 return;
             }
             task.status = status.clone();
+            task.usage = usage.clone();
             task.delivery.notified = true;
             task.validation_state = transition_validation_state(
                 task.task_type,

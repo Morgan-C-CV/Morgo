@@ -8,7 +8,7 @@ use crate::core::state_frame_model_resolver::resolve_step_model;
 use crate::core::state_frame_model_router::{ModelRoute, route_model_tier};
 use crate::core::state_frame_projection::project_state_frame;
 use crate::core::state_frame_router::{apply_route, route_toolset};
-use crate::service::api::client::ModelProviderClient;
+use crate::service::api::client::{ModelPricing, ModelProviderClient};
 use crate::service::observability::ServiceObservabilityTracker;
 use crate::state::active_model_runtime::ActiveModelRuntimeSnapshot;
 
@@ -93,7 +93,10 @@ pub async fn run_step_with_state_frame_and_runtime<'a>(
         config,
     )
     .await?;
-    Ok(map_loop_outcome(outcome))
+    Ok(map_loop_outcome_with_pricing(
+        outcome,
+        &resolved.resolved_snapshot.config.pricing,
+    ))
 }
 
 pub fn resolve_routed_step_runtime<'a>(
@@ -124,7 +127,10 @@ pub async fn run_routed_step_with_runtime<'a>(
         config,
     )
     .await?;
-    Ok(map_loop_outcome(outcome))
+    Ok(map_loop_outcome_with_pricing(
+        outcome,
+        &resolved.resolved_snapshot.config.pricing,
+    ))
 }
 
 fn map_loop_outcome(outcome: LoopOutcome) -> StepOutcome {
@@ -138,4 +144,23 @@ fn map_loop_outcome(outcome: LoopOutcome) -> StepOutcome {
             reason: format!("repair exhausted: {reason}; raw: {raw_json}"),
         },
     }
+}
+
+fn map_loop_outcome_with_pricing(outcome: LoopOutcome, pricing: &ModelPricing) -> StepOutcome {
+    match map_loop_outcome(outcome) {
+        StepOutcome::Completed { mut usage } => {
+            usage.estimated_cost_micros_usd = estimate_loop_usage_cost_micros(&usage, pricing);
+            StepOutcome::Completed { usage }
+        }
+        failed => failed,
+    }
+}
+
+fn estimate_loop_usage_cost_micros(usage: &LoopUsage, pricing: &ModelPricing) -> u64 {
+    let estimated_cost_usd = (usage.input_tokens as f64 / 1_000_000.0)
+        * pricing.input_per_million_usd
+        + (usage.output_tokens as f64 / 1_000_000.0) * pricing.output_per_million_usd
+        + (usage.cache_write_tokens as f64 / 1_000_000.0) * pricing.cache_write_per_million_usd
+        + (usage.cache_read_tokens as f64 / 1_000_000.0) * pricing.cache_read_per_million_usd;
+    (estimated_cost_usd * 1_000_000.0).round() as u64
 }

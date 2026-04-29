@@ -191,6 +191,9 @@ pub struct BossStepRoutedMetadata {
     /// Total output tokens billed for this step (v1 stub: always 0).
     #[serde(default)]
     pub output_tokens: Option<usize>,
+    /// Estimated cost in micros USD for this routed step.
+    #[serde(default)]
+    pub estimated_cost_micros_usd: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

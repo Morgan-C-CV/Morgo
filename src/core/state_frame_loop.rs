@@ -27,6 +27,7 @@ pub struct LoopUsage {
     pub output_tokens: usize,
     pub cache_read_tokens: usize,
     pub cache_write_tokens: usize,
+    pub estimated_cost_micros_usd: u64,
 }
 
 #[derive(Debug, Clone)]
