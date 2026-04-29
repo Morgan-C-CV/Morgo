@@ -39,6 +39,10 @@ pub struct ModelProfileSpec {
     pub ca_bundle_path: Option<String>,
     #[serde(default)]
     pub max_tokens_param: Option<String>,
+    #[serde(default)]
+    pub prompt_cache_key: Option<String>,
+    #[serde(default)]
+    pub prompt_cache_retention: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -70,6 +74,8 @@ pub struct ModelProfileDisplayView {
     pub retry_max_attempts: usize,
     pub retry_initial_backoff_ms: u64,
     pub retry_max_backoff_ms: u64,
+    pub prompt_cache_key: Option<String>,
+    pub prompt_cache_retention: Option<String>,
 }
 
 pub fn load_active_model_profile_from_root(
@@ -194,6 +200,8 @@ pub fn build_model_profile_display_view(
         retry_max_attempts: spec.retry_max_attempts.unwrap_or(3),
         retry_initial_backoff_ms: spec.retry_initial_backoff_ms.unwrap_or(200),
         retry_max_backoff_ms: spec.retry_max_backoff_ms.unwrap_or(1_000),
+        prompt_cache_key: spec.prompt_cache_key.clone(),
+        prompt_cache_retention: spec.prompt_cache_retention.clone(),
     })
 }
 
@@ -252,6 +260,8 @@ impl ModelProfileSpec {
             no_proxy: self.no_proxy.clone(),
             ca_bundle_path: self.ca_bundle_path.clone(),
             max_tokens_param: self.max_tokens_param.clone(),
+            prompt_cache_key: self.prompt_cache_key.clone(),
+            prompt_cache_retention: self.prompt_cache_retention.clone(),
         };
         Ok(config)
     }
@@ -361,6 +371,8 @@ stream_timeout_ms = 90000
 retry_max_attempts = 2
 retry_initial_backoff_ms = 100
 retry_max_backoff_ms = 500
+prompt_cache_key = "rust-agent-r1"
+prompt_cache_retention = "in_memory"
 "#,
         )
         .expect("active profile should resolve");
@@ -385,6 +397,14 @@ retry_max_backoff_ms = 500
         assert_eq!(resolved.config.retry_policy.max_attempts, 2);
         assert_eq!(resolved.config.retry_policy.initial_backoff_ms, 100);
         assert_eq!(resolved.config.retry_policy.max_backoff_ms, 500);
+        assert_eq!(
+            resolved.config.prompt_cache_key.as_deref(),
+            Some("rust-agent-r1")
+        );
+        assert_eq!(
+            resolved.config.prompt_cache_retention.as_deref(),
+            Some("in_memory")
+        );
     }
 
     #[test]
@@ -645,6 +665,8 @@ auth_strategy = "none"
             no_proxy: None,
             ca_bundle_path: None,
             max_tokens_param: None,
+            prompt_cache_key: Some("rust-agent-test-cache-key".into()),
+            prompt_cache_retention: Some("in_memory".into()),
         };
         let view = build_model_profile_display_view("test-profile", &spec)
             .expect("display view should build");
@@ -653,5 +675,10 @@ auth_strategy = "none"
         assert_eq!(view.api_key_env_status.as_deref(), Some("set"));
         assert_eq!(view.request_timeout_ms, 30_000);
         assert_eq!(view.retry_max_attempts, 3);
+        assert_eq!(
+            view.prompt_cache_key.as_deref(),
+            Some("rust-agent-test-cache-key")
+        );
+        assert_eq!(view.prompt_cache_retention.as_deref(), Some("in_memory"));
     }
 }

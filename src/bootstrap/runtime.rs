@@ -163,6 +163,8 @@ pub fn has_explicit_provider_env_override() -> bool {
         "RUST_AGENT_PROVIDER_PROTOCOL",
         "RUST_AGENT_PROVIDER_COMPATIBILITY_PROFILE",
         "RUST_AGENT_PROVIDER_AUTH_STRATEGY",
+        "RUST_AGENT_PROVIDER_PROMPT_CACHE_KEY",
+        "RUST_AGENT_PROVIDER_PROMPT_CACHE_RETENTION",
     ]
     .iter()
     .any(|key| {
@@ -1538,6 +1540,12 @@ impl RuntimeBootstrap {
                     ProviderAuthStrategy::NoAuth
                 }
             });
+        let prompt_cache_key = std::env::var("RUST_AGENT_PROVIDER_PROMPT_CACHE_KEY")
+            .ok()
+            .filter(|value| !value.trim().is_empty());
+        let prompt_cache_retention = std::env::var("RUST_AGENT_PROVIDER_PROMPT_CACHE_RETENTION")
+            .ok()
+            .filter(|value| !value.trim().is_empty());
         let proxy_resolution = resolve_proxy_env_contract();
         Ok(ModelProviderConfig {
             provider_id,
@@ -1565,6 +1573,8 @@ impl RuntimeBootstrap {
                 .ok()
                 .filter(|v| !v.trim().is_empty()),
             max_tokens_param: None,
+            prompt_cache_key,
+            prompt_cache_retention,
         })
     }
 

@@ -183,6 +183,8 @@ async fn run_provider_case(case: ProviderCase) -> FixtureResult {
         no_proxy: None,
         ca_bundle_path: None,
         max_tokens_param: None,
+            prompt_cache_key: None,
+            prompt_cache_retention: None,
     };
     let _ = &case.expected;
 
@@ -1967,6 +1969,8 @@ async fn query_engine_submit_turn_works_through_production_provider_path() {
         no_proxy: None,
         ca_bundle_path: None,
         max_tokens_param: None,
+            prompt_cache_key: None,
+            prompt_cache_retention: None,
     };
     let cost_tracker =
         CostTracker::with_default_pricing(config.model_id.clone(), config.pricing.clone());
@@ -2073,6 +2077,8 @@ async fn production_provider_request_envelope_stays_compatible() {
         no_proxy: None,
         ca_bundle_path: None,
         max_tokens_param: None,
+            prompt_cache_key: None,
+            prompt_cache_retention: None,
     };
 
     let events = ModelProviderClient::from_config(config)
@@ -2118,6 +2124,8 @@ async fn production_provider_surfaces_unsupported_streaming_as_typed_failure() {
         no_proxy: None,
         ca_bundle_path: None,
         max_tokens_param: None,
+            prompt_cache_key: None,
+            prompt_cache_retention: None,
     };
 
     let events = ModelProviderClient::from_config(config)
@@ -2167,6 +2175,8 @@ async fn production_provider_assembles_partial_tool_use_payload_metadata() {
         no_proxy: None,
         ca_bundle_path: None,
         max_tokens_param: None,
+            prompt_cache_key: None,
+            prompt_cache_retention: None,
     };
 
     let events = ModelProviderClient::from_config(config)
@@ -2224,6 +2234,8 @@ async fn production_provider_normalizes_stringified_tool_use_alias_payload() {
         no_proxy: None,
         ca_bundle_path: None,
         max_tokens_param: None,
+            prompt_cache_key: None,
+            prompt_cache_retention: None,
     };
 
     let events = ModelProviderClient::from_config(config)
@@ -2271,6 +2283,8 @@ async fn production_provider_preserves_terminal_http_compatibility_metadata() {
         no_proxy: None,
         ca_bundle_path: None,
         max_tokens_param: None,
+            prompt_cache_key: None,
+            prompt_cache_retention: None,
     };
 
     let events = ModelProviderClient::from_config(config)
@@ -2321,6 +2335,8 @@ async fn production_provider_accepts_top_level_usage_envelope() {
         no_proxy: None,
         ca_bundle_path: None,
         max_tokens_param: None,
+            prompt_cache_key: None,
+            prompt_cache_retention: None,
     };
 
     let events = ModelProviderClient::from_config(config)
@@ -2367,6 +2383,8 @@ async fn production_provider_accepts_delta_usage_envelope() {
         no_proxy: None,
         ca_bundle_path: None,
         max_tokens_param: None,
+            prompt_cache_key: None,
+            prompt_cache_retention: None,
     };
 
     let events = ModelProviderClient::from_config(config)
@@ -2415,6 +2433,8 @@ async fn production_provider_merges_usage_across_provider_envelopes_without_drif
         no_proxy: None,
         ca_bundle_path: None,
         max_tokens_param: None,
+            prompt_cache_key: None,
+            prompt_cache_retention: None,
     };
     let cost_tracker =
         CostTracker::with_default_pricing(config.model_id.clone(), config.pricing.clone());
@@ -2533,6 +2553,8 @@ async fn production_provider_extracts_nested_http_error_message() {
         no_proxy: None,
         ca_bundle_path: None,
         max_tokens_param: None,
+            prompt_cache_key: None,
+            prompt_cache_retention: None,
     };
 
     let events = ModelProviderClient::from_config(config)
@@ -2613,6 +2635,8 @@ async fn production_provider_surfaces_interrupted_stream_metadata() {
         no_proxy: None,
         ca_bundle_path: None,
         max_tokens_param: None,
+            prompt_cache_key: None,
+            prompt_cache_retention: None,
     };
 
     let events = ModelProviderClient::from_config(config)
@@ -2664,6 +2688,8 @@ async fn production_provider_surfaces_malformed_stream_as_protocol_failure() {
         no_proxy: None,
         ca_bundle_path: None,
         max_tokens_param: None,
+            prompt_cache_key: None,
+            prompt_cache_retention: None,
     };
 
     let events = ModelProviderClient::from_config(config)
@@ -2715,6 +2741,8 @@ async fn production_provider_surfaces_tool_use_protocol_failure() {
         no_proxy: None,
         ca_bundle_path: None,
         max_tokens_param: None,
+            prompt_cache_key: None,
+            prompt_cache_retention: None,
     };
 
     let events = ModelProviderClient::from_config(config)
@@ -2766,6 +2794,8 @@ async fn production_provider_surfaces_structured_output_protocol_failure() {
         no_proxy: None,
         ca_bundle_path: None,
         max_tokens_param: None,
+            prompt_cache_key: None,
+            prompt_cache_retention: None,
     };
 
     let events = ModelProviderClient::from_config(config)
@@ -2819,6 +2849,8 @@ async fn production_provider_maps_terminal_http_error_to_query_loop_failure_code
         no_proxy: None,
         ca_bundle_path: None,
         max_tokens_param: None,
+            prompt_cache_key: None,
+            prompt_cache_retention: None,
     };
 
     let context = QueryContext {
@@ -2924,6 +2956,8 @@ async fn production_provider_rejects_wrong_content_type_as_invalid_response() {
         no_proxy: None,
         ca_bundle_path: None,
         max_tokens_param: None,
+            prompt_cache_key: None,
+            prompt_cache_retention: None,
     };
 
     let events = ModelProviderClient::from_config(config)
@@ -2975,6 +3009,8 @@ async fn production_provider_rejects_empty_response_body() {
         no_proxy: None,
         ca_bundle_path: None,
         max_tokens_param: None,
+            prompt_cache_key: None,
+            prompt_cache_retention: None,
     };
 
     let events = ModelProviderClient::from_config(config)
@@ -3026,6 +3062,8 @@ async fn production_provider_rejects_truncated_stream_as_protocol_failure() {
         no_proxy: None,
         ca_bundle_path: None,
         max_tokens_param: None,
+            prompt_cache_key: None,
+            prompt_cache_retention: None,
     };
 
     let events = ModelProviderClient::from_config(config)
@@ -3094,6 +3132,8 @@ async fn production_provider_slow_first_byte_hits_request_timeout() {
         no_proxy: None,
         ca_bundle_path: None,
         max_tokens_param: None,
+            prompt_cache_key: None,
+            prompt_cache_retention: None,
     };
 
     let events = ModelProviderClient::from_config(config)
@@ -3160,6 +3200,8 @@ async fn production_provider_headers_then_idle_hits_stream_timeout() {
         no_proxy: None,
         ca_bundle_path: None,
         max_tokens_param: None,
+            prompt_cache_key: None,
+            prompt_cache_retention: None,
     };
 
     let events = ModelProviderClient::from_config(config)
@@ -3230,6 +3272,8 @@ async fn production_provider_short_request_timeout_does_not_truncate_active_stre
         no_proxy: None,
         ca_bundle_path: None,
         max_tokens_param: None,
+            prompt_cache_key: None,
+            prompt_cache_retention: None,
     };
 
     let events = ModelProviderClient::from_config(config)
@@ -3285,6 +3329,8 @@ async fn production_provider_maps_timeout_after_retries_exhaust_to_query_loop_fa
         no_proxy: None,
         ca_bundle_path: None,
         max_tokens_param: None,
+            prompt_cache_key: None,
+            prompt_cache_retention: None,
     };
 
     let context = QueryContext {
@@ -3391,6 +3437,8 @@ async fn production_provider_retries_429_then_succeeds() {
         no_proxy: None,
         ca_bundle_path: None,
         max_tokens_param: None,
+            prompt_cache_key: None,
+            prompt_cache_retention: None,
     };
 
     let events = ModelProviderClient::from_config(config)
@@ -3443,6 +3491,8 @@ async fn production_provider_respects_retry_after_header_for_429_retry() {
         no_proxy: None,
         ca_bundle_path: None,
         max_tokens_param: None,
+            prompt_cache_key: None,
+            prompt_cache_retention: None,
     };
 
     let started = Instant::now();
@@ -3502,6 +3552,8 @@ async fn production_provider_safety_cap_prevents_oversized_retry_after_sleep() {
         no_proxy: None,
         ca_bundle_path: None,
         max_tokens_param: None,
+            prompt_cache_key: None,
+            prompt_cache_retention: None,
     };
 
     let started = Instant::now();
@@ -3556,6 +3608,8 @@ async fn production_provider_429_without_retry_after_uses_exponential_backoff() 
         no_proxy: None,
         ca_bundle_path: None,
         max_tokens_param: None,
+            prompt_cache_key: None,
+            prompt_cache_retention: None,
     };
 
     let started = Instant::now();
@@ -3610,6 +3664,8 @@ async fn production_provider_does_not_retry_terminal_400_errors() {
         no_proxy: None,
         ca_bundle_path: None,
         max_tokens_param: None,
+            prompt_cache_key: None,
+            prompt_cache_retention: None,
     };
 
     let events = ModelProviderClient::from_config(config)
@@ -3661,6 +3717,8 @@ async fn production_provider_retries_503_then_surfaces_terminal_protocol_failure
         no_proxy: None,
         ca_bundle_path: None,
         max_tokens_param: None,
+            prompt_cache_key: None,
+            prompt_cache_retention: None,
     };
 
     let events = ModelProviderClient::from_config(config)

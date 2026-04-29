@@ -69,6 +69,8 @@ fn make_inherited_runtime_snapshot_with_scripted_turns(
             no_proxy: None,
             ca_bundle_path: None,
             max_tokens_param: None,
+            prompt_cache_key: None,
+            prompt_cache_retention: None,
         },
         client: rust_agent::service::api::client::ModelProviderClient::with_scripted_turns(scripted_turns),
         active_profile_name: Some("inherited-fast".into()),

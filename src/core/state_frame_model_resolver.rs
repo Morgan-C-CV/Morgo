@@ -90,6 +90,8 @@ mod tests {
             no_proxy: None,
             ca_bundle_path: None,
             max_tokens_param: None,
+            prompt_cache_key: None,
+            prompt_cache_retention: None,
         };
         ActiveModelRuntimeSnapshot {
             config: config.clone(),

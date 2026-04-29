@@ -148,6 +148,8 @@ pub struct ModelProviderConfig {
     pub no_proxy: Option<String>,
     pub ca_bundle_path: Option<String>,
     pub max_tokens_param: Option<String>,
+    pub prompt_cache_key: Option<String>,
+    pub prompt_cache_retention: Option<String>,
 }
 
 /// Redact userinfo (password) from a proxy URL for safe display in logs/warnings.
@@ -199,6 +201,8 @@ impl Default for ModelProviderConfig {
             no_proxy: None,
             ca_bundle_path: None,
             max_tokens_param: None,
+            prompt_cache_key: None,
+            prompt_cache_retention: None,
         }
     }
 }
@@ -819,6 +823,22 @@ impl ProviderAdapter for OpenAICompatibleAdapter {
         }
         if !options.stop_sequences.is_empty() {
             payload["stop"] = json!(options.stop_sequences);
+        }
+        if let Some(key) = config
+            .prompt_cache_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            payload["prompt_cache_key"] = json!(key);
+        }
+        if let Some(retention) = config
+            .prompt_cache_retention
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            payload["prompt_cache_retention"] = json!(retention);
         }
         Ok(payload)
     }
@@ -2133,6 +2153,8 @@ mod tests {
             no_proxy: None,
             ca_bundle_path: None,
             max_tokens_param: None,
+            prompt_cache_key: None,
+            prompt_cache_retention: None,
         }
     }
 
@@ -2189,6 +2211,22 @@ mod tests {
         let msg = Message::user("hello");
         let payload = build_request_payload_for_provider(&config, &msg).unwrap();
         assert_eq!(payload["messages"][0]["content"], "hello");
+    }
+
+    #[test]
+    fn openai_adapter_includes_prompt_cache_fields_when_configured() {
+        use crate::core::message::Message;
+        let mut config = test_provider(
+            ProviderProtocol::OpenAICompatible,
+            ProviderCompatibilityProfileKind::OpenAICompatible,
+        );
+        config.prompt_cache_key = Some("rust-agent-r1".into());
+        config.prompt_cache_retention = Some("in_memory".into());
+
+        let payload = build_request_payload_for_provider(&config, &Message::user("hello")).unwrap();
+
+        assert_eq!(payload["prompt_cache_key"], "rust-agent-r1");
+        assert_eq!(payload["prompt_cache_retention"], "in_memory");
     }
 
     #[test]

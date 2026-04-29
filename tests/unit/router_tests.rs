@@ -82,6 +82,8 @@ fn app_state_with_session_root(root: &std::path::Path) -> AppState {
         no_proxy: None,
         ca_bundle_path: None,
         max_tokens_param: None,
+            prompt_cache_key: None,
+            prompt_cache_retention: None,
     };
     let runtime_snapshot = ActiveModelRuntimeSnapshot {
         config: config.clone(),
