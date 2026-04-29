@@ -2440,7 +2440,6 @@ fn next_runnable_step(plan: &BossPlan) -> Option<&BossPlanStep> {
             && matches!(
                 step.status,
                 BossPlanStepStatus::Pending
-                    | BossPlanStepStatus::WaitingForApproval
                     | BossPlanStepStatus::Rejected
             )
     })
