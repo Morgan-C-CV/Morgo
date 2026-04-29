@@ -19,6 +19,8 @@ use crate::core::context::QueryContext;
 use crate::core::engine::QueryEngine;
 use crate::core::lism_ab_sample::LisMAbSampleSink;
 use crate::core::lism_ab_sample::LisMRolloutConclusion;
+use crate::core::boss_state::{BossPlan, BossPlanStep, BossPlanStepStatus};
+use crate::core::boss::save_plan;
 use crate::cost::tracker::CostTracker;
 use crate::history::resume::{
     ResolvedSessionState, RestoreRequest, RestoreSource, resolve_session_state,
@@ -274,6 +276,10 @@ pub struct BootstrapCli {
     /// Override the boss LisM policy for this run. One of: inherit, force-on, force-off.
     #[arg(long, value_name = "POLICY")]
     pub lism_policy: Option<String>,
+    /// Run a single boss task non-interactively. Creates a one-step plan, executes it
+    /// to completion, records the LisM A/B sample if --lism-ab-sample is set, then exits.
+    #[arg(long, value_name = "TASK")]
+    pub boss_task: Option<String>,
 }
 
 impl Default for BootstrapCli {
@@ -293,6 +299,7 @@ impl Default for BootstrapCli {
             lism_ab_summarize: None,
             lism_ab_conclude: None,
             lism_policy: None,
+            boss_task: None,
         }
     }
 }
@@ -591,6 +598,47 @@ impl RuntimeBootstrap {
                 "initialized {} runtime in {:?} mode",
                 self.cli.surface, state.session_mode
             );
+            return Ok(());
+        }
+
+        if let Some(task_desc) = self.cli.boss_task.clone() {
+            let app_arc = Arc::new(app_state.clone());
+            if let Some(boss) = app_arc.boss_coordinator.as_ref() {
+                boss.seed_plan_for_task(&task_desc).await;
+                let _ = boss.advance_plan(&app_arc).await;
+                // Poll until completion or 5-minute timeout.
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
+                loop {
+                    let stage = boss.get_stage().await;
+                    if matches!(
+                        stage,
+                        crate::core::boss_state::BossStage::Completed
+                    ) {
+                        break;
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        println!("[boss-task] timed out after 5 minutes");
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                }
+                println!("[boss-task] final stage: {:?}", boss.get_stage().await);
+                if let Some(task_manager) = app_arc.permission_context.task_manager.as_ref() {
+                    if let Ok(report) = boss.report_progress(task_manager).await {
+                        if let Some(obs) = &report.observability_summary {
+                            if let Some(ratio) = obs.cache_hit_ratio() {
+                                println!("[boss-task] cache_hit_ratio: {:.3}", ratio);
+                            }
+                            println!(
+                                "[boss-task] cost_micros_usd: {}",
+                                obs.estimated_cost_micros_usd
+                            );
+                        }
+                    }
+                }
+            } else {
+                println!("[boss-task] no BossCoordinator available");
+            }
             return Ok(());
         }
 

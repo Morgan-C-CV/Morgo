@@ -965,6 +965,63 @@ impl BossCoordinator {
         self.lism_ab_sink.as_ref()
     }
 
+    /// Inject a single-step execution plan for non-interactive `--boss-task` runs.
+    /// Sets stage to Execution and current_step to 0 so `advance_plan` dispatches immediately.
+    /// Safe to call after bootstrap_coordinator but before advance_plan.
+    pub async fn seed_plan_for_task(&self, task: &str) {
+        let plan_id = format!(
+            "boss-task-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0)
+        );
+        let plan = BossPlan {
+            plan_id: plan_id.clone(),
+            task_description: task.to_string(),
+            document_spec: task.to_string(),
+            pseudo_code: String::new(),
+            draft_spec: None,
+            review_feedback: None,
+            revision_notes: None,
+            finalized: true,
+            documentation_feedback: vec![],
+            steps: vec![BossPlanStep {
+                id: 0,
+                description: task.to_string(),
+                objective: Some(task.to_string()),
+                acceptance: vec!["Task completed successfully.".into()],
+                requires_approval: false,
+                status: BossPlanStepStatus::Pending,
+                completed: false,
+                result_diff: None,
+                worker_task_id: None,
+                attempt_count: 0,
+                retry_budget: 3,
+                last_review_summary: None,
+                last_correction: None,
+                review_task_id: None,
+            }],
+            accepted_by_user: true,
+            auto_sequence: true,
+            session_snapshot: None,
+        };
+        {
+            let mut plan_guard = self.plan.write().await;
+            *plan_guard = Some(plan);
+        }
+        {
+            let mut status = self.status.write().await;
+            status.stage = BossStage::Execution;
+            status.current_step = Some(0);
+            status.total_steps = Some(1);
+        }
+        {
+            let mut session_guard = self.session.write().await;
+            *session_guard = Some(BossSession::from_plan_id(&plan_id, BossStage::Execution));
+        }
+    }
+
     /// Stable run identifier derived from plan_id, or a timestamp fallback.
     async fn current_run_id(&self) -> String {
         self.session
