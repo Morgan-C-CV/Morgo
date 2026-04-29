@@ -542,6 +542,18 @@ impl RuntimeBootstrap {
             active_session_id,
         );
         let app_state = finalized.app_state.clone();
+        // build_runtime_seed_state doesn't carry task_manager/task_list_manager/plan_manager
+        // through RuntimeInitializeBundle — patch them into the finalized permission_context here
+        // so boss dispatch (and any other tool that requires task_manager) works.
+        let app_state = {
+            let mut s = app_state;
+            s.permission_context = s
+                .permission_context
+                .with_task_manager(task_manager.clone())
+                .with_task_list_manager(task_list_manager.clone())
+                .with_plan_manager(plan_manager.clone());
+            s
+        };
         let router = finalized.router;
         let engine = finalized.engine;
 
@@ -605,25 +617,52 @@ impl RuntimeBootstrap {
             let app_arc = Arc::new(app_state.clone());
             if let Some(boss) = app_arc.boss_coordinator.as_ref() {
                 boss.seed_plan_for_task(&task_desc).await;
-                let _ = boss.advance_plan(&app_arc).await;
-                // Poll until completion or 5-minute timeout.
+                let advance_msg = boss.advance_plan(&app_arc).await;
+                println!("[boss-task] advance_plan result: {:?}", advance_msg);
+                // Poll until completion or terminal failure, 5-minute timeout.
                 let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
+                let mut tick = 0u32;
                 loop {
                     let stage = boss.get_stage().await;
-                    if matches!(
-                        stage,
-                        crate::core::boss_state::BossStage::Completed
-                    ) {
+                    if matches!(stage, crate::core::boss_state::BossStage::Completed) {
+                        break;
+                    }
+                    // Also exit on terminal failure so we don't waste the timeout.
+                    let step_failed = if let Some(task_manager) = app_arc.permission_context.task_manager.as_ref() {
+                        let b_task_id = boss.b_task_id().await;
+                        if let Some(tid) = b_task_id {
+                            matches!(task_manager.status(&tid), Some(crate::task::types::TaskStatus::Failed | crate::task::types::TaskStatus::Killed))
+                        } else { false }
+                    } else { false };
+                    if step_failed {
+                        println!("[boss-task] step task failed/killed — stopping poll");
                         break;
                     }
                     if std::time::Instant::now() >= deadline {
                         println!("[boss-task] timed out after 5 minutes");
                         break;
                     }
+                    tick += 1;
+                    if tick % 20 == 0 {
+                        let b_task_id = boss.b_task_id().await;
+                        if let Some(tid) = b_task_id {
+                            if let Some(task_manager) = app_arc.permission_context.task_manager.as_ref() {
+                                println!("[boss-task] b_task {} status: {:?}", tid, task_manager.status(&tid));
+                            }
+                        }
+                        println!("[boss-task] still waiting, stage: {:?}", stage);
+                    }
                     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                 }
                 println!("[boss-task] final stage: {:?}", boss.get_stage().await);
                 if let Some(task_manager) = app_arc.permission_context.task_manager.as_ref() {
+                    // Print B task output to diagnose failures.
+                    if let Some(b_id) = boss.b_task_id().await {
+                        println!("[boss-task] b_task {} status: {:?}", b_id, task_manager.status(&b_id));
+                        if let Some(slice) = task_manager.get_output(&b_id, 0) {
+                            println!("[boss-task] b_task output (first 500 chars): {:?}", &slice.content[..slice.content.len().min(500)]);
+                        }
+                    }
                     if let Ok(report) = boss.report_progress(task_manager).await {
                         if let Some(obs) = &report.observability_summary {
                             if let Some(ratio) = obs.cache_hit_ratio() {
