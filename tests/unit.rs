@@ -60,3 +60,5 @@ mod tool_orchestrator_tests;
 mod tool_tests;
 #[path = "unit/visibility_plugin_tests.rs"]
 mod visibility_plugin_tests;
+#[path = "unit/skills_visibility_tests.rs"]
+mod skills_visibility_tests;
