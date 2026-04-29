@@ -386,3 +386,39 @@ async fn r1_2_sink_summary_after_completed_and_aborted_runs() {
     let _ = std::fs::remove_file(completed_path);
     let _ = std::fs::remove_file(failed_path);
 }
+
+// ── Scenario 8: init_lism_policy (R1 slice 3 — sync setter before Arc-wrap) ──
+
+#[tokio::test]
+async fn r1_3_init_lism_policy_sets_force_on() {
+    use rust_agent::core::boss_state::BossLisMPolicy;
+    let mut coordinator = BossCoordinator::new();
+    coordinator.init_lism_policy(BossLisMPolicy::ForceOn);
+    assert_eq!(coordinator.lism_policy().await, BossLisMPolicy::ForceOn);
+}
+
+#[tokio::test]
+async fn r1_3_init_lism_policy_sets_force_off() {
+    use rust_agent::core::boss_state::BossLisMPolicy;
+    let mut coordinator = BossCoordinator::new();
+    coordinator.init_lism_policy(BossLisMPolicy::ForceOff);
+    assert_eq!(coordinator.lism_policy().await, BossLisMPolicy::ForceOff);
+}
+
+#[tokio::test]
+async fn r1_3_init_lism_policy_defaults_to_inherit() {
+    use rust_agent::core::boss_state::BossLisMPolicy;
+    let coordinator = BossCoordinator::new();
+    assert_eq!(coordinator.lism_policy().await, BossLisMPolicy::Inherit);
+}
+
+#[tokio::test]
+async fn r1_3_init_lism_policy_sink_and_policy_both_wire_independently() {
+    use rust_agent::core::boss_state::BossLisMPolicy;
+    let sink = new_shared_ab_sink();
+    let mut coordinator = BossCoordinator::new();
+    coordinator.set_lism_ab_sink(sink);
+    coordinator.init_lism_policy(BossLisMPolicy::ForceOn);
+    assert!(coordinator.lism_ab_sink().is_some());
+    assert_eq!(coordinator.lism_policy().await, BossLisMPolicy::ForceOn);
+}

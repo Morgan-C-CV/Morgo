@@ -50,6 +50,9 @@ fn runtime_for_surface(surface: &str, interactive: bool, init_only: bool) -> Run
         tui: false,
         attachments: Vec::new(),
         surface: surface.into(),
+        lism_ab_sample: None,
+    lism_ab_summarize: None,
+    lism_policy: None,
     })
     .with_provider_config(test_model_provider_config())
 }
@@ -662,6 +665,9 @@ api_key_env = "OPENAI_API_KEY"
         tui: false,
         attachments: Vec::new(),
         surface: "cli".into(),
+        lism_ab_sample: None,
+    lism_ab_summarize: None,
+    lism_policy: None,
     });
     let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::InitOnly, false);
     state.current_cwd = root;
@@ -714,6 +720,9 @@ fn bootstrap_models_toml_missing_file_falls_back_to_existing_bootstrap_defaults(
         tui: false,
         attachments: Vec::new(),
         surface: "cli".into(),
+        lism_ab_sample: None,
+    lism_ab_summarize: None,
+    lism_policy: None,
     });
     let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::InitOnly, false);
     state.current_cwd = root;
@@ -776,6 +785,9 @@ api_key_env = "OPENAI_API_KEY"
         tui: false,
         attachments: Vec::new(),
         surface: "cli".into(),
+        lism_ab_sample: None,
+    lism_ab_summarize: None,
+    lism_policy: None,
     });
     let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::InitOnly, false);
     state.current_cwd = root;
@@ -834,6 +846,9 @@ api_key_env = "OPENAI_API_KEY"
         tui: false,
         attachments: Vec::new(),
         surface: "cli".into(),
+        lism_ab_sample: None,
+    lism_ab_summarize: None,
+    lism_policy: None,
     });
     let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::InitOnly, false);
     state.current_cwd = root;
@@ -988,6 +1003,9 @@ api_key_env = "OPENAI_API_KEY"
         tui: false,
         attachments: Vec::new(),
         surface: "cli".into(),
+        lism_ab_sample: None,
+    lism_ab_summarize: None,
+    lism_policy: None,
     });
     let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::InitOnly, false);
     state.current_cwd = root;
@@ -1037,6 +1055,9 @@ fn bootstrap_infers_openai_family_provider_contract_from_env() {
         tui: false,
         attachments: Vec::new(),
         surface: "cli".into(),
+        lism_ab_sample: None,
+    lism_ab_summarize: None,
+    lism_policy: None,
     });
     let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::InitOnly, false);
     state.current_cwd = std::env::current_dir().expect("cwd available");
@@ -1101,6 +1122,9 @@ auth_strategy = "none"
         tui: false,
         attachments: Vec::new(),
         surface: "cli".into(),
+        lism_ab_sample: None,
+    lism_ab_summarize: None,
+    lism_policy: None,
     });
     let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::InitOnly, false);
     state.current_cwd = root;
@@ -1138,6 +1162,9 @@ fn bootstrap_rejects_unknown_provider_without_explicit_contract() {
         tui: false,
         attachments: Vec::new(),
         surface: "cli".into(),
+        lism_ab_sample: None,
+    lism_ab_summarize: None,
+    lism_policy: None,
     });
     let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::InitOnly, false);
     state.current_cwd = std::env::current_dir().expect("cwd available");
@@ -1179,6 +1206,9 @@ fn bootstrap_uses_default_chat_completions_path_when_env_unset() {
         tui: false,
         attachments: Vec::new(),
         surface: "cli".into(),
+        lism_ab_sample: None,
+    lism_ab_summarize: None,
+    lism_policy: None,
     });
     let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::InitOnly, false);
     state.current_cwd = std::env::current_dir().expect("cwd available");
@@ -1231,6 +1261,9 @@ fn bootstrap_accepts_custom_chat_completions_path_for_custom_provider() {
         tui: false,
         attachments: Vec::new(),
         surface: "cli".into(),
+        lism_ab_sample: None,
+    lism_ab_summarize: None,
+    lism_policy: None,
     });
     let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::InitOnly, false);
     state.current_cwd = std::env::current_dir().expect("cwd available");
@@ -1284,6 +1317,9 @@ fn bootstrap_rejects_invalid_chat_completions_path_env() {
         tui: false,
         attachments: Vec::new(),
         surface: "cli".into(),
+        lism_ab_sample: None,
+    lism_ab_summarize: None,
+    lism_policy: None,
     });
     let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::InitOnly, false);
     state.current_cwd = std::env::current_dir().expect("cwd available");
@@ -1326,6 +1362,9 @@ fn bootstrap_provider_alias_matrix(
         tui: false,
         attachments: Vec::new(),
         surface: "cli".into(),
+        lism_ab_sample: None,
+    lism_ab_summarize: None,
+    lism_policy: None,
     });
     let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::InitOnly, false);
     state.current_cwd = std::env::current_dir().expect("cwd available");
@@ -1928,6 +1967,9 @@ fn augment_prompt_depends_on_input_state_without_mutating_store() {
         tui: false,
         attachments: Vec::new(),
         surface: "cli".into(),
+        lism_ab_sample: None,
+    lism_ab_summarize: None,
+    lism_policy: None,
     })
     .with_provider_config(test_model_provider_config());
     let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::Headless, false);
@@ -2068,6 +2110,9 @@ fn gate_user_access_matches_cli_remote_and_telegram_expectations() {
         tui: false,
         attachments: Vec::new(),
         surface: "cli".into(),
+        lism_ab_sample: None,
+    lism_ab_summarize: None,
+    lism_policy: None,
     })
     .with_provider_config(test_model_provider_config());
 
@@ -2582,6 +2627,9 @@ fn finalize_runtime_state_is_single_writeback_entrypoint() {
         tui: false,
         attachments: Vec::new(),
         surface: "cli".into(),
+        lism_ab_sample: None,
+    lism_ab_summarize: None,
+    lism_policy: None,
     })
     .with_provider_config(test_model_provider_config());
     let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::Headless, false);
@@ -2720,6 +2768,9 @@ async fn runtime_continue_session_uses_restored_snapshot() {
         tui: false,
         attachments: Vec::new(),
         surface: "cli".into(),
+        lism_ab_sample: None,
+    lism_ab_summarize: None,
+    lism_policy: None,
     })
     .with_provider_config(test_model_provider_config())
     .with_session_store(store);
@@ -2753,6 +2804,9 @@ async fn runtime_resume_prefers_restored_surface_and_mode() {
         tui: false,
         attachments: Vec::new(),
         surface: "cli".into(),
+        lism_ab_sample: None,
+    lism_ab_summarize: None,
+    lism_policy: None,
     })
     .with_provider_config(test_model_provider_config())
     .with_session_store(store);
@@ -2776,6 +2830,9 @@ fn initialize_runtime_tracks_surface_mode_visibility_matrix() {
         tui: false,
         attachments: Vec::new(),
         surface: "cli".into(),
+        lism_ab_sample: None,
+    lism_ab_summarize: None,
+    lism_policy: None,
     })
     .with_provider_config(test_model_provider_config());
 
@@ -2869,6 +2926,9 @@ async fn runtime_resume_keeps_restored_surface_visibility_contract() {
         tui: false,
         attachments: Vec::new(),
         surface: "cli".into(),
+        lism_ab_sample: None,
+    lism_ab_summarize: None,
+    lism_policy: None,
     })
     .with_provider_config(test_model_provider_config())
     .with_session_store(store.clone());
@@ -2959,6 +3019,9 @@ async fn runtime_restores_persisted_task_list_for_resumed_session() {
         tui: false,
         attachments: Vec::new(),
         surface: "cli".into(),
+        lism_ab_sample: None,
+    lism_ab_summarize: None,
+    lism_policy: None,
     })
     .with_provider_config(test_model_provider_config())
     .with_session_store(store);
@@ -3022,6 +3085,9 @@ async fn runtime_continue_restores_from_file_backed_store_across_instances() {
         tui: false,
         attachments: Vec::new(),
         surface: "cli".into(),
+        lism_ab_sample: None,
+    lism_ab_summarize: None,
+    lism_policy: None,
     })
     .with_provider_config(test_model_provider_config())
     .with_session_store(store_b);
@@ -3049,6 +3115,9 @@ async fn runtime_initializes_fresh_session_record_in_store() {
         tui: false,
         attachments: Vec::new(),
         surface: "cli".into(),
+        lism_ab_sample: None,
+    lism_ab_summarize: None,
+    lism_policy: None,
     })
     .with_provider_config(test_model_provider_config())
     .with_session_store(store.clone());
@@ -3788,6 +3857,9 @@ fn proxy_env_var_is_read_into_config() {
         tui: false,
         attachments: Vec::new(),
         surface: "cli".into(),
+        lism_ab_sample: None,
+    lism_ab_summarize: None,
+    lism_policy: None,
     });
     let config = runtime
         .build_model_provider_config_from_env_for_test()
@@ -3818,6 +3890,9 @@ fn no_proxy_env_var_is_read_into_config() {
         tui: false,
         attachments: Vec::new(),
         surface: "cli".into(),
+        lism_ab_sample: None,
+    lism_ab_summarize: None,
+    lism_policy: None,
     });
     let config = runtime
         .build_model_provider_config_from_env_for_test()
@@ -3844,6 +3919,9 @@ fn ca_bundle_env_var_is_read_into_config() {
         tui: false,
         attachments: Vec::new(),
         surface: "cli".into(),
+        lism_ab_sample: None,
+    lism_ab_summarize: None,
+    lism_policy: None,
     });
     let config = runtime
         .build_model_provider_config_from_env_for_test()
@@ -3872,6 +3950,9 @@ fn no_proxy_env_unset_leaves_field_none() {
         tui: false,
         attachments: Vec::new(),
         surface: "cli".into(),
+        lism_ab_sample: None,
+    lism_ab_summarize: None,
+    lism_policy: None,
     });
     let config = runtime
         .build_model_provider_config_from_env_for_test()
@@ -4020,6 +4101,9 @@ fn https_proxy_falls_back_when_rust_agent_proxy_unset() {
         tui: false,
         attachments: Vec::new(),
         surface: "cli".into(),
+        lism_ab_sample: None,
+    lism_ab_summarize: None,
+    lism_policy: None,
     });
     let config = runtime
         .build_model_provider_config_from_env_for_test()
@@ -4058,6 +4142,9 @@ fn webfetch_uses_same_proxy_resolution_contract() {
         tui: false,
         attachments: Vec::new(),
         surface: "cli".into(),
+        lism_ab_sample: None,
+    lism_ab_summarize: None,
+    lism_policy: None,
     });
     let config = runtime
         .build_model_provider_config_from_env_for_test()

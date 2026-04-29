@@ -938,6 +938,13 @@ impl BossCoordinator {
         *self.lism_policy.write().await = policy;
     }
 
+    /// Synchronous policy initializer — only safe to call before the coordinator is Arc-wrapped.
+    pub fn init_lism_policy(&mut self, policy: BossLisMPolicy) {
+        if let Ok(mut guard) = self.lism_policy.try_write() {
+            *guard = policy;
+        }
+    }
+
     pub async fn lism_policy(&self) -> BossLisMPolicy {
         *self.lism_policy.read().await
     }

@@ -115,6 +115,9 @@ async fn bootstrap_env_policy_is_attached_and_enforced_by_file_tools() {
 
         attachments: vec![],
         surface: "cli".into(),
+        lism_ab_sample: None,
+    lism_ab_summarize: None,
+    lism_policy: None,
     })
     .with_provider_config(test_model_provider_config());
     let state = BootstrapState::new(InteractionSurface::Cli, SessionMode::Headless, false);

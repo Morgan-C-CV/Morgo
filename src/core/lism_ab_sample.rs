@@ -166,6 +166,11 @@ impl LisMAbSampleSink {
         }
         inner.records.push(record);
     }
+
+    /// Push a pre-built record (e.g., loaded from JSONL) into the in-memory list only.
+    pub fn push_record(&self, record: LisMAbSampleRecord) {
+        self.inner.lock().unwrap().records.push(record);
+    }
 }
 
 pub type SharedLisMAbSampleSink = Arc<LisMAbSampleSink>;

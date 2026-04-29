@@ -14,8 +14,10 @@ use crate::bootstrap::{BootstrapPhase, BootstrapState, InteractionSurface, Sessi
 use crate::command::registry::CommandRegistry;
 use crate::core::boss::BossCoordinator;
 use crate::core::boss_runtime::BossRuntimeHost;
+use crate::core::boss_state::BossLisMPolicy;
 use crate::core::context::QueryContext;
 use crate::core::engine::QueryEngine;
+use crate::core::lism_ab_sample::LisMAbSampleSink;
 use crate::cost::tracker::CostTracker;
 use crate::history::resume::{
     ResolvedSessionState, RestoreRequest, RestoreSource, resolve_session_state,
@@ -258,6 +260,16 @@ pub struct BootstrapCli {
     pub surface: String,
     #[arg(long = "attach", value_name = "PATH")]
     pub attachments: Vec<String>,
+    /// Path to JSONL file for LisM A/B sample collection. When set, boss runs
+    /// automatically append a sample record on completion/abortion.
+    #[arg(long, value_name = "PATH")]
+    pub lism_ab_sample: Option<String>,
+    /// Read a LisM A/B JSONL sample file and print an A/B summary, then exit.
+    #[arg(long, value_name = "PATH")]
+    pub lism_ab_summarize: Option<String>,
+    /// Override the boss LisM policy for this run. One of: inherit, force-on, force-off.
+    #[arg(long, value_name = "POLICY")]
+    pub lism_policy: Option<String>,
 }
 
 impl Default for BootstrapCli {
@@ -273,6 +285,9 @@ impl Default for BootstrapCli {
             tui: false,
             surface: "cli".into(),
             attachments: Vec::new(),
+            lism_ab_sample: None,
+            lism_ab_summarize: None,
+            lism_policy: None,
         }
     }
 }
@@ -384,6 +399,22 @@ impl RuntimeBootstrap {
     }
 
     pub async fn run(&self) -> anyhow::Result<()> {
+        // Early-exit: print LisM A/B summary and return without bootstrapping the runtime.
+        if let Some(path) = &self.cli.lism_ab_summarize {
+            let records = LisMAbSampleSink::load_records(path);
+            if records.is_empty() {
+                println!("No LisM A/B sample records found at: {path}");
+                return Ok(());
+            }
+            let sink = LisMAbSampleSink::in_memory();
+            for rec in &records {
+                sink.push_record(rec.clone());
+            }
+            let summary = sink.summarize();
+            print_lism_ab_summary(&summary, records.len());
+            return Ok(());
+        }
+
         let detected_surface = self.detect_surface();
         let detected_mode = self.detect_session_mode();
         let mut state =
@@ -754,7 +785,22 @@ impl RuntimeBootstrap {
         let runtime_tool_registry = Arc::new(RwLock::new(coordinator_tools.clone()));
 
         let boss_runtime_host = BossRuntimeHost::new();
-        let boss_coordinator = Arc::new(BossCoordinator::new_with_runtime_owner(boss_runtime_host.owner()));
+        let mut boss_coordinator = BossCoordinator::new_with_runtime_owner(boss_runtime_host.owner());
+
+        // Wire LisM A/B sample sink if requested via CLI.
+        if let Some(path) = &self.cli.lism_ab_sample {
+            match LisMAbSampleSink::with_jsonl_path(path) {
+                Ok(sink) => boss_coordinator.set_lism_ab_sink(Arc::new(sink)),
+                Err(e) => tracing::warn!("Failed to open LisM A/B sample path {path}: {e}"),
+            }
+        }
+
+        // Apply LisM policy override if requested via CLI.
+        if let Some(policy_str) = &self.cli.lism_policy {
+            boss_coordinator.init_lism_policy(parse_lism_policy(policy_str));
+        }
+
+        let boss_coordinator = Arc::new(boss_coordinator);
 
         let notification_dispatcher = NotificationDispatcher::new(self.build_telegram_gateway())
             .with_hook_registry(hook_registry.clone())
@@ -1636,5 +1682,47 @@ fn shutdown_failure_reason(failure: &ShutdownFailure) -> String {
         ShutdownFailure::PersistAfterShutdown(inner) => {
             format!("persist_after_shutdown:{}", inner.reason())
         }
+    }
+}
+
+fn parse_lism_policy(s: &str) -> BossLisMPolicy {
+    match s.trim().to_lowercase().as_str() {
+        "force-on" | "force_on" | "on" => BossLisMPolicy::ForceOn,
+        "force-off" | "force_off" | "off" => BossLisMPolicy::ForceOff,
+        _ => BossLisMPolicy::Inherit,
+    }
+}
+
+fn print_lism_ab_summary(summary: &crate::core::lism_ab_sample::LisMAbSummary, total_records: usize) {
+    println!("LisM A/B Sample Summary");
+    println!("=======================");
+    println!("Total records : {total_records}");
+    println!(
+        "LisM ON       : {} runs | completion {:.2} | avg cache_hit_ratio {} | avg cost {}μ | avg tokens_saved {}",
+        summary.on_runs,
+        summary.on_completion_rate.map_or_else(|| "n/a".into(), |r| format!("{:.2}", r)),
+        summary.on_avg_cache_hit_ratio.map_or_else(|| "n/a".into(), |r| format!("{:.3}", r)),
+        summary.on_avg_cost_micros_usd,
+        summary.on_avg_tokens_saved,
+    );
+    println!(
+        "LisM OFF      : {} runs | completion {:.2} | avg cache_hit_ratio {} | avg cost {}μ | avg tokens_saved {}",
+        summary.off_runs,
+        summary.off_completion_rate.map_or_else(|| "n/a".into(), |r| format!("{:.2}", r)),
+        summary.off_avg_cache_hit_ratio.map_or_else(|| "n/a".into(), |r| format!("{:.3}", r)),
+        summary.off_avg_cost_micros_usd,
+        summary.off_avg_tokens_saved,
+    );
+    if summary.has_both_arms() {
+        println!("---");
+        if let Some(delta) = summary.cache_hit_ratio_delta() {
+            let direction = if delta > 0.0 { "↑ LisM improves" } else { "↓ LisM degrades" };
+            println!("Δ cache_hit_ratio  : {:+.3} ({})", delta, direction);
+        }
+        let cost_delta = summary.cost_delta_micros();
+        let cost_direction = if cost_delta < 0 { "↓ LisM saves" } else { "↑ LisM costs more" };
+        println!("Δ cost             : {:+}μ ({})", cost_delta, cost_direction);
+    } else {
+        println!("--- (only one arm has data; cannot compute delta)");
     }
 }

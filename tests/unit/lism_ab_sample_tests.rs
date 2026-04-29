@@ -385,3 +385,93 @@ fn r1_1_shared_sink_can_be_cloned_and_records_are_shared() {
 
     assert_eq!(sink2.record_count(), 1);
 }
+
+// ── push_record (R1 slice 3 — in-memory import for summarize path) ────────────
+
+#[test]
+fn r1_3_push_record_adds_to_memory_without_file_write() {
+    let sink = LisMAbSampleSink::in_memory();
+    let report = make_report(2, 2, 600, 400, 1000);
+
+    // Build a record via record_run first to get a real LisMAbSampleRecord shape.
+    sink.record_run("run-1", true, &report, BossTestRunOutcome::Completed, 0);
+    let original = sink.records().into_iter().next().unwrap();
+
+    // Push a cloned record directly via push_record (no JSONL writer → no I/O).
+    let sink2 = LisMAbSampleSink::in_memory();
+    assert!(sink2.path().is_none(), "in_memory sink should have no path");
+    sink2.push_record(original.clone());
+    assert_eq!(sink2.record_count(), 1);
+    assert_eq!(sink2.records()[0].run_id, "run-1");
+}
+
+#[test]
+fn r1_3_push_record_multiple_records_preserved_in_order() {
+    let sink = LisMAbSampleSink::in_memory();
+    let report = make_report(1, 1, 600, 400, 0);
+    sink.record_run("first", true, &report, BossTestRunOutcome::Completed, 0);
+    let r1 = sink.records()[0].clone();
+    sink.record_run("second", false, &report, BossTestRunOutcome::Aborted, 0);
+    let r2 = sink.records()[1].clone();
+
+    let sink2 = LisMAbSampleSink::in_memory();
+    sink2.push_record(r1);
+    sink2.push_record(r2);
+
+    assert_eq!(sink2.record_count(), 2);
+    assert_eq!(sink2.records()[0].run_id, "first");
+    assert_eq!(sink2.records()[1].run_id, "second");
+}
+
+#[test]
+fn r1_3_push_record_then_summarize_matches_direct_record_run() {
+    let report_on = make_report(1, 1, 800, 200, 1000);
+    let report_off = make_report(1, 1, 300, 700, 3000);
+
+    // Direct recording path.
+    let sink_direct = LisMAbSampleSink::in_memory();
+    sink_direct.record_run("on-1", true, &report_on, BossTestRunOutcome::Completed, 0);
+    sink_direct.record_run("off-1", false, &report_off, BossTestRunOutcome::Completed, 0);
+
+    // Import path (simulates --lism-ab-summarize loading JSONL records).
+    let sink_import = LisMAbSampleSink::in_memory();
+    for rec in sink_direct.records() {
+        sink_import.push_record(rec);
+    }
+
+    let s_direct = sink_direct.summarize();
+    let s_import = sink_import.summarize();
+    assert_eq!(s_direct.on_runs, s_import.on_runs);
+    assert_eq!(s_direct.off_runs, s_import.off_runs);
+    assert_eq!(s_direct.on_avg_cost_micros_usd, s_import.on_avg_cost_micros_usd);
+    assert_eq!(s_direct.off_avg_cost_micros_usd, s_import.off_avg_cost_micros_usd);
+    assert_eq!(
+        s_direct.on_avg_cache_hit_ratio.map(|v| (v * 1000.0) as u64),
+        s_import.on_avg_cache_hit_ratio.map(|v| (v * 1000.0) as u64),
+    );
+}
+
+#[test]
+fn r1_3_load_records_then_push_into_sink_matches_summarize() {
+    let path = unique_temp_path("r1-3-load-push");
+    let sink_writer = LisMAbSampleSink::with_jsonl_path(&path).unwrap();
+    let report = make_report(2, 2, 700, 300, 2000);
+    sink_writer.record_run("run-on", true, &report, BossTestRunOutcome::Completed, 0);
+    sink_writer.record_run("run-off", false, &report, BossTestRunOutcome::Aborted, 0);
+
+    // Simulate --lism-ab-summarize: load from file, push into in-memory sink, summarize.
+    let loaded = LisMAbSampleSink::load_records(&path);
+    assert_eq!(loaded.len(), 2);
+
+    let sink_summary = LisMAbSampleSink::in_memory();
+    for rec in loaded {
+        sink_summary.push_record(rec);
+    }
+    let summary = sink_summary.summarize();
+    assert_eq!(summary.on_runs, 1);
+    assert_eq!(summary.off_runs, 1);
+    assert!(summary.has_both_arms());
+    assert_eq!(summary.on_avg_cost_micros_usd, 2000);
+
+    let _ = std::fs::remove_file(path);
+}
