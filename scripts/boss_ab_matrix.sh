@@ -147,10 +147,10 @@ EOF
   cat >>"$file" <<'EOF'
 
 参考实现路径：
-- RustAgent/Agent/src/security/workspace_capability.rs
-- RustAgent/Agent/src/security/approval_protocol.rs
-- RustAgent/Agent/src/tool/builtin/bash/mod.rs
-- RustAgent/Agent/src/tool/builtin/bash/sandbox.rs
+- src/security/workspace_capability.rs
+- src/security/approval_protocol.rs
+- src/tool/builtin/bash/mod.rs
+- src/tool/builtin/bash/sandbox.rs
 EOF
   append_task_footer "$file"
 }
@@ -308,12 +308,18 @@ write_usecase_multistage_research() {
   4. 最后综合成一份“复杂任务下的性能与风险判断”
 - 报告必须显式按阶段组织，且说明每阶段证据来源。
 - 允许读取仓库文件与文档；最终要把结果写成 markdown 文件。
+- 优先直接 Read 指定文件；不要对整个仓库做宽泛 Grep/Glob。
+- 只有在 `src/tool` 子树内需要补充证据时，才允许做带窄范围的搜索。
 
 建议核验路径：
-- RustAgent/Agent/src/tool
-- RustAgent/docs/29-memory-backpressure-and-resource-limits.md
-- RustAgent/docs/31-token-efficiency-cost-performance.md
-- RustAgent/docs/30-boss-mode-and-dual-agent-workflow.md
+- src/tool/definition.rs
+- src/tool/registry.rs
+- src/tool/orchestrator.rs
+- src/tool/builtin/glob.rs
+- src/tool/builtin/grep.rs
+- ../docs/29-memory-backpressure-and-resource-limits.md
+- ../docs/31-token-efficiency-cost-performance.md
+- ../docs/30-boss-mode-and-dual-agent-workflow.md
 EOF
   append_build_footer "$file"
 }
