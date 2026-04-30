@@ -72,6 +72,10 @@ pub fn evaluate_tool_permission(
         };
     }
 
+    if metadata.requires_auth && delegated_write_call_is_allowed(metadata, call, permissions) {
+        return PermissionDecision::Allow;
+    }
+
     if metadata.requires_auth && permissions.always_allow_rules().is_empty() {
         return PermissionDecision::Ask {
             message: format!("tool {} requires explicit approval", metadata.name),
@@ -81,4 +85,29 @@ pub fn evaluate_tool_permission(
     }
 
     PermissionDecision::Allow
+}
+
+fn delegated_write_call_is_allowed(
+    metadata: &ToolMetadata,
+    call: &ToolCall,
+    permissions: &ToolPermissionContext,
+) -> bool {
+    if metadata.name != "Write" && metadata.name != "Edit" {
+        return false;
+    }
+    let Some(input) = call.json_input() else {
+        return false;
+    };
+    let Some(file_path) = input.get("file_path").and_then(|value| value.as_str()) else {
+        return false;
+    };
+    if file_path.trim().is_empty() || !permissions.is_delegated_write_path(file_path.trim()) {
+        return false;
+    }
+    let Some(policy) = permissions.filesystem_policy() else {
+        return true;
+    };
+    policy
+        .check_existing_or_create_path_for_write(std::path::Path::new(file_path.trim()))
+        .is_allowed()
 }

@@ -291,6 +291,15 @@ fn launch_agent_task(
             boss_actor_policy: request.boss_actor_policy,
         },
     );
+    if request.role == WorkerRole::Implement {
+        for expectation in crate::core::boss_acceptance::extract_artifact_expectations(&task_input)
+        {
+            query_context
+                .app_state
+                .permission_context
+                .add_delegated_write_path(expectation.path);
+        }
+    }
     let tasks_for_run = tasks.clone();
     let launched_task_id = task_id.clone();
     tasks.launch(&launched_task_id.clone(), task_input.clone(), async move {

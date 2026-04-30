@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 use crate::bootstrap::InteractionSurface;
@@ -102,6 +103,7 @@ pub struct ToolPermissionContext {
     telegram_surface_admission_policy: Arc<RwLock<SurfaceAdmissionPolicy>>,
     pub external_memory_entries: Arc<RwLock<Vec<String>>>,
     pub nested_memory_lineage: Arc<RwLock<Vec<String>>>,
+    pub delegated_write_paths: Arc<RwLock<Vec<PathBuf>>>,
     pub lism_mode: Arc<RwLock<bool>>,
     pub last_activity_ts: Option<Arc<AtomicU64>>,
     pub cancellation_token: Option<CancellationToken>,
@@ -143,6 +145,7 @@ impl ToolPermissionContext {
             )),
             external_memory_entries: Arc::new(RwLock::new(Vec::new())),
             nested_memory_lineage: Arc::new(RwLock::new(Vec::new())),
+            delegated_write_paths: Arc::new(RwLock::new(Vec::new())),
             lism_mode: Arc::new(RwLock::new(false)),
             last_activity_ts: None,
             cancellation_token: None,
@@ -410,6 +413,32 @@ impl ToolPermissionContext {
             .unwrap_or_default()
     }
 
+    pub fn add_delegated_write_path(&self, path: impl AsRef<Path>) -> bool {
+        let candidate = normalize_delegated_path(path.as_ref());
+        if let Ok(mut paths) = self.delegated_write_paths.write() {
+            if paths.iter().any(|existing| existing == &candidate) {
+                return false;
+            }
+            paths.push(candidate);
+            return true;
+        }
+        false
+    }
+
+    pub fn delegated_write_paths(&self) -> Vec<PathBuf> {
+        self.delegated_write_paths
+            .read()
+            .map(|paths| paths.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn is_delegated_write_path(&self, path: impl AsRef<Path>) -> bool {
+        let candidate = normalize_delegated_path(path.as_ref());
+        self.delegated_write_paths()
+            .iter()
+            .any(|allowed| candidate == *allowed || candidate.starts_with(allowed))
+    }
+
     pub fn with_deferred_tools(mut self, include_deferred_tools: bool) -> Self {
         self.include_deferred_tools = include_deferred_tools;
         self
@@ -441,6 +470,31 @@ impl ToolPermissionContext {
             ts.store(now, std::sync::atomic::Ordering::Release);
         }
     }
+}
+
+fn normalize_delegated_path(path: &Path) -> PathBuf {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(path)
+    };
+    normalize_path_lexically(&absolute)
+}
+
+fn normalize_path_lexically(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    normalized
 }
 
 fn add_rule(slot: &Arc<RwLock<Vec<String>>>, rule: impl Into<String>) -> bool {

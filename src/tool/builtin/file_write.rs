@@ -66,6 +66,16 @@ impl Tool for FileWriteTool {
                 .check_existing_or_create_path_for_write(path)
                 .into_result()?;
         }
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            fs::create_dir_all(parent).await.map_err(|error| {
+                anyhow::anyhow!(
+                    "failed to create parent directory {}: {error}",
+                    parent.display()
+                )
+            })?;
+        }
         fs::write(path, input.content)
             .await
             .map_err(|error| anyhow::anyhow!("failed to write {}: {error}", path.display()))?;

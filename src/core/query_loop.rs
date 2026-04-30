@@ -588,7 +588,7 @@ async fn consume_model_stream(
     max_output_tokens_recovery_limit: usize,
 ) -> TurnOutcome {
     let mut aggregated_text = String::new();
-    let mut pending_tool_use: Option<(String, String)> = None;
+    let mut pending_tool_uses: Vec<(String, String)> = Vec::new();
     let mut pending_usage: Option<crate::service::api::streaming::UsageEvent> = None;
     let mut terminal_stop_reason: Option<StopReason> = None;
 
@@ -604,7 +604,7 @@ async fn consume_model_stream(
                     tool_name: tool_name.clone(),
                     input: input.clone(),
                 });
-                pending_tool_use = Some((tool_name, input));
+                pending_tool_uses.push((tool_name, input));
             }
             StreamEvent::Usage(usage) => {
                 pending_usage = Some(usage);
@@ -676,7 +676,7 @@ async fn consume_model_stream(
             };
         }
         Some(StopReason::ToolUse) => {
-            let Some((tool_name, tool_input)) = pending_tool_use.take() else {
+            if pending_tool_uses.is_empty() {
                 let message = "tool stop without tool payload";
                 let error_message = Message::assistant(format!("stream error: {message}"));
                 engine_events.push(EngineEvent::MessageCommitted(error_message.clone()));
@@ -692,8 +692,13 @@ async fn consume_model_stream(
                         },
                     ),
                 };
-            };
-            return execute_tool_phase(context, state, engine_events, tool_name, tool_input).await;
+            }
+            if pending_tool_uses.len() == 1 {
+                let (tool_name, tool_input) = pending_tool_uses.remove(0);
+                return execute_tool_phase(context, state, engine_events, tool_name, tool_input)
+                    .await;
+            }
+            return execute_tool_batch_phase(context, state, engine_events, pending_tool_uses).await;
         }
         Some(StopReason::MaxTokens) => {
             if state.max_output_tokens_override.is_none() {
