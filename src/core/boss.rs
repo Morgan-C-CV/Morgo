@@ -2256,6 +2256,7 @@ impl BossCoordinator {
                     required_output_hint: Some("return a unified diff or file edits".into()),
                 },
             ),
+            "task_contains_boss_context": true,
             "role": "implement",
             "inherit_context": false,
             "context_strategy": "brief",

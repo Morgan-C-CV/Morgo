@@ -32,6 +32,7 @@ enum AgentRequest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SpawnAgentRequest {
     task: String,
+    task_contains_boss_context: bool,
     role: WorkerRole,
     inherit_context: bool,
     max_turns: Option<usize>,
@@ -59,6 +60,7 @@ enum ReuseStrategy {
 #[derive(Debug, Deserialize)]
 struct AgentJsonRequest {
     task: Option<String>,
+    task_contains_boss_context: Option<bool>,
     role: Option<String>,
     inherit_context: Option<bool>,
     max_turns: Option<usize>,
@@ -343,6 +345,7 @@ fn parse_agent_request(input: &str) -> anyhow::Result<AgentRequest> {
             )?;
             return Ok(AgentRequest::Spawn(SpawnAgentRequest {
                 task,
+                task_contains_boss_context: request.task_contains_boss_context.unwrap_or(false),
                 role,
                 inherit_context: request.inherit_context.unwrap_or(true),
                 max_turns: request.max_turns,
@@ -372,6 +375,7 @@ fn parse_agent_request(input: &str) -> anyhow::Result<AgentRequest> {
 
     Ok(AgentRequest::Spawn(SpawnAgentRequest {
         task: input.to_string(),
+        task_contains_boss_context: false,
         role: WorkerRole::Research,
         inherit_context: true,
         max_turns: None,
@@ -391,6 +395,10 @@ fn parse_agent_request(input: &str) -> anyhow::Result<AgentRequest> {
 }
 
 fn build_worker_task_input(request: &SpawnAgentRequest) -> String {
+    if request.task_contains_boss_context {
+        return request.task.clone();
+    }
+
     let mut sections = vec![request.task.clone()];
 
     if request.boss_plan_id.is_some()
@@ -425,6 +433,55 @@ fn build_worker_task_input(request: &SpawnAgentRequest) -> String {
     }
 
     sections.join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_spawn_request() -> SpawnAgentRequest {
+        SpawnAgentRequest {
+            task: "implement feature".into(),
+            task_contains_boss_context: false,
+            role: WorkerRole::Implement,
+            inherit_context: false,
+            max_turns: None,
+            allowed_tools: None,
+            reuse_strategy: ReuseStrategy::Fresh,
+            parent_task_id: None,
+            orchestration_group_id: None,
+            phase: None,
+            step_id: Some(0),
+            boss_plan_id: Some("plan-1".into()),
+            step_objective: Some("objective 1".into()),
+            step_acceptance: vec!["acceptance 1".into()],
+            parent_session_id: Some("parent-session".into()),
+            requires_verification: false,
+            boss_actor_policy: None,
+        }
+    }
+
+    #[test]
+    fn build_worker_task_input_preserves_preassembled_boss_prompt_without_duplication() {
+        let mut request = sample_spawn_request();
+        request.task = "objective: already assembled\nplan_id: plan-1".into();
+        request.task_contains_boss_context = true;
+        let input = build_worker_task_input(&request);
+        assert_eq!(input, request.task);
+        assert!(
+            !input.contains("<boss-step-context>"),
+            "preassembled boss prompts must not receive duplicated boss-step-context"
+        );
+    }
+
+    #[test]
+    fn build_worker_task_input_appends_boss_step_context_by_default() {
+        let request = sample_spawn_request();
+        let input = build_worker_task_input(&request);
+        assert!(input.contains("<boss-step-context>"));
+        assert!(input.contains("objective: objective 1"));
+        assert!(input.contains("plan_id: plan-1"));
+    }
 }
 
 fn parse_worker_role(value: Option<&str>) -> anyhow::Result<WorkerRole> {
