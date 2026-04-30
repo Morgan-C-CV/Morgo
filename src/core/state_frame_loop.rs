@@ -90,6 +90,9 @@ StateDecision schema:\n\
 Rules:\n\
 - Use \"decision\": \"done\" when the objective is complete\n\
 - Use \"decision\": \"continue\" to proceed with more work\n\
+- Treat `recent_evidence` entries prefixed with `fact:` as the authoritative Fact Ledger for this turn\n\
+- If a fact entry already says `none`, `none recorded`, `absent`, or equivalent, do NOT request that same context again\n\
+- Only use \"decision\": \"request_context\" when the missing fact is not already present in objective/open_items/blocked_items/accepted_summary/recent_evidence\n\
 - The \"decision\" field MUST be one of the exact string values above — never use free text\n\
 - Respond with JSON only, no prose or explanation\n\
 \n\

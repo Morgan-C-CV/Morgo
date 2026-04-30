@@ -7608,6 +7608,13 @@ fn t27_3_execution_stage_with_step_maps_objective_and_open_items() {
     assert_eq!(frame.open_items, vec!["tests pass", "no regressions"]);
     assert!(frame.blocked_items.is_empty());
     assert!(frame.allowed_actions.contains(&"edit_file".to_string()));
+    assert!(
+        frame
+            .recent_evidence
+            .iter()
+            .any(|item| item.contains("fact: immutable_plan")),
+        "projection should carry immutable plan facts"
+    );
 }
 
 #[test]
@@ -7696,6 +7703,67 @@ fn t27_3_waiting_for_approval_maps_to_blocked_with_blocked_item() {
     assert_eq!(frame.state, AgentState::Blocked);
     assert_eq!(frame.blocked_items, vec!["waiting for user approval"]);
     assert!(frame.allowed_actions.is_empty());
+}
+
+#[test]
+fn t27_3_readonly_audit_projection_emits_fact_ledger_and_readonly_actions() {
+    use rust_agent::core::boss_state::{BossPlan, BossPlanStep, BossPlanStepStatus, BossStage};
+    use rust_agent::core::state_frame::ActorRole;
+    use rust_agent::core::state_frame_projection::project_state_frame;
+
+    let step = BossPlanStep {
+        id: 0,
+        description: "readonly audit".into(),
+        objective: Some("只读输出，不改文件；总结当前 LisM / KV cache 约束".into()),
+        acceptance: vec!["Task completed successfully.".into()],
+        requires_approval: false,
+        status: BossPlanStepStatus::Running,
+        completed: false,
+        result_diff: None,
+        worker_task_id: None,
+        attempt_count: 0,
+        retry_budget: 3,
+        last_review_summary: None,
+        last_correction: None,
+        review_task_id: None,
+    };
+    let plan = BossPlan {
+        plan_id: "p-readonly".into(),
+        task_description: "readonly task".into(),
+        document_spec: String::new(),
+        pseudo_code: String::new(),
+        steps: vec![step],
+        accepted_by_user: true,
+        auto_sequence: true,
+        ..Default::default()
+    };
+
+    let frame = project_state_frame(&plan, BossStage::Execution, Some(0), ActorRole::Worker);
+    assert_eq!(
+        frame.allowed_actions,
+        vec!["read_file".to_string(), "summarize_findings".to_string()]
+    );
+    assert!(
+        frame
+            .recent_evidence
+            .iter()
+            .any(|item| item.contains("fact: execution_mode read_only_analysis")),
+        "readonly tasks should project read-only mode into the fact ledger"
+    );
+    assert!(
+        frame
+            .recent_evidence
+            .iter()
+            .any(|item| item.contains("fact: open_blockers none")),
+        "projection should explicitly say there are no open blockers"
+    );
+    assert!(
+        frame
+            .recent_evidence
+            .iter()
+            .any(|item| item.contains("fact: reject_correction none recorded")),
+        "projection should explicitly say when reject/correction history is absent"
+    );
 }
 
 #[test]
