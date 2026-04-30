@@ -10577,6 +10577,48 @@ async fn t27_8_lism_boss_production_path_missing_inherited_snapshot_returns_erro
 }
 
 #[tokio::test]
+async fn t27_8_lism_external_effect_step_falls_back_to_full_worker_path() {
+    let mut step = boss_step(0, "external effect fallback");
+    step.objective = Some(
+        "创建一个工具并写入目标文件：/tmp/t278_lism_external_effect_fallback/report.md".into(),
+    );
+    step.acceptance = vec!["Task completed successfully.".into()];
+    let (coordinator, plan_path) = coordinator_with_plan(
+        boss_plan(vec![step]),
+        "test_boss_t278_lism_external_effect_fallback.json",
+    )
+    .await;
+
+    let mut app = (*app_state_with_tasks(
+        "t278-external-effect-fallback",
+        Arc::new(TaskManager::default()),
+    ))
+    .clone();
+    app.permission_context.set_lism_enabled(true);
+    app.permission_context.inherited_active_model_snapshot = None;
+    let app_state = Arc::new(app);
+
+    let message = coordinator
+        .advance_plan(&app_state)
+        .await
+        .expect("fallback path should not error")
+        .expect("dispatch should produce a payload");
+
+    assert!(
+        message.contains("\"boss_actor_role\":\"executor_b\""),
+        "expected full worker spawn payload, got: {message}"
+    );
+    let metadata = coordinator.routed_step_metadata_snapshot().await;
+    let meta = metadata
+        .get(&0)
+        .expect("fallback should record routed metadata");
+    assert_eq!(meta.fallback_count, Some(1));
+
+    let _ = std::fs::remove_file(plan_path);
+    let _ = std::fs::remove_dir_all("/tmp/t278_lism_external_effect_fallback");
+}
+
+#[tokio::test]
 async fn t27_8_terminal_failure_transitions_stage_to_documentation_and_surfaces_reason() {
     let mut failed_step = boss_step(0, "artifact verification should fail");
     failed_step.status = BossPlanStepStatus::Failed;

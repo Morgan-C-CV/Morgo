@@ -22,7 +22,7 @@ use crate::core::state_frame_loop::DecisionLoopConfig;
 use crate::core::state_frame_model_router::ModelTier;
 use crate::core::state_frame_orchestrator::{
     StepOutcome, StepRuntimeResolutionContext, build_routed_state_frame_with_model_route,
-    run_routed_step_with_runtime,
+    requires_external_tool_execution, run_routed_step_with_runtime,
 };
 use crate::history::session::SessionHistory;
 use crate::interaction::dispatcher::NotificationDispatcher;
@@ -1954,39 +1954,39 @@ impl BossCoordinator {
             Some(AdvanceOutcome::Dispatch(step_id)) => {
                 self.update_current_step(Some(step_id)).await;
 
-                if effective_lism_enabled(
+                let lism_enabled = effective_lism_enabled(
                     self.lism_policy().await,
                     app_state.permission_context.lism_enabled(),
-                ) {
-                    let (outcome, routed_metadata) = {
+                );
+
+                if lism_enabled {
+                    let routed_preview = {
                         let plan_guard = self.plan.read().await;
                         let plan = plan_guard
                             .as_ref()
                             .ok_or_else(|| anyhow::anyhow!("No plan loaded"))?;
-                        let inherited_snapshot = app_state
-                            .permission_context
-                            .inherited_active_model_snapshot
-                            .as_ref()
-                            .ok_or_else(|| {
-                                anyhow::anyhow!("LisM boss path requires an active model snapshot")
-                            })?;
-                        let routed = build_routed_state_frame_with_model_route(
+                        build_routed_state_frame_with_model_route(
                             plan,
                             BossStage::Execution,
                             step_id,
                             ActorRole::Worker,
-                        );
-                        let state_frame_size =
-                            serde_json::to_string(&routed.frame).map(|s| s.len()).ok();
-                        let mut routed_metadata = BossStepRoutedMetadata {
-                            toolset_id: routed.frame.toolset_id.clone(),
-                            skillset_id: routed.frame.skillset_id.clone(),
-                            model_tier: Some(model_tier_label(routed.model_route.tier).to_string()),
-                            provider_profile_id: routed.model_route.provider_profile_id.clone(),
+                        )
+                    };
+                    if requires_external_tool_execution(&routed_preview.frame) {
+                        let state_frame_size = serde_json::to_string(&routed_preview.frame)
+                            .map(|s| s.len())
+                            .ok();
+                        let routed_metadata = BossStepRoutedMetadata {
+                            toolset_id: routed_preview.frame.toolset_id.clone(),
+                            skillset_id: routed_preview.frame.skillset_id.clone(),
+                            model_tier: Some(
+                                model_tier_label(routed_preview.model_route.tier).to_string(),
+                            ),
+                            provider_profile_id: routed_preview.model_route.provider_profile_id,
                             state_frame_size,
                             cache_read_tokens: Some(0),
                             cache_write_tokens: Some(0),
-                            fallback_count: Some(0),
+                            fallback_count: Some(1),
                             projection_mismatch_count: Some(0),
                             input_tokens: Some(0),
                             uncached_input_tokens: Some(0),
@@ -1995,73 +1995,152 @@ impl BossCoordinator {
                             sent_prompt_chars: Some(0),
                             estimated_cost_micros_usd: Some(0),
                         };
-                        let cwd = app_state
-                            .session
-                            .as_ref()
-                            .map(|s| std::path::Path::new(s.cwd.as_str()).to_path_buf())
-                            .unwrap_or_else(|| std::path::PathBuf::from("."));
-                        let model_registry = resolve_config_root(&cwd).ok().and_then(|root| {
-                            load_model_profiles_registry_from_root(&root).ok().flatten()
-                        });
-                        let runtime = StepRuntimeResolutionContext {
-                            inherited_snapshot,
-                            model_registry: model_registry.as_ref(),
-                            observability: app_state.service_observability_tracker.clone(),
-                        };
-                        let outcome = run_routed_step_with_runtime(
-                            routed,
-                            DecisionLoopConfig::default(),
-                            runtime,
-                        )
-                        .await?;
-                        if let Some(usage) = match &outcome {
-                            StepOutcome::Completed { usage } => Some(usage),
-                            StepOutcome::Failed {
-                                usage: Some(usage), ..
-                            } => Some(usage),
-                            StepOutcome::Failed { usage: None, .. } => None,
-                        } {
-                            routed_metadata.input_tokens = Some(usage.input_tokens);
-                            routed_metadata.uncached_input_tokens =
-                                Some(usage.uncached_input_tokens);
-                            routed_metadata.output_tokens = Some(usage.output_tokens);
-                            routed_metadata.cache_read_tokens = Some(usage.cache_read_tokens);
-                            routed_metadata.cache_write_tokens = Some(usage.cache_write_tokens);
-                            routed_metadata.original_prompt_chars =
-                                Some(usage.original_prompt_chars);
-                            routed_metadata.sent_prompt_chars = Some(usage.sent_prompt_chars);
-                            routed_metadata.estimated_cost_micros_usd =
-                                Some(usage.estimated_cost_micros_usd);
-                        }
-                        (outcome, routed_metadata)
-                    };
-                    {
                         let mut routed_step_metadata = self.routed_step_metadata.write().await;
                         routed_step_metadata.insert(step_id, routed_metadata);
-                    }
+                    } else {
+                        let (outcome, routed_metadata) = {
+                            let plan_guard = self.plan.read().await;
+                            let plan = plan_guard
+                                .as_ref()
+                                .ok_or_else(|| anyhow::anyhow!("No plan loaded"))?;
+                            let inherited_snapshot = app_state
+                                .permission_context
+                                .inherited_active_model_snapshot
+                                .as_ref()
+                                .ok_or_else(|| {
+                                    anyhow::anyhow!(
+                                        "LisM boss path requires an active model snapshot"
+                                    )
+                                })?;
+                            let routed = build_routed_state_frame_with_model_route(
+                                plan,
+                                BossStage::Execution,
+                                step_id,
+                                ActorRole::Worker,
+                            );
+                            let state_frame_size =
+                                serde_json::to_string(&routed.frame).map(|s| s.len()).ok();
+                            let mut routed_metadata = BossStepRoutedMetadata {
+                                toolset_id: routed.frame.toolset_id.clone(),
+                                skillset_id: routed.frame.skillset_id.clone(),
+                                model_tier: Some(
+                                    model_tier_label(routed.model_route.tier).to_string(),
+                                ),
+                                provider_profile_id: routed.model_route.provider_profile_id.clone(),
+                                state_frame_size,
+                                cache_read_tokens: Some(0),
+                                cache_write_tokens: Some(0),
+                                fallback_count: Some(0),
+                                projection_mismatch_count: Some(0),
+                                input_tokens: Some(0),
+                                uncached_input_tokens: Some(0),
+                                output_tokens: Some(0),
+                                original_prompt_chars: Some(0),
+                                sent_prompt_chars: Some(0),
+                                estimated_cost_micros_usd: Some(0),
+                            };
+                            let cwd = app_state
+                                .session
+                                .as_ref()
+                                .map(|s| std::path::Path::new(s.cwd.as_str()).to_path_buf())
+                                .unwrap_or_else(|| std::path::PathBuf::from("."));
+                            let model_registry = resolve_config_root(&cwd).ok().and_then(|root| {
+                                load_model_profiles_registry_from_root(&root).ok().flatten()
+                            });
+                            let runtime = StepRuntimeResolutionContext {
+                                inherited_snapshot,
+                                model_registry: model_registry.as_ref(),
+                                observability: app_state.service_observability_tracker.clone(),
+                            };
+                            let outcome = run_routed_step_with_runtime(
+                                routed,
+                                DecisionLoopConfig::default(),
+                                runtime,
+                            )
+                            .await?;
+                            if let Some(usage) = match &outcome {
+                                StepOutcome::Completed { usage } => Some(usage),
+                                StepOutcome::Failed {
+                                    usage: Some(usage), ..
+                                } => Some(usage),
+                                StepOutcome::Failed { usage: None, .. } => None,
+                            } {
+                                routed_metadata.input_tokens = Some(usage.input_tokens);
+                                routed_metadata.uncached_input_tokens =
+                                    Some(usage.uncached_input_tokens);
+                                routed_metadata.output_tokens = Some(usage.output_tokens);
+                                routed_metadata.cache_read_tokens = Some(usage.cache_read_tokens);
+                                routed_metadata.cache_write_tokens = Some(usage.cache_write_tokens);
+                                routed_metadata.original_prompt_chars =
+                                    Some(usage.original_prompt_chars);
+                                routed_metadata.sent_prompt_chars = Some(usage.sent_prompt_chars);
+                                routed_metadata.estimated_cost_micros_usd =
+                                    Some(usage.estimated_cost_micros_usd);
+                            }
+                            (outcome, routed_metadata)
+                        };
+                        {
+                            let mut routed_step_metadata = self.routed_step_metadata.write().await;
+                            routed_step_metadata.insert(step_id, routed_metadata);
+                        }
 
-                    match outcome {
-                        StepOutcome::Completed { .. } => {
-                            {
-                                let mut plan_guard = self.plan.write().await;
-                                let plan = plan_guard
-                                    .as_mut()
-                                    .ok_or_else(|| anyhow::anyhow!("No plan loaded"))?;
-                                let step = plan
-                                    .steps
-                                    .iter_mut()
-                                    .find(|step| step.id == step_id)
-                                    .ok_or_else(|| {
-                                        anyhow::anyhow!("Unknown boss step {step_id}")
-                                    })?;
-                                if let Some(reason) = step_artifact_verification_error(step) {
-                                    step.completed = false;
-                                    step.status = BossPlanStepStatus::Failed;
-                                    step.last_review_summary = Some(reason.clone());
-                                    drop(plan_guard);
-                                    self.update_current_step(Some(step_id)).await;
-                                    if self.get_stage().await != BossStage::Documentation {
-                                        self.transition_to(BossStage::Documentation).await?;
+                        match outcome {
+                            StepOutcome::Completed { .. } => {
+                                {
+                                    let mut plan_guard = self.plan.write().await;
+                                    let plan = plan_guard
+                                        .as_mut()
+                                        .ok_or_else(|| anyhow::anyhow!("No plan loaded"))?;
+                                    let step = plan
+                                        .steps
+                                        .iter_mut()
+                                        .find(|step| step.id == step_id)
+                                        .ok_or_else(|| {
+                                            anyhow::anyhow!("Unknown boss step {step_id}")
+                                        })?;
+                                    if let Some(reason) = step_artifact_verification_error(step) {
+                                        step.completed = false;
+                                        step.status = BossPlanStepStatus::Failed;
+                                        step.last_review_summary = Some(reason.clone());
+                                        drop(plan_guard);
+                                        self.update_current_step(Some(step_id)).await;
+                                        if self.get_stage().await != BossStage::Documentation {
+                                            self.transition_to(BossStage::Documentation).await?;
+                                        }
+                                        let run_id = self.current_run_id().await;
+                                        let lism_enabled = effective_lism_enabled(
+                                            self.lism_policy().await,
+                                            app_state.permission_context.lism_enabled(),
+                                        );
+                                        self.emit_lism_sample(
+                                            &run_id,
+                                            lism_enabled,
+                                            BossTestRunOutcome::Aborted,
+                                            0,
+                                        )
+                                        .await;
+                                        return Ok(Some(format!(
+                                            "LisM failed boss step {}: {}",
+                                            step_id, reason
+                                        )));
+                                    }
+                                    step.completed = true;
+                                    step.status = BossPlanStepStatus::Completed;
+                                }
+                                if let Some(path) = self.status.read().await.planning_file.clone() {
+                                    self.save_plan_with_session(std::path::Path::new(&path))
+                                        .await?;
+                                }
+                                let next_step = self
+                                    .plan
+                                    .read()
+                                    .await
+                                    .as_ref()
+                                    .and_then(|p| next_unfinished_step_id(p));
+                                self.update_current_step(next_step).await;
+                                if next_step.is_none() {
+                                    if self.get_stage().await != BossStage::Completed {
+                                        self.transition_to(BossStage::Completed).await?;
                                     }
                                     let run_id = self.current_run_id().await;
                                     let lism_enabled = effective_lism_enabled(
@@ -2071,32 +2150,41 @@ impl BossCoordinator {
                                     self.emit_lism_sample(
                                         &run_id,
                                         lism_enabled,
-                                        BossTestRunOutcome::Aborted,
+                                        BossTestRunOutcome::Completed,
                                         0,
                                     )
                                     .await;
-                                    return Ok(Some(format!(
-                                        "LisM failed boss step {}: {}",
-                                        step_id, reason
-                                    )));
                                 }
-                                step.completed = true;
-                                step.status = BossPlanStepStatus::Completed;
+                                return Ok(Some(format!(
+                                    "LisM executed boss step {} to completion.",
+                                    step_id
+                                )));
                             }
-                            if let Some(path) = self.status.read().await.planning_file.clone() {
-                                self.save_plan_with_session(std::path::Path::new(&path))
-                                    .await?;
-                            }
-                            let next_step = self
-                                .plan
-                                .read()
-                                .await
-                                .as_ref()
-                                .and_then(|p| next_unfinished_step_id(p));
-                            self.update_current_step(next_step).await;
-                            if next_step.is_none() {
-                                if self.get_stage().await != BossStage::Completed {
-                                    self.transition_to(BossStage::Completed).await?;
+                            StepOutcome::Failed { reason, .. } => {
+                                let reason_clone = reason.clone();
+                                {
+                                    let mut plan_guard = self.plan.write().await;
+                                    let plan = plan_guard
+                                        .as_mut()
+                                        .ok_or_else(|| anyhow::anyhow!("No plan loaded"))?;
+                                    let step = plan
+                                        .steps
+                                        .iter_mut()
+                                        .find(|step| step.id == step_id)
+                                        .ok_or_else(|| {
+                                            anyhow::anyhow!("Unknown boss step {step_id}")
+                                        })?;
+                                    step.completed = false;
+                                    step.status = BossPlanStepStatus::Failed;
+                                    step.last_review_summary = Some(reason_clone.clone());
+                                }
+                                self.update_current_step(Some(step_id)).await;
+                                if self.get_stage().await != BossStage::Documentation {
+                                    self.transition_to(BossStage::Documentation).await?;
+                                }
+                                if let Some(path) = self.status.read().await.planning_file.clone() {
+                                    self.save_plan_with_session(std::path::Path::new(&path))
+                                        .await?;
                                 }
                                 let run_id = self.current_run_id().await;
                                 let lism_enabled = effective_lism_enabled(
@@ -2106,58 +2194,15 @@ impl BossCoordinator {
                                 self.emit_lism_sample(
                                     &run_id,
                                     lism_enabled,
-                                    BossTestRunOutcome::Completed,
+                                    BossTestRunOutcome::Aborted,
                                     0,
                                 )
                                 .await;
+                                return Ok(Some(format!(
+                                    "LisM failed boss step {}: {}",
+                                    step_id, reason
+                                )));
                             }
-                            return Ok(Some(format!(
-                                "LisM executed boss step {} to completion.",
-                                step_id
-                            )));
-                        }
-                        StepOutcome::Failed { reason, .. } => {
-                            let reason_clone = reason.clone();
-                            {
-                                let mut plan_guard = self.plan.write().await;
-                                let plan = plan_guard
-                                    .as_mut()
-                                    .ok_or_else(|| anyhow::anyhow!("No plan loaded"))?;
-                                let step = plan
-                                    .steps
-                                    .iter_mut()
-                                    .find(|step| step.id == step_id)
-                                    .ok_or_else(|| {
-                                        anyhow::anyhow!("Unknown boss step {step_id}")
-                                    })?;
-                                step.completed = false;
-                                step.status = BossPlanStepStatus::Failed;
-                                step.last_review_summary = Some(reason_clone.clone());
-                            }
-                            self.update_current_step(Some(step_id)).await;
-                            if self.get_stage().await != BossStage::Documentation {
-                                self.transition_to(BossStage::Documentation).await?;
-                            }
-                            if let Some(path) = self.status.read().await.planning_file.clone() {
-                                self.save_plan_with_session(std::path::Path::new(&path))
-                                    .await?;
-                            }
-                            let run_id = self.current_run_id().await;
-                            let lism_enabled = effective_lism_enabled(
-                                self.lism_policy().await,
-                                app_state.permission_context.lism_enabled(),
-                            );
-                            self.emit_lism_sample(
-                                &run_id,
-                                lism_enabled,
-                                BossTestRunOutcome::Aborted,
-                                0,
-                            )
-                            .await;
-                            return Ok(Some(format!(
-                                "LisM failed boss step {}: {}",
-                                step_id, reason
-                            )));
                         }
                     }
                 }
