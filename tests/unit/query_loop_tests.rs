@@ -15,7 +15,10 @@ use rust_agent::hook::registry::{
 use rust_agent::interaction::dispatcher::NotificationDispatcher;
 use rust_agent::interaction::telegram::gateway::TelegramGateway;
 use rust_agent::plugins::runtime_state::{RuntimePluginSnapshot, build_turn_engine};
-use rust_agent::service::api::client::{ModelProviderClient, parse_anthropic_sse_response};
+use rust_agent::service::api::client::{
+    ModelProviderClient, ModelProviderConfig, ProviderAuthStrategy,
+    ProviderCompatibilityProfileKind, ProviderProtocol, parse_anthropic_sse_response,
+};
 use rust_agent::service::api::errors::ApiError;
 use rust_agent::service::api::retry::RetryPolicy;
 use rust_agent::service::api::streaming::{
@@ -28,8 +31,12 @@ use rust_agent::service::observability::ServiceObservabilityTracker;
 use rust_agent::state::active_model_runtime::{ActiveModelRuntime, ActiveModelRuntimeSnapshot};
 use rust_agent::state::app_state::WorkerRole;
 use rust_agent::task::types::{TaskOwner, ValidationState, WorkerPhase};
+use serde_json::json;
 use std::sync::Arc;
+use std::sync::Mutex;
 
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
 use tokio::sync::RwLock;
 use tokio::time::{Duration, timeout};
 
@@ -44,6 +51,7 @@ use rust_agent::tool::registry::ToolRegistry;
 struct ProgressFixtureTool;
 struct PendingApprovalFixtureTool;
 struct DeniedFixtureTool;
+struct EchoFixtureTool;
 
 #[async_trait]
 impl Tool for ProgressFixtureTool {
@@ -144,6 +152,49 @@ impl Tool for DeniedFixtureTool {
     }
 }
 
+#[async_trait]
+impl Tool for EchoFixtureTool {
+    fn metadata(&self) -> ToolMetadata {
+        ToolMetadata {
+            name: "EchoFixture".into(),
+            description: "Echoes a value for tool-calling tests".into(),
+            aliases: &[],
+            search_hint: None,
+            read_only: true,
+            destructive: false,
+            concurrency_safe: true,
+            always_load: true,
+            should_defer: false,
+            requires_auth: false,
+            requires_user_interaction: false,
+            is_open_world: false,
+            is_search_or_read_command: false,
+        }
+    }
+
+    fn input_schema(&self) -> Option<serde_json::Value> {
+        Some(json!({
+            "type": "object",
+            "required": ["value"],
+            "properties": {
+                "value": { "type": "string" }
+            }
+        }))
+    }
+
+    async fn invoke(
+        &self,
+        call: &ToolCall,
+        _permissions: &ToolPermissionContext,
+    ) -> anyhow::Result<ToolResult> {
+        let value = call
+            .json_input()
+            .and_then(|json| json.get("value").and_then(|value| value.as_str()).map(str::to_string))
+            .unwrap_or_else(|| "missing".into());
+        Ok(ToolResult::Text(format!("echoed {value}")))
+    }
+}
+
 fn assert_ordered_sections(haystack: &str, headers: &[&str]) {
     let mut previous = None;
     for header in headers {
@@ -224,6 +275,104 @@ fn test_context_with_turns(
     }
 }
 
+fn test_context_with_production_client(
+    api_client: ModelProviderClient,
+    tool_registry: ToolRegistry,
+    observability: ServiceObservabilityTracker,
+) -> QueryContext {
+    let permission_context = ToolPermissionContext::new(PermissionMode::Default)
+        .with_task_manager(Arc::new(TaskManager::default()));
+    QueryContext {
+        app_state: AppState {
+            surface: InteractionSurface::Cli,
+            session_mode: SessionMode::Headless,
+            client_type: ClientType::Cli,
+            session_source: SessionSource::LocalCli,
+            runtime_role: RuntimeRole::Coordinator,
+            worker_role: None,
+            permission_context,
+            command_registry: None,
+            runtime_tool_registry: Some(Arc::new(RwLock::new(ToolRegistry::new()))),
+            skill_registry: None,
+            mcp_runtime: None,
+            plugin_load_result: None,
+            cost_tracker: CostTracker::default(),
+            service_observability_tracker: observability,
+            notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
+            audit_log: Arc::new(std::sync::Mutex::new(
+                rust_agent::security::audit::AuditLog::default(),
+            )),
+            startup_trace: Vec::new(),
+            active_model_runtime: None,
+            active_model_profile_name: None,
+            active_model_profile_source:
+                rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
+            active_model_provider_summary:
+                rust_agent::state::app_state::ActiveModelProviderSummary {
+                    provider_id: "openai-compatible".into(),
+                    protocol: "OpenAICompatible".into(),
+                    compatibility_profile: "OpenAICompatible".into(),
+                    base_url_host: "localhost".into(),
+                    model: "test-model".into(),
+                    auth_status: "none".into(),
+                },
+            active_session_id: "test-session".into(),
+            session_store: None,
+            session: None,
+            history: None,
+            restored_session: None,
+            last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            cancellation_token: tokio_util::sync::CancellationToken::new(),
+            subagent_limiter: None,
+            boss_coordinator: None,
+            remote_actor_store: None,
+        },
+        tool_registry,
+        api_client,
+        compactor: ReactiveCompactor,
+        hook_registry: HookRegistry::default(),
+        agent_id: None,
+        system_prompt: "test system".into(),
+        tools_prompt: "test tools".into(),
+        context_prompt: "test context".into(),
+    }
+}
+
+async fn run_openai_tool_loop_mock_server(
+    listener: TcpListener,
+    request_bodies: Arc<Mutex<Vec<String>>>,
+) {
+    for response_body in [
+        concat!(
+            "data: {\"id\":\"chatcmpl-tool\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_echo\",\"type\":\"function\",\"function\":{\"name\":\"EchoFixture\",\"arguments\":\"{\\\"value\\\":\\\"123\\\"}\"}}]},\"index\":0,\"finish_reason\":\"tool_calls\"}],\"usage\":{\"model\":\"test-model\",\"prompt_tokens\":20,\"completion_tokens\":5,\"total_tokens\":25}}\n\n",
+            "data: [DONE]\n\n"
+        ),
+        concat!(
+            "data: {\"id\":\"chatcmpl-final\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"delta\":{\"content\":\"completed after tool\"},\"index\":0,\"finish_reason\":\"stop\"}],\"usage\":{\"model\":\"test-model\",\"prompt_tokens\":30,\"completion_tokens\":6,\"total_tokens\":36}}\n\n",
+            "data: [DONE]\n\n"
+        ),
+    ] {
+        let (mut stream, _) = listener.accept().await.expect("accept request");
+        let mut buffer = vec![0_u8; 32 * 1024];
+        let bytes_read = stream.read(&mut buffer).await.expect("read request");
+        let request = String::from_utf8_lossy(&buffer[..bytes_read]).to_string();
+        request_bodies
+            .lock()
+            .expect("request bodies poisoned")
+            .push(request);
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+            response_body.len(),
+            response_body
+        );
+        stream
+            .write_all(response.as_bytes())
+            .await
+            .expect("write response");
+        stream.flush().await.expect("flush response");
+    }
+}
+
 #[test]
 fn query_context_composes_turn_prompt_in_system_tools_context_user_order() {
     let context =
@@ -239,6 +388,99 @@ fn query_context_composes_turn_prompt_in_system_tools_context_user_order() {
             "USER_SENTINEL",
         ],
     );
+}
+
+#[test]
+fn query_context_composes_transcript_prompt_with_roles_in_order() {
+    let context = test_context_with_turns(vec![], ToolRegistry::new());
+    let prompt = context.compose_turn_prompt_from_messages(&[
+        Message::user("original objective"),
+        Message::assistant("tool Read result: alpha"),
+        Message::user("tool result for Read: alpha"),
+    ]);
+
+    assert_ordered_sections(
+        &prompt,
+        &[
+            "You are",
+            "Runtime context summary:",
+            "Conversation transcript:",
+            "<user>",
+            "original objective",
+            "<assistant>",
+            "tool Read result: alpha",
+            "tool result for Read: alpha",
+        ],
+    );
+}
+
+#[tokio::test]
+async fn query_loop_openai_tool_calling_includes_tools_and_preserves_transcript() {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind mock listener");
+    let addr = listener.local_addr().expect("listener addr");
+    let request_bodies = Arc::new(Mutex::new(Vec::new()));
+    let request_bodies_for_server = request_bodies.clone();
+    let server = tokio::spawn(async move {
+        run_openai_tool_loop_mock_server(listener, request_bodies_for_server).await;
+    });
+
+    let observability = ServiceObservabilityTracker::default();
+    let config = ModelProviderConfig {
+        provider_id: "openai-compatible".into(),
+        protocol: ProviderProtocol::OpenAICompatible,
+        compatibility_profile: ProviderCompatibilityProfileKind::OpenAICompatible,
+        base_url: format!("http://{addr}"),
+        chat_completions_path: "/v1/chat/completions".into(),
+        auth_strategy: ProviderAuthStrategy::NoAuth,
+        model_id: "test-model".into(),
+        retry_policy: RetryPolicy::default(),
+        ..ModelProviderConfig::default()
+    };
+    let client =
+        ModelProviderClient::from_config_with_observability(config, observability.clone());
+    let context = test_context_with_production_client(
+        client,
+        ToolRegistry::new().register(Arc::new(EchoFixtureTool)),
+        observability,
+    );
+
+    let result = run_query_loop(&context, Message::user("perform the echo task")).await;
+
+    assert_eq!(result.state, QueryLoopState::Completed);
+    assert_eq!(result.terminal, Terminal::Completed);
+    assert!(
+        result
+            .messages
+            .iter()
+            .any(|message| message.text().contains("completed after tool"))
+    );
+
+    let bodies = request_bodies.lock().expect("request bodies poisoned");
+    assert_eq!(bodies.len(), 2, "expected tool turn plus follow-up turn");
+    let first = &bodies[0];
+    let second = &bodies[1];
+    assert!(first.contains("\"tools\""), "first request must expose tools");
+    assert!(
+        first.contains("\"tool_choice\":\"auto\""),
+        "first request must allow automatic tool selection"
+    );
+    assert!(
+        first.contains("EchoFixture"),
+        "first request must include the tool schema"
+    );
+    assert!(
+        second.contains("perform the echo task"),
+        "follow-up prompt must retain the original objective"
+    );
+    assert!(
+        second.contains("tool result for EchoFixture: echoed 123"),
+        "follow-up prompt must carry the concrete tool result"
+    );
+
+    drop(bodies);
+    server.await.expect("mock server finished");
 }
 
 #[tokio::test]

@@ -16,6 +16,7 @@ use crate::service::api::streaming::{
     ProviderFailureDisposition, StopReason, StreamError, StreamEvent, UsageEvent,
 };
 use crate::service::observability::{ApiCallRecord, ServiceObservabilityTracker};
+use crate::tool::definition::ModelToolDefinition;
 
 // Retry-After header is authoritative but bounded to prevent malicious or runaway values.
 const RETRY_AFTER_SAFETY_CAP_MS: u64 = 30_000;
@@ -52,6 +53,7 @@ struct RequestOptions {
     top_p: Option<f64>,
     stop_sequences: Vec<String>,
     require_tools: bool,
+    tools: Vec<ModelToolDefinition>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,6 +109,7 @@ struct NormalizedRequestOptions {
     temperature: Option<f64>,
     top_p: Option<f64>,
     stop_sequences: Vec<String>,
+    tools: Vec<ModelToolDefinition>,
 }
 
 impl Default for RequestOptions {
@@ -117,6 +120,7 @@ impl Default for RequestOptions {
             top_p: None,
             stop_sequences: Vec::new(),
             require_tools: false,
+            tools: Vec::new(),
         }
     }
 }
@@ -280,6 +284,43 @@ impl ModelProviderClient {
     }
 
     pub async fn stream_message(&self, input: &Message) -> Vec<StreamEvent> {
+        self.stream_message_with_options(input, RequestOptions::default())
+            .await
+    }
+
+    pub async fn stream_message_with_tools(
+        &self,
+        input: &Message,
+        tools: &[ModelToolDefinition],
+    ) -> Vec<StreamEvent> {
+        if tools.is_empty() || !self.supports_tool_requests() {
+            return self.stream_message_with_options(input, RequestOptions::default()).await;
+        }
+        self.stream_message_with_options(
+            input,
+            RequestOptions {
+                require_tools: !tools.is_empty(),
+                tools: tools.to_vec(),
+                ..RequestOptions::default()
+            },
+        )
+        .await
+    }
+
+    fn supports_tool_requests(&self) -> bool {
+        match &self.transport {
+            ProviderTransport::Scripted { .. } => true,
+            ProviderTransport::Production { config, .. } => profile_for_provider(config)
+                .map(|profile| profile.supports_tools)
+                .unwrap_or(false),
+        }
+    }
+
+    async fn stream_message_with_options(
+        &self,
+        input: &Message,
+        request_options: RequestOptions,
+    ) -> Vec<StreamEvent> {
         match &self.transport {
             ProviderTransport::Scripted { turns } => {
                 let mut turns = turns.write().expect("scripted turns poisoned");
@@ -298,7 +339,13 @@ impl ModelProviderClient {
                     return Vec::new();
                 }
                 match self
-                    .stream_message_with_retry(config, client, observability, input)
+                    .stream_message_with_retry(
+                        config,
+                        client,
+                        observability,
+                        input,
+                        request_options,
+                    )
                     .await
                 {
                     Ok(events) => events,
@@ -316,10 +363,14 @@ impl ModelProviderClient {
         client: &reqwest::Client,
         observability: &ServiceObservabilityTracker,
         input: &Message,
+        request_options: RequestOptions,
     ) -> Result<Vec<StreamEvent>, ApiError> {
         let mut attempt = 0;
         loop {
-            match self.stream_message_once(config, client, input).await {
+            match self
+                .stream_message_once(config, client, input, request_options.clone())
+                .await
+            {
                 Ok(events) => {
                     observability.record_api_call(build_api_call_record(config, input, &events));
                     return Ok(events);
@@ -354,9 +405,10 @@ impl ModelProviderClient {
         config: &ModelProviderConfig,
         client: &reqwest::Client,
         input: &Message,
+        request_options: RequestOptions,
     ) -> Result<Vec<StreamEvent>, ApiError> {
         let url = build_messages_url_for_provider(config)?;
-        let payload = build_request_payload_for_provider(config, input)?;
+        let payload = build_request_payload_with_options(config, input, request_options)?;
         let mut request = client
             .post(url)
             .header(ACCEPT, "text/event-stream")
@@ -808,6 +860,17 @@ impl ProviderAdapter for AnthropicAdapter {
         if !options.stop_sequences.is_empty() {
             payload["stop_sequences"] = json!(options.stop_sequences);
         }
+        if !options.tools.is_empty() {
+            payload["tools"] = json!(options
+                .tools
+                .iter()
+                .map(|tool| json!({
+                    "name": tool.name,
+                    "description": tool.description,
+                    "input_schema": tool.input_schema,
+                }))
+                .collect::<Vec<_>>());
+        }
         Ok(payload)
     }
 
@@ -873,6 +936,21 @@ impl ProviderAdapter for OpenAICompatibleAdapter {
         }
         if !options.stop_sequences.is_empty() {
             payload["stop"] = json!(options.stop_sequences);
+        }
+        if !options.tools.is_empty() {
+            payload["tools"] = json!(options
+                .tools
+                .iter()
+                .map(|tool| json!({
+                    "type": "function",
+                    "function": {
+                        "name": tool.name,
+                        "description": tool.description,
+                        "parameters": tool.input_schema,
+                    }
+                }))
+                .collect::<Vec<_>>());
+            payload["tool_choice"] = json!("auto");
         }
         if let Some(key) = config
             .prompt_cache_key
@@ -951,7 +1029,7 @@ fn normalize_request_options(
     profile: &ProviderCompatibilityProfile,
     options: &RequestOptions,
 ) -> Result<NormalizedRequestOptions, ApiError> {
-    if options.require_tools && !profile.supports_tools {
+    if (options.require_tools || !options.tools.is_empty()) && !profile.supports_tools {
         return Err(ApiError::capability_unsupported(
             "provider does not support tool-use requests",
         ));
@@ -995,6 +1073,7 @@ fn normalize_request_options(
         } else {
             Vec::new()
         },
+        tools: options.tools.clone(),
     })
 }
 
@@ -2177,9 +2256,10 @@ mod tests {
     use crate::service::api::errors::ApiError;
     use crate::service::api::retry::RetryPolicy;
     use crate::service::api::streaming::{ProviderFailureDisposition, StopReason, StreamEvent};
+    use crate::tool::definition::ModelToolDefinition;
     use reqwest::StatusCode;
     use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderValue, RETRY_AFTER};
-    use serde_json::Value;
+    use serde_json::{Value, json};
 
     fn test_provider(
         protocol: ProviderProtocol,
@@ -2514,6 +2594,7 @@ mod tests {
                 top_p: Some(0.9),
                 stop_sequences: vec!["STOP".into()],
                 require_tools: true,
+                tools: Vec::new(),
             },
         )
         .expect("supported options should build");
@@ -2528,6 +2609,88 @@ mod tests {
         );
         assert_eq!(payload.get("top_p").and_then(Value::as_f64), Some(0.9));
         assert_eq!(payload["stop_sequences"][0].as_str(), Some("STOP"));
+    }
+
+    #[test]
+    fn anthropic_payload_includes_tools_when_present() {
+        let config = ModelProviderConfig {
+            provider_id: "anthropic".into(),
+            protocol: ProviderProtocol::Anthropic,
+            compatibility_profile: ProviderCompatibilityProfileKind::Anthropic,
+            auth_strategy: ProviderAuthStrategy::NoAuth,
+            ..ModelProviderConfig::default()
+        };
+
+        let payload = build_request_payload_with_options(
+            &config,
+            &crate::core::message::Message::user("hello"),
+            RequestOptions {
+                require_tools: true,
+                tools: vec![ModelToolDefinition {
+                    name: "Read".into(),
+                    description: "Read a file".into(),
+                    input_schema: json!({
+                        "type": "object",
+                        "required": ["file_path"],
+                        "properties": {
+                            "file_path": {"type": "string"}
+                        }
+                    }),
+                }],
+                ..RequestOptions::default()
+            },
+        )
+        .expect("anthropic payload should build");
+
+        assert_eq!(payload["tools"][0]["name"].as_str(), Some("Read"));
+        assert_eq!(
+            payload["tools"][0]["input_schema"]["required"][0].as_str(),
+            Some("file_path")
+        );
+    }
+
+    #[test]
+    fn openai_compatible_payload_includes_function_tools_when_present() {
+        let config = ModelProviderConfig {
+            provider_id: "openai-compatible".into(),
+            protocol: ProviderProtocol::OpenAICompatible,
+            compatibility_profile: ProviderCompatibilityProfileKind::OpenAICompatible,
+            auth_strategy: ProviderAuthStrategy::NoAuth,
+            ..ModelProviderConfig::default()
+        };
+
+        let payload = build_request_payload_with_options(
+            &config,
+            &crate::core::message::Message::user("hello"),
+            RequestOptions {
+                require_tools: true,
+                tools: vec![ModelToolDefinition {
+                    name: "Write".into(),
+                    description: "Write a file".into(),
+                    input_schema: json!({
+                        "type": "object",
+                        "required": ["file_path", "content"],
+                        "properties": {
+                            "file_path": {"type": "string"},
+                            "content": {"type": "string"}
+                        }
+                    }),
+                }],
+                ..RequestOptions::default()
+            },
+        )
+        .expect("openai-compatible payload should build");
+
+        assert_eq!(payload["tool_choice"].as_str(), Some("auto"));
+        assert_eq!(payload["tools"][0]["type"].as_str(), Some("function"));
+        assert_eq!(
+            payload["tools"][0]["function"]["name"].as_str(),
+            Some("Write")
+        );
+        assert_eq!(
+            payload["tools"][0]["function"]["parameters"]["required"][1].as_str(),
+            Some("content")
+        );
     }
 
     #[test]
@@ -2548,6 +2711,7 @@ mod tests {
                 top_p: Some(0.8),
                 stop_sequences: vec!["END".into()],
                 require_tools: false,
+                tools: Vec::new(),
             },
         )
         .expect("unsupported optional options should be dropped");

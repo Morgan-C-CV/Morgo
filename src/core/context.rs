@@ -2,6 +2,7 @@ use crate::hook::registry::HookRegistry;
 use crate::prompt::{
     context::build_context_prompt, system::build_system_prompt, tools::build_tools_prompt,
 };
+use crate::core::message::{Message, Role};
 use crate::service::api::client::ModelProviderClient;
 use crate::service::api::streaming::StreamEvent;
 use crate::service::compact::ReactiveCompactor;
@@ -60,6 +61,19 @@ impl QueryContext {
             user_input.to_string(),
         ]
         .join("\n")
+    }
+
+    pub fn compose_turn_prompt_from_messages(&self, messages: &[Message]) -> String {
+        let mut sections = vec![
+            self.current_system_prompt(),
+            self.current_tools_prompt(),
+            self.current_context_prompt(),
+        ];
+        let transcript = render_transcript(messages);
+        if !transcript.is_empty() {
+            sections.push(transcript);
+        }
+        sections.join("\n")
     }
 
     pub fn create_subagent_context(
@@ -141,6 +155,29 @@ impl QueryContext {
             agent_id: Some(child_agent_id),
         }
     }
+}
+
+fn render_transcript(messages: &[Message]) -> String {
+    let mut lines = Vec::new();
+    for message in messages {
+        let text = message.text();
+        if text.trim().is_empty() {
+            continue;
+        }
+        let role = match message.role {
+            Role::System => "system",
+            Role::User => "user",
+            Role::Assistant => "assistant",
+            Role::Tool => "tool",
+        };
+        if lines.is_empty() {
+            lines.push("Conversation transcript:".to_string());
+        }
+        lines.push(format!("<{role}>"));
+        lines.push(text);
+        lines.push(format!("</{role}>"));
+    }
+    lines.join("\n")
 }
 
 fn build_nested_memory_lineage(

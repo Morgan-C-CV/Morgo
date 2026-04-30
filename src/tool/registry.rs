@@ -5,7 +5,8 @@ use crate::core::boss_state::BossStage;
 use crate::state::app_state::RuntimeRole;
 use crate::state::permission_context::{BossActorPolicy, ToolPermissionContext};
 use crate::tool::definition::{
-    InterruptBehavior, ObservableInput, Tool, ToolCall, ToolMetadata, ToolResult,
+    InterruptBehavior, ModelToolDefinition, ObservableInput, Tool, ToolCall, ToolMetadata,
+    ToolResult,
 };
 use crate::tool::permission::{evaluate_tool_permission, is_tool_allowed};
 
@@ -146,6 +147,35 @@ impl ToolRegistry {
                 !metadata.requires_user_interaction || permissions.include_interactive_tools
             })
             .filter(|metadata| is_tool_allowed(metadata, permissions))
+            .collect()
+    }
+
+    pub fn visible_model_tools(
+        &self,
+        permissions: &ToolPermissionContext,
+    ) -> Vec<ModelToolDefinition> {
+        self.tools
+            .iter()
+            .filter_map(|tool| {
+                let metadata = tool.metadata();
+                if !(metadata.always_load
+                    || (!metadata.should_defer || permissions.include_deferred_tools))
+                {
+                    return None;
+                }
+                if metadata.requires_user_interaction && !permissions.include_interactive_tools {
+                    return None;
+                }
+                if !is_tool_allowed(&metadata, permissions) {
+                    return None;
+                }
+                let input_schema = tool.input_schema()?;
+                Some(ModelToolDefinition {
+                    name: metadata.name.to_string(),
+                    description: metadata.description.to_string(),
+                    input_schema,
+                })
+            })
             .collect()
     }
 

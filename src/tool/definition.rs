@@ -39,6 +39,13 @@ pub struct ToolMetadata {
     pub is_search_or_read_command: bool,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct ModelToolDefinition {
+    pub name: String,
+    pub description: String,
+    pub input_schema: Value,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolCall {
     pub name: String,

@@ -164,6 +164,7 @@ pub async fn run_query_loop_with_params(
     state.messages.extend(inbox_messages(context, None));
     let mut events = Vec::new();
     let mut current_input = input;
+    state.messages.push(current_input.clone());
 
     loop {
         context.app_state.record_activity();
@@ -297,7 +298,11 @@ fn prepare_turn(
     current_input: &Message,
     events: &mut Vec<EngineEvent>,
 ) -> Result<PreparedTurn, QueryLoopResult> {
-    let prepared_prompt = context.compose_turn_prompt(&current_input.text());
+    let prepared_prompt = if state.turn_count == 0 && params.messages.is_empty() {
+        context.compose_turn_prompt(&current_input.text())
+    } else {
+        context.compose_turn_prompt_from_messages(&state.messages)
+    };
     let prepared = PreparedTurn {
         token_estimate: prepared_prompt.len(),
         prompt: prepared_prompt,
@@ -427,9 +432,12 @@ async fn stream_model_turn(
     prepared: &PreparedTurn,
     transition: Option<&Continue>,
 ) -> Vec<StreamEvent> {
+    let model_tools = context
+        .tool_registry
+        .visible_model_tools(&context.app_state.permission_context);
     let mut streamed = context
         .api_client
-        .stream_message(&Message::user(prepared.prompt.clone()))
+        .stream_message_with_tools(&Message::user(prepared.prompt.clone()), &model_tools)
         .await;
     if matches!(transition, Some(Continue::ModelFallbackRetry)) {
         if let Some(index) = streamed.iter().position(|event| {
@@ -480,6 +488,7 @@ async fn decide_next_turn(
                     events: next_events,
                 } => {
                     *state = loop_state;
+                    state.messages.push(next_input.clone());
                     state.turn_count += 1;
                     state.transition = Some(Continue::StopHookBlocking);
                     *events = next_events;
@@ -494,6 +503,7 @@ async fn decide_next_turn(
         }
         TurnDecision::ContinueWith(next_input, continue_reason) => {
             *state = turn_outcome.state;
+            state.messages.push(next_input.clone());
             state.turn_count += 1;
             state.transition = Some(continue_reason.clone());
             *events = turn_outcome.events;
@@ -507,6 +517,7 @@ async fn decide_next_turn(
         TurnDecision::AwaitMailbox => {
             if let Some(next_input) = next_worker_mailbox_message(context).await {
                 *state = turn_outcome.state;
+                state.messages.push(next_input.clone());
                 state.turn_count += 1;
                 state.transition = Some(Continue::NextTurn);
                 *events = turn_outcome.events;
@@ -525,6 +536,7 @@ async fn decide_next_turn(
                     events: next_events,
                 } => {
                     *state = loop_state;
+                    state.messages.push(next_input.clone());
                     state.turn_count += 1;
                     state.transition = Some(Continue::StopHookBlocking);
                     *events = next_events;
