@@ -1,5 +1,7 @@
 use crate::core::message::Message;
-use crate::core::state_frame::{AgentState, DecisionKind, StateFrame, validate_state_decision};
+use crate::core::state_frame::{
+    AgentState, DecisionKind, StateFrame, StatePatch, validate_state_decision,
+};
 use crate::service::api::client::ModelProviderClient;
 use crate::service::api::streaming::StreamEvent;
 
@@ -41,13 +43,21 @@ pub enum LoopOutcome {
     },
     Rejected {
         reason: String,
+        usage: LoopUsage,
     },
     MaxIterationsReached {
         last_state: AgentState,
+        usage: LoopUsage,
+    },
+    NoProgress {
+        last_state: AgentState,
+        reason: String,
+        usage: LoopUsage,
     },
     RepairExhausted {
         raw_json: String,
         reason: String,
+        usage: LoopUsage,
     },
 }
 
@@ -89,7 +99,7 @@ StateDecision schema:\n\
 \n\
 Rules:\n\
 - Use \"decision\": \"done\" when the objective is complete\n\
-- Use \"decision\": \"continue\" to proceed with more work\n\
+- Use \"decision\": \"continue\" only when you also change state or provide a non-empty state_patch that advances the frame\n\
 - Treat `recent_evidence` entries prefixed with `fact:` as the authoritative Fact Ledger for this turn\n\
 - If a fact entry already says `none`, `none recorded`, `absent`, or equivalent, do NOT request that same context again\n\
 - Only use \"decision\": \"request_context\" when the missing fact is not already present in objective/open_items/blocked_items/accepted_summary/recent_evidence\n\
@@ -97,6 +107,30 @@ Rules:\n\
 - Respond with JSON only, no prose or explanation\n\
 \n\
 StateFrame:";
+
+fn push_unique(items: &mut Vec<String>, value: String) -> bool {
+    if items.iter().any(|item| item == &value) {
+        return false;
+    }
+    items.push(value);
+    true
+}
+
+fn apply_state_patch(frame: &mut StateFrame, patch: &StatePatch) -> bool {
+    let mut changed = false;
+    for item in &patch.open_items_add {
+        changed |= push_unique(&mut frame.open_items, item.clone());
+    }
+    for item in &patch.open_items_remove {
+        let before = frame.open_items.len();
+        frame.open_items.retain(|existing| existing != item);
+        changed |= frame.open_items.len() != before;
+    }
+    for item in &patch.accepted_summary_add {
+        changed |= push_unique(&mut frame.accepted_summary, item.clone());
+    }
+    changed
+}
 
 /// Run a stateless JSON decision loop.
 ///
@@ -169,6 +203,7 @@ pub async fn run_decision_loop(
                         return Ok(LoopOutcome::RepairExhausted {
                             raw_json: last_repair.raw_json,
                             reason: last_repair.reason,
+                            usage: total_usage,
                         });
                     }
                 }
@@ -190,11 +225,23 @@ pub async fn run_decision_loop(
                     .and_then(|v| v.as_str())
                     .unwrap_or("rejected by model")
                     .to_string();
-                return Ok(LoopOutcome::Rejected { reason });
+                return Ok(LoopOutcome::Rejected {
+                    reason,
+                    usage: total_usage,
+                });
             }
             DecisionKind::Continue => {
-                // Advance state using only decision.state — no implicit field mutation.
+                let before = frame.to_prompt_segment().content;
+                let _patch_changed = apply_state_patch(&mut frame, &decision.state_patch);
                 frame.state = decision.state;
+                let after = frame.to_prompt_segment().content;
+                if before == after {
+                    return Ok(LoopOutcome::NoProgress {
+                        last_state: frame.state,
+                        reason: "continue decision made no StateFrame progress".into(),
+                        usage: total_usage,
+                    });
+                }
             }
             DecisionKind::RequestContext => {
                 // Append requested context keys with prefix to distinguish from real evidence.
@@ -214,5 +261,6 @@ pub async fn run_decision_loop(
 
     Ok(LoopOutcome::MaxIterationsReached {
         last_state: frame.state,
+        usage: total_usage,
     })
 }

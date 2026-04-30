@@ -100,11 +100,7 @@ fn build_fact_ledger(
             "current_step",
             format!(
                 "id={} status={:?} requires_approval={} attempt_count={} retry_budget={}",
-                step.id,
-                step.status,
-                step.requires_approval,
-                step.attempt_count,
-                step.retry_budget
+                step.id, step.status, step.requires_approval, step.attempt_count, step.retry_budget
             ),
         ));
         facts.push(fact_line(
@@ -144,10 +140,7 @@ fn build_fact_ledger(
             summarize_list(open_items)
         },
     ));
-    facts.push(fact_line(
-        "dangerous_assumptions",
-        "none recorded",
-    ));
+    facts.push(fact_line("dangerous_assumptions", "none recorded"));
     facts.push(fact_line(
         "review_feedback",
         plan.review_feedback.as_deref().unwrap_or("none recorded"),
@@ -164,18 +157,9 @@ fn build_fact_ledger(
             summarize_list(&plan.documentation_feedback)
         },
     ));
-    facts.push(fact_line(
-        "file_facts",
-        "none recorded",
-    ));
-    facts.push(fact_line(
-        "test_failures",
-        "none recorded",
-    ));
-    facts.push(fact_line(
-        "recent_changes_in_files",
-        "none recorded",
-    ));
+    facts.push(fact_line("file_facts", "none recorded"));
+    facts.push(fact_line("test_failures", "none recorded"));
+    facts.push(fact_line("recent_changes_in_files", "none recorded"));
     if readonly_analysis {
         facts.push(fact_line(
             "execution_mode",
@@ -222,8 +206,14 @@ pub fn project_state_frame(
     let accepted_summary = archive_to_summary(&archive);
 
     // recent_evidence doubles as a compact Fact Ledger v1.
-    let mut recent_evidence =
-        build_fact_ledger(plan, stage, step_id, &open_items, &blocked_items, readonly_analysis);
+    let mut recent_evidence = build_fact_ledger(
+        plan,
+        stage,
+        step_id,
+        &open_items,
+        &blocked_items,
+        readonly_analysis,
+    );
     if let Some(step) = step_id.and_then(|id| plan.steps.iter().find(|s| s.id == id)) {
         if let Some(r) = &step.last_review_summary {
             recent_evidence.push(format!("review: {r}"));

@@ -1962,7 +1962,13 @@ impl BossCoordinator {
                             runtime,
                         )
                         .await?;
-                        if let StepOutcome::Completed { ref usage } = outcome {
+                        if let Some(usage) = match &outcome {
+                            StepOutcome::Completed { usage } => Some(usage),
+                            StepOutcome::Failed {
+                                usage: Some(usage), ..
+                            } => Some(usage),
+                            StepOutcome::Failed { usage: None, .. } => None,
+                        } {
                             routed_metadata.input_tokens = Some(usage.input_tokens);
                             routed_metadata.uncached_input_tokens =
                                 Some(usage.uncached_input_tokens);
@@ -2032,7 +2038,7 @@ impl BossCoordinator {
                                 step_id
                             )));
                         }
-                        StepOutcome::Failed { reason } => {
+                        StepOutcome::Failed { reason, .. } => {
                             let reason_clone = reason.clone();
                             {
                                 let mut plan_guard = self.plan.write().await;

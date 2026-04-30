@@ -19,11 +19,11 @@ use rust_agent::core::boss_state::{
 };
 use rust_agent::core::boss_state::{CompressionStrategy, ContextMode};
 use rust_agent::core::boss_test_readiness::BossTestRunOutcome;
-use rust_agent::core::lism_ab_sample::new_shared_ab_sink;
 use rust_agent::core::concurrency::{
     BossBudgetDecision, MemoryPressureLevel, evaluate_boss_budget,
 };
 use rust_agent::core::context::SubagentConfig;
+use rust_agent::core::lism_ab_sample::new_shared_ab_sink;
 use rust_agent::core::prompt_budget::{
     BudgetDecision, PromptCacheCapability, ProviderProfile, evaluate_prompt_budget,
 };
@@ -7843,8 +7843,8 @@ fn t27_4_continue_decision_advances_state() {
     use rust_agent::service::api::streaming::StreamEvent;
 
     let rt = tokio::runtime::Runtime::new().unwrap();
-    // First turn: continue (state stays executing), second turn: done
-    let continue_json = r#"{"state":"executing","decision":"continue"}"#;
+    // First turn: continue with real StateFrame progress, second turn: done.
+    let continue_json = r#"{"state":"verifying","decision":"continue"}"#;
     let done_json = r#"{"state":"done","decision":"done"}"#;
     let client = ModelProviderClient::with_scripted_turns(vec![
         vec![StreamEvent::TextDelta(continue_json.into())],
@@ -7908,7 +7908,7 @@ fn t27_4_reject_decision_returns_rejected_outcome() {
         ))
         .expect("loop should not error");
     match outcome {
-        LoopOutcome::Rejected { reason } => {
+        LoopOutcome::Rejected { reason, .. } => {
             assert_eq!(reason, "acceptance criteria not met");
         }
         other => panic!("expected Rejected, got {other:?}"),
@@ -7965,12 +7965,14 @@ fn t27_4_max_iterations_reached_when_always_continue() {
     use rust_agent::service::api::streaming::StreamEvent;
 
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let continue_json = r#"{"state":"executing","decision":"continue"}"#;
-    // 3 turns of continue → max_iterations=3 → MaxIterationsReached
+    let continue_planning = r#"{"state":"planning","decision":"continue"}"#;
+    let continue_executing = r#"{"state":"executing","decision":"continue"}"#;
+    let continue_verifying = r#"{"state":"verifying","decision":"continue"}"#;
+    // 3 progress-making continue turns → max_iterations=3 → MaxIterationsReached
     let client = ModelProviderClient::with_scripted_turns(vec![
-        vec![StreamEvent::TextDelta(continue_json.into())],
-        vec![StreamEvent::TextDelta(continue_json.into())],
-        vec![StreamEvent::TextDelta(continue_json.into())],
+        vec![StreamEvent::TextDelta(continue_planning.into())],
+        vec![StreamEvent::TextDelta(continue_executing.into())],
+        vec![StreamEvent::TextDelta(continue_verifying.into())],
     ]);
     let frame = StateFrame {
         role: ActorRole::Worker,
@@ -7997,11 +7999,116 @@ fn t27_4_max_iterations_reached_when_always_continue() {
         matches!(
             outcome,
             LoopOutcome::MaxIterationsReached {
-                last_state: AgentState::Executing
+                last_state: AgentState::Verifying,
+                ..
             }
         ),
         "expected MaxIterationsReached, got {outcome:?}"
     );
+}
+
+#[test]
+fn t27_4_noop_continue_stops_without_repeating_prompt() {
+    use rust_agent::core::state_frame::{ActorRole, AgentState, StateBudget, StateFrame};
+    use rust_agent::core::state_frame_loop::{DecisionLoopConfig, LoopOutcome, run_decision_loop};
+    use rust_agent::service::api::client::ModelProviderClient;
+    use rust_agent::service::api::streaming::{StreamEvent, UsageEvent};
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let continue_json =
+        r#"{"state":"executing","decision":"continue","needed_context":[],"state_patch":{}}"#;
+    let done_json = r#"{"state":"done","decision":"done"}"#;
+    let client = ModelProviderClient::with_scripted_turns(vec![
+        vec![
+            StreamEvent::TextDelta(continue_json.into()),
+            StreamEvent::Usage(UsageEvent {
+                model: "scripted".into(),
+                input_tokens: 100,
+                output_tokens: 10,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
+            }),
+        ],
+        vec![StreamEvent::TextDelta(done_json.into())],
+    ]);
+    let frame = StateFrame {
+        role: ActorRole::Worker,
+        state: AgentState::Executing,
+        objective: "same prompt should not be resent".into(),
+        open_items: vec![],
+        blocked_items: vec![],
+        accepted_summary: vec![],
+        recent_evidence: vec![],
+        allowed_actions: vec![],
+        toolset_id: None,
+        skillset_id: None,
+        required_output_schema: None,
+        budget: StateBudget::default(),
+    };
+    let outcome = rt
+        .block_on(run_decision_loop(
+            &client,
+            frame,
+            DecisionLoopConfig {
+                max_iterations: 5,
+                repair_budget: 1,
+            },
+        ))
+        .expect("loop should not error");
+    match outcome {
+        LoopOutcome::NoProgress {
+            last_state,
+            reason,
+            usage,
+        } => {
+            assert_eq!(last_state, AgentState::Executing);
+            assert!(reason.contains("no StateFrame progress"));
+            assert_eq!(usage.input_tokens, 100);
+            assert_eq!(usage.output_tokens, 10);
+        }
+        other => panic!("expected NoProgress, got {other:?}"),
+    }
+}
+
+#[test]
+fn t27_4_continue_with_state_patch_is_progress() {
+    use rust_agent::core::state_frame::{ActorRole, AgentState, StateBudget, StateFrame};
+    use rust_agent::core::state_frame_loop::{DecisionLoopConfig, LoopOutcome, run_decision_loop};
+    use rust_agent::service::api::client::ModelProviderClient;
+    use rust_agent::service::api::streaming::StreamEvent;
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let continue_json = r#"{"state":"executing","decision":"continue","state_patch":{"accepted_summary_add":["drafted rollout summary"]}}"#;
+    let done_json = r#"{"state":"done","decision":"done"}"#;
+    let client = ModelProviderClient::with_scripted_turns(vec![
+        vec![StreamEvent::TextDelta(continue_json.into())],
+        vec![StreamEvent::TextDelta(done_json.into())],
+    ]);
+    let frame = StateFrame {
+        role: ActorRole::Worker,
+        state: AgentState::Executing,
+        objective: "allow patch-driven progress".into(),
+        open_items: vec![],
+        blocked_items: vec![],
+        accepted_summary: vec![],
+        recent_evidence: vec![],
+        allowed_actions: vec![],
+        toolset_id: None,
+        skillset_id: None,
+        required_output_schema: None,
+        budget: StateBudget::default(),
+    };
+    let outcome = rt
+        .block_on(run_decision_loop(
+            &client,
+            frame,
+            DecisionLoopConfig {
+                max_iterations: 5,
+                repair_budget: 1,
+            },
+        ))
+        .expect("loop should not error");
+    assert!(matches!(outcome, LoopOutcome::Done { .. }));
 }
 
 #[tokio::test]
@@ -9044,9 +9151,12 @@ async fn lism_enabled_boss_advance_plan_marks_step_completed_via_state_frame_pat
 async fn lism_enabled_boss_advance_plan_marks_step_failed_with_reason() {
     let sink = new_shared_ab_sink();
     let plan_path = std::env::temp_dir().join("test_boss_lism_failed.json");
-    save_plan(&boss_plan(vec![boss_step(0, "LisM failing step")]), &plan_path)
-        .await
-        .unwrap();
+    save_plan(
+        &boss_plan(vec![boss_step(0, "LisM failing step")]),
+        &plan_path,
+    )
+    .await
+    .unwrap();
     let owner = Arc::new(rust_agent::core::boss_runtime::BossRuntimeOwner::default());
     let coordinator = Arc::new(
         BossCoordinator::restore_or_init_with_owner(&plan_path, owner)
@@ -9357,7 +9467,9 @@ fn t27_5_rejected_loop_outcome_maps_to_failed_with_reason() {
         ))
         .expect("should not error");
     match outcome {
-        StepOutcome::Failed { reason } => assert!(reason.contains("output does not meet criteria")),
+        StepOutcome::Failed { reason, .. } => {
+            assert!(reason.contains("output does not meet criteria"))
+        }
         other => panic!("expected Failed, got {other:?}"),
     }
 }
@@ -9372,10 +9484,11 @@ fn t27_5_max_iterations_maps_to_failed() {
     use rust_agent::service::api::streaming::StreamEvent;
 
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let continue_json = r#"{"state":"executing","decision":"continue"}"#;
+    let continue_planning = r#"{"state":"planning","decision":"continue"}"#;
+    let continue_executing = r#"{"state":"executing","decision":"continue"}"#;
     let client = ModelProviderClient::with_scripted_turns(vec![
-        vec![StreamEvent::TextDelta(continue_json.into())],
-        vec![StreamEvent::TextDelta(continue_json.into())],
+        vec![StreamEvent::TextDelta(continue_planning.into())],
+        vec![StreamEvent::TextDelta(continue_executing.into())],
     ]);
     let plan = make_plan_with_step(2, "never finishes", vec![]);
     let config = DecisionLoopConfig {
@@ -9393,10 +9506,63 @@ fn t27_5_max_iterations_maps_to_failed() {
         ))
         .expect("should not error");
     match outcome {
-        StepOutcome::Failed { reason } => {
+        StepOutcome::Failed { reason, .. } => {
             assert!(reason.contains("max iterations"), "reason: {reason}")
         }
         other => panic!("expected Failed, got {other:?}"),
+    }
+}
+
+#[test]
+fn t27_5_no_progress_failure_preserves_usage() {
+    use rust_agent::core::boss_state::BossStage;
+    use rust_agent::core::state_frame::ActorRole;
+    use rust_agent::core::state_frame_loop::DecisionLoopConfig;
+    use rust_agent::core::state_frame_orchestrator::{StepOutcome, run_step_with_state_frame};
+    use rust_agent::service::api::client::ModelProviderClient;
+    use rust_agent::service::api::streaming::{StreamEvent, UsageEvent};
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let continue_json = r#"{"state":"executing","decision":"continue","state_patch":{}}"#;
+    let client = ModelProviderClient::with_scripted_turns(vec![vec![
+        StreamEvent::TextDelta(continue_json.into()),
+        StreamEvent::Usage(UsageEvent {
+            model: "scripted".into(),
+            input_tokens: 321,
+            output_tokens: 12,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 128,
+        }),
+    ]]);
+    let plan = make_plan_with_step(2, "no-op continue", vec![]);
+    let outcome = rt
+        .block_on(run_step_with_state_frame(
+            &client,
+            &plan,
+            BossStage::Execution,
+            2,
+            ActorRole::Worker,
+            DecisionLoopConfig {
+                max_iterations: 5,
+                repair_budget: 1,
+            },
+        ))
+        .expect("should not error");
+    match outcome {
+        StepOutcome::Failed {
+            reason,
+            usage: Some(usage),
+        } => {
+            assert!(
+                reason.contains("no StateFrame progress"),
+                "reason: {reason}"
+            );
+            assert_eq!(usage.input_tokens, 321);
+            assert_eq!(usage.uncached_input_tokens, 193);
+            assert_eq!(usage.output_tokens, 12);
+            assert_eq!(usage.cache_read_tokens, 128);
+        }
+        other => panic!("expected Failed with usage, got {other:?}"),
     }
 }
 
@@ -9432,7 +9598,7 @@ fn t27_5_repair_exhausted_maps_to_failed() {
         ))
         .expect("should not error");
     match outcome {
-        StepOutcome::Failed { reason } => {
+        StepOutcome::Failed { reason, .. } => {
             assert!(reason.contains("repair exhausted"), "reason: {reason}")
         }
         other => panic!("expected Failed, got {other:?}"),
@@ -10326,7 +10492,7 @@ async fn t27_9_boss_production_path_override_rejected_decision_step_fails_with_o
         .expect("seam should return outcome, not error");
 
     match outcome {
-        StepOutcome::Failed { reason } => {
+        StepOutcome::Failed { reason, .. } => {
             assert!(
                 !reason.is_empty(),
                 "failure reason must be observable, got empty string"

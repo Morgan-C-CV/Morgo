@@ -15,8 +15,13 @@ use crate::state::active_model_runtime::ActiveModelRuntimeSnapshot;
 /// Outcome of a single step execution via the StateFrame orchestrator seam.
 #[derive(Debug, Clone)]
 pub enum StepOutcome {
-    Completed { usage: LoopUsage },
-    Failed { reason: String },
+    Completed {
+        usage: LoopUsage,
+    },
+    Failed {
+        reason: String,
+        usage: Option<LoopUsage>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -136,12 +141,29 @@ pub async fn run_routed_step_with_runtime<'a>(
 fn map_loop_outcome(outcome: LoopOutcome) -> StepOutcome {
     match outcome {
         LoopOutcome::Done { usage, .. } => StepOutcome::Completed { usage },
-        LoopOutcome::Rejected { reason } => StepOutcome::Failed { reason },
-        LoopOutcome::MaxIterationsReached { last_state } => StepOutcome::Failed {
-            reason: format!("max iterations reached; last state: {last_state:?}"),
+        LoopOutcome::Rejected { reason, usage } => StepOutcome::Failed {
+            reason,
+            usage: Some(usage),
         },
-        LoopOutcome::RepairExhausted { reason, raw_json } => StepOutcome::Failed {
+        LoopOutcome::MaxIterationsReached { last_state, usage } => StepOutcome::Failed {
+            reason: format!("max iterations reached; last state: {last_state:?}"),
+            usage: Some(usage),
+        },
+        LoopOutcome::NoProgress {
+            last_state,
+            reason,
+            usage,
+        } => StepOutcome::Failed {
+            reason: format!("{reason}; last state: {last_state:?}"),
+            usage: Some(usage),
+        },
+        LoopOutcome::RepairExhausted {
+            reason,
+            raw_json,
+            usage,
+        } => StepOutcome::Failed {
             reason: format!("repair exhausted: {reason}; raw: {raw_json}"),
+            usage: Some(usage),
         },
     }
 }
@@ -151,6 +173,16 @@ fn map_loop_outcome_with_pricing(outcome: LoopOutcome, pricing: &ModelPricing) -
         StepOutcome::Completed { mut usage } => {
             usage.estimated_cost_micros_usd = estimate_loop_usage_cost_micros(&usage, pricing);
             StepOutcome::Completed { usage }
+        }
+        StepOutcome::Failed {
+            reason,
+            usage: Some(mut usage),
+        } => {
+            usage.estimated_cost_micros_usd = estimate_loop_usage_cost_micros(&usage, pricing);
+            StepOutcome::Failed {
+                reason,
+                usage: Some(usage),
+            }
         }
         failed => failed,
     }
