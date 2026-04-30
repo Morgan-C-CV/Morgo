@@ -1,6 +1,6 @@
 use crate::bootstrap::config_root::resolve_config_root;
 use crate::bootstrap::model_profiles::load_model_profiles_registry_from_root;
-use crate::core::boss_acceptance::verify_artifact_expectations;
+use crate::core::boss_acceptance::{extract_artifact_expectations, verify_artifact_expectations};
 use crate::core::boss_actor_runtime::{
     BossActorEvent, BossActorRegistry, DesignerACommand, ExecutorBCommand,
 };
@@ -57,6 +57,24 @@ fn step_artifact_verification_error(step: &BossPlanStep) -> Option<String> {
     verify_artifact_expectations(step.objective())
         .err()
         .map(|reason| format!("artifact verification failed: {reason}"))
+}
+
+fn seed_step_acceptance(task: &str) -> Vec<String> {
+    let mut acceptance = vec!["Task completed successfully.".to_string()];
+    for expectation in extract_artifact_expectations(task) {
+        let line = match expectation.kind {
+            crate::core::boss_acceptance::BossArtifactKind::File => {
+                format!("target file exists and is non-empty: {}", expectation.path.display())
+            }
+            crate::core::boss_acceptance::BossArtifactKind::Directory => {
+                format!("target directory exists and is non-empty: {}", expectation.path.display())
+            }
+        };
+        if !acceptance.iter().any(|item| item == &line) {
+            acceptance.push(line);
+        }
+    }
+    acceptance
 }
 
 fn summarize_acceptance_items(step: &BossPlanStep) -> String {
@@ -1107,7 +1125,7 @@ impl BossCoordinator {
                 id: 0,
                 description: task.to_string(),
                 objective: Some(task.to_string()),
-                acceptance: vec!["Task completed successfully.".into()],
+                acceptance: seed_step_acceptance(task),
                 requires_approval: false,
                 status: BossPlanStepStatus::Pending,
                 completed: false,
@@ -1610,6 +1628,9 @@ impl BossCoordinator {
                 step.completed = false;
                 step.status = BossPlanStepStatus::Failed;
                 step.worker_task_id = Some(event.task_id.clone());
+                step.last_review_summary = step_artifact_verification_error(step)
+                    .or_else(|| Some(event.result.clone()).filter(|text| !text.trim().is_empty()))
+                    .or_else(|| Some(event.summary.clone()).filter(|text| !text.trim().is_empty()));
                 tracing::warn!("BossPlan: Step {} marked as failed", step_id);
                 None
             }
@@ -1894,6 +1915,22 @@ impl BossCoordinator {
                 step.completed = false;
                 step.status = BossPlanStepStatus::Failed;
                 step.worker_task_id = notification.task_id.clone();
+                step.last_review_summary = step_artifact_verification_error(step)
+                    .or_else(|| {
+                        notification
+                            .body
+                            .split("Result: ")
+                            .nth(1)
+                            .map(str::trim)
+                            .map(str::to_string)
+                            .filter(|text| !text.is_empty())
+                    })
+                    .or_else(|| {
+                        notification
+                            .next_action
+                            .clone()
+                            .filter(|text| !text.trim().is_empty())
+                    });
                 tracing::warn!(
                     "BossPlan: Step {} marked as failed via notification",
                     step_id
@@ -3448,5 +3485,16 @@ mod tests {
         }
 
         assert!(coordinator.has_terminal_failure().await);
+    }
+
+    #[test]
+    fn seed_step_acceptance_adds_artifact_expectation_for_target_file() {
+        let acceptance = seed_step_acceptance(
+            "任务目标：\n- 目标文件：/tmp/example-report.md\n- 生成一份 markdown 报告",
+        );
+        assert!(acceptance.iter().any(|item| item == "Task completed successfully."));
+        assert!(acceptance.iter().any(|item| {
+            item == "target file exists and is non-empty: /tmp/example-report.md"
+        }));
     }
 }

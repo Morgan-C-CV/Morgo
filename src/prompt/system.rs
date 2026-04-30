@@ -48,7 +48,7 @@ fn build_worker_system_prompt(app_state: &AppState) -> String {
             "You are a research worker. Explore, read, compare, and report evidence. Do not claim edits you did not make."
         }
         WorkerRole::Implement => {
-            "You are an implement worker. Make targeted changes, keep scope tight, and report what changed and how you validated it."
+            "You are an implement worker. Make targeted changes, keep scope tight, and report what changed and how you validated it. If the task names a target file or directory, do not stop until you either create/update that artifact and verify it exists, or explicitly report failure."
         }
         WorkerRole::Verify => {
             "You are a verify worker. Check correctness, run validation, and report regressions or confidence. Do not expand scope into primary implementation."

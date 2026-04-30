@@ -276,6 +276,7 @@ fn launch_agent_task(
     permit: Option<tokio::sync::OwnedSemaphorePermit>,
 ) {
     let task_input = build_worker_task_input(&request);
+    let effective_max_turns = effective_max_turns(&request);
     let query_context = parent_context.create_subagent_context(
         task_id.clone(),
         permissions
@@ -297,7 +298,7 @@ fn launch_agent_task(
         let _permit = permit;
 
         let mut params = QueryParams::default();
-        params.max_turns = request.max_turns;
+        params.max_turns = effective_max_turns;
         let usage_before = query_context.app_state.cost_tracker.snapshot();
         let result =
             run_query_loop_with_params(&query_context, Message::user(task_input.clone()), params)
@@ -325,15 +326,35 @@ fn launch_agent_task(
             }
         }
 
+        let artifact_verification = if request.role == WorkerRole::Implement {
+            crate::core::boss_acceptance::verify_artifact_expectations(&task_input)
+        } else {
+            Ok(())
+        };
+
         if matches!(
             result.state,
             crate::core::query_loop::QueryLoopState::Failed
         ) {
             tasks_for_run.fail_with_usage(&launched_task_id, &dispatcher, usage_summary);
+        } else if let Err(reason) = artifact_verification {
+            tasks_for_run.append_output(
+                &launched_task_id,
+                format!("worker artifact verification failed: {reason}\n"),
+            );
+            tasks_for_run.fail_with_usage(&launched_task_id, &dispatcher, usage_summary);
         } else {
             tasks_for_run.complete_with_usage(&launched_task_id, &dispatcher, usage_summary);
         }
     });
+}
+
+fn effective_max_turns(request: &SpawnAgentRequest) -> Option<usize> {
+    request.max_turns.or(match request.role {
+        WorkerRole::Research => None,
+        WorkerRole::Verify => request.step_id.map(|_| 6),
+        WorkerRole::Implement => request.step_id.map(|_| 8),
+    })
 }
 
 fn parse_agent_request(input: &str) -> anyhow::Result<AgentRequest> {
@@ -485,6 +506,19 @@ mod tests {
         assert!(input.contains("<boss-step-context>"));
         assert!(input.contains("objective: objective 1"));
         assert!(input.contains("plan_id: plan-1"));
+    }
+
+    #[test]
+    fn effective_max_turns_defaults_boss_implement_steps_to_eight() {
+        let request = sample_spawn_request();
+        assert_eq!(effective_max_turns(&request), Some(8));
+    }
+
+    #[test]
+    fn effective_max_turns_preserves_explicit_override() {
+        let mut request = sample_spawn_request();
+        request.max_turns = Some(3);
+        assert_eq!(effective_max_turns(&request), Some(3));
     }
 }
 
