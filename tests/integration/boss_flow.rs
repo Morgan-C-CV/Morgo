@@ -290,10 +290,11 @@ fn make_openai_runtime_snapshot_for_base_url(
     };
     rust_agent::state::active_model_runtime::ActiveModelRuntimeSnapshot {
         config: config.clone(),
-        client: rust_agent::service::api::client::ModelProviderClient::from_config_with_observability(
-            config,
-            observability.clone(),
-        ),
+        client:
+            rust_agent::service::api::client::ModelProviderClient::from_config_with_observability(
+                config,
+                observability.clone(),
+            ),
         active_profile_name: Some("test-openai-compatible".into()),
         source: rust_agent::state::app_state::ActiveModelProfileSource::ModelsToml,
         summary: rust_agent::state::app_state::ActiveModelProviderSummary {
@@ -312,15 +313,19 @@ fn allow_write_policy_for(
 ) -> Arc<rust_agent::security::filesystem_policy::FilesystemPolicy> {
     std::fs::create_dir_all(root).expect("writable root should exist");
     let canonical_root = std::fs::canonicalize(root).expect("writable root should canonicalize");
-    let mut rules = vec![rust_agent::security::filesystem_policy::FilesystemPolicyRule {
-        path: root.to_string_lossy().to_string(),
-        level: rust_agent::security::filesystem_policy::FilesystemPermissionLevel::Allow,
-    }];
-    if canonical_root != root {
-        rules.push(rust_agent::security::filesystem_policy::FilesystemPolicyRule {
-            path: canonical_root.to_string_lossy().to_string(),
+    let mut rules = vec![
+        rust_agent::security::filesystem_policy::FilesystemPolicyRule {
+            path: root.to_string_lossy().to_string(),
             level: rust_agent::security::filesystem_policy::FilesystemPermissionLevel::Allow,
-        });
+        },
+    ];
+    if canonical_root != root {
+        rules.push(
+            rust_agent::security::filesystem_policy::FilesystemPolicyRule {
+                path: canonical_root.to_string_lossy().to_string(),
+                level: rust_agent::security::filesystem_policy::FilesystemPermissionLevel::Allow,
+            },
+        );
     }
     Arc::new(
         rust_agent::security::filesystem_policy::FilesystemPolicy::from_config(
@@ -351,9 +356,7 @@ fn app_state_with_boss_worker_runtime(
         .with_filesystem_policy(allow_write_policy_for(writable_root));
     app.runtime_tool_registry = Some(Arc::new(RwLock::new(tool_registry)));
     app.active_model_runtime = Some(
-        rust_agent::state::active_model_runtime::ActiveModelRuntime::new(
-            runtime_snapshot.clone(),
-        ),
+        rust_agent::state::active_model_runtime::ActiveModelRuntime::new(runtime_snapshot.clone()),
     );
     app.active_model_profile_name = runtime_snapshot.active_profile_name.clone();
     app.active_model_profile_source = runtime_snapshot.source.clone();
@@ -4952,7 +4955,11 @@ async fn r0_single_step_task_event_completed_routes_through_review_gate() {
     }
 
     coordinator
-        .on_task_event(&task_event("worker-r0-task-event", 0, TaskStatus::Completed))
+        .on_task_event(&task_event(
+            "worker-r0-task-event",
+            0,
+            TaskStatus::Completed,
+        ))
         .await
         .unwrap();
 
@@ -11029,7 +11036,9 @@ async fn r0_boss_full_worker_real_tool_call_creates_artifact_and_completes() {
         make_openai_runtime_snapshot_for_base_url(&format!("http://{addr}"), observability);
     let tool_registry = ToolRegistry::new()
         .register(Arc::new(AgentTool))
-        .register(Arc::new(rust_agent::tool::builtin::file_write::FileWriteTool));
+        .register(Arc::new(
+            rust_agent::tool::builtin::file_write::FileWriteTool,
+        ));
     let app_state = app_state_with_boss_worker_runtime(
         "r0-boss-real-tool-call",
         task_manager.clone(),
@@ -11118,7 +11127,9 @@ async fn r0_boss_full_worker_text_only_completion_fails_artifact_verification() 
         make_openai_runtime_snapshot_for_base_url(&format!("http://{addr}"), observability);
     let tool_registry = ToolRegistry::new()
         .register(Arc::new(AgentTool))
-        .register(Arc::new(rust_agent::tool::builtin::file_write::FileWriteTool));
+        .register(Arc::new(
+            rust_agent::tool::builtin::file_write::FileWriteTool,
+        ));
     let app_state = app_state_with_boss_worker_runtime(
         "r0-boss-text-only-failure",
         task_manager.clone(),
@@ -11148,11 +11159,18 @@ async fn r0_boss_full_worker_text_only_completion_fails_artifact_verification() 
             .is_some_and(|summary| summary.contains("artifact verification failed")),
         "boss must surface artifact verification failure"
     );
-    assert!(!step.completed, "failed verification must not mark completed");
+    assert!(
+        !step.completed,
+        "failed verification must not mark completed"
+    );
     drop(guard);
 
     let bodies = request_bodies.lock().expect("request bodies poisoned");
-    assert_eq!(bodies.len(), 1, "text-only path should need one model request");
+    assert_eq!(
+        bodies.len(),
+        1,
+        "text-only path should need one model request"
+    );
     assert!(
         bodies[0].contains("\"tools\""),
         "worker request must still expose available tools even if model ignores them"

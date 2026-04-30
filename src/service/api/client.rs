@@ -15,7 +15,9 @@ use crate::service::api::retry::RetryPolicy;
 use crate::service::api::streaming::{
     ProviderFailureDisposition, StopReason, StreamError, StreamEvent, UsageEvent,
 };
-use crate::service::observability::{ApiCallRecord, ServiceObservabilityTracker};
+use crate::service::observability::{
+    ApiCallRecord, ApiToolCallRecord, ServiceObservabilityTracker,
+};
 use crate::tool::definition::ModelToolDefinition;
 
 // Retry-After header is authoritative but bounded to prevent malicious or runaway values.
@@ -294,7 +296,9 @@ impl ModelProviderClient {
         tools: &[ModelToolDefinition],
     ) -> Vec<StreamEvent> {
         if tools.is_empty() || !self.supports_tool_requests() {
-            return self.stream_message_with_options(input, RequestOptions::default()).await;
+            return self
+                .stream_message_with_options(input, RequestOptions::default())
+                .await;
         }
         self.stream_message_with_options(
             input,
@@ -474,9 +478,16 @@ fn build_api_call_record(
         cache_read_input_tokens: 0,
     };
     let mut stop_reason = None;
+    let mut tool_calls = Vec::new();
     for event in events {
         match event {
             StreamEvent::TextDelta(text) => response_text.push_str(text),
+            StreamEvent::ToolUse { tool_name, input } => {
+                tool_calls.push(ApiToolCallRecord {
+                    tool_name: tool_name.clone(),
+                    input: input.clone(),
+                });
+            }
             StreamEvent::Usage(u) => {
                 usage.model = u.model.clone();
                 usage.input_tokens += u.input_tokens;
@@ -502,6 +513,7 @@ fn build_api_call_record(
         stop_reason,
         input.text().to_string(),
         response_text,
+        tool_calls,
     )
 }
 
@@ -861,15 +873,17 @@ impl ProviderAdapter for AnthropicAdapter {
             payload["stop_sequences"] = json!(options.stop_sequences);
         }
         if !options.tools.is_empty() {
-            payload["tools"] = json!(options
-                .tools
-                .iter()
-                .map(|tool| json!({
-                    "name": tool.name,
-                    "description": tool.description,
-                    "input_schema": tool.input_schema,
-                }))
-                .collect::<Vec<_>>());
+            payload["tools"] = json!(
+                options
+                    .tools
+                    .iter()
+                    .map(|tool| json!({
+                        "name": tool.name,
+                        "description": tool.description,
+                        "input_schema": tool.input_schema,
+                    }))
+                    .collect::<Vec<_>>()
+            );
         }
         Ok(payload)
     }
@@ -938,18 +952,20 @@ impl ProviderAdapter for OpenAICompatibleAdapter {
             payload["stop"] = json!(options.stop_sequences);
         }
         if !options.tools.is_empty() {
-            payload["tools"] = json!(options
-                .tools
-                .iter()
-                .map(|tool| json!({
-                    "type": "function",
-                    "function": {
-                        "name": tool.name,
-                        "description": tool.description,
-                        "parameters": tool.input_schema,
-                    }
-                }))
-                .collect::<Vec<_>>());
+            payload["tools"] = json!(
+                options
+                    .tools
+                    .iter()
+                    .map(|tool| json!({
+                        "type": "function",
+                        "function": {
+                            "name": tool.name,
+                            "description": tool.description,
+                            "parameters": tool.input_schema,
+                        }
+                    }))
+                    .collect::<Vec<_>>()
+            );
             payload["tool_choice"] = json!("auto");
         }
         if let Some(key) = config
@@ -2935,9 +2951,11 @@ mod tests {
         let events =
             parse_openai_compatible_sse_response("openai-compatible", body, "default-model")
                 .expect("content arrays should parse");
-        assert!(events.iter().any(
-            |event| matches!(event, StreamEvent::TextDelta(text) if text == "hello world")
-        ));
+        assert!(
+            events.iter().any(
+                |event| matches!(event, StreamEvent::TextDelta(text) if text == "hello world")
+            )
+        );
     }
 
     #[test]
@@ -2950,9 +2968,11 @@ mod tests {
         let events =
             parse_openai_compatible_sse_response("openai-compatible", body, "default-model")
                 .expect("single text object should parse");
-        assert!(events.iter().any(
-            |event| matches!(event, StreamEvent::TextDelta(text) if text == "hello object")
-        ));
+        assert!(
+            events.iter().any(
+                |event| matches!(event, StreamEvent::TextDelta(text) if text == "hello object")
+            )
+        );
     }
 
     #[test]

@@ -58,6 +58,14 @@ pub struct ApiCallRecord {
     #[serde(default)]
     pub prompt_text: String,
     pub response_text: String,
+    #[serde(default)]
+    pub tool_calls: Vec<ApiToolCallRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApiToolCallRecord {
+    pub tool_name: String,
+    pub input: String,
 }
 
 #[derive(Debug)]
@@ -337,6 +345,7 @@ impl ApiCallRecord {
         stop_reason: Option<String>,
         prompt_text: impl Into<String>,
         response_text: impl Into<String>,
+        tool_calls: Vec<ApiToolCallRecord>,
     ) -> Self {
         let timestamp_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -355,6 +364,7 @@ impl ApiCallRecord {
             stop_reason,
             prompt_text: prompt_text.into(),
             response_text: response_text.into(),
+            tool_calls,
         }
     }
 }
@@ -663,6 +673,10 @@ mod tests {
             Some("endturn".into()),
             "hello prompt",
             "hello world",
+            vec![ApiToolCallRecord {
+                tool_name: "Read".into(),
+                input: "{\"file_path\":\"example.md\"}".into(),
+            }],
         ));
 
         let text = std::fs::read_to_string(&path).expect("log file should exist");
@@ -670,6 +684,7 @@ mod tests {
         assert!(text.contains("\"model\":\"gpt-test\""));
         assert!(text.contains("\"prompt_text\":\"hello prompt\""));
         assert!(text.contains("\"response_text\":\"hello world\""));
+        assert!(text.contains("\"tool_name\":\"Read\""));
 
         let _ = std::fs::remove_file(path);
     }

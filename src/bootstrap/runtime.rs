@@ -228,6 +228,25 @@ fn preview_chars(value: &str, max_chars: usize) -> &str {
     }
 }
 
+fn diagnostic_preview(value: &str, max_chars: usize) -> String {
+    let total = value.chars().count();
+    if total <= max_chars {
+        return value.to_string();
+    }
+    let half = max_chars / 2;
+    let head = preview_chars(value, half);
+    let tail_start = value
+        .char_indices()
+        .nth(total.saturating_sub(half))
+        .map(|(idx, _)| idx)
+        .unwrap_or(0);
+    format!(
+        "{head}\n[truncated: {} chars omitted]\n{}",
+        total.saturating_sub(max_chars),
+        &value[tail_start..]
+    )
+}
+
 const DEFAULT_RUNTIME_SHUTDOWN_TIMEOUT_MS: u64 = 1_500;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -696,8 +715,8 @@ impl RuntimeBootstrap {
                         );
                         if let Some(slice) = task_manager.get_output(&b_id, 0) {
                             println!(
-                                "[boss-task] b_task output (first 500 chars): {:?}",
-                                preview_chars(&slice.content, 500)
+                                "[boss-task] b_task output (diagnostic head/tail): {:?}",
+                                diagnostic_preview(&slice.content, 4_000)
                             );
                         }
                     }

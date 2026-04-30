@@ -18,8 +18,8 @@ use rust_agent::tool::builtin::task_update::TaskUpdateTool;
 use rust_agent::tool::builtin::tool_search::ToolSearchTool;
 use rust_agent::tool::builtin::web_fetch::{WebFetchTool, fetch_text_with};
 use rust_agent::tool::builtin::web_search::WebSearchTool;
-use rust_agent::tool::definition::{Tool, ToolCall, ToolMetadata, ToolResult};
-use rust_agent::tool::permission::is_tool_allowed;
+use rust_agent::tool::definition::{PermissionDecision, Tool, ToolCall, ToolMetadata, ToolResult};
+use rust_agent::tool::permission::{evaluate_tool_permission, is_tool_allowed};
 use rust_agent::tool::registry::{ToolAssemblyContext, ToolAssemblyEnvironment, ToolRegistry};
 use tokio::fs;
 
@@ -172,7 +172,9 @@ async fn glob_tool_supports_path_and_ignores_target_directory() {
     let src = dir.join("src");
     let target = dir.join("target");
     fs::create_dir_all(&src).await.expect("create src dir");
-    fs::create_dir_all(&target).await.expect("create target dir");
+    fs::create_dir_all(&target)
+        .await
+        .expect("create target dir");
     fs::write(src.join("alpha.rs"), "fn alpha() {}")
         .await
         .expect("write src file");
@@ -275,7 +277,9 @@ async fn grep_tool_supports_path_and_ignores_target_directory() {
     let docs = dir.join("docs");
     let target = dir.join("target");
     fs::create_dir_all(&docs).await.expect("create docs dir");
-    fs::create_dir_all(&target).await.expect("create target dir");
+    fs::create_dir_all(&target)
+        .await
+        .expect("create target dir");
     fs::write(docs.join("alpha.txt"), "needle in docs")
         .await
         .expect("write docs file");
@@ -795,6 +799,54 @@ async fn tool_search_matches_search_hint() {
 fn auth_gated_tools_stay_visible_after_deferred_loading() {
     let context = ToolPermissionContext::new(PermissionMode::Default).with_deferred_tools(true);
     assert!(is_tool_allowed(&WebFetchTool.metadata(), &context));
+}
+
+#[test]
+fn delegated_write_path_allows_only_scoped_write_without_global_bypass() {
+    let delegated = std::env::temp_dir()
+        .join(format!(
+            "delegated-write-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ))
+        .join("report.md");
+    let outside = delegated
+        .parent()
+        .expect("delegated path has parent")
+        .join("outside.md");
+    let permissions = ToolPermissionContext::new(PermissionMode::Default);
+    permissions.add_delegated_write_path(&delegated);
+    let metadata = FileWriteTool.metadata();
+
+    let delegated_decision = evaluate_tool_permission(
+        &metadata,
+        &ToolCall::new(
+            "Write",
+            serde_json::json!({
+                "file_path": delegated,
+                "content": "ok"
+            })
+            .to_string(),
+        ),
+        &permissions,
+    );
+    assert_eq!(delegated_decision, PermissionDecision::Allow);
+
+    let outside_decision = evaluate_tool_permission(
+        &metadata,
+        &ToolCall::new(
+            "Write",
+            serde_json::json!({
+                "file_path": outside,
+                "content": "no"
+            })
+            .to_string(),
+        ),
+        &permissions,
+    );
+    assert!(matches!(outside_decision, PermissionDecision::Ask { .. }));
 }
 
 #[test]

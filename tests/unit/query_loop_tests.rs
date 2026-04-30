@@ -189,7 +189,11 @@ impl Tool for EchoFixtureTool {
     ) -> anyhow::Result<ToolResult> {
         let value = call
             .json_input()
-            .and_then(|json| json.get("value").and_then(|value| value.as_str()).map(str::to_string))
+            .and_then(|json| {
+                json.get("value")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string)
+            })
             .unwrap_or_else(|| "missing".into());
         Ok(ToolResult::Text(format!("echoed {value}")))
     }
@@ -438,8 +442,7 @@ async fn query_loop_openai_tool_calling_includes_tools_and_preserves_transcript(
         retry_policy: RetryPolicy::default(),
         ..ModelProviderConfig::default()
     };
-    let client =
-        ModelProviderClient::from_config_with_observability(config, observability.clone());
+    let client = ModelProviderClient::from_config_with_observability(config, observability.clone());
     let context = test_context_with_production_client(
         client,
         ToolRegistry::new().register(Arc::new(EchoFixtureTool)),
@@ -461,7 +464,10 @@ async fn query_loop_openai_tool_calling_includes_tools_and_preserves_transcript(
     assert_eq!(bodies.len(), 2, "expected tool turn plus follow-up turn");
     let first = &bodies[0];
     let second = &bodies[1];
-    assert!(first.contains("\"tools\""), "first request must expose tools");
+    assert!(
+        first.contains("\"tools\""),
+        "first request must expose tools"
+    );
     assert!(
         first.contains("\"tool_choice\":\"auto\""),
         "first request must allow automatic tool selection"
@@ -738,7 +744,8 @@ async fn query_loop_invokes_tool_and_continues_follow_up_turn() {
         result
             .messages
             .iter()
-            .any(|message| message.content.contains("tool Agent result:") && message.content.contains(": "))
+            .any(|message| message.content.contains("tool Agent result:")
+                && message.content.contains(": "))
     );
     assert!(
         result
@@ -765,6 +772,61 @@ async fn query_loop_invokes_tool_and_continues_follow_up_turn() {
             .iter()
             .any(|event| matches!(event, EngineEvent::Transition(Continue::ToolUseFollowUp)))
     );
+}
+
+#[tokio::test]
+async fn query_loop_executes_multiple_tool_calls_from_one_turn() {
+    let registry = ToolRegistry::new().register(Arc::new(EchoFixtureTool));
+    let engine = QueryEngine::new(test_context_with_turns(
+        vec![
+            vec![
+                StreamEvent::MessageStart,
+                StreamEvent::ToolUse {
+                    tool_name: "EchoFixture".into(),
+                    input: r#"{"value":"first"}"#.into(),
+                },
+                StreamEvent::ToolUse {
+                    tool_name: "EchoFixture".into(),
+                    input: r#"{"value":"second"}"#.into(),
+                },
+                StreamEvent::MessageStop {
+                    stop_reason: StopReason::ToolUse,
+                },
+            ],
+            vec![
+                StreamEvent::MessageStart,
+                StreamEvent::TextDelta("done after batch".into()),
+                StreamEvent::MessageStop {
+                    stop_reason: StopReason::EndTurn,
+                },
+            ],
+        ],
+        registry,
+    ));
+
+    let result = engine.submit_turn(Message::user("run both tools")).await;
+
+    assert_eq!(result.state, QueryLoopState::Completed);
+    assert_eq!(result.terminal, Terminal::Completed);
+    assert_eq!(result.transition, Some(Continue::ToolUseFollowUp));
+    assert!(
+        result
+            .messages
+            .iter()
+            .any(|message| message.content.contains("echoed first"))
+    );
+    assert!(
+        result
+            .messages
+            .iter()
+            .any(|message| message.content.contains("echoed second"))
+    );
+    let committed_tool_results = result
+        .events
+        .iter()
+        .filter(|event| matches!(event, EngineEvent::ToolResultCommitted { .. }))
+        .count();
+    assert_eq!(committed_tool_results, 2);
 }
 
 #[tokio::test]
@@ -1005,8 +1067,10 @@ async fn query_loop_requests_compaction_for_large_input() {
     assert_eq!(result.state, QueryLoopState::Completed);
     assert_eq!(result.terminal, Terminal::Completed);
     assert_eq!(result.transition, Some(Continue::ReactiveCompactRetry));
-    assert!(result.messages.iter().any(|message| message
-        == &Message::assistant("compaction requested before continuing the turn")));
+    assert!(
+        result.messages.iter().any(|message| message
+            == &Message::assistant("compaction requested before continuing the turn"))
+    );
     assert!(result.events.iter().any(|event| matches!(
         event,
         EngineEvent::CompactPlanIssued { kind, message }
@@ -1060,14 +1124,18 @@ async fn query_loop_surfaces_stream_errors_after_recovery_attempt() {
     assert_eq!(result.state, QueryLoopState::Completed);
     assert_eq!(result.terminal, Terminal::Completed);
     assert_eq!(result.transition, Some(Continue::CollapseDrainRetry));
-    assert!(result
-        .messages
-        .iter()
-        .any(|message| message.content.contains("stream error: boom")));
-    assert!(result
-        .messages
-        .iter()
-        .any(|message| message.content.contains("stream error: boom again")));
+    assert!(
+        result
+            .messages
+            .iter()
+            .any(|message| message.content.contains("stream error: boom"))
+    );
+    assert!(
+        result
+            .messages
+            .iter()
+            .any(|message| message.content.contains("stream error: boom again"))
+    );
     assert!(result.events.iter().any(|event| matches!(
         event,
         EngineEvent::Notice {
@@ -1103,12 +1171,11 @@ async fn query_loop_treats_pre_stream_terminal_errors_as_immediate_terminal_fail
         }
     );
     assert_eq!(result.transition, None);
-    assert!(result
-        .messages
-        .iter()
-        .any(|message| message
+    assert!(result.messages.iter().any(|message| {
+        message
             .content
-            .contains("stream error: provider request failed")));
+            .contains("stream error: provider request failed")
+    }));
     assert!(!result.events.iter().any(|event| matches!(
         event,
         EngineEvent::Notice {
@@ -1317,19 +1384,20 @@ async fn query_loop_compensates_missing_tool_result_after_tool_failure() {
     assert_eq!(result.state, QueryLoopState::Completed);
     assert_eq!(result.terminal, Terminal::Completed);
     assert_eq!(result.transition, Some(Continue::ToolUseFollowUp));
-    assert!(result
-        .messages
-        .iter()
-        .any(|message| message
+    assert!(result.messages.iter().any(|message| {
+        message
             .content
-            .contains("tool MissingTool interrupted: unknown tool MissingTool")));
-    assert!(result.messages.iter().any(|message| message
-        .content
-        .contains("tool result for MissingTool: interrupted: unknown tool MissingTool"))
-        || result.events.iter().any(|event| matches!(
-            event,
-            EngineEvent::Transition(Continue::ToolUseFollowUp)
-        )));
+            .contains("tool MissingTool interrupted: unknown tool MissingTool")
+    }));
+    assert!(
+        result.messages.iter().any(|message| message
+            .content
+            .contains("tool result for MissingTool: interrupted: unknown tool MissingTool"))
+            || result
+                .events
+                .iter()
+                .any(|event| matches!(event, EngineEvent::Transition(Continue::ToolUseFollowUp)))
+    );
 }
 
 #[tokio::test]
@@ -1356,12 +1424,16 @@ async fn query_loop_preserves_synthesized_missing_tool_result_for_denied_tool() 
     assert_eq!(result.state, QueryLoopState::Completed);
     assert_eq!(result.terminal, Terminal::Completed);
     assert_eq!(result.transition, Some(Continue::ToolUseFollowUp));
-    assert!(result.messages.iter().any(|message| message
-        .content
-        .contains("tool DeniedFixture denied: requires policy escalation")));
-    assert!(result.messages.iter().any(|message| message
-        .content
-        .contains("tool DeniedFixture result missing; synthesized denial result preserved")));
+    assert!(result.messages.iter().any(|message| {
+        message
+            .content
+            .contains("tool DeniedFixture denied: requires policy escalation")
+    }));
+    assert!(result.messages.iter().any(|message| {
+        message
+            .content
+            .contains("tool DeniedFixture result missing; synthesized denial result preserved")
+    }));
     assert!(result.events.iter().any(|event| matches!(
         event,
         EngineEvent::MessageCommitted(message)
@@ -1559,10 +1631,12 @@ async fn query_loop_respects_pre_tool_hook_denial() {
 
     assert_eq!(result.state, QueryLoopState::Interrupted);
     assert_eq!(result.terminal, Terminal::AbortedTools);
-    assert!(result
-        .messages
-        .iter()
-        .any(|message| message.content.contains("denied by hook")));
+    assert!(
+        result
+            .messages
+            .iter()
+            .any(|message| message.content.contains("denied by hook"))
+    );
     assert!(
         engine
             .context
@@ -1678,14 +1752,18 @@ async fn query_loop_runs_permission_request_hook_before_tool_execution() {
 
     assert_eq!(result.state, QueryLoopState::Interrupted);
     assert_eq!(result.terminal, Terminal::AbortedTools);
-    assert!(result
-        .messages
-        .iter()
-        .any(|message| message.content.contains("permission request observed")));
-    assert!(result
-        .messages
-        .iter()
-        .any(|message| message.content.contains("denied before execution")));
+    assert!(
+        result
+            .messages
+            .iter()
+            .any(|message| message.content.contains("permission request observed"))
+    );
+    assert!(
+        result
+            .messages
+            .iter()
+            .any(|message| message.content.contains("denied before execution"))
+    );
     assert!(engine.context.hook_registry.recorded_events().contains(
         &HookEvent::PermissionRequest {
             tool_name: "Agent".into(),
@@ -2323,10 +2401,12 @@ async fn subagent_context_inherits_parent_tools_and_hooks() {
     let result = QueryEngine::new(child.clone())
         .submit_turn(Message::user("run child"))
         .await;
-    assert!(result
-        .messages
-        .iter()
-        .any(|message| message == &Message::assistant("inherited stop hook")));
+    assert!(
+        result
+            .messages
+            .iter()
+            .any(|message| message == &Message::assistant("inherited stop hook"))
+    );
     assert!(
         child
             .hook_registry

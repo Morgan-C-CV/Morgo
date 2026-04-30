@@ -1,8 +1,8 @@
+use crate::core::message::{Message, Role};
 use crate::hook::registry::HookRegistry;
 use crate::prompt::{
     context::build_context_prompt, system::build_system_prompt, tools::build_tools_prompt,
 };
-use crate::core::message::{Message, Role};
 use crate::service::api::client::ModelProviderClient;
 use crate::service::api::streaming::StreamEvent;
 use crate::service::compact::ReactiveCompactor;

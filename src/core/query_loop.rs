@@ -698,7 +698,8 @@ async fn consume_model_stream(
                 return execute_tool_phase(context, state, engine_events, tool_name, tool_input)
                     .await;
             }
-            return execute_tool_batch_phase(context, state, engine_events, pending_tool_uses).await;
+            return execute_tool_batch_phase(context, state, engine_events, pending_tool_uses)
+                .await;
         }
         Some(StopReason::MaxTokens) => {
             if state.max_output_tokens_override.is_none() {
@@ -1245,13 +1246,224 @@ async fn execute_tool_phase(
                 state: state.clone(),
                 events: engine_events,
                 decision: TurnDecision::ContinueWith(
-                    Message::user(format!(
-                        "tool result for {tool_name}: failure: {error}"
-                    )),
+                    Message::user(format!("tool result for {tool_name}: failure: {error}")),
                     Continue::ToolUseFollowUp,
                 ),
             }
         }
+    }
+}
+
+async fn execute_tool_batch_phase(
+    context: &QueryContext,
+    state: &mut LoopState,
+    mut engine_events: Vec<EngineEvent>,
+    tool_uses: Vec<(String, String)>,
+) -> TurnOutcome {
+    let requests = tool_uses
+        .iter()
+        .map(
+            |(tool_name, tool_input)| crate::tool::orchestrator::ToolExecutionRequest {
+                call: crate::tool::definition::ToolCall::new(tool_name.clone(), tool_input.clone()),
+            },
+        )
+        .collect::<Vec<_>>();
+    let orchestrator = crate::tool::orchestrator::ToolOrchestrator::new(&context.tool_registry);
+    let tool_result = orchestrator
+        .execute(&requests, &context.app_state.permission_context)
+        .await;
+
+    let outcomes = match tool_result {
+        Ok(outcomes) => outcomes,
+        Err(error) => {
+            let failure = Message::assistant(format!("tool batch failed: {error}"));
+            engine_events.push(EngineEvent::MessageCommitted(failure.clone()));
+            state.messages.push(failure);
+            return TurnOutcome {
+                state: state.clone(),
+                events: engine_events,
+                decision: TurnDecision::ContinueWith(
+                    Message::user(format!("tool batch result: failure: {error}")),
+                    Continue::ToolUseFollowUp,
+                ),
+            };
+        }
+    };
+
+    let records = outcomes
+        .iter()
+        .map(|outcome| outcome.record.clone())
+        .collect::<Vec<_>>();
+    let report = aggregate_execution_records(&records).unwrap_or_else(|| ToolExecutionReport {
+        records,
+        summary: "tool batch returned no outcomes".to_string(),
+        detail: None,
+        report_modifier: ToolReportModifier::NeedsAttention,
+        context_modifier: ToolReportContextModifier::SetPendingToolUseSummary(
+            "tool batch returned no outcomes".to_string(),
+        ),
+    });
+
+    for outcome in outcomes {
+        engine_events.push(tool_notice_event(&outcome.record));
+        match outcome.result {
+            crate::tool::definition::ToolResult::Text(text) => {
+                engine_events.push(tool_result_committed_event(
+                    &outcome.tool_name,
+                    &text,
+                    &outcome.record,
+                ));
+                let message = Message::assistant(format!(
+                    "tool {} result: {}",
+                    outcome.tool_name,
+                    record_detail_or_summary(&outcome.record)
+                ));
+                engine_events.push(EngineEvent::MessageCommitted(message.clone()));
+                state.messages.push(message);
+            }
+            crate::tool::definition::ToolResult::PendingApproval {
+                tool_name,
+                message,
+                approval,
+            } => {
+                let pending_summary = outcome
+                    .record
+                    .pending_approval
+                    .as_ref()
+                    .map(|pending| pending.summary.clone())
+                    .unwrap_or_else(|| approval.summary.clone());
+                let pending_detail = outcome
+                    .record
+                    .pending_approval
+                    .as_ref()
+                    .and_then(|pending| pending.detail.clone())
+                    .or_else(|| approval.detail.clone());
+                let pending_code = outcome
+                    .record
+                    .pending_approval
+                    .as_ref()
+                    .and_then(|pending| pending.code.clone())
+                    .or_else(|| approval.code.clone());
+                let pending_kind = outcome
+                    .record
+                    .pending_approval
+                    .as_ref()
+                    .and_then(|pending| pending.approval_kind.clone())
+                    .or_else(|| approval.approval_kind.clone());
+                let pending_reasons = outcome
+                    .record
+                    .pending_approval
+                    .as_ref()
+                    .map(|pending| pending.escalation_reasons.clone())
+                    .unwrap_or_else(|| approval.escalation_reasons.clone());
+                let tool_input = requests
+                    .iter()
+                    .find(|request| request.call.name == tool_name)
+                    .map(|request| request.call.input.clone())
+                    .unwrap_or_default();
+                context
+                    .app_state
+                    .permission_context
+                    .set_pending_approval(Some(
+                        crate::state::permission_context::PendingApproval {
+                            tool_name: tool_name.clone(),
+                            tool_input,
+                            message: message.clone(),
+                            code: pending_code.clone(),
+                            summary: Some(pending_summary.clone()),
+                            detail: pending_detail.clone(),
+                            approval_kind: pending_kind.clone(),
+                            escalation_reasons: pending_reasons.clone(),
+                        },
+                    ));
+                engine_events.push(EngineEvent::PendingApproval {
+                    tool_name: tool_name.clone(),
+                    message: message.clone(),
+                    code: pending_code,
+                    summary: pending_summary.clone(),
+                    detail: pending_detail.clone(),
+                    approval_kind: pending_kind,
+                    escalation_reasons: pending_reasons,
+                    report_modifier: outcome.record.report_modifier.clone(),
+                });
+                apply_tool_report_context(state, &report);
+                let approval_message = Message::assistant(format!(
+                    "approval required for {tool_name}: {}",
+                    pending_detail.unwrap_or(pending_summary)
+                ));
+                engine_events.push(EngineEvent::MessageCommitted(approval_message.clone()));
+                state.messages.push(approval_message);
+                return TurnOutcome {
+                    state: state.clone(),
+                    events: engine_events,
+                    decision: TurnDecision::Return(state.clone(), Terminal::AbortedTools),
+                };
+            }
+            crate::tool::definition::ToolResult::Denied(reason) => {
+                let message = Message::assistant(format!(
+                    "tool {} denied: {}",
+                    outcome.tool_name,
+                    record_detail_or_summary(&outcome.record)
+                ));
+                engine_events.push(EngineEvent::MessageCommitted(message.clone()));
+                state.messages.push(message);
+                let follow_up = Message::assistant(format!(
+                    "tool {} result missing; synthesized denial result preserved: {reason}",
+                    outcome.tool_name
+                ));
+                engine_events.push(EngineEvent::MessageCommitted(follow_up.clone()));
+                state.messages.push(follow_up);
+            }
+            crate::tool::definition::ToolResult::Interrupted(reason) => {
+                let message = Message::assistant(format!(
+                    "tool {} interrupted: {}",
+                    outcome.tool_name,
+                    record_detail_or_summary(&outcome.record)
+                ));
+                engine_events.push(EngineEvent::MessageCommitted(message.clone()));
+                state.messages.push(message);
+                let follow_up = Message::assistant(format!(
+                    "tool {} structured failure preserved: {reason}",
+                    outcome.tool_name
+                ));
+                engine_events.push(EngineEvent::MessageCommitted(follow_up.clone()));
+                state.messages.push(follow_up);
+            }
+            crate::tool::definition::ToolResult::Progress(progress) => {
+                let message =
+                    Message::assistant(format!("tool {} progress: {progress}", outcome.tool_name));
+                engine_events.push(EngineEvent::MessageCommitted(message.clone()));
+                state.messages.push(message);
+            }
+            crate::tool::definition::ToolResult::ResultTooLarge(reason) => {
+                let message = Message::assistant(format!(
+                    "tool {} result too large: {}",
+                    outcome.tool_name,
+                    record_detail_or_summary(&outcome.record)
+                ));
+                engine_events.push(EngineEvent::MessageCommitted(message.clone()));
+                state.messages.push(message);
+                let follow_up = Message::assistant(format!(
+                    "tool {} oversized result preserved: {reason}",
+                    outcome.tool_name
+                ));
+                engine_events.push(EngineEvent::MessageCommitted(follow_up.clone()));
+                state.messages.push(follow_up);
+            }
+        }
+    }
+
+    apply_tool_report_context(state, &report);
+    TurnOutcome {
+        state: state.clone(),
+        events: engine_events,
+        decision: TurnDecision::ContinueWith(
+            Message::user(format!(
+                "tool batch result:\n{}",
+                report_detail_or_summary(&report)
+            )),
+            Continue::ToolUseFollowUp,
+        ),
     }
 }
 

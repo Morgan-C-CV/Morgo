@@ -298,11 +298,12 @@ impl ToolRegistry {
         let tool_decision = tool.check_permissions(call, permissions).await;
         let resolved_decision = merge_permission_decisions(base_decision, tool_decision);
         match resolved_decision {
-            crate::tool::definition::PermissionDecision::Allow => match tool.invoke(call, permissions).await
-            {
-                Ok(result) => Ok(result),
-                Err(error) => Ok(ToolResult::Interrupted(error.to_string())),
-            },
+            crate::tool::definition::PermissionDecision::Allow => {
+                match tool.invoke(call, permissions).await {
+                    Ok(result) => Ok(result),
+                    Err(error) => Ok(ToolResult::Interrupted(error.to_string())),
+                }
+            }
             crate::tool::definition::PermissionDecision::Ask {
                 message,
                 metadata: approval_metadata,

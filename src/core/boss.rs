@@ -65,10 +65,16 @@ fn seed_step_acceptance(task: &str) -> Vec<String> {
     for expectation in extract_artifact_expectations(task) {
         let line = match expectation.kind {
             crate::core::boss_acceptance::BossArtifactKind::File => {
-                format!("target file exists and is non-empty: {}", expectation.path.display())
+                format!(
+                    "target file exists and is non-empty: {}",
+                    expectation.path.display()
+                )
             }
             crate::core::boss_acceptance::BossArtifactKind::Directory => {
-                format!("target directory exists and is non-empty: {}", expectation.path.display())
+                format!(
+                    "target directory exists and is non-empty: {}",
+                    expectation.path.display()
+                )
             }
         };
         if !acceptance.iter().any(|item| item == &line) {
@@ -83,7 +89,10 @@ fn extract_relevant_file_hints(text: &str) -> Vec<String> {
     let cwd = std::env::current_dir().ok();
     for line in text.lines() {
         let trimmed = line.trim();
-        if !(trimmed.starts_with('-') || trimmed.starts_with("目标文件") || trimmed.starts_with("目标目录")) {
+        if !(trimmed.starts_with('-')
+            || trimmed.starts_with("目标文件")
+            || trimmed.starts_with("目标目录"))
+        {
             continue;
         }
         for token in trimmed.split_whitespace() {
@@ -1119,7 +1128,8 @@ impl BossCoordinator {
     async fn persist_plan_if_configured(&self) -> anyhow::Result<()> {
         let plan_path = self.status.read().await.planning_file.clone();
         if let Some(path) = plan_path {
-            self.save_plan_with_session(std::path::Path::new(&path)).await?;
+            self.save_plan_with_session(std::path::Path::new(&path))
+                .await?;
         }
         Ok(())
     }
@@ -1131,7 +1141,8 @@ impl BossCoordinator {
     ) -> anyhow::Result<()> {
         self.update_current_step(Some(step_id)).await;
         self.persist_plan_if_configured().await?;
-        self.on_review_event(step_id, true, &review_summary, None).await
+        self.on_review_event(step_id, true, &review_summary, None)
+            .await
     }
 
     pub async fn set_lism_policy(&self, policy: BossLisMPolicy) {
@@ -1709,7 +1720,8 @@ impl BossCoordinator {
 
         if let Some(summary) = review_summary {
             drop(plan_guard);
-            self.trigger_review_for_completed_step(step_id, summary).await?;
+            self.trigger_review_for_completed_step(step_id, summary)
+                .await?;
             return Ok(());
         }
 
@@ -1956,10 +1968,7 @@ impl BossCoordinator {
                                 ),
                                 ("Title", notification.title.as_str()),
                                 ("Body", notification.body.as_str()),
-                                (
-                                    "Status",
-                                    notification.status.as_deref().unwrap_or_default(),
-                                ),
+                                ("Status", notification.status.as_deref().unwrap_or_default()),
                                 (
                                     "Next action",
                                     notification.next_action.as_deref().unwrap_or_default(),
@@ -2012,7 +2021,8 @@ impl BossCoordinator {
 
         if let Some(summary) = review_summary {
             drop(plan_guard);
-            self.trigger_review_for_completed_step(step_id, summary).await?;
+            self.trigger_review_for_completed_step(step_id, summary)
+                .await?;
             return Ok(());
         }
 
@@ -3558,10 +3568,16 @@ mod tests {
         let acceptance = seed_step_acceptance(
             "任务目标：\n- 目标文件：/tmp/example-report.md\n- 生成一份 markdown 报告",
         );
-        assert!(acceptance.iter().any(|item| item == "Task completed successfully."));
-        assert!(acceptance.iter().any(|item| {
-            item == "target file exists and is non-empty: /tmp/example-report.md"
-        }));
+        assert!(
+            acceptance
+                .iter()
+                .any(|item| item == "Task completed successfully.")
+        );
+        assert!(
+            acceptance.iter().any(|item| {
+                item == "target file exists and is non-empty: /tmp/example-report.md"
+            })
+        );
     }
 
     #[test]
