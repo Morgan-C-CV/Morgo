@@ -707,7 +707,10 @@ async fn query_loop_uses_max_output_escalation_then_recovery() {
 fn compact_service_returns_typed_auto_compact_contract() {
     let compactor = ReactiveCompactor;
     let compact = compactor
-        .plan_auto_compact(AUTO_COMPACT_INPUT_CHAR_LIMIT + 1, AUTO_COMPACT_INPUT_CHAR_LIMIT)
+        .plan_auto_compact(
+            AUTO_COMPACT_INPUT_CHAR_LIMIT + 1,
+            AUTO_COMPACT_INPUT_CHAR_LIMIT,
+        )
         .expect("oversized input should request auto compact");
 
     assert_eq!(

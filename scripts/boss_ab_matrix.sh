@@ -53,6 +53,7 @@ prepare_dirs() {
     "$out_dir/usecases" \
     "$out_dir/config" \
     "$out_dir/samples" \
+    "$out_dir/api_logs" \
     "$out_dir/logs" \
     "$out_dir/reports"
 }
@@ -269,6 +270,7 @@ run_one() {
   local config_root
   local sample_file
   local log_file
+  local api_log_file
   local task_file
   local objective
 
@@ -276,12 +278,14 @@ run_one() {
   config_root="$out_dir/config/${usecase}-${arm}/.claude"
   sample_file="$out_dir/samples/${usecase}.jsonl"
   log_file="$out_dir/logs/${usecase}-${arm}-run${iteration}.log"
+  api_log_file="$out_dir/api_logs/${usecase}-${arm}-run${iteration}.jsonl"
   task_file="$out_dir/usecases/${usecase}.txt"
   objective="$(cat "$task_file")"
 
   echo "=== $usecase | $arm | run $iteration ==="
   (
     export RUST_AGENT_CONFIG_ROOT="$config_root"
+    export RUST_AGENT_API_CALL_LOG="$api_log_file"
     "$BIN_PATH" \
       --lism-policy "$policy" \
       --lism-ab-sample "$sample_file" \
@@ -342,7 +346,7 @@ report() {
       "$BIN_PATH" --lism-ab-conclude "$sample_file"
       echo
       echo "Records:"
-      jq -r '[.run_id,.lism_enabled,.total_input_tokens,.total_output_tokens,.cache_read_tokens,.cache_write_tokens,.cache_hit_ratio,.cost_micros_usd] | @tsv' "$sample_file"
+      jq -r '[.run_id,.lism_enabled,.total_input_tokens,.total_uncached_input_tokens,.total_output_tokens,.cache_hit_observed,.cache_read_tokens,.cache_write_tokens,.cache_hit_ratio,.cost_micros_usd] | @tsv' "$sample_file"
       echo
     } | tee "$out_dir/reports/${usecase}.txt"
   done
@@ -355,7 +359,7 @@ report() {
       "$BIN_PATH" --lism-ab-conclude "$out_dir/reports/combined_samples.jsonl"
       echo
       echo "=== Combined Records ==="
-      jq -r '[.run_id,.lism_enabled,.total_input_tokens,.total_output_tokens,.cache_read_tokens,.cache_write_tokens,.cache_hit_ratio,.cost_micros_usd] | @tsv' "$out_dir/reports/combined_samples.jsonl"
+      jq -r '[.run_id,.lism_enabled,.total_input_tokens,.total_uncached_input_tokens,.total_output_tokens,.cache_hit_observed,.cache_read_tokens,.cache_write_tokens,.cache_hit_ratio,.cost_micros_usd] | @tsv' "$out_dir/reports/combined_samples.jsonl"
     } | tee "$out_dir/reports/combined.txt"
   fi
 }

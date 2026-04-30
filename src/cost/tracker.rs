@@ -42,7 +42,9 @@ impl CostSnapshot {
             original_prompt_chars: self
                 .original_prompt_chars
                 .saturating_sub(before.original_prompt_chars),
-            sent_prompt_chars: self.sent_prompt_chars.saturating_sub(before.sent_prompt_chars),
+            sent_prompt_chars: self
+                .sent_prompt_chars
+                .saturating_sub(before.sent_prompt_chars),
             cache_hit_requests: self
                 .cache_hit_requests
                 .saturating_sub(before.cache_hit_requests),

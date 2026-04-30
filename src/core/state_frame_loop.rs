@@ -60,7 +60,8 @@ fn collect_text_and_usage(events: Vec<StreamEvent>) -> (String, LoopUsage) {
             StreamEvent::TextDelta(t) => text.push_str(&t),
             StreamEvent::Usage(u) => {
                 usage.input_tokens += u.input_tokens;
-                usage.uncached_input_tokens += u.input_tokens.saturating_sub(u.cache_read_input_tokens);
+                usage.uncached_input_tokens +=
+                    u.input_tokens.saturating_sub(u.cache_read_input_tokens);
                 usage.output_tokens += u.output_tokens;
                 usage.cache_read_tokens += u.cache_read_input_tokens;
                 usage.cache_write_tokens += u.cache_creation_input_tokens;

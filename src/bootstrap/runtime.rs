@@ -1863,12 +1863,22 @@ fn print_lism_ab_summary(
     let on_cache_dist = summary
         .on_cache_read_tokens_distribution
         .as_ref()
-        .map(|d| format!("p50={} p90={} max={} nz={}/{}", d.p50, d.p90, d.max, d.nonzero_count, d.sample_count))
+        .map(|d| {
+            format!(
+                "p50={} p90={} max={} nz={}/{}",
+                d.p50, d.p90, d.max, d.nonzero_count, d.sample_count
+            )
+        })
         .unwrap_or_else(|| "n/a".into());
     let off_cache_dist = summary
         .off_cache_read_tokens_distribution
         .as_ref()
-        .map(|d| format!("p50={} p90={} max={} nz={}/{}", d.p50, d.p90, d.max, d.nonzero_count, d.sample_count))
+        .map(|d| {
+            format!(
+                "p50={} p90={} max={} nz={}/{}",
+                d.p50, d.p90, d.max, d.nonzero_count, d.sample_count
+            )
+        })
         .unwrap_or_else(|| "n/a".into());
     println!(
         "LisM ON       : {} runs | completion {:.2} | avg gross_input {} | avg uncached_input {} | avg output {} | hit_run_rate {} | avg cache_read {} | cache_read_dist {} | avg cost {}μ | avg tokens_saved {} | avg sent_chars {}",

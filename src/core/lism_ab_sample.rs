@@ -631,7 +631,10 @@ fn hit_run_rate(records: &[&LisMAbSampleRecord]) -> Option<f64> {
     if with_cache_obs.is_empty() {
         return None;
     }
-    let hits = with_cache_obs.iter().filter(|r| r.cache_hit_observed).count();
+    let hits = with_cache_obs
+        .iter()
+        .filter(|r| r.cache_hit_observed)
+        .count();
     Some(hits as f64 / with_cache_obs.len() as f64)
 }
 

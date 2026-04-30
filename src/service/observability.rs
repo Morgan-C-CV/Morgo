@@ -155,10 +155,9 @@ impl ServiceObservabilityTracker {
         *self
             .api_call_log_sink
             .lock()
-            .expect("service observability api call log sink poisoned") =
-            Some(ApiCallLogSink {
-                writer: BufWriter::new(file),
-            });
+            .expect("service observability api call log sink poisoned") = Some(ApiCallLogSink {
+            writer: BufWriter::new(file),
+        });
         Ok(())
     }
 

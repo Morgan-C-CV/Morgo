@@ -1126,8 +1126,7 @@ impl BossCoordinator {
                 summary.total_cache_read_tokens += m.cache_read_tokens.unwrap_or(0);
                 summary.total_cache_write_tokens += m.cache_write_tokens.unwrap_or(0);
                 summary.total_fallback_count += m.fallback_count.unwrap_or(0);
-                summary.total_projection_mismatch_count +=
-                    m.projection_mismatch_count.unwrap_or(0);
+                summary.total_projection_mismatch_count += m.projection_mismatch_count.unwrap_or(0);
                 summary.total_input_tokens += m.input_tokens.unwrap_or(0);
                 summary.total_uncached_input_tokens += m.uncached_input_tokens.unwrap_or(0);
                 summary.total_output_tokens += m.output_tokens.unwrap_or(0);
