@@ -657,6 +657,11 @@ impl RuntimeBootstrap {
                     }
                     if boss.has_terminal_failure().await {
                         println!("[boss-task] boss plan reached terminal failure — stopping poll");
+                        let terminal_msg = boss.advance_plan(&app_arc).await;
+                        println!(
+                            "[boss-task] terminal advance_plan result: {:?}",
+                            terminal_msg
+                        );
                         break;
                     }
                     // Also exit on terminal failure so we don't waste the timeout.
@@ -680,6 +685,11 @@ impl RuntimeBootstrap {
                     };
                     if step_failed {
                         println!("[boss-task] step task failed/killed — stopping poll");
+                        let terminal_msg = boss.advance_plan(&app_arc).await;
+                        println!(
+                            "[boss-task] terminal advance_plan result: {:?}",
+                            terminal_msg
+                        );
                         break;
                     }
                     if std::time::Instant::now() >= deadline {
