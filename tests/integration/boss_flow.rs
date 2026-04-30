@@ -198,6 +198,224 @@ async fn run_mock_server_with_json_content(listener: TcpListener, content_json: 
     stream.flush().await.expect("flush scripted response");
 }
 
+async fn run_openai_write_tool_loop_mock_server(
+    listener: TcpListener,
+    request_bodies: Arc<std::sync::Mutex<Vec<String>>>,
+    artifact_path: String,
+    artifact_content: String,
+) {
+    for response_body in [
+        format!(
+            concat!(
+                "data: {{\"id\":\"chatcmpl-tool\",\"object\":\"chat.completion.chunk\",\"choices\":[{{\"delta\":{{\"tool_calls\":[{{\"index\":0,\"id\":\"call_write\",\"type\":\"function\",\"function\":{{\"name\":\"Write\",\"arguments\":\"{{\\\"file_path\\\":\\\"{}\\\",\\\"content\\\":\\\"{}\\\"}}\"}}}}]}},\"index\":0,\"finish_reason\":\"tool_calls\"}}],\"usage\":{{\"model\":\"test-model\",\"prompt_tokens\":64,\"completion_tokens\":12,\"total_tokens\":76}}}}\n\n",
+                "data: [DONE]\n\n"
+            ),
+            artifact_path.replace('\\', "\\\\").replace('"', "\\\""),
+            artifact_content.replace('\\', "\\\\").replace('"', "\\\""),
+        ),
+        concat!(
+            "data: {\"id\":\"chatcmpl-final\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"delta\":{\"content\":\"artifact written\"},\"index\":0,\"finish_reason\":\"stop\"}],\"usage\":{\"model\":\"test-model\",\"prompt_tokens\":72,\"completion_tokens\":8,\"total_tokens\":80}}\n\n",
+            "data: [DONE]\n\n"
+        )
+        .to_string(),
+    ] {
+        let (mut stream, _) = listener.accept().await.expect("accept request");
+        let mut buffer = vec![0_u8; 32 * 1024];
+        let bytes_read = stream.read(&mut buffer).await.expect("read request");
+        let request = String::from_utf8_lossy(&buffer[..bytes_read]).to_string();
+        request_bodies
+            .lock()
+            .expect("request bodies poisoned")
+            .push(request);
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+            response_body.len(),
+            response_body
+        );
+        stream
+            .write_all(response.as_bytes())
+            .await
+            .expect("write response");
+        stream.flush().await.expect("flush response");
+    }
+}
+
+async fn run_openai_text_only_mock_server(
+    listener: TcpListener,
+    request_bodies: Arc<std::sync::Mutex<Vec<String>>>,
+    content: String,
+) {
+    let (mut stream, _) = listener.accept().await.expect("accept request");
+    let mut buffer = vec![0_u8; 32 * 1024];
+    let bytes_read = stream.read(&mut buffer).await.expect("read request");
+    let request = String::from_utf8_lossy(&buffer[..bytes_read]).to_string();
+    request_bodies
+        .lock()
+        .expect("request bodies poisoned")
+        .push(request);
+    let response_body = format!(
+        concat!(
+            "data: {{\"id\":\"chatcmpl-final\",\"object\":\"chat.completion.chunk\",\"choices\":[{{\"delta\":{{\"content\":\"{}\"}},\"index\":0,\"finish_reason\":\"stop\"}}],\"usage\":{{\"model\":\"test-model\",\"prompt_tokens\":48,\"completion_tokens\":6,\"total_tokens\":54}}}}\n\n",
+            "data: [DONE]\n\n"
+        ),
+        content.replace('\\', "\\\\").replace('"', "\\\""),
+    );
+    let response = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+        response_body.len(),
+        response_body
+    );
+    stream
+        .write_all(response.as_bytes())
+        .await
+        .expect("write response");
+    stream.flush().await.expect("flush response");
+}
+
+fn make_openai_runtime_snapshot_for_base_url(
+    base_url: &str,
+    observability: rust_agent::service::observability::ServiceObservabilityTracker,
+) -> rust_agent::state::active_model_runtime::ActiveModelRuntimeSnapshot {
+    let config = rust_agent::service::api::client::ModelProviderConfig {
+        provider_id: "openai-compatible".into(),
+        protocol: rust_agent::service::api::client::ProviderProtocol::OpenAICompatible,
+        compatibility_profile:
+            rust_agent::service::api::client::ProviderCompatibilityProfileKind::OpenAICompatible,
+        base_url: base_url.into(),
+        chat_completions_path: "/v1/chat/completions".into(),
+        auth_strategy: rust_agent::service::api::client::ProviderAuthStrategy::NoAuth,
+        model_id: "test-model".into(),
+        retry_policy: rust_agent::service::api::retry::RetryPolicy::default(),
+        ..rust_agent::service::api::client::ModelProviderConfig::default()
+    };
+    rust_agent::state::active_model_runtime::ActiveModelRuntimeSnapshot {
+        config: config.clone(),
+        client: rust_agent::service::api::client::ModelProviderClient::from_config_with_observability(
+            config,
+            observability.clone(),
+        ),
+        active_profile_name: Some("test-openai-compatible".into()),
+        source: rust_agent::state::app_state::ActiveModelProfileSource::ModelsToml,
+        summary: rust_agent::state::app_state::ActiveModelProviderSummary {
+            provider_id: "openai-compatible".into(),
+            protocol: "OpenAICompatible".into(),
+            compatibility_profile: "OpenAICompatible".into(),
+            base_url_host: "localhost".into(),
+            model: "test-model".into(),
+            auth_status: "none".into(),
+        },
+    }
+}
+
+fn allow_write_policy_for(
+    root: &std::path::Path,
+) -> Arc<rust_agent::security::filesystem_policy::FilesystemPolicy> {
+    std::fs::create_dir_all(root).expect("writable root should exist");
+    let canonical_root = std::fs::canonicalize(root).expect("writable root should canonicalize");
+    let mut rules = vec![rust_agent::security::filesystem_policy::FilesystemPolicyRule {
+        path: root.to_string_lossy().to_string(),
+        level: rust_agent::security::filesystem_policy::FilesystemPermissionLevel::Allow,
+    }];
+    if canonical_root != root {
+        rules.push(rust_agent::security::filesystem_policy::FilesystemPolicyRule {
+            path: canonical_root.to_string_lossy().to_string(),
+            level: rust_agent::security::filesystem_policy::FilesystemPermissionLevel::Allow,
+        });
+    }
+    Arc::new(
+        rust_agent::security::filesystem_policy::FilesystemPolicy::from_config(
+            rust_agent::security::filesystem_policy::FilesystemPolicyConfig {
+                protected_paths: Vec::new(),
+                rules,
+            },
+        )
+        .expect("filesystem policy should parse"),
+    )
+}
+
+fn app_state_with_boss_worker_runtime(
+    active_session_id: &str,
+    task_manager: Arc<TaskManager>,
+    boss: Arc<BossCoordinator>,
+    tool_registry: ToolRegistry,
+    runtime_snapshot: rust_agent::state::active_model_runtime::ActiveModelRuntimeSnapshot,
+    writable_root: &std::path::Path,
+) -> Arc<AppState> {
+    let mut app = (*app_state_with_tasks(active_session_id, task_manager)).clone();
+    app.permission_context = app
+        .permission_context
+        .clone()
+        .with_boss_coordinator(boss.clone())
+        .with_inherited_tool_registry(tool_registry.clone())
+        .with_inherited_active_model_snapshot(runtime_snapshot.clone())
+        .with_filesystem_policy(allow_write_policy_for(writable_root));
+    app.runtime_tool_registry = Some(Arc::new(RwLock::new(tool_registry)));
+    app.active_model_runtime = Some(
+        rust_agent::state::active_model_runtime::ActiveModelRuntime::new(
+            runtime_snapshot.clone(),
+        ),
+    );
+    app.active_model_profile_name = runtime_snapshot.active_profile_name.clone();
+    app.active_model_profile_source = runtime_snapshot.source.clone();
+    app.active_model_provider_summary = runtime_snapshot.summary.clone();
+    app.boss_coordinator = Some(boss);
+    Arc::new(app)
+}
+
+async fn seed_fake_a_review_session(
+    coordinator: &Arc<BossCoordinator>,
+    task_manager: Arc<TaskManager>,
+    session_id: &str,
+    response: &'static str,
+) {
+    let fake_a_task = task_manager.create_with_type(
+        "fake designer A reviewer".to_string(),
+        TaskType::LocalAgent,
+        session_id.to_string(),
+        InteractionSurface::Cli,
+    );
+    let aid = fake_a_task.id.clone();
+    let tm_for_a = task_manager.clone();
+    let aid_for_loop = aid.clone();
+    task_manager.launch(&aid, "", async move {
+        loop {
+            let messages = tm_for_a.drain_mailbox(&aid_for_loop);
+            for _ in messages {
+                tm_for_a.append_output(&aid_for_loop, response);
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        }
+    });
+    coordinator.record_a_session_id_pub(&aid).await;
+}
+
+async fn wait_for_step_status(
+    coordinator: &Arc<BossCoordinator>,
+    step_id: usize,
+    expected: BossPlanStepStatus,
+) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let status = {
+            let guard = coordinator.plan.read().await;
+            let plan = guard.as_ref().expect("plan must exist");
+            plan.steps
+                .iter()
+                .find(|step| step.id == step_id)
+                .expect("step must exist")
+                .status
+        };
+        if status == expected {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for step {step_id} to become {expected:?}; latest={status:?}"
+        );
+        tokio::time::sleep(tokio::time::Duration::from_millis(25)).await;
+    }
+}
+
 async fn run_minimal_openai_mock_server_n(listener: TcpListener, n: usize) {
     let done_body = concat!(
         "data: {\"choices\":[{\"delta\":{\"content\":\"{\\\"state\\\":\\\"done\\\",\\\"decision\\\":\\\"done\\\"}\"}}]}\n\n",
@@ -4701,6 +4919,131 @@ async fn t22_1b_review_fn_uses_a_verdict_when_a_responds_reject() {
     );
 
     let _ = std::fs::remove_file(plan_path);
+}
+
+#[tokio::test]
+async fn r0_single_step_task_event_completed_routes_through_review_gate() {
+    let tmp = std::env::temp_dir().join("r0_single_step_task_event_review_gate");
+    let task_manager = Arc::new(TaskManager::new_with_output_root(&tmp));
+    let session_id = "r0-single-step-task-event";
+    let app_state = app_state_with_tasks(session_id, task_manager.clone());
+
+    let (coordinator, plan_path) = coordinator_with_plan(
+        boss_plan(vec![boss_step(0, "single-step review gate")]),
+        "r0_single_step_task_event_review_gate.json",
+    )
+    .await;
+    coordinator
+        .bootstrap_actor_registry_with_app_state(&app_state)
+        .await;
+    seed_fake_a_review_session(
+        &coordinator,
+        task_manager.clone(),
+        session_id,
+        "REJECT: needs a better result. CORRECTION: add the missing artifact\n",
+    )
+    .await;
+
+    {
+        let mut guard = coordinator.plan.write().await;
+        let plan = guard.as_mut().unwrap();
+        plan.steps[0].status = BossPlanStepStatus::Running;
+        plan.steps[0].worker_task_id = Some("worker-r0-task-event".into());
+    }
+
+    coordinator
+        .on_task_event(&task_event("worker-r0-task-event", 0, TaskStatus::Completed))
+        .await
+        .unwrap();
+
+    wait_for_step_status(&coordinator, 0, BossPlanStepStatus::Rejected).await;
+
+    let guard = coordinator.plan.read().await;
+    let step = &guard.as_ref().unwrap().steps[0];
+    assert_eq!(
+        step.status,
+        BossPlanStepStatus::Rejected,
+        "completed task event must not bypass A review"
+    );
+    assert!(!step.completed, "rejected review must keep completed=false");
+    assert_eq!(step.attempt_count, 1);
+    assert_eq!(
+        step.last_correction.as_deref(),
+        Some("add the missing artifact"),
+        "A correction must be preserved"
+    );
+
+    let _ = std::fs::remove_file(plan_path);
+    let _ = std::fs::remove_dir_all(tmp);
+}
+
+#[tokio::test]
+async fn r0_single_step_notification_completed_routes_through_review_gate() {
+    let tmp = std::env::temp_dir().join("r0_single_step_notification_review_gate");
+    let task_manager = Arc::new(TaskManager::new_with_output_root(&tmp));
+    let session_id = "r0-single-step-notification";
+    let app_state = app_state_with_tasks(session_id, task_manager.clone());
+
+    let (coordinator, plan_path) = coordinator_with_plan(
+        boss_plan(vec![boss_step(0, "notification review gate")]),
+        "r0_single_step_notification_review_gate.json",
+    )
+    .await;
+    coordinator
+        .bootstrap_actor_registry_with_app_state(&app_state)
+        .await;
+    seed_fake_a_review_session(
+        &coordinator,
+        task_manager.clone(),
+        session_id,
+        "REJECT: the notification result is not enough. CORRECTION: verify output before accepting\n",
+    )
+    .await;
+
+    {
+        let mut guard = coordinator.plan.write().await;
+        let plan = guard.as_mut().unwrap();
+        plan.steps[0].status = BossPlanStepStatus::Running;
+        plan.steps[0].worker_task_id = Some("worker-r0-notify".into());
+    }
+
+    let notification = rust_agent::interaction::notification::Notification::task_update(
+        session_id,
+        "worker step complete",
+        "worker says the step is done",
+        "worker-r0-notify",
+        Some("local_agent"),
+        "completed",
+        "await review",
+        Some("implement"),
+        None,
+        None,
+        None,
+        Some(0),
+        "",
+        None,
+    );
+
+    coordinator.on_notification(&notification).await.unwrap();
+
+    wait_for_step_status(&coordinator, 0, BossPlanStepStatus::Rejected).await;
+
+    let guard = coordinator.plan.read().await;
+    let step = &guard.as_ref().unwrap().steps[0];
+    assert_eq!(
+        step.status,
+        BossPlanStepStatus::Rejected,
+        "completed notification must not bypass A review"
+    );
+    assert!(!step.completed, "rejected review must keep completed=false");
+    assert_eq!(
+        step.last_correction.as_deref(),
+        Some("verify output before accepting"),
+        "notification path must preserve A's correction"
+    );
+
+    let _ = std::fs::remove_file(plan_path);
+    let _ = std::fs::remove_dir_all(tmp);
 }
 
 // ---------------------------------------------------------------------------
@@ -10651,6 +10994,174 @@ async fn t27_8_terminal_failure_transitions_stage_to_documentation_and_surfaces_
     assert_eq!(coordinator.status.read().await.current_step, None);
 
     let _ = std::fs::remove_file(plan_path);
+}
+
+#[tokio::test]
+async fn r0_boss_full_worker_real_tool_call_creates_artifact_and_completes() {
+    let root = std::env::temp_dir().join("r0_boss_full_worker_real_tool_call");
+    let output_root = root.join("task_output");
+    let artifact_path = root.join("report.md");
+    let artifact_content = "hello from the real write tool";
+    let request_bodies = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let request_bodies_for_server = request_bodies.clone();
+    let server = tokio::spawn(run_openai_write_tool_loop_mock_server(
+        listener,
+        request_bodies_for_server,
+        artifact_path.to_string_lossy().to_string(),
+        artifact_content.to_string(),
+    ));
+
+    let mut step = boss_step(0, "real tool call artifact");
+    step.objective = Some(format!("创建目标文件：{}", artifact_path.display()));
+    step.acceptance = vec!["artifact file exists and is non-empty".into()];
+    let (coordinator, plan_path) = coordinator_with_plan(
+        boss_plan(vec![step]),
+        "r0_boss_full_worker_real_tool_call.json",
+    )
+    .await;
+
+    let task_manager = Arc::new(TaskManager::new_with_output_root(&output_root));
+    let observability = rust_agent::service::observability::ServiceObservabilityTracker::default();
+    let runtime_snapshot =
+        make_openai_runtime_snapshot_for_base_url(&format!("http://{addr}"), observability);
+    let tool_registry = ToolRegistry::new()
+        .register(Arc::new(AgentTool))
+        .register(Arc::new(rust_agent::tool::builtin::file_write::FileWriteTool));
+    let app_state = app_state_with_boss_worker_runtime(
+        "r0-boss-real-tool-call",
+        task_manager.clone(),
+        coordinator.clone(),
+        tool_registry,
+        runtime_snapshot,
+        &root,
+    );
+    coordinator
+        .bootstrap_actor_registry_with_app_state(&app_state)
+        .await;
+    seed_fake_a_review_session(
+        &coordinator,
+        task_manager.clone(),
+        "r0-boss-real-tool-call",
+        "ACCEPT: artifact verified\n",
+    )
+    .await;
+
+    coordinator.advance_plan(&app_state).await.unwrap();
+    wait_for_step_status(&coordinator, 0, BossPlanStepStatus::Completed).await;
+
+    let artifact = std::fs::read_to_string(&artifact_path).expect("artifact should exist");
+    assert_eq!(artifact, artifact_content);
+
+    let guard = coordinator.plan.read().await;
+    let step = &guard.as_ref().unwrap().steps[0];
+    assert_eq!(step.status, BossPlanStepStatus::Completed);
+    assert!(step.completed, "artifact-backed run must complete");
+    assert!(
+        step.last_review_summary
+            .as_deref()
+            .is_some_and(|summary| summary.contains("Objective:")),
+        "completed run should retain a concrete review summary"
+    );
+    drop(guard);
+
+    let bodies = request_bodies.lock().expect("request bodies poisoned");
+    assert_eq!(bodies.len(), 2, "expected tool turn plus follow-up turn");
+    assert!(
+        bodies[0].contains("\"tools\"") && bodies[0].contains("\"Write\""),
+        "first request must expose the Write tool schema"
+    );
+    assert!(
+        bodies[1].contains(&format!(
+            "tool result for Write: wrote {}",
+            artifact_path.display()
+        )),
+        "follow-up request must carry the concrete write result"
+    );
+    drop(bodies);
+
+    server.await.expect("mock provider server finished");
+    let _ = std::fs::remove_file(plan_path);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn r0_boss_full_worker_text_only_completion_fails_artifact_verification() {
+    let root = std::env::temp_dir().join("r0_boss_full_worker_text_only_failure");
+    let output_root = root.join("task_output");
+    let artifact_path = root.join("missing-report.md");
+    let request_bodies = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let request_bodies_for_server = request_bodies.clone();
+    let server = tokio::spawn(run_openai_text_only_mock_server(
+        listener,
+        request_bodies_for_server,
+        "done without tools".to_string(),
+    ));
+
+    let mut step = boss_step(0, "text-only completion should fail verification");
+    step.objective = Some(format!("创建目标文件：{}", artifact_path.display()));
+    step.acceptance = vec!["artifact file exists and is non-empty".into()];
+    let (coordinator, plan_path) = coordinator_with_plan(
+        boss_plan(vec![step]),
+        "r0_boss_full_worker_text_only_failure.json",
+    )
+    .await;
+
+    let task_manager = Arc::new(TaskManager::new_with_output_root(&output_root));
+    let observability = rust_agent::service::observability::ServiceObservabilityTracker::default();
+    let runtime_snapshot =
+        make_openai_runtime_snapshot_for_base_url(&format!("http://{addr}"), observability);
+    let tool_registry = ToolRegistry::new()
+        .register(Arc::new(AgentTool))
+        .register(Arc::new(rust_agent::tool::builtin::file_write::FileWriteTool));
+    let app_state = app_state_with_boss_worker_runtime(
+        "r0-boss-text-only-failure",
+        task_manager.clone(),
+        coordinator.clone(),
+        tool_registry,
+        runtime_snapshot,
+        &root,
+    );
+    coordinator
+        .bootstrap_actor_registry_with_app_state(&app_state)
+        .await;
+
+    coordinator.advance_plan(&app_state).await.unwrap();
+    wait_for_step_status(&coordinator, 0, BossPlanStepStatus::Failed).await;
+
+    assert!(
+        !artifact_path.exists(),
+        "text-only completion must not create the artifact"
+    );
+
+    let guard = coordinator.plan.read().await;
+    let step = &guard.as_ref().unwrap().steps[0];
+    assert_eq!(step.status, BossPlanStepStatus::Failed);
+    assert!(
+        step.last_review_summary
+            .as_deref()
+            .is_some_and(|summary| summary.contains("artifact verification failed")),
+        "boss must surface artifact verification failure"
+    );
+    assert!(!step.completed, "failed verification must not mark completed");
+    drop(guard);
+
+    let bodies = request_bodies.lock().expect("request bodies poisoned");
+    assert_eq!(bodies.len(), 1, "text-only path should need one model request");
+    assert!(
+        bodies[0].contains("\"tools\""),
+        "worker request must still expose available tools even if model ignores them"
+    );
+    drop(bodies);
+
+    server.await.expect("mock provider server finished");
+    let _ = std::fs::remove_file(plan_path);
+    let _ = std::fs::remove_dir_all(root);
 }
 
 // ── T27.9 Boss production-path override contract ──────────────────────────

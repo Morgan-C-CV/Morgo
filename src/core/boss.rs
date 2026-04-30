@@ -59,6 +59,38 @@ fn step_artifact_verification_error(step: &BossPlanStep) -> Option<String> {
         .map(|reason| format!("artifact verification failed: {reason}"))
 }
 
+fn summarize_acceptance_items(step: &BossPlanStep) -> String {
+    if step.acceptance.is_empty() {
+        "- none".to_string()
+    } else {
+        step.acceptance
+            .iter()
+            .map(|item| format!("- {item}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+
+fn build_step_review_summary(
+    step: &BossPlanStep,
+    source: &str,
+    details: &[(&str, &str)],
+) -> String {
+    let mut sections = vec![
+        format!("{source} reported boss step {} complete.", step.id),
+        format!("Objective: {}", step.objective()),
+        "Acceptance:".to_string(),
+        summarize_acceptance_items(step),
+    ];
+    for (label, value) in details {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            sections.push(format!("{label}: {trimmed}"));
+        }
+    }
+    sections.join("\n")
+}
+
 impl BossCoordinator {
     /// State-only constructor — no callbacks wired. Use in tests or low-level assembly only.
     /// Production code must call `new_with_runtime_owner` followed by
@@ -1001,6 +1033,24 @@ impl BossCoordinator {
         self.routed_step_metadata.read().await.clone()
     }
 
+    async fn persist_plan_if_configured(&self) -> anyhow::Result<()> {
+        let plan_path = self.status.read().await.planning_file.clone();
+        if let Some(path) = plan_path {
+            self.save_plan_with_session(std::path::Path::new(&path)).await?;
+        }
+        Ok(())
+    }
+
+    async fn trigger_review_for_completed_step(
+        &self,
+        step_id: usize,
+        review_summary: String,
+    ) -> anyhow::Result<()> {
+        self.update_current_step(Some(step_id)).await;
+        self.persist_plan_if_configured().await?;
+        self.on_review_event(step_id, true, &review_summary, None).await
+    }
+
     pub async fn set_lism_policy(&self, policy: BossLisMPolicy) {
         *self.lism_policy.write().await = policy;
     }
@@ -1516,7 +1566,7 @@ impl BossCoordinator {
             return Ok(());
         };
 
-        let should_auto_advance = match event.status {
+        let review_summary = match event.status {
             TaskStatus::Completed => {
                 if let Some(reason) = step_artifact_verification_error(step) {
                     step.completed = false;
@@ -1528,15 +1578,32 @@ impl BossCoordinator {
                         step_id,
                         reason
                     );
-                    false
+                    None
                 } else {
-                    let was_completed =
-                        step.completed || step.status == BossPlanStepStatus::Completed;
-                    step.completed = true;
-                    step.status = BossPlanStepStatus::Completed;
                     step.worker_task_id = Some(event.task_id.clone());
-                    tracing::info!("BossPlan: Step {} marked as completed", step_id);
-                    !was_completed
+                    if matches!(
+                        step.status,
+                        BossPlanStepStatus::Completed | BossPlanStepStatus::Reviewing
+                    ) {
+                        None
+                    } else {
+                        step.completed = false;
+                        step.status = BossPlanStepStatus::Reviewing;
+                        tracing::info!(
+                            "BossPlan: Step {} completed by worker, entering Reviewing",
+                            step_id
+                        );
+                        Some(build_step_review_summary(
+                            step,
+                            "Worker task",
+                            &[
+                                ("Worker task id", event.task_id.as_str()),
+                                ("Summary", event.summary.as_str()),
+                                ("Result", event.result.as_str()),
+                                ("Next action", event.next_action.as_str()),
+                            ],
+                        ))
+                    }
                 }
             }
             TaskStatus::Failed | TaskStatus::Killed => {
@@ -1544,22 +1611,25 @@ impl BossCoordinator {
                 step.status = BossPlanStepStatus::Failed;
                 step.worker_task_id = Some(event.task_id.clone());
                 tracing::warn!("BossPlan: Step {} marked as failed", step_id);
-                false
+                None
             }
             TaskStatus::Running => {
                 step.status = BossPlanStepStatus::Running;
                 step.worker_task_id = Some(event.task_id.clone());
-                false
+                None
             }
-            TaskStatus::Pending => false,
+            TaskStatus::Pending => None,
         };
+
+        if let Some(summary) = review_summary {
+            drop(plan_guard);
+            self.trigger_review_for_completed_step(step_id, summary).await?;
+            return Ok(());
+        }
 
         let next_step = next_unfinished_step_id(plan);
         drop(plan_guard);
         self.update_current_step(next_step).await;
-        if should_auto_advance {
-            self.maybe_auto_advance_after_completion().await?;
-        }
 
         Ok(())
     }
@@ -1701,16 +1771,7 @@ impl BossCoordinator {
                 }
             }
         };
-        if matches!(
-            decision,
-            crate::core::boss_actor_runtime::ReviewDecision::ReplanStep { .. }
-        ) {
-            let plan_path = self.status.read().await.planning_file.clone();
-            if let Some(path) = plan_path {
-                self.save_plan_with_session(std::path::Path::new(&path))
-                    .await?;
-            }
-        }
+        self.persist_plan_if_configured().await?;
         if should_auto_advance {
             let next_step = self
                 .plan
@@ -1772,7 +1833,7 @@ impl BossCoordinator {
             return Ok(());
         };
 
-        let should_auto_advance = match notification.status.as_deref().unwrap_or_default() {
+        let review_summary = match notification.status.as_deref().unwrap_or_default() {
             status if status.eq_ignore_ascii_case("completed") => {
                 if let Some(reason) = step_artifact_verification_error(step) {
                     step.completed = false;
@@ -1784,18 +1845,46 @@ impl BossCoordinator {
                         step_id,
                         reason
                     );
-                    false
+                    None
                 } else {
-                    let was_completed =
-                        step.completed || step.status == BossPlanStepStatus::Completed;
-                    step.completed = true;
-                    step.status = BossPlanStepStatus::Completed;
                     step.worker_task_id = notification.task_id.clone();
-                    tracing::info!(
-                        "BossPlan: Step {} marked as completed via notification",
-                        step_id
-                    );
-                    !was_completed
+                    if matches!(
+                        step.status,
+                        BossPlanStepStatus::Completed | BossPlanStepStatus::Reviewing
+                    ) {
+                        None
+                    } else {
+                        step.completed = false;
+                        step.status = BossPlanStepStatus::Reviewing;
+                        tracing::info!(
+                            "BossPlan: Step {} completed via notification, entering Reviewing",
+                            step_id
+                        );
+                        Some(build_step_review_summary(
+                            step,
+                            "Worker notification",
+                            &[
+                                (
+                                    "Worker task id",
+                                    notification.task_id.as_deref().unwrap_or(""),
+                                ),
+                                ("Title", notification.title.as_str()),
+                                ("Body", notification.body.as_str()),
+                                (
+                                    "Status",
+                                    notification.status.as_deref().unwrap_or_default(),
+                                ),
+                                (
+                                    "Next action",
+                                    notification.next_action.as_deref().unwrap_or_default(),
+                                ),
+                                (
+                                    "Output file",
+                                    notification.output_file.as_deref().unwrap_or_default(),
+                                ),
+                            ],
+                        ))
+                    }
                 }
             }
             status
@@ -1809,22 +1898,25 @@ impl BossCoordinator {
                     "BossPlan: Step {} marked as failed via notification",
                     step_id
                 );
-                false
+                None
             }
             status if status.eq_ignore_ascii_case("running") => {
                 step.status = BossPlanStepStatus::Running;
                 step.worker_task_id = notification.task_id.clone();
-                false
+                None
             }
-            _ => false,
+            _ => None,
         };
+
+        if let Some(summary) = review_summary {
+            drop(plan_guard);
+            self.trigger_review_for_completed_step(step_id, summary).await?;
+            return Ok(());
+        }
 
         let next_step = next_unfinished_step_id(plan);
         drop(plan_guard);
         self.update_current_step(next_step).await;
-        if should_auto_advance {
-            self.maybe_auto_advance_after_completion().await?;
-        }
 
         Ok(())
     }
