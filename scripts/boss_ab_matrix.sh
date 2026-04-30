@@ -154,17 +154,17 @@ EOF
 
 实现摘录一：tool/builtin/bash/clamped_reader.rs
 EOF
-  sed -n '1,220p' "$AGENT_DIR/src/tool/builtin/bash/clamped_reader.rs" >>"$file"
+  sed -n '1,60p' "$AGENT_DIR/src/tool/builtin/bash/clamped_reader.rs" >>"$file"
   cat >>"$file" <<'EOF'
 
 实现摘录二：tool/builtin/bash/sandbox.rs
 EOF
-  sed -n '1,220p' "$AGENT_DIR/src/tool/builtin/bash/sandbox.rs" >>"$file"
+  sed -n '1,60p' "$AGENT_DIR/src/tool/builtin/bash/sandbox.rs" >>"$file"
   cat >>"$file" <<'EOF'
 
 实现摘录三：tool/builtin/bash/mod.rs
 EOF
-  sed -n '1,260p' "$AGENT_DIR/src/tool/builtin/bash/mod.rs" >>"$file"
+  sed -n '1,60p' "$AGENT_DIR/src/tool/builtin/bash/mod.rs" >>"$file"
   append_task_footer "$file"
 }
 
@@ -179,7 +179,7 @@ write_usecase_efficiency() {
 
 关键材料摘录：
 EOF
-  sed -n '1,220p' "$DOCS_DIR/31-token-efficiency-cost-performance.md" >>"$file"
+  sed -n '1,210p' "$DOCS_DIR/31-token-efficiency-cost-performance.md" >>"$file"
   append_task_footer "$file"
 }
 
@@ -194,9 +194,9 @@ write_usecase_boss() {
 
 关键材料摘录：
 EOF
-  sed -n '183,245p' "$DOCS_DIR/30-boss-mode-and-dual-agent-workflow.md" >>"$file"
+  sed -n '191,245p' "$DOCS_DIR/30-boss-mode-and-dual-agent-workflow.md" >>"$file"
   printf '\n' >>"$file"
-  sed -n '323,448p' "$DOCS_DIR/30-boss-mode-and-dual-agent-workflow.md" >>"$file"
+  sed -n '334,396p' "$DOCS_DIR/30-boss-mode-and-dual-agent-workflow.md" >>"$file"
   append_task_footer "$file"
 }
 
@@ -211,12 +211,14 @@ write_usecase_roadmap() {
 
 关键材料摘录一：full design implementation gap audit
 EOF
-  sed -n '1,220p' "$DOCS_DIR/33-full-design-implementation-gap-audit.md" >>"$file"
+  sed -n '1,130p' "$DOCS_DIR/33-full-design-implementation-gap-audit.md" >>"$file"
   cat >>"$file" <<'EOF'
 
 关键材料摘录二：future gaps and roadmap
 EOF
-  sed -n '1,280p' "$DOCS_DIR/14-progress-gap-roadmap.md" >>"$file"
+  sed -n '44,110p' "$DOCS_DIR/14-progress-gap-roadmap.md" >>"$file"
+  printf '\n' >>"$file"
+  sed -n '184,214p' "$DOCS_DIR/14-progress-gap-roadmap.md" >>"$file"
   append_task_footer "$file"
 }
 
