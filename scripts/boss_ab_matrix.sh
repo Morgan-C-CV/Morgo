@@ -19,6 +19,8 @@ ENV_LOADER="$REPO_ROOT/load-env.sh"
 BIN_PATH="$AGENT_DIR/target/debug/rust-agent"
 DEFAULT_OUT_DIR="${TMPDIR:-/tmp}/rustagent-boss-ab-$(date +%Y%m%d-%H%M%S)"
 MODEL_ID="${RUST_AGENT_AB_MODEL:-gpt-5-mini-2025-08-07}"
+RUNS_PER_ARM="${RUST_AGENT_AB_RUNS_PER_ARM:-3}"
+MORGO_TEST_ROOT="${RUST_AGENT_AB_MORGO_TEST_ROOT:-/Users/wangmorgan/MProject/MorgoTest}"
 
 usage() {
   cat <<'EOF'
@@ -30,6 +32,8 @@ Usage:
 
 Environment:
   RUST_AGENT_AB_MODEL   Override the model in generated models.toml.
+  RUST_AGENT_AB_RUNS_PER_ARM  Number of runs per arm. Default: 3
+  RUST_AGENT_AB_MORGO_TEST_ROOT  Target workspace for generated demo tasks.
 EOF
 }
 
@@ -112,6 +116,18 @@ append_task_footer() {
 - 使用中文输出。
 - 输出 4 个小段：现状、主要风险、证据来源、下一步建议。
 - 若需要补充核验，可读取引用文件，但最终只返回简洁报告。
+EOF
+}
+
+append_build_footer() {
+  local file="$1"
+  cat >>"$file" <<'EOF'
+
+执行要求：
+- 允许修改文件、创建目录、运行必要命令。
+- 优先把产物写到指定目标目录，不要改动其他无关路径。
+- 最终必须输出：做了什么、改了哪些文件、如何运行/验证、剩余风险。
+- 如果需要运行命令，优先运行最小验证命令并报告结果。
 EOF
 }
 
@@ -223,12 +239,151 @@ EOF
   append_task_footer "$file"
 }
 
+write_usecase_frontend_site() {
+  local file="$out_dir/usecases/u6_frontend_agent_site.txt"
+  cat >"$file" <<EOF
+真实 /boss A/B use case 6：创建一个介绍 RustAgent / Boss Mode / LisM 的前端静态网站。
+
+任务目标：
+- 在目标目录创建一个可直接打开的静态网站：
+  - 目标目录：$MORGO_TEST_ROOT/agent-site
+- 网站内容必须介绍：
+  - RustAgent 是什么
+  - Boss Mode 的双 Agent / 编排思想
+  - LisM / StateFrame 的核心价值
+  - KV cache / token efficiency 的设计原则
+- 页面要求：
+  - 桌面和移动端可用
+  - 有明确视觉风格，不要默认模板感
+  - 使用纯静态文件（HTML/CSS/少量 JS 可选）
+- 输出一个简短 README，说明如何打开与查看。
+
+参考材料摘录：
+EOF
+  sed -n '1,120p' "$DOCS_DIR/31-token-efficiency-cost-performance.md" >>"$file"
+  printf '\n' >>"$file"
+  sed -n '280,360p' "$DOCS_DIR/30-boss-mode-and-dual-agent-workflow.md" >>"$file"
+  append_build_footer "$file"
+}
+
+write_usecase_python_demo() {
+  local file="$out_dir/usecases/u7_python_boss_lism_demo.txt"
+  cat >"$file" <<EOF
+真实 /boss A/B use case 7：在独立目录抽象一个最小 Python 运行时 demo，解释 Boss Mode 与 LisM 的工作原理。
+
+任务目标：
+- 在目标目录创建一个最小 Python demo：
+  - 目标目录：$MORGO_TEST_ROOT/python-boss-lism-demo
+- demo 目标：
+  - 用最小运行时模拟 Boss -> Worker
+  - 模拟 StateFrame / StateDecision / Fact Ledger
+  - 展示 full-context 与 LisM 两条路径的差异
+  - 输出至少一个可运行示例
+- 技术要求：
+  - Python 3 标准库优先，不依赖重型第三方库
+  - 代码结构至少包含：runtime、model stub、demo entry、README
+  - README 说明 Boss Mode / LisM 的概念与 demo 的运行方式
+- 必须运行一次 demo，并报告输出。
+
+参考材料摘录：
+EOF
+  sed -n '220,420p' "$DOCS_DIR/30-boss-mode-and-dual-agent-workflow.md" >>"$file"
+  printf '\n' >>"$file"
+  sed -n '1,160p' "$DOCS_DIR/31-token-efficiency-cost-performance.md" >>"$file"
+  append_build_footer "$file"
+}
+
+write_usecase_multistage_research() {
+  local file="$out_dir/usecases/u8_multistage_tools_memory_token_report.txt"
+  cat >"$file" <<EOF
+真实 /boss A/B use case 8：执行一个多阶段复杂任务，并把结果落成报告。
+
+任务目标：
+- 在目标目录生成一份多阶段报告：
+  - 目标文件：$MORGO_TEST_ROOT/reports/multistage-tools-memory-token-report.md
+- 任务必须按 4 个阶段推进：
+  1. 查看并总结 toolsystem / tool registry / tool contract
+  2. 查看并总结 memory/backpressure/resource limit 策略
+  3. 查看并总结 token efficiency / KV cache / LisM 策略
+  4. 最后综合成一份“复杂任务下的性能与风险判断”
+- 报告必须显式按阶段组织，且说明每阶段证据来源。
+- 允许读取仓库文件与文档；最终要把结果写成 markdown 文件。
+
+建议核验路径：
+- RustAgent/Agent/src/tool
+- RustAgent/docs/29-memory-backpressure-and-resource-limits.md
+- RustAgent/docs/31-token-efficiency-cost-performance.md
+- RustAgent/docs/30-boss-mode-and-dual-agent-workflow.md
+EOF
+  append_build_footer "$file"
+}
+
+write_usecase_jsonl_analyzer() {
+  local file="$out_dir/usecases/u9_lism_jsonl_analyzer_tool.txt"
+  cat >"$file" <<EOF
+真实 /boss A/B use case 9：创建一个 JSONL 分析工具，读取 LisM A/B 样本并输出策略建议。
+
+任务目标：
+- 在目标目录实现一个小工具：
+  - 目标目录：$MORGO_TEST_ROOT/lism-jsonl-analyzer
+- 工具输入：
+  - /tmp/rustagent-boss-ab-full-5x33-20260430/reports/combined_samples.jsonl
+- 工具输出：
+  - 终端摘要
+  - 生成 markdown 报告：$MORGO_TEST_ROOT/lism-jsonl-analyzer/report.md
+- 分析内容至少包含：
+  - 各 use case 的 on/off completion
+  - 平均 cost / input / uncached input
+  - ForceOn / Inherit / ForceOff 建议表
+- 要求：
+  - Python 标准库优先
+  - 需要实际运行一次工具并汇报结果
+
+参考样本：
+- /tmp/rustagent-boss-ab-full-5x33-20260430/reports/combined.txt
+- /tmp/rustagent-boss-ab-full-5x33-20260430/reports/combined_samples.jsonl
+EOF
+  append_build_footer "$file"
+}
+
+write_usecase_runtime_validator() {
+  local file="$out_dir/usecases/u10_state_decision_runtime_validator.txt"
+  cat >"$file" <<EOF
+真实 /boss A/B use case 10：创建一个 StateDecision/readonly-audit contract 验证器，并用真实日志回放。
+
+任务目标：
+- 在目标目录创建一个最小验证器：
+  - 目标目录：$MORGO_TEST_ROOT/state-decision-validator
+- 功能要求：
+  - 读取真实 API JSONL 日志
+  - 抽取 response_text
+  - 校验是否满足 canonical StateDecision 合同
+  - 对只读审计任务额外校验 4 段输出 contract
+- 至少回放以下日志：
+  - /tmp/rustagent-boss-ab-full-5x33-20260430/api_logs/u3-on-run1.jsonl
+  - /tmp/rustagent-boss-ab-u3-contractfix-20260430/api_logs/u3-on-run1.jsonl
+- 输出：
+  - 终端验证摘要
+  - 一个 markdown 结论文件，说明修复前后差异
+- 要求实际执行验证器并给出结果。
+
+参考背景材料：
+EOF
+  sed -n '1,120p' "$DOCS_DIR/34-lism-rollout-decision-memo-2026-04-30.md" >>"$file"
+  append_build_footer "$file"
+}
+
 generate_usecases() {
   write_usecase_security
   write_usecase_memory
   write_usecase_efficiency
   write_usecase_boss
   write_usecase_roadmap
+  write_usecase_frontend_site
+  write_usecase_python_demo
+  write_usecase_multistage_research
+  write_usecase_jsonl_analyzer
+  write_usecase_runtime_validator
 }
 
 generate_configs() {
@@ -313,11 +468,11 @@ run_matrix() {
   local usecase
   for usecase_path in "$out_dir"/usecases/*.txt; do
     usecase="$(basename "$usecase_path" .txt)"
-    for i in 1 2 3; do
+    for i in $(seq 1 "$RUNS_PER_ARM"); do
       run_one "$usecase" off "$i"
       sleep 1
     done
-    for i in 1 2 3; do
+    for i in $(seq 1 "$RUNS_PER_ARM"); do
       run_one "$usecase" on "$i"
       sleep 1
     done
