@@ -990,8 +990,9 @@ async fn execute_tool_phase(
                                 state.messages.push(message);
                             }
                             let tool_message = Message::assistant(format!(
-                                "tool {tool_name} result: {}",
-                                report_detail_or_summary(&report)
+                                "tool {tool_name} result: {} ({} chars)",
+                                report.summary,
+                                text.chars().count()
                             ));
                             engine_events
                                 .push(tool_result_committed_event(&tool_name, &text, &record));

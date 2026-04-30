@@ -10,7 +10,7 @@ use crate::tool::definition::{Tool, ToolCall, ToolMetadata, ToolResult};
 pub struct FileReadTool;
 
 const DEFAULT_READ_LIMIT_CHARS: usize = 3_000;
-const MAX_READ_LIMIT_CHARS: usize = 20_000;
+const MAX_READ_LIMIT_CHARS: usize = 5_000;
 
 #[derive(Debug, Deserialize)]
 struct ReadInput {
@@ -68,7 +68,7 @@ impl Tool for FileReadTool {
             "properties": {
                 "file_path": {"type": "string"},
                 "offset": {"type": "integer", "minimum": 0},
-                "limit": {"type": "integer", "minimum": 1, "maximum": 20000}
+                "limit": {"type": "integer", "minimum": 1, "maximum": 5000}
             }
         }))
     }
