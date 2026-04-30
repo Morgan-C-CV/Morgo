@@ -118,11 +118,11 @@ pub struct NextAction {
 /// Incremental patch the LLM proposes to apply to the orchestrator's state.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct StatePatch {
-    #[serde(default)]
+    #[serde(default, alias = "open_items")]
     pub open_items_add: Vec<String>,
     #[serde(default)]
     pub open_items_remove: Vec<String>,
-    #[serde(default)]
+    #[serde(default, alias = "accepted_summary")]
     pub accepted_summary_add: Vec<String>,
 }
 

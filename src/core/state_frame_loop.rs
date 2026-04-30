@@ -92,7 +92,11 @@ StateDecision schema:\n\
   \"decision\": \"<one of: continue, request_context, call_tool, handoff, accept, reject, done>\",\n\
   \"next_action\": null,\n\
   \"needed_context\": [],\n\
-  \"state_patch\": {},\n\
+  \"state_patch\": {\n\
+    \"open_items_add\": [],\n\
+    \"open_items_remove\": [],\n\
+    \"accepted_summary_add\": []\n\
+  },\n\
   \"confidence\": 0.9,\n\
   \"escalate\": false\n\
 }\n\
@@ -100,6 +104,9 @@ StateDecision schema:\n\
 Rules:\n\
 - Use \"decision\": \"done\" when the objective is complete\n\
 - Use \"decision\": \"continue\" only when you also change state or provide a non-empty state_patch that advances the frame\n\
+- When adding accepted summary lines, use `state_patch.accepted_summary_add`; do not emit `accepted_summary` as a replacement field\n\
+- When adding open items, use `state_patch.open_items_add`; do not emit `open_items` as a replacement field\n\
+- If `recent_evidence` contains `fact: execution_mode read_only_analysis`, prefer a single-turn `done`; do not use `continue` just to outline or narrate your plan\n\
 - Treat `recent_evidence` entries prefixed with `fact:` as the authoritative Fact Ledger for this turn\n\
 - If a fact entry already says `none`, `none recorded`, `absent`, or equivalent, do NOT request that same context again\n\
 - Only use \"decision\": \"request_context\" when the missing fact is not already present in objective/open_items/blocked_items/accepted_summary/recent_evidence\n\
@@ -232,8 +239,18 @@ pub async fn run_decision_loop(
             }
             DecisionKind::Continue => {
                 let before = frame.to_prompt_segment().content;
+                let open_items_before = frame.open_items.len();
                 let _patch_changed = apply_state_patch(&mut frame, &decision.state_patch);
                 frame.state = decision.state;
+                if open_items_before > 0
+                    && frame.open_items.is_empty()
+                    && frame.blocked_items.is_empty()
+                {
+                    return Ok(LoopOutcome::Done {
+                        final_state: AgentState::Done,
+                        usage: total_usage,
+                    });
+                }
                 let after = frame.to_prompt_segment().content;
                 if before == after {
                     return Ok(LoopOutcome::NoProgress {

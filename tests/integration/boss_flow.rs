@@ -7538,6 +7538,27 @@ fn t27_2_state_frame_to_prompt_segment_is_non_cacheable() {
     );
 }
 
+#[test]
+fn t27_2_state_decision_patch_aliases_deserialize() {
+    use rust_agent::core::state_frame::validate_state_decision;
+
+    let json = r#"{
+        "state": "reviewing",
+        "decision": "continue",
+        "state_patch": {
+            "accepted_summary": ["draft summary"],
+            "open_items": ["verify evidence"]
+        }
+    }"#;
+
+    let decision = validate_state_decision(json).expect("should parse");
+    assert_eq!(
+        decision.state_patch.accepted_summary_add,
+        vec!["draft summary"]
+    );
+    assert_eq!(decision.state_patch.open_items_add, vec!["verify evidence"]);
+}
+
 // ── T27.3 StateFrame projection ───────────────────────────────────────────
 
 #[test]
@@ -8109,6 +8130,108 @@ fn t27_4_continue_with_state_patch_is_progress() {
         ))
         .expect("loop should not error");
     assert!(matches!(outcome, LoopOutcome::Done { .. }));
+}
+
+#[test]
+fn t27_4_continue_with_patch_alias_is_progress() {
+    use rust_agent::core::state_frame::{ActorRole, AgentState, StateBudget, StateFrame};
+    use rust_agent::core::state_frame_loop::{DecisionLoopConfig, LoopOutcome, run_decision_loop};
+    use rust_agent::service::api::client::ModelProviderClient;
+    use rust_agent::service::api::streaming::StreamEvent;
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let continue_json = r#"{"state":"executing","decision":"continue","state_patch":{"accepted_summary":["drafted rollout summary"]}}"#;
+    let done_json = r#"{"state":"done","decision":"done"}"#;
+    let client = ModelProviderClient::with_scripted_turns(vec![
+        vec![StreamEvent::TextDelta(continue_json.into())],
+        vec![StreamEvent::TextDelta(done_json.into())],
+    ]);
+    let frame = StateFrame {
+        role: ActorRole::Worker,
+        state: AgentState::Executing,
+        objective: "allow alias-driven progress".into(),
+        open_items: vec![],
+        blocked_items: vec![],
+        accepted_summary: vec![],
+        recent_evidence: vec![],
+        allowed_actions: vec![],
+        toolset_id: None,
+        skillset_id: None,
+        required_output_schema: None,
+        budget: StateBudget::default(),
+    };
+    let outcome = rt
+        .block_on(run_decision_loop(
+            &client,
+            frame,
+            DecisionLoopConfig {
+                max_iterations: 5,
+                repair_budget: 1,
+            },
+        ))
+        .expect("loop should not error");
+    assert!(matches!(outcome, LoopOutcome::Done { .. }));
+}
+
+#[test]
+fn t27_4_continue_clearing_open_items_auto_completes() {
+    use rust_agent::core::state_frame::{ActorRole, AgentState, StateBudget, StateFrame};
+    use rust_agent::core::state_frame_loop::{DecisionLoopConfig, LoopOutcome, run_decision_loop};
+    use rust_agent::service::api::client::ModelProviderClient;
+    use rust_agent::service::api::streaming::{StreamEvent, UsageEvent};
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let continue_json = r#"{
+        "state":"executing",
+        "decision":"continue",
+        "state_patch":{"open_items_remove":["write final report"]}
+    }"#;
+    let client = ModelProviderClient::with_scripted_turns(vec![vec![
+        StreamEvent::TextDelta(continue_json.into()),
+        StreamEvent::Usage(UsageEvent {
+            input_tokens: 120,
+            output_tokens: 18,
+            cache_read_input_tokens: 64,
+            cache_creation_input_tokens: 32,
+            model: "scripted".into(),
+        }),
+    ]]);
+    let frame = StateFrame {
+        role: ActorRole::Worker,
+        state: AgentState::Executing,
+        objective: "finish readonly report".into(),
+        open_items: vec!["write final report".into()],
+        blocked_items: vec![],
+        accepted_summary: vec![],
+        recent_evidence: vec![
+            "fact: execution_mode read_only_analysis no_file_edits no_patch".into(),
+        ],
+        allowed_actions: vec!["read_file".into(), "summarize_findings".into()],
+        toolset_id: None,
+        skillset_id: None,
+        required_output_schema: None,
+        budget: StateBudget::default(),
+    };
+    let outcome = rt
+        .block_on(run_decision_loop(
+            &client,
+            frame,
+            DecisionLoopConfig {
+                max_iterations: 5,
+                repair_budget: 1,
+            },
+        ))
+        .expect("loop should not error");
+    match outcome {
+        LoopOutcome::Done { final_state, usage } => {
+            assert_eq!(final_state, AgentState::Done);
+            assert_eq!(usage.input_tokens, 120);
+            assert_eq!(usage.output_tokens, 18);
+            assert_eq!(usage.cache_read_tokens, 64);
+            assert_eq!(usage.cache_write_tokens, 32);
+        }
+        other => panic!("expected Done after clearing open_items, got {other:?}"),
+    }
 }
 
 #[tokio::test]
