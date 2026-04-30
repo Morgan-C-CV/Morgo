@@ -9,7 +9,7 @@ use crate::tool::definition::{Tool, ToolCall, ToolMetadata, ToolResult};
 
 pub struct FileReadTool;
 
-const DEFAULT_READ_LIMIT_CHARS: usize = 8_000;
+const DEFAULT_READ_LIMIT_CHARS: usize = 3_000;
 const MAX_READ_LIMIT_CHARS: usize = 20_000;
 
 #[derive(Debug, Deserialize)]

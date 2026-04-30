@@ -1314,9 +1314,10 @@ async fn execute_tool_batch_phase(
                     &outcome.record,
                 ));
                 let message = Message::assistant(format!(
-                    "tool {} result: {}",
+                    "tool {} result: {} ({} chars)",
                     outcome.tool_name,
-                    record_detail_or_summary(&outcome.record)
+                    outcome.record.summary,
+                    text.chars().count()
                 ));
                 engine_events.push(EngineEvent::MessageCommitted(message.clone()));
                 state.messages.push(message);

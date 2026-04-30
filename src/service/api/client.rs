@@ -584,9 +584,9 @@ fn classify_retry_policy(error: &ApiError) -> RetryDecision {
             .map(RetryDecision::RetryAfterMs)
             .unwrap_or(RetryDecision::RetryDefaultBackoff),
         ApiErrorKind::HttpStatus(500..=599) => RetryDecision::RetryDefaultBackoff,
+        ApiErrorKind::Transport => RetryDecision::RetryDefaultBackoff,
         ApiErrorKind::HttpStatus(_)
         | ApiErrorKind::RequestBuild
-        | ApiErrorKind::Transport
         | ApiErrorKind::EmptyBody
         | ApiErrorKind::BadContentType
         | ApiErrorKind::InvalidResponse
@@ -3649,7 +3649,7 @@ mod tests {
         );
         assert_eq!(
             classify_retry_policy(&ApiError::transport("transport")),
-            RetryDecision::DoNotRetry
+            RetryDecision::RetryDefaultBackoff
         );
         assert_eq!(
             classify_retry_policy(&ApiError::sse_protocol("protocol")),
