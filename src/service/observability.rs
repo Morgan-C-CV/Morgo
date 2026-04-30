@@ -433,7 +433,7 @@ fn compact_recovery_key(kind: &CompactPlanKind) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ServiceObservabilityEventRecord, ServiceObservabilityExportSink,
+        ApiCallRecord, ServiceObservabilityEventRecord, ServiceObservabilityExportSink,
         ServiceObservabilitySnapshot, ServiceObservabilityTracker,
     };
     use crate::core::events::{ServiceFailureCode, ServiceFailureNotice};
@@ -633,5 +633,39 @@ mod tests {
             ))
         );
         assert_eq!(sink.recent_events, snapshot.recent_events);
+    }
+
+    #[test]
+    fn api_call_log_sink_persists_jsonl_records() {
+        let tracker = ServiceObservabilityTracker::default();
+        let path = std::env::temp_dir().join(format!(
+            "service-observability-api-call-{}.jsonl",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock should be after epoch")
+                .as_nanos()
+        ));
+        tracker
+            .configure_api_call_log_path(&path)
+            .expect("log path should be configurable");
+        tracker.record_api_call(ApiCallRecord::now(
+            "openai",
+            "gpt-test",
+            1200,
+            42,
+            1500,
+            10,
+            0,
+            1024,
+            Some("endturn".into()),
+            "hello world",
+        ));
+
+        let text = std::fs::read_to_string(&path).expect("log file should exist");
+        assert!(text.contains("\"provider_id\":\"openai\""));
+        assert!(text.contains("\"model\":\"gpt-test\""));
+        assert!(text.contains("\"response_text\":\"hello world\""));
+
+        let _ = std::fs::remove_file(path);
     }
 }

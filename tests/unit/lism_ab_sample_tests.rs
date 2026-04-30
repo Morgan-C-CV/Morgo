@@ -303,6 +303,61 @@ fn r1_1_summarize_cache_hit_ratio_delta_positive_means_lism_helps() {
 }
 
 #[test]
+fn r1_1_summarize_hit_run_rate_computed_per_arm() {
+    let sink = LisMAbSampleSink::in_memory();
+    sink.record_run(
+        "on-hit",
+        true,
+        &make_report(1, 1, 800, 200, 0),
+        BossTestRunOutcome::Completed,
+        0,
+    );
+    sink.record_run(
+        "on-miss",
+        true,
+        &make_report_with_usage(1, 1, 1000, 50, 0),
+        BossTestRunOutcome::Completed,
+        0,
+    );
+    sink.record_run(
+        "off-miss",
+        false,
+        &make_report_with_usage(1, 1, 1000, 50, 0),
+        BossTestRunOutcome::Completed,
+        0,
+    );
+
+    let summary = sink.summarize();
+    assert_eq!(summary.on_hit_run_rate, Some(0.5));
+    assert_eq!(summary.off_hit_run_rate, Some(0.0));
+    assert_eq!(summary.hit_run_rate_delta(), Some(0.5));
+}
+
+#[test]
+fn r1_1_summarize_cache_read_distribution_computed_per_arm() {
+    let sink = LisMAbSampleSink::in_memory();
+    for (run_id, cache_read) in [("on-1", 0usize), ("on-2", 200), ("on-3", 800)] {
+        sink.record_run(
+            run_id,
+            true,
+            &make_report(1, 1, cache_read, 0, 0),
+            BossTestRunOutcome::Completed,
+            0,
+        );
+    }
+
+    let summary = sink.summarize();
+    let dist = summary
+        .on_cache_read_tokens_distribution
+        .expect("distribution should be Some");
+    assert_eq!(dist.sample_count, 3);
+    assert_eq!(dist.nonzero_count, 2);
+    assert_eq!(dist.p50, 200);
+    assert_eq!(dist.p90, 800);
+    assert_eq!(dist.max, 800);
+}
+
+#[test]
 fn r1_1_summarize_avg_cost_computed_per_arm() {
     let sink = LisMAbSampleSink::in_memory();
     let on_report = make_report(1, 1, 0, 0, 1000);
