@@ -341,9 +341,14 @@ fn launch_agent_task(
             Ok(())
         };
 
-        if matches!(
+        if !matches!(
+            result.terminal,
+            crate::core::query_loop::Terminal::Completed
+        ) || matches!(
             result.state,
             crate::core::query_loop::QueryLoopState::Failed
+                | crate::core::query_loop::QueryLoopState::Interrupted
+                | crate::core::query_loop::QueryLoopState::Compacting
         ) {
             tasks_for_run.fail_with_usage(&launched_task_id, &dispatcher, usage_summary);
         } else if let Err(reason) = artifact_verification {

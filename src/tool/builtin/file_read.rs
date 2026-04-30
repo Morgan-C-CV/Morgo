@@ -9,18 +9,36 @@ use crate::tool::definition::{Tool, ToolCall, ToolMetadata, ToolResult};
 
 pub struct FileReadTool;
 
+const DEFAULT_READ_LIMIT_CHARS: usize = 8_000;
+const MAX_READ_LIMIT_CHARS: usize = 20_000;
+
 #[derive(Debug, Deserialize)]
 struct ReadInput {
     file_path: String,
+    #[serde(default)]
+    offset: Option<usize>,
+    #[serde(default)]
+    limit: Option<usize>,
 }
 
-fn parse_input(call: &ToolCall) -> anyhow::Result<String> {
+fn parse_input(call: &ToolCall) -> anyhow::Result<ReadInput> {
     if let Some(json) = call.json_input() {
-        let input: ReadInput = serde_json::from_value(json)
-            .map_err(|error| anyhow::anyhow!("invalid read input: {error}"))?;
-        return Ok(input.file_path);
+        return Ok(serde_json::from_value(json)
+            .map_err(|error| anyhow::anyhow!("invalid read input: {error}"))?);
     }
-    Ok(call.input.trim().to_string())
+    Ok(ReadInput {
+        file_path: call.input.trim().to_string(),
+        offset: None,
+        limit: None,
+    })
+}
+
+fn slice_contents(contents: &str, offset: usize, limit: usize) -> (String, bool, usize) {
+    let total_chars = contents.chars().count();
+    let start = offset.min(total_chars);
+    let end = start.saturating_add(limit).min(total_chars);
+    let text = contents.chars().skip(start).take(end - start).collect();
+    (text, end < total_chars, total_chars)
 }
 
 #[async_trait]
@@ -48,14 +66,16 @@ impl Tool for FileReadTool {
             "type": "object",
             "required": ["file_path"],
             "properties": {
-                "file_path": {"type": "string"}
+                "file_path": {"type": "string"},
+                "offset": {"type": "integer", "minimum": 0},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 20000}
             }
         }))
     }
 
     async fn validate_input(&self, call: &ToolCall) -> anyhow::Result<()> {
-        let path = parse_input(call)?;
-        if path.trim().is_empty() {
+        let input = parse_input(call)?;
+        if input.file_path.trim().is_empty() {
             anyhow::bail!("read target cannot be empty")
         }
         Ok(())
@@ -66,7 +86,8 @@ impl Tool for FileReadTool {
         call: &ToolCall,
         permissions: &ToolPermissionContext,
     ) -> anyhow::Result<ToolResult> {
-        let raw_path = parse_input(call)?;
+        let input = parse_input(call)?;
+        let raw_path = input.file_path;
         let path = Path::new(raw_path.trim());
         if let Some(policy) = permissions.filesystem_policy() {
             policy.check_existing_path_for_read(path).into_result()?;
@@ -74,6 +95,21 @@ impl Tool for FileReadTool {
         let contents = fs::read_to_string(path)
             .await
             .map_err(|error| anyhow::anyhow!("failed to read {}: {error}", path.display()))?;
-        Ok(ToolResult::Text(contents))
+        let offset = input.offset.unwrap_or(0);
+        let requested_limit = input.limit.unwrap_or(DEFAULT_READ_LIMIT_CHARS);
+        let limit = requested_limit.clamp(1, MAX_READ_LIMIT_CHARS);
+        let (slice, truncated, total_chars) = slice_contents(&contents, offset, limit);
+        if truncated || offset > 0 || total_chars > slice.chars().count() {
+            return Ok(ToolResult::Text(format!(
+                "{slice}\n\n[Read truncated: path={}, offset={}, returned_chars={}, total_chars={}. Use Read with offset={} and limit<={} to continue.]",
+                path.display(),
+                offset,
+                slice.chars().count(),
+                total_chars,
+                offset.saturating_add(slice.chars().count()),
+                MAX_READ_LIMIT_CHARS
+            )));
+        }
+        Ok(ToolResult::Text(slice))
     }
 }

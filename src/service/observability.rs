@@ -446,8 +446,8 @@ fn compact_recovery_key(kind: &CompactPlanKind) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ApiCallRecord, ServiceObservabilityEventRecord, ServiceObservabilityExportSink,
-        ServiceObservabilitySnapshot, ServiceObservabilityTracker,
+        ApiCallRecord, ApiToolCallRecord, ServiceObservabilityEventRecord,
+        ServiceObservabilityExportSink, ServiceObservabilitySnapshot, ServiceObservabilityTracker,
     };
     use crate::core::events::{ServiceFailureCode, ServiceFailureNotice};
     use crate::service::api::errors::ApiError;

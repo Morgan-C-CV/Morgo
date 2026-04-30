@@ -114,6 +114,54 @@ async fn read_tool_returns_file_contents() {
 }
 
 #[tokio::test]
+async fn read_tool_truncates_large_files_and_supports_offsets() {
+    let dir = std::env::temp_dir().join(unique_name("rust-agent-read-large"));
+    fs::create_dir_all(&dir).await.expect("create dir");
+    let file = dir.join("large.txt");
+    let content = "a".repeat(9_000);
+    fs::write(&file, content).await.expect("write sample file");
+
+    let first = FileReadTool
+        .invoke(
+            &ToolCall {
+                name: "Read".into(),
+                input: serde_json::json!({ "file_path": file }).to_string(),
+            },
+            &ToolPermissionContext::new(PermissionMode::Default),
+        )
+        .await
+        .expect("read should succeed");
+    let ToolResult::Text(first_text) = first else {
+        panic!("expected text result");
+    };
+    assert!(first_text.contains("[Read truncated:"));
+    assert!(first_text.contains("offset=0"));
+    assert!(first_text.contains("total_chars=9000"));
+
+    let second = FileReadTool
+        .invoke(
+            &ToolCall {
+                name: "Read".into(),
+                input: serde_json::json!({
+                    "file_path": file,
+                    "offset": 8_000,
+                    "limit": 1_000
+                })
+                .to_string(),
+            },
+            &ToolPermissionContext::new(PermissionMode::Default),
+        )
+        .await
+        .expect("read offset should succeed");
+    let ToolResult::Text(second_text) = second else {
+        panic!("expected text result");
+    };
+    assert!(second_text.starts_with(&"a".repeat(1_000)));
+
+    fs::remove_dir_all(&dir).await.expect("cleanup dir");
+}
+
+#[tokio::test]
 async fn glob_tool_matches_nested_files() {
     let dir = std::env::temp_dir().join(unique_name("rust-agent-glob"));
     let nested = dir.join("nested");
