@@ -1,5 +1,6 @@
 use crate::bootstrap::config_root::resolve_config_root;
 use crate::bootstrap::model_profiles::load_model_profiles_registry_from_root;
+use crate::core::boss_acceptance::verify_artifact_expectations;
 use crate::core::boss_actor_runtime::{
     BossActorEvent, BossActorRegistry, DesignerACommand, ExecutorBCommand,
 };
@@ -50,6 +51,12 @@ pub struct BossCoordinator {
     runtime_owner: Arc<BossRuntimeOwner>,
     lism_policy: Arc<RwLock<BossLisMPolicy>>,
     lism_ab_sink: Option<SharedLisMAbSampleSink>,
+}
+
+fn step_artifact_verification_error(step: &BossPlanStep) -> Option<String> {
+    verify_artifact_expectations(step.objective())
+        .err()
+        .map(|reason| format!("artifact verification failed: {reason}"))
 }
 
 impl BossCoordinator {
@@ -1511,12 +1518,26 @@ impl BossCoordinator {
 
         let should_auto_advance = match event.status {
             TaskStatus::Completed => {
-                let was_completed = step.completed || step.status == BossPlanStepStatus::Completed;
-                step.completed = true;
-                step.status = BossPlanStepStatus::Completed;
-                step.worker_task_id = Some(event.task_id.clone());
-                tracing::info!("BossPlan: Step {} marked as completed", step_id);
-                !was_completed
+                if let Some(reason) = step_artifact_verification_error(step) {
+                    step.completed = false;
+                    step.status = BossPlanStepStatus::Failed;
+                    step.worker_task_id = Some(event.task_id.clone());
+                    step.last_review_summary = Some(reason.clone());
+                    tracing::warn!(
+                        "BossPlan: Step {} failed artifact verification: {}",
+                        step_id,
+                        reason
+                    );
+                    false
+                } else {
+                    let was_completed =
+                        step.completed || step.status == BossPlanStepStatus::Completed;
+                    step.completed = true;
+                    step.status = BossPlanStepStatus::Completed;
+                    step.worker_task_id = Some(event.task_id.clone());
+                    tracing::info!("BossPlan: Step {} marked as completed", step_id);
+                    !was_completed
+                }
             }
             TaskStatus::Failed | TaskStatus::Killed => {
                 step.completed = false;
@@ -1644,11 +1665,19 @@ impl BossCoordinator {
             };
             match decision {
                 crate::core::boss_actor_runtime::ReviewDecision::Accept { summary } => {
-                    step.last_review_summary = Some(summary.clone());
-                    step.completed = true;
-                    step.status = BossPlanStepStatus::Completed;
-                    step.last_correction = None;
-                    true
+                    if let Some(reason) = step_artifact_verification_error(step) {
+                        step.last_review_summary = Some(reason);
+                        step.completed = false;
+                        step.status = BossPlanStepStatus::Failed;
+                        step.last_correction = None;
+                        false
+                    } else {
+                        step.last_review_summary = Some(summary.clone());
+                        step.completed = true;
+                        step.status = BossPlanStepStatus::Completed;
+                        step.last_correction = None;
+                        true
+                    }
                 }
                 crate::core::boss_actor_runtime::ReviewDecision::Correct {
                     summary,
@@ -1745,15 +1774,29 @@ impl BossCoordinator {
 
         let should_auto_advance = match notification.status.as_deref().unwrap_or_default() {
             status if status.eq_ignore_ascii_case("completed") => {
-                let was_completed = step.completed || step.status == BossPlanStepStatus::Completed;
-                step.completed = true;
-                step.status = BossPlanStepStatus::Completed;
-                step.worker_task_id = notification.task_id.clone();
-                tracing::info!(
-                    "BossPlan: Step {} marked as completed via notification",
-                    step_id
-                );
-                !was_completed
+                if let Some(reason) = step_artifact_verification_error(step) {
+                    step.completed = false;
+                    step.status = BossPlanStepStatus::Failed;
+                    step.worker_task_id = notification.task_id.clone();
+                    step.last_review_summary = Some(reason.clone());
+                    tracing::warn!(
+                        "BossPlan: Step {} failed artifact verification via notification: {}",
+                        step_id,
+                        reason
+                    );
+                    false
+                } else {
+                    let was_completed =
+                        step.completed || step.status == BossPlanStepStatus::Completed;
+                    step.completed = true;
+                    step.status = BossPlanStepStatus::Completed;
+                    step.worker_task_id = notification.task_id.clone();
+                    tracing::info!(
+                        "BossPlan: Step {} marked as completed via notification",
+                        step_id
+                    );
+                    !was_completed
+                }
             }
             status
                 if status.eq_ignore_ascii_case("failed")
@@ -2002,6 +2045,32 @@ impl BossCoordinator {
                                     .ok_or_else(|| {
                                         anyhow::anyhow!("Unknown boss step {step_id}")
                                     })?;
+                                if let Some(reason) = step_artifact_verification_error(step) {
+                                    step.completed = false;
+                                    step.status = BossPlanStepStatus::Failed;
+                                    step.last_review_summary = Some(reason.clone());
+                                    drop(plan_guard);
+                                    self.update_current_step(Some(step_id)).await;
+                                    if self.get_stage().await != BossStage::Documentation {
+                                        self.transition_to(BossStage::Documentation).await?;
+                                    }
+                                    let run_id = self.current_run_id().await;
+                                    let lism_enabled = effective_lism_enabled(
+                                        self.lism_policy().await,
+                                        app_state.permission_context.lism_enabled(),
+                                    );
+                                    self.emit_lism_sample(
+                                        &run_id,
+                                        lism_enabled,
+                                        BossTestRunOutcome::Aborted,
+                                        0,
+                                    )
+                                    .await;
+                                    return Ok(Some(format!(
+                                        "LisM failed boss step {}: {}",
+                                        step_id, reason
+                                    )));
+                                }
                                 step.completed = true;
                                 step.status = BossPlanStepStatus::Completed;
                             }

@@ -9642,6 +9642,44 @@ fn t27_5_done_loop_outcome_maps_to_completed() {
 }
 
 #[test]
+fn t27_5_external_effect_step_fails_without_stateframe_tool_dispatch() {
+    use rust_agent::core::boss_state::BossStage;
+    use rust_agent::core::state_frame::ActorRole;
+    use rust_agent::core::state_frame_loop::DecisionLoopConfig;
+    use rust_agent::core::state_frame_orchestrator::{StepOutcome, run_step_with_state_frame};
+    use rust_agent::service::api::client::ModelProviderClient;
+    use rust_agent::service::api::streaming::StreamEvent;
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let done_json = r#"{"state":"done","decision":"done"}"#;
+    let client = ModelProviderClient::with_scripted_turns(vec![vec![StreamEvent::TextDelta(
+        done_json.into(),
+    )]]);
+    let plan = make_plan_with_step(
+        0,
+        "创建 demo；目标文件：/tmp/rust-agent-stateframe-tool-dispatch-required.md",
+        vec!["Task completed successfully.".into()],
+    );
+    let outcome = rt
+        .block_on(run_step_with_state_frame(
+            &client,
+            &plan,
+            BossStage::Execution,
+            0,
+            ActorRole::Worker,
+            DecisionLoopConfig::default(),
+        ))
+        .expect("should not error");
+    match outcome {
+        StepOutcome::Failed { reason, usage } => {
+            assert!(reason.contains("cannot yet perform required filesystem"));
+            assert!(usage.is_none());
+        }
+        other => panic!("expected Failed, got {other:?}"),
+    }
+}
+
+#[test]
 fn t27_5_rejected_loop_outcome_maps_to_failed_with_reason() {
     use rust_agent::core::boss_state::BossStage;
     use rust_agent::core::state_frame::ActorRole;

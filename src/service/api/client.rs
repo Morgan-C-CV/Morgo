@@ -448,6 +448,7 @@ fn build_api_call_record(
         usage.cache_creation_input_tokens,
         usage.cache_read_input_tokens,
         stop_reason,
+        input.text().to_string(),
         response_text,
     )
 }

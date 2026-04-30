@@ -55,6 +55,8 @@ pub struct ApiCallRecord {
     pub cache_creation_input_tokens: usize,
     pub cache_read_input_tokens: usize,
     pub stop_reason: Option<String>,
+    #[serde(default)]
+    pub prompt_text: String,
     pub response_text: String,
 }
 
@@ -333,6 +335,7 @@ impl ApiCallRecord {
         cache_creation_input_tokens: usize,
         cache_read_input_tokens: usize,
         stop_reason: Option<String>,
+        prompt_text: impl Into<String>,
         response_text: impl Into<String>,
     ) -> Self {
         let timestamp_ms = SystemTime::now()
@@ -350,6 +353,7 @@ impl ApiCallRecord {
             cache_creation_input_tokens,
             cache_read_input_tokens,
             stop_reason,
+            prompt_text: prompt_text.into(),
             response_text: response_text.into(),
         }
     }
@@ -657,12 +661,14 @@ mod tests {
             0,
             1024,
             Some("endturn".into()),
+            "hello prompt",
             "hello world",
         ));
 
         let text = std::fs::read_to_string(&path).expect("log file should exist");
         assert!(text.contains("\"provider_id\":\"openai\""));
         assert!(text.contains("\"model\":\"gpt-test\""));
+        assert!(text.contains("\"prompt_text\":\"hello prompt\""));
         assert!(text.contains("\"response_text\":\"hello world\""));
 
         let _ = std::fs::remove_file(path);

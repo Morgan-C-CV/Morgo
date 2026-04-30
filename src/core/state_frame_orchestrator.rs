@@ -30,6 +30,52 @@ pub struct RoutedStateFrame {
     pub model_route: ModelRoute,
 }
 
+fn contains_external_effect_marker(text: &str) -> bool {
+    let lowered = text.to_lowercase();
+    [
+        "目标目录",
+        "目标文件",
+        "目标路径",
+        "创建",
+        "生成",
+        "写入",
+        "修改文件",
+        "运行命令",
+        "运行一次",
+        "执行命令",
+        "create ",
+        "write ",
+        "modify ",
+        "edit ",
+        "run ",
+        "execute ",
+        "target directory",
+        "target file",
+        "output file",
+    ]
+    .iter()
+    .any(|marker| lowered.contains(marker))
+}
+
+/// The current StateFrame loop can decide, summarize, and request context, but it does not
+/// execute read/write/shell tool calls. Until tool dispatch is wired, direct LisM execution must
+/// reject tasks whose success depends on filesystem or command side effects.
+pub fn requires_external_tool_execution(frame: &StateFrame) -> bool {
+    frame.role == ActorRole::Worker
+        && !matches!(
+            frame.required_output_schema.as_deref(),
+            Some("readonly_audit_4_paragraphs_v1")
+        )
+        && contains_external_effect_marker(&frame.objective)
+}
+
+fn external_tool_execution_unsupported() -> StepOutcome {
+    StepOutcome::Failed {
+        reason: "StateFrame direct execution cannot yet perform required filesystem or command side effects; use full worker path or wire tool dispatch before enabling LisM for this step".into(),
+        usage: None,
+    }
+}
+
 pub fn build_routed_state_frame(
     plan: &BossPlan,
     stage: BossStage,
@@ -78,6 +124,9 @@ pub async fn run_step_with_state_frame(
     config: DecisionLoopConfig,
 ) -> anyhow::Result<StepOutcome> {
     let routed = build_routed_state_frame_with_model_route(plan, stage, step_id, role);
+    if requires_external_tool_execution(&routed.frame) {
+        return Ok(external_tool_execution_unsupported());
+    }
     let outcome = run_decision_loop(client, routed.frame, config).await?;
     Ok(map_loop_outcome(outcome))
 }
@@ -91,6 +140,9 @@ pub async fn run_step_with_state_frame_and_runtime<'a>(
     runtime: StepRuntimeResolutionContext<'a>,
 ) -> anyhow::Result<StepOutcome> {
     let routed = build_routed_state_frame_with_model_route(plan, stage, step_id, role);
+    if requires_external_tool_execution(&routed.frame) {
+        return Ok(external_tool_execution_unsupported());
+    }
     let resolved = resolve_routed_step_runtime(routed, runtime)?;
     let outcome = run_decision_loop(
         &resolved.resolved_snapshot.client,
@@ -125,6 +177,9 @@ pub async fn run_routed_step_with_runtime<'a>(
     config: DecisionLoopConfig,
     runtime: StepRuntimeResolutionContext<'a>,
 ) -> anyhow::Result<StepOutcome> {
+    if requires_external_tool_execution(&routed.frame) {
+        return Ok(external_tool_execution_unsupported());
+    }
     let resolved = resolve_routed_step_runtime(routed, runtime)?;
     let outcome = run_decision_loop(
         &resolved.resolved_snapshot.client,
