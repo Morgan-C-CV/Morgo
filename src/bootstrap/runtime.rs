@@ -636,6 +636,10 @@ impl RuntimeBootstrap {
                     if matches!(stage, crate::core::boss_state::BossStage::Completed) {
                         break;
                     }
+                    if boss.has_terminal_failure().await {
+                        println!("[boss-task] boss plan reached terminal failure — stopping poll");
+                        break;
+                    }
                     // Also exit on terminal failure so we don't waste the timeout.
                     let step_failed = if let Some(task_manager) =
                         app_arc.permission_context.task_manager.as_ref()

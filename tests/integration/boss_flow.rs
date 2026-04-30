@@ -18,6 +18,8 @@ use rust_agent::core::boss_state::{
     BossPlanStep, BossPlanStepStatus, BossStage, BossStopStage,
 };
 use rust_agent::core::boss_state::{CompressionStrategy, ContextMode};
+use rust_agent::core::boss_test_readiness::BossTestRunOutcome;
+use rust_agent::core::lism_ab_sample::new_shared_ab_sink;
 use rust_agent::core::concurrency::{
     BossBudgetDecision, MemoryPressureLevel, evaluate_boss_budget,
 };
@@ -8972,11 +8974,18 @@ async fn lism_enabled_boss_advance_plan_marks_step_completed_via_state_frame_pat
 
 #[tokio::test]
 async fn lism_enabled_boss_advance_plan_marks_step_failed_with_reason() {
-    let (coordinator, plan_path) = coordinator_with_plan(
-        boss_plan(vec![boss_step(0, "LisM failing step")]),
-        "test_boss_lism_failed.json",
-    )
-    .await;
+    let sink = new_shared_ab_sink();
+    let plan_path = std::env::temp_dir().join("test_boss_lism_failed.json");
+    save_plan(&boss_plan(vec![boss_step(0, "LisM failing step")]), &plan_path)
+        .await
+        .unwrap();
+    let owner = Arc::new(rust_agent::core::boss_runtime::BossRuntimeOwner::default());
+    let coordinator = Arc::new(
+        BossCoordinator::restore_or_init_with_owner(&plan_path, owner)
+            .await
+            .unwrap()
+            .with_lism_ab_sink(sink.clone()),
+    );
 
     let reject_json = r#"{"state":"blocked","decision":"reject","next_action":{"action_type":"reject","args":{"reason":"state frame output does not satisfy acceptance"}}}"#;
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -9019,6 +9028,11 @@ async fn lism_enabled_boss_advance_plan_marks_step_failed_with_reason() {
         step.last_review_summary.as_deref(),
         Some("state frame output does not satisfy acceptance")
     );
+    assert_eq!(coordinator.get_stage().await, BossStage::Documentation);
+    assert!(coordinator.has_terminal_failure().await);
+    assert_eq!(sink.record_count(), 1);
+    let records = sink.records();
+    assert_eq!(records[0].outcome, BossTestRunOutcome::Aborted);
 
     server.await.expect("mock provider server finished");
     let _ = std::fs::remove_file(plan_path);

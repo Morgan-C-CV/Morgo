@@ -1097,6 +1097,14 @@ impl BossCoordinator {
             })
     }
 
+    pub async fn has_terminal_failure(&self) -> bool {
+        self.plan.read().await.as_ref().is_some_and(|plan| {
+            plan.steps
+                .iter()
+                .any(|step| step.status.is_terminal_failure())
+        })
+    }
+
     fn add_task_usage_to_observability(
         summary: &mut BossObservabilitySummary,
         usage: &TaskUsageSummary,
@@ -2042,10 +2050,26 @@ impl BossCoordinator {
                                 step.status = BossPlanStepStatus::Failed;
                                 step.last_review_summary = Some(reason_clone.clone());
                             }
+                            self.update_current_step(Some(step_id)).await;
+                            if self.get_stage().await != BossStage::Documentation {
+                                self.transition_to(BossStage::Documentation).await?;
+                            }
                             if let Some(path) = self.status.read().await.planning_file.clone() {
                                 self.save_plan_with_session(std::path::Path::new(&path))
                                     .await?;
                             }
+                            let run_id = self.current_run_id().await;
+                            let lism_enabled = effective_lism_enabled(
+                                self.lism_policy().await,
+                                app_state.permission_context.lism_enabled(),
+                            );
+                            self.emit_lism_sample(
+                                &run_id,
+                                lism_enabled,
+                                BossTestRunOutcome::Aborted,
+                                0,
+                            )
+                            .await;
                             return Ok(Some(format!(
                                 "LisM failed boss step {}: {}",
                                 step_id, reason
@@ -3172,5 +3196,36 @@ mod tests {
         assert_eq!(restored.status.read().await.current_step, Some(0));
 
         std::fs::remove_file(plan_path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_has_terminal_failure_detects_failed_step() {
+        let coordinator = BossCoordinator::new();
+        {
+            let mut plan = coordinator.plan.write().await;
+            *plan = Some(BossPlan {
+                accepted_by_user: true,
+                auto_sequence: true,
+                steps: vec![crate::core::boss_state::BossPlanStep {
+                    id: 0,
+                    description: "failed".into(),
+                    objective: None,
+                    acceptance: Vec::new(),
+                    requires_approval: false,
+                    status: BossPlanStepStatus::Failed,
+                    completed: false,
+                    result_diff: None,
+                    worker_task_id: None,
+                    attempt_count: 0,
+                    retry_budget: 3,
+                    last_review_summary: None,
+                    last_correction: None,
+                    review_task_id: None,
+                }],
+                ..Default::default()
+            });
+        }
+
+        assert!(coordinator.has_terminal_failure().await);
     }
 }
