@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use crate::core::prompt_segment::{PromptSegment, PromptSegmentKind};
 
@@ -155,11 +155,174 @@ pub struct RepairNeeded {
     pub raw_json: String,
 }
 
+fn normalized_agent_state(raw: &str) -> Option<&'static str> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "planning" | "plan" => Some("planning"),
+        "executing" | "execute" | "execution" | "running" | "in_progress" => Some("executing"),
+        "reviewing" | "review" => Some("reviewing"),
+        "correcting" | "correct" => Some("correcting"),
+        "verifying" | "verify" => Some("verifying"),
+        "blocked" => Some("blocked"),
+        "done" | "completed" | "complete" | "success" | "succeeded" | "idle" => Some("done"),
+        _ => None,
+    }
+}
+
+fn normalized_decision_kind(raw: &str) -> Option<&'static str> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "continue" => Some("continue"),
+        "request_context" | "requestcontext" => Some("request_context"),
+        "call_tool" | "calltool" | "tool" => Some("call_tool"),
+        "handoff" => Some("handoff"),
+        "accept" => Some("accept"),
+        "reject" => Some("reject"),
+        "done" | "complete" | "completed" | "finish" | "finished" => Some("done"),
+        _ => None,
+    }
+}
+
+fn infer_decision_kind(
+    explicit: Option<&str>,
+    state: Option<&str>,
+    needed_context: Option<&Vec<Value>>,
+    actions: Option<&Vec<Value>>,
+) -> &'static str {
+    if let Some(kind) = explicit.and_then(normalized_decision_kind) {
+        return kind;
+    }
+    if needed_context
+        .map(|items| !items.is_empty())
+        .unwrap_or(false)
+    {
+        return "request_context";
+    }
+    if actions.map(|items| !items.is_empty()).unwrap_or(false) {
+        return "call_tool";
+    }
+    if matches!(state.and_then(normalized_agent_state), Some("done")) {
+        return "done";
+    }
+    "continue"
+}
+
+fn normalize_state_patch(
+    patch: Option<&Map<String, Value>>,
+    root: &Map<String, Value>,
+) -> Option<Value> {
+    let mut normalized = Map::new();
+    let accepted_summary = patch
+        .and_then(|m| {
+            m.get("accepted_summary_add")
+                .or_else(|| m.get("accepted_summary"))
+        })
+        .or_else(|| {
+            root.get("accepted_summary_add")
+                .or_else(|| root.get("accepted_summary"))
+        });
+    let open_items_add = patch
+        .and_then(|m| m.get("open_items_add").or_else(|| m.get("open_items")))
+        .or_else(|| {
+            root.get("open_items_add")
+                .or_else(|| root.get("open_items"))
+        });
+    let open_items_remove = patch.and_then(|m| m.get("open_items_remove"));
+
+    if let Some(value) = accepted_summary {
+        normalized.insert("accepted_summary_add".into(), value.clone());
+    }
+    if let Some(value) = open_items_add {
+        normalized.insert("open_items_add".into(), value.clone());
+    }
+    if let Some(value) = open_items_remove {
+        normalized.insert("open_items_remove".into(), value.clone());
+    }
+
+    if normalized.is_empty() {
+        None
+    } else {
+        Some(Value::Object(normalized))
+    }
+}
+
+fn normalize_state_decision_value(value: Value) -> Result<Value, String> {
+    let root = value
+        .as_object()
+        .ok_or_else(|| "StateDecision must be a JSON object".to_string())?;
+    let nested = root.get("decision").and_then(Value::as_object);
+
+    let state_raw = root
+        .get("state")
+        .and_then(Value::as_str)
+        .or_else(|| nested.and_then(|m| m.get("state").and_then(Value::as_str)))
+        .or_else(|| nested.and_then(|m| m.get("next_state").and_then(Value::as_str)));
+    let state = state_raw
+        .and_then(normalized_agent_state)
+        .ok_or_else(|| "missing or unsupported state/next_state".to_string())?;
+
+    let needed_context = root
+        .get("needed_context")
+        .and_then(Value::as_array)
+        .or_else(|| nested.and_then(|m| m.get("needed_context").and_then(Value::as_array)));
+    let actions = root
+        .get("actions")
+        .and_then(Value::as_array)
+        .or_else(|| nested.and_then(|m| m.get("actions").and_then(Value::as_array)));
+    let decision_raw = root
+        .get("decision")
+        .and_then(Value::as_str)
+        .or_else(|| nested.and_then(|m| m.get("decision").and_then(Value::as_str)));
+    let decision = infer_decision_kind(decision_raw, Some(state), needed_context, actions);
+
+    let mut normalized = Map::new();
+    normalized.insert("state".into(), Value::String(state.to_string()));
+    normalized.insert("decision".into(), Value::String(decision.to_string()));
+
+    if let Some(next_action) = root
+        .get("next_action")
+        .cloned()
+        .or_else(|| nested.and_then(|m| m.get("next_action").cloned()))
+    {
+        normalized.insert("next_action".into(), next_action);
+    }
+    if let Some(items) = needed_context {
+        normalized.insert("needed_context".into(), Value::Array(items.clone()));
+    }
+    if let Some(patch) =
+        normalize_state_patch(root.get("state_patch").and_then(Value::as_object), root)
+    {
+        normalized.insert("state_patch".into(), patch);
+    }
+    if let Some(confidence) = root
+        .get("confidence")
+        .cloned()
+        .or_else(|| nested.and_then(|m| m.get("confidence").cloned()))
+    {
+        normalized.insert("confidence".into(), confidence);
+    }
+    if let Some(escalate) = root
+        .get("escalate")
+        .cloned()
+        .or_else(|| nested.and_then(|m| m.get("escalate").cloned()))
+    {
+        normalized.insert("escalate".into(), escalate);
+    }
+
+    Ok(Value::Object(normalized))
+}
+
 /// Parse and validate a JSON string as a `StateDecision`.
 /// Pure function — no LLM calls, no side effects.
 /// Returns `Err(RepairNeeded)` if the JSON is invalid or missing required fields.
 pub fn validate_state_decision(json: &str) -> Result<StateDecision, RepairNeeded> {
-    let decision: StateDecision = serde_json::from_str(json).map_err(|e| RepairNeeded {
+    let parsed: Value = serde_json::from_str(json).map_err(|e| RepairNeeded {
+        reason: format!("JSON parse error: {e}"),
+        raw_json: json.to_string(),
+    })?;
+    let normalized = normalize_state_decision_value(parsed).map_err(|reason| RepairNeeded {
+        reason,
+        raw_json: json.to_string(),
+    })?;
+    let decision: StateDecision = serde_json::from_value(normalized).map_err(|e| RepairNeeded {
         reason: format!("JSON parse error: {e}"),
         raw_json: json.to_string(),
     })?;

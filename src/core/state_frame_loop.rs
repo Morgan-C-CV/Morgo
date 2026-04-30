@@ -1,6 +1,6 @@
 use crate::core::message::Message;
 use crate::core::state_frame::{
-    AgentState, DecisionKind, StateFrame, StatePatch, validate_state_decision,
+    AgentState, DecisionKind, RepairNeeded, StateFrame, StatePatch, validate_state_decision,
 };
 use crate::service::api::client::ModelProviderClient;
 use crate::service::api::streaming::StreamEvent;
@@ -106,7 +106,9 @@ Rules:\n\
 - Use \"decision\": \"continue\" only when you also change state or provide a non-empty state_patch that advances the frame\n\
 - When adding accepted summary lines, use `state_patch.accepted_summary_add`; do not emit `accepted_summary` as a replacement field\n\
 - When adding open items, use `state_patch.open_items_add`; do not emit `open_items` as a replacement field\n\
+- Do NOT return wrapper payloads like `{ \"type\": ..., \"valid\": ..., \"decision\": {...} }`; return the canonical StateDecision object itself\n\
 - If `recent_evidence` contains `fact: execution_mode read_only_analysis`, prefer a single-turn `done`; do not use `continue` just to outline or narrate your plan\n\
+- If `required_output_schema` is `readonly_audit_4_paragraphs_v1`, return `decision=\"done\"` with exactly 4 `state_patch.accepted_summary_add` items, one each for `现状`、`主要风险`、`证据来源`、`下一步建议`\n\
 - Treat `recent_evidence` entries prefixed with `fact:` as the authoritative Fact Ledger for this turn\n\
 - If a fact entry already says `none`, `none recorded`, `absent`, or equivalent, do NOT request that same context again\n\
 - Only use \"decision\": \"request_context\" when the missing fact is not already present in objective/open_items/blocked_items/accepted_summary/recent_evidence\n\
@@ -137,6 +139,61 @@ fn apply_state_patch(frame: &mut StateFrame, patch: &StatePatch) -> bool {
         changed |= push_unique(&mut frame.accepted_summary, item.clone());
     }
     changed
+}
+
+fn requires_readonly_audit_contract(frame: &StateFrame) -> bool {
+    frame.required_output_schema.as_deref() == Some("readonly_audit_4_paragraphs_v1")
+}
+
+fn validate_decision_for_frame(
+    frame: &StateFrame,
+    decision: &crate::core::state_frame::StateDecision,
+) -> Result<(), RepairNeeded> {
+    if !requires_readonly_audit_contract(frame) {
+        return Ok(());
+    }
+
+    if decision.decision != DecisionKind::Done {
+        return Err(RepairNeeded {
+            reason: "readonly_audit_4_paragraphs_v1 requires decision=done".into(),
+            raw_json: String::new(),
+        });
+    }
+
+    let sections = &decision.state_patch.accepted_summary_add;
+    if sections.len() != 4 {
+        return Err(RepairNeeded {
+            reason: format!(
+                "readonly_audit_4_paragraphs_v1 requires exactly 4 accepted_summary_add items; got {}",
+                sections.len()
+            ),
+            raw_json: String::new(),
+        });
+    }
+
+    for item in sections {
+        if item.trim().is_empty() {
+            return Err(RepairNeeded {
+                reason: "readonly_audit_4_paragraphs_v1 does not allow empty paragraph items"
+                    .into(),
+                raw_json: String::new(),
+            });
+        }
+    }
+
+    Ok(())
+}
+
+fn parse_and_validate_decision(
+    frame: &StateFrame,
+    text: &str,
+) -> Result<crate::core::state_frame::StateDecision, RepairNeeded> {
+    let decision = validate_state_decision(text)?;
+    validate_decision_for_frame(frame, &decision).map_err(|mut err| {
+        err.raw_json = text.to_string();
+        err
+    })?;
+    Ok(decision)
 }
 
 /// Run a stateless JSON decision loop.
@@ -173,7 +230,7 @@ pub async fn run_decision_loop(
         total_usage.cache_write_tokens += iter_usage.cache_write_tokens;
 
         // Repair loop: retry on JSON parse failure.
-        let decision = match validate_state_decision(&text) {
+        let decision = match parse_and_validate_decision(&frame, &text) {
             Ok(d) => d,
             Err(first_repair) => {
                 let mut last_repair = first_repair;
@@ -196,7 +253,7 @@ pub async fn run_decision_loop(
                     total_usage.output_tokens += repair_usage.output_tokens;
                     total_usage.cache_read_tokens += repair_usage.cache_read_tokens;
                     total_usage.cache_write_tokens += repair_usage.cache_write_tokens;
-                    match validate_state_decision(&repaired_text) {
+                    match parse_and_validate_decision(&frame, &repaired_text) {
                         Ok(d) => {
                             resolved = Some(d);
                             break;

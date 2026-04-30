@@ -236,7 +236,11 @@ pub fn project_state_frame(
         allowed_actions,
         toolset_id: None,
         skillset_id: None,
-        required_output_schema: Some("state_decision_v1".into()),
+        required_output_schema: Some(if readonly_analysis {
+            "readonly_audit_4_paragraphs_v1".into()
+        } else {
+            "state_decision_v1".into()
+        }),
         budget: StateBudget::default(),
     }
 }

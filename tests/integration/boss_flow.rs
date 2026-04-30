@@ -7559,6 +7559,25 @@ fn t27_2_state_decision_patch_aliases_deserialize() {
     assert_eq!(decision.state_patch.open_items_add, vec!["verify evidence"]);
 }
 
+#[test]
+fn t27_2_state_decision_wrapper_payload_normalizes() {
+    use rust_agent::core::state_frame::{AgentState, DecisionKind, validate_state_decision};
+
+    let json = r#"{
+        "type": "StateDecision",
+        "valid": true,
+        "decision": {
+            "next_state": "Idle",
+            "actions": []
+        },
+        "message": "StateDecision generated successfully."
+    }"#;
+
+    let decision = validate_state_decision(json).expect("should normalize");
+    assert_eq!(decision.state, AgentState::Done);
+    assert_eq!(decision.decision, DecisionKind::Done);
+}
+
 // ── T27.3 StateFrame projection ───────────────────────────────────────────
 
 #[test]
@@ -8232,6 +8251,64 @@ fn t27_4_continue_clearing_open_items_auto_completes() {
         }
         other => panic!("expected Done after clearing open_items, got {other:?}"),
     }
+}
+
+#[test]
+fn t27_4_readonly_audit_contract_repairs_short_summary() {
+    use rust_agent::core::state_frame::{ActorRole, AgentState, StateBudget, StateFrame};
+    use rust_agent::core::state_frame_loop::{DecisionLoopConfig, LoopOutcome, run_decision_loop};
+    use rust_agent::service::api::client::ModelProviderClient;
+    use rust_agent::service::api::streaming::StreamEvent;
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let invalid_done = r#"{
+        "state":"done",
+        "decision":"done",
+        "state_patch":{"accepted_summary_add":["too short"]}
+    }"#;
+    let repaired_done = r#"{
+        "state":"done",
+        "decision":"done",
+        "state_patch":{
+            "accepted_summary_add":[
+                "现状：当前 LisM 以只读 StateFrame 模式总结任务。",
+                "主要风险：projection 漏事实与 prefix 不稳定会影响质量与成本。",
+                "证据来源：结论基于提供文档摘录与当前 StateFrame 事实。",
+                "下一步建议：继续保留 fallback ladder 并监控 cache 与 schema 漂移。"
+            ]
+        }
+    }"#;
+    let client = ModelProviderClient::with_scripted_turns(vec![
+        vec![StreamEvent::TextDelta(invalid_done.into())],
+        vec![StreamEvent::TextDelta(repaired_done.into())],
+    ]);
+    let frame = StateFrame {
+        role: ActorRole::Worker,
+        state: AgentState::Executing,
+        objective: "write readonly audit".into(),
+        open_items: vec!["Task completed successfully.".into()],
+        blocked_items: vec![],
+        accepted_summary: vec![],
+        recent_evidence: vec![
+            "fact: execution_mode read_only_analysis no_file_edits no_patch".into(),
+        ],
+        allowed_actions: vec!["read_file".into(), "summarize_findings".into()],
+        toolset_id: None,
+        skillset_id: None,
+        required_output_schema: Some("readonly_audit_4_paragraphs_v1".into()),
+        budget: StateBudget::default(),
+    };
+    let outcome = rt
+        .block_on(run_decision_loop(
+            &client,
+            frame,
+            DecisionLoopConfig {
+                max_iterations: 5,
+                repair_budget: 1,
+            },
+        ))
+        .expect("loop should not error");
+    assert!(matches!(outcome, LoopOutcome::Done { .. }));
 }
 
 #[tokio::test]
