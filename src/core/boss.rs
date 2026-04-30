@@ -1858,12 +1858,16 @@ impl BossCoordinator {
 
             if plan.steps.iter().all(|step| step.completed) {
                 Some(AdvanceOutcome::PlanComplete)
-            } else if plan
+            } else if let Some(step) = plan
                 .steps
                 .iter()
-                .any(|step| step.status.is_terminal_failure())
+                .find(|step| step.status.is_terminal_failure())
             {
-                Some(AdvanceOutcome::TerminalFailure)
+                Some(AdvanceOutcome::TerminalFailure(
+                    step.last_review_summary
+                        .clone()
+                        .unwrap_or_else(|| format!("step {} failed", step.id)),
+                ))
             } else if plan
                 .steps
                 .iter()
@@ -1921,7 +1925,11 @@ impl BossCoordinator {
                     "Boss plan complete; no further steps to dispatch.".into(),
                 ))
             }
-            Some(AdvanceOutcome::TerminalFailure) => {
+            Some(AdvanceOutcome::TerminalFailure(reason)) => {
+                self.update_current_step(None).await;
+                if self.get_stage().await != BossStage::Documentation {
+                    self.transition_to(BossStage::Documentation).await?;
+                }
                 let run_id = self.current_run_id().await;
                 let lism_enabled = effective_lism_enabled(
                     self.lism_policy().await,
@@ -1929,9 +1937,10 @@ impl BossCoordinator {
                 );
                 self.emit_lism_sample(&run_id, lism_enabled, BossTestRunOutcome::Aborted, 0)
                     .await;
-                Ok(Some(
-                    "Boss plan stopped after a terminal step failure; auto-advance halted.".into(),
-                ))
+                Ok(Some(format!(
+                    "Boss plan stopped after a terminal step failure; auto-advance halted. Reason: {}",
+                    reason
+                )))
             }
             Some(AdvanceOutcome::ApprovalBarrier(step_id)) => {
                 self.update_step_status(step_id, BossPlanStepStatus::WaitingForApproval)
@@ -2840,7 +2849,7 @@ impl BossCoordinator {
 enum AdvanceOutcome {
     Dispatch(usize),
     ApprovalBarrier(usize),
-    TerminalFailure,
+    TerminalFailure(String),
     PlanComplete,
     ReplanRequired(usize, String),
     NoRunnableStep,

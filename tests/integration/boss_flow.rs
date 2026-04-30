@@ -10576,6 +10576,41 @@ async fn t27_8_lism_boss_production_path_missing_inherited_snapshot_returns_erro
     let _ = std::fs::remove_file(plan_path);
 }
 
+#[tokio::test]
+async fn t27_8_terminal_failure_transitions_stage_to_documentation_and_surfaces_reason() {
+    let mut failed_step = boss_step(0, "artifact verification should fail");
+    failed_step.status = BossPlanStepStatus::Failed;
+    failed_step.completed = false;
+    failed_step.last_review_summary =
+        Some("artifact verification failed: target file missing".into());
+    let (coordinator, plan_path) = coordinator_with_plan(
+        boss_plan(vec![failed_step]),
+        "test_boss_t278_terminal_failure_stage.json",
+    )
+    .await;
+
+    {
+        let mut status = coordinator.status.write().await;
+        status.stage = BossStage::Execution;
+        status.current_step = Some(0);
+        status.total_steps = Some(1);
+    }
+
+    let app_state = app_state("t278-terminal-failure");
+    let message = coordinator
+        .advance_plan(&app_state)
+        .await
+        .expect("advance should succeed")
+        .expect("terminal failure should return message");
+
+    assert!(message.contains("terminal step failure"));
+    assert!(message.contains("artifact verification failed"));
+    assert_eq!(coordinator.get_stage().await, BossStage::Documentation);
+    assert_eq!(coordinator.status.read().await.current_step, None);
+
+    let _ = std::fs::remove_file(plan_path);
+}
+
 // ── T27.9 Boss production-path override contract ──────────────────────────
 //
 // These tests verify the override contract at the orchestrator seam that
