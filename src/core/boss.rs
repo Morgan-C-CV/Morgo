@@ -30,6 +30,7 @@ use crate::task::manager::TaskManager;
 use crate::task::types::{TaskEvent, TaskStatus, TaskUsageSummary};
 use crate::tool::definition::{Tool, ToolCall};
 use serde_json::json;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -79,6 +80,7 @@ fn seed_step_acceptance(task: &str) -> Vec<String> {
 
 fn extract_relevant_file_hints(text: &str) -> Vec<String> {
     let mut hints = Vec::new();
+    let cwd = std::env::current_dir().ok();
     for line in text.lines() {
         let trimmed = line.trim();
         if !(trimmed.starts_with('-') || trimmed.starts_with("目标文件") || trimmed.starts_with("目标目录")) {
@@ -103,13 +105,41 @@ fn extract_relevant_file_hints(text: &str) -> Vec<String> {
             {
                 continue;
             }
-            let candidate = candidate.to_string();
+            let candidate = normalize_relevant_file_hint(candidate, cwd.as_deref())
+                .unwrap_or_else(|| candidate.to_string());
             if !hints.iter().any(|existing| existing == &candidate) {
                 hints.push(candidate);
             }
         }
     }
     hints
+}
+
+fn normalize_relevant_file_hint(candidate: &str, cwd: Option<&Path>) -> Option<String> {
+    let cwd = cwd?;
+    let candidate_path = Path::new(candidate);
+    if candidate_path.is_absolute() {
+        return Some(candidate.to_string());
+    }
+
+    let mut attempts: Vec<PathBuf> = vec![cwd.join(candidate_path)];
+    if candidate.starts_with("src/") {
+        attempts.push(cwd.join("RustAgent/Agent").join(candidate_path));
+    }
+    if let Some(rest) = candidate.strip_prefix("../docs/") {
+        attempts.push(cwd.join("RustAgent/docs").join(rest));
+    }
+
+    for attempt in attempts {
+        if attempt.exists() {
+            if let Ok(relative) = attempt.strip_prefix(cwd) {
+                return Some(relative.to_string_lossy().replace('\\', "/"));
+            }
+            return Some(attempt.to_string_lossy().replace('\\', "/"));
+        }
+    }
+
+    None
 }
 
 fn summarize_acceptance_items(step: &BossPlanStep) -> String {
@@ -3532,5 +3562,22 @@ mod tests {
         assert!(acceptance.iter().any(|item| {
             item == "target file exists and is non-empty: /tmp/example-report.md"
         }));
+    }
+
+    #[test]
+    fn extract_relevant_file_hints_normalizes_agent_relative_paths() {
+        let repo_root = Path::new("/Users/wangmorgan/MProject/LearnCCfromCC");
+        assert_eq!(
+            normalize_relevant_file_hint("src/tool/definition.rs", Some(repo_root)).as_deref(),
+            Some("RustAgent/Agent/src/tool/definition.rs")
+        );
+        assert_eq!(
+            normalize_relevant_file_hint(
+                "../docs/30-boss-mode-and-dual-agent-workflow.md",
+                Some(repo_root)
+            )
+            .as_deref(),
+            Some("RustAgent/docs/30-boss-mode-and-dual-agent-workflow.md")
+        );
     }
 }

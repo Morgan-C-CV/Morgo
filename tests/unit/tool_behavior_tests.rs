@@ -612,7 +612,7 @@ async fn bash_tool_launches_background_task() {
 #[tokio::test]
 async fn registry_rejects_non_json_input_for_schema_backed_tools() {
     let registry = ToolRegistry::new().register(Arc::new(FileEditTool));
-    let error = registry
+    let result = registry
         .invoke(
             &ToolCall {
                 name: "Edit".into(),
@@ -621,13 +621,31 @@ async fn registry_rejects_non_json_input_for_schema_backed_tools() {
             &ToolPermissionContext::new(PermissionMode::Default),
         )
         .await
-        .expect_err("schema-backed tool should reject non-json input");
+        .expect("schema-backed tool should surface structured failure");
 
-    assert!(
-        error
-            .to_string()
-            .contains("tool Edit requires JSON-structured input")
-    );
+    let ToolResult::Interrupted(message) = result else {
+        panic!("expected interrupted result");
+    };
+    assert!(message.contains("tool Edit requires JSON-structured input"));
+}
+
+#[tokio::test]
+async fn registry_surfaces_unknown_tool_as_structured_failure() {
+    let result = ToolRegistry::new()
+        .invoke(
+            &ToolCall {
+                name: "MissingTool".into(),
+                input: "{}".into(),
+            },
+            &ToolPermissionContext::new(PermissionMode::Default),
+        )
+        .await
+        .expect("unknown tool should surface structured failure");
+
+    let ToolResult::Interrupted(message) = result else {
+        panic!("expected interrupted result");
+    };
+    assert!(message.contains("unknown tool MissingTool"));
 }
 
 #[tokio::test]

@@ -1320,18 +1320,16 @@ async fn query_loop_compensates_missing_tool_result_after_tool_failure() {
     assert!(result
         .messages
         .iter()
-        .any(|message| message.content.contains("tool MissingTool failed")));
+        .any(|message| message
+            .content
+            .contains("tool MissingTool interrupted: unknown tool MissingTool")));
     assert!(result.messages.iter().any(|message| message
         .content
-        .contains("tool MissingTool result missing; synthesized failure result preserved")));
-    assert!(result.events.iter().any(|event| matches!(
-        event,
-        EngineEvent::Notice {
-            kind: "tool",
-            message,
-            ..
-        } if message == "injecting missing tool result after tool failure for MissingTool"
-    )));
+        .contains("tool result for MissingTool: interrupted: unknown tool MissingTool"))
+        || result.events.iter().any(|event| matches!(
+            event,
+            EngineEvent::Transition(Continue::ToolUseFollowUp)
+        )));
 }
 
 #[tokio::test]

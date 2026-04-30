@@ -274,22 +274,35 @@ impl ToolRegistry {
         call: &ToolCall,
         permissions: &ToolPermissionContext,
     ) -> anyhow::Result<ToolResult> {
-        let tool = self
-            .find(call)
-            .ok_or_else(|| anyhow::anyhow!("unknown tool {}", call.name))?;
+        let Some(tool) = self.find(call) else {
+            return Ok(ToolResult::Interrupted(format!(
+                "unknown tool {}",
+                call.name
+            )));
+        };
 
         let metadata = tool.metadata();
         if tool.input_schema().is_some() && call.json_input().is_none() {
-            anyhow::bail!("tool {} requires JSON-structured input", metadata.name);
+            return Ok(ToolResult::Interrupted(format!(
+                "tool {} requires JSON-structured input",
+                metadata.name
+            )));
         }
-        tool.validate_input(call).await?;
+        if let Err(error) = tool.validate_input(call).await {
+            return Ok(ToolResult::Interrupted(format!(
+                "invalid input for {}: {}",
+                metadata.name, error
+            )));
+        }
         let base_decision = evaluate_tool_permission(&metadata, call, permissions);
         let tool_decision = tool.check_permissions(call, permissions).await;
         let resolved_decision = merge_permission_decisions(base_decision, tool_decision);
         match resolved_decision {
-            crate::tool::definition::PermissionDecision::Allow => {
-                tool.invoke(call, permissions).await
-            }
+            crate::tool::definition::PermissionDecision::Allow => match tool.invoke(call, permissions).await
+            {
+                Ok(result) => Ok(result),
+                Err(error) => Ok(ToolResult::Interrupted(error.to_string())),
+            },
             crate::tool::definition::PermissionDecision::Ask {
                 message,
                 metadata: approval_metadata,
@@ -333,15 +346,29 @@ impl ToolRegistry {
         call: &ToolCall,
         permissions: &ToolPermissionContext,
     ) -> anyhow::Result<ToolResult> {
-        let tool = self
-            .find(call)
-            .ok_or_else(|| anyhow::anyhow!("unknown tool {}", call.name))?;
+        let Some(tool) = self.find(call) else {
+            return Ok(ToolResult::Interrupted(format!(
+                "unknown tool {}",
+                call.name
+            )));
+        };
         let metadata = tool.metadata();
         if tool.input_schema().is_some() && call.json_input().is_none() {
-            anyhow::bail!("tool {} requires JSON-structured input", metadata.name);
+            return Ok(ToolResult::Interrupted(format!(
+                "tool {} requires JSON-structured input",
+                metadata.name
+            )));
         }
-        tool.validate_input(call).await?;
-        tool.invoke(call, permissions).await
+        if let Err(error) = tool.validate_input(call).await {
+            return Ok(ToolResult::Interrupted(format!(
+                "invalid input for {}: {}",
+                metadata.name, error
+            )));
+        }
+        match tool.invoke(call, permissions).await {
+            Ok(result) => Ok(result),
+            Err(error) => Ok(ToolResult::Interrupted(error.to_string())),
+        }
     }
 }
 
