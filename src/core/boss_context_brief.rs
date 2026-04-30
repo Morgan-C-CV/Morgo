@@ -13,6 +13,10 @@ pub enum BossContextStrategy {
 /// Stable, cacheable fields for a B/child actor's initial context.
 /// Maps to `PromptSegmentKind::ActorBrief` (cacheable).
 /// `recent_decisions` and `relevant_files` are v1 empty — T27 will populate them.
+///
+/// Important for provider-side prompt cache efficiency: volatile identifiers like
+/// `plan_id` must render late in the segment so stable task semantics can occupy
+/// the earliest prefix tokens.
 #[derive(Debug, Clone)]
 pub struct BossContextBrief {
     pub plan_id: String,
@@ -45,9 +49,8 @@ impl BossContextBrief {
     /// Render the stable fields as a `PromptSegment` (cacheable).
     pub fn to_prompt_segment(&self) -> PromptSegment {
         let mut lines = vec![
-            format!("plan_id: {}", self.plan_id),
-            format!("step_id: {}", self.step_id),
             format!("objective: {}", self.objective),
+            format!("step_id: {}", self.step_id),
         ];
         if !self.acceptance.is_empty() {
             lines.push("acceptance:".into());
@@ -74,6 +77,7 @@ impl BossContextBrief {
             lines.push(format!("allowed_tools: {}", self.allowed_tools.join(", ")));
         }
         lines.push(format!("parent_session_id: {}", self.parent_session_id));
+        lines.push(format!("plan_id: {}", self.plan_id));
         PromptSegment::new(
             "actor_brief",
             PromptSegmentKind::ActorBrief,

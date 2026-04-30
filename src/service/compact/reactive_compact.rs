@@ -39,6 +39,11 @@ pub struct CompactServiceResult {
 #[derive(Debug, Clone, Default)]
 pub struct ReactiveCompactor;
 
+/// `prepare_turn` currently estimates prompt size with `prompt.len()`, i.e. chars not tokens.
+/// Keep the auto-compact threshold materially above the provider prompt-cache floor so
+/// full-context runs can still exercise prompt caching before local compaction intervenes.
+pub const AUTO_COMPACT_INPUT_CHAR_LIMIT: usize = 16_384;
+
 impl ReactiveCompactor {
     pub fn plan_auto_compact(
         &self,

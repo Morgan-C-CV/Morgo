@@ -21,7 +21,9 @@ use rust_agent::service::api::retry::RetryPolicy;
 use rust_agent::service::api::streaming::{
     ProviderFailureDisposition, StopReason, StreamError, StreamEvent, UsageEvent,
 };
-use rust_agent::service::compact::reactive_compact::{CompactServiceNextStep, ReactiveCompactor};
+use rust_agent::service::compact::reactive_compact::{
+    AUTO_COMPACT_INPUT_CHAR_LIMIT, CompactServiceNextStep, ReactiveCompactor,
+};
 use rust_agent::service::observability::ServiceObservabilityTracker;
 use rust_agent::state::active_model_runtime::{ActiveModelRuntime, ActiveModelRuntimeSnapshot};
 use rust_agent::state::app_state::WorkerRole;
@@ -705,7 +707,7 @@ async fn query_loop_uses_max_output_escalation_then_recovery() {
 fn compact_service_returns_typed_auto_compact_contract() {
     let compactor = ReactiveCompactor;
     let compact = compactor
-        .plan_auto_compact(5000, 4096)
+        .plan_auto_compact(AUTO_COMPACT_INPUT_CHAR_LIMIT + 1, AUTO_COMPACT_INPUT_CHAR_LIMIT)
         .expect("oversized input should request auto compact");
 
     assert_eq!(
@@ -728,7 +730,7 @@ fn compact_service_returns_typed_auto_compact_contract() {
 #[tokio::test]
 async fn query_loop_requests_compaction_for_large_input() {
     let engine = QueryEngine::new(test_context(Vec::new()));
-    let oversized = "x".repeat(5000);
+    let oversized = "x".repeat(AUTO_COMPACT_INPUT_CHAR_LIMIT + 1);
 
     let result = engine.submit_turn(Message::user(oversized)).await;
 

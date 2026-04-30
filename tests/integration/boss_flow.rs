@@ -6308,7 +6308,27 @@ fn t26_4_assembly_output_contains_brief_and_state_frame() {
     );
 }
 
-/// T26.4.6: build_b_step_payload uses brief/state_frame (inherit_context: false).
+/// T26.4.6: objective renders before volatile plan_id so provider cache can lock
+/// onto stable task semantics before run-specific identifiers.
+#[test]
+fn t26_4_brief_renders_stable_semantics_before_plan_id() {
+    let brief = make_brief(BossContextStrategy::Brief);
+    let seg = brief.to_prompt_segment();
+    let objective_idx = seg
+        .content
+        .find("objective: implement the feature")
+        .expect("objective must render");
+    let plan_id_idx = seg
+        .content
+        .find("plan_id: plan-t26-4")
+        .expect("plan_id must render");
+    assert!(
+        objective_idx < plan_id_idx,
+        "objective should precede plan_id to stabilize the provider cache prefix"
+    );
+}
+
+/// T26.4.7: build_b_step_payload uses brief/state_frame (inherit_context: false).
 #[tokio::test]
 async fn t26_4_dispatch_payload_uses_brief_not_full_inherit() {
     let plan_path = std::env::temp_dir().join("t26_4_dispatch.json");

@@ -6,7 +6,9 @@ use crate::hook::registry::HookEvent;
 use crate::service::api::streaming::{
     ProviderFailureDisposition, StopReason, StreamError, StreamEvent,
 };
-use crate::service::compact::{CompactRecoveryErrorContext, CompactServiceNextStep};
+use crate::service::compact::{
+    AUTO_COMPACT_INPUT_CHAR_LIMIT, CompactRecoveryErrorContext, CompactServiceNextStep,
+};
 use crate::tool::orchestrator::{ToolExecutionOutcome, aggregate_execution_records};
 use crate::tool::result::{
     ToolExecutionRecord, ToolExecutionReport, ToolReportContextModifier, ToolReportModifier,
@@ -342,7 +344,7 @@ fn prepare_turn(
 
     if let Some(compact) = context
         .compactor
-        .plan_auto_compact(prepared.token_estimate, 4096)
+        .plan_auto_compact(prepared.token_estimate, AUTO_COMPACT_INPUT_CHAR_LIMIT)
     {
         if let Some(compact_message) = compact.plan.assistant_message.clone() {
             let compact_message = Message::assistant(compact_message);
