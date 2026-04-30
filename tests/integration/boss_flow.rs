@@ -42,7 +42,7 @@ use rust_agent::state::permission_context::{
     BossActorPolicy, PermissionMode, ToolPermissionContext,
 };
 use rust_agent::task::manager::TaskManager;
-use rust_agent::task::types::{TaskEvent, TaskOwner, TaskStatus, TaskType};
+use rust_agent::task::types::{TaskEvent, TaskOwner, TaskStatus, TaskType, TaskUsageSummary};
 use rust_agent::tool::builtin::agent::AgentTool;
 use rust_agent::tool::definition::{Tool, ToolCall};
 use rust_agent::tool::registry::{ToolAssemblyContext, ToolRegistry};
@@ -10966,6 +10966,87 @@ async fn t27_8_lism_external_effect_step_falls_back_to_full_worker_path() {
 
     let _ = std::fs::remove_file(plan_path);
     let _ = std::fs::remove_dir_all("/tmp/t278_lism_external_effect_fallback");
+}
+
+#[tokio::test]
+async fn t27_8_lism_fallback_metadata_does_not_mask_worker_usage() {
+    let task_manager = Arc::new(TaskManager::default());
+    let mut step = boss_step(0, "external effect fallback usage");
+    step.objective = Some("写入目标文件：/tmp/t278_lism_fallback_usage/report.md".into());
+    step.acceptance = vec!["Task completed successfully.".into()];
+    let (coordinator, plan_path) = coordinator_with_plan(
+        boss_plan(vec![step]),
+        "test_boss_t278_lism_fallback_usage.json",
+    )
+    .await;
+
+    let mut app =
+        (*app_state_with_tasks("t278-external-effect-fallback-usage", task_manager.clone()))
+            .clone();
+    app.permission_context.set_lism_enabled(true);
+    app.permission_context.inherited_active_model_snapshot = None;
+    let app_state = Arc::new(app);
+
+    coordinator
+        .advance_plan(&app_state)
+        .await
+        .expect("fallback path should dispatch full worker");
+
+    let task = task_manager
+        .list()
+        .into_iter()
+        .last()
+        .expect("fallback dispatch should create a worker task");
+    let dispatcher = NotificationDispatcher::new(TelegramGateway::default());
+    task_manager.complete_with_usage(
+        &task.id,
+        &dispatcher,
+        Some(TaskUsageSummary {
+            requests: 2,
+            input_tokens: 2400,
+            uncached_input_tokens: 1800,
+            output_tokens: 321,
+            cache_creation_input_tokens: 128,
+            cache_read_input_tokens: 512,
+            original_prompt_chars: 12000,
+            sent_prompt_chars: 7600,
+            cache_hit_requests: 1,
+            estimated_cost_micros_usd: 9876,
+        }),
+    );
+
+    {
+        let mut plan = coordinator.plan.write().await;
+        let step = plan
+            .as_mut()
+            .expect("plan should exist")
+            .steps
+            .iter_mut()
+            .find(|step| step.id == 0)
+            .expect("step should exist");
+        step.worker_task_id = Some(task.id);
+        step.completed = true;
+        step.status = BossPlanStepStatus::Completed;
+    }
+
+    let report = coordinator.report_progress(&task_manager).await.unwrap();
+    let summary = report
+        .observability_summary
+        .expect("fallback metadata plus worker usage should produce summary");
+
+    assert_eq!(summary.total_steps_routed, 1);
+    assert_eq!(summary.total_fallback_count, 1);
+    assert_eq!(summary.total_input_tokens, 2400);
+    assert_eq!(summary.total_uncached_input_tokens, 1800);
+    assert_eq!(summary.total_output_tokens, 321);
+    assert_eq!(summary.total_cache_read_tokens, 512);
+    assert_eq!(summary.total_cache_write_tokens, 128);
+    assert_eq!(summary.total_original_chars, 12000);
+    assert_eq!(summary.total_sent_chars, 7600);
+    assert_eq!(summary.estimated_cost_micros_usd, 9876);
+
+    let _ = std::fs::remove_file(plan_path);
+    let _ = std::fs::remove_dir_all("/tmp/t278_lism_fallback_usage");
 }
 
 #[tokio::test]

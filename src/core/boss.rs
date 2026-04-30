@@ -1270,6 +1270,17 @@ impl BossCoordinator {
         summary.estimated_cost_micros_usd += usage.estimated_cost_micros_usd;
     }
 
+    fn routed_metadata_has_usage(m: &BossStepRoutedMetadata) -> bool {
+        m.input_tokens.unwrap_or(0) > 0
+            || m.uncached_input_tokens.unwrap_or(0) > 0
+            || m.output_tokens.unwrap_or(0) > 0
+            || m.cache_read_tokens.unwrap_or(0) > 0
+            || m.cache_write_tokens.unwrap_or(0) > 0
+            || m.original_prompt_chars.unwrap_or(0) > 0
+            || m.sent_prompt_chars.unwrap_or(0) > 0
+            || m.estimated_cost_micros_usd.unwrap_or(0) > 0
+    }
+
     fn build_observability_summary(
         steps: &[BossStepReport],
         tasks: Option<&TaskManager>,
@@ -1298,7 +1309,9 @@ impl BossCoordinator {
                 if let Some(tier) = &m.model_tier {
                     *summary.model_tier_counts.entry(tier.clone()).or_insert(0) += 1;
                 }
-                continue;
+                if Self::routed_metadata_has_usage(m) {
+                    continue;
+                }
             }
 
             let Some(task_usage) = step
