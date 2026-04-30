@@ -1439,12 +1439,15 @@ impl<'a> OpenAICompatibleStreamParser<'a> {
         for choice in choices {
             if let Some(delta) = choice.get("delta") {
                 if let Some(content) = delta.get("content") {
-                    let Some(text) = content.as_str() else {
-                        return Err(self.protocol_error(
-                            "openai-compatible delta.content must be string when present",
-                        ));
-                    };
-                    output.push(StreamEvent::TextDelta(text.to_string()));
+                    if let Some(text) =
+                        extract_openai_compatible_delta_text(content).map_err(|message| {
+                            self.protocol_error(format!(
+                                "openai-compatible delta.content {message}"
+                            ))
+                        })?
+                    {
+                        output.push(StreamEvent::TextDelta(text));
+                    }
                 }
             }
 
@@ -1602,6 +1605,49 @@ impl<'a> OpenAICompatibleStreamParser<'a> {
                 ProviderFailureDisposition::PreStreamTerminal
             },
         )
+    }
+}
+
+fn extract_openai_compatible_delta_text(content: &Value) -> Result<Option<String>, String> {
+    match content {
+        Value::Null => Ok(None),
+        Value::String(text) => Ok(Some(text.clone())),
+        Value::Object(_) => extract_openai_compatible_content_part_text(content)
+            .map(Some)
+            .ok_or_else(|| "must be string or text-like object when present".to_string()),
+        Value::Array(parts) => {
+            let mut combined = String::new();
+            for part in parts {
+                if let Some(text) = extract_openai_compatible_content_part_text(part) {
+                    combined.push_str(&text);
+                }
+            }
+            if combined.is_empty() {
+                Err("array did not contain any text-like parts".to_string())
+            } else {
+                Ok(Some(combined))
+            }
+        }
+        _ => Err("must be string, text-like object, or text-like array when present".to_string()),
+    }
+}
+
+fn extract_openai_compatible_content_part_text(part: &Value) -> Option<String> {
+    match part {
+        Value::String(text) => Some(text.clone()),
+        Value::Object(map) => map
+            .get("text")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .or_else(|| {
+                map.get("type")
+                    .and_then(Value::as_str)
+                    .filter(|kind| *kind == "refusal")
+                    .and_then(|_| map.get("refusal"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            }),
+        _ => None,
     }
 }
 
@@ -2877,6 +2923,36 @@ mod tests {
                 && usage.input_tokens == 11
                 && usage.output_tokens == 3))
         );
+    }
+
+    #[test]
+    fn openai_compatible_content_array_text_parts_are_accepted() {
+        let body = concat!(
+            "data: {\"id\":\"chatcmpl-redacted\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"delta\":{\"content\":[{\"type\":\"text\",\"text\":\"hello \"},{\"type\":\"text\",\"text\":\"world\"}]},\"index\":0,\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+
+        let events =
+            parse_openai_compatible_sse_response("openai-compatible", body, "default-model")
+                .expect("content arrays should parse");
+        assert!(events.iter().any(
+            |event| matches!(event, StreamEvent::TextDelta(text) if text == "hello world")
+        ));
+    }
+
+    #[test]
+    fn openai_compatible_content_object_text_part_is_accepted() {
+        let body = concat!(
+            "data: {\"id\":\"chatcmpl-redacted\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"delta\":{\"content\":{\"type\":\"text\",\"text\":\"hello object\"}},\"index\":0,\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+
+        let events =
+            parse_openai_compatible_sse_response("openai-compatible", body, "default-model")
+                .expect("single text object should parse");
+        assert!(events.iter().any(
+            |event| matches!(event, StreamEvent::TextDelta(text) if text == "hello object")
+        ));
     }
 
     #[test]

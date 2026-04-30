@@ -81,6 +81,13 @@ fn cwd_lock() -> &'static Mutex<()> {
     LOCK.get_or_init(|| Mutex::new(()))
 }
 
+fn restore_cwd(original: &std::path::Path) {
+    if std::env::set_current_dir(original).is_ok() {
+        return;
+    }
+    let _ = std::env::set_current_dir("/");
+}
+
 #[tokio::test]
 async fn read_tool_returns_file_contents() {
     let dir = std::env::temp_dir().join(unique_name("rust-agent-read"));
@@ -142,7 +149,7 @@ async fn glob_tool_matches_nested_files() {
                 .await
         });
 
-        std::env::set_current_dir(&original).expect("restore current dir");
+        restore_cwd(&original);
         result
     })
     .await
@@ -157,6 +164,60 @@ async fn glob_tool_matches_nested_files() {
     assert!(text.contains("alpha.rs"));
     assert!(text.contains("nested/beta.rs"));
     assert!(!text.contains("gamma.txt"));
+}
+
+#[tokio::test]
+async fn glob_tool_supports_path_and_ignores_target_directory() {
+    let dir = std::env::temp_dir().join(unique_name("rust-agent-glob-path"));
+    let src = dir.join("src");
+    let target = dir.join("target");
+    fs::create_dir_all(&src).await.expect("create src dir");
+    fs::create_dir_all(&target).await.expect("create target dir");
+    fs::write(src.join("alpha.rs"), "fn alpha() {}")
+        .await
+        .expect("write src file");
+    fs::write(target.join("beta.rs"), "fn beta() {}")
+        .await
+        .expect("write target file");
+
+    let dir_for_call = dir.clone();
+    let src_for_call = src.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let _guard = cwd_lock().lock().expect("cwd lock poisoned");
+        let original = std::env::current_dir().expect("get current dir");
+        std::env::set_current_dir(&dir_for_call).expect("enter temp dir");
+
+        let runtime = tokio::runtime::Runtime::new().expect("create runtime");
+        let result = runtime.block_on(async {
+            GlobTool
+                .invoke(
+                    &ToolCall {
+                        name: "Glob".into(),
+                        input: serde_json::json!({
+                            "pattern": "*.rs",
+                            "path": src_for_call.to_string_lossy()
+                        })
+                        .to_string(),
+                    },
+                    &ToolPermissionContext::new(PermissionMode::Default),
+                )
+                .await
+        });
+
+        restore_cwd(&original);
+        result
+    })
+    .await
+    .expect("join blocking glob task")
+    .expect("glob should succeed");
+
+    fs::remove_dir_all(&dir).await.expect("cleanup dir");
+
+    let ToolResult::Text(text) = result else {
+        panic!("expected text result");
+    };
+    assert!(text.contains("src/alpha.rs"));
+    assert!(!text.contains("target/beta.rs"));
 }
 
 #[tokio::test]
@@ -192,7 +253,7 @@ async fn grep_tool_reports_matching_lines() {
                 .await
         });
 
-        std::env::set_current_dir(&original).expect("restore current dir");
+        restore_cwd(&original);
         result
     })
     .await
@@ -206,6 +267,110 @@ async fn grep_tool_reports_matching_lines() {
     };
     assert!(text.contains("alpha.txt:2:needle here"));
     assert!(text.contains("nested/beta.txt:1:needle there too"));
+}
+
+#[tokio::test]
+async fn grep_tool_supports_path_and_ignores_target_directory() {
+    let dir = std::env::temp_dir().join(unique_name("rust-agent-grep-path"));
+    let docs = dir.join("docs");
+    let target = dir.join("target");
+    fs::create_dir_all(&docs).await.expect("create docs dir");
+    fs::create_dir_all(&target).await.expect("create target dir");
+    fs::write(docs.join("alpha.txt"), "needle in docs")
+        .await
+        .expect("write docs file");
+    fs::write(target.join("beta.txt"), "needle in target")
+        .await
+        .expect("write target file");
+
+    let dir_for_call = dir.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let _guard = cwd_lock().lock().expect("cwd lock poisoned");
+        let original = std::env::current_dir().expect("get current dir");
+        std::env::set_current_dir(&dir_for_call).expect("enter temp dir");
+
+        let runtime = tokio::runtime::Runtime::new().expect("create runtime");
+        let result = runtime.block_on(async {
+            GrepTool
+                .invoke(
+                    &ToolCall {
+                        name: "Grep".into(),
+                        input: serde_json::json!({
+                            "pattern": "needle",
+                            "path": "docs"
+                        })
+                        .to_string(),
+                    },
+                    &ToolPermissionContext::new(PermissionMode::Default),
+                )
+                .await
+        });
+
+        restore_cwd(&original);
+        result
+    })
+    .await
+    .expect("join blocking grep task")
+    .expect("grep should succeed");
+
+    fs::remove_dir_all(&dir).await.expect("cleanup dir");
+
+    let ToolResult::Text(text) = result else {
+        panic!("expected text result");
+    };
+    assert!(text.contains("docs/alpha.txt:1:needle in docs"));
+    assert!(!text.contains("target/beta.txt"));
+}
+
+#[tokio::test]
+async fn grep_tool_returns_result_too_large_for_oversized_search() {
+    let dir = std::env::temp_dir().join(unique_name("rust-agent-grep-large"));
+    fs::create_dir_all(&dir).await.expect("create dir");
+    let mut contents = String::new();
+    for index in 0..400 {
+        contents.push_str(&format!("needle line {index}\n"));
+    }
+    fs::write(dir.join("large.txt"), contents)
+        .await
+        .expect("write large file");
+
+    let dir_for_call = dir.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let _guard = cwd_lock().lock().expect("cwd lock poisoned");
+        let original = std::env::current_dir().expect("get current dir");
+        std::env::set_current_dir(&dir_for_call).expect("enter temp dir");
+
+        let runtime = tokio::runtime::Runtime::new().expect("create runtime");
+        let result = runtime.block_on(async {
+            GrepTool
+                .invoke(
+                    &ToolCall {
+                        name: "Grep".into(),
+                        input: serde_json::json!({
+                            "pattern": "needle"
+                        })
+                        .to_string(),
+                    },
+                    &ToolPermissionContext::new(PermissionMode::Default),
+                )
+                .await
+        });
+
+        restore_cwd(&original);
+        result
+    })
+    .await
+    .expect("join blocking grep task")
+    .expect("grep should succeed");
+
+    fs::remove_dir_all(&dir).await.expect("cleanup dir");
+
+    let ToolResult::ResultTooLarge(message) = result else {
+        panic!("expected result-too-large");
+    };
+    assert!(message.contains("Grep matched"));
+    assert!(message.contains("Narrow the query or provide a path"));
+    assert!(message.contains("Preview:"));
 }
 
 #[tokio::test]

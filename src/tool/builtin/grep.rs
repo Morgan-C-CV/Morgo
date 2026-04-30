@@ -9,18 +9,81 @@ use crate::tool::definition::{Tool, ToolCall, ToolMetadata, ToolResult};
 
 pub struct GrepTool;
 
+const MAX_SEARCH_RESULT_ITEMS: usize = 200;
+const MAX_SEARCH_RESULT_CHARS: usize = 12_000;
+const SEARCH_PREVIEW_ITEMS: usize = 20;
+const IGNORED_DIR_NAMES: &[&str] = &[
+    ".git",
+    ".rust-agent",
+    "node_modules",
+    "target",
+    "dist",
+    "build",
+    ".venv",
+];
+
 #[derive(Debug, Deserialize)]
 struct GrepInput {
     pattern: String,
+    path: Option<String>,
 }
 
-fn parse_pattern(call: &ToolCall) -> anyhow::Result<String> {
+fn parse_input(call: &ToolCall) -> anyhow::Result<GrepInput> {
     if let Some(json) = call.json_input() {
         let input: GrepInput = serde_json::from_value(json)
             .map_err(|error| anyhow::anyhow!("invalid grep input: {error}"))?;
-        return Ok(input.pattern);
+        return Ok(input);
     }
-    Ok(call.input.trim().to_string())
+    Ok(GrepInput {
+        pattern: call.input.trim().to_string(),
+        path: None,
+    })
+}
+
+fn resolve_search_root(root: &Path, path: Option<&str>) -> anyhow::Result<std::path::PathBuf> {
+    let Some(path) = path.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(root.to_path_buf());
+    };
+    let candidate = Path::new(path);
+    if candidate.is_absolute() {
+        let resolved = candidate.to_path_buf();
+        if resolved.exists() {
+            return Ok(resolved.canonicalize().unwrap_or(resolved));
+        }
+        anyhow::bail!("grep path does not exist: {}", resolved.display());
+    }
+    Ok(candidate.to_path_buf())
+}
+
+fn should_skip_dir(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| IGNORED_DIR_NAMES.contains(&name))
+        .unwrap_or(false)
+}
+
+fn finalize_matches(tool_name: &str, mut matches: Vec<String>) -> ToolResult {
+    matches.sort();
+    let output = matches.join("\n");
+    if matches.len() > MAX_SEARCH_RESULT_ITEMS || output.len() > MAX_SEARCH_RESULT_CHARS {
+        let preview = matches
+            .iter()
+            .take(SEARCH_PREVIEW_ITEMS)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut message = format!(
+            "{tool_name} matched {} lines ({} chars). Narrow the query or provide a path.",
+            matches.len(),
+            output.len()
+        );
+        if !preview.is_empty() {
+            message.push_str("\nPreview:\n");
+            message.push_str(&preview);
+        }
+        return ToolResult::ResultTooLarge(message);
+    }
+    ToolResult::Text(output)
 }
 
 #[async_trait]
@@ -48,13 +111,14 @@ impl Tool for GrepTool {
             "type": "object",
             "required": ["pattern"],
             "properties": {
-                "pattern": {"type": "string"}
+                "pattern": {"type": "string"},
+                "path": {"type": "string"}
             }
         }))
     }
 
     async fn validate_input(&self, call: &ToolCall) -> anyhow::Result<()> {
-        if parse_pattern(call)?.trim().is_empty() {
+        if parse_input(call)?.pattern.trim().is_empty() {
             anyhow::bail!("grep query cannot be empty")
         }
         Ok(())
@@ -67,13 +131,14 @@ impl Tool for GrepTool {
     ) -> anyhow::Result<ToolResult> {
         let root = std::env::current_dir()
             .map_err(|error| anyhow::anyhow!("failed to resolve cwd: {error}"))?;
-        let query = parse_pattern(call)?;
+        let input = parse_input(call)?;
+        let search_root = resolve_search_root(&root, input.path.as_deref())?;
         let mut matches = Vec::new();
         let mut searched_paths = Vec::new();
         collect_matches(
             &root,
-            &root,
-            query.trim(),
+            &search_root,
+            input.pattern.trim(),
             &mut searched_paths,
             &mut matches,
         )?;
@@ -85,8 +150,7 @@ impl Tool for GrepTool {
                 )
                 .into_result()?;
         }
-        matches.sort();
-        Ok(ToolResult::Text(matches.join("\n")))
+        Ok(finalize_matches("Grep", matches))
     }
 }
 
@@ -97,6 +161,27 @@ fn collect_matches(
     searched_paths: &mut Vec<std::path::PathBuf>,
     matches: &mut Vec<String>,
 ) -> anyhow::Result<()> {
+    if current.is_dir() && should_skip_dir(current) && current != root {
+        return Ok(());
+    }
+    if current.is_file() {
+        searched_paths.push(current.to_path_buf());
+        let Ok(contents) = fs::read_to_string(current) else {
+            return Ok(());
+        };
+        let relative = current
+            .strip_prefix(root)
+            .unwrap_or(current)
+            .to_string_lossy()
+            .replace('\\', "/");
+        for (index, line) in contents.lines().enumerate() {
+            if line.contains(query) {
+                matches.push(format!("{}:{}:{}", relative, index + 1, line.trim()));
+            }
+        }
+        return Ok(());
+    }
+
     for entry in fs::read_dir(current).map_err(|error| {
         anyhow::anyhow!("failed to read directory {}: {error}", current.display())
     })? {
@@ -112,6 +197,9 @@ fn collect_matches(
         })?;
 
         if file_type.is_dir() {
+            if should_skip_dir(&entry_path) {
+                continue;
+            }
             collect_matches(root, &entry_path, query, searched_paths, matches)?;
             continue;
         }

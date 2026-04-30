@@ -9,18 +9,81 @@ use crate::tool::definition::{Tool, ToolCall, ToolMetadata, ToolResult};
 
 pub struct GlobTool;
 
+const MAX_SEARCH_RESULT_ITEMS: usize = 200;
+const MAX_SEARCH_RESULT_CHARS: usize = 12_000;
+const SEARCH_PREVIEW_ITEMS: usize = 20;
+const IGNORED_DIR_NAMES: &[&str] = &[
+    ".git",
+    ".rust-agent",
+    "node_modules",
+    "target",
+    "dist",
+    "build",
+    ".venv",
+];
+
 #[derive(Debug, Deserialize)]
 struct GlobInput {
     pattern: String,
+    path: Option<String>,
 }
 
-fn parse_pattern(call: &ToolCall) -> anyhow::Result<String> {
+fn parse_input(call: &ToolCall) -> anyhow::Result<GlobInput> {
     if let Some(json) = call.json_input() {
         let input: GlobInput = serde_json::from_value(json)
             .map_err(|error| anyhow::anyhow!("invalid glob input: {error}"))?;
-        return Ok(input.pattern);
+        return Ok(input);
     }
-    Ok(call.input.trim().to_string())
+    Ok(GlobInput {
+        pattern: call.input.trim().to_string(),
+        path: None,
+    })
+}
+
+fn resolve_search_root(root: &Path, path: Option<&str>) -> anyhow::Result<std::path::PathBuf> {
+    let Some(path) = path.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(root.to_path_buf());
+    };
+    let candidate = Path::new(path);
+    if candidate.is_absolute() {
+        let resolved = candidate.to_path_buf();
+        if resolved.exists() {
+            return Ok(resolved.canonicalize().unwrap_or(resolved));
+        }
+        anyhow::bail!("glob path does not exist: {}", resolved.display());
+    }
+    Ok(candidate.to_path_buf())
+}
+
+fn should_skip_dir(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| IGNORED_DIR_NAMES.contains(&name))
+        .unwrap_or(false)
+}
+
+fn finalize_matches(tool_name: &str, mut matches: Vec<String>) -> ToolResult {
+    matches.sort();
+    let output = matches.join("\n");
+    if matches.len() > MAX_SEARCH_RESULT_ITEMS || output.len() > MAX_SEARCH_RESULT_CHARS {
+        let preview = matches
+            .iter()
+            .take(SEARCH_PREVIEW_ITEMS)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut message = format!(
+            "{tool_name} matched {} files ({} chars). Narrow the pattern or provide a path.",
+            matches.len(),
+            output.len()
+        );
+        if !preview.is_empty() {
+            message.push_str("\nPreview:\n");
+            message.push_str(&preview);
+        }
+        return ToolResult::ResultTooLarge(message);
+    }
+    ToolResult::Text(output)
 }
 
 #[async_trait]
@@ -48,13 +111,14 @@ impl Tool for GlobTool {
             "type": "object",
             "required": ["pattern"],
             "properties": {
-                "pattern": {"type": "string"}
+                "pattern": {"type": "string"},
+                "path": {"type": "string"}
             }
         }))
     }
 
     async fn validate_input(&self, call: &ToolCall) -> anyhow::Result<()> {
-        if parse_pattern(call)?.trim().is_empty() {
+        if parse_input(call)?.pattern.trim().is_empty() {
             anyhow::bail!("glob pattern cannot be empty")
         }
         Ok(())
@@ -67,9 +131,10 @@ impl Tool for GlobTool {
     ) -> anyhow::Result<ToolResult> {
         let root = std::env::current_dir()
             .map_err(|error| anyhow::anyhow!("failed to resolve cwd: {error}"))?;
-        let pattern = parse_pattern(call)?;
+        let input = parse_input(call)?;
+        let search_root = resolve_search_root(&root, input.path.as_deref())?;
         let mut matches = Vec::new();
-        collect_matches(&root, &root, pattern.trim(), &mut matches)?;
+        collect_matches(&root, &search_root, input.pattern.trim(), &mut matches)?;
         if let Some(policy) = permissions.filesystem_policy() {
             let absolute_matches = matches
                 .iter()
@@ -82,8 +147,7 @@ impl Tool for GlobTool {
                 )
                 .into_result()?;
         }
-        matches.sort();
-        Ok(ToolResult::Text(matches.join("\n")))
+        Ok(finalize_matches("Glob", matches))
     }
 }
 
@@ -93,6 +157,21 @@ fn collect_matches(
     pattern: &str,
     matches: &mut Vec<String>,
 ) -> anyhow::Result<()> {
+    if current.is_dir() && should_skip_dir(current) && current != root {
+        return Ok(());
+    }
+    if current.is_file() {
+        let relative = current
+            .strip_prefix(root)
+            .unwrap_or(current)
+            .to_string_lossy()
+            .replace('\\', "/");
+        if pattern_matches(pattern, &relative) {
+            matches.push(relative);
+        }
+        return Ok(());
+    }
+
     for entry in fs::read_dir(current).map_err(|error| {
         anyhow::anyhow!("failed to read directory {}: {error}", current.display())
     })? {
@@ -108,6 +187,9 @@ fn collect_matches(
         })?;
 
         if file_type.is_dir() {
+            if should_skip_dir(&entry_path) {
+                continue;
+            }
             collect_matches(root, &entry_path, pattern, matches)?;
             continue;
         }
