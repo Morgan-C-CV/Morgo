@@ -157,7 +157,7 @@ fn map_loop_outcome_with_pricing(outcome: LoopOutcome, pricing: &ModelPricing) -
 }
 
 fn estimate_loop_usage_cost_micros(usage: &LoopUsage, pricing: &ModelPricing) -> u64 {
-    let estimated_cost_usd = (usage.input_tokens as f64 / 1_000_000.0)
+    let estimated_cost_usd = (usage.uncached_input_tokens as f64 / 1_000_000.0)
         * pricing.input_per_million_usd
         + (usage.output_tokens as f64 / 1_000_000.0) * pricing.output_per_million_usd
         + (usage.cache_write_tokens as f64 / 1_000_000.0) * pricing.cache_write_per_million_usd

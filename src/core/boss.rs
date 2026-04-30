@@ -1102,9 +1102,12 @@ impl BossCoordinator {
         usage: &TaskUsageSummary,
     ) {
         summary.total_input_tokens += usage.input_tokens;
+        summary.total_uncached_input_tokens += usage.uncached_input_tokens;
         summary.total_output_tokens += usage.output_tokens;
         summary.total_cache_read_tokens += usage.cache_read_input_tokens;
         summary.total_cache_write_tokens += usage.cache_creation_input_tokens;
+        summary.total_original_chars += usage.original_prompt_chars;
+        summary.total_sent_chars += usage.sent_prompt_chars;
         summary.estimated_cost_micros_usd += usage.estimated_cost_micros_usd;
     }
 
@@ -1126,7 +1129,10 @@ impl BossCoordinator {
                 summary.total_projection_mismatch_count +=
                     m.projection_mismatch_count.unwrap_or(0);
                 summary.total_input_tokens += m.input_tokens.unwrap_or(0);
+                summary.total_uncached_input_tokens += m.uncached_input_tokens.unwrap_or(0);
                 summary.total_output_tokens += m.output_tokens.unwrap_or(0);
+                summary.total_original_chars += m.original_prompt_chars.unwrap_or(0);
+                summary.total_sent_chars += m.sent_prompt_chars.unwrap_or(0);
                 summary.estimated_cost_micros_usd += m.estimated_cost_micros_usd.unwrap_or(0);
                 if m.provider_profile_id.is_some() {
                     summary.override_hit_count += 1;
@@ -1924,7 +1930,10 @@ impl BossCoordinator {
                             fallback_count: Some(0),
                             projection_mismatch_count: Some(0),
                             input_tokens: Some(0),
+                            uncached_input_tokens: Some(0),
                             output_tokens: Some(0),
+                            original_prompt_chars: Some(0),
+                            sent_prompt_chars: Some(0),
                             estimated_cost_micros_usd: Some(0),
                         };
                         let cwd = app_state
@@ -1948,9 +1957,14 @@ impl BossCoordinator {
                         .await?;
                         if let StepOutcome::Completed { ref usage } = outcome {
                             routed_metadata.input_tokens = Some(usage.input_tokens);
+                            routed_metadata.uncached_input_tokens =
+                                Some(usage.uncached_input_tokens);
                             routed_metadata.output_tokens = Some(usage.output_tokens);
                             routed_metadata.cache_read_tokens = Some(usage.cache_read_tokens);
                             routed_metadata.cache_write_tokens = Some(usage.cache_write_tokens);
+                            routed_metadata.original_prompt_chars =
+                                Some(usage.original_prompt_chars);
+                            routed_metadata.sent_prompt_chars = Some(usage.sent_prompt_chars);
                             routed_metadata.estimated_cost_micros_usd =
                                 Some(usage.estimated_cost_micros_usd);
                         }

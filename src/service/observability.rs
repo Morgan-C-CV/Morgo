@@ -1,15 +1,21 @@
 use std::collections::BTreeMap;
-use std::sync::{Arc, RwLock};
+use std::fs::{File, OpenOptions};
+use std::io::{BufWriter, Write};
+use std::path::Path;
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::core::events::ServiceFailureNotice;
 use crate::service::api::errors::ApiError;
 use crate::service::compact::CompactPlanKind;
+use serde::{Deserialize, Serialize};
 
 const MAX_RECENT_EVENTS: usize = 16;
 
 #[derive(Debug, Clone, Default)]
 pub struct ServiceObservabilityTracker {
     inner: Arc<RwLock<ServiceObservabilityState>>,
+    api_call_log_sink: Arc<Mutex<Option<ApiCallLogSink>>>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -35,6 +41,26 @@ pub struct ServiceObservabilityEventRecord {
     pub category: &'static str,
     pub key: String,
     pub detail: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApiCallRecord {
+    pub timestamp_ms: u64,
+    pub provider_id: String,
+    pub model: String,
+    pub prompt_chars: usize,
+    pub response_chars: usize,
+    pub input_tokens: usize,
+    pub output_tokens: usize,
+    pub cache_creation_input_tokens: usize,
+    pub cache_read_input_tokens: usize,
+    pub stop_reason: Option<String>,
+    pub response_text: String,
+}
+
+#[derive(Debug)]
+struct ApiCallLogSink {
+    writer: BufWriter<File>,
 }
 
 pub trait ServiceObservabilityExportSink {
@@ -120,6 +146,36 @@ impl ServiceObservabilitySnapshot {
 }
 
 impl ServiceObservabilityTracker {
+    pub fn configure_api_call_log_path(&self, path: impl AsRef<Path>) -> anyhow::Result<()> {
+        let path = path.as_ref();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let file = OpenOptions::new().create(true).append(true).open(path)?;
+        *self
+            .api_call_log_sink
+            .lock()
+            .expect("service observability api call log sink poisoned") =
+            Some(ApiCallLogSink {
+                writer: BufWriter::new(file),
+            });
+        Ok(())
+    }
+
+    pub fn record_api_call(&self, record: ApiCallRecord) {
+        let mut guard = self
+            .api_call_log_sink
+            .lock()
+            .expect("service observability api call log sink poisoned");
+        let Some(sink) = guard.as_mut() else {
+            return;
+        };
+        if let Ok(line) = serde_json::to_string(&record) {
+            let _ = writeln!(sink.writer, "{line}");
+            let _ = sink.writer.flush();
+        }
+    }
+
     pub fn record_service_failure(&self, notice: &ServiceFailureNotice) {
         self.record_event(ObservabilityEvent::ServiceFailure {
             failure_code: notice.service_failure_code.as_str().to_string(),
@@ -264,6 +320,39 @@ impl ServiceObservabilityTracker {
             }
         }
         push_recent_event(&mut state.recent_events, event);
+    }
+}
+
+impl ApiCallRecord {
+    pub fn now(
+        provider_id: impl Into<String>,
+        model: impl Into<String>,
+        prompt_chars: usize,
+        response_chars: usize,
+        input_tokens: usize,
+        output_tokens: usize,
+        cache_creation_input_tokens: usize,
+        cache_read_input_tokens: usize,
+        stop_reason: Option<String>,
+        response_text: impl Into<String>,
+    ) -> Self {
+        let timestamp_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or_default();
+        Self {
+            timestamp_ms,
+            provider_id: provider_id.into(),
+            model: model.into(),
+            prompt_chars,
+            response_chars,
+            input_tokens,
+            output_tokens,
+            cache_creation_input_tokens,
+            cache_read_input_tokens,
+            stop_reason,
+            response_text: response_text.into(),
+        }
     }
 }
 

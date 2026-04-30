@@ -324,9 +324,13 @@ fn task_type_changes_terminal_summary_result_and_next_action_semantics() {
     let usage = Some(rust_agent::task::types::TaskUsageSummary {
         requests: 1,
         input_tokens: 10,
+        uncached_input_tokens: 10,
         output_tokens: 5,
         cache_creation_input_tokens: 0,
         cache_read_input_tokens: 0,
+        original_prompt_chars: 0,
+        sent_prompt_chars: 0,
+        cache_hit_requests: 0,
         estimated_cost_micros_usd: 42,
     });
 

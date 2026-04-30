@@ -24,9 +24,12 @@ impl Default for DecisionLoopConfig {
 #[derive(Debug, Clone, Default)]
 pub struct LoopUsage {
     pub input_tokens: usize,
+    pub uncached_input_tokens: usize,
     pub output_tokens: usize,
     pub cache_read_tokens: usize,
     pub cache_write_tokens: usize,
+    pub original_prompt_chars: usize,
+    pub sent_prompt_chars: usize,
     pub estimated_cost_micros_usd: u64,
 }
 
@@ -57,6 +60,7 @@ fn collect_text_and_usage(events: Vec<StreamEvent>) -> (String, LoopUsage) {
             StreamEvent::TextDelta(t) => text.push_str(&t),
             StreamEvent::Usage(u) => {
                 usage.input_tokens += u.input_tokens;
+                usage.uncached_input_tokens += u.input_tokens.saturating_sub(u.cache_read_input_tokens);
                 usage.output_tokens += u.output_tokens;
                 usage.cache_read_tokens += u.cache_read_input_tokens;
                 usage.cache_write_tokens += u.cache_creation_input_tokens;
@@ -112,9 +116,13 @@ pub async fn run_decision_loop(
             STATE_DECISION_INSTRUCTION,
             frame.to_prompt_segment().content
         );
+        let prompt_chars = prompt.chars().count();
+        total_usage.original_prompt_chars += prompt_chars;
+        total_usage.sent_prompt_chars += prompt_chars;
         let events = client.stream_message(&Message::user(prompt)).await;
         let (text, iter_usage) = collect_text_and_usage(events);
         total_usage.input_tokens += iter_usage.input_tokens;
+        total_usage.uncached_input_tokens += iter_usage.uncached_input_tokens;
         total_usage.output_tokens += iter_usage.output_tokens;
         total_usage.cache_read_tokens += iter_usage.cache_read_tokens;
         total_usage.cache_write_tokens += iter_usage.cache_write_tokens;
@@ -133,9 +141,13 @@ pub async fn run_decision_loop(
                          Please respond with valid StateDecision JSON only.",
                         last_repair.reason, last_repair.raw_json
                     );
+                    let repair_prompt_chars = repair_prompt.chars().count();
+                    total_usage.original_prompt_chars += repair_prompt_chars;
+                    total_usage.sent_prompt_chars += repair_prompt_chars;
                     let repair_events = client.stream_message(&Message::user(repair_prompt)).await;
                     let (repaired_text, repair_usage) = collect_text_and_usage(repair_events);
                     total_usage.input_tokens += repair_usage.input_tokens;
+                    total_usage.uncached_input_tokens += repair_usage.uncached_input_tokens;
                     total_usage.output_tokens += repair_usage.output_tokens;
                     total_usage.cache_read_tokens += repair_usage.cache_read_tokens;
                     total_usage.cache_write_tokens += repair_usage.cache_write_tokens;

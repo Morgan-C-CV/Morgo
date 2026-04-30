@@ -15,7 +15,7 @@ use crate::service::api::retry::RetryPolicy;
 use crate::service::api::streaming::{
     ProviderFailureDisposition, StopReason, StreamError, StreamEvent, UsageEvent,
 };
-use crate::service::observability::ServiceObservabilityTracker;
+use crate::service::observability::{ApiCallRecord, ServiceObservabilityTracker};
 
 // Retry-After header is authoritative but bounded to prevent malicious or runaway values.
 const RETRY_AFTER_SAFETY_CAP_MS: u64 = 30_000;
@@ -320,7 +320,10 @@ impl ModelProviderClient {
         let mut attempt = 0;
         loop {
             match self.stream_message_once(config, client, input).await {
-                Ok(events) => return Ok(events),
+                Ok(events) => {
+                    observability.record_api_call(build_api_call_record(config, input, &events));
+                    return Ok(events);
+                }
                 Err(error) => {
                     observability.record_api_client_error(&config.provider_id, &error);
                     let retry_decision = classify_retry_policy(&error);
@@ -403,6 +406,50 @@ impl ModelProviderClient {
 
         parse_stream_response_for_provider(config, &body, &config.model_id)
     }
+}
+
+fn build_api_call_record(
+    config: &ModelProviderConfig,
+    input: &Message,
+    events: &[StreamEvent],
+) -> ApiCallRecord {
+    let mut response_text = String::new();
+    let mut usage = UsageEvent {
+        model: normalized_request_model(config).to_string(),
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: 0,
+    };
+    let mut stop_reason = None;
+    for event in events {
+        match event {
+            StreamEvent::TextDelta(text) => response_text.push_str(text),
+            StreamEvent::Usage(u) => {
+                usage.model = u.model.clone();
+                usage.input_tokens += u.input_tokens;
+                usage.output_tokens += u.output_tokens;
+                usage.cache_creation_input_tokens += u.cache_creation_input_tokens;
+                usage.cache_read_input_tokens += u.cache_read_input_tokens;
+            }
+            StreamEvent::MessageStop { stop_reason: stop } => {
+                stop_reason = Some(format!("{stop:?}").to_lowercase());
+            }
+            _ => {}
+        }
+    }
+    ApiCallRecord::now(
+        config.provider_id.clone(),
+        usage.model,
+        input.text().chars().count(),
+        response_text.chars().count(),
+        usage.input_tokens,
+        usage.output_tokens,
+        usage.cache_creation_input_tokens,
+        usage.cache_read_input_tokens,
+        stop_reason,
+        response_text,
+    )
 }
 
 async fn read_response_body_with_idle_timeout(

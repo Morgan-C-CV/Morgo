@@ -8325,6 +8325,7 @@ async fn t27_r1_format_report_includes_hit_ratio_and_tokens_saved() {
         total_cache_write_tokens: 100,
         override_hit_count: 1,
         total_input_tokens: 0,
+        total_uncached_input_tokens: 0,
         total_output_tokens: 0,
         estimated_cost_micros_usd: 0,
         ..Default::default()
@@ -8357,7 +8358,10 @@ async fn t27_r1_format_report_includes_hit_ratio_and_tokens_saved() {
                 fallback_count: Some(0),
                 projection_mismatch_count: Some(0),
                 input_tokens: Some(0),
+                uncached_input_tokens: Some(0),
                 output_tokens: Some(0),
+                original_prompt_chars: Some(0),
+                sent_prompt_chars: Some(0),
                 estimated_cost_micros_usd: Some(0),
             }),
         }],

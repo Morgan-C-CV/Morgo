@@ -889,9 +889,13 @@ fn remote_delivery_mode_classifies_dual_channel_and_response_only_surface_items(
         usage: Some(TaskUsageSummary {
             requests: 1,
             input_tokens: 10,
+            uncached_input_tokens: 10,
             output_tokens: 5,
             cache_creation_input_tokens: 0,
             cache_read_input_tokens: 0,
+            original_prompt_chars: 0,
+            sent_prompt_chars: 0,
+            cache_hit_requests: 0,
             estimated_cost_micros_usd: 42,
         }),
     });
@@ -1037,9 +1041,13 @@ fn remote_event_envelope_preserves_structured_task_payload() {
         usage: Some(TaskUsageSummary {
             requests: 2,
             input_tokens: 20,
+            uncached_input_tokens: 16,
             output_tokens: 8,
             cache_creation_input_tokens: 3,
             cache_read_input_tokens: 4,
+            original_prompt_chars: 0,
+            sent_prompt_chars: 0,
+            cache_hit_requests: 1,
             estimated_cost_micros_usd: 88,
         }),
     });
@@ -1060,9 +1068,13 @@ fn remote_event_envelope_preserves_structured_task_payload() {
                 && task.usage == Some(TaskUsageSummary {
                     requests: 2,
                     input_tokens: 20,
+                    uncached_input_tokens: 16,
                     output_tokens: 8,
                     cache_creation_input_tokens: 3,
                     cache_read_input_tokens: 4,
+                    original_prompt_chars: 0,
+                    sent_prompt_chars: 0,
+                    cache_hit_requests: 1,
                     estimated_cost_micros_usd: 88,
                 })
     ));

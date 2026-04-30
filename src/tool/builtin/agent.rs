@@ -307,9 +307,13 @@ fn launch_agent_task(
         let usage_summary = usage_delta.has_usage().then_some(TaskUsageSummary {
             requests: usage_delta.requests,
             input_tokens: usage_delta.input_tokens,
+            uncached_input_tokens: usage_delta.uncached_input_tokens,
             output_tokens: usage_delta.output_tokens,
             cache_creation_input_tokens: usage_delta.cache_creation_input_tokens,
             cache_read_input_tokens: usage_delta.cache_read_input_tokens,
+            original_prompt_chars: usage_delta.original_prompt_chars,
+            sent_prompt_chars: usage_delta.sent_prompt_chars,
+            cache_hit_requests: usage_delta.cache_hit_requests,
             estimated_cost_micros_usd: usage_delta.estimated_cost_micros_usd,
         });
 

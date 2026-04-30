@@ -153,9 +153,13 @@ impl ValidationState {
 pub struct TaskUsageSummary {
     pub requests: usize,
     pub input_tokens: usize,
+    pub uncached_input_tokens: usize,
     pub output_tokens: usize,
     pub cache_creation_input_tokens: usize,
     pub cache_read_input_tokens: usize,
+    pub original_prompt_chars: usize,
+    pub sent_prompt_chars: usize,
+    pub cache_hit_requests: usize,
     pub estimated_cost_micros_usd: u64,
 }
 
@@ -163,20 +167,27 @@ impl TaskUsageSummary {
     pub fn is_empty(&self) -> bool {
         self.requests == 0
             && self.input_tokens == 0
+            && self.uncached_input_tokens == 0
             && self.output_tokens == 0
             && self.cache_creation_input_tokens == 0
             && self.cache_read_input_tokens == 0
+            && self.original_prompt_chars == 0
+            && self.sent_prompt_chars == 0
+            && self.cache_hit_requests == 0
             && self.estimated_cost_micros_usd == 0
     }
 
     pub fn format_compact(&self) -> String {
         format!(
-            "requests={}, input_tokens={}, output_tokens={}, cache_write_tokens={}, cache_read_tokens={}, estimated_cost_usd={:.6}",
+            "requests={}, input_tokens={}, uncached_input_tokens={}, output_tokens={}, cache_write_tokens={}, cache_read_tokens={}, sent_prompt_chars={}, cache_hit_requests={}, estimated_cost_usd={:.6}",
             self.requests,
             self.input_tokens,
+            self.uncached_input_tokens,
             self.output_tokens,
             self.cache_creation_input_tokens,
             self.cache_read_input_tokens,
+            self.sent_prompt_chars,
+            self.cache_hit_requests,
             self.estimated_cost_micros_usd as f64 / 1_000_000.0
         )
     }

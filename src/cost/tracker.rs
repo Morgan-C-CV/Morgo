@@ -14,9 +14,13 @@ pub struct CostTracker {
 pub struct CostSnapshot {
     pub requests: usize,
     pub input_tokens: usize,
+    pub uncached_input_tokens: usize,
     pub output_tokens: usize,
     pub cache_creation_input_tokens: usize,
     pub cache_read_input_tokens: usize,
+    pub original_prompt_chars: usize,
+    pub sent_prompt_chars: usize,
+    pub cache_hit_requests: usize,
     pub estimated_cost_micros_usd: u64,
 }
 
@@ -25,6 +29,9 @@ impl CostSnapshot {
         Self {
             requests: self.requests.saturating_sub(before.requests),
             input_tokens: self.input_tokens.saturating_sub(before.input_tokens),
+            uncached_input_tokens: self
+                .uncached_input_tokens
+                .saturating_sub(before.uncached_input_tokens),
             output_tokens: self.output_tokens.saturating_sub(before.output_tokens),
             cache_creation_input_tokens: self
                 .cache_creation_input_tokens
@@ -32,6 +39,13 @@ impl CostSnapshot {
             cache_read_input_tokens: self
                 .cache_read_input_tokens
                 .saturating_sub(before.cache_read_input_tokens),
+            original_prompt_chars: self
+                .original_prompt_chars
+                .saturating_sub(before.original_prompt_chars),
+            sent_prompt_chars: self.sent_prompt_chars.saturating_sub(before.sent_prompt_chars),
+            cache_hit_requests: self
+                .cache_hit_requests
+                .saturating_sub(before.cache_hit_requests),
             estimated_cost_micros_usd: self
                 .estimated_cost_micros_usd
                 .saturating_sub(before.estimated_cost_micros_usd),
@@ -41,9 +55,13 @@ impl CostSnapshot {
     pub fn has_usage(&self) -> bool {
         self.requests > 0
             || self.input_tokens > 0
+            || self.uncached_input_tokens > 0
             || self.output_tokens > 0
             || self.cache_creation_input_tokens > 0
             || self.cache_read_input_tokens > 0
+            || self.original_prompt_chars > 0
+            || self.sent_prompt_chars > 0
+            || self.cache_hit_requests > 0
             || self.estimated_cost_micros_usd > 0
     }
 }
@@ -58,9 +76,13 @@ impl Default for CostTracker {
 struct ModelUsage {
     requests: usize,
     input_tokens: usize,
+    uncached_input_tokens: usize,
     output_tokens: usize,
     cache_creation_input_tokens: usize,
     cache_read_input_tokens: usize,
+    original_prompt_chars: usize,
+    sent_prompt_chars: usize,
+    cache_hit_requests: usize,
     estimated_cost_usd: f64,
 }
 
@@ -68,9 +90,13 @@ struct ModelUsage {
 struct CostState {
     requests: usize,
     input_tokens: usize,
+    uncached_input_tokens: usize,
     output_tokens: usize,
     cache_creation_input_tokens: usize,
     cache_read_input_tokens: usize,
+    original_prompt_chars: usize,
+    sent_prompt_chars: usize,
+    cache_hit_requests: usize,
     estimated_cost_usd: f64,
     by_model: BTreeMap<String, ModelUsage>,
 }
@@ -111,27 +137,61 @@ impl CostTracker {
         cache_creation_input_tokens: usize,
         cache_read_input_tokens: usize,
     ) {
-        let mut state = self.inner.write().expect("cost tracker poisoned");
-        let estimated_cost_usd = self.estimate_cost_usd(
+        self.record_model_usage_detailed(
             model,
             input_tokens,
+            output_tokens,
+            cache_creation_input_tokens,
+            cache_read_input_tokens,
+            0,
+            0,
+        );
+    }
+
+    pub fn record_model_usage_detailed(
+        &self,
+        model: &str,
+        input_tokens: usize,
+        output_tokens: usize,
+        cache_creation_input_tokens: usize,
+        cache_read_input_tokens: usize,
+        original_prompt_chars: usize,
+        sent_prompt_chars: usize,
+    ) {
+        let mut state = self.inner.write().expect("cost tracker poisoned");
+        let uncached_input_tokens = input_tokens.saturating_sub(cache_read_input_tokens);
+        let estimated_cost_usd = self.estimate_cost_usd(
+            model,
+            uncached_input_tokens,
             output_tokens,
             cache_creation_input_tokens,
             cache_read_input_tokens,
         );
         state.requests += 1;
         state.input_tokens += input_tokens;
+        state.uncached_input_tokens += uncached_input_tokens;
         state.output_tokens += output_tokens;
         state.cache_creation_input_tokens += cache_creation_input_tokens;
         state.cache_read_input_tokens += cache_read_input_tokens;
+        state.original_prompt_chars += original_prompt_chars;
+        state.sent_prompt_chars += sent_prompt_chars;
+        if cache_read_input_tokens > 0 {
+            state.cache_hit_requests += 1;
+        }
         state.estimated_cost_usd += estimated_cost_usd;
 
         let model_usage = state.by_model.entry(model.to_string()).or_default();
         model_usage.requests += 1;
         model_usage.input_tokens += input_tokens;
+        model_usage.uncached_input_tokens += uncached_input_tokens;
         model_usage.output_tokens += output_tokens;
         model_usage.cache_creation_input_tokens += cache_creation_input_tokens;
         model_usage.cache_read_input_tokens += cache_read_input_tokens;
+        model_usage.original_prompt_chars += original_prompt_chars;
+        model_usage.sent_prompt_chars += sent_prompt_chars;
+        if cache_read_input_tokens > 0 {
+            model_usage.cache_hit_requests += 1;
+        }
         model_usage.estimated_cost_usd += estimated_cost_usd;
     }
 
@@ -140,9 +200,13 @@ impl CostTracker {
         CostSnapshot {
             requests: state.requests,
             input_tokens: state.input_tokens,
+            uncached_input_tokens: state.uncached_input_tokens,
             output_tokens: state.output_tokens,
             cache_creation_input_tokens: state.cache_creation_input_tokens,
             cache_read_input_tokens: state.cache_read_input_tokens,
+            original_prompt_chars: state.original_prompt_chars,
+            sent_prompt_chars: state.sent_prompt_chars,
+            cache_hit_requests: state.cache_hit_requests,
             estimated_cost_micros_usd: (state.estimated_cost_usd * 1_000_000.0).round() as u64,
         }
     }
@@ -153,23 +217,31 @@ impl CostTracker {
             "Session cost summary".into(),
             format!("requests: {}", state.requests),
             format!("input_tokens: {}", state.input_tokens),
+            format!("uncached_input_tokens: {}", state.uncached_input_tokens),
             format!("output_tokens: {}", state.output_tokens),
             format!(
                 "cache_creation_input_tokens: {}",
                 state.cache_creation_input_tokens
             ),
             format!("cache_read_input_tokens: {}", state.cache_read_input_tokens),
+            format!("original_prompt_chars: {}", state.original_prompt_chars),
+            format!("sent_prompt_chars: {}", state.sent_prompt_chars),
+            format!("cache_hit_requests: {}", state.cache_hit_requests),
             format!("estimated_cost_usd: {:.6}", state.estimated_cost_usd),
         ];
         for (model, usage) in &state.by_model {
             lines.push(format!(
-                "model {} -> requests: {}, input_tokens: {}, output_tokens: {}, cache_creation_input_tokens: {}, cache_read_input_tokens: {}, estimated_cost_usd: {:.6}",
+                "model {} -> requests: {}, input_tokens: {}, uncached_input_tokens: {}, output_tokens: {}, cache_creation_input_tokens: {}, cache_read_input_tokens: {}, original_prompt_chars: {}, sent_prompt_chars: {}, cache_hit_requests: {}, estimated_cost_usd: {:.6}",
                 model,
                 usage.requests,
                 usage.input_tokens,
+                usage.uncached_input_tokens,
                 usage.output_tokens,
                 usage.cache_creation_input_tokens,
                 usage.cache_read_input_tokens,
+                usage.original_prompt_chars,
+                usage.sent_prompt_chars,
+                usage.cache_hit_requests,
                 usage.estimated_cost_usd
             ));
         }

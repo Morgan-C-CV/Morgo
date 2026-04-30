@@ -203,9 +203,13 @@ async fn r1_2_plan_complete_records_full_context_worker_usage() {
         Some(TaskUsageSummary {
             requests: 1,
             input_tokens: 1200,
+            uncached_input_tokens: 688,
             output_tokens: 90,
             cache_creation_input_tokens: 256,
             cache_read_input_tokens: 512,
+            original_prompt_chars: 0,
+            sent_prompt_chars: 0,
+            cache_hit_requests: 1,
             estimated_cost_micros_usd: 345,
         }),
     );

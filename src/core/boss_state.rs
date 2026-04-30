@@ -188,9 +188,18 @@ pub struct BossStepRoutedMetadata {
     /// Total input tokens billed for this step (v1 stub: always 0).
     #[serde(default)]
     pub input_tokens: Option<usize>,
+    /// Total uncached input tokens billed at full price for this step.
+    #[serde(default)]
+    pub uncached_input_tokens: Option<usize>,
     /// Total output tokens billed for this step (v1 stub: always 0).
     #[serde(default)]
     pub output_tokens: Option<usize>,
+    /// Original prompt chars before compression/context assembly, when known.
+    #[serde(default)]
+    pub original_prompt_chars: Option<usize>,
+    /// Actual prompt chars sent to the provider, when known.
+    #[serde(default)]
+    pub sent_prompt_chars: Option<usize>,
     /// Estimated cost in micros USD for this routed step.
     #[serde(default)]
     pub estimated_cost_micros_usd: Option<u64>,
@@ -224,6 +233,9 @@ pub struct BossObservabilitySummary {
     /// Total input tokens across all routed steps (v1 stub: always 0).
     #[serde(default)]
     pub total_input_tokens: usize,
+    /// Total uncached input tokens across all routed steps.
+    #[serde(default)]
+    pub total_uncached_input_tokens: usize,
     /// Total output tokens across all routed steps (v1 stub: always 0).
     #[serde(default)]
     pub total_output_tokens: usize,
@@ -239,6 +251,11 @@ pub struct BossObservabilitySummary {
 }
 
 impl BossObservabilitySummary {
+    /// Whether any cache-read tokens were observed during the run.
+    pub fn cache_hit_observed(&self) -> bool {
+        self.total_cache_read_tokens > 0
+    }
+
     /// Cache hit ratio: cache_read / (cache_read + cache_write).
     /// Returns None when both are 0 (no cache data available yet).
     pub fn cache_hit_ratio(&self) -> Option<f64> {
@@ -290,7 +307,7 @@ impl BossReportPayload {
         for step in &self.steps {
             let m = step.routed_metadata.as_ref();
             lines.push(format!(
-                "  step {:>3}: status={:?} tier={} profile={} frame={}B cache_r={} cache_w={} fb={} mm={}",
+                "  step {:>3}: status={:?} tier={} profile={} frame={}B cache_r={} cache_w={} input={} uncached_input={} output={} sent_chars={} original_chars={} fb={} mm={}",
                 step.id,
                 step.status,
                 m.and_then(|m| m.model_tier.as_deref()).unwrap_or("-"),
@@ -298,6 +315,11 @@ impl BossReportPayload {
                 m.and_then(|m| m.state_frame_size).map(|n| n.to_string()).unwrap_or_else(|| "-".into()),
                 m.and_then(|m| m.cache_read_tokens).map(|n| n.to_string()).unwrap_or_else(|| "-".into()),
                 m.and_then(|m| m.cache_write_tokens).map(|n| n.to_string()).unwrap_or_else(|| "-".into()),
+                m.and_then(|m| m.input_tokens).map(|n| n.to_string()).unwrap_or_else(|| "-".into()),
+                m.and_then(|m| m.uncached_input_tokens).map(|n| n.to_string()).unwrap_or_else(|| "-".into()),
+                m.and_then(|m| m.output_tokens).map(|n| n.to_string()).unwrap_or_else(|| "-".into()),
+                m.and_then(|m| m.sent_prompt_chars).map(|n| n.to_string()).unwrap_or_else(|| "-".into()),
+                m.and_then(|m| m.original_prompt_chars).map(|n| n.to_string()).unwrap_or_else(|| "-".into()),
                 m.and_then(|m| m.fallback_count).map(|n| n.to_string()).unwrap_or_else(|| "-".into()),
                 m.and_then(|m| m.projection_mismatch_count).map(|n| n.to_string()).unwrap_or_else(|| "-".into()),
             ));
@@ -308,14 +330,16 @@ impl BossReportPayload {
                 .map(|r| format!("{:.1}%", r * 100.0))
                 .unwrap_or_else(|| "-".into());
             lines.push(format!(
-                "  summary: routed={} override_hits={} cache_r={} cache_w={} hit_ratio={} tokens_saved={} input={} output={} chars={}/{} cost_micros_usd={} fallback={} mismatch={} tiers={:?}",
+                "  summary: routed={} override_hits={} cache_r={} cache_w={} cache_hit_observed={} hit_ratio={} tokens_saved={} input={} uncached_input={} output={} chars={}/{} cost_micros_usd={} fallback={} mismatch={} tiers={:?}",
                 s.total_steps_routed,
                 s.override_hit_count,
                 s.total_cache_read_tokens,
                 s.total_cache_write_tokens,
+                s.cache_hit_observed(),
                 hit_ratio,
                 s.estimated_tokens_saved(),
                 s.total_input_tokens,
+                s.total_uncached_input_tokens,
                 s.total_output_tokens,
                 s.total_sent_chars,
                 s.total_original_chars,

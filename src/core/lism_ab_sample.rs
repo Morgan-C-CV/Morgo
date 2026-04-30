@@ -21,6 +21,9 @@ pub struct LisMAbSampleRecord {
     /// Provider-reported input tokens. Zero means no usage metadata was reported.
     #[serde(default)]
     pub total_input_tokens: usize,
+    /// Provider-reported uncached input tokens billed at full input price.
+    #[serde(default)]
+    pub total_uncached_input_tokens: usize,
     /// Provider-reported output tokens. Zero means no usage metadata was reported.
     #[serde(default)]
     pub total_output_tokens: usize,
@@ -36,11 +39,28 @@ pub struct LisMAbSampleRecord {
     /// Actual outbound chars after compression/context assembly, when known.
     #[serde(default)]
     pub sent_prompt_chars: usize,
+    /// True when this run observed any provider-reported cache read tokens.
+    #[serde(default)]
+    pub cache_hit_observed: bool,
+    /// Whether this run had any cache-related observability payload at all.
+    #[serde(default)]
+    pub cache_observability_present: bool,
+    /// Legacy cache ratio field kept for backward compatibility with old JSONL.
+    #[serde(default)]
     pub cache_hit_ratio: Option<f64>,
     pub estimated_tokens_saved: usize,
     pub cost_micros_usd: u64,
     pub pending_approval_count: usize,
     pub outcome: BossTestRunOutcome,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenDistributionStats {
+    pub sample_count: usize,
+    pub nonzero_count: usize,
+    pub p50: usize,
+    pub p90: usize,
+    pub max: usize,
 }
 
 // ── Summary ───────────────────────────────────────────────────────────────────
@@ -54,14 +74,22 @@ pub struct LisMAbSummary {
     pub on_avg_cache_hit_ratio: Option<f64>,
     /// Mean cache hit ratio across LisM-off runs; None if no off-runs have cache data.
     pub off_avg_cache_hit_ratio: Option<f64>,
+    /// Fraction of runs that observed any cache-read tokens.
+    pub on_hit_run_rate: Option<f64>,
+    /// Fraction of runs that observed any cache-read tokens.
+    pub off_hit_run_rate: Option<f64>,
     pub on_avg_cost_micros_usd: u64,
     pub off_avg_cost_micros_usd: u64,
     pub on_avg_input_tokens: usize,
     pub off_avg_input_tokens: usize,
+    pub on_avg_uncached_input_tokens: usize,
+    pub off_avg_uncached_input_tokens: usize,
     pub on_avg_output_tokens: usize,
     pub off_avg_output_tokens: usize,
     pub on_avg_cache_read_tokens: usize,
     pub off_avg_cache_read_tokens: usize,
+    pub on_cache_read_tokens_distribution: Option<TokenDistributionStats>,
+    pub off_cache_read_tokens_distribution: Option<TokenDistributionStats>,
     pub on_avg_cache_write_tokens: usize,
     pub off_avg_cache_write_tokens: usize,
     pub on_avg_sent_prompt_chars: usize,
@@ -85,6 +113,11 @@ impl LisMAbSummary {
         Some(self.on_avg_cache_hit_ratio? - self.off_avg_cache_hit_ratio?)
     }
 
+    /// Difference in hit-run rate (on − off). Positive means LisM sees cache hits more often.
+    pub fn hit_run_rate_delta(&self) -> Option<f64> {
+        Some(self.on_hit_run_rate? - self.off_hit_run_rate?)
+    }
+
     /// Difference in average cost (on − off). Negative means LisM saves money.
     pub fn cost_delta_micros(&self) -> i64 {
         self.on_avg_cost_micros_usd as i64 - self.off_avg_cost_micros_usd as i64
@@ -93,6 +126,11 @@ impl LisMAbSummary {
     /// Difference in average input tokens (on - off). Negative means LisM uses fewer tokens.
     pub fn input_token_delta(&self) -> i64 {
         self.on_avg_input_tokens as i64 - self.off_avg_input_tokens as i64
+    }
+
+    /// Difference in average uncached input tokens (on - off). Negative means LisM uses less billable input.
+    pub fn uncached_input_token_delta(&self) -> i64 {
+        self.on_avg_uncached_input_tokens as i64 - self.off_avg_uncached_input_tokens as i64
     }
 
     /// Difference in average sent prompt chars (on - off). Negative means LisM sends less context.
@@ -124,7 +162,7 @@ impl LisMAbSummary {
                     "Insufficient data: {} on-runs and {} off-runs (min {} per arm required)",
                     self.on_runs, self.off_runs, min_runs_per_arm
                 ),
-                cache_hit_ratio_delta: self.cache_hit_ratio_delta(),
+                cache_hit_ratio_delta: self.cache_hit_ratio_delta().or(self.hit_run_rate_delta()),
                 cost_delta_micros: self.cost_delta_micros(),
                 input_token_delta: self.input_token_delta(),
                 sent_prompt_char_delta: self.sent_prompt_char_delta(),
@@ -133,7 +171,7 @@ impl LisMAbSummary {
             };
         }
 
-        let cache_delta = self.cache_hit_ratio_delta();
+        let cache_delta = self.cache_hit_ratio_delta().or(self.hit_run_rate_delta());
         let cost_delta = self.cost_delta_micros();
 
         let no_cache_signal = cache_delta.is_none();
@@ -142,6 +180,8 @@ impl LisMAbSummary {
             && self.off_avg_cost_micros_usd == 0;
         let no_saved_token_signal = self.on_avg_tokens_saved == 0 && self.off_avg_tokens_saved == 0;
         let no_input_signal = self.on_avg_input_tokens == 0 && self.off_avg_input_tokens == 0;
+        let no_uncached_input_signal =
+            self.on_avg_uncached_input_tokens == 0 && self.off_avg_uncached_input_tokens == 0;
         let no_char_signal =
             self.on_avg_sent_prompt_chars == 0 && self.off_avg_sent_prompt_chars == 0;
 
@@ -149,6 +189,7 @@ impl LisMAbSummary {
             && no_cost_signal
             && no_saved_token_signal
             && no_input_signal
+            && no_uncached_input_signal
             && no_char_signal
         {
             return LisMRolloutConclusion {
@@ -170,13 +211,13 @@ impl LisMAbSummary {
         if cache_hurts || cost_penalty_exceeded {
             let reason = if cache_hurts && cost_penalty_exceeded {
                 format!(
-                    "LisM degrades cache hit ratio ({:+.3}) and increases cost ({:+}μ); recommend ForceOff",
+                    "LisM degrades cache hit signal ({:+.3}) and increases cost ({:+}μ); recommend ForceOff",
                     cache_delta.unwrap_or(0.0),
                     cost_delta
                 )
             } else if cache_hurts {
                 format!(
-                    "LisM degrades cache hit ratio ({:+.3}); recommend ForceOff",
+                    "LisM degrades cache hit signal ({:+.3}); recommend ForceOff",
                     cache_delta.unwrap_or(0.0)
                 )
             } else {
@@ -201,15 +242,20 @@ impl LisMAbSummary {
         // below the configured hard penalty threshold.
         let cache_helps = cache_delta.map_or(false, |d| d > cache_delta_threshold);
         let cost_within_penalty = cost_delta <= cost_penalty_threshold_micros as i64;
+        let uncached_input_delta = self.uncached_input_token_delta();
         let input_delta = self.input_token_delta();
-        let input_token_saves = !no_input_signal && input_delta < -128;
+        let input_token_saves = if !no_uncached_input_signal {
+            uncached_input_delta < -128
+        } else {
+            !no_input_signal && input_delta < -128
+        };
         let cache_not_hurt = !cache_hurts;
 
         if cache_helps && cost_within_penalty {
             return LisMRolloutConclusion {
                 recommendation: LisMPolicyRecommendation::ForceOn,
                 reason: format!(
-                    "LisM improves cache hit ratio ({:+.3}) and keeps cost delta within threshold ({:+}μ <= {}μ); recommend ForceOn",
+                    "LisM improves cache hit signal ({:+.3}) and keeps cost delta within threshold ({:+}μ <= {}μ); recommend ForceOn",
                     cache_delta.unwrap_or(0.0),
                     cost_delta,
                     cost_penalty_threshold_micros
@@ -227,12 +273,16 @@ impl LisMAbSummary {
             return LisMRolloutConclusion {
                 recommendation: LisMPolicyRecommendation::ForceOn,
                 reason: format!(
-                    "LisM reduces input tokens ({:+}) and keeps cost delta within threshold ({:+}μ <= {}μ); recommend ForceOn",
-                    input_delta, cost_delta, cost_penalty_threshold_micros
+                    "LisM reduces input tokens via lower uncached input ({:+}) and keeps cost delta within threshold ({:+}μ <= {}μ); recommend ForceOn",
+                    uncached_input_delta, cost_delta, cost_penalty_threshold_micros
                 ),
                 cache_hit_ratio_delta: cache_delta,
                 cost_delta_micros: cost_delta,
-                input_token_delta: input_delta,
+                input_token_delta: if !no_uncached_input_signal {
+                    uncached_input_delta
+                } else {
+                    input_delta
+                },
                 sent_prompt_char_delta: self.sent_prompt_char_delta(),
                 on_completion_rate: self.on_completion_rate,
                 off_completion_rate: self.off_completion_rate,
@@ -307,7 +357,7 @@ impl std::fmt::Display for LisMRolloutConclusion {
         writeln!(f, "Rollout Conclusion: {rec}")?;
         writeln!(f, "  Reason           : {}", self.reason)?;
         if let Some(d) = self.cache_hit_ratio_delta {
-            writeln!(f, "  Δ cache_hit_ratio: {:+.3}", d)?;
+            writeln!(f, "  Δ cache_hit_sig  : {:+.3}", d)?;
         }
         writeln!(f, "  Δ cost           : {:+}μ", self.cost_delta_micros)?;
         writeln!(f, "  Δ input tokens   : {:+}", self.input_token_delta)?;
@@ -477,11 +527,14 @@ fn build_ab_record(
         total_steps,
         completed_steps,
         total_input_tokens: obs.map(|o| o.total_input_tokens).unwrap_or(0),
+        total_uncached_input_tokens: obs.map(|o| o.total_uncached_input_tokens).unwrap_or(0),
         total_output_tokens: obs.map(|o| o.total_output_tokens).unwrap_or(0),
         cache_read_tokens: obs.map(|o| o.total_cache_read_tokens).unwrap_or(0),
         cache_write_tokens: obs.map(|o| o.total_cache_write_tokens).unwrap_or(0),
         original_prompt_chars: obs.map(|o| o.total_original_chars).unwrap_or(0),
         sent_prompt_chars: obs.map(|o| o.total_sent_chars).unwrap_or(0),
+        cache_hit_observed: obs.map(|o| o.cache_hit_observed()).unwrap_or(false),
+        cache_observability_present: obs.is_some(),
         cache_hit_ratio: obs.and_then(|o| o.cache_hit_ratio()),
         estimated_tokens_saved: obs.map(|o| o.estimated_tokens_saved()).unwrap_or(0),
         cost_micros_usd: obs.map(|o| o.estimated_cost_micros_usd).unwrap_or(0),
@@ -499,14 +552,20 @@ fn summarize_records(records: &[LisMAbSampleRecord]) -> LisMAbSummary {
         off_runs: off.len(),
         on_avg_cache_hit_ratio: avg_cache_hit_ratio(&on),
         off_avg_cache_hit_ratio: avg_cache_hit_ratio(&off),
+        on_hit_run_rate: hit_run_rate(&on),
+        off_hit_run_rate: hit_run_rate(&off),
         on_avg_cost_micros_usd: avg_cost(&on),
         off_avg_cost_micros_usd: avg_cost(&off),
         on_avg_input_tokens: avg_input_tokens(&on),
         off_avg_input_tokens: avg_input_tokens(&off),
+        on_avg_uncached_input_tokens: avg_uncached_input_tokens(&on),
+        off_avg_uncached_input_tokens: avg_uncached_input_tokens(&off),
         on_avg_output_tokens: avg_output_tokens(&on),
         off_avg_output_tokens: avg_output_tokens(&off),
         on_avg_cache_read_tokens: avg_cache_read_tokens(&on),
         off_avg_cache_read_tokens: avg_cache_read_tokens(&off),
+        on_cache_read_tokens_distribution: cache_read_distribution(&on),
+        off_cache_read_tokens_distribution: cache_read_distribution(&off),
         on_avg_cache_write_tokens: avg_cache_write_tokens(&on),
         off_avg_cache_write_tokens: avg_cache_write_tokens(&off),
         on_avg_sent_prompt_chars: avg_sent_prompt_chars(&on),
@@ -539,6 +598,10 @@ fn avg_input_tokens(records: &[&LisMAbSampleRecord]) -> usize {
     avg_usize(records, |r| r.total_input_tokens)
 }
 
+fn avg_uncached_input_tokens(records: &[&LisMAbSampleRecord]) -> usize {
+    avg_usize(records, |r| r.total_uncached_input_tokens)
+}
+
 fn avg_output_tokens(records: &[&LisMAbSampleRecord]) -> usize {
     avg_usize(records, |r| r.total_output_tokens)
 }
@@ -557,6 +620,37 @@ fn avg_sent_prompt_chars(records: &[&LisMAbSampleRecord]) -> usize {
 
 fn avg_tokens_saved(records: &[&LisMAbSampleRecord]) -> usize {
     avg_usize(records, |r| r.estimated_tokens_saved)
+}
+
+fn hit_run_rate(records: &[&LisMAbSampleRecord]) -> Option<f64> {
+    let with_cache_obs: Vec<&LisMAbSampleRecord> = records
+        .iter()
+        .copied()
+        .filter(|r| r.cache_observability_present)
+        .collect();
+    if with_cache_obs.is_empty() {
+        return None;
+    }
+    let hits = with_cache_obs.iter().filter(|r| r.cache_hit_observed).count();
+    Some(hits as f64 / with_cache_obs.len() as f64)
+}
+
+fn cache_read_distribution(records: &[&LisMAbSampleRecord]) -> Option<TokenDistributionStats> {
+    if records.is_empty() {
+        return None;
+    }
+    let mut values: Vec<usize> = records.iter().map(|r| r.cache_read_tokens).collect();
+    values.sort_unstable();
+    let len = values.len();
+    let p50_idx = percentile_index(len, 0.50);
+    let p90_idx = percentile_index(len, 0.90);
+    Some(TokenDistributionStats {
+        sample_count: len,
+        nonzero_count: values.iter().filter(|&&v| v > 0).count(),
+        p50: values[p50_idx],
+        p90: values[p90_idx],
+        max: *values.last().unwrap_or(&0),
+    })
 }
 
 fn avg_usize(
@@ -579,4 +673,12 @@ fn completion_rate(records: &[&LisMAbSampleRecord]) -> Option<f64> {
         .filter(|r| r.outcome == BossTestRunOutcome::Completed)
         .count();
     Some(completed as f64 / records.len() as f64)
+}
+
+fn percentile_index(len: usize, percentile: f64) -> usize {
+    if len <= 1 {
+        return 0;
+    }
+    let rank = (percentile * len as f64).ceil() as usize;
+    rank.saturating_sub(1).min(len - 1)
 }

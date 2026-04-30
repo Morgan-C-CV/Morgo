@@ -46,7 +46,10 @@ fn make_report(
                     fallback_count: None,
                     projection_mismatch_count: None,
                     input_tokens: None,
+                    uncached_input_tokens: None,
                     output_tokens: None,
+                    original_prompt_chars: None,
+                    sent_prompt_chars: None,
                     estimated_cost_micros_usd: None,
                 })
             } else {
@@ -65,6 +68,7 @@ fn make_report(
             override_hit_count: 0,
             model_tier_counts: Default::default(),
             total_input_tokens: 0,
+            total_uncached_input_tokens: 0,
             total_output_tokens: 0,
             estimated_cost_micros_usd: cost_micros,
             total_original_chars: 0,

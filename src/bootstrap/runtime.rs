@@ -699,9 +699,14 @@ impl RuntimeBootstrap {
                     }
                     if let Ok(report) = boss.report_progress(task_manager).await {
                         if let Some(obs) = &report.observability_summary {
-                            if let Some(ratio) = obs.cache_hit_ratio() {
-                                println!("[boss-task] cache_hit_ratio: {:.3}", ratio);
-                            }
+                            println!(
+                                "[boss-task] cache_hit_observed: {}",
+                                obs.cache_hit_observed()
+                            );
+                            println!(
+                                "[boss-task] cache_read_tokens: {}",
+                                obs.total_cache_read_tokens
+                            );
                             println!(
                                 "[boss-task] cost_micros_usd: {}",
                                 obs.estimated_cost_micros_usd
@@ -880,6 +885,14 @@ impl RuntimeBootstrap {
         discovered_skills.extend(loaded_skills.skills);
         let skill_registry = Arc::new(SkillRegistry::new(discovered_skills));
         let service_observability_tracker = ServiceObservabilityTracker::default();
+        if let Some(path) = std::env::var("RUST_AGENT_API_CALL_LOG")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+        {
+            if let Err(error) = service_observability_tracker.configure_api_call_log_path(&path) {
+                tracing::warn!("Failed to open API call log path {}: {}", path, error);
+            }
+        }
         let mcp_config_result = load_server_configs_from_root(&config_root);
         let mcp_governance_result = load_mcp_governance_state_from_root(&config_root);
         let mcp_config_diagnostics = mcp_config_result.diagnostics.clone();
@@ -1847,45 +1860,61 @@ fn print_lism_ab_summary(
     println!("LisM A/B Sample Summary");
     println!("=======================");
     println!("Total records : {total_records}");
+    let on_cache_dist = summary
+        .on_cache_read_tokens_distribution
+        .as_ref()
+        .map(|d| format!("p50={} p90={} max={} nz={}/{}", d.p50, d.p90, d.max, d.nonzero_count, d.sample_count))
+        .unwrap_or_else(|| "n/a".into());
+    let off_cache_dist = summary
+        .off_cache_read_tokens_distribution
+        .as_ref()
+        .map(|d| format!("p50={} p90={} max={} nz={}/{}", d.p50, d.p90, d.max, d.nonzero_count, d.sample_count))
+        .unwrap_or_else(|| "n/a".into());
     println!(
-        "LisM ON       : {} runs | completion {:.2} | avg input {} | avg output {} | avg cache_hit_ratio {} | avg cost {}μ | avg tokens_saved {} | avg sent_chars {}",
+        "LisM ON       : {} runs | completion {:.2} | avg gross_input {} | avg uncached_input {} | avg output {} | hit_run_rate {} | avg cache_read {} | cache_read_dist {} | avg cost {}μ | avg tokens_saved {} | avg sent_chars {}",
         summary.on_runs,
         summary
             .on_completion_rate
             .map_or_else(|| "n/a".into(), |r| format!("{:.2}", r)),
         summary.on_avg_input_tokens,
+        summary.on_avg_uncached_input_tokens,
         summary.on_avg_output_tokens,
         summary
-            .on_avg_cache_hit_ratio
+            .on_hit_run_rate
             .map_or_else(|| "n/a".into(), |r| format!("{:.3}", r)),
+        summary.on_avg_cache_read_tokens,
+        on_cache_dist,
         summary.on_avg_cost_micros_usd,
         summary.on_avg_tokens_saved,
         summary.on_avg_sent_prompt_chars,
     );
     println!(
-        "LisM OFF      : {} runs | completion {:.2} | avg input {} | avg output {} | avg cache_hit_ratio {} | avg cost {}μ | avg tokens_saved {} | avg sent_chars {}",
+        "LisM OFF      : {} runs | completion {:.2} | avg gross_input {} | avg uncached_input {} | avg output {} | hit_run_rate {} | avg cache_read {} | cache_read_dist {} | avg cost {}μ | avg tokens_saved {} | avg sent_chars {}",
         summary.off_runs,
         summary
             .off_completion_rate
             .map_or_else(|| "n/a".into(), |r| format!("{:.2}", r)),
         summary.off_avg_input_tokens,
+        summary.off_avg_uncached_input_tokens,
         summary.off_avg_output_tokens,
         summary
-            .off_avg_cache_hit_ratio
+            .off_hit_run_rate
             .map_or_else(|| "n/a".into(), |r| format!("{:.3}", r)),
+        summary.off_avg_cache_read_tokens,
+        off_cache_dist,
         summary.off_avg_cost_micros_usd,
         summary.off_avg_tokens_saved,
         summary.off_avg_sent_prompt_chars,
     );
     if summary.has_both_arms() {
         println!("---");
-        if let Some(delta) = summary.cache_hit_ratio_delta() {
+        if let Some(delta) = summary.hit_run_rate_delta() {
             let direction = if delta > 0.0 {
-                "↑ LisM improves"
+                "↑ LisM hits cache more often"
             } else {
-                "↓ LisM degrades"
+                "↓ LisM hits cache less often"
             };
-            println!("Δ cache_hit_ratio  : {:+.3} ({})", delta, direction);
+            println!("Δ hit_run_rate     : {:+.3} ({})", delta, direction);
         }
         let cost_delta = summary.cost_delta_micros();
         let cost_direction = if cost_delta < 0 {
@@ -1897,7 +1926,11 @@ fn print_lism_ab_summary(
             "Δ cost             : {:+}μ ({})",
             cost_delta, cost_direction
         );
-        println!("Δ input tokens     : {:+}", summary.input_token_delta());
+        println!("Δ gross input      : {:+}", summary.input_token_delta());
+        println!(
+            "Δ uncached input   : {:+}",
+            summary.uncached_input_token_delta()
+        );
         println!(
             "Δ sent chars       : {:+}",
             summary.sent_prompt_char_delta()
