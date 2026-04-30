@@ -77,6 +77,41 @@ fn seed_step_acceptance(task: &str) -> Vec<String> {
     acceptance
 }
 
+fn extract_relevant_file_hints(text: &str) -> Vec<String> {
+    let mut hints = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if !(trimmed.starts_with('-') || trimmed.starts_with("目标文件") || trimmed.starts_with("目标目录")) {
+            continue;
+        }
+        for token in trimmed.split_whitespace() {
+            let candidate = token
+                .trim_matches('`')
+                .trim_matches('"')
+                .trim_matches('\'')
+                .trim_matches('-')
+                .trim_matches('：')
+                .trim_end_matches(['，', ',', '。', '.', ';', '；', ')', '）', ']']);
+            if candidate.is_empty() || !candidate.contains('/') {
+                continue;
+            }
+            if !(candidate.ends_with(".rs")
+                || candidate.ends_with(".md")
+                || candidate.starts_with('/')
+                || candidate.starts_with("./")
+                || candidate.starts_with("../"))
+            {
+                continue;
+            }
+            let candidate = candidate.to_string();
+            if !hints.iter().any(|existing| existing == &candidate) {
+                hints.push(candidate);
+            }
+        }
+    }
+    hints
+}
+
 fn summarize_acceptance_items(step: &BossPlanStep) -> String {
     if step.acceptance.is_empty() {
         "- none".to_string()
@@ -2527,6 +2562,7 @@ impl BossCoordinator {
             .iter()
             .find(|step| step.id == step_id)
             .ok_or_else(|| anyhow::anyhow!("Unknown boss step {step_id}"))?;
+        let relevant_files = extract_relevant_file_hints(step.objective());
 
         Ok(json!({
             "task": assemble_brief_prompt(
@@ -2537,7 +2573,7 @@ impl BossCoordinator {
                     acceptance: step.acceptance.clone(),
                     last_correction: step.last_correction.clone(),
                     recent_decisions: Vec::new(),
-                    relevant_files: Vec::new(),
+                    relevant_files,
                     allowed_tools: Vec::new(),
                     parent_session_id: parent_session_id.to_string(),
                     context_strategy: BossContextStrategy::Brief,

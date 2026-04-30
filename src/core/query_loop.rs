@@ -1055,9 +1055,11 @@ async fn execute_tool_phase(
                             TurnOutcome {
                                 state: state.clone(),
                                 events: engine_events,
-                                decision: TurnDecision::Return(
-                                    state.clone(),
-                                    Terminal::AbortedTools,
+                                decision: TurnDecision::ContinueWith(
+                                    Message::user(format!(
+                                        "tool result for {tool_name}: denied: {reason}"
+                                    )),
+                                    Continue::ToolUseFollowUp,
                                 ),
                             }
                         }
@@ -1147,9 +1149,12 @@ async fn execute_tool_phase(
                             TurnOutcome {
                                 state: state.clone(),
                                 events: engine_events,
-                                decision: TurnDecision::Return(
-                                    state.clone(),
-                                    Terminal::AbortedTools,
+                                decision: TurnDecision::ContinueWith(
+                                    Message::user(format!(
+                                        "tool result for {tool_name}: interrupted: {}",
+                                        report_detail_or_summary(&report)
+                                    )),
+                                    Continue::ToolUseFollowUp,
                                 ),
                             }
                         }
@@ -1180,9 +1185,12 @@ async fn execute_tool_phase(
                             TurnOutcome {
                                 state: state.clone(),
                                 events: engine_events,
-                                decision: TurnDecision::Return(
-                                    state.clone(),
-                                    Terminal::AbortedTools,
+                                decision: TurnDecision::ContinueWith(
+                                    Message::user(format!(
+                                        "tool result for {tool_name}: result too large: {}",
+                                        report_detail_or_summary(&report)
+                                    )),
+                                    Continue::ToolUseFollowUp,
                                 ),
                             }
                         }
@@ -1231,7 +1239,12 @@ async fn execute_tool_phase(
             TurnOutcome {
                 state: state.clone(),
                 events: engine_events,
-                decision: TurnDecision::Return(state.clone(), Terminal::AbortedTools),
+                decision: TurnDecision::ContinueWith(
+                    Message::user(format!(
+                        "tool result for {tool_name}: failure: {error}"
+                    )),
+                    Continue::ToolUseFollowUp,
+                ),
             }
         }
     }
