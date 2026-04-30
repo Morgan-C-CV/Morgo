@@ -221,6 +221,13 @@ pub fn tui_clear_screen_prefix() -> &'static str {
     "\x1B[2J\x1B[H"
 }
 
+fn preview_chars(value: &str, max_chars: usize) -> &str {
+    match value.char_indices().nth(max_chars) {
+        Some((idx, _)) => &value[..idx],
+        None => value,
+    }
+}
+
 const DEFAULT_RUNTIME_SHUTDOWN_TIMEOUT_MS: u64 = 1_500;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -686,7 +693,7 @@ impl RuntimeBootstrap {
                         if let Some(slice) = task_manager.get_output(&b_id, 0) {
                             println!(
                                 "[boss-task] b_task output (first 500 chars): {:?}",
-                                &slice.content[..slice.content.len().min(500)]
+                                preview_chars(&slice.content, 500)
                             );
                         }
                     }
@@ -1897,5 +1904,19 @@ fn print_lism_ab_summary(
         );
     } else {
         println!("--- (only one arm has data; cannot compute delta)");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::preview_chars;
+
+    #[test]
+    fn preview_chars_respects_utf8_boundaries() {
+        let value = "abc中文def";
+        assert_eq!(preview_chars(value, 0), "");
+        assert_eq!(preview_chars(value, 3), "abc");
+        assert_eq!(preview_chars(value, 5), "abc中文");
+        assert_eq!(preview_chars(value, 50), value);
     }
 }
