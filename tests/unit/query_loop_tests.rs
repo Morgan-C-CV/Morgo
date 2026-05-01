@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use rust_agent::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
+use rust_agent::core::boss_state::BossStage;
 use rust_agent::core::context::{QueryContext, SubagentConfig};
 use rust_agent::core::engine::QueryEngine;
 use rust_agent::core::events::EngineEvent;
@@ -41,9 +42,11 @@ use tokio::sync::RwLock;
 use tokio::time::{Duration, timeout};
 
 use rust_agent::state::app_state::{AppState, RuntimeRole};
-use rust_agent::state::permission_context::{PermissionMode, ToolPermissionContext};
+use rust_agent::state::permission_context::{
+    BossActorPolicy, PermissionMode, ToolPermissionContext,
+};
 use rust_agent::task::manager::TaskManager;
-use rust_agent::tool::builtin::agent::AgentTool;
+use rust_agent::tool::builtin::{agent::AgentTool, bash::BashTool};
 use rust_agent::tool::definition::PermissionDecision;
 use rust_agent::tool::definition::{Tool, ToolCall, ToolMetadata, ToolResult};
 use rust_agent::tool::registry::ToolRegistry;
@@ -676,6 +679,42 @@ fn test_subagent_context_inherits_activity_tracking() {
     assert!(!context.app_state.cancellation_token.is_cancelled());
     sub_context.app_state.cancellation_token.cancel();
     assert!(context.app_state.cancellation_token.is_cancelled());
+}
+
+#[test]
+fn executor_b_subagent_prompt_keeps_bash_visible() {
+    let context = test_context_with_turns(
+        vec![],
+        ToolRegistry::new()
+            .register(Arc::new(AgentTool))
+            .register(Arc::new(BashTool)),
+    );
+
+    let sub_context = context.create_subagent_context(
+        "executor-b",
+        vec![],
+        SubagentConfig {
+            worker_role: WorkerRole::Implement,
+            inherit_context: false,
+            max_turns: None,
+            allowed_tools: None,
+            boss_actor_policy: Some(BossActorPolicy::executor_b(BossStage::Execution)),
+        },
+    );
+
+    assert!(
+        sub_context.tools_prompt.contains("Bash -"),
+        "ExecutorB prompt must expose Bash for script execution and verification; prompt: {}",
+        sub_context.tools_prompt
+    );
+    assert!(
+        sub_context
+            .tool_registry
+            .all_metadata()
+            .iter()
+            .any(|tool| tool.name == "Bash"),
+        "ExecutorB registry must retain Bash"
+    );
 }
 
 #[tokio::test]

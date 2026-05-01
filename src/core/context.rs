@@ -111,6 +111,12 @@ impl QueryContext {
         }
         if let Some(policy) = config.boss_actor_policy {
             permission_context = permission_context.with_boss_actor_policy(policy);
+            if policy.may_spawn() {
+                // ExecutorB is the production execution worker. It may see interactive/open-world
+                // tools such as Bash, while execution is still governed by permission and
+                // workspace-capability checks at invocation time.
+                permission_context = permission_context.with_interactive_tools(true);
+            }
         }
         let lineage = build_nested_memory_lineage(self, &child_agent_id, config.inherit_context);
         permission_context.set_nested_memory_lineage(lineage);

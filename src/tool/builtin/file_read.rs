@@ -41,6 +41,20 @@ fn slice_contents(contents: &str, offset: usize, limit: usize) -> (String, bool,
     (text, end < total_chars, total_chars)
 }
 
+fn should_block_structured_data_paging(path: &Path, offset: usize) -> bool {
+    offset > 0
+        && path
+            .extension()
+            .and_then(|value| value.to_str())
+            .map(|extension| {
+                matches!(
+                    extension.to_ascii_lowercase().as_str(),
+                    "jsonl" | "csv" | "tsv" | "log" | "ndjson"
+                )
+            })
+            .unwrap_or(false)
+}
+
 #[async_trait]
 impl Tool for FileReadTool {
     fn metadata(&self) -> ToolMetadata {
@@ -98,6 +112,13 @@ impl Tool for FileReadTool {
         let offset = input.offset.unwrap_or(0);
         let requested_limit = input.limit.unwrap_or(DEFAULT_READ_LIMIT_CHARS);
         let limit = requested_limit.clamp(1, MAX_READ_LIMIT_CHARS);
+        if should_block_structured_data_paging(path, offset) {
+            return Ok(ToolResult::ResultTooLarge(format!(
+                "structured data paging stopped for {} at offset {}. Use Bash or a local script to aggregate/process the full file instead of paging it with Read.",
+                path.display(),
+                offset
+            )));
+        }
         let (slice, truncated, total_chars) = slice_contents(&contents, offset, limit);
         if truncated || offset > 0 || total_chars > slice.chars().count() {
             return Ok(ToolResult::Text(format!(

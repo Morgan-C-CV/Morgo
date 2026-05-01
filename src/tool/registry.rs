@@ -82,6 +82,7 @@ impl ToolAssemblyContext {
         Self {
             boss_actor_policy: Some(BossActorPolicy::executor_b(BossStage::Execution)),
             include_interactive_tools: true,
+            include_open_world_tools: true,
             ..Self::worker(surface, session_mode)
         }
     }

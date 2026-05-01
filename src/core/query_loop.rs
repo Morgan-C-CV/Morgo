@@ -1011,14 +1011,13 @@ async fn execute_tool_phase(
                                 };
                             }
                             apply_tool_report_context(state, &report);
+                            let follow_up =
+                                tool_follow_up_message(&tool_name, &effective_tool_input, &report);
                             TurnOutcome {
                                 state: state.clone(),
                                 events: engine_events,
                                 decision: TurnDecision::ContinueWith(
-                                    Message::user(format!(
-                                        "tool result for {tool_name}: {}",
-                                        report_detail_or_summary(&report)
-                                    )),
+                                    Message::user(follow_up),
                                     Continue::ToolUseFollowUp,
                                 ),
                             }
@@ -1253,6 +1252,39 @@ async fn execute_tool_phase(
             }
         }
     }
+}
+
+fn tool_follow_up_message(
+    tool_name: &str,
+    tool_input: &str,
+    report: &ToolExecutionReport,
+) -> String {
+    let detail = report_detail_or_summary(report);
+    let mut message = format!("tool result for {tool_name}: {detail}");
+    if tool_name == "Read"
+        && detail.contains("[Read truncated:")
+        && (tool_input.contains(".jsonl")
+            || tool_input.contains(".csv")
+            || tool_input.contains(".log")
+            || detail.contains(".jsonl")
+            || detail.contains(".csv")
+            || detail.contains(".log"))
+    {
+        message.push_str(
+            "\nRuntime guidance: this is a truncated structured data/log file. Do not keep paging through the entire input with Read. Infer the schema from the sample, then use Bash or write a local script to aggregate the full file and produce the requested artifact.",
+        );
+    }
+    if tool_name == "Write"
+        && (tool_input.contains(".py")
+            || tool_input.contains(".sh")
+            || detail.contains(".py")
+            || detail.contains(".sh"))
+    {
+        message.push_str(
+            "\nRuntime guidance: you wrote an executable/script artifact. Next, run it with Bash, inspect the result, and verify the named target output exists before doing more input reading.",
+        );
+    }
+    message
 }
 
 async fn execute_tool_batch_phase(

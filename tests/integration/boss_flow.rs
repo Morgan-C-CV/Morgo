@@ -2373,10 +2373,12 @@ async fn user_feedback_reopens_documentation_loop_before_execution() {
 }
 #[test]
 fn boss_spawned_b_runtime_has_executor_policy_and_agent_tool() {
-    use rust_agent::tool::builtin::agent::AgentTool;
+    use rust_agent::tool::builtin::{agent::AgentTool, bash::BashTool};
 
-    // Build a registry with Agent registered.
-    let registry = ToolRegistry::new().register(Arc::new(AgentTool));
+    // Build a registry with Boss ExecutorB production tools registered.
+    let registry = ToolRegistry::new()
+        .register(Arc::new(AgentTool))
+        .register(Arc::new(BashTool));
 
     // Assemble with executor_b context — Agent must be visible.
     let b_ctx = ToolAssemblyContext::executor_b(InteractionSurface::Cli, SessionMode::Headless);
@@ -2391,6 +2393,10 @@ fn boss_spawned_b_runtime_has_executor_policy_and_agent_tool() {
         b_tools.iter().any(|m| m.name == "Agent"),
         "ExecutorB registry must include Agent tool"
     );
+    assert!(
+        b_tools.iter().any(|m| m.name == "Bash"),
+        "ExecutorB registry must include Bash so execution workers can run/verify scripts"
+    );
 
     // Assemble with plain worker context — Agent must NOT be visible.
     let worker_ctx = ToolAssemblyContext::worker(InteractionSurface::Cli, SessionMode::Headless);
@@ -2399,6 +2405,10 @@ fn boss_spawned_b_runtime_has_executor_policy_and_agent_tool() {
     assert!(
         !worker_tools.iter().any(|m| m.name == "Agent"),
         "plain worker registry must NOT include Agent tool"
+    );
+    assert!(
+        !worker_tools.iter().any(|m| m.name == "Bash"),
+        "plain worker registry must NOT include open-world Bash by default"
     );
 
     // SubagentConfig with boss_actor_policy set must carry the policy through.

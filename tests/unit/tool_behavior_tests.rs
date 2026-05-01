@@ -162,6 +162,53 @@ async fn read_tool_truncates_large_files_and_supports_offsets() {
 }
 
 #[tokio::test]
+async fn read_tool_blocks_structured_data_paging_after_schema_sample() {
+    let dir = std::env::temp_dir().join(unique_name("rust-agent-read-jsonl"));
+    fs::create_dir_all(&dir).await.expect("create dir");
+    let file = dir.join("samples.jsonl");
+    let content = (0..600)
+        .map(|i| format!(r#"{{"case":"u{i}","cost":{i}}}"#))
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(&file, content).await.expect("write sample file");
+
+    let first = FileReadTool
+        .invoke(
+            &ToolCall {
+                name: "Read".into(),
+                input: serde_json::json!({ "file_path": file }).to_string(),
+            },
+            &ToolPermissionContext::new(PermissionMode::Default),
+        )
+        .await
+        .expect("initial schema sample should succeed");
+    assert!(matches!(first, ToolResult::Text(_)));
+
+    let second = FileReadTool
+        .invoke(
+            &ToolCall {
+                name: "Read".into(),
+                input: serde_json::json!({
+                    "file_path": file,
+                    "offset": 5_000,
+                    "limit": 5_000
+                })
+                .to_string(),
+            },
+            &ToolPermissionContext::new(PermissionMode::Default),
+        )
+        .await
+        .expect("structured paging should return a structured tool result");
+    let ToolResult::ResultTooLarge(message) = second else {
+        panic!("expected ResultTooLarge for structured data paging");
+    };
+    assert!(message.contains("structured data paging stopped"));
+    assert!(message.contains("Use Bash or a local script"));
+
+    fs::remove_dir_all(&dir).await.expect("cleanup dir");
+}
+
+#[tokio::test]
 async fn glob_tool_matches_nested_files() {
     let dir = std::env::temp_dir().join(unique_name("rust-agent-glob"));
     let nested = dir.join("nested");
