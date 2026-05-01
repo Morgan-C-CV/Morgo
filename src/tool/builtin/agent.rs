@@ -367,7 +367,7 @@ fn effective_max_turns(request: &SpawnAgentRequest) -> Option<usize> {
     request.max_turns.or(match request.role {
         WorkerRole::Research => None,
         WorkerRole::Verify => request.step_id.map(|_| 6),
-        WorkerRole::Implement => request.step_id.map(|_| 16),
+        WorkerRole::Implement => request.step_id.map(|_| 64),
     })
 }
 
@@ -523,9 +523,9 @@ mod tests {
     }
 
     #[test]
-    fn effective_max_turns_defaults_boss_implement_steps_to_sixteen() {
+    fn effective_max_turns_defaults_boss_implement_steps_to_sixty_four() {
         let request = sample_spawn_request();
-        assert_eq!(effective_max_turns(&request), Some(16));
+        assert_eq!(effective_max_turns(&request), Some(64));
     }
 
     #[test]
