@@ -12,19 +12,20 @@ pub struct BossArtifactExpectation {
     pub kind: BossArtifactKind,
 }
 
-fn line_declares_target_file(line: &str) -> bool {
+fn target_file_marker(line: &str) -> Option<usize> {
     let lowered = line.to_lowercase();
-    lowered.contains("目标文件")
-        || lowered.contains("target file")
-        || lowered.contains("output file")
-        || lowered.contains("生成 markdown 报告")
+    ["目标文件", "target file", "output file", "生成 markdown 报告"]
+        .iter()
+        .filter_map(|marker| lowered.find(marker).map(|idx| idx + marker.len()))
+        .min()
 }
 
-fn line_declares_target_dir(line: &str) -> bool {
+fn target_dir_marker(line: &str) -> Option<usize> {
     let lowered = line.to_lowercase();
-    lowered.contains("目标目录")
-        || lowered.contains("target directory")
-        || lowered.contains("output directory")
+    ["目标目录", "target directory", "output directory"]
+        .iter()
+        .filter_map(|marker| lowered.find(marker).map(|idx| idx + marker.len()))
+        .min()
 }
 
 fn clean_path_token(token: &str) -> String {
@@ -37,8 +38,8 @@ fn clean_path_token(token: &str) -> String {
         .to_string()
 }
 
-fn first_absolute_path(line: &str) -> Option<PathBuf> {
-    let start = line.find('/')?;
+fn first_absolute_path_after(line: &str, offset: usize) -> Option<PathBuf> {
+    let start = line.get(offset..)?.find('/').map(|idx| idx + offset)?;
     let token = line[start..]
         .split_whitespace()
         .next()
@@ -49,23 +50,21 @@ fn first_absolute_path(line: &str) -> Option<PathBuf> {
 pub fn extract_artifact_expectations(text: &str) -> Vec<BossArtifactExpectation> {
     let mut expectations = Vec::new();
     for line in text.lines() {
-        let Some(path) = first_absolute_path(line) else {
+        let (kind, path_offset) = if let Some(offset) = target_file_marker(line) {
+            (BossArtifactKind::File, offset)
+        } else if let Some(offset) = target_dir_marker(line) {
+            (BossArtifactKind::Directory, offset)
+        } else {
             continue;
         };
-        let kind = if line_declares_target_file(line) {
-            Some(BossArtifactKind::File)
-        } else if line_declares_target_dir(line) {
-            Some(BossArtifactKind::Directory)
-        } else {
-            None
+        let Some(path) = first_absolute_path_after(line, path_offset) else {
+            continue;
         };
-        if let Some(kind) = kind {
-            if !expectations
-                .iter()
-                .any(|item: &BossArtifactExpectation| item.path == path && item.kind == kind)
-            {
-                expectations.push(BossArtifactExpectation { path, kind });
-            }
+        if !expectations
+            .iter()
+            .any(|item: &BossArtifactExpectation| item.path == path && item.kind == kind)
+        {
+            expectations.push(BossArtifactExpectation { path, kind });
         }
     }
     expectations
@@ -140,6 +139,21 @@ mod tests {
             item.kind == BossArtifactKind::File
                 && item.path == PathBuf::from("/tmp/example-report.md")
         }));
+    }
+
+    #[test]
+    fn ignores_slash_tokens_before_target_marker() {
+        let text = "\
+- u9 ON/OFF 也已完成，目标目录 `/tmp/lism-jsonl-analyzer` 下生成 `analyze.py` 与 `report.md`
+- `/LisM off`：关闭当前 session。";
+
+        let expectations = extract_artifact_expectations(text);
+        assert_eq!(expectations.len(), 1);
+        assert_eq!(expectations[0].kind, BossArtifactKind::Directory);
+        assert_eq!(
+            expectations[0].path,
+            PathBuf::from("/tmp/lism-jsonl-analyzer")
+        );
     }
 
     #[test]

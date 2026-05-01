@@ -50,6 +50,7 @@ pub struct LoopState {
     pub has_attempted_reactive_compact: bool,
     pub max_output_tokens_override: Option<u64>,
     pub pending_tool_use_summary: Option<String>,
+    pub prompt_only_output_contract_active: bool,
     pub prompt_only_discovery_locked: bool,
     pub stop_hook_active: bool,
     pub turn_count: usize,
@@ -65,6 +66,7 @@ impl LoopState {
             has_attempted_reactive_compact: false,
             max_output_tokens_override: None,
             pending_tool_use_summary: None,
+            prompt_only_output_contract_active: false,
             prompt_only_discovery_locked: false,
             stop_hook_active: false,
             turn_count: 0,
@@ -309,6 +311,9 @@ fn prepare_turn(
         token_estimate: prepared_prompt.len(),
         prompt: prepared_prompt,
     };
+    if prepared.prompt.contains("Output contract:") {
+        state.prompt_only_output_contract_active = true;
+    }
 
     if let Some(max_budget_input_tokens) = params.max_budget_input_tokens {
         if prepared.token_estimate >= max_budget_input_tokens {
@@ -1356,7 +1361,7 @@ fn should_discourage_repeated_discovery_search(report: &ToolExecutionReport) -> 
 }
 
 fn should_lock_prompt_only_discovery(state: &LoopState, report: &ToolExecutionReport) -> bool {
-    prompt_only_output_contract_from_messages(&state.messages).is_some()
+    state.prompt_only_output_contract_active
         && should_discourage_repeated_discovery_search(report)
 }
 
@@ -2166,6 +2171,7 @@ mod tests {
     #[test]
     fn repeated_discovery_search_guidance_triggers_after_non_empty_batch() {
         let mut state = LoopState::new(&QueryParams::default());
+        state.prompt_only_output_contract_active = true;
         state.messages.push(Message::user(
             "Loaded skill: collaboration-audit-handoff\nOutput contract:\n- final answer only\n- max_lines: 3\n- required_line_prefixes: 目标文件 | 改动点 | 验收标准\n- do not broaden scope beyond this contract\nArguments: 只给出 roadmap 下一步的 3 行 handoff：目标文件、改动点、验收标准",
         ));
