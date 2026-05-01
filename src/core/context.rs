@@ -25,6 +25,14 @@ impl WorkerLisMPolicy {
         Self::ForceOn
     }
 
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Inherit => "inherit",
+            Self::ForceOn => "force-on",
+            Self::ForceOff => "force-off",
+        }
+    }
+
     fn resolve(self, parent_enabled: bool) -> bool {
         match self {
             Self::Inherit => parent_enabled,

@@ -54,6 +54,7 @@ fn runtime_for_surface(surface: &str, interactive: bool, init_only: bool) -> Run
         lism_ab_conclude: None,
         lism_ab_summarize: None,
         lism_policy: None,
+        worker_lism_policy: None,
         boss_task: None,
     })
     .with_provider_config(test_model_provider_config())
@@ -674,6 +675,7 @@ api_key_env = "OPENAI_API_KEY"
         lism_ab_conclude: None,
         lism_ab_summarize: None,
         lism_policy: None,
+        worker_lism_policy: None,
         boss_task: None,
     });
     let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::InitOnly, false);
@@ -731,6 +733,7 @@ fn bootstrap_models_toml_missing_file_falls_back_to_existing_bootstrap_defaults(
         lism_ab_conclude: None,
         lism_ab_summarize: None,
         lism_policy: None,
+        worker_lism_policy: None,
         boss_task: None,
     });
     let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::InitOnly, false);
@@ -798,6 +801,7 @@ api_key_env = "OPENAI_API_KEY"
         lism_ab_conclude: None,
         lism_ab_summarize: None,
         lism_policy: None,
+        worker_lism_policy: None,
         boss_task: None,
     });
     let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::InitOnly, false);
@@ -861,6 +865,7 @@ api_key_env = "OPENAI_API_KEY"
         lism_ab_conclude: None,
         lism_ab_summarize: None,
         lism_policy: None,
+        worker_lism_policy: None,
         boss_task: None,
     });
     let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::InitOnly, false);
@@ -1020,6 +1025,7 @@ api_key_env = "OPENAI_API_KEY"
         lism_ab_conclude: None,
         lism_ab_summarize: None,
         lism_policy: None,
+        worker_lism_policy: None,
         boss_task: None,
     });
     let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::InitOnly, false);
@@ -1074,6 +1080,7 @@ fn bootstrap_infers_openai_family_provider_contract_from_env() {
         lism_ab_conclude: None,
         lism_ab_summarize: None,
         lism_policy: None,
+        worker_lism_policy: None,
         boss_task: None,
     });
     let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::InitOnly, false);
@@ -1143,6 +1150,7 @@ auth_strategy = "none"
         lism_ab_conclude: None,
         lism_ab_summarize: None,
         lism_policy: None,
+        worker_lism_policy: None,
         boss_task: None,
     });
     let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::InitOnly, false);
@@ -1185,6 +1193,7 @@ fn bootstrap_rejects_unknown_provider_without_explicit_contract() {
         lism_ab_conclude: None,
         lism_ab_summarize: None,
         lism_policy: None,
+        worker_lism_policy: None,
         boss_task: None,
     });
     let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::InitOnly, false);
@@ -1231,6 +1240,7 @@ fn bootstrap_uses_default_chat_completions_path_when_env_unset() {
         lism_ab_conclude: None,
         lism_ab_summarize: None,
         lism_policy: None,
+        worker_lism_policy: None,
         boss_task: None,
     });
     let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::InitOnly, false);
@@ -1288,6 +1298,7 @@ fn bootstrap_accepts_custom_chat_completions_path_for_custom_provider() {
         lism_ab_conclude: None,
         lism_ab_summarize: None,
         lism_policy: None,
+        worker_lism_policy: None,
         boss_task: None,
     });
     let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::InitOnly, false);
@@ -1346,6 +1357,7 @@ fn bootstrap_rejects_invalid_chat_completions_path_env() {
         lism_ab_conclude: None,
         lism_ab_summarize: None,
         lism_policy: None,
+        worker_lism_policy: None,
         boss_task: None,
     });
     let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::InitOnly, false);
@@ -1393,6 +1405,7 @@ fn bootstrap_provider_alias_matrix(
         lism_ab_conclude: None,
         lism_ab_summarize: None,
         lism_policy: None,
+        worker_lism_policy: None,
         boss_task: None,
     });
     let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::InitOnly, false);
@@ -2000,6 +2013,7 @@ fn augment_prompt_depends_on_input_state_without_mutating_store() {
         lism_ab_conclude: None,
         lism_ab_summarize: None,
         lism_policy: None,
+        worker_lism_policy: None,
         boss_task: None,
     })
     .with_provider_config(test_model_provider_config());
@@ -2145,6 +2159,7 @@ fn gate_user_access_matches_cli_remote_and_telegram_expectations() {
         lism_ab_conclude: None,
         lism_ab_summarize: None,
         lism_policy: None,
+        worker_lism_policy: None,
         boss_task: None,
     })
     .with_provider_config(test_model_provider_config());
@@ -2664,6 +2679,7 @@ fn finalize_runtime_state_is_single_writeback_entrypoint() {
         lism_ab_conclude: None,
         lism_ab_summarize: None,
         lism_policy: None,
+        worker_lism_policy: None,
         boss_task: None,
     })
     .with_provider_config(test_model_provider_config());
@@ -2807,6 +2823,7 @@ async fn runtime_continue_session_uses_restored_snapshot() {
         lism_ab_conclude: None,
         lism_ab_summarize: None,
         lism_policy: None,
+        worker_lism_policy: None,
         boss_task: None,
     })
     .with_provider_config(test_model_provider_config())
@@ -2845,6 +2862,7 @@ async fn runtime_resume_prefers_restored_surface_and_mode() {
         lism_ab_conclude: None,
         lism_ab_summarize: None,
         lism_policy: None,
+        worker_lism_policy: None,
         boss_task: None,
     })
     .with_provider_config(test_model_provider_config())
@@ -2873,6 +2891,7 @@ fn initialize_runtime_tracks_surface_mode_visibility_matrix() {
         lism_ab_conclude: None,
         lism_ab_summarize: None,
         lism_policy: None,
+        worker_lism_policy: None,
         boss_task: None,
     })
     .with_provider_config(test_model_provider_config());
@@ -2971,6 +2990,7 @@ async fn runtime_resume_keeps_restored_surface_visibility_contract() {
         lism_ab_conclude: None,
         lism_ab_summarize: None,
         lism_policy: None,
+        worker_lism_policy: None,
         boss_task: None,
     })
     .with_provider_config(test_model_provider_config())
@@ -3066,6 +3086,7 @@ async fn runtime_restores_persisted_task_list_for_resumed_session() {
         lism_ab_conclude: None,
         lism_ab_summarize: None,
         lism_policy: None,
+        worker_lism_policy: None,
         boss_task: None,
     })
     .with_provider_config(test_model_provider_config())
@@ -3134,6 +3155,7 @@ async fn runtime_continue_restores_from_file_backed_store_across_instances() {
         lism_ab_conclude: None,
         lism_ab_summarize: None,
         lism_policy: None,
+        worker_lism_policy: None,
         boss_task: None,
     })
     .with_provider_config(test_model_provider_config())
@@ -3166,6 +3188,7 @@ async fn runtime_initializes_fresh_session_record_in_store() {
         lism_ab_conclude: None,
         lism_ab_summarize: None,
         lism_policy: None,
+        worker_lism_policy: None,
         boss_task: None,
     })
     .with_provider_config(test_model_provider_config())
@@ -3910,6 +3933,7 @@ fn proxy_env_var_is_read_into_config() {
         lism_ab_conclude: None,
         lism_ab_summarize: None,
         lism_policy: None,
+        worker_lism_policy: None,
         boss_task: None,
     });
     let config = runtime
@@ -3945,6 +3969,7 @@ fn no_proxy_env_var_is_read_into_config() {
         lism_ab_conclude: None,
         lism_ab_summarize: None,
         lism_policy: None,
+        worker_lism_policy: None,
         boss_task: None,
     });
     let config = runtime
@@ -3976,6 +4001,7 @@ fn ca_bundle_env_var_is_read_into_config() {
         lism_ab_conclude: None,
         lism_ab_summarize: None,
         lism_policy: None,
+        worker_lism_policy: None,
         boss_task: None,
     });
     let config = runtime
@@ -4009,6 +4035,7 @@ fn no_proxy_env_unset_leaves_field_none() {
         lism_ab_conclude: None,
         lism_ab_summarize: None,
         lism_policy: None,
+        worker_lism_policy: None,
         boss_task: None,
     });
     let config = runtime
@@ -4168,6 +4195,7 @@ fn https_proxy_falls_back_when_rust_agent_proxy_unset() {
         lism_ab_conclude: None,
         lism_ab_summarize: None,
         lism_policy: None,
+        worker_lism_policy: None,
         boss_task: None,
     });
     let config = runtime
@@ -4220,6 +4248,7 @@ fn webfetch_uses_same_proxy_resolution_contract() {
         lism_ab_conclude: None,
         lism_ab_summarize: None,
         lism_policy: None,
+        worker_lism_policy: None,
         boss_task: None,
     });
     let config = runtime

@@ -15,6 +15,7 @@ use crate::core::boss_state::{
     BossStopOutcome, BossStopStage, CompressionStrategy, ContextMode,
 };
 use crate::core::boss_test_readiness::BossTestRunOutcome;
+use crate::core::context::WorkerLisMPolicy;
 use crate::core::lism_ab_sample::SharedLisMAbSampleSink;
 use crate::core::prompt_budget::{BudgetDecision, evaluate_message_budget};
 use crate::core::state_frame::ActorRole;
@@ -51,6 +52,7 @@ pub struct BossCoordinator {
     runtime_key: Arc<RwLock<Option<String>>>,
     runtime_owner: Arc<BossRuntimeOwner>,
     lism_policy: Arc<RwLock<BossLisMPolicy>>,
+    worker_lism_policy: Arc<RwLock<WorkerLisMPolicy>>,
     lism_ab_sink: Option<SharedLisMAbSampleSink>,
 }
 
@@ -203,6 +205,7 @@ impl BossCoordinator {
             runtime_key: Arc::new(RwLock::new(None)),
             runtime_owner,
             lism_policy: Arc::new(RwLock::new(BossLisMPolicy::Inherit)),
+            worker_lism_policy: Arc::new(RwLock::new(WorkerLisMPolicy::ForceOn)),
             lism_ab_sink: None,
         }
     }
@@ -394,6 +397,7 @@ impl BossCoordinator {
             runtime_key: self.runtime_key.clone(),
             runtime_owner: self.runtime_owner.clone(),
             lism_policy: self.lism_policy.clone(),
+            worker_lism_policy: self.worker_lism_policy.clone(),
             lism_ab_sink: self.lism_ab_sink.clone(),
         }
     }
@@ -1158,6 +1162,21 @@ impl BossCoordinator {
 
     pub async fn lism_policy(&self) -> BossLisMPolicy {
         *self.lism_policy.read().await
+    }
+
+    pub async fn set_worker_lism_policy(&self, policy: WorkerLisMPolicy) {
+        *self.worker_lism_policy.write().await = policy;
+    }
+
+    /// Synchronous policy initializer — only safe to call before the coordinator is Arc-wrapped.
+    pub fn init_worker_lism_policy(&mut self, policy: WorkerLisMPolicy) {
+        if let Ok(mut guard) = self.worker_lism_policy.try_write() {
+            *guard = policy;
+        }
+    }
+
+    pub async fn worker_lism_policy(&self) -> WorkerLisMPolicy {
+        *self.worker_lism_policy.read().await
     }
 
     /// Attach a LisM A/B sample sink. Call before the first `advance_plan`.
@@ -2643,6 +2662,7 @@ impl BossCoordinator {
             "task_contains_boss_context": true,
             "role": "implement",
             "inherit_context": false,
+            "lism_policy": self.worker_lism_policy().await.as_str(),
             "context_strategy": "brief",
             "reuse_strategy": "running_only",
             "step_id": step.id,

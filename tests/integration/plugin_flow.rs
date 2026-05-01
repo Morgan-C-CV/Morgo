@@ -143,6 +143,7 @@ async fn plugin_runtime_exposes_command_hook_tool_and_diagnostics() {
         lism_ab_conclude: None,
         lism_ab_summarize: None,
         lism_policy: None,
+        worker_lism_policy: None,
         boss_task: None,
     })
     .with_session_store(session_store)

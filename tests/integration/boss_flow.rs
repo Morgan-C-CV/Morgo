@@ -9305,6 +9305,70 @@ async fn t27_r1_report_lism_policy_field_reflects_coordinator_policy() {
     let _ = app_state;
 }
 
+#[tokio::test]
+async fn t27_r2_boss_mode_end_to_end_worker_lism_modes_propagate_to_spawn_payload() {
+    async fn run_case(
+        case_name: &str,
+        boss_policy: rust_agent::core::boss_state::BossLisMPolicy,
+        worker_policy: WorkerLisMPolicy,
+    ) -> String {
+        let mut step = boss_step(0, case_name);
+        step.objective = Some(format!(
+            "创建目标文件：/tmp/{case_name}_boss_mode_worker_lism/report.md"
+        ));
+        step.acceptance = vec!["Task completed successfully.".into()];
+        let (coordinator, plan_path) = coordinator_with_plan(
+            boss_plan(vec![step]),
+            &format!("test_boss_worker_lism_{case_name}.json"),
+        )
+        .await;
+
+        coordinator.set_lism_policy(boss_policy).await;
+        coordinator.set_worker_lism_policy(worker_policy).await;
+
+        let app_state = app_state(&format!("worker-lism-{case_name}"));
+        let result = coordinator
+            .advance_plan(&app_state)
+            .await
+            .expect("advance_plan should succeed")
+            .expect("dispatch should return payload");
+
+        assert_eq!(coordinator.lism_policy().await, boss_policy);
+        assert!(result.contains(&format!(
+            "\"lism_policy\":\"{}\"",
+            worker_policy.as_str()
+        )));
+
+        let _ = std::fs::remove_file(plan_path);
+        let _ = std::fs::remove_dir_all(format!("/tmp/{case_name}_boss_mode_worker_lism"));
+        result
+    }
+
+    let all_off = run_case(
+        "all_off",
+        rust_agent::core::boss_state::BossLisMPolicy::ForceOff,
+        WorkerLisMPolicy::ForceOff,
+    )
+    .await;
+    assert!(all_off.contains("\"lism_policy\":\"force-off\""));
+
+    let boss_on_only = run_case(
+        "boss_on_only",
+        rust_agent::core::boss_state::BossLisMPolicy::ForceOn,
+        WorkerLisMPolicy::ForceOff,
+    )
+    .await;
+    assert!(boss_on_only.contains("\"lism_policy\":\"force-off\""));
+
+    let all_on = run_case(
+        "all_on",
+        rust_agent::core::boss_state::BossLisMPolicy::ForceOn,
+        WorkerLisMPolicy::ForceOn,
+    )
+    .await;
+    assert!(all_on.contains("\"lism_policy\":\"force-on\""));
+}
+
 // ── R2 provider routing integration tests ────────────────────────────────────
 
 /// Verifies that when models.toml has two profiles (default + worker-override)

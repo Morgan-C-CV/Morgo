@@ -122,6 +122,7 @@ async fn bootstrap_env_policy_is_attached_and_enforced_by_file_tools() {
         lism_ab_conclude: None,
         lism_ab_summarize: None,
         lism_policy: None,
+        worker_lism_policy: None,
         boss_task: None,
     })
     .with_provider_config(test_model_provider_config());

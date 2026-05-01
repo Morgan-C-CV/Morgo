@@ -17,7 +17,7 @@ use crate::core::boss::save_plan;
 use crate::core::boss_runtime::BossRuntimeHost;
 use crate::core::boss_state::BossLisMPolicy;
 use crate::core::boss_state::{BossPlan, BossPlanStep, BossPlanStepStatus};
-use crate::core::context::QueryContext;
+use crate::core::context::{QueryContext, WorkerLisMPolicy};
 use crate::core::engine::QueryEngine;
 use crate::core::lism_ab_sample::LisMAbSampleSink;
 use crate::core::lism_ab_sample::LisMRolloutConclusion;
@@ -304,6 +304,10 @@ pub struct BootstrapCli {
     /// Override the boss LisM policy for this run. One of: inherit, force-on, force-off.
     #[arg(long, value_name = "POLICY")]
     pub lism_policy: Option<String>,
+    /// Override the worker LisM policy for boss-spawned execution workers.
+    /// One of: inherit, force-on, force-off.
+    #[arg(long, value_name = "POLICY")]
+    pub worker_lism_policy: Option<String>,
     /// Run a single boss task non-interactively. Creates a one-step plan, executes it
     /// to completion, records the LisM A/B sample if --lism-ab-sample is set, then exits.
     #[arg(long, value_name = "TASK")]
@@ -327,6 +331,7 @@ impl Default for BootstrapCli {
             lism_ab_summarize: None,
             lism_ab_conclude: None,
             lism_policy: None,
+            worker_lism_policy: None,
             boss_task: None,
         }
     }
@@ -1000,6 +1005,11 @@ impl RuntimeBootstrap {
         // Apply LisM policy override if requested via CLI.
         if let Some(policy_str) = &self.cli.lism_policy {
             boss_coordinator.init_lism_policy(parse_lism_policy(policy_str));
+        }
+
+        // Apply boss-spawned worker LisM policy override if requested via CLI.
+        if let Some(policy_str) = &self.cli.worker_lism_policy {
+            boss_coordinator.init_worker_lism_policy(parse_worker_lism_policy(policy_str));
         }
 
         let boss_coordinator = Arc::new(boss_coordinator);
@@ -1893,6 +1903,14 @@ fn parse_lism_policy(s: &str) -> BossLisMPolicy {
         "force-on" | "force_on" | "on" => BossLisMPolicy::ForceOn,
         "force-off" | "force_off" | "off" => BossLisMPolicy::ForceOff,
         _ => BossLisMPolicy::Inherit,
+    }
+}
+
+fn parse_worker_lism_policy(s: &str) -> WorkerLisMPolicy {
+    match s.trim().to_lowercase().as_str() {
+        "force-on" | "force_on" | "on" => WorkerLisMPolicy::ForceOn,
+        "force-off" | "force_off" | "off" => WorkerLisMPolicy::ForceOff,
+        _ => WorkerLisMPolicy::Inherit,
     }
 }
 
