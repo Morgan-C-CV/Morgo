@@ -14,7 +14,7 @@ pub fn classify_bash_command(command: &str) -> ClassifierDecision {
             warning: "download-and-exec pattern detected".into(),
         };
     }
-    if lowered.contains("token") || lowered.contains("credential") || lowered.contains("id_rsa") {
+    if contains_secret_access_pattern(&lowered) {
         return ClassifierDecision::Ask {
             code: "secret_access",
             warning: "command may access credentials or secrets".into(),
@@ -28,4 +28,21 @@ pub fn classify_bash_command(command: &str) -> ClassifierDecision {
     }
 
     ClassifierDecision::Allow
+}
+
+fn contains_secret_access_pattern(lowered: &str) -> bool {
+    [
+        "id_rsa",
+        "id_ed25519",
+        ".env",
+        "api_key",
+        "apikey",
+        "access_key",
+        "secret_key",
+        "credentials",
+        "credential",
+        "bearer ",
+    ]
+    .iter()
+    .any(|needle| lowered.contains(needle))
 }

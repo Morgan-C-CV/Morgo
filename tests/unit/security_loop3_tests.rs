@@ -3,6 +3,7 @@ use rust_agent::tool::builtin::bash::BashTool;
 use rust_agent::tool::builtin::bash::command_helpers::{
     command_matches_rule, normalized_command_variants,
 };
+use rust_agent::tool::classifier::auto_classifier::{ClassifierDecision, classify_bash_command};
 use rust_agent::tool::definition::{PermissionDecision, Tool, ToolCall};
 
 #[test]
@@ -84,6 +85,15 @@ async fn bash_classifier_asks_on_secret_access_patterns() {
                 && metadata.code.as_deref() == Some("secret_access")
                 && metadata.escalation_reasons.iter().any(|reason| reason == "classifier.secret_access")
     ));
+}
+
+#[test]
+fn bash_classifier_allows_token_as_normal_report_filename_word() {
+    let decision = classify_bash_command(
+        "wc -c /Users/example/reports/multistage-tools-memory-token-report.md",
+    );
+
+    assert_eq!(decision, ClassifierDecision::Allow);
 }
 
 #[tokio::test]
