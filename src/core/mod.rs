@@ -22,6 +22,7 @@ pub mod query_loop;
 pub mod state_frame;
 pub mod state_frame_archive;
 pub mod state_fact_ledger;
+pub mod state_frame_hydration;
 pub mod state_frame_loop;
 pub mod state_frame_model_resolver;
 pub mod state_frame_model_router;

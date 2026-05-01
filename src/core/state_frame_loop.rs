@@ -1,4 +1,5 @@
 use crate::core::message::Message;
+use crate::core::state_frame_hydration::hydrate_needed_context;
 use crate::core::state_frame::{
     AgentState, DecisionKind, RepairNeeded, StateFrame, StatePatch, validate_state_decision,
 };
@@ -112,6 +113,7 @@ Rules:\n\
 - Treat `recent_evidence` entries prefixed with `fact:` as the authoritative Fact Ledger for this turn\n\
 - If a fact entry already says `none`, `none recorded`, `absent`, or equivalent, do NOT request that same context again\n\
 - Only use \"decision\": \"request_context\" when the missing fact is not already present in objective/open_items/blocked_items/accepted_summary/recent_evidence\n\
+- When using `needed_context`, prefer typed selectors like `file_snippet:path`, `test_failure`, `change_ref:path`, `artifact:path`, or `fact:name`\n\
 - The \"decision\" field MUST be one of the exact string values above — never use free text\n\
 - Respond with JSON only, no prose or explanation\n\
 \n\
@@ -318,13 +320,15 @@ pub async fn run_decision_loop(
                 }
             }
             DecisionKind::RequestContext => {
-                // Append requested context keys with prefix to distinguish from real evidence.
-                for key in &decision.needed_context {
-                    frame
-                        .recent_evidence
-                        .push(format!("requested_context: {key}"));
-                }
+                let summary = hydrate_needed_context(&mut frame, &decision.needed_context);
                 frame.state = decision.state;
+                if !summary.changed {
+                    return Ok(LoopOutcome::NoProgress {
+                        last_state: frame.state,
+                        reason: "request_context decision produced no hydration progress".into(),
+                        usage: total_usage,
+                    });
+                }
             }
             // Unsupported kinds: advance state, continue loop (observable via MaxIterationsReached).
             _ => {
