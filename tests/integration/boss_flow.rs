@@ -8595,6 +8595,92 @@ fn t27_4_noop_continue_stops_without_repeating_prompt() {
 }
 
 #[test]
+fn t27_4_request_context_hydrates_typed_selector_before_done() {
+    use rust_agent::core::state_frame::{ActorRole, AgentState, StateBudget, StateFrame};
+    use rust_agent::core::state_frame_loop::{DecisionLoopConfig, LoopOutcome, run_decision_loop};
+    use rust_agent::service::api::client::ModelProviderClient;
+    use rust_agent::service::api::streaming::StreamEvent;
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let request_json =
+        r#"{"state":"executing","decision":"request_context","needed_context":["file_snippet:src/core/state_frame_projection.rs"]}"#;
+    let done_json = r#"{"state":"done","decision":"done"}"#;
+    let client = ModelProviderClient::with_scripted_turns(vec![
+        vec![StreamEvent::TextDelta(request_json.into())],
+        vec![StreamEvent::TextDelta(done_json.into())],
+    ]);
+    let frame = StateFrame {
+        role: ActorRole::Worker,
+        state: AgentState::Executing,
+        objective: "update src/core/state_frame_projection.rs".into(),
+        open_items: vec!["tests pass".into()],
+        blocked_items: vec![],
+        accepted_summary: vec![],
+        recent_evidence: vec![
+            "fact: file_facts ref=filefact:1 path=src/core/state_frame_projection.rs kind=target_file source=step_objective freshness=current confidence=1.00 fact=target file".into(),
+        ],
+        allowed_actions: vec![],
+        toolset_id: None,
+        skillset_id: None,
+        required_output_schema: None,
+        budget: StateBudget::default(),
+    };
+    let outcome = rt
+        .block_on(run_decision_loop(
+            &client,
+            frame,
+            DecisionLoopConfig::default(),
+        ))
+        .expect("loop should not error");
+    assert!(matches!(outcome, LoopOutcome::Done { .. }));
+}
+
+#[test]
+fn t27_4_request_context_budget_deferred_still_counts_as_progress() {
+    use rust_agent::core::state_frame::{ActorRole, AgentState, StateBudget, StateFrame};
+    use rust_agent::core::state_frame_loop::{DecisionLoopConfig, LoopOutcome, run_decision_loop};
+    use rust_agent::service::api::client::ModelProviderClient;
+    use rust_agent::service::api::streaming::StreamEvent;
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let request_json = r#"{"state":"executing","decision":"request_context","needed_context":["test_failure","change_ref:src/core/state_frame_projection.rs","symbol:BossCoordinator"]}"#;
+    let done_json = r#"{"state":"done","decision":"done"}"#;
+    let client = ModelProviderClient::with_scripted_turns(vec![
+        vec![StreamEvent::TextDelta(request_json.into())],
+        vec![StreamEvent::TextDelta(done_json.into())],
+    ]);
+    let frame = StateFrame {
+        role: ActorRole::Worker,
+        state: AgentState::Executing,
+        objective: "update src/core/state_frame_projection.rs around BossCoordinator".into(),
+        open_items: vec!["tests pass".into()],
+        blocked_items: vec![],
+        accepted_summary: vec![],
+        recent_evidence: vec![
+            "fact: file_facts ref=filefact:1 path=src/core/state_frame_projection.rs kind=target_file source=step_objective freshness=current confidence=1.00 symbol=BossCoordinator fact=target file".into(),
+            "fact: recent_changes_in_files ref=change:1 path=src/core/state_frame_projection.rs source=worker_result freshness=after-worker-output confidence=0.90 summary=updated src/core/state_frame_projection.rs".into(),
+            "fact: test_failures ref=test:1 name=worker_reported_tests status=failed source=worker_result freshness=after-worker-output confidence=0.85 summary=tests failed in boss_flow".into(),
+        ],
+        allowed_actions: vec![],
+        toolset_id: None,
+        skillset_id: None,
+        required_output_schema: None,
+        budget: StateBudget {
+            max_input_tokens: 250,
+            ..StateBudget::default()
+        },
+    };
+    let outcome = rt
+        .block_on(run_decision_loop(
+            &client,
+            frame,
+            DecisionLoopConfig::default(),
+        ))
+        .expect("loop should not error");
+    assert!(matches!(outcome, LoopOutcome::Done { .. }));
+}
+
+#[test]
 fn t27_4_continue_with_state_patch_is_progress() {
     use rust_agent::core::state_frame::{ActorRole, AgentState, StateBudget, StateFrame};
     use rust_agent::core::state_frame_loop::{DecisionLoopConfig, LoopOutcome, run_decision_loop};
