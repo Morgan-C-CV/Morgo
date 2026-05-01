@@ -50,6 +50,7 @@ pub struct LoopState {
     pub has_attempted_reactive_compact: bool,
     pub max_output_tokens_override: Option<u64>,
     pub pending_tool_use_summary: Option<String>,
+    pub prompt_only_discovery_locked: bool,
     pub stop_hook_active: bool,
     pub turn_count: usize,
     pub transition: Option<Continue>,
@@ -64,6 +65,7 @@ impl LoopState {
             has_attempted_reactive_compact: false,
             max_output_tokens_override: None,
             pending_tool_use_summary: None,
+            prompt_only_discovery_locked: false,
             stop_hook_active: false,
             turn_count: 0,
             transition: None,
@@ -1287,14 +1289,38 @@ fn tool_follow_up_message(
     message
 }
 
-fn batch_follow_up_message(report: &ToolExecutionReport) -> String {
+fn batch_follow_up_message(state: &LoopState, report: &ToolExecutionReport) -> String {
     let mut message = format!("tool batch result:\n{}", report_detail_or_summary(report));
+    if state.prompt_only_discovery_locked
+        && report
+            .records
+            .iter()
+            .any(is_prompt_only_discovery_gate_record)
+    {
+        message.push_str(
+            "\nRuntime gate: broad discovery is now locked for this prompt-only skill. Do not call Glob/Grep again. Answer from the evidence you already have, or issue one specific Read only if a concrete gap remains.",
+        );
+    }
     if should_discourage_repeated_discovery_search(report) {
         message.push_str(
             "\nRuntime guidance: you already have non-empty evidence from this tool batch. Do not repeat the same discovery/search patterns. Either answer directly from the evidence you have, or read one specific next file only if a concrete gap remains.",
         );
+        if let Some(contract) = prompt_only_output_contract_from_messages(&state.messages) {
+            message.push_str("\nContract reminder:\n");
+            message.push_str(&contract);
+            message.push_str("\nReturn the final answer now if the current evidence is sufficient.");
+        }
     }
     message
+}
+
+fn prompt_only_output_contract_from_messages(messages: &[Message]) -> Option<String> {
+    let first_user = messages.iter().find(|message| matches!(message.role, crate::core::message::Role::User))?;
+    let text = first_user.text();
+    let (_, tail) = text.split_once("Output contract:\n")?;
+    let end = tail.find("\nArguments:").unwrap_or(tail.len());
+    let contract = tail[..end].trim();
+    (!contract.is_empty()).then(|| contract.to_string())
 }
 
 fn should_discourage_repeated_discovery_search(report: &ToolExecutionReport) -> bool {
@@ -1302,16 +1328,24 @@ fn should_discourage_repeated_discovery_search(report: &ToolExecutionReport) -> 
     let mut has_empty_discovery = false;
     for record in &report.records {
         let summary = record.summary.to_ascii_lowercase();
-        let detail = record.detail.as_deref().unwrap_or_default().to_ascii_lowercase();
+        let raw_detail = record.detail.as_deref().unwrap_or_default();
+        let detail = raw_detail.to_ascii_lowercase();
         let combined = format!("{summary}\n{detail}");
+        let detail_is_empty = raw_detail.trim().is_empty();
         match record.tool_name.as_str() {
             "Read" | "Glob" => {
-                if !combined.contains("(0 chars)") && !combined.contains("returned no matches") {
+                if !detail_is_empty
+                    && !combined.contains("(0 chars)")
+                    && !combined.contains("returned no matches")
+                {
                     has_non_empty_read_or_glob = true;
                 }
             }
             "Grep" => {
-                if combined.contains("(0 chars)") || combined.contains("returned no matches") {
+                if detail_is_empty
+                    || combined.contains("(0 chars)")
+                    || combined.contains("returned no matches")
+                {
                     has_empty_discovery = true;
                 }
             }
@@ -1321,26 +1355,99 @@ fn should_discourage_repeated_discovery_search(report: &ToolExecutionReport) -> 
     has_non_empty_read_or_glob && has_empty_discovery
 }
 
+fn should_lock_prompt_only_discovery(state: &LoopState, report: &ToolExecutionReport) -> bool {
+    prompt_only_output_contract_from_messages(&state.messages).is_some()
+        && should_discourage_repeated_discovery_search(report)
+}
+
+fn is_broad_discovery_tool(tool_name: &str) -> bool {
+    matches!(tool_name, "Glob" | "Grep" | "ToolSearch")
+}
+
+fn should_gate_prompt_only_discovery(state: &LoopState, tool_name: &str) -> bool {
+    state.prompt_only_discovery_locked && is_broad_discovery_tool(tool_name)
+}
+
+fn prompt_only_discovery_gate_outcome(
+    tool_name: &str,
+    tool_input: &str,
+    batch_index: usize,
+    batch_size: usize,
+    executed_in_batch: bool,
+) -> ToolExecutionOutcome {
+    let summary = format!(
+        "{tool_name} blocked by prompt-only output contract after sufficient evidence"
+    );
+    let detail = Some(
+        "Broad discovery is locked for this prompt-only skill. Reuse the evidence you already have, or issue one specific Read only."
+            .to_string(),
+    );
+    ToolExecutionOutcome {
+        tool_name: tool_name.to_string(),
+        result: crate::tool::definition::ToolResult::Interrupted(
+            detail.clone().unwrap_or_else(|| summary.clone()),
+        ),
+        executed_in_batch,
+        record: ToolExecutionRecord {
+            tool_name: tool_name.to_string(),
+            outcome: "Interrupted(\"prompt_only_discovery_locked\")".into(),
+            kind: crate::tool::result::ToolExecutionOutcomeKind::Interrupted,
+            summary,
+            detail,
+            pending_approval: None,
+            report_modifier: ToolReportModifier::NeedsAttention,
+            observable_input: Some(crate::tool::definition::ObservableInput {
+                value: tool_input.trim().to_string(),
+                source: crate::tool::definition::ObservableInputSource::Raw,
+            }),
+            batch_context: crate::tool::result::ToolBatchContext {
+                batch_index,
+                batch_size,
+                executed_in_batch,
+            },
+        },
+    }
+}
+
+fn is_prompt_only_discovery_gate_record(record: &ToolExecutionRecord) -> bool {
+    record.summary.contains("blocked by prompt-only output contract")
+}
+
 async fn execute_tool_batch_phase(
     context: &QueryContext,
     state: &mut LoopState,
     mut engine_events: Vec<EngineEvent>,
     tool_uses: Vec<(String, String)>,
 ) -> TurnOutcome {
-    let requests = tool_uses
-        .iter()
-        .map(
-            |(tool_name, tool_input)| crate::tool::orchestrator::ToolExecutionRequest {
-                call: crate::tool::definition::ToolCall::new(tool_name.clone(), tool_input.clone()),
-            },
-        )
-        .collect::<Vec<_>>();
+    let batch_size = tool_uses.len();
+    let executed_in_batch = batch_size > 1;
+    let mut requests = Vec::new();
+    let mut blocked_outcomes = Vec::new();
+    for (batch_index, (tool_name, tool_input)) in tool_uses.iter().enumerate() {
+        if should_gate_prompt_only_discovery(state, tool_name) {
+            blocked_outcomes.push(prompt_only_discovery_gate_outcome(
+                tool_name,
+                tool_input,
+                batch_index,
+                batch_size,
+                executed_in_batch,
+            ));
+            continue;
+        }
+        requests.push(crate::tool::orchestrator::ToolExecutionRequest {
+            call: crate::tool::definition::ToolCall::new(tool_name.clone(), tool_input.clone()),
+        });
+    }
     let orchestrator = crate::tool::orchestrator::ToolOrchestrator::new(&context.tool_registry);
-    let tool_result = orchestrator
-        .execute(&requests, &context.app_state.permission_context)
-        .await;
+    let tool_result = if requests.is_empty() {
+        Ok(Vec::new())
+    } else {
+        orchestrator
+            .execute(&requests, &context.app_state.permission_context)
+            .await
+    };
 
-    let outcomes = match tool_result {
+    let mut outcomes = match tool_result {
         Ok(outcomes) => outcomes,
         Err(error) => {
             let failure = Message::assistant(format!("tool batch failed: {error}"));
@@ -1356,6 +1463,7 @@ async fn execute_tool_batch_phase(
             };
         }
     };
+    outcomes.extend(blocked_outcomes);
 
     let records = outcomes
         .iter()
@@ -1521,12 +1629,15 @@ async fn execute_tool_batch_phase(
         }
     }
 
+    if should_lock_prompt_only_discovery(state, &report) {
+        state.prompt_only_discovery_locked = true;
+    }
     apply_tool_report_context(state, &report);
     TurnOutcome {
         state: state.clone(),
         events: engine_events,
         decision: TurnDecision::ContinueWith(
-            Message::user(batch_follow_up_message(&report)),
+            Message::user(batch_follow_up_message(state, &report)),
             Continue::ToolUseFollowUp,
         ),
     }
@@ -1982,10 +2093,14 @@ mod tests {
     use super::{
         LoopState, QueryParams, apply_tool_report_context, batch_follow_up_message,
         classify_pre_stream_failure_code, classify_stream_failure_code, report_detail_or_summary,
+        is_broad_discovery_tool, is_prompt_only_discovery_gate_record,
+        prompt_only_discovery_gate_outcome, prompt_only_output_contract_from_messages,
         should_discourage_repeated_discovery_search,
+        should_gate_prompt_only_discovery, should_lock_prompt_only_discovery,
         should_return_terminal_after_recovery_exhausted,
     };
     use crate::core::events::ServiceFailureCode;
+    use crate::core::message::Message;
     use crate::service::api::streaming::ProviderFailureDisposition;
     use crate::tool::definition::{ObservableInput, ObservableInputSource};
     use crate::tool::result::{
@@ -2050,6 +2165,10 @@ mod tests {
 
     #[test]
     fn repeated_discovery_search_guidance_triggers_after_non_empty_batch() {
+        let mut state = LoopState::new(&QueryParams::default());
+        state.messages.push(Message::user(
+            "Loaded skill: collaboration-audit-handoff\nOutput contract:\n- final answer only\n- max_lines: 3\n- required_line_prefixes: 目标文件 | 改动点 | 验收标准\n- do not broaden scope beyond this contract\nArguments: 只给出 roadmap 下一步的 3 行 handoff：目标文件、改动点、验收标准",
+        ));
         let report = ToolExecutionReport {
             records: vec![
                 ToolExecutionRecord {
@@ -2096,7 +2215,11 @@ mod tests {
         };
 
         assert!(should_discourage_repeated_discovery_search(&report));
-        assert!(batch_follow_up_message(&report).contains("Do not repeat the same discovery/search patterns"));
+        let follow_up = batch_follow_up_message(&state, &report);
+        assert!(follow_up.contains("Do not repeat the same discovery/search patterns"));
+        assert!(follow_up.contains("Contract reminder:"));
+        assert!(follow_up.contains("- max_lines: 3"));
+        assert!(should_lock_prompt_only_discovery(&state, &report));
     }
 
     #[test]
@@ -2124,6 +2247,108 @@ mod tests {
         };
 
         assert!(!should_discourage_repeated_discovery_search(&report));
+    }
+
+    #[test]
+    fn repeated_discovery_search_guidance_treats_blank_grep_detail_as_empty() {
+        let report = ToolExecutionReport {
+            records: vec![
+                ToolExecutionRecord {
+                    tool_name: "Read".into(),
+                    outcome: "success".into(),
+                    kind: ToolExecutionOutcomeKind::Success,
+                    summary: "Read succeeded".into(),
+                    detail: Some("useful evidence".into()),
+                    pending_approval: None,
+                    report_modifier: ToolReportModifier::None,
+                    observable_input: None,
+                    batch_context: ToolBatchContext {
+                        batch_index: 0,
+                        batch_size: 2,
+                        executed_in_batch: true,
+                    },
+                },
+                ToolExecutionRecord {
+                    tool_name: "Grep".into(),
+                    outcome: "success".into(),
+                    kind: ToolExecutionOutcomeKind::Success,
+                    summary: "Grep succeeded".into(),
+                    detail: Some(String::new()),
+                    pending_approval: None,
+                    report_modifier: ToolReportModifier::None,
+                    observable_input: None,
+                    batch_context: ToolBatchContext {
+                        batch_index: 1,
+                        batch_size: 2,
+                        executed_in_batch: true,
+                    },
+                },
+            ],
+            summary: "Read succeeded; Grep succeeded".into(),
+            detail: Some("useful evidence".into()),
+            report_modifier: ToolReportModifier::None,
+            context_modifier: ToolReportContextModifier::None,
+        };
+
+        assert!(should_discourage_repeated_discovery_search(&report));
+    }
+
+    #[test]
+    fn prompt_only_output_contract_is_extracted_from_loaded_skill_message() {
+        let messages = vec![Message::user(
+            "Loaded skill: summarize-skill\nOutput contract:\n- final answer only\n- max_lines: 3\nArguments: demo",
+        )];
+        assert_eq!(
+            prompt_only_output_contract_from_messages(&messages).as_deref(),
+            Some("- final answer only\n- max_lines: 3")
+        );
+    }
+
+    #[test]
+    fn prompt_only_discovery_gate_blocks_broad_search_after_lock() {
+        let mut state = LoopState::new(&QueryParams::default());
+        state.prompt_only_discovery_locked = true;
+        assert!(is_broad_discovery_tool("Glob"));
+        assert!(is_broad_discovery_tool("Grep"));
+        assert!(is_broad_discovery_tool("ToolSearch"));
+        assert!(should_gate_prompt_only_discovery(&state, "Glob"));
+        assert!(!should_gate_prompt_only_discovery(&state, "Read"));
+    }
+
+    #[test]
+    fn prompt_only_discovery_gate_outcome_is_marked_and_reported() {
+        let blocked =
+            prompt_only_discovery_gate_outcome("Glob", "{\"pattern\":\"**/*\"}", 0, 1, false);
+        assert!(is_prompt_only_discovery_gate_record(&blocked.record));
+        assert_eq!(
+            blocked.record.kind,
+            ToolExecutionOutcomeKind::Interrupted
+        );
+        assert_eq!(
+            blocked.record.detail.as_deref(),
+            Some(
+                "Broad discovery is locked for this prompt-only skill. Reuse the evidence you already have, or issue one specific Read only."
+            )
+        );
+
+        let mut state = LoopState::new(&QueryParams::default());
+        state.prompt_only_discovery_locked = true;
+        let report = ToolExecutionReport {
+            records: vec![blocked.record],
+            summary: "Glob blocked by prompt-only output contract after sufficient evidence"
+                .into(),
+            detail: Some(
+                "Broad discovery is locked for this prompt-only skill. Reuse the evidence you already have, or issue one specific Read only."
+                    .into(),
+            ),
+            report_modifier: ToolReportModifier::NeedsAttention,
+            context_modifier: ToolReportContextModifier::SetPendingToolUseSummary(
+                "Glob blocked by prompt-only output contract after sufficient evidence".into(),
+            ),
+        };
+        let follow_up = batch_follow_up_message(&state, &report);
+        assert!(follow_up.contains("Runtime gate: broad discovery is now locked"));
+        assert!(follow_up.contains("Do not call Glob/Grep again"));
     }
 
     #[test]
