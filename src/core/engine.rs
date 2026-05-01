@@ -4,7 +4,7 @@ use crate::core::events::{
     SessionMilestone,
 };
 use crate::core::message::Message;
-use crate::core::query_loop::{QueryLoopResult, run_query_loop};
+use crate::core::query_loop::{QueryLoopResult, QueryParams, run_query_loop_with_params};
 use crate::history::session::{SessionHistoryEntry, SessionId};
 use crate::task::types::TaskEvent;
 use tokio::sync::mpsc;
@@ -49,7 +49,12 @@ impl QueryEngine {
 
     pub async fn submit_turn(&self, input: Message) -> QueryLoopResult {
         let user_input = input.clone();
-        let mut result = run_query_loop(&self.context, input).await;
+        let mut result = run_query_loop_with_params(
+            &self.context,
+            input,
+            query_params_for_input(&user_input),
+        )
+        .await;
         result.events = self.persist_turn(user_input, result.events.clone());
         result
     }
@@ -210,6 +215,22 @@ impl QueryEngine {
     }
 }
 
+fn query_params_for_input(input: &Message) -> QueryParams {
+    if should_extend_turn_budget_for_skill(input) {
+        QueryParams {
+            max_turns: Some(8),
+            ..QueryParams::default()
+        }
+    } else {
+        QueryParams::default()
+    }
+}
+
+fn should_extend_turn_budget_for_skill(input: &Message) -> bool {
+    let text = input.text();
+    text.starts_with("Loaded skill:") || text.starts_with("Skill workflow:")
+}
+
 fn runtime_event_for_transition(
     transition: &crate::core::query_loop::Continue,
 ) -> RuntimeEventEnvelope {
@@ -324,4 +345,27 @@ fn compact_plan_code_from_events(events: &[EngineEvent]) -> Option<ServiceFailur
         EngineEvent::CompactPlanIssued { .. } => Some(ServiceFailureCode::CompactRecoveryError),
         _ => None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{query_params_for_input, should_extend_turn_budget_for_skill};
+    use crate::core::message::Message;
+    use crate::core::query_loop::QueryParams;
+
+    #[test]
+    fn skill_loaded_prompt_gets_extended_turn_budget() {
+        let input = Message::user("Loaded skill: summarize-skill\nArguments: src");
+        let params = query_params_for_input(&input);
+        assert_eq!(params.max_turns, Some(8));
+        assert!(should_extend_turn_budget_for_skill(&input));
+    }
+
+    #[test]
+    fn regular_user_prompt_keeps_default_turn_budget() {
+        let input = Message::user("Summarize the roadmap");
+        let params = query_params_for_input(&input);
+        assert_eq!(params.max_turns, QueryParams::default().max_turns);
+        assert!(!should_extend_turn_budget_for_skill(&input));
+    }
 }

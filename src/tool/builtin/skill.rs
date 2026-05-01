@@ -66,15 +66,17 @@ pub fn format_skill_prompt(skill: &SkillDefinition, args: &str) -> anyhow::Resul
         format!("Allowed tools: {}\n", skill.allowed_tools.join(", "))
     };
     let source = format!("Source: {}\n", skill.source.as_str());
+    let execution_hint = "Execution hint: use the minimum evidence needed, avoid repeating the same search after a non-empty result, and answer directly once you have enough evidence for the requested output.\n";
 
     Ok(format!(
-        "Loaded skill: {}\n{}{}{}{}{}{}\nSkill instructions:\n{}",
+        "Loaded skill: {}\n{}{}{}{}{}{}{}\nSkill instructions:\n{}",
         skill.name,
         when_to_use,
         argument_hint,
         workflow_hint,
         allowed_tools,
         source,
+        execution_hint,
         args_line,
         skill.content
     ))

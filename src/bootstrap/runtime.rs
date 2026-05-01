@@ -910,10 +910,11 @@ impl RuntimeBootstrap {
         let _ = run_hook(&hook_registry, HookEvent::SessionStart);
         let _ = run_hook(&hook_registry, HookEvent::Setup);
 
+        let skill_project_root = resolve_skill_project_root(&config_root, &state.current_cwd);
         let mut discovered_skills = bundled_skills();
         let mut skill_loader_cache = SkillLoaderCache::default();
         let (loaded_skills, _) = skill_loader_cache
-            .load_or_reload(&state.current_cwd)
+            .load_or_reload(&skill_project_root)
             .unwrap_or_default();
         discovered_skills.extend(loaded_skills.skills);
         let skill_registry = Arc::new(SkillRegistry::new(discovered_skills));
@@ -1886,6 +1887,14 @@ fn parse_lism_policy(s: &str) -> BossLisMPolicy {
     }
 }
 
+fn resolve_skill_project_root(config_root: &std::path::Path, current_cwd: &std::path::Path) -> std::path::PathBuf {
+    config_root
+        .parent()
+        .filter(|parent| parent.join(".claude") == config_root)
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| current_cwd.to_path_buf())
+}
+
 fn print_lism_ab_summary(
     summary: &crate::core::lism_ab_sample::LisMAbSummary,
     total_records: usize,
@@ -1985,7 +1994,9 @@ fn print_lism_ab_summary(
 
 #[cfg(test)]
 mod tests {
-    use super::preview_chars;
+    use std::path::Path;
+
+    use super::{preview_chars, resolve_skill_project_root};
 
     #[test]
     fn preview_chars_respects_utf8_boundaries() {
@@ -1994,5 +2005,22 @@ mod tests {
         assert_eq!(preview_chars(value, 3), "abc");
         assert_eq!(preview_chars(value, 5), "abc中文");
         assert_eq!(preview_chars(value, 50), value);
+    }
+
+    #[test]
+    fn resolve_skill_project_root_prefers_config_root_parent_for_dot_claude() {
+        let cwd = Path::new("/workspace/repo");
+        let config_root = Path::new("/tmp/smoke/.claude");
+        assert_eq!(
+            resolve_skill_project_root(config_root, cwd),
+            Path::new("/tmp/smoke")
+        );
+    }
+
+    #[test]
+    fn resolve_skill_project_root_falls_back_to_cwd_for_non_dot_claude_root() {
+        let cwd = Path::new("/workspace/repo");
+        let config_root = Path::new("/tmp/custom-config");
+        assert_eq!(resolve_skill_project_root(config_root, cwd), cwd);
     }
 }
