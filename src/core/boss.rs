@@ -226,6 +226,18 @@ fn collect_recent_decisions(plan: &BossPlan, current_step_id: usize) -> Vec<Stri
     decisions
 }
 
+fn store_step_result_diff(step: &mut BossPlanStep, primary: &str, fallback: Option<&str>) {
+    let candidate = if primary.trim().is_empty() {
+        fallback.unwrap_or_default()
+    } else {
+        primary
+    };
+    if candidate.trim().is_empty() {
+        return;
+    }
+    step.result_diff = Some(candidate.trim().to_string());
+}
+
 fn build_step_review_summary(
     step: &BossPlanStep,
     source: &str,
@@ -1768,6 +1780,7 @@ impl BossCoordinator {
                     None
                 } else {
                     step.worker_task_id = Some(event.task_id.clone());
+                    store_step_result_diff(step, &event.result, Some(&event.summary));
                     if matches!(
                         step.status,
                         BossPlanStepStatus::Completed | BossPlanStepStatus::Reviewing
@@ -1797,6 +1810,7 @@ impl BossCoordinator {
                 step.completed = false;
                 step.status = BossPlanStepStatus::Failed;
                 step.worker_task_id = Some(event.task_id.clone());
+                store_step_result_diff(step, &event.result, Some(&event.summary));
                 step.last_review_summary = step_artifact_verification_error(step)
                     .or_else(|| Some(event.result.clone()).filter(|text| !text.trim().is_empty()))
                     .or_else(|| Some(event.summary.clone()).filter(|text| !text.trim().is_empty()));
@@ -2039,6 +2053,11 @@ impl BossCoordinator {
                     None
                 } else {
                     step.worker_task_id = notification.task_id.clone();
+                    store_step_result_diff(
+                        step,
+                        notification.output_file.as_deref().unwrap_or_default(),
+                        Some(notification.body.as_str()),
+                    );
                     if matches!(
                         step.status,
                         BossPlanStepStatus::Completed | BossPlanStepStatus::Reviewing
@@ -2082,6 +2101,11 @@ impl BossCoordinator {
                 step.completed = false;
                 step.status = BossPlanStepStatus::Failed;
                 step.worker_task_id = notification.task_id.clone();
+                store_step_result_diff(
+                    step,
+                    notification.output_file.as_deref().unwrap_or_default(),
+                    Some(notification.body.as_str()),
+                );
                 step.last_review_summary = step_artifact_verification_error(step)
                     .or_else(|| {
                         notification
@@ -3761,5 +3785,30 @@ mod tests {
         assert_eq!(recent.len(), 3);
         assert_eq!(recent[0], "step 1 review: summary 1");
         assert_eq!(recent[2], "step 3 review: summary 3");
+    }
+
+    #[test]
+    fn store_step_result_diff_prefers_primary_but_uses_fallback() {
+        let mut step = BossPlanStep {
+            id: 0,
+            description: "step".into(),
+            objective: Some("objective".into()),
+            acceptance: Vec::new(),
+            requires_approval: false,
+            status: BossPlanStepStatus::Pending,
+            completed: false,
+            result_diff: None,
+            worker_task_id: None,
+            attempt_count: 0,
+            retry_budget: 3,
+            last_review_summary: None,
+            last_correction: None,
+            review_task_id: None,
+        };
+
+        store_step_result_diff(&mut step, "", Some("fallback summary"));
+        assert_eq!(step.result_diff.as_deref(), Some("fallback summary"));
+        store_step_result_diff(&mut step, "primary result", Some("ignored"));
+        assert_eq!(step.result_diff.as_deref(), Some("primary result"));
     }
 }

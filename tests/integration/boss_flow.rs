@@ -8230,6 +8230,67 @@ fn t27_3_readonly_audit_projection_emits_fact_ledger_and_readonly_actions() {
 }
 
 #[test]
+fn t27_3_projection_emits_file_change_and_test_ledgers() {
+    use rust_agent::core::boss_state::{BossPlan, BossPlanStep, BossPlanStepStatus, BossStage};
+    use rust_agent::core::state_frame::ActorRole;
+    use rust_agent::core::state_frame_projection::project_state_frame;
+
+    let step = BossPlanStep {
+        id: 0,
+        description: "implement worker ledger".into(),
+        objective: Some(
+            "任务目标：\n- 目标文件：src/core/state_frame_projection.rs\n- 修复 worker ledger".into(),
+        ),
+        acceptance: vec!["tests pass".into()],
+        requires_approval: false,
+        status: BossPlanStepStatus::Running,
+        completed: false,
+        result_diff: Some(
+            "updated src/core/state_frame_projection.rs; tests failed in boss_flow due to stale file_facts placeholder".into(),
+        ),
+        worker_task_id: None,
+        attempt_count: 1,
+        retry_budget: 3,
+        last_review_summary: Some("tests failed because file_facts still said none recorded".into()),
+        last_correction: None,
+        review_task_id: None,
+    };
+    let plan = BossPlan {
+        plan_id: "p-ledger".into(),
+        task_description: "ledger task".into(),
+        document_spec: String::new(),
+        pseudo_code: String::new(),
+        steps: vec![step],
+        accepted_by_user: true,
+        auto_sequence: true,
+        ..Default::default()
+    };
+
+    let frame = project_state_frame(&plan, BossStage::Execution, Some(0), ActorRole::Worker);
+    assert!(
+        frame.recent_evidence.iter().any(|item| {
+            item.contains("fact: file_facts")
+                && item.contains("path=src/core/state_frame_projection.rs")
+        }),
+        "projection should emit file fact refs for concrete target files"
+    );
+    assert!(
+        frame.recent_evidence.iter().any(|item| {
+            item.contains("fact: recent_changes_in_files")
+                && item.contains("path=src/core/state_frame_projection.rs")
+        }),
+        "projection should emit change refs when worker output references changed files"
+    );
+    assert!(
+        frame.recent_evidence.iter().any(|item| {
+            item.contains("fact: test_failures")
+                && item.contains("status=failed")
+        }),
+        "projection should emit test ledger entries when failures are reported"
+    );
+}
+
+#[test]
 fn t27_3_projected_frame_is_non_cacheable_segment() {
     use rust_agent::core::boss_state::{BossPlan, BossStage};
     use rust_agent::core::prompt_segment::PromptSegmentKind;

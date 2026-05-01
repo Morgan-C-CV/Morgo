@@ -1,4 +1,5 @@
 use crate::core::boss_state::{BossPlan, BossStage};
+use crate::core::state_fact_ledger::build_step_fact_ledgers;
 use crate::core::state_frame::{ActorRole, AgentState, StateBudget, StateFrame};
 use crate::core::state_frame_archive::{
     archive_to_summary, build_accepted_archive, retain_blocked_items, retain_open_items,
@@ -75,6 +76,10 @@ fn summarize_list(items: &[String]) -> String {
     }
 }
 
+fn format_confidence(confidence_milli: u16) -> String {
+    format!("{:.2}", confidence_milli as f32 / 1000.0)
+}
+
 fn build_fact_ledger(
     plan: &BossPlan,
     stage: BossStage,
@@ -96,6 +101,7 @@ fn build_fact_ledger(
     )];
 
     if let Some(step) = current_step {
+        let ledgers = build_step_fact_ledgers(step);
         facts.push(fact_line(
             "current_step",
             format!(
@@ -118,10 +124,69 @@ fn build_fact_ledger(
             "recent_diff",
             step.result_diff.as_deref().unwrap_or("none recorded"),
         ));
+        if ledgers.file_facts.is_empty() {
+            facts.push(fact_line("file_facts", "none recorded"));
+        } else {
+            for item in ledgers.file_facts {
+                facts.push(fact_line(
+                    "file_facts",
+                    format!(
+                        "ref={} path={} kind={} source={} freshness={} confidence={} fact={}",
+                        item.ref_id,
+                        item.path,
+                        item.kind,
+                        item.source,
+                        item.freshness,
+                        format_confidence(item.confidence_milli),
+                        item.fact
+                    ),
+                ));
+            }
+        }
+        if ledgers.test_refs.is_empty() {
+            facts.push(fact_line("test_failures", "none recorded"));
+        } else {
+            for item in ledgers.test_refs {
+                facts.push(fact_line(
+                    "test_failures",
+                    format!(
+                        "ref={} name={} status={} source={} freshness={} confidence={} summary={}",
+                        item.ref_id,
+                        item.name,
+                        item.status,
+                        item.source,
+                        item.freshness,
+                        format_confidence(item.confidence_milli),
+                        item.summary
+                    ),
+                ));
+            }
+        }
+        if ledgers.change_refs.is_empty() {
+            facts.push(fact_line("recent_changes_in_files", "none recorded"));
+        } else {
+            for item in ledgers.change_refs {
+                facts.push(fact_line(
+                    "recent_changes_in_files",
+                    format!(
+                        "ref={} path={} source={} freshness={} confidence={} summary={}",
+                        item.ref_id,
+                        item.path,
+                        item.source,
+                        item.freshness,
+                        format_confidence(item.confidence_milli),
+                        item.summary
+                    ),
+                ));
+            }
+        }
     } else {
         facts.push(fact_line("accepted_constraints", "none recorded"));
         facts.push(fact_line("reject_correction", "none recorded"));
         facts.push(fact_line("recent_diff", "none recorded"));
+        facts.push(fact_line("file_facts", "none recorded"));
+        facts.push(fact_line("test_failures", "none recorded"));
+        facts.push(fact_line("recent_changes_in_files", "none recorded"));
     }
 
     facts.push(fact_line(
@@ -157,9 +222,6 @@ fn build_fact_ledger(
             summarize_list(&plan.documentation_feedback)
         },
     ));
-    facts.push(fact_line("file_facts", "none recorded"));
-    facts.push(fact_line("test_failures", "none recorded"));
-    facts.push(fact_line("recent_changes_in_files", "none recorded"));
     if readonly_analysis {
         facts.push(fact_line(
             "execution_mode",
