@@ -701,14 +701,18 @@ impl RuntimeBootstrap {
                         false
                     };
                     if step_terminal {
-                        println!("[boss-task] step task reached terminal status; syncing boss state");
+                        println!(
+                            "[boss-task] step task reached terminal status; syncing boss state"
+                        );
                         let terminal_msg = boss.advance_plan(&app_arc).await;
                         println!(
                             "[boss-task] terminal advance_plan result: {:?}",
                             terminal_msg
                         );
-                        if matches!(boss.get_stage().await, crate::core::boss_state::BossStage::Completed)
-                        {
+                        if matches!(
+                            boss.get_stage().await,
+                            crate::core::boss_state::BossStage::Completed
+                        ) {
                             break;
                         }
                     }
@@ -1923,7 +1927,10 @@ fn parse_worker_lism_policy(s: &str) -> WorkerLisMPolicy {
     }
 }
 
-fn resolve_skill_project_root(config_root: &std::path::Path, current_cwd: &std::path::Path) -> std::path::PathBuf {
+fn resolve_skill_project_root(
+    config_root: &std::path::Path,
+    current_cwd: &std::path::Path,
+) -> std::path::PathBuf {
     config_root
         .parent()
         .filter(|parent| parent.join(".claude") == config_root)

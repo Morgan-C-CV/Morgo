@@ -1,5 +1,6 @@
 use crate::core::boss_state::BossPlanStepStatus;
 use crate::core::prompt_segment::{PromptAssembly, PromptSegment, PromptSegmentKind};
+use serde::{Deserialize, Serialize};
 
 /// Which context strategy was used to build the B/child initial prompt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -17,7 +18,7 @@ pub enum BossContextStrategy {
 /// Important for provider-side prompt cache efficiency: volatile identifiers like
 /// `plan_id` must render late in the segment so stable task semantics can occupy
 /// the earliest prefix tokens.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RelevantFileHandle {
     pub path: String,
     pub kind: String,
@@ -27,7 +28,7 @@ pub struct RelevantFileHandle {
     pub step_revision: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TargetArtifact {
     pub path: String,
     pub kind: String,
@@ -35,7 +36,7 @@ pub struct TargetArtifact {
     pub source: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PermissionScopeView {
     pub lism_policy: String,
     pub inherit_context: bool,

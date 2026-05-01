@@ -49,12 +49,9 @@ impl QueryEngine {
 
     pub async fn submit_turn(&self, input: Message) -> QueryLoopResult {
         let user_input = input.clone();
-        let mut result = run_query_loop_with_params(
-            &self.context,
-            input,
-            query_params_for_input(&user_input),
-        )
-        .await;
+        let mut result =
+            run_query_loop_with_params(&self.context, input, query_params_for_input(&user_input))
+                .await;
         result.events = self.persist_turn(user_input, result.events.clone());
         result
     }

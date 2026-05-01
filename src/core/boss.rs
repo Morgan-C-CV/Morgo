@@ -5,8 +5,8 @@ use crate::core::boss_actor_runtime::{
     BossActorEvent, BossActorRegistry, DesignerACommand, ExecutorBCommand,
 };
 use crate::core::boss_context_brief::{
-    BossContextBrief, BossContextStrategy, BossStateFrame, PermissionScopeView,
-    RelevantFileHandle, TargetArtifact, assemble_brief_prompt,
+    BossContextBrief, BossContextStrategy, BossStateFrame, PermissionScopeView, RelevantFileHandle,
+    TargetArtifact, assemble_brief_prompt,
 };
 use crate::core::boss_runtime::{BossControlRuntime, BossRuntimeOwner};
 use crate::core::boss_state::{
@@ -32,6 +32,8 @@ use crate::task::manager::TaskManager;
 use crate::task::types::{TaskEvent, TaskStatus, TaskUsageSummary};
 use crate::tool::definition::{Tool, ToolCall};
 use serde_json::json;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -111,6 +113,37 @@ fn build_file_handle_relevance(kind: &str, line: &str, path: &str) -> String {
     } else {
         format!("referenced in step objective as {kind}: {path}")
     }
+}
+
+#[derive(Debug, Clone)]
+struct ExecutorBAssignmentContract {
+    brief: BossContextBrief,
+    state_frame: BossStateFrame,
+    allowed_tools: Vec<String>,
+    lism_policy: String,
+    assignment_fingerprint: String,
+}
+
+#[derive(Debug, Clone)]
+struct ContinuePayloadBuild {
+    payload: String,
+    assignment_fingerprint: String,
+    plan_version: String,
+    step_revision: String,
+}
+
+#[derive(Debug, Clone)]
+struct SpawnPayloadBuild {
+    payload: String,
+    assignment_fingerprint: String,
+    plan_version: String,
+    step_revision: String,
+}
+
+fn assignment_fingerprint(material: &serde_json::Value) -> String {
+    let mut hasher = DefaultHasher::new();
+    material.to_string().hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
 }
 
 fn extract_relevant_file_handles(text: &str, step_revision: &str) -> Vec<RelevantFileHandle> {
@@ -291,7 +324,10 @@ fn collect_blocked_items(step: &BossPlanStep) -> Vec<String> {
     if matches!(step.status, BossPlanStepStatus::WaitingForApproval) {
         blocked.push("waiting for approval before implementation may proceed".to_string());
     }
-    if matches!(step.status, BossPlanStepStatus::Rejected | BossPlanStepStatus::Failed) {
+    if matches!(
+        step.status,
+        BossPlanStepStatus::Rejected | BossPlanStepStatus::Failed
+    ) {
         if let Some(summary) = step
             .last_review_summary
             .as_ref()
@@ -822,13 +858,20 @@ impl BossCoordinator {
                 .map(|s| s.executor_b.actor_id.clone())
                 .unwrap_or_else(|| "boss-unknown-b".into())
         };
-        let payload = match self
-            .build_step_spawn_payload(step_id, &parent_session_id, &b_actor_id)
+        let spawn_build = match self
+            .build_step_spawn_payload_internal(step_id, &parent_session_id, &b_actor_id)
             .await
         {
-            Ok(p) => p,
+            Ok(build) => build,
             Err(_) => return,
         };
+        self.record_b_assignment_contract(
+            &spawn_build.assignment_fingerprint,
+            &spawn_build.plan_version,
+            &spawn_build.step_revision,
+        )
+        .await;
+        let payload = spawn_build.payload;
 
         if let Ok(task_id) = self
             .invoke_agent_tool_with_task_id(app_state, &payload)
@@ -2619,9 +2662,20 @@ impl BossCoordinator {
                 };
 
                 let payload = if let Some(b_task_id) = running_b {
-                    let continue_payload = self
-                        .build_step_continue_payload(step_id, &b_task_id, &parent_session_id)
+                    let continue_build = self
+                        .build_step_continue_payload_internal(
+                            step_id,
+                            &b_task_id,
+                            &parent_session_id,
+                        )
                         .await?;
+                    self.record_b_assignment_contract(
+                        &continue_build.assignment_fingerprint,
+                        &continue_build.plan_version,
+                        &continue_build.step_revision,
+                    )
+                    .await;
+                    let continue_payload = continue_build.payload;
 
                     self.bootstrap_actor_registry_with_app_state(app_state)
                         .await;
@@ -2645,9 +2699,16 @@ impl BossCoordinator {
                             .map(|s| s.executor_b.actor_id.clone())
                             .unwrap_or_else(|| "boss-unknown-b".into())
                     };
-                    let spawn_payload = self
-                        .build_step_spawn_payload(step_id, &parent_session_id, &b_actor_id)
+                    let spawn_build = self
+                        .build_step_spawn_payload_internal(step_id, &parent_session_id, &b_actor_id)
                         .await?;
+                    self.record_b_assignment_contract(
+                        &spawn_build.assignment_fingerprint,
+                        &spawn_build.plan_version,
+                        &spawn_build.step_revision,
+                    )
+                    .await;
+                    let spawn_payload = spawn_build.payload;
 
                     self.bootstrap_actor_registry_with_app_state(app_state)
                         .await;
@@ -2745,48 +2806,11 @@ impl BossCoordinator {
         }
     }
 
-    /// Builds a Continue payload that sends step context to a running ExecutorB task.
-    pub async fn build_step_continue_payload(
-        &self,
-        step_id: usize,
-        b_task_id: &str,
-        parent_session_id: &str,
-    ) -> anyhow::Result<String> {
-        let plan_guard = self.plan.read().await;
-        let plan = plan_guard
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("No plan loaded"))?;
-        let step = plan
-            .steps
-            .iter()
-            .find(|s| s.id == step_id)
-            .ok_or_else(|| anyhow::anyhow!("Unknown boss step {step_id}"))?;
-
-        let message = format!(
-            "Boss step {step_id}\nplan_id: {}\nobjective: {}\nacceptance:\n{}",
-            plan.plan_id,
-            step.objective(),
-            format_acceptance(step),
-        );
-
-        Ok(json!({
-            "task_id": b_task_id,
-            "message": message,
-            "step_id": step_id,
-            "boss_plan_id": plan.plan_id,
-            "step_objective": step.objective(),
-            "step_acceptance": step.acceptance,
-            "parent_session_id": parent_session_id,
-        })
-        .to_string())
-    }
-
-    pub async fn build_step_spawn_payload(
+    async fn build_executor_b_assignment_contract(
         &self,
         step_id: usize,
         parent_session_id: &str,
-        b_actor_id: &str,
-    ) -> anyhow::Result<String> {
+    ) -> anyhow::Result<ExecutorBAssignmentContract> {
         let plan_guard = self.plan.read().await;
         let plan = plan_guard
             .as_ref()
@@ -2809,6 +2833,7 @@ impl BossCoordinator {
         };
         let blocked_items = collect_blocked_items(step);
         let allowed_tools = default_allowed_tools();
+        let lism_policy = self.worker_lism_policy().await.as_str().to_string();
         let generated_at = format!(
             "{}",
             std::time::SystemTime::now()
@@ -2816,59 +2841,260 @@ impl BossCoordinator {
                 .map(|d| d.as_secs())
                 .unwrap_or(0)
         );
+        let permission_scope = PermissionScopeView {
+            lism_policy: lism_policy.clone(),
+            inherit_context: false,
+            workspace_capability: render_workspace_capability_scope(),
+            boss_actor_role: "executor_b".to_string(),
+        };
+        let brief = BossContextBrief {
+            plan_id: plan.plan_id.clone(),
+            step_id: step.id,
+            plan_version: plan_version.clone(),
+            step_revision: step_revision.clone(),
+            generated_at,
+            objective: step.objective().to_string(),
+            acceptance: step.acceptance.clone(),
+            last_correction: step.last_correction.clone(),
+            recent_decisions: recent_decisions.clone(),
+            relevant_file_handles: relevant_file_handles.clone(),
+            target_files: target_files.clone(),
+            target_artifacts: target_artifacts.clone(),
+            allowed_tools: allowed_tools.clone(),
+            permission_scope: permission_scope.clone(),
+            parent_session_id: parent_session_id.to_string(),
+            context_strategy: BossContextStrategy::Brief,
+        };
+        let state_frame = BossStateFrame {
+            step_id: step.id,
+            status: step.status,
+            open_items,
+            blocked_items,
+            allowed_actions: vec!["implement".into()],
+            required_output_hint: Some("return a unified diff or file edits".into()),
+        };
+        let assignment_fingerprint = assignment_fingerprint(&json!({
+            "plan_id": plan.plan_id,
+            "plan_version": plan_version,
+            "plan_shape": plan.steps.iter().map(|s| json!({
+                "id": s.id,
+                "objective": s.objective(),
+                "acceptance": s.acceptance,
+                "status": format!("{:?}", s.status),
+            })).collect::<Vec<_>>(),
+            "step_id": step.id,
+            "step_revision": step_revision,
+            "objective": step.objective(),
+            "acceptance": step.acceptance,
+            "last_correction": step.last_correction,
+            "recent_decisions": recent_decisions,
+            "relevant_file_handles": relevant_file_handles,
+            "target_files": target_files,
+            "target_artifacts": target_artifacts,
+            "allowed_tools": allowed_tools,
+            "permission_scope": {
+                "lism_policy": permission_scope.lism_policy,
+                "inherit_context": permission_scope.inherit_context,
+                "workspace_capability": permission_scope.workspace_capability,
+                "boss_actor_role": permission_scope.boss_actor_role,
+            },
+            "parent_session_id": parent_session_id,
+        }));
 
-        Ok(json!({
+        Ok(ExecutorBAssignmentContract {
+            brief,
+            state_frame,
+            allowed_tools,
+            lism_policy,
+            assignment_fingerprint,
+        })
+    }
+
+    async fn record_b_assignment_contract(
+        &self,
+        assignment_fingerprint: &str,
+        plan_version: &str,
+        step_revision: &str,
+    ) {
+        let mut guard = self.session.write().await;
+        if let Some(session) = guard.as_mut() {
+            session.executor_b.last_assignment_fingerprint =
+                Some(assignment_fingerprint.to_string());
+            session.executor_b.last_assignment_plan_version = Some(plan_version.to_string());
+            session.executor_b.last_assignment_step_revision = Some(step_revision.to_string());
+        }
+    }
+
+    async fn build_step_continue_payload_internal(
+        &self,
+        step_id: usize,
+        b_task_id: &str,
+        parent_session_id: &str,
+    ) -> anyhow::Result<ContinuePayloadBuild> {
+        let contract = self
+            .build_executor_b_assignment_contract(step_id, parent_session_id)
+            .await?;
+        let prior_assignment = {
+            let guard = self.session.read().await;
+            guard.as_ref().map(|session| {
+                (
+                    session.executor_b.last_assignment_fingerprint.clone(),
+                    session.executor_b.last_assignment_plan_version.clone(),
+                    session.executor_b.last_assignment_step_revision.clone(),
+                )
+            })
+        };
+        let needs_refresh = prior_assignment
+            .as_ref()
+            .map(|(fingerprint, _, _)| {
+                fingerprint.as_deref() != Some(contract.assignment_fingerprint.as_str())
+            })
+            .unwrap_or(true);
+        let refresh_reason = if !needs_refresh {
+            None
+        } else {
+            let (prior_plan_version, prior_step_revision) = prior_assignment
+                .as_ref()
+                .map(|(_, plan_version, step_revision)| {
+                    (
+                        plan_version.as_deref().unwrap_or("unknown"),
+                        step_revision.as_deref().unwrap_or("unknown"),
+                    )
+                })
+                .unwrap_or(("none", "none"));
+            Some(format!(
+                "stale brief detected: prior plan_version={prior_plan_version} prior step_revision={prior_step_revision}"
+            ))
+        };
+        let message = if needs_refresh {
+            format!(
+                "Boss assignment refresh for step {step_id}\n\
+IMPORTANT: discard any previous brief for this executor session and replace it with the refreshed brief below.\n\
+refresh_reason: {}\n\n{}",
+                refresh_reason
+                    .clone()
+                    .unwrap_or_else(|| "assignment contract changed".into()),
+                assemble_brief_prompt(&contract.brief, &contract.state_frame),
+            )
+        } else {
+            format!(
+                "Boss step {step_id}\nplan_id: {}\nobjective: {}\nacceptance:\n{}",
+                contract.brief.plan_id,
+                contract.brief.objective,
+                format_acceptance_from_items(&contract.brief.acceptance),
+            )
+        };
+        let plan_id = contract.brief.plan_id.clone();
+        let objective = contract.brief.objective.clone();
+        let acceptance = contract.brief.acceptance.clone();
+        let plan_version = contract.brief.plan_version.clone();
+        let step_revision = contract.brief.step_revision.clone();
+        let assignment_fingerprint = contract.assignment_fingerprint.clone();
+        let payload = json!({
+            "task_id": b_task_id,
+            "message": message,
+            "step_id": step_id,
+            "boss_plan_id": plan_id,
+            "step_objective": objective,
+            "step_acceptance": acceptance,
+            "parent_session_id": parent_session_id,
+            "plan_version": plan_version,
+            "step_revision": step_revision,
+            "assignment_fingerprint": assignment_fingerprint,
+            "stale_brief_action": if needs_refresh { "refresh" } else { "reuse" },
+            "refresh_reason": refresh_reason,
+            "refresh_task": if needs_refresh {
+                Some(assemble_brief_prompt(&contract.brief, &contract.state_frame))
+            } else {
+                None
+            },
+            "allowed_tools": contract.allowed_tools,
+            "lism_policy": contract.lism_policy,
+            "task_contains_boss_context": needs_refresh,
+        })
+        .to_string();
+
+        Ok(ContinuePayloadBuild {
+            payload,
+            assignment_fingerprint: contract.assignment_fingerprint,
+            plan_version: contract.brief.plan_version,
+            step_revision: contract.brief.step_revision,
+        })
+    }
+
+    /// Builds a Continue payload that sends step context to a running ExecutorB task.
+    pub async fn build_step_continue_payload(
+        &self,
+        step_id: usize,
+        b_task_id: &str,
+        parent_session_id: &str,
+    ) -> anyhow::Result<String> {
+        Ok(self
+            .build_step_continue_payload_internal(step_id, b_task_id, parent_session_id)
+            .await?
+            .payload)
+    }
+
+    async fn build_step_spawn_payload_internal(
+        &self,
+        step_id: usize,
+        parent_session_id: &str,
+        b_actor_id: &str,
+    ) -> anyhow::Result<SpawnPayloadBuild> {
+        let contract = self
+            .build_executor_b_assignment_contract(step_id, parent_session_id)
+            .await?;
+        let plan_id = contract.brief.plan_id.clone();
+        let objective = contract.brief.objective.clone();
+        let acceptance = contract.brief.acceptance.clone();
+        let plan_version = contract.brief.plan_version.clone();
+        let step_revision = contract.brief.step_revision.clone();
+        let assignment_fingerprint = contract.assignment_fingerprint.clone();
+        let payload = json!({
             "task": assemble_brief_prompt(
-                &BossContextBrief {
-                    plan_id: plan.plan_id.clone(),
-                    step_id: step.id,
-                    plan_version,
-                    step_revision: step_revision.clone(),
-                    generated_at,
-                    objective: step.objective().to_string(),
-                    acceptance: step.acceptance.clone(),
-                    last_correction: step.last_correction.clone(),
-                    recent_decisions,
-                    relevant_file_handles,
-                    target_files,
-                    target_artifacts,
-                    allowed_tools: allowed_tools.clone(),
-                    permission_scope: PermissionScopeView {
-                        lism_policy: self.worker_lism_policy().await.as_str().to_string(),
-                        inherit_context: false,
-                        workspace_capability: render_workspace_capability_scope(),
-                        boss_actor_role: "executor_b".to_string(),
-                    },
-                    parent_session_id: parent_session_id.to_string(),
-                    context_strategy: BossContextStrategy::Brief,
-                },
-                &BossStateFrame {
-                    step_id: step.id,
-                    status: step.status,
-                    open_items,
-                    blocked_items,
-                    allowed_actions: vec!["implement".into()],
-                    required_output_hint: Some("return a unified diff or file edits".into()),
-                },
+                &contract.brief,
+                &contract.state_frame,
             ),
             "task_contains_boss_context": true,
             "role": "implement",
             "inherit_context": false,
-            "allowed_tools": allowed_tools,
-            "lism_policy": self.worker_lism_policy().await.as_str(),
+            "allowed_tools": contract.allowed_tools,
+            "lism_policy": contract.lism_policy,
             "context_strategy": "brief",
             "reuse_strategy": "running_only",
-            "step_id": step.id,
-            "boss_plan_id": plan.plan_id,
-            "step_objective": step.objective(),
-            "step_acceptance": step.acceptance,
+            "step_id": contract.brief.step_id,
+            "boss_plan_id": plan_id,
+            "step_objective": objective,
+            "step_acceptance": acceptance,
             "parent_session_id": parent_session_id,
             "parent_runtime_role": "coordinator",
             "orchestration_group_id": b_actor_id,
             "boss_actor_role": "executor_b",
             "boss_lineage_depth": 0,
+            "plan_version": plan_version,
+            "step_revision": step_revision,
+            "assignment_fingerprint": assignment_fingerprint,
         })
-        .to_string())
+        .to_string();
+
+        Ok(SpawnPayloadBuild {
+            payload,
+            assignment_fingerprint: contract.assignment_fingerprint,
+            plan_version: contract.brief.plan_version,
+            step_revision: contract.brief.step_revision,
+        })
+    }
+
+    pub async fn build_step_spawn_payload(
+        &self,
+        step_id: usize,
+        parent_session_id: &str,
+        b_actor_id: &str,
+    ) -> anyhow::Result<String> {
+        Ok(self
+            .build_step_spawn_payload_internal(step_id, parent_session_id, b_actor_id)
+            .await?
+            .payload)
     }
 
     async fn invoke_agent_tool(
@@ -3365,10 +3591,14 @@ fn next_runnable_step(plan: &BossPlan) -> Option<&BossPlanStep> {
 }
 
 fn format_acceptance(step: &BossPlanStep) -> String {
-    if step.acceptance.is_empty() {
+    format_acceptance_from_items(&step.acceptance)
+}
+
+fn format_acceptance_from_items(items: &[String]) -> String {
+    if items.is_empty() {
         "- Complete the step objective.".into()
     } else {
-        step.acceptance
+        items
             .iter()
             .map(|item| format!("- {item}"))
             .collect::<Vec<_>>()
@@ -3830,9 +4060,12 @@ mod tests {
             "step-1-attempt-0",
         );
         assert!(!handles.iter().any(|handle| handle.path == "/"));
-        assert!(handles
-            .iter()
-            .any(|handle| handle.path == "/tmp/example/samples/" && handle.kind == "target_directory"));
+        assert!(
+            handles
+                .iter()
+                .any(|handle| handle.path == "/tmp/example/samples/"
+                    && handle.kind == "target_directory")
+        );
         assert!(handles.iter().any(|handle| {
             handle.path == "/tmp/example/report.md"
                 && handle.kind == "target_file"
@@ -3909,12 +4142,18 @@ mod tests {
             last_correction: None,
             review_task_id: None,
         };
-        let artifacts = collect_target_artifacts(
-            &step,
-            &["/tmp/report.md".into(), "/tmp/results/".into()],
+        let artifacts =
+            collect_target_artifacts(&step, &["/tmp/report.md".into(), "/tmp/results/".into()]);
+        assert!(
+            artifacts
+                .iter()
+                .any(|artifact| artifact.path == "/tmp/report.md")
         );
-        assert!(artifacts.iter().any(|artifact| artifact.path == "/tmp/report.md"));
-        assert!(artifacts.iter().any(|artifact| artifact.path == "/tmp/results/"));
+        assert!(
+            artifacts
+                .iter()
+                .any(|artifact| artifact.path == "/tmp/results/")
+        );
     }
 
     #[test]
@@ -3935,7 +4174,10 @@ mod tests {
             last_correction: None,
             review_task_id: None,
         };
-        assert_eq!(collect_blocked_items(&step), vec!["tests are still failing"]);
+        assert_eq!(
+            collect_blocked_items(&step),
+            vec!["tests are still failing"]
+        );
     }
 
     #[test]

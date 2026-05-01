@@ -10,8 +10,8 @@ use rust_agent::core::boss_actor_runtime::{
     BossActorRegistry, DesignerARuntime, ExecutionFn, ExecutorBRuntime, SpecReviewFn,
 };
 use rust_agent::core::boss_context_brief::{
-    BossContextBrief, BossContextStrategy, BossStateFrame, PermissionScopeView,
-    RelevantFileHandle, TargetArtifact, assemble_brief_prompt,
+    BossContextBrief, BossContextStrategy, BossStateFrame, PermissionScopeView, RelevantFileHandle,
+    TargetArtifact, assemble_brief_prompt,
 };
 use rust_agent::core::boss_runtime::BossRuntimeHost;
 use rust_agent::core::boss_state::{
@@ -704,6 +704,9 @@ async fn report_interrupt_includes_active_children_and_attempt_review_summary() 
                 lineage_depth: 1,
                 mailbox_id: None,
                 cancel_id: None,
+                last_assignment_fingerprint: None,
+                last_assignment_plan_version: None,
+                last_assignment_step_revision: None,
             });
     }
 
@@ -1824,6 +1827,7 @@ async fn execution_reuses_persistent_b_instead_of_fresh_worker_per_step() {
         "continue payload must target the existing B task"
     );
     assert_eq!(v2["step_id"], 2, "continue payload must carry step_id 2");
+    assert_eq!(v2["stale_brief_action"], "refresh");
     assert!(
         v2["reuse_strategy"].is_null(),
         "continue payload must NOT have reuse_strategy"
@@ -1983,6 +1987,9 @@ async fn boss_b_receives_step_context_via_continue_or_mailbox() {
     assert_eq!(vc["step_objective"], "objective 0");
     assert_eq!(vc["step_acceptance"][0], "acceptance 0");
     assert_eq!(vc["parent_session_id"], "parent-ctx-session");
+    assert_eq!(vc["stale_brief_action"], "refresh");
+    assert_eq!(vc["plan_version"], "plan-alpha:steps=1");
+    assert_eq!(vc["step_revision"], "step-0-attempt-0");
     // Continue payload must NOT have reuse_strategy or task field.
     assert!(
         vc["reuse_strategy"].is_null(),
@@ -1991,6 +1998,13 @@ async fn boss_b_receives_step_context_via_continue_or_mailbox() {
     assert!(
         vc["task"].is_null(),
         "continue payload must not have task field"
+    );
+    assert!(
+        vc["refresh_task"]
+            .as_str()
+            .unwrap_or("")
+            .contains("permission_scope:"),
+        "refresh continue payload must carry a replacement brief"
     );
 
     let _ = std::fs::remove_file(plan_path);
@@ -2002,9 +2016,8 @@ async fn boss_spawn_payload_carries_recent_decisions_from_prior_steps() {
     step0.status = BossPlanStepStatus::Completed;
     step0.last_review_summary = Some("keep the JSONL parsing flow".into());
     let mut step1 = boss_step(1, "Step B");
-    step1.objective = Some(
-        "任务目标：\n- 目标文件：src/core/boss.rs\n- 调整 worker spawn payload".into(),
-    );
+    step1.objective =
+        Some("任务目标：\n- 目标文件：src/core/boss.rs\n- 调整 worker spawn payload".into());
     let (coordinator, plan_path) = coordinator_with_plan(
         boss_plan(vec![step0, step1]),
         "test_boss_flow_recent_decisions.json",
@@ -2036,6 +2049,154 @@ async fn boss_spawn_payload_carries_recent_decisions_from_prior_steps() {
     assert!(
         task.contains("target_files:"),
         "spawn prompt must include structured target files"
+    );
+
+    let _ = std::fs::remove_file(plan_path);
+}
+
+#[tokio::test]
+async fn boss_continue_payload_reuses_brief_when_assignment_contract_is_unchanged() {
+    let (coordinator, plan_path) = coordinator_with_plan(
+        boss_plan(vec![boss_step(0, "Step A")]),
+        "test_boss_flow_continue_reuse_assignment.json",
+    )
+    .await;
+
+    let spawn_payload = coordinator
+        .build_step_spawn_payload(0, "parent-ctx-session", "boss-plan-alpha-b")
+        .await
+        .unwrap();
+    let spawn_json: serde_json::Value = serde_json::from_str(&spawn_payload).unwrap();
+    {
+        let mut session = coordinator.session.write().await;
+        let session = session.as_mut().unwrap();
+        session.executor_b.task_id = Some("b-task-42".into());
+        session.executor_b.last_assignment_fingerprint = spawn_json["assignment_fingerprint"]
+            .as_str()
+            .map(str::to_string);
+        session.executor_b.last_assignment_plan_version =
+            spawn_json["plan_version"].as_str().map(str::to_string);
+        session.executor_b.last_assignment_step_revision =
+            spawn_json["step_revision"].as_str().map(str::to_string);
+    }
+
+    let continue_payload = coordinator
+        .build_step_continue_payload(0, "b-task-42", "parent-ctx-session")
+        .await
+        .unwrap();
+    let continue_json: serde_json::Value = serde_json::from_str(&continue_payload).unwrap();
+
+    assert_eq!(continue_json["stale_brief_action"], "reuse");
+    assert!(
+        continue_json["refresh_task"].is_null(),
+        "unchanged assignment must not resend a replacement brief"
+    );
+    assert!(
+        continue_json["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("Boss step 0"),
+        "unchanged assignment should use the lightweight continue message"
+    );
+
+    let _ = std::fs::remove_file(plan_path);
+}
+
+#[tokio::test]
+async fn boss_continue_payload_refreshes_brief_when_worker_permission_scope_changes() {
+    use rust_agent::core::context::WorkerLisMPolicy;
+
+    let (coordinator, plan_path) = coordinator_with_plan(
+        boss_plan(vec![boss_step(0, "Step A")]),
+        "test_boss_flow_continue_refresh_permission.json",
+    )
+    .await;
+
+    let spawn_payload = coordinator
+        .build_step_spawn_payload(0, "parent-ctx-session", "boss-plan-alpha-b")
+        .await
+        .unwrap();
+    let spawn_json: serde_json::Value = serde_json::from_str(&spawn_payload).unwrap();
+    {
+        let mut session = coordinator.session.write().await;
+        let session = session.as_mut().unwrap();
+        session.executor_b.task_id = Some("b-task-42".into());
+        session.executor_b.last_assignment_fingerprint = spawn_json["assignment_fingerprint"]
+            .as_str()
+            .map(str::to_string);
+        session.executor_b.last_assignment_plan_version =
+            spawn_json["plan_version"].as_str().map(str::to_string);
+        session.executor_b.last_assignment_step_revision =
+            spawn_json["step_revision"].as_str().map(str::to_string);
+    }
+    coordinator
+        .set_worker_lism_policy(WorkerLisMPolicy::ForceOff)
+        .await;
+
+    let continue_payload = coordinator
+        .build_step_continue_payload(0, "b-task-42", "parent-ctx-session")
+        .await
+        .unwrap();
+    let continue_json: serde_json::Value = serde_json::from_str(&continue_payload).unwrap();
+
+    assert_eq!(continue_json["stale_brief_action"], "refresh");
+    assert!(
+        continue_json["refresh_task"]
+            .as_str()
+            .unwrap_or("")
+            .contains("lism_policy=force-off"),
+        "permission scope drift must refresh the worker brief"
+    );
+
+    let _ = std::fs::remove_file(plan_path);
+}
+
+#[tokio::test]
+async fn boss_continue_payload_refreshes_brief_when_step_objective_changes() {
+    let (coordinator, plan_path) = coordinator_with_plan(
+        boss_plan(vec![boss_step(0, "Step A")]),
+        "test_boss_flow_continue_refresh_objective.json",
+    )
+    .await;
+
+    let spawn_payload = coordinator
+        .build_step_spawn_payload(0, "parent-ctx-session", "boss-plan-alpha-b")
+        .await
+        .unwrap();
+    let spawn_json: serde_json::Value = serde_json::from_str(&spawn_payload).unwrap();
+    {
+        let mut session = coordinator.session.write().await;
+        let session = session.as_mut().unwrap();
+        session.executor_b.task_id = Some("b-task-42".into());
+        session.executor_b.last_assignment_fingerprint = spawn_json["assignment_fingerprint"]
+            .as_str()
+            .map(str::to_string);
+        session.executor_b.last_assignment_plan_version =
+            spawn_json["plan_version"].as_str().map(str::to_string);
+        session.executor_b.last_assignment_step_revision =
+            spawn_json["step_revision"].as_str().map(str::to_string);
+    }
+    {
+        let mut plan = coordinator.plan.write().await;
+        let plan = plan.as_mut().unwrap();
+        plan.steps[0].objective = Some(
+            "任务目标：\n- 目标文件：RustAgent/Agent/src/core/boss.rs\n- 重写 worker brief".into(),
+        );
+    }
+
+    let continue_payload = coordinator
+        .build_step_continue_payload(0, "b-task-42", "parent-ctx-session")
+        .await
+        .unwrap();
+    let continue_json: serde_json::Value = serde_json::from_str(&continue_payload).unwrap();
+
+    assert_eq!(continue_json["stale_brief_action"], "refresh");
+    assert!(
+        continue_json["refresh_task"]
+            .as_str()
+            .unwrap_or("")
+            .contains("重写 worker brief"),
+        "objective drift must regenerate the worker brief"
     );
 
     let _ = std::fs::remove_file(plan_path);
@@ -8322,10 +8483,10 @@ fn t27_3_projection_emits_file_change_and_test_ledgers() {
         "projection should emit change refs when worker output references changed files"
     );
     assert!(
-        frame.recent_evidence.iter().any(|item| {
-            item.contains("fact: test_failures")
-                && item.contains("status=failed")
-        }),
+        frame
+            .recent_evidence
+            .iter()
+            .any(|item| { item.contains("fact: test_failures") && item.contains("status=failed") }),
         "projection should emit test ledger entries when failures are reported"
     );
 }
@@ -8642,8 +8803,7 @@ fn t27_4_request_context_hydrates_typed_selector_before_done() {
     use rust_agent::service::api::streaming::StreamEvent;
 
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let request_json =
-        r#"{"state":"executing","decision":"request_context","needed_context":["file_snippet:src/core/state_frame_projection.rs"]}"#;
+    let request_json = r#"{"state":"executing","decision":"request_context","needed_context":["file_snippet:src/core/state_frame_projection.rs"]}"#;
     let done_json = r#"{"state":"done","decision":"done"}"#;
     let client = ModelProviderClient::with_scripted_turns(vec![
         vec![StreamEvent::TextDelta(request_json.into())],
@@ -9583,10 +9743,7 @@ async fn t27_r2_boss_mode_end_to_end_worker_lism_modes_propagate_to_spawn_payloa
             .expect("dispatch should return payload");
 
         assert_eq!(coordinator.lism_policy().await, boss_policy);
-        assert!(result.contains(&format!(
-            "\"lism_policy\":\"{}\"",
-            worker_policy.as_str()
-        )));
+        assert!(result.contains(&format!("\"lism_policy\":\"{}\"", worker_policy.as_str())));
 
         let _ = std::fs::remove_file(plan_path);
         let _ = std::fs::remove_dir_all(format!("/tmp/{case_name}_boss_mode_worker_lism"));

@@ -14,10 +14,15 @@ pub struct BossArtifactExpectation {
 
 fn target_file_marker(line: &str) -> Option<usize> {
     let lowered = line.to_lowercase();
-    ["目标文件", "target file", "output file", "生成 markdown 报告"]
-        .iter()
-        .filter_map(|marker| lowered.find(marker).map(|idx| idx + marker.len()))
-        .min()
+    [
+        "目标文件",
+        "target file",
+        "output file",
+        "生成 markdown 报告",
+    ]
+    .iter()
+    .filter_map(|marker| lowered.find(marker).map(|idx| idx + marker.len()))
+    .min()
 }
 
 fn target_dir_marker(line: &str) -> Option<usize> {

@@ -493,6 +493,15 @@ pub struct BossActorHandle {
     pub mailbox_id: Option<String>,
     /// Opaque token id used to cancel this actor's work; resolved at runtime.
     pub cancel_id: Option<String>,
+    /// Fingerprint of the last assignment contract issued to this actor.
+    #[serde(default)]
+    pub last_assignment_fingerprint: Option<String>,
+    /// Last plan version issued to this actor for stale-brief detection.
+    #[serde(default)]
+    pub last_assignment_plan_version: Option<String>,
+    /// Last step revision issued to this actor for stale-brief detection.
+    #[serde(default)]
+    pub last_assignment_step_revision: Option<String>,
 }
 
 impl BossActorHandle {
@@ -511,6 +520,9 @@ impl BossActorHandle {
             lineage_depth: 0,
             mailbox_id: None,
             cancel_id: None,
+            last_assignment_fingerprint: None,
+            last_assignment_plan_version: None,
+            last_assignment_step_revision: None,
         }
     }
 }

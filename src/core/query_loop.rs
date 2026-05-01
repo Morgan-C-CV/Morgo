@@ -1313,14 +1313,17 @@ fn batch_follow_up_message(state: &LoopState, report: &ToolExecutionReport) -> S
         if let Some(contract) = prompt_only_output_contract_from_messages(&state.messages) {
             message.push_str("\nContract reminder:\n");
             message.push_str(&contract);
-            message.push_str("\nReturn the final answer now if the current evidence is sufficient.");
+            message
+                .push_str("\nReturn the final answer now if the current evidence is sufficient.");
         }
     }
     message
 }
 
 fn prompt_only_output_contract_from_messages(messages: &[Message]) -> Option<String> {
-    let first_user = messages.iter().find(|message| matches!(message.role, crate::core::message::Role::User))?;
+    let first_user = messages
+        .iter()
+        .find(|message| matches!(message.role, crate::core::message::Role::User))?;
     let text = first_user.text();
     let (_, tail) = text.split_once("Output contract:\n")?;
     let end = tail.find("\nArguments:").unwrap_or(tail.len());
@@ -1361,8 +1364,7 @@ fn should_discourage_repeated_discovery_search(report: &ToolExecutionReport) -> 
 }
 
 fn should_lock_prompt_only_discovery(state: &LoopState, report: &ToolExecutionReport) -> bool {
-    state.prompt_only_output_contract_active
-        && should_discourage_repeated_discovery_search(report)
+    state.prompt_only_output_contract_active && should_discourage_repeated_discovery_search(report)
 }
 
 fn is_broad_discovery_tool(tool_name: &str) -> bool {
@@ -1380,9 +1382,8 @@ fn prompt_only_discovery_gate_outcome(
     batch_size: usize,
     executed_in_batch: bool,
 ) -> ToolExecutionOutcome {
-    let summary = format!(
-        "{tool_name} blocked by prompt-only output contract after sufficient evidence"
-    );
+    let summary =
+        format!("{tool_name} blocked by prompt-only output contract after sufficient evidence");
     let detail = Some(
         "Broad discovery is locked for this prompt-only skill. Reuse the evidence you already have, or issue one specific Read only."
             .to_string(),
@@ -1415,7 +1416,9 @@ fn prompt_only_discovery_gate_outcome(
 }
 
 fn is_prompt_only_discovery_gate_record(record: &ToolExecutionRecord) -> bool {
-    record.summary.contains("blocked by prompt-only output contract")
+    record
+        .summary
+        .contains("blocked by prompt-only output contract")
 }
 
 async fn execute_tool_batch_phase(
@@ -2097,12 +2100,11 @@ impl QueryLoopStateExt for QueryLoopState {
 mod tests {
     use super::{
         LoopState, QueryParams, apply_tool_report_context, batch_follow_up_message,
-        classify_pre_stream_failure_code, classify_stream_failure_code, report_detail_or_summary,
-        is_broad_discovery_tool, is_prompt_only_discovery_gate_record,
-        prompt_only_discovery_gate_outcome, prompt_only_output_contract_from_messages,
-        should_discourage_repeated_discovery_search,
-        should_gate_prompt_only_discovery, should_lock_prompt_only_discovery,
-        should_return_terminal_after_recovery_exhausted,
+        classify_pre_stream_failure_code, classify_stream_failure_code, is_broad_discovery_tool,
+        is_prompt_only_discovery_gate_record, prompt_only_discovery_gate_outcome,
+        prompt_only_output_contract_from_messages, report_detail_or_summary,
+        should_discourage_repeated_discovery_search, should_gate_prompt_only_discovery,
+        should_lock_prompt_only_discovery, should_return_terminal_after_recovery_exhausted,
     };
     use crate::core::events::ServiceFailureCode;
     use crate::core::message::Message;
@@ -2326,10 +2328,7 @@ mod tests {
         let blocked =
             prompt_only_discovery_gate_outcome("Glob", "{\"pattern\":\"**/*\"}", 0, 1, false);
         assert!(is_prompt_only_discovery_gate_record(&blocked.record));
-        assert_eq!(
-            blocked.record.kind,
-            ToolExecutionOutcomeKind::Interrupted
-        );
+        assert_eq!(blocked.record.kind, ToolExecutionOutcomeKind::Interrupted);
         assert_eq!(
             blocked.record.detail.as_deref(),
             Some(

@@ -193,7 +193,11 @@ pub fn build_step_fact_ledgers(step: &BossPlanStep) -> StepFactLedgers {
         });
     }
 
-    if let Some(result_diff) = step.result_diff.as_deref().filter(|text| !text.trim().is_empty()) {
+    if let Some(result_diff) = step
+        .result_diff
+        .as_deref()
+        .filter(|text| !text.trim().is_empty())
+    {
         let paths = extract_path_candidates(result_diff);
         if paths.is_empty() {
             for (idx, file) in ledgers.file_facts.iter().enumerate() {
@@ -291,23 +295,26 @@ mod tests {
             worker_task_id: None,
             attempt_count: 0,
             retry_budget: 3,
-            last_review_summary: Some("tests failed because prompt did not include open items".into()),
+            last_review_summary: Some(
+                "tests failed because prompt did not include open items".into(),
+            ),
             last_correction: None,
             review_task_id: None,
         };
 
         let ledgers = build_step_fact_ledgers(&step);
-        assert!(ledgers
-            .file_facts
-            .iter()
-            .any(|item| item.path == "src/core/boss.rs"));
-        assert!(ledgers
-            .change_refs
-            .iter()
-            .any(|item| item.path == "src/core/boss.rs"));
-        assert!(ledgers
-            .test_refs
-            .iter()
-            .any(|item| item.status == "failed"));
+        assert!(
+            ledgers
+                .file_facts
+                .iter()
+                .any(|item| item.path == "src/core/boss.rs")
+        );
+        assert!(
+            ledgers
+                .change_refs
+                .iter()
+                .any(|item| item.path == "src/core/boss.rs")
+        );
+        assert!(ledgers.test_refs.iter().any(|item| item.status == "failed"));
     }
 }

@@ -553,10 +553,9 @@ mod tests {
 
     #[test]
     fn parse_agent_request_accepts_explicit_worker_lism_override() {
-        let request = parse_agent_request(
-            r#"{"task":"fix it","role":"implement","lism_policy":"inherit"}"#,
-        )
-        .expect("request should parse");
+        let request =
+            parse_agent_request(r#"{"task":"fix it","role":"implement","lism_policy":"inherit"}"#)
+                .expect("request should parse");
         let AgentRequest::Spawn(spawn) = request else {
             panic!("expected spawn request");
         };

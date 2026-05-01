@@ -377,9 +377,7 @@ impl ToolPermissionContext {
             inherited_hook_registry: self.inherited_hook_registry.clone(),
             inherited_active_model_snapshot: self.inherited_active_model_snapshot.clone(),
             runtime_plugin_state: self.runtime_plugin_state.clone(),
-            remote_surface_admission_policy: Arc::new(RwLock::new(
-                remote_surface_admission_policy,
-            )),
+            remote_surface_admission_policy: Arc::new(RwLock::new(remote_surface_admission_policy)),
             telegram_surface_admission_policy: Arc::new(RwLock::new(
                 telegram_surface_admission_policy,
             )),
@@ -699,17 +697,30 @@ mod tests {
         child.set_pending_approval(None);
         child.add_delegated_write_path("/tmp/child");
         child.set_external_memory_entries(vec!["child-memory".into()]);
-        child.set_nested_memory_lineage(vec!["session:session-1".into(), "agent:child:inherit_context=false".into()]);
+        child.set_nested_memory_lineage(vec![
+            "session:session-1".into(),
+            "agent:child:inherit_context=false".into(),
+        ]);
         child.set_lism_enabled(true);
 
-        assert!(!parent.always_allow_rules().iter().any(|rule| rule == "Agent"));
+        assert!(
+            !parent
+                .always_allow_rules()
+                .iter()
+                .any(|rule| rule == "Agent")
+        );
         assert!(parent.pending_approval().is_some());
         assert!(!parent.is_delegated_write_path("/tmp/child"));
         assert_eq!(parent.external_memory_entries(), vec!["parent-memory"]);
         assert_eq!(parent.nested_memory_lineage(), vec!["session:session-1"]);
         assert!(!parent.lism_enabled());
 
-        assert!(child.always_allow_rules().iter().any(|rule| rule == "Agent"));
+        assert!(
+            child
+                .always_allow_rules()
+                .iter()
+                .any(|rule| rule == "Agent")
+        );
         assert!(child.pending_approval().is_none());
         assert!(child.is_delegated_write_path("/tmp/child"));
         assert_eq!(child.external_memory_entries(), vec!["child-memory"]);

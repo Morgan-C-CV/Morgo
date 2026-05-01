@@ -464,7 +464,10 @@ impl McpRuntime {
         self.servers.blocking_read().len()
     }
 
-    pub async fn approve_server(&self, server: &str) -> anyhow::Result<(McpServerState, std::path::PathBuf)> {
+    pub async fn approve_server(
+        &self,
+        server: &str,
+    ) -> anyhow::Result<(McpServerState, std::path::PathBuf)> {
         self.refresh_stale_server_config(server).await?;
         let state = self.find_server(server).await?;
         let fingerprint = fingerprint_config(&state.config);

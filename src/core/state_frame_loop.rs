@@ -1,8 +1,8 @@
 use crate::core::message::Message;
-use crate::core::state_frame_hydration::hydrate_needed_context;
 use crate::core::state_frame::{
     AgentState, DecisionKind, RepairNeeded, StateFrame, StatePatch, validate_state_decision,
 };
+use crate::core::state_frame_hydration::hydrate_needed_context;
 use crate::service::api::client::ModelProviderClient;
 use crate::service::api::streaming::StreamEvent;
 

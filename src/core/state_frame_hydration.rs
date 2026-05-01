@@ -169,7 +169,11 @@ fn select_context_requests(
     let mut selected = Vec::new();
     let mut deferred = Vec::new();
     let mut used_tokens = 0_u64;
-    let cap = frame.budget.max_input_tokens.saturating_mul(35).saturating_div(100);
+    let cap = frame
+        .budget
+        .max_input_tokens
+        .saturating_mul(35)
+        .saturating_div(100);
     for selector in selectors {
         let estimate = selector_estimated_tokens(&selector);
         if !selected.is_empty() && used_tokens.saturating_add(estimate) > cap.max(estimate) {
@@ -192,43 +196,42 @@ fn hydrate_selector(
     excerpt_chars: usize,
 ) -> Option<String> {
     match selector {
-        NeededContextSelector::FileSnippet { path } => find_recent_evidence(frame, "fact: file_facts")
-            .find(|item| contains_path(item, path))
-            .map(|item| {
-                format!(
-                    "hydrated_context: {} source=fact_ledger excerpt={}",
-                    selector_key(selector),
-                    compact_excerpt(item, excerpt_chars)
-                )
-            })
-            .or_else(|| {
-                find_recent_evidence(frame, "fact: recent_changes_in_files")
-                    .find(|item| contains_path(item, path))
-                    .map(|item| {
-                        format!(
-                            "hydrated_context: {} source=change_ledger excerpt={}",
-                            selector_key(selector),
-                            compact_excerpt(item, excerpt_chars)
-                        )
-                    })
-            })
-            .or_else(|| {
-                frame.objective.contains(path).then(|| {
+        NeededContextSelector::FileSnippet { path } => {
+            find_recent_evidence(frame, "fact: file_facts")
+                .find(|item| contains_path(item, path))
+                .map(|item| {
                     format!(
-                        "hydrated_context: {} source=objective excerpt={}",
+                        "hydrated_context: {} source=fact_ledger excerpt={}",
                         selector_key(selector),
-                        compact_excerpt(&frame.objective, excerpt_chars)
+                        compact_excerpt(item, excerpt_chars)
                     )
                 })
-            }),
+                .or_else(|| {
+                    find_recent_evidence(frame, "fact: recent_changes_in_files")
+                        .find(|item| contains_path(item, path))
+                        .map(|item| {
+                            format!(
+                                "hydrated_context: {} source=change_ledger excerpt={}",
+                                selector_key(selector),
+                                compact_excerpt(item, excerpt_chars)
+                            )
+                        })
+                })
+                .or_else(|| {
+                    frame.objective.contains(path).then(|| {
+                        format!(
+                            "hydrated_context: {} source=objective excerpt={}",
+                            selector_key(selector),
+                            compact_excerpt(&frame.objective, excerpt_chars)
+                        )
+                    })
+                })
+        }
         NeededContextSelector::TestFailure { query } => {
             find_recent_evidence(frame, "fact: test_failures")
                 .find(|item| {
                     item.contains("status=failed")
-                        && query
-                            .as_ref()
-                            .map(|q| item.contains(q))
-                            .unwrap_or(true)
+                        && query.as_ref().map(|q| item.contains(q)).unwrap_or(true)
                 })
                 .map(|item| {
                     format!(
@@ -238,18 +241,21 @@ fn hydrate_selector(
                     )
                 })
         }
-        NeededContextSelector::ChangeRef { path } => find_recent_evidence(
-            frame,
-            "fact: recent_changes_in_files",
-        )
-        .find(|item| path.as_ref().map(|p| contains_path(item, p)).unwrap_or(true))
-        .map(|item| {
-            format!(
-                "hydrated_context: {} source=change_ledger excerpt={}",
-                selector_key(selector),
-                compact_excerpt(item, excerpt_chars)
-            )
-        }),
+        NeededContextSelector::ChangeRef { path } => {
+            find_recent_evidence(frame, "fact: recent_changes_in_files")
+                .find(|item| {
+                    path.as_ref()
+                        .map(|p| contains_path(item, p))
+                        .unwrap_or(true)
+                })
+                .map(|item| {
+                    format!(
+                        "hydrated_context: {} source=change_ledger excerpt={}",
+                        selector_key(selector),
+                        compact_excerpt(item, excerpt_chars)
+                    )
+                })
+        }
         NeededContextSelector::Artifact { path } => {
             let match_in_changes = path.as_ref().and_then(|p| {
                 find_recent_evidence(frame, "fact: recent_changes_in_files")
@@ -278,19 +284,21 @@ fn hydrate_selector(
                         )
                     )
                 });
-            match_in_changes
-                .or(match_in_objective)
-                .or_else(|| {
-                    find_recent_evidence(frame, "fact: file_facts")
-                        .find(|item| path.as_ref().map(|p| contains_path(item, p)).unwrap_or(true))
-                        .map(|item| {
-                            format!(
-                                "hydrated_context: {} source=fact_ledger excerpt={}",
-                                selector_key(selector),
-                                compact_excerpt(item, excerpt_chars)
-                            )
-                        })
-                })
+            match_in_changes.or(match_in_objective).or_else(|| {
+                find_recent_evidence(frame, "fact: file_facts")
+                    .find(|item| {
+                        path.as_ref()
+                            .map(|p| contains_path(item, p))
+                            .unwrap_or(true)
+                    })
+                    .map(|item| {
+                        format!(
+                            "hydrated_context: {} source=fact_ledger excerpt={}",
+                            selector_key(selector),
+                            compact_excerpt(item, excerpt_chars)
+                        )
+                    })
+            })
         }
         NeededContextSelector::Fact { name } => frame
             .recent_evidence
@@ -333,7 +341,10 @@ pub fn hydrate_needed_context(frame: &mut StateFrame, requested: &[String]) -> H
     let excerpt_chars = estimate_excerpt_chars(frame, selected.len());
 
     for selector in deferred {
-        let deferred_line = format!("context_deferred: {} reason=budget", selector_key(&selector));
+        let deferred_line = format!(
+            "context_deferred: {} reason=budget",
+            selector_key(&selector)
+        );
         if push_unique(&mut frame.recent_evidence, deferred_line.clone()) {
             summary.changed = true;
         }
@@ -361,7 +372,7 @@ pub fn hydrate_needed_context(frame: &mut StateFrame, requested: &[String]) -> H
 
 #[cfg(test)]
 mod tests {
-    use super::{hydrate_needed_context, parse_needed_context_selector, NeededContextSelector};
+    use super::{NeededContextSelector, hydrate_needed_context, parse_needed_context_selector};
     use crate::core::state_frame::{ActorRole, AgentState, StateBudget, StateFrame};
 
     fn make_frame() -> StateFrame {
@@ -416,14 +427,15 @@ mod tests {
         assert!(summary.changed);
         assert_eq!(summary.unavailable.len(), 0);
         assert_eq!(summary.hydrated.len(), 3);
-        assert!(frame
-            .recent_evidence
-            .iter()
-            .any(|item| item.contains("hydrated_context: file_snippet:src/core/state_frame_projection.rs")));
-        assert!(frame
-            .recent_evidence
-            .iter()
-            .any(|item| item.contains("hydrated_context: test_failure")));
+        assert!(frame.recent_evidence.iter().any(|item| {
+            item.contains("hydrated_context: file_snippet:src/core/state_frame_projection.rs")
+        }));
+        assert!(
+            frame
+                .recent_evidence
+                .iter()
+                .any(|item| item.contains("hydrated_context: test_failure"))
+        );
     }
 
     #[test]
@@ -449,14 +461,15 @@ mod tests {
         );
         assert!(summary.changed);
         assert_eq!(summary.unavailable.len(), 0);
-        assert!(frame
-            .recent_evidence
-            .iter()
-            .any(|item| item.contains("hydrated_context: symbol:BossCoordinator")));
-        assert!(frame
-            .recent_evidence
-            .iter()
-            .any(|item| item.contains("hydrated_context: artifact:src/core/state_frame_projection.rs")));
+        assert!(
+            frame
+                .recent_evidence
+                .iter()
+                .any(|item| item.contains("hydrated_context: symbol:BossCoordinator"))
+        );
+        assert!(frame.recent_evidence.iter().any(|item| {
+            item.contains("hydrated_context: artifact:src/core/state_frame_projection.rs")
+        }));
     }
 
     #[test]
@@ -473,9 +486,11 @@ mod tests {
         );
         assert!(summary.changed);
         assert!(!summary.deferred.is_empty());
-        assert!(summary
-            .deferred
-            .iter()
-            .any(|item| item.contains("context_deferred: symbol:BossCoordinator")));
+        assert!(
+            summary
+                .deferred
+                .iter()
+                .any(|item| item.contains("context_deferred: symbol:BossCoordinator"))
+        );
     }
 }
