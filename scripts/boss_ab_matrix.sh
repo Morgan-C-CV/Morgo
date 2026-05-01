@@ -231,7 +231,7 @@ write_usecase_roadmap() {
 真实 /boss A/B use case 5：综合 gap audit 与 roadmap，给出当前真实产品测试主线判断。
 
 任务目标：
-- 综合 full design gap audit 与 roadmap，回答当前主 blocker、已关账基线、以及 `/boss + real skill + MCP` 的下一步。
+- 综合 full design gap audit 与 roadmap，回答当前主 blocker、已关账基线、以及 \`/boss + real skill + MCP\` 的下一步。
 - 只做只读总结。
 
 关键材料摘录一：full design implementation gap audit
@@ -317,7 +317,7 @@ write_usecase_multistage_research() {
 - 报告必须显式按阶段组织，且说明每阶段证据来源。
 - 允许读取仓库文件与文档；最终要把结果写成 markdown 文件。
 - 优先直接 Read 指定文件；不要对整个仓库做宽泛 Grep/Glob。
-- 只有在 `src/tool` 子树内需要补充证据时，才允许做带窄范围的搜索。
+- 只有在 \`src/tool\` 子树内需要补充证据时，才允许做带窄范围的搜索。
 
 建议核验路径：
 - src/tool/definition.rs
@@ -341,7 +341,7 @@ write_usecase_jsonl_analyzer() {
 - 在目标目录实现一个小工具：
   - 目标目录：$MORGO_TEST_ROOT/lism-jsonl-analyzer
 - 工具输入：
-  - /tmp/rustagent-boss-ab-full-5x33-20260430/reports/combined_samples.jsonl
+  - $out_dir/samples/
 - 工具输出：
   - 终端摘要
   - 生成 markdown 报告：$MORGO_TEST_ROOT/lism-jsonl-analyzer/report.md
@@ -354,8 +354,14 @@ write_usecase_jsonl_analyzer() {
   - 需要实际运行一次工具并汇报结果
 
 参考样本：
-- /tmp/rustagent-boss-ab-full-5x33-20260430/reports/combined.txt
-- /tmp/rustagent-boss-ab-full-5x33-20260430/reports/combined_samples.jsonl
+- $out_dir/samples/u1_security_beta_runtime.jsonl
+- $out_dir/samples/u2_memory_backpressure_contract.jsonl
+- $out_dir/samples/u3_token_efficiency_rollout.jsonl
+- $out_dir/samples/u4_boss_workflow_and_lism.jsonl
+- $out_dir/samples/u5_gap_audit_and_roadmap.jsonl
+- $out_dir/samples/u6_frontend_agent_site.jsonl
+- $out_dir/samples/u7_python_boss_lism_demo.jsonl
+- $out_dir/samples/u8_multistage_tools_memory_token_report.jsonl
 EOF
   append_build_footer "$file"
 }
@@ -374,11 +380,11 @@ write_usecase_runtime_validator() {
   - 校验是否满足 canonical StateDecision 合同
   - 对只读审计任务额外校验 4 段输出 contract
 - 至少回放以下日志：
-  - /tmp/rustagent-boss-ab-full-5x33-20260430/api_logs/u3-on-run1.jsonl
-  - /tmp/rustagent-boss-ab-u3-contractfix-20260430/api_logs/u3-on-run1.jsonl
+  - $out_dir/api_logs/u3_token_efficiency_rollout-off-run1.jsonl
+  - $out_dir/api_logs/u3_token_efficiency_rollout-on-run1.jsonl
 - 输出：
   - 终端验证摘要
-  - 一个 markdown 结论文件，说明修复前后差异
+  - 一个 markdown 结论文件，说明 ON/OFF 差异
 - 要求实际执行验证器并给出结果。
 
 参考背景材料：
@@ -400,13 +406,28 @@ generate_usecases() {
   write_usecase_runtime_validator
 }
 
+ordered_usecases() {
+  cat <<'EOF'
+u1_security_beta_runtime
+u2_memory_backpressure_contract
+u3_token_efficiency_rollout
+u4_boss_workflow_and_lism
+u5_gap_audit_and_roadmap
+u6_frontend_agent_site
+u7_python_boss_lism_demo
+u8_multistage_tools_memory_token_report
+u9_lism_jsonl_analyzer_tool
+u10_state_decision_runtime_validator
+EOF
+}
+
 generate_configs() {
   local usecase
-  for usecase_path in "$out_dir"/usecases/*.txt; do
-    usecase="$(basename "$usecase_path" .txt)"
+  while IFS= read -r usecase; do
+    [ -n "$usecase" ] || continue
     write_models_toml "$out_dir/config/${usecase}-off/.claude" "boss-ab-${usecase}-off"
     write_models_toml "$out_dir/config/${usecase}-on/.claude" "boss-ab-${usecase}-on"
-  done
+  done < <(ordered_usecases)
 }
 
 write_manifest() {
@@ -415,10 +436,12 @@ write_manifest() {
     echo "model=$MODEL_ID"
     echo "generated_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo
-    for usecase_path in "$out_dir"/usecases/*.txt; do
+    while IFS= read -r usecase; do
+      [ -n "$usecase" ] || continue
+      local usecase_path="$out_dir/usecases/${usecase}.txt"
       printf '%s\t' "$(basename "$usecase_path")"
       wc -w -c "$usecase_path" | awk '{print "words="$1"\tchars="$2}'
-    done
+    done < <(ordered_usecases)
   } >"$out_dir/reports/manifest.tsv"
 }
 
@@ -480,8 +503,8 @@ run_matrix() {
   fi
 
   local usecase
-  for usecase_path in "$out_dir"/usecases/*.txt; do
-    usecase="$(basename "$usecase_path" .txt)"
+  while IFS= read -r usecase; do
+    [ -n "$usecase" ] || continue
     for i in $(seq 1 "$RUNS_PER_ARM"); do
       run_one "$usecase" off "$i"
       sleep 1
@@ -490,7 +513,7 @@ run_matrix() {
       run_one "$usecase" on "$i"
       sleep 1
     done
-  done
+  done < <(ordered_usecases)
 }
 
 report() {
@@ -504,9 +527,10 @@ report() {
 
   : >"$out_dir/reports/combined_samples.jsonl"
   local usecase
-  for sample_file in "$out_dir"/samples/*.jsonl; do
+  while IFS= read -r usecase; do
+    [ -n "$usecase" ] || continue
+    sample_file="$out_dir/samples/${usecase}.jsonl"
     [ -e "$sample_file" ] || continue
-    usecase="$(basename "$sample_file" .jsonl)"
     cat "$sample_file" >>"$out_dir/reports/combined_samples.jsonl"
     {
       echo "=== $usecase ==="
@@ -518,7 +542,7 @@ report() {
       jq -r '[.run_id,.lism_enabled,.total_input_tokens,.total_uncached_input_tokens,.total_output_tokens,.cache_hit_observed,.cache_read_tokens,.cache_write_tokens,.cache_hit_ratio,.cost_micros_usd] | @tsv' "$sample_file"
       echo
     } | tee "$out_dir/reports/${usecase}.txt"
-  done
+  done < <(ordered_usecases)
 
   if [ -s "$out_dir/reports/combined_samples.jsonl" ]; then
     {
