@@ -46,7 +46,7 @@ use rust_agent::state::permission_context::{
     BossActorPolicy, PermissionMode, ToolPermissionContext,
 };
 use rust_agent::task::manager::TaskManager;
-use rust_agent::tool::builtin::{agent::AgentTool, bash::BashTool};
+use rust_agent::tool::builtin::agent::AgentTool;
 use rust_agent::tool::definition::PermissionDecision;
 use rust_agent::tool::definition::{Tool, ToolCall, ToolMetadata, ToolResult};
 use rust_agent::tool::registry::ToolRegistry;
@@ -685,9 +685,9 @@ fn test_subagent_context_inherits_activity_tracking() {
 fn executor_b_subagent_prompt_keeps_bash_visible() {
     let context = test_context_with_turns(
         vec![],
-        ToolRegistry::new()
-            .register(Arc::new(AgentTool))
-            .register(Arc::new(BashTool)),
+        // Reproduce the production headless path: the parent registry may already have filtered
+        // open-world Bash out before ExecutorB is spawned.
+        ToolRegistry::new().register(Arc::new(AgentTool)),
     );
 
     let sub_context = context.create_subagent_context(

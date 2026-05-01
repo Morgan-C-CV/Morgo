@@ -123,11 +123,24 @@ impl QueryContext {
         let tool_registry = if permission_context.boss_actor_policy.is_some() {
             use crate::bootstrap::InteractionSurface;
             use crate::bootstrap::SessionMode;
-            self.tool_registry
-                .assemble(crate::tool::registry::ToolAssemblyContext::executor_b(
+            let assembled = self.tool_registry.assemble(
+                crate::tool::registry::ToolAssemblyContext::executor_b(
                     InteractionSurface::Cli,
                     SessionMode::Headless,
-                ))
+                ),
+            );
+            if assembled
+                .all_metadata()
+                .iter()
+                .any(|metadata| metadata.name == "Bash")
+            {
+                assembled
+            } else {
+                // Headless coordinators may have already filtered open-world tools out of the
+                // inherited registry. ExecutorB still needs Bash for production execution and
+                // verification; invocation remains permission/workspace-gated.
+                assembled.register(std::sync::Arc::new(crate::tool::builtin::bash::BashTool))
+            }
         } else {
             self.tool_registry
                 .assemble_worker_registry(config.allowed_tools.as_deref())

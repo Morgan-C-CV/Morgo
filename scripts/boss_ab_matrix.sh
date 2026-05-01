@@ -105,6 +105,14 @@ max_tokens_param = "max_completion_tokens"
 prompt_cache_key = "$cache_key"
 prompt_cache_retention = "in_memory"
 EOF
+  cat >"$config_root/workspace-capability.json" <<'EOF'
+{
+  "global_max_tier": "admin_bash",
+  "scopes": [],
+  "escalate_to_pending_approval": true,
+  "audit_capability_decisions": true
+}
+EOF
 }
 
 append_task_footer() {
