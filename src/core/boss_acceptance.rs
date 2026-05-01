@@ -47,9 +47,22 @@ fn first_absolute_path_after(line: &str, offset: usize) -> Option<PathBuf> {
     (!token.is_empty()).then(|| PathBuf::from(token))
 }
 
+fn is_artifact_scope_boundary(line: &str) -> bool {
+    let trimmed = line.trim();
+    trimmed.starts_with("参考材料")
+        || trimmed.starts_with("关键材料")
+        || trimmed.starts_with("参考背景")
+        || trimmed.starts_with("参考样本")
+        || trimmed.starts_with("建议核验路径")
+        || trimmed.starts_with("实现摘录")
+}
+
 pub fn extract_artifact_expectations(text: &str) -> Vec<BossArtifactExpectation> {
     let mut expectations = Vec::new();
     for line in text.lines() {
+        if is_artifact_scope_boundary(line) {
+            break;
+        }
         let (kind, path_offset) = if let Some(offset) = target_file_marker(line) {
             (BossArtifactKind::File, offset)
         } else if let Some(offset) = target_dir_marker(line) {
@@ -154,6 +167,21 @@ mod tests {
             expectations[0].path,
             PathBuf::from("/tmp/lism-jsonl-analyzer")
         );
+    }
+
+    #[test]
+    fn ignores_artifacts_in_reference_material_sections() {
+        let text = "\
+任务目标：
+- 目标目录：/tmp/agent-site
+
+参考材料摘录：
+- u9 ON/OFF 也已完成，目标目录 `/tmp/lism-jsonl-analyzer` 下生成 `analyze.py` 与 `report.md`";
+
+        let expectations = extract_artifact_expectations(text);
+        assert_eq!(expectations.len(), 1);
+        assert_eq!(expectations[0].kind, BossArtifactKind::Directory);
+        assert_eq!(expectations[0].path, PathBuf::from("/tmp/agent-site"));
     }
 
     #[test]
