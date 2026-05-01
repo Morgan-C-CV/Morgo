@@ -20,7 +20,6 @@ BIN_PATH="$AGENT_DIR/target/debug/rust-agent"
 DEFAULT_OUT_DIR="${TMPDIR:-/tmp}/rustagent-boss-ab-$(date +%Y%m%d-%H%M%S)"
 MODEL_ID="${RUST_AGENT_AB_MODEL:-gpt-5-mini-2025-08-07}"
 RUNS_PER_ARM="${RUST_AGENT_AB_RUNS_PER_ARM:-3}"
-MORGO_TEST_ROOT="${RUST_AGENT_AB_MORGO_TEST_ROOT:-/Users/wangmorgan/MProject/MorgoTest}"
 
 usage() {
   cat <<'EOF'
@@ -39,6 +38,7 @@ EOF
 
 subcommand="${1:-}"
 out_dir="${2:-$DEFAULT_OUT_DIR}"
+MORGO_TEST_ROOT="${RUST_AGENT_AB_MORGO_TEST_ROOT:-$out_dir/morgo}"
 
 if [ -z "$subcommand" ]; then
   usage
