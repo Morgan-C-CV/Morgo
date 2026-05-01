@@ -52,6 +52,21 @@ fn format_skill_prompt_uses_augmented_workflow_summary() {
 }
 
 #[test]
+fn format_skill_prompt_adds_output_contract_for_compact_args() {
+    let prompt = format_skill_prompt(
+        &sample_skill(),
+        "只给出 roadmap 下一步的 3 行 handoff：目标文件、改动点、验收标准",
+    )
+    .expect("skill prompt should render");
+
+    assert!(prompt.contains("Output contract:"));
+    assert!(prompt.contains("- final answer only"));
+    assert!(prompt.contains("- max_lines: 3"));
+    assert!(prompt.contains("- required_line_prefixes: 目标文件 | 改动点 | 验收标准"));
+    assert!(prompt.contains("- do not broaden scope beyond this contract"));
+}
+
+#[test]
 fn format_skill_invocation_emits_agent_request_for_agent_workflows() {
     let prompt = format_skill_invocation(&agent_skill(), "src/lib.rs")
         .expect("agent skill invocation should render");
