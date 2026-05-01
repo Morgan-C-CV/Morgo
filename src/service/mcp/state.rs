@@ -101,12 +101,25 @@ pub fn write_mcp_governance_state(
     cwd: &Path,
     states: &BTreeMap<String, McpGovernanceStateEntry>,
 ) -> anyhow::Result<PathBuf> {
-    let path = mcp_governance_state_path(cwd);
+    write_mcp_governance_state_to_path(&mcp_governance_state_path(cwd), states)
+}
+
+pub fn write_mcp_governance_state_from_root(
+    config_root: &Path,
+    states: &BTreeMap<String, McpGovernanceStateEntry>,
+) -> anyhow::Result<PathBuf> {
+    write_mcp_governance_state_to_path(&config_root.join("mcp-governance.json"), states)
+}
+
+fn write_mcp_governance_state_to_path(
+    path: &Path,
+    states: &BTreeMap<String, McpGovernanceStateEntry>,
+) -> anyhow::Result<PathBuf> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let entries = states.values().cloned().collect::<Vec<_>>();
     let raw = serde_json::to_string_pretty(&entries)?;
-    std::fs::write(&path, raw)?;
-    Ok(path)
+    std::fs::write(path, raw)?;
+    Ok(path.to_path_buf())
 }

@@ -203,8 +203,7 @@ impl Command for McpCommand {
                 )
             }),
             "approve" => {
-                let cwd = app_state.current_working_directory();
-                runtime.approve_server(server.trim(), &cwd).await.map(|(state, path)| {
+                runtime.approve_server(server.trim()).await.map(|(state, path)| {
                     format!(
                         "Approved MCP server {} ({}). governance_path={}; fingerprint={}",
                         state.config.name,
@@ -215,15 +214,10 @@ impl Command for McpCommand {
                 })
             }
             "deny" => {
-                let cwd = app_state.current_working_directory();
                 let target = remainder.first().copied().unwrap_or_default();
                 let reason = remainder.iter().skip(1).copied().collect::<Vec<_>>().join(" ");
                 runtime
-                    .deny_server(
-                        target,
-                        &cwd,
-                        (!reason.trim().is_empty()).then_some(reason),
-                    )
+                    .deny_server(target, (!reason.trim().is_empty()).then_some(reason))
                     .await
                     .map(|(state, path)| {
                         format!(

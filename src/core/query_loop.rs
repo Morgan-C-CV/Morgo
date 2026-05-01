@@ -1287,6 +1287,40 @@ fn tool_follow_up_message(
     message
 }
 
+fn batch_follow_up_message(report: &ToolExecutionReport) -> String {
+    let mut message = format!("tool batch result:\n{}", report_detail_or_summary(report));
+    if should_discourage_repeated_discovery_search(report) {
+        message.push_str(
+            "\nRuntime guidance: you already have non-empty evidence from this tool batch. Do not repeat the same discovery/search patterns. Either answer directly from the evidence you have, or read one specific next file only if a concrete gap remains.",
+        );
+    }
+    message
+}
+
+fn should_discourage_repeated_discovery_search(report: &ToolExecutionReport) -> bool {
+    let mut has_non_empty_read_or_glob = false;
+    let mut has_empty_discovery = false;
+    for record in &report.records {
+        let summary = record.summary.to_ascii_lowercase();
+        let detail = record.detail.as_deref().unwrap_or_default().to_ascii_lowercase();
+        let combined = format!("{summary}\n{detail}");
+        match record.tool_name.as_str() {
+            "Read" | "Glob" => {
+                if !combined.contains("(0 chars)") && !combined.contains("returned no matches") {
+                    has_non_empty_read_or_glob = true;
+                }
+            }
+            "Grep" => {
+                if combined.contains("(0 chars)") || combined.contains("returned no matches") {
+                    has_empty_discovery = true;
+                }
+            }
+            _ => {}
+        }
+    }
+    has_non_empty_read_or_glob && has_empty_discovery
+}
+
 async fn execute_tool_batch_phase(
     context: &QueryContext,
     state: &mut LoopState,
@@ -1492,10 +1526,7 @@ async fn execute_tool_batch_phase(
         state: state.clone(),
         events: engine_events,
         decision: TurnDecision::ContinueWith(
-            Message::user(format!(
-                "tool batch result:\n{}",
-                report_detail_or_summary(&report)
-            )),
+            Message::user(batch_follow_up_message(&report)),
             Continue::ToolUseFollowUp,
         ),
     }
@@ -1949,13 +1980,18 @@ impl QueryLoopStateExt for QueryLoopState {
 #[cfg(test)]
 mod tests {
     use super::{
-        LoopState, QueryParams, apply_tool_report_context, classify_pre_stream_failure_code,
-        classify_stream_failure_code, report_detail_or_summary,
+        LoopState, QueryParams, apply_tool_report_context, batch_follow_up_message,
+        classify_pre_stream_failure_code, classify_stream_failure_code, report_detail_or_summary,
+        should_discourage_repeated_discovery_search,
         should_return_terminal_after_recovery_exhausted,
     };
     use crate::core::events::ServiceFailureCode;
     use crate::service::api::streaming::ProviderFailureDisposition;
-    use crate::tool::result::{ToolExecutionReport, ToolReportContextModifier, ToolReportModifier};
+    use crate::tool::definition::{ObservableInput, ObservableInputSource};
+    use crate::tool::result::{
+        ToolBatchContext, ToolExecutionOutcomeKind, ToolExecutionRecord, ToolExecutionReport,
+        ToolReportContextModifier, ToolReportModifier,
+    };
 
     #[test]
     fn report_detail_or_summary_prefers_detail() {
@@ -2010,6 +2046,84 @@ mod tests {
             state.pending_tool_use_summary.as_deref(),
             Some("Read succeeded; ProgressTool in progress")
         );
+    }
+
+    #[test]
+    fn repeated_discovery_search_guidance_triggers_after_non_empty_batch() {
+        let report = ToolExecutionReport {
+            records: vec![
+                ToolExecutionRecord {
+                    tool_name: "Glob".into(),
+                    outcome: "success".into(),
+                    kind: ToolExecutionOutcomeKind::Success,
+                    summary: "Glob succeeded (43 chars)".into(),
+                    detail: Some("./RustAgent/docs/14-progress-gap-roadmap.md".into()),
+                    pending_approval: None,
+                    report_modifier: ToolReportModifier::None,
+                    observable_input: Some(ObservableInput {
+                        value: "{\"path\":\".\",\"pattern\":\"**/*roadmap*\"}".into(),
+                        source: ObservableInputSource::Raw,
+                    }),
+                    batch_context: ToolBatchContext {
+                        batch_index: 0,
+                        batch_size: 2,
+                        executed_in_batch: true,
+                    },
+                },
+                ToolExecutionRecord {
+                    tool_name: "Grep".into(),
+                    outcome: "success".into(),
+                    kind: ToolExecutionOutcomeKind::Success,
+                    summary: "Grep succeeded (0 chars)".into(),
+                    detail: Some(String::new()),
+                    pending_approval: None,
+                    report_modifier: ToolReportModifier::None,
+                    observable_input: Some(ObservableInput {
+                        value: "{\"path\":\".\",\"pattern\":\"roadmap|next step\"}".into(),
+                        source: ObservableInputSource::Raw,
+                    }),
+                    batch_context: ToolBatchContext {
+                        batch_index: 1,
+                        batch_size: 2,
+                        executed_in_batch: true,
+                    },
+                },
+            ],
+            summary: "Glob succeeded; Grep found no matches".into(),
+            detail: Some("./RustAgent/docs/14-progress-gap-roadmap.md".into()),
+            report_modifier: ToolReportModifier::None,
+            context_modifier: ToolReportContextModifier::None,
+        };
+
+        assert!(should_discourage_repeated_discovery_search(&report));
+        assert!(batch_follow_up_message(&report).contains("Do not repeat the same discovery/search patterns"));
+    }
+
+    #[test]
+    fn repeated_discovery_search_guidance_does_not_trigger_without_non_empty_evidence() {
+        let report = ToolExecutionReport {
+            records: vec![ToolExecutionRecord {
+                tool_name: "Grep".into(),
+                outcome: "success".into(),
+                kind: ToolExecutionOutcomeKind::Success,
+                summary: "Grep succeeded (0 chars)".into(),
+                detail: Some(String::new()),
+                pending_approval: None,
+                report_modifier: ToolReportModifier::None,
+                observable_input: None,
+                batch_context: ToolBatchContext {
+                    batch_index: 0,
+                    batch_size: 1,
+                    executed_in_batch: true,
+                },
+            }],
+            summary: "Grep found no matches".into(),
+            detail: None,
+            report_modifier: ToolReportModifier::None,
+            context_modifier: ToolReportContextModifier::None,
+        };
+
+        assert!(!should_discourage_repeated_discovery_search(&report));
     }
 
     #[test]

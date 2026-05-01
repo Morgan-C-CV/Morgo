@@ -10,7 +10,7 @@ use crate::service::mcp::client::{McpClient, RoutingMcpClient};
 use crate::service::mcp::config::{McpConfigLoadResult, McpConfigSource, default_server_configs};
 use crate::service::mcp::state::{
     McpGovernanceStateEntry, McpGovernanceStateLoadResult, McpGovernanceStateSource,
-    write_mcp_governance_state,
+    write_mcp_governance_state_from_root,
 };
 use crate::service::mcp::types::{
     McpAction, McpCapabilities, McpConnectInfo, McpConnectionStatus, McpFailureCode,
@@ -464,11 +464,7 @@ impl McpRuntime {
         self.servers.blocking_read().len()
     }
 
-    pub async fn approve_server(
-        &self,
-        server: &str,
-        cwd: &Path,
-    ) -> anyhow::Result<(McpServerState, std::path::PathBuf)> {
+    pub async fn approve_server(&self, server: &str) -> anyhow::Result<(McpServerState, std::path::PathBuf)> {
         self.refresh_stale_server_config(server).await?;
         let state = self.find_server(server).await?;
         let fingerprint = fingerprint_config(&state.config);
@@ -480,7 +476,7 @@ impl McpRuntime {
         };
         let mut states = self.governance_states.write().await;
         states.insert(state.config.id.clone(), entry.clone());
-        let path = write_mcp_governance_state(cwd, &states)?;
+        let path = write_mcp_governance_state_from_root(self.governance_config_root(), &states)?;
         drop(states);
         let updated = self
             .update_governance_for_server(&state.config.id, Some(&entry))
@@ -491,7 +487,6 @@ impl McpRuntime {
     pub async fn deny_server(
         &self,
         server: &str,
-        cwd: &Path,
         reason: Option<String>,
     ) -> anyhow::Result<(McpServerState, std::path::PathBuf)> {
         self.refresh_stale_server_config(server).await?;
@@ -505,12 +500,19 @@ impl McpRuntime {
         };
         let mut states = self.governance_states.write().await;
         states.insert(state.config.id.clone(), entry.clone());
-        let path = write_mcp_governance_state(cwd, &states)?;
+        let path = write_mcp_governance_state_from_root(self.governance_config_root(), &states)?;
         drop(states);
         let updated = self
             .update_governance_for_server(&state.config.id, Some(&entry))
             .await?;
         Ok((updated, path))
+    }
+
+    fn governance_config_root(&self) -> &Path {
+        self.governance_load_result
+            .path
+            .parent()
+            .unwrap_or_else(|| Path::new(".claude"))
     }
 
     async fn ensure_connected(&self, server: &str) -> anyhow::Result<()> {
@@ -1291,5 +1293,41 @@ mod tests {
             "non-retryable failure should not retry; elapsed={}ms",
             elapsed.as_millis()
         );
+    }
+
+    #[tokio::test]
+    async fn approve_server_persists_to_runtime_governance_root_not_cwd() {
+        use crate::service::mcp::config::{McpConfigLoadResult, McpConfigSource};
+        use crate::service::mcp::state::{McpGovernanceStateLoadResult, McpGovernanceStateSource};
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config_root = temp.path().join(".claude");
+        let governance_path = config_root.join("mcp-governance.json");
+        let config = test_config("approve-server", "Approve Server");
+
+        let runtime = McpRuntime::new_with_config_and_governance_result_and_observability(
+            Arc::new(MockMcpClient),
+            McpConfigLoadResult {
+                path: config_root.join("mcp_servers.json"),
+                source: McpConfigSource::File,
+                configs: vec![config],
+                diagnostics: vec![],
+            },
+            McpGovernanceStateLoadResult {
+                path: governance_path.clone(),
+                source: McpGovernanceStateSource::Defaults,
+                states: BTreeMap::new(),
+                diagnostics: vec![],
+            },
+            Default::default(),
+        );
+
+        let (_state, persisted_path) = runtime
+            .approve_server("approve-server")
+            .await
+            .expect("approve should persist");
+
+        assert_eq!(persisted_path, governance_path);
+        assert!(persisted_path.exists(), "governance file should exist");
     }
 }
