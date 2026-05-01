@@ -13,12 +13,34 @@ use crate::state::permission_context::{
 };
 use crate::tool::registry::ToolRegistry;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkerLisMPolicy {
+    Inherit,
+    ForceOn,
+    ForceOff,
+}
+
+impl WorkerLisMPolicy {
+    pub fn default_for_role(_worker_role: WorkerRole) -> Self {
+        Self::ForceOn
+    }
+
+    fn resolve(self, parent_enabled: bool) -> bool {
+        match self {
+            Self::Inherit => parent_enabled,
+            Self::ForceOn => true,
+            Self::ForceOff => false,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct SubagentConfig {
     pub worker_role: WorkerRole,
     pub inherit_context: bool,
     pub max_turns: Option<usize>,
     pub allowed_tools: Option<Vec<String>>,
+    pub lism_policy: WorkerLisMPolicy,
     /// When set, the subagent runtime is assembled with ExecutorB policy and sees Agent tool.
     pub boss_actor_policy: Option<BossActorPolicy>,
 }
@@ -103,8 +125,13 @@ impl QueryContext {
             app_state.active_model_profile_source = active_model_snapshot.source.clone();
             app_state.active_model_provider_summary = active_model_snapshot.summary.clone();
         }
-        let mut permission_context = app_state.permission_context.clone();
+        let mut permission_context = app_state.permission_context.fork_for_subagent();
         permission_context.set_pending_approval(None);
+        permission_context.set_lism_enabled(
+            config
+                .lism_policy
+                .resolve(self.app_state.permission_context.lism_enabled()),
+        );
         if let Some(active_model_snapshot) = inherited_active_model_snapshot {
             permission_context =
                 permission_context.with_inherited_active_model_snapshot(active_model_snapshot);
@@ -221,4 +248,139 @@ fn build_nested_memory_lineage(
     bounded.extend(agent_markers);
     bounded.push(child_marker);
     bounded
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
+    use crate::cost::tracker::CostTracker;
+    use crate::interaction::dispatcher::NotificationDispatcher;
+    use crate::interaction::telegram::gateway::TelegramGateway;
+    use crate::service::compact::ReactiveCompactor;
+    use crate::service::observability::ServiceObservabilityTracker;
+    use crate::state::app_state::{
+        ActiveModelProfileSource, ActiveModelProviderSummary, AppState, RuntimeRole,
+    };
+    use std::sync::atomic::AtomicU64;
+    use std::sync::{Arc, Mutex};
+    use tokio::sync::RwLock;
+    use tokio_util::sync::CancellationToken;
+
+    fn test_query_context() -> QueryContext {
+        let permission_context = crate::state::permission_context::ToolPermissionContext::new(
+            crate::state::permission_context::PermissionMode::Default,
+        );
+        let tool_registry = ToolRegistry::new();
+        let app_state = AppState {
+            surface: InteractionSurface::Cli,
+            session_mode: SessionMode::Headless,
+            client_type: ClientType::Cli,
+            session_source: SessionSource::LocalCli,
+            runtime_role: RuntimeRole::Coordinator,
+            worker_role: None,
+            permission_context,
+            command_registry: None,
+            runtime_tool_registry: Some(Arc::new(RwLock::new(tool_registry.clone()))),
+            skill_registry: None,
+            mcp_runtime: None,
+            plugin_load_result: None,
+            cost_tracker: CostTracker::default(),
+            service_observability_tracker: ServiceObservabilityTracker::default(),
+            notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
+            audit_log: Arc::new(Mutex::new(crate::security::audit::AuditLog::default())),
+            startup_trace: Vec::new(),
+            active_model_runtime: None,
+            active_model_profile_name: None,
+            active_model_profile_source: ActiveModelProfileSource::BootstrapDefault,
+            active_model_provider_summary: ActiveModelProviderSummary {
+                provider_id: "default-provider".into(),
+                protocol: "Anthropic".into(),
+                compatibility_profile: "Anthropic".into(),
+                base_url_host: "localhost".into(),
+                model: "default-model".into(),
+                auth_status: "unset".into(),
+            },
+            active_session_id: "parent-session".into(),
+            session_store: None,
+            session: None,
+            history: None,
+            restored_session: None,
+            last_activity_ts: Arc::new(AtomicU64::new(0)),
+            cancellation_token: CancellationToken::new(),
+            subagent_limiter: None,
+            boss_coordinator: None,
+            remote_actor_store: None,
+        };
+        QueryContext {
+            system_prompt: String::new(),
+            tools_prompt: String::new(),
+            context_prompt: String::new(),
+            app_state,
+            tool_registry,
+            api_client: ModelProviderClient::default(),
+            compactor: ReactiveCompactor,
+            hook_registry: HookRegistry::default(),
+            agent_id: None,
+        }
+    }
+
+    #[test]
+    fn worker_lism_policy_defaults_to_force_on() {
+        assert_eq!(
+            WorkerLisMPolicy::default_for_role(WorkerRole::Research),
+            WorkerLisMPolicy::ForceOn
+        );
+        assert_eq!(
+            WorkerLisMPolicy::default_for_role(WorkerRole::Implement),
+            WorkerLisMPolicy::ForceOn
+        );
+        assert_eq!(
+            WorkerLisMPolicy::default_for_role(WorkerRole::Verify),
+            WorkerLisMPolicy::ForceOn
+        );
+    }
+
+    #[test]
+    fn create_subagent_context_force_on_enables_lism_without_mutating_parent() {
+        let parent = test_query_context();
+        parent.app_state.permission_context.set_lism_enabled(false);
+
+        let child = parent.create_subagent_context(
+            "child-agent",
+            Vec::new(),
+            SubagentConfig {
+                worker_role: WorkerRole::Implement,
+                inherit_context: false,
+                max_turns: None,
+                allowed_tools: None,
+                lism_policy: WorkerLisMPolicy::ForceOn,
+                boss_actor_policy: None,
+            },
+        );
+
+        assert!(!parent.app_state.permission_context.lism_enabled());
+        assert!(child.app_state.permission_context.lism_enabled());
+    }
+
+    #[test]
+    fn create_subagent_context_inherit_preserves_parent_lism_state() {
+        let parent = test_query_context();
+        parent.app_state.permission_context.set_lism_enabled(false);
+
+        let child = parent.create_subagent_context(
+            "child-agent",
+            Vec::new(),
+            SubagentConfig {
+                worker_role: WorkerRole::Research,
+                inherit_context: false,
+                max_turns: None,
+                allowed_tools: None,
+                lism_policy: WorkerLisMPolicy::Inherit,
+                boss_actor_policy: None,
+            },
+        );
+
+        assert!(!child.app_state.permission_context.lism_enabled());
+    }
 }

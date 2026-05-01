@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use rust_agent::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
 use rust_agent::core::boss_state::BossStage;
-use rust_agent::core::context::{QueryContext, SubagentConfig};
+use rust_agent::core::context::{QueryContext, SubagentConfig, WorkerLisMPolicy};
 use rust_agent::core::engine::QueryEngine;
 use rust_agent::core::events::EngineEvent;
 use rust_agent::core::message::Message;
@@ -648,6 +648,7 @@ fn test_subagent_context_inherits_activity_tracking() {
             inherit_context: true,
             max_turns: None,
             allowed_tools: None,
+            lism_policy: WorkerLisMPolicy::default_for_role(WorkerRole::Research),
             boss_actor_policy: None,
         },
     );
@@ -698,6 +699,7 @@ fn executor_b_subagent_prompt_keeps_bash_visible() {
             inherit_context: false,
             max_turns: None,
             allowed_tools: None,
+            lism_policy: WorkerLisMPolicy::default_for_role(WorkerRole::Implement),
             boss_actor_policy: Some(BossActorPolicy::executor_b(BossStage::Execution)),
         },
     );
@@ -2402,6 +2404,7 @@ async fn subagent_context_inherits_parent_tools_and_hooks() {
             inherit_context: true,
             max_turns: None,
             allowed_tools: None,
+            lism_policy: WorkerLisMPolicy::default_for_role(WorkerRole::Research),
             boss_actor_policy: None,
         },
     );
@@ -2543,6 +2546,7 @@ async fn subagent_context_inherits_active_model_snapshot_without_sharing_handle(
             inherit_context: true,
             max_turns: None,
             allowed_tools: None,
+            lism_policy: WorkerLisMPolicy::default_for_role(WorkerRole::Research),
             boss_actor_policy: None,
         },
     );
@@ -2722,6 +2726,7 @@ async fn updated_runtime_snapshot_applies_only_to_next_turn_and_new_subagents() 
             inherit_context: true,
             max_turns: None,
             allowed_tools: None,
+            lism_policy: WorkerLisMPolicy::default_for_role(WorkerRole::Research),
             boss_actor_policy: None,
         },
     );
@@ -2769,6 +2774,7 @@ async fn updated_runtime_snapshot_applies_only_to_next_turn_and_new_subagents() 
             inherit_context: true,
             max_turns: None,
             allowed_tools: None,
+            lism_policy: WorkerLisMPolicy::default_for_role(WorkerRole::Research),
             boss_actor_policy: None,
         },
     );
@@ -2858,6 +2864,7 @@ async fn subagent_context_does_not_inherit_session_memory_when_disabled() {
             inherit_context: false,
             max_turns: None,
             allowed_tools: None,
+            lism_policy: WorkerLisMPolicy::default_for_role(WorkerRole::Research),
             boss_actor_policy: None,
         },
     );
@@ -2968,6 +2975,7 @@ async fn subagent_context_reanchors_and_bounds_nested_memory_lineage() {
             inherit_context: true,
             max_turns: None,
             allowed_tools: None,
+            lism_policy: WorkerLisMPolicy::default_for_role(WorkerRole::Research),
             boss_actor_policy: None,
         },
     );
@@ -3026,6 +3034,7 @@ async fn subagent_context_shares_activity_tracker_and_cancellation_with_parent()
             inherit_context: true,
             max_turns: None,
             allowed_tools: None,
+            lism_policy: WorkerLisMPolicy::default_for_role(WorkerRole::Research),
             boss_actor_policy: None,
         },
     );

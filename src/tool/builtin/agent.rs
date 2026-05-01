@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use serde::Deserialize;
 
 use crate::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
-use crate::core::context::{QueryContext, SubagentConfig};
+use crate::core::context::{QueryContext, SubagentConfig, WorkerLisMPolicy};
 use crate::core::message::Message;
 use crate::core::query_loop::{QueryParams, run_query_loop_with_params};
 use crate::cost::tracker::CostTracker;
@@ -47,6 +47,7 @@ struct SpawnAgentRequest {
     step_acceptance: Vec<String>,
     parent_session_id: Option<String>,
     requires_verification: bool,
+    lism_policy: WorkerLisMPolicy,
     /// When set, the spawned subagent runtime is assembled with this boss actor policy.
     boss_actor_policy: Option<crate::state::permission_context::BossActorPolicy>,
 }
@@ -75,6 +76,7 @@ struct AgentJsonRequest {
     step_acceptance: Option<Vec<String>>,
     parent_session_id: Option<String>,
     requires_verification: Option<bool>,
+    lism_policy: Option<String>,
     task_id: Option<String>,
     message: Option<String>,
     boss_actor_role: Option<String>,
@@ -288,6 +290,7 @@ fn launch_agent_task(
             inherit_context: request.inherit_context,
             max_turns: request.max_turns,
             allowed_tools: request.allowed_tools.clone(),
+            lism_policy: request.lism_policy,
             boss_actor_policy: request.boss_actor_policy,
         },
     );
@@ -399,6 +402,7 @@ fn parse_agent_request(input: &str) -> anyhow::Result<AgentRequest> {
                 step_acceptance: request.step_acceptance.unwrap_or_default(),
                 parent_session_id: request.parent_session_id,
                 requires_verification: request.requires_verification.unwrap_or(false),
+                lism_policy: parse_worker_lism_policy(request.lism_policy.as_deref(), role)?,
                 boss_actor_policy,
             }));
         }
@@ -429,6 +433,7 @@ fn parse_agent_request(input: &str) -> anyhow::Result<AgentRequest> {
         step_acceptance: Vec::new(),
         parent_session_id: None,
         requires_verification: false,
+        lism_policy: WorkerLisMPolicy::default_for_role(WorkerRole::Research),
         boss_actor_policy: None,
     }))
 }
@@ -496,6 +501,7 @@ mod tests {
             step_acceptance: vec!["acceptance 1".into()],
             parent_session_id: Some("parent-session".into()),
             requires_verification: false,
+            lism_policy: WorkerLisMPolicy::default_for_role(WorkerRole::Implement),
             boss_actor_policy: None,
         }
     }
@@ -533,6 +539,28 @@ mod tests {
         let mut request = sample_spawn_request();
         request.max_turns = Some(3);
         assert_eq!(effective_max_turns(&request), Some(3));
+    }
+
+    #[test]
+    fn parse_agent_request_defaults_worker_lism_to_force_on() {
+        let request = parse_agent_request(r#"{"task":"fix it","role":"implement"}"#)
+            .expect("request should parse");
+        let AgentRequest::Spawn(spawn) = request else {
+            panic!("expected spawn request");
+        };
+        assert_eq!(spawn.lism_policy, WorkerLisMPolicy::ForceOn);
+    }
+
+    #[test]
+    fn parse_agent_request_accepts_explicit_worker_lism_override() {
+        let request = parse_agent_request(
+            r#"{"task":"fix it","role":"implement","lism_policy":"inherit"}"#,
+        )
+        .expect("request should parse");
+        let AgentRequest::Spawn(spawn) = request else {
+            panic!("expected spawn request");
+        };
+        assert_eq!(spawn.lism_policy, WorkerLisMPolicy::Inherit);
     }
 }
 
@@ -591,6 +619,19 @@ fn parse_boss_actor_policy(
         lineage_depth: depth.unwrap_or(0),
         phase: BossStage::Execution,
     }))
+}
+
+fn parse_worker_lism_policy(
+    value: Option<&str>,
+    role: WorkerRole,
+) -> anyhow::Result<WorkerLisMPolicy> {
+    match value {
+        Some("inherit") => Ok(WorkerLisMPolicy::Inherit),
+        Some("force-on") | Some("force_on") | Some("on") => Ok(WorkerLisMPolicy::ForceOn),
+        Some("force-off") | Some("force_off") | Some("off") => Ok(WorkerLisMPolicy::ForceOff),
+        Some(other) => anyhow::bail!("unknown worker lism_policy: {other}"),
+        None => Ok(WorkerLisMPolicy::default_for_role(role)),
+    }
 }
 
 fn maybe_reuse_running_task(

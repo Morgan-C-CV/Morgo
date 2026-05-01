@@ -22,7 +22,7 @@ use rust_agent::core::boss_test_readiness::BossTestRunOutcome;
 use rust_agent::core::concurrency::{
     BossBudgetDecision, MemoryPressureLevel, evaluate_boss_budget,
 };
-use rust_agent::core::context::SubagentConfig;
+use rust_agent::core::context::{SubagentConfig, WorkerLisMPolicy};
 use rust_agent::core::lism_ab_sample::new_shared_ab_sink;
 use rust_agent::core::prompt_budget::{
     BudgetDecision, PromptCacheCapability, ProviderProfile, evaluate_prompt_budget,
@@ -2418,6 +2418,7 @@ fn boss_spawned_b_runtime_has_executor_policy_and_agent_tool() {
         inherit_context: false,
         max_turns: None,
         allowed_tools: None,
+        lism_policy: WorkerLisMPolicy::default_for_role(WorkerRole::Implement),
         boss_actor_policy: Some(policy),
     };
     assert!(

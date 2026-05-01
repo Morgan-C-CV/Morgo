@@ -341,6 +341,60 @@ impl ToolPermissionContext {
         self
     }
 
+    /// Fork a subagent-local permission context while preserving shared service handles.
+    /// Mutable runtime knobs must not share the parent's RwLock state, otherwise child-only
+    /// changes like pending approvals or LisM overrides leak back into the parent session.
+    pub fn fork_for_subagent(&self) -> Self {
+        let mode = self.mode();
+        let pending_approval = self.pending_approval();
+        let remote_surface_admission_policy = self.remote_surface_admission_policy();
+        let telegram_surface_admission_policy = self.telegram_surface_admission_policy();
+        let external_memory_entries = self.external_memory_entries();
+        let nested_memory_lineage = self.nested_memory_lineage();
+        let delegated_write_paths = self.delegated_write_paths();
+        let lism_enabled = self.lism_enabled();
+
+        Self {
+            mode: Arc::new(RwLock::new(mode)),
+            always_allow_rules: Arc::new(RwLock::new(self.always_allow_rules())),
+            always_deny_rules: Arc::new(RwLock::new(self.always_deny_rules())),
+            always_ask_rules: Arc::new(RwLock::new(self.always_ask_rules())),
+            include_deferred_tools: self.include_deferred_tools,
+            include_interactive_tools: self.include_interactive_tools,
+            task_manager: self.task_manager.clone(),
+            task_list_manager: self.task_list_manager.clone(),
+            plan_manager: self.plan_manager.clone(),
+            skill_registry: self.skill_registry.clone(),
+            mcp_runtime: self.mcp_runtime.clone(),
+            active_session_id: self.active_session_id.clone(),
+            active_surface: self.active_surface,
+            notification_dispatcher: self.notification_dispatcher.clone(),
+            pending_approval: Arc::new(RwLock::new(pending_approval)),
+            filesystem_policy: self.filesystem_policy.clone(),
+            workspace_capability: self.workspace_capability.clone(),
+            subagent_scripted_turns: self.subagent_scripted_turns.clone(),
+            inherited_tool_registry: self.inherited_tool_registry.clone(),
+            inherited_hook_registry: self.inherited_hook_registry.clone(),
+            inherited_active_model_snapshot: self.inherited_active_model_snapshot.clone(),
+            runtime_plugin_state: self.runtime_plugin_state.clone(),
+            remote_surface_admission_policy: Arc::new(RwLock::new(
+                remote_surface_admission_policy,
+            )),
+            telegram_surface_admission_policy: Arc::new(RwLock::new(
+                telegram_surface_admission_policy,
+            )),
+            external_memory_entries: Arc::new(RwLock::new(external_memory_entries)),
+            nested_memory_lineage: Arc::new(RwLock::new(nested_memory_lineage)),
+            delegated_write_paths: Arc::new(RwLock::new(delegated_write_paths)),
+            lism_mode: Arc::new(RwLock::new(lism_enabled)),
+            last_activity_ts: self.last_activity_ts.clone(),
+            cancellation_token: self.cancellation_token.clone(),
+            subagent_limiter: self.subagent_limiter.clone(),
+            boss_coordinator: self.boss_coordinator.clone(),
+            boss_actor_policy: self.boss_actor_policy,
+        }
+    }
+
     pub fn with_remote_surface_admission_policy(self, policy: SurfaceAdmissionPolicy) -> Self {
         self.set_remote_surface_admission_policy(policy);
         self
@@ -618,5 +672,51 @@ mod tests {
 
         let val = ts.load(Ordering::Acquire);
         assert!(val > 1000, "Heartbeat should have updated the timestamp");
+    }
+
+    #[test]
+    fn fork_for_subagent_keeps_mutable_runtime_state_isolated() {
+        let parent = ToolPermissionContext::new(PermissionMode::AcceptEdits)
+            .with_active_session_id("session-1")
+            .with_external_memory_entries(vec!["parent-memory".into()])
+            .with_nested_memory_lineage(vec!["session:session-1".into()]);
+        parent.add_always_allow_rule("Bash");
+        parent.set_pending_approval(Some(PendingApproval {
+            tool_name: "Bash".into(),
+            tool_input: "pwd".into(),
+            message: "allow?".into(),
+            code: None,
+            summary: None,
+            detail: None,
+            approval_kind: None,
+            escalation_reasons: Vec::new(),
+        }));
+        parent.add_delegated_write_path("/tmp/parent");
+        parent.set_lism_enabled(false);
+
+        let child = parent.fork_for_subagent();
+        child.add_always_allow_rule("Agent");
+        child.set_pending_approval(None);
+        child.add_delegated_write_path("/tmp/child");
+        child.set_external_memory_entries(vec!["child-memory".into()]);
+        child.set_nested_memory_lineage(vec!["session:session-1".into(), "agent:child:inherit_context=false".into()]);
+        child.set_lism_enabled(true);
+
+        assert!(!parent.always_allow_rules().iter().any(|rule| rule == "Agent"));
+        assert!(parent.pending_approval().is_some());
+        assert!(!parent.is_delegated_write_path("/tmp/child"));
+        assert_eq!(parent.external_memory_entries(), vec!["parent-memory"]);
+        assert_eq!(parent.nested_memory_lineage(), vec!["session:session-1"]);
+        assert!(!parent.lism_enabled());
+
+        assert!(child.always_allow_rules().iter().any(|rule| rule == "Agent"));
+        assert!(child.pending_approval().is_none());
+        assert!(child.is_delegated_write_path("/tmp/child"));
+        assert_eq!(child.external_memory_entries(), vec!["child-memory"]);
+        assert_eq!(
+            child.nested_memory_lineage(),
+            vec!["session:session-1", "agent:child:inherit_context=false"]
+        );
+        assert!(child.lism_enabled());
     }
 }
