@@ -5,8 +5,8 @@ use crate::core::boss_actor_runtime::{
     BossActorEvent, BossActorRegistry, DesignerACommand, ExecutorBCommand,
 };
 use crate::core::boss_context_brief::{
-    BossContextBrief, BossContextStrategy, BossStateFrame, RelevantFileHandle,
-    assemble_brief_prompt,
+    BossContextBrief, BossContextStrategy, BossStateFrame, PermissionScopeView,
+    RelevantFileHandle, TargetArtifact, assemble_brief_prompt,
 };
 use crate::core::boss_runtime::{BossControlRuntime, BossRuntimeOwner};
 use crate::core::boss_state::{
@@ -224,6 +224,83 @@ fn collect_recent_decisions(plan: &BossPlan, current_step_id: usize) -> Vec<Stri
         decisions = decisions.split_off(decisions.len() - 3);
     }
     decisions
+}
+
+fn collect_target_files(relevant_file_handles: &[RelevantFileHandle]) -> Vec<String> {
+    let mut target_files = Vec::new();
+    for handle in relevant_file_handles {
+        if matches!(
+            handle.kind.as_str(),
+            "target_file" | "target_directory" | "source_file" | "document"
+        ) && !target_files.iter().any(|path| path == &handle.path)
+        {
+            target_files.push(handle.path.clone());
+        }
+    }
+    target_files
+}
+
+fn collect_target_artifacts(step: &BossPlanStep, target_files: &[String]) -> Vec<TargetArtifact> {
+    let mut artifacts = Vec::new();
+    for expectation in extract_artifact_expectations(step.objective()) {
+        let kind = match expectation.kind {
+            crate::core::boss_acceptance::BossArtifactKind::File => "file",
+            crate::core::boss_acceptance::BossArtifactKind::Directory => "directory",
+        };
+        artifacts.push(TargetArtifact {
+            path: expectation.path.display().to_string(),
+            kind: kind.to_string(),
+            required_state: "exists_non_empty".to_string(),
+            source: "artifact_expectation".to_string(),
+        });
+    }
+    for path in target_files {
+        if !artifacts.iter().any(|artifact| artifact.path == *path) {
+            artifacts.push(TargetArtifact {
+                path: path.clone(),
+                kind: if path.ends_with('/') {
+                    "directory".to_string()
+                } else {
+                    "file".to_string()
+                },
+                required_state: "referenced_for_step".to_string(),
+                source: "target_file_handle".to_string(),
+            });
+        }
+    }
+    artifacts
+}
+
+fn default_allowed_tools() -> Vec<String> {
+    vec![
+        "Read".into(),
+        "Edit".into(),
+        "Glob".into(),
+        "Grep".into(),
+        "LS".into(),
+        "Bash".into(),
+    ]
+}
+
+fn render_workspace_capability_scope() -> String {
+    "inherited_runtime_scope".to_string()
+}
+
+fn collect_blocked_items(step: &BossPlanStep) -> Vec<String> {
+    let mut blocked = Vec::new();
+    if matches!(step.status, BossPlanStepStatus::WaitingForApproval) {
+        blocked.push("waiting for approval before implementation may proceed".to_string());
+    }
+    if matches!(step.status, BossPlanStepStatus::Rejected | BossPlanStepStatus::Failed) {
+        if let Some(summary) = step
+            .last_review_summary
+            .as_ref()
+            .filter(|text| !text.trim().is_empty())
+        {
+            blocked.push(summary.clone());
+        }
+    }
+    blocked
 }
 
 fn store_step_result_diff(step: &mut BossPlanStep, primary: &str, fallback: Option<&str>) {
@@ -2719,26 +2796,49 @@ impl BossCoordinator {
             .iter()
             .find(|step| step.id == step_id)
             .ok_or_else(|| anyhow::anyhow!("Unknown boss step {step_id}"))?;
+        let plan_version = format!("{}:steps={}", plan.plan_id, plan.steps.len());
         let step_revision = format!("step-{}-attempt-{}", step.id, step.attempt_count);
         let relevant_file_handles = extract_relevant_file_handles(step.objective(), &step_revision);
+        let target_files = collect_target_files(&relevant_file_handles);
+        let target_artifacts = collect_target_artifacts(step, &target_files);
         let recent_decisions = collect_recent_decisions(plan, step.id);
         let open_items = if step.status == BossPlanStepStatus::Completed {
             Vec::new()
         } else {
             step.acceptance.clone()
         };
+        let blocked_items = collect_blocked_items(step);
+        let allowed_tools = default_allowed_tools();
+        let generated_at = format!(
+            "{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0)
+        );
 
         Ok(json!({
             "task": assemble_brief_prompt(
                 &BossContextBrief {
                     plan_id: plan.plan_id.clone(),
                     step_id: step.id,
+                    plan_version,
+                    step_revision: step_revision.clone(),
+                    generated_at,
                     objective: step.objective().to_string(),
                     acceptance: step.acceptance.clone(),
                     last_correction: step.last_correction.clone(),
                     recent_decisions,
                     relevant_file_handles,
-                    allowed_tools: Vec::new(),
+                    target_files,
+                    target_artifacts,
+                    allowed_tools: allowed_tools.clone(),
+                    permission_scope: PermissionScopeView {
+                        lism_policy: self.worker_lism_policy().await.as_str().to_string(),
+                        inherit_context: false,
+                        workspace_capability: render_workspace_capability_scope(),
+                        boss_actor_role: "executor_b".to_string(),
+                    },
                     parent_session_id: parent_session_id.to_string(),
                     context_strategy: BossContextStrategy::Brief,
                 },
@@ -2746,7 +2846,7 @@ impl BossCoordinator {
                     step_id: step.id,
                     status: step.status,
                     open_items,
-                    blocked_items: Vec::new(),
+                    blocked_items,
                     allowed_actions: vec!["implement".into()],
                     required_output_hint: Some("return a unified diff or file edits".into()),
                 },
@@ -2754,6 +2854,7 @@ impl BossCoordinator {
             "task_contains_boss_context": true,
             "role": "implement",
             "inherit_context": false,
+            "allowed_tools": allowed_tools,
             "lism_policy": self.worker_lism_policy().await.as_str(),
             "context_strategy": "brief",
             "reuse_strategy": "running_only",
@@ -3785,6 +3886,56 @@ mod tests {
         assert_eq!(recent.len(), 3);
         assert_eq!(recent[0], "step 1 review: summary 1");
         assert_eq!(recent[2], "step 3 review: summary 3");
+    }
+
+    #[test]
+    fn collect_target_artifacts_merges_expectations_and_target_files() {
+        let step = BossPlanStep {
+            id: 0,
+            description: "step".into(),
+            objective: Some(
+                "任务目标：\n- 目标文件：/tmp/report.md\n- 目标目录：/tmp/results/\n- 产出 markdown 报告"
+                    .into(),
+            ),
+            acceptance: Vec::new(),
+            requires_approval: false,
+            status: BossPlanStepStatus::Pending,
+            completed: false,
+            result_diff: None,
+            worker_task_id: None,
+            attempt_count: 0,
+            retry_budget: 3,
+            last_review_summary: None,
+            last_correction: None,
+            review_task_id: None,
+        };
+        let artifacts = collect_target_artifacts(
+            &step,
+            &["/tmp/report.md".into(), "/tmp/results/".into()],
+        );
+        assert!(artifacts.iter().any(|artifact| artifact.path == "/tmp/report.md"));
+        assert!(artifacts.iter().any(|artifact| artifact.path == "/tmp/results/"));
+    }
+
+    #[test]
+    fn collect_blocked_items_uses_review_summary_for_failed_steps() {
+        let step = BossPlanStep {
+            id: 0,
+            description: "step".into(),
+            objective: Some("objective".into()),
+            acceptance: Vec::new(),
+            requires_approval: false,
+            status: BossPlanStepStatus::Failed,
+            completed: false,
+            result_diff: None,
+            worker_task_id: None,
+            attempt_count: 0,
+            retry_budget: 3,
+            last_review_summary: Some("tests are still failing".into()),
+            last_correction: None,
+            review_task_id: None,
+        };
+        assert_eq!(collect_blocked_items(&step), vec!["tests are still failing"]);
     }
 
     #[test]

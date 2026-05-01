@@ -10,8 +10,8 @@ use rust_agent::core::boss_actor_runtime::{
     BossActorRegistry, DesignerARuntime, ExecutionFn, ExecutorBRuntime, SpecReviewFn,
 };
 use rust_agent::core::boss_context_brief::{
-    BossContextBrief, BossContextStrategy, BossStateFrame, RelevantFileHandle,
-    assemble_brief_prompt,
+    BossContextBrief, BossContextStrategy, BossStateFrame, PermissionScopeView,
+    RelevantFileHandle, TargetArtifact, assemble_brief_prompt,
 };
 use rust_agent::core::boss_runtime::BossRuntimeHost;
 use rust_agent::core::boss_state::{
@@ -1954,6 +1954,18 @@ async fn boss_b_receives_step_context_via_continue_or_mailbox() {
         task.contains("acceptance 0"),
         "spawn prompt must carry acceptance as open items"
     );
+    assert!(
+        task.contains("plan_version: plan-alpha:steps=1"),
+        "spawn prompt must carry plan version"
+    );
+    assert!(
+        task.contains("permission_scope:"),
+        "spawn prompt must carry permission scope"
+    );
+    assert_eq!(
+        v["allowed_tools"][0], "Read",
+        "spawn payload must pass allowed tools to the worker runtime"
+    );
 
     // build_step_continue_payload must embed step context and target the B task id.
     let continue_payload = coordinator
@@ -2020,6 +2032,10 @@ async fn boss_spawn_payload_carries_recent_decisions_from_prior_steps() {
     assert!(
         task.contains("path=src/core/boss.rs"),
         "typed file handles must include the referenced source path"
+    );
+    assert!(
+        task.contains("target_files:"),
+        "spawn prompt must include structured target files"
     );
 
     let _ = std::fs::remove_file(plan_path);
@@ -6606,6 +6622,9 @@ fn make_brief(strategy: BossContextStrategy) -> BossContextBrief {
     BossContextBrief {
         plan_id: "plan-t26-4".into(),
         step_id: 1,
+        plan_version: "plan-t26-4:steps=1".into(),
+        step_revision: "step-1-attempt-0".into(),
+        generated_at: "1714690000".into(),
         objective: "implement the feature".into(),
         acceptance: vec!["tests pass".into()],
         last_correction: None,
@@ -6618,7 +6637,20 @@ fn make_brief(strategy: BossContextStrategy) -> BossContextBrief {
             why_relevant: "spawn payload logic lives here".into(),
             step_revision: "step-1-attempt-0".into(),
         }],
-        allowed_tools: Vec::new(),
+        target_files: vec!["RustAgent/Agent/src/core/boss.rs".into()],
+        target_artifacts: vec![TargetArtifact {
+            path: "RustAgent/Agent/src/core/boss.rs".into(),
+            kind: "file".into(),
+            required_state: "referenced_for_step".into(),
+            source: "target_file_handle".into(),
+        }],
+        allowed_tools: vec!["Read".into(), "Edit".into()],
+        permission_scope: PermissionScopeView {
+            lism_policy: "force-on".into(),
+            inherit_context: false,
+            workspace_capability: "inherited_runtime_scope".into(),
+            boss_actor_role: "executor_b".into(),
+        },
         parent_session_id: "parent-session-1".into(),
         context_strategy: strategy,
     }
@@ -6653,6 +6685,14 @@ fn t26_4_brief_renders_to_actor_brief_segment() {
     assert!(
         seg.content.contains("relevant_file_handles:"),
         "content must include typed file handles"
+    );
+    assert!(
+        seg.content.contains("target_artifacts:"),
+        "content must include target artifacts"
+    );
+    assert!(
+        seg.content.contains("permission_scope:"),
+        "content must include permission scope"
     );
 }
 

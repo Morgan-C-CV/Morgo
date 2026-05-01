@@ -27,10 +27,29 @@ pub struct RelevantFileHandle {
     pub step_revision: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TargetArtifact {
+    pub path: String,
+    pub kind: String,
+    pub required_state: String,
+    pub source: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PermissionScopeView {
+    pub lism_policy: String,
+    pub inherit_context: bool,
+    pub workspace_capability: String,
+    pub boss_actor_role: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct BossContextBrief {
     pub plan_id: String,
     pub step_id: usize,
+    pub plan_version: String,
+    pub step_revision: String,
+    pub generated_at: String,
     pub objective: String,
     pub acceptance: Vec<String>,
     pub last_correction: Option<String>,
@@ -38,7 +57,10 @@ pub struct BossContextBrief {
     pub recent_decisions: Vec<String>,
     /// Typed file handles for the worker assignment memory.
     pub relevant_file_handles: Vec<RelevantFileHandle>,
+    pub target_files: Vec<String>,
+    pub target_artifacts: Vec<TargetArtifact>,
     pub allowed_tools: Vec<String>,
+    pub permission_scope: PermissionScopeView,
     pub parent_session_id: String,
     pub context_strategy: BossContextStrategy,
 }
@@ -61,6 +83,9 @@ impl BossContextBrief {
         let mut lines = vec![
             format!("objective: {}", self.objective),
             format!("step_id: {}", self.step_id),
+            format!("plan_version: {}", self.plan_version),
+            format!("step_revision: {}", self.step_revision),
+            format!("generated_at: {}", self.generated_at),
         ];
         if !self.acceptance.is_empty() {
             lines.push("acceptance:".into());
@@ -91,9 +116,31 @@ impl BossContextBrief {
                 ));
             }
         }
+        if !self.target_files.is_empty() {
+            lines.push("target_files:".into());
+            for path in &self.target_files {
+                lines.push(format!("  - {path}"));
+            }
+        }
+        if !self.target_artifacts.is_empty() {
+            lines.push("target_artifacts:".into());
+            for artifact in &self.target_artifacts {
+                lines.push(format!(
+                    "  - path={} kind={} required_state={} source={}",
+                    artifact.path, artifact.kind, artifact.required_state, artifact.source
+                ));
+            }
+        }
         if !self.allowed_tools.is_empty() {
             lines.push(format!("allowed_tools: {}", self.allowed_tools.join(", ")));
         }
+        lines.push(format!(
+            "permission_scope: lism_policy={} inherit_context={} workspace_capability={} boss_actor_role={}",
+            self.permission_scope.lism_policy,
+            self.permission_scope.inherit_context,
+            self.permission_scope.workspace_capability,
+            self.permission_scope.boss_actor_role
+        ));
         lines.push(format!("parent_session_id: {}", self.parent_session_id));
         lines.push(format!("plan_id: {}", self.plan_id));
         PromptSegment::new(
