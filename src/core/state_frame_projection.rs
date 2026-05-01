@@ -131,13 +131,17 @@ fn build_fact_ledger(
                 facts.push(fact_line(
                     "file_facts",
                     format!(
-                        "ref={} path={} kind={} source={} freshness={} confidence={} fact={}",
+                        "ref={} path={} kind={} source={} freshness={} confidence={}{} fact={}",
                         item.ref_id,
                         item.path,
                         item.kind,
                         item.source,
                         item.freshness,
                         format_confidence(item.confidence_milli),
+                        item.symbol
+                            .as_deref()
+                            .map(|symbol| format!(" symbol={symbol}"))
+                            .unwrap_or_default(),
                         item.fact
                     ),
                 ));

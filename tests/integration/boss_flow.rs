@@ -8492,6 +8492,53 @@ fn t27_3_projection_emits_file_change_and_test_ledgers() {
 }
 
 #[test]
+fn t27_3_projection_emits_file_fact_when_worker_reports_reading_a_file() {
+    use rust_agent::core::boss_state::{BossPlan, BossPlanStep, BossPlanStepStatus, BossStage};
+    use rust_agent::core::state_frame::ActorRole;
+    use rust_agent::core::state_frame_projection::project_state_frame;
+
+    let step = BossPlanStep {
+        id: 0,
+        description: "investigate".into(),
+        objective: Some("diagnose worker context drift".into()),
+        acceptance: vec![],
+        requires_approval: false,
+        status: BossPlanStepStatus::Running,
+        completed: false,
+        result_diff: Some(
+            "read src/core/state_fact_ledger.rs and inspected FileFactRecord before planning the patch".into(),
+        ),
+        worker_task_id: None,
+        attempt_count: 0,
+        retry_budget: 3,
+        last_review_summary: None,
+        last_correction: None,
+        review_task_id: None,
+    };
+    let plan = BossPlan {
+        plan_id: "p-read-ledger".into(),
+        task_description: "ledger read task".into(),
+        document_spec: String::new(),
+        pseudo_code: String::new(),
+        steps: vec![step],
+        accepted_by_user: true,
+        auto_sequence: true,
+        ..Default::default()
+    };
+
+    let frame = project_state_frame(&plan, BossStage::Execution, Some(0), ActorRole::Worker);
+    assert!(
+        frame.recent_evidence.iter().any(|item| {
+            item.contains("fact: file_facts")
+                && item.contains("kind=read_observation")
+                && item.contains("path=src/core/state_fact_ledger.rs")
+                && item.contains("symbol=FileFactRecord")
+        }),
+        "worker-reported reads should emit concrete file fact refs"
+    );
+}
+
+#[test]
 fn t27_3_projected_frame_is_non_cacheable_segment() {
     use rust_agent::core::boss_state::{BossPlan, BossStage};
     use rust_agent::core::prompt_segment::PromptSegmentKind;
