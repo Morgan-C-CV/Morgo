@@ -124,6 +124,7 @@ async fn bootstrap_env_policy_is_attached_and_enforced_by_file_tools() {
         lism_policy: None,
         worker_lism_policy: None,
         boss_task: None,
+        boss_task_timeout_secs: 900,
     })
     .with_provider_config(test_model_provider_config());
     let state = BootstrapState::new(InteractionSurface::Cli, SessionMode::Headless, false);

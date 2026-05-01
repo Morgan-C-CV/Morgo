@@ -248,6 +248,7 @@ fn diagnostic_preview(value: &str, max_chars: usize) -> String {
 }
 
 const DEFAULT_RUNTIME_SHUTDOWN_TIMEOUT_MS: u64 = 1_500;
+const DEFAULT_BOSS_TASK_TIMEOUT_SECS: u64 = 900;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ShutdownFailure {
@@ -312,6 +313,9 @@ pub struct BootstrapCli {
     /// to completion, records the LisM A/B sample if --lism-ab-sample is set, then exits.
     #[arg(long, value_name = "TASK")]
     pub boss_task: Option<String>,
+    /// Timeout for non-interactive --boss-task polling. Default is 900 seconds.
+    #[arg(long, value_name = "SECONDS", default_value_t = DEFAULT_BOSS_TASK_TIMEOUT_SECS)]
+    pub boss_task_timeout_secs: u64,
 }
 
 impl Default for BootstrapCli {
@@ -333,6 +337,7 @@ impl Default for BootstrapCli {
             lism_policy: None,
             worker_lism_policy: None,
             boss_task: None,
+            boss_task_timeout_secs: DEFAULT_BOSS_TASK_TIMEOUT_SECS,
         }
     }
 }
@@ -652,8 +657,9 @@ impl RuntimeBootstrap {
                 boss.seed_plan_for_task(&task_desc).await;
                 let advance_msg = boss.advance_plan(&app_arc).await;
                 println!("[boss-task] advance_plan result: {:?}", advance_msg);
-                // Poll until completion or terminal failure, 5-minute timeout.
-                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
+                // Poll until completion or terminal failure.
+                let timeout = std::time::Duration::from_secs(self.cli.boss_task_timeout_secs);
+                let deadline = std::time::Instant::now() + timeout;
                 let mut tick = 0u32;
                 loop {
                     if let Some(task_manager) = app_arc.permission_context.task_manager.as_ref() {
@@ -707,7 +713,10 @@ impl RuntimeBootstrap {
                         }
                     }
                     if std::time::Instant::now() >= deadline {
-                        println!("[boss-task] timed out after 5 minutes");
+                        println!(
+                            "[boss-task] timed out after {} seconds",
+                            self.cli.boss_task_timeout_secs
+                        );
                         break;
                     }
                     tick += 1;
@@ -2023,7 +2032,9 @@ fn print_lism_ab_summary(
 mod tests {
     use std::path::Path;
 
-    use super::{preview_chars, resolve_skill_project_root};
+    use super::{
+        BootstrapCli, DEFAULT_BOSS_TASK_TIMEOUT_SECS, preview_chars, resolve_skill_project_root,
+    };
 
     #[test]
     fn preview_chars_respects_utf8_boundaries() {
@@ -2049,5 +2060,11 @@ mod tests {
         let cwd = Path::new("/workspace/repo");
         let config_root = Path::new("/tmp/custom-config");
         assert_eq!(resolve_skill_project_root(config_root, cwd), cwd);
+    }
+
+    #[test]
+    fn bootstrap_cli_default_boss_task_timeout_is_extended_for_e2e_runs() {
+        let cli = BootstrapCli::default();
+        assert_eq!(cli.boss_task_timeout_secs, DEFAULT_BOSS_TASK_TIMEOUT_SECS);
     }
 }

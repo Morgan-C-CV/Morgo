@@ -105,7 +105,12 @@ fn extract_relevant_file_hints(text: &str) -> Vec<String> {
                 .trim_matches('-')
                 .trim_matches('：')
                 .trim_end_matches(['，', ',', '。', '.', ';', '；', ')', '）', ']']);
-            if candidate.is_empty() || !candidate.contains('/') {
+            let candidate = candidate
+                .rsplit_once(['：', ':'])
+                .map(|(_, suffix)| suffix)
+                .filter(|suffix| suffix.contains('/'))
+                .unwrap_or(candidate);
+            if candidate.is_empty() || candidate == "/" || !candidate.contains('/') {
                 continue;
             }
             if !(candidate.ends_with(".rs")
@@ -3628,5 +3633,15 @@ mod tests {
             .as_deref(),
             Some("RustAgent/docs/30-boss-mode-and-dual-agent-workflow.md")
         );
+    }
+
+    #[test]
+    fn extract_relevant_file_hints_ignores_root_only_tokens() {
+        let hints = extract_relevant_file_hints(
+            "任务目标：\n- 工具输入：\n  - /\n  - /tmp/example/samples/\n- 目标文件：/tmp/example/report.md",
+        );
+        assert!(!hints.iter().any(|hint| hint == "/"));
+        assert!(hints.iter().any(|hint| hint == "/tmp/example/samples/"));
+        assert!(hints.iter().any(|hint| hint == "/tmp/example/report.md"));
     }
 }

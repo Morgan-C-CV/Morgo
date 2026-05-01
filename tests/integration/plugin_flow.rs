@@ -145,6 +145,7 @@ async fn plugin_runtime_exposes_command_hook_tool_and_diagnostics() {
         lism_policy: None,
         worker_lism_policy: None,
         boss_task: None,
+        boss_task_timeout_secs: 900,
     })
     .with_session_store(session_store)
     .with_provider_config(test_model_provider_config());
