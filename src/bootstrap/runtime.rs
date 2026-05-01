@@ -651,6 +651,11 @@ impl RuntimeBootstrap {
                 let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
                 let mut tick = 0u32;
                 loop {
+                    if let Some(task_manager) = app_arc.permission_context.task_manager.as_ref() {
+                        for event in task_manager.drain_events(&app_arc.active_session_id) {
+                            let _ = boss.on_task_event(&event).await;
+                        }
+                    }
                     let stage = boss.get_stage().await;
                     if matches!(stage, crate::core::boss_state::BossStage::Completed) {
                         break;
@@ -664,8 +669,8 @@ impl RuntimeBootstrap {
                         );
                         break;
                     }
-                    // Also exit on terminal failure so we don't waste the timeout.
-                    let step_failed = if let Some(task_manager) =
+                    // If the tracked B task is terminal, keep draining events until Boss catches up.
+                    let step_terminal = if let Some(task_manager) =
                         app_arc.permission_context.task_manager.as_ref()
                     {
                         let b_task_id = boss.b_task_id().await;
@@ -673,7 +678,8 @@ impl RuntimeBootstrap {
                             matches!(
                                 task_manager.status(&tid),
                                 Some(
-                                    crate::task::types::TaskStatus::Failed
+                                    crate::task::types::TaskStatus::Completed
+                                        | crate::task::types::TaskStatus::Failed
                                         | crate::task::types::TaskStatus::Killed
                                 )
                             )
@@ -683,14 +689,17 @@ impl RuntimeBootstrap {
                     } else {
                         false
                     };
-                    if step_failed {
-                        println!("[boss-task] step task failed/killed — stopping poll");
+                    if step_terminal {
+                        println!("[boss-task] step task reached terminal status; syncing boss state");
                         let terminal_msg = boss.advance_plan(&app_arc).await;
                         println!(
                             "[boss-task] terminal advance_plan result: {:?}",
                             terminal_msg
                         );
-                        break;
+                        if matches!(boss.get_stage().await, crate::core::boss_state::BossStage::Completed)
+                        {
+                            break;
+                        }
                     }
                     if std::time::Instant::now() >= deadline {
                         println!("[boss-task] timed out after 5 minutes");
