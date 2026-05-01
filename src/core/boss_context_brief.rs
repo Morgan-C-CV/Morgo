@@ -12,11 +12,21 @@ pub enum BossContextStrategy {
 
 /// Stable, cacheable fields for a B/child actor's initial context.
 /// Maps to `PromptSegmentKind::ActorBrief` (cacheable).
-/// `recent_decisions` and `relevant_files` are v1 empty — T27 will populate them.
+/// `recent_decisions` and `relevant_file_handles` carry compact assignment memory.
 ///
 /// Important for provider-side prompt cache efficiency: volatile identifiers like
 /// `plan_id` must render late in the segment so stable task semantics can occupy
 /// the earliest prefix tokens.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelevantFileHandle {
+    pub path: String,
+    pub kind: String,
+    pub source: String,
+    pub freshness: String,
+    pub why_relevant: String,
+    pub step_revision: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct BossContextBrief {
     pub plan_id: String,
@@ -24,10 +34,10 @@ pub struct BossContextBrief {
     pub objective: String,
     pub acceptance: Vec<String>,
     pub last_correction: Option<String>,
-    /// Key decisions from prior steps (v1: empty list).
+    /// Key decisions from prior steps, compact enough to stay cacheable.
     pub recent_decisions: Vec<String>,
-    /// Files known to be relevant (v1: empty list).
-    pub relevant_files: Vec<String>,
+    /// Typed file handles for the worker assignment memory.
+    pub relevant_file_handles: Vec<RelevantFileHandle>,
     pub allowed_tools: Vec<String>,
     pub parent_session_id: String,
     pub context_strategy: BossContextStrategy,
@@ -67,10 +77,18 @@ impl BossContextBrief {
                 lines.push(format!("  - {d}"));
             }
         }
-        if !self.relevant_files.is_empty() {
-            lines.push("relevant_files:".into());
-            for f in &self.relevant_files {
-                lines.push(format!("  - {f}"));
+        if !self.relevant_file_handles.is_empty() {
+            lines.push("relevant_file_handles:".into());
+            for handle in &self.relevant_file_handles {
+                lines.push(format!(
+                    "  - path={} kind={} source={} freshness={} step_revision={} why_relevant={}",
+                    handle.path,
+                    handle.kind,
+                    handle.source,
+                    handle.freshness,
+                    handle.step_revision,
+                    handle.why_relevant
+                ));
             }
         }
         if !self.allowed_tools.is_empty() {

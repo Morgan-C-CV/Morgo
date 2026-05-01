@@ -5,7 +5,8 @@ use crate::core::boss_actor_runtime::{
     BossActorEvent, BossActorRegistry, DesignerACommand, ExecutorBCommand,
 };
 use crate::core::boss_context_brief::{
-    BossContextBrief, BossContextStrategy, BossStateFrame, assemble_brief_prompt,
+    BossContextBrief, BossContextStrategy, BossStateFrame, RelevantFileHandle,
+    assemble_brief_prompt,
 };
 use crate::core::boss_runtime::{BossControlRuntime, BossRuntimeOwner};
 use crate::core::boss_state::{
@@ -86,8 +87,34 @@ fn seed_step_acceptance(task: &str) -> Vec<String> {
     acceptance
 }
 
-fn extract_relevant_file_hints(text: &str) -> Vec<String> {
-    let mut hints = Vec::new();
+fn classify_relevant_file_handle(path: &str, line: &str) -> String {
+    if line.contains("目标目录") || path.ends_with('/') {
+        "target_directory".to_string()
+    } else if line.contains("目标文件") {
+        "target_file".to_string()
+    } else if path.ends_with(".rs") {
+        "source_file".to_string()
+    } else if path.ends_with(".md") {
+        "document".to_string()
+    } else if path.ends_with(".jsonl") || path.ends_with(".json") || path.ends_with(".log") {
+        "data_or_log".to_string()
+    } else {
+        "path".to_string()
+    }
+}
+
+fn build_file_handle_relevance(kind: &str, line: &str, path: &str) -> String {
+    if line.contains("目标文件") {
+        format!("explicit target file for this step: {path}")
+    } else if line.contains("目标目录") {
+        format!("explicit target directory for this step: {path}")
+    } else {
+        format!("referenced in step objective as {kind}: {path}")
+    }
+}
+
+fn extract_relevant_file_handles(text: &str, step_revision: &str) -> Vec<RelevantFileHandle> {
+    let mut handles: Vec<RelevantFileHandle> = Vec::new();
     let cwd = std::env::current_dir().ok();
     for line in text.lines() {
         let trimmed = line.trim();
@@ -123,12 +150,20 @@ fn extract_relevant_file_hints(text: &str) -> Vec<String> {
             }
             let candidate = normalize_relevant_file_hint(candidate, cwd.as_deref())
                 .unwrap_or_else(|| candidate.to_string());
-            if !hints.iter().any(|existing| existing == &candidate) {
-                hints.push(candidate);
+            if !handles.iter().any(|existing| existing.path == candidate) {
+                let kind = classify_relevant_file_handle(&candidate, trimmed);
+                handles.push(RelevantFileHandle {
+                    path: candidate.clone(),
+                    kind: kind.clone(),
+                    source: "boss_step_objective".to_string(),
+                    freshness: "current".to_string(),
+                    why_relevant: build_file_handle_relevance(&kind, trimmed, &candidate),
+                    step_revision: step_revision.to_string(),
+                });
             }
         }
     }
-    hints
+    handles
 }
 
 fn normalize_relevant_file_hint(candidate: &str, cwd: Option<&Path>) -> Option<String> {
@@ -168,6 +203,27 @@ fn summarize_acceptance_items(step: &BossPlanStep) -> String {
             .collect::<Vec<_>>()
             .join("\n")
     }
+}
+
+fn collect_recent_decisions(plan: &BossPlan, current_step_id: usize) -> Vec<String> {
+    let mut decisions = plan
+        .steps
+        .iter()
+        .filter(|step| step.id < current_step_id)
+        .filter_map(|step| {
+            if let Some(summary) = step.last_review_summary.as_ref() {
+                Some(format!("step {} review: {}", step.id, summary))
+            } else if step.status == BossPlanStepStatus::Completed {
+                Some(format!("step {} completed: {}", step.id, step.objective()))
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    if decisions.len() > 3 {
+        decisions = decisions.split_off(decisions.len() - 3);
+    }
+    decisions
 }
 
 fn build_step_review_summary(
@@ -2639,7 +2695,14 @@ impl BossCoordinator {
             .iter()
             .find(|step| step.id == step_id)
             .ok_or_else(|| anyhow::anyhow!("Unknown boss step {step_id}"))?;
-        let relevant_files = extract_relevant_file_hints(step.objective());
+        let step_revision = format!("step-{}-attempt-{}", step.id, step.attempt_count);
+        let relevant_file_handles = extract_relevant_file_handles(step.objective(), &step_revision);
+        let recent_decisions = collect_recent_decisions(plan, step.id);
+        let open_items = if step.status == BossPlanStepStatus::Completed {
+            Vec::new()
+        } else {
+            step.acceptance.clone()
+        };
 
         Ok(json!({
             "task": assemble_brief_prompt(
@@ -2649,8 +2712,8 @@ impl BossCoordinator {
                     objective: step.objective().to_string(),
                     acceptance: step.acceptance.clone(),
                     last_correction: step.last_correction.clone(),
-                    recent_decisions: Vec::new(),
-                    relevant_files,
+                    recent_decisions,
+                    relevant_file_handles,
                     allowed_tools: Vec::new(),
                     parent_session_id: parent_session_id.to_string(),
                     context_strategy: BossContextStrategy::Brief,
@@ -2658,7 +2721,7 @@ impl BossCoordinator {
                 &BossStateFrame {
                     step_id: step.id,
                     status: step.status,
-                    open_items: Vec::new(),
+                    open_items,
                     blocked_items: Vec::new(),
                     allowed_actions: vec!["implement".into()],
                     required_output_hint: Some("return a unified diff or file edits".into()),
@@ -3619,7 +3682,7 @@ mod tests {
     }
 
     #[test]
-    fn extract_relevant_file_hints_normalizes_agent_relative_paths() {
+    fn extract_relevant_file_handles_normalizes_agent_relative_paths() {
         let repo_root = Path::new("/Users/wangmorgan/MProject/LearnCCfromCC");
         assert_eq!(
             normalize_relevant_file_hint("src/tool/definition.rs", Some(repo_root)).as_deref(),
@@ -3636,12 +3699,67 @@ mod tests {
     }
 
     #[test]
-    fn extract_relevant_file_hints_ignores_root_only_tokens() {
-        let hints = extract_relevant_file_hints(
+    fn extract_relevant_file_handles_ignores_root_only_tokens() {
+        let handles = extract_relevant_file_handles(
             "任务目标：\n- 工具输入：\n  - /\n  - /tmp/example/samples/\n- 目标文件：/tmp/example/report.md",
+            "step-1-attempt-0",
         );
-        assert!(!hints.iter().any(|hint| hint == "/"));
-        assert!(hints.iter().any(|hint| hint == "/tmp/example/samples/"));
-        assert!(hints.iter().any(|hint| hint == "/tmp/example/report.md"));
+        assert!(!handles.iter().any(|handle| handle.path == "/"));
+        assert!(handles
+            .iter()
+            .any(|handle| handle.path == "/tmp/example/samples/" && handle.kind == "target_directory"));
+        assert!(handles.iter().any(|handle| {
+            handle.path == "/tmp/example/report.md"
+                && handle.kind == "target_file"
+                && handle.step_revision == "step-1-attempt-0"
+        }));
+    }
+
+    #[test]
+    fn collect_recent_decisions_keeps_latest_review_summaries() {
+        let mut steps = Vec::new();
+        for id in 0..5 {
+            let mut step = BossPlanStep {
+                id,
+                description: format!("step {id}"),
+                objective: Some(format!("objective {id}")),
+                acceptance: vec![format!("acceptance {id}")],
+                requires_approval: false,
+                status: BossPlanStepStatus::Completed,
+                completed: true,
+                result_diff: None,
+                worker_task_id: None,
+                attempt_count: 0,
+                retry_budget: 3,
+                last_review_summary: Some(format!("summary {id}")),
+                last_correction: None,
+                review_task_id: None,
+            };
+            if id == 4 {
+                step.status = BossPlanStepStatus::Pending;
+                step.completed = false;
+            }
+            steps.push(step);
+        }
+        let plan = BossPlan {
+            plan_id: "plan-alpha".into(),
+            task_description: "task".into(),
+            document_spec: String::new(),
+            pseudo_code: String::new(),
+            draft_spec: None,
+            review_feedback: None,
+            revision_notes: None,
+            finalized: false,
+            documentation_feedback: Vec::new(),
+            steps,
+            accepted_by_user: true,
+            auto_sequence: true,
+            session_snapshot: None,
+        };
+
+        let recent = collect_recent_decisions(&plan, 4);
+        assert_eq!(recent.len(), 3);
+        assert_eq!(recent[0], "step 1 review: summary 1");
+        assert_eq!(recent[2], "step 3 review: summary 3");
     }
 }

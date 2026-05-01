@@ -10,7 +10,8 @@ use rust_agent::core::boss_actor_runtime::{
     BossActorRegistry, DesignerARuntime, ExecutionFn, ExecutorBRuntime, SpecReviewFn,
 };
 use rust_agent::core::boss_context_brief::{
-    BossContextBrief, BossContextStrategy, BossStateFrame, assemble_brief_prompt,
+    BossContextBrief, BossContextStrategy, BossStateFrame, RelevantFileHandle,
+    assemble_brief_prompt,
 };
 use rust_agent::core::boss_runtime::BossRuntimeHost;
 use rust_agent::core::boss_state::{
@@ -1944,6 +1945,15 @@ async fn boss_b_receives_step_context_via_continue_or_mailbox() {
         v["orchestration_group_id"], b_actor_id,
         "orchestration_group_id must be B's actor id"
     );
+    let task = v["task"].as_str().unwrap_or("");
+    assert!(
+        task.contains("open_items:"),
+        "spawn prompt must carry open items to the worker"
+    );
+    assert!(
+        task.contains("acceptance 0"),
+        "spawn prompt must carry acceptance as open items"
+    );
 
     // build_step_continue_payload must embed step context and target the B task id.
     let continue_payload = coordinator
@@ -1969,6 +1979,47 @@ async fn boss_b_receives_step_context_via_continue_or_mailbox() {
     assert!(
         vc["task"].is_null(),
         "continue payload must not have task field"
+    );
+
+    let _ = std::fs::remove_file(plan_path);
+}
+
+#[tokio::test]
+async fn boss_spawn_payload_carries_recent_decisions_from_prior_steps() {
+    let mut step0 = boss_step(0, "Step A");
+    step0.status = BossPlanStepStatus::Completed;
+    step0.last_review_summary = Some("keep the JSONL parsing flow".into());
+    let mut step1 = boss_step(1, "Step B");
+    step1.objective = Some(
+        "任务目标：\n- 目标文件：src/core/boss.rs\n- 调整 worker spawn payload".into(),
+    );
+    let (coordinator, plan_path) = coordinator_with_plan(
+        boss_plan(vec![step0, step1]),
+        "test_boss_flow_recent_decisions.json",
+    )
+    .await;
+
+    let payload = coordinator
+        .build_step_spawn_payload(1, "parent-ctx-session", "boss-plan-alpha-b")
+        .await
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
+    let task = v["task"].as_str().unwrap_or("");
+    assert!(
+        task.contains("recent_decisions:"),
+        "spawn prompt must include recent decisions when prior step reviews exist"
+    );
+    assert!(
+        task.contains("keep the JSONL parsing flow"),
+        "spawn prompt must carry the prior review summary"
+    );
+    assert!(
+        task.contains("relevant_file_handles:"),
+        "spawn prompt must include typed file handles"
+    );
+    assert!(
+        task.contains("path=src/core/boss.rs"),
+        "typed file handles must include the referenced source path"
     );
 
     let _ = std::fs::remove_file(plan_path);
@@ -6559,7 +6610,14 @@ fn make_brief(strategy: BossContextStrategy) -> BossContextBrief {
         acceptance: vec!["tests pass".into()],
         last_correction: None,
         recent_decisions: Vec::new(),
-        relevant_files: Vec::new(),
+        relevant_file_handles: vec![RelevantFileHandle {
+            path: "RustAgent/Agent/src/core/boss.rs".into(),
+            kind: "source_file".into(),
+            source: "boss_step_objective".into(),
+            freshness: "current".into(),
+            why_relevant: "spawn payload logic lives here".into(),
+            step_revision: "step-1-attempt-0".into(),
+        }],
         allowed_tools: Vec::new(),
         parent_session_id: "parent-session-1".into(),
         context_strategy: strategy,
@@ -6591,6 +6649,10 @@ fn t26_4_brief_renders_to_actor_brief_segment() {
     assert!(
         seg.content.contains("tests pass"),
         "content must include acceptance"
+    );
+    assert!(
+        seg.content.contains("relevant_file_handles:"),
+        "content must include typed file handles"
     );
 }
 
