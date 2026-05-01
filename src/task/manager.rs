@@ -15,6 +15,7 @@ use crate::task::types::{
     TaskDeliveryState, TaskEvent, TaskOutputSlice, TaskOwner, TaskRecord, TaskStatus, TaskType,
     TaskUsageSummary, ValidationState, WorkerPhase, format_task_result, format_task_summary,
 };
+use crate::tool::result::ToolExecutionRecord;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskGroupSummary {
@@ -36,6 +37,7 @@ struct TaskRuntimeStore {
     mailboxes: HashMap<String, Vec<String>>,
     mailbox_notifiers: HashMap<String, Arc<Notify>>,
     events: Vec<TaskEvent>,
+    tool_execution_records: HashMap<String, Vec<ToolExecutionRecord>>,
 }
 
 const MAX_QUEUED_EVENTS: usize = 256;
@@ -342,6 +344,29 @@ impl TaskManager {
 
     pub fn append_output(&self, id: &str, chunk: impl AsRef<str>) {
         self.append_output_with_activity(id, chunk, true);
+    }
+
+    pub fn record_tool_execution(&self, id: &str, record: ToolExecutionRecord) {
+        let mut runtime_store = self
+            .runtime_store
+            .write()
+            .expect("task runtime store poisoned");
+        runtime_store
+            .tool_execution_records
+            .entry(id.to_string())
+            .or_default()
+            .push(record);
+        self.record_activity();
+    }
+
+    pub fn tool_execution_records(&self, id: &str) -> Vec<ToolExecutionRecord> {
+        self.runtime_store
+            .read()
+            .expect("task runtime store poisoned")
+            .tool_execution_records
+            .get(id)
+            .cloned()
+            .unwrap_or_default()
     }
 
     fn append_output_without_activity(&self, id: &str, chunk: impl AsRef<str>) {

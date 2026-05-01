@@ -969,6 +969,9 @@ async fn execute_tool_phase(
 
     match tool_result {
         Ok(outcomes) => {
+            for outcome in &outcomes {
+                record_tool_execution_for_active_task(context, &outcome.record);
+            }
             let report = aggregate_execution_records(
                 &outcomes
                     .iter()
@@ -1706,6 +1709,22 @@ fn tool_result_committed_event(
         kind: record.kind.clone(),
         report_modifier: record.report_modifier.clone(),
     }
+}
+
+fn record_tool_execution_for_active_task(context: &QueryContext, record: &ToolExecutionRecord) {
+    if !context.is_subagent() {
+        return;
+    }
+    let Some(task_manager) = context.app_state.permission_context.task_manager.as_ref() else {
+        return;
+    };
+    if task_manager
+        .get(&context.app_state.active_session_id)
+        .is_none()
+    {
+        return;
+    }
+    task_manager.record_tool_execution(&context.app_state.active_session_id, record.clone());
 }
 
 fn inbox_messages(context: &QueryContext, target_task_id: Option<&str>) -> Vec<Message> {

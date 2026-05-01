@@ -45,8 +45,12 @@ use rust_agent::state::permission_context::{
 use rust_agent::task::manager::TaskManager;
 use rust_agent::task::types::{TaskEvent, TaskOwner, TaskStatus, TaskType, TaskUsageSummary};
 use rust_agent::tool::builtin::agent::AgentTool;
+use rust_agent::tool::definition::{ObservableInput, ObservableInputSource};
 use rust_agent::tool::definition::{Tool, ToolCall};
 use rust_agent::tool::registry::{ToolAssemblyContext, ToolRegistry};
+use rust_agent::tool::result::{
+    ToolBatchContext, ToolExecutionOutcomeKind, ToolExecutionRecord, ToolReportModifier,
+};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::RwLock;
@@ -467,6 +471,7 @@ fn make_orchestrator_route_override_plan(step_id: usize) -> BossPlan {
             last_review_summary: None,
             last_correction: None,
             review_task_id: None,
+            tool_execution_records: Vec::new(),
         }],
         accepted_by_user: true,
         auto_sequence: true,
@@ -552,6 +557,7 @@ fn boss_step(id: usize, description: &str) -> BossPlanStep {
         last_review_summary: None,
         last_correction: None,
         review_task_id: None,
+        tool_execution_records: Vec::new(),
     }
 }
 
@@ -8254,6 +8260,7 @@ fn t27_3_execution_stage_with_step_maps_objective_and_open_items() {
         last_review_summary: None,
         last_correction: None,
         review_task_id: None,
+        tool_execution_records: Vec::new(),
     };
     let plan = BossPlan {
         plan_id: "p2".into(),
@@ -8302,6 +8309,7 @@ fn t27_3_completed_steps_go_into_accepted_summary() {
         last_review_summary: None,
         last_correction: None,
         review_task_id: None,
+        tool_execution_records: Vec::new(),
     };
     let current_step = BossPlanStep {
         id: 1,
@@ -8318,6 +8326,7 @@ fn t27_3_completed_steps_go_into_accepted_summary() {
         last_review_summary: None,
         last_correction: None,
         review_task_id: None,
+        tool_execution_records: Vec::new(),
     };
     let plan = BossPlan {
         plan_id: "p3".into(),
@@ -8390,6 +8399,7 @@ fn t27_3_readonly_audit_projection_emits_fact_ledger_and_readonly_actions() {
         last_review_summary: None,
         last_correction: None,
         review_task_id: None,
+        tool_execution_records: Vec::new(),
     };
     let plan = BossPlan {
         plan_id: "p-readonly".into(),
@@ -8455,6 +8465,7 @@ fn t27_3_projection_emits_file_change_and_test_ledgers() {
         last_review_summary: Some("tests failed because file_facts still said none recorded".into()),
         last_correction: None,
         review_task_id: None,
+        tool_execution_records: Vec::new(),
     };
     let plan = BossPlan {
         plan_id: "p-ledger".into(),
@@ -8514,6 +8525,7 @@ fn t27_3_projection_emits_file_fact_when_worker_reports_reading_a_file() {
         last_review_summary: None,
         last_correction: None,
         review_task_id: None,
+        tool_execution_records: Vec::new(),
     };
     let plan = BossPlan {
         plan_id: "p-read-ledger".into(),
@@ -8536,6 +8548,125 @@ fn t27_3_projection_emits_file_fact_when_worker_reports_reading_a_file() {
         }),
         "worker-reported reads should emit concrete file fact refs"
     );
+}
+
+#[tokio::test]
+async fn t27_5_on_task_event_persists_runtime_tool_records_into_step_ledgers() {
+    let task_manager = Arc::new(TaskManager::default());
+    let app_state = app_state_with_tasks("runtime-ledger-session", task_manager.clone());
+    let (coordinator, plan_path) = coordinator_with_plan(
+        boss_plan(vec![boss_step(0, "runtime ledger step")]),
+        "test_boss_flow_runtime_tool_ledgers.json",
+    )
+    .await;
+    {
+        let mut guard = coordinator.auto_advance_app_state.write().await;
+        *guard = Some(app_state.clone());
+    }
+
+    let task = task_manager.create_with_type(
+        "runtime ledger worker",
+        TaskType::LocalAgent,
+        "runtime-ledger-session",
+        InteractionSurface::Cli,
+    );
+    task_manager.set_step_id(&task.id, Some(0));
+    task_manager.record_tool_execution(
+        &task.id,
+        ToolExecutionRecord {
+            tool_name: "Read".into(),
+            outcome: "Text".into(),
+            kind: ToolExecutionOutcomeKind::Success,
+            summary: "Read succeeded".into(),
+            detail: Some("pub struct FileFactRecord".into()),
+            pending_approval: None,
+            report_modifier: ToolReportModifier::None,
+            observable_input: Some(ObservableInput {
+                value: r#"{"path":"src/core/state_fact_ledger.rs"}"#.into(),
+                source: ObservableInputSource::Raw,
+            }),
+            batch_context: ToolBatchContext {
+                batch_index: 0,
+                batch_size: 1,
+                executed_in_batch: false,
+            },
+        },
+    );
+    task_manager.record_tool_execution(
+        &task.id,
+        ToolExecutionRecord {
+            tool_name: "Edit".into(),
+            outcome: "Text".into(),
+            kind: ToolExecutionOutcomeKind::Success,
+            summary: "Edit succeeded".into(),
+            detail: Some("updated state frame projection".into()),
+            pending_approval: None,
+            report_modifier: ToolReportModifier::None,
+            observable_input: Some(ObservableInput {
+                value: r#"{"path":"src/core/state_frame_projection.rs"}"#.into(),
+                source: ObservableInputSource::Raw,
+            }),
+            batch_context: ToolBatchContext {
+                batch_index: 0,
+                batch_size: 1,
+                executed_in_batch: false,
+            },
+        },
+    );
+    task_manager.record_tool_execution(
+        &task.id,
+        ToolExecutionRecord {
+            tool_name: "Bash".into(),
+            outcome: "Text".into(),
+            kind: ToolExecutionOutcomeKind::Success,
+            summary: "Bash succeeded".into(),
+            detail: Some(
+                "command: cargo test -p rust_agent boss_flow\nexit_code: 0\nstdout:\nok".into(),
+            ),
+            pending_approval: None,
+            report_modifier: ToolReportModifier::None,
+            observable_input: Some(ObservableInput {
+                value: r#"{"command":"cargo test -p rust_agent boss_flow"}"#.into(),
+                source: ObservableInputSource::Raw,
+            }),
+            batch_context: ToolBatchContext {
+                batch_index: 0,
+                batch_size: 1,
+                executed_in_batch: false,
+            },
+        },
+    );
+
+    let mut event = task_event(&task.id, 0, TaskStatus::Completed);
+    event.result = "worker finished".into();
+    event.summary = "runtime worker completed".into();
+    coordinator.on_task_event(&event).await.unwrap();
+
+    let plan_guard = coordinator.plan.read().await;
+    let step = &plan_guard.as_ref().unwrap().steps[0];
+    assert_eq!(step.tool_execution_records.len(), 3);
+
+    let ledgers = rust_agent::core::state_fact_ledger::build_step_fact_ledgers(step);
+    assert!(
+        ledgers
+            .file_facts
+            .iter()
+            .any(|item| item.source == "tool:Read")
+    );
+    assert!(
+        ledgers
+            .change_refs
+            .iter()
+            .any(|item| item.source == "tool:Edit")
+    );
+    assert!(
+        ledgers
+            .test_refs
+            .iter()
+            .any(|item| item.source == "tool:Bash")
+    );
+
+    let _ = std::fs::remove_file(plan_path);
 }
 
 #[test]
@@ -10321,6 +10452,7 @@ fn make_plan_with_step(
             last_review_summary: None,
             last_correction: None,
             review_task_id: None,
+            tool_execution_records: Vec::new(),
         }],
         accepted_by_user: true,
         auto_sequence: true,
@@ -10863,6 +10995,7 @@ fn t27_7_build_accepted_archive_excludes_current_step() {
         last_review_summary: None,
         last_correction: None,
         review_task_id: None,
+        tool_execution_records: Vec::new(),
     };
 
     let plan = BossPlan {
@@ -10935,6 +11068,7 @@ fn t27_7_projection_uses_archive_for_accepted_summary() {
         last_review_summary: None,
         last_correction: None,
         review_task_id: None,
+        tool_execution_records: Vec::new(),
     };
 
     let plan = BossPlan {
@@ -10990,6 +11124,7 @@ fn t27_7_open_items_excludes_criteria_already_in_archive() {
         last_review_summary: None,
         last_correction: None,
         review_task_id: None,
+        tool_execution_records: Vec::new(),
     };
     let current_step = BossPlanStep {
         id: 1,
@@ -11007,6 +11142,7 @@ fn t27_7_open_items_excludes_criteria_already_in_archive() {
         last_review_summary: None,
         last_correction: None,
         review_task_id: None,
+        tool_execution_records: Vec::new(),
     };
     let plan = BossPlan {
         plan_id: "p-t277c".into(),
@@ -11062,6 +11198,7 @@ fn make_t278_step(
         last_review_summary: None,
         last_correction: None,
         review_task_id: None,
+        tool_execution_records: Vec::new(),
     }
 }
 

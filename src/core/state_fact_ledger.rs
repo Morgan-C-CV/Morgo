@@ -1,4 +1,6 @@
 use crate::core::boss_state::BossPlanStep;
+use crate::tool::result::{ToolExecutionOutcomeKind, ToolExecutionRecord};
+use serde_json::Value;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -233,6 +235,150 @@ fn push_file_fact(ledger: &mut StepFactLedgers, record: FileFactRecord) {
     }
 }
 
+fn observable_input_json(record: &ToolExecutionRecord) -> Option<Value> {
+    let raw = record.observable_input.as_ref()?.value.as_str();
+    serde_json::from_str(raw).ok()
+}
+
+fn observable_path(record: &ToolExecutionRecord) -> Option<String> {
+    let json = observable_input_json(record)?;
+    json.get("path")
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
+        .or_else(|| {
+            json.get("file_path")
+                .and_then(|value| value.as_str())
+                .map(str::to_string)
+        })
+}
+
+fn observable_bash_command(record: &ToolExecutionRecord) -> Option<String> {
+    let json = observable_input_json(record)?;
+    json.get("command")
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
+}
+
+fn normalize_runtime_path(path: &str) -> String {
+    normalize_candidate_path(path, std::env::current_dir().ok().as_deref())
+        .unwrap_or_else(|| path.to_string())
+}
+
+fn tool_record_summary(record: &ToolExecutionRecord) -> String {
+    trim_excerpt(
+        record.detail.as_deref().unwrap_or(record.summary.as_str()),
+        140,
+    )
+}
+
+fn is_test_command(command: &str) -> bool {
+    let lowered = command.to_lowercase();
+    lowered.contains("cargo test")
+        || lowered.contains("pytest")
+        || lowered.contains("pnpm test")
+        || lowered.contains("npm test")
+        || lowered.contains("yarn test")
+        || lowered.contains("go test")
+        || lowered.contains("jest")
+        || lowered.contains("vitest")
+        || lowered.contains("bun test")
+        || lowered.contains("uv run pytest")
+}
+
+fn apply_runtime_tool_records(ledgers: &mut StepFactLedgers, step: &BossPlanStep) {
+    for (idx, record) in step.tool_execution_records.iter().enumerate() {
+        match record.tool_name.as_str() {
+            "Read" => {
+                if record.kind != ToolExecutionOutcomeKind::Success {
+                    continue;
+                }
+                let Some(path) = observable_path(record).map(|path| normalize_runtime_path(&path))
+                else {
+                    continue;
+                };
+                push_file_fact(
+                    ledgers,
+                    FileFactRecord {
+                        ref_id: format!("filefact:step{}:runtime-read:{idx}", step.id),
+                        path: path.clone(),
+                        kind: "read_observation".into(),
+                        fact: format!("runtime Read succeeded for {path}"),
+                        symbol: extract_symbol_for_path(
+                            &path,
+                            &[record.detail.as_deref().unwrap_or_default()],
+                        ),
+                        source: "tool:Read".into(),
+                        source_event_id: format!("tool-read:{}:{idx}", step.id),
+                        freshness: "after-runtime-read".into(),
+                        confidence_milli: 1000,
+                    },
+                );
+            }
+            "Edit" | "Write" => {
+                if record.kind != ToolExecutionOutcomeKind::Success {
+                    continue;
+                }
+                let Some(path) = observable_path(record).map(|path| normalize_runtime_path(&path))
+                else {
+                    continue;
+                };
+                ledgers.change_refs.push(ChangeRecord {
+                    ref_id: format!("change:step{}:runtime:{idx}", step.id),
+                    path: path.clone(),
+                    summary: tool_record_summary(record),
+                    source: format!("tool:{}", record.tool_name),
+                    source_event_id: format!("tool-edit:{}:{idx}", step.id),
+                    freshness: "after-runtime-edit".into(),
+                    confidence_milli: 1000,
+                });
+                push_file_fact(
+                    ledgers,
+                    FileFactRecord {
+                        ref_id: format!("filefact:step{}:edited:{idx}", step.id),
+                        path,
+                        kind: "edited_file".into(),
+                        fact: format!("runtime {} succeeded for this file", record.tool_name),
+                        symbol: None,
+                        source: format!("tool:{}", record.tool_name),
+                        source_event_id: format!("tool-edit:{}:{idx}", step.id),
+                        freshness: "after-runtime-edit".into(),
+                        confidence_milli: 1000,
+                    },
+                );
+            }
+            "Bash" => {
+                let Some(command) = observable_bash_command(record) else {
+                    continue;
+                };
+                if !is_test_command(&command) {
+                    continue;
+                }
+                let detail = record.detail.as_deref().unwrap_or_default();
+                let status = if record.kind == ToolExecutionOutcomeKind::Success
+                    && !detail.contains("exit_code:")
+                {
+                    "passed"
+                } else if detail.contains("exit_code: 0") {
+                    "passed"
+                } else {
+                    "failed"
+                };
+                ledgers.test_refs.push(TestRecord {
+                    ref_id: format!("test:step{}:runtime:{idx}", step.id),
+                    name: trim_excerpt(&command, 60),
+                    status: status.into(),
+                    summary: tool_record_summary(record),
+                    source: "tool:Bash".into(),
+                    source_event_id: format!("tool-bash:{}:{idx}", step.id),
+                    freshness: "after-runtime-test".into(),
+                    confidence_milli: 1000,
+                });
+            }
+            _ => {}
+        }
+    }
+}
+
 fn infer_test_status(text: &str) -> Option<&'static str> {
     let lowered = text.to_lowercase();
     if lowered.contains("test") || lowered.contains("测试") {
@@ -258,6 +404,7 @@ fn infer_test_status(text: &str) -> Option<&'static str> {
 
 pub fn build_step_fact_ledgers(step: &BossPlanStep) -> StepFactLedgers {
     let mut ledgers = StepFactLedgers::default();
+    apply_runtime_tool_records(&mut ledgers, step);
 
     let objective = step.objective();
     for (idx, (path, line)) in extract_path_candidates(objective).into_iter().enumerate() {
@@ -456,6 +603,10 @@ pub fn build_step_fact_ledgers(step: &BossPlanStep) -> StepFactLedgers {
 mod tests {
     use super::build_step_fact_ledgers;
     use crate::core::boss_state::{BossPlanStep, BossPlanStepStatus};
+    use crate::tool::definition::{ObservableInput, ObservableInputSource};
+    use crate::tool::result::{
+        ToolBatchContext, ToolExecutionOutcomeKind, ToolExecutionRecord, ToolReportModifier,
+    };
 
     #[test]
     fn build_step_fact_ledgers_extracts_target_files_and_worker_changes() {
@@ -476,6 +627,7 @@ mod tests {
             ),
             last_correction: None,
             review_task_id: None,
+            tool_execution_records: Vec::new(),
         };
 
         let ledgers = build_step_fact_ledgers(&step);
@@ -519,6 +671,7 @@ mod tests {
             last_review_summary: None,
             last_correction: None,
             review_task_id: None,
+            tool_execution_records: Vec::new(),
         };
 
         let ledgers = build_step_fact_ledgers(&step);
@@ -527,5 +680,95 @@ mod tests {
                 && item.path.ends_with("src/core/state_fact_ledger.rs")
                 && item.symbol.as_deref() == Some("FileFactRecord")
         }));
+    }
+
+    #[test]
+    fn build_step_fact_ledgers_prefers_runtime_tool_records_over_text_inference() {
+        let step = BossPlanStep {
+            id: 9,
+            description: "runtime records".into(),
+            objective: Some("update src/core/state_frame_projection.rs".into()),
+            acceptance: vec!["tests pass".into()],
+            requires_approval: false,
+            status: BossPlanStepStatus::Reviewing,
+            completed: false,
+            result_diff: None,
+            worker_task_id: Some("task-runtime-1".into()),
+            attempt_count: 0,
+            retry_budget: 3,
+            last_review_summary: None,
+            last_correction: None,
+            review_task_id: None,
+            tool_execution_records: vec![
+                ToolExecutionRecord {
+                    tool_name: "Read".into(),
+                    outcome: "Text".into(),
+                    kind: ToolExecutionOutcomeKind::Success,
+                    summary: "Read succeeded".into(),
+                    detail: Some("pub struct FileFactRecord".into()),
+                    pending_approval: None,
+                    report_modifier: ToolReportModifier::None,
+                    observable_input: Some(ObservableInput {
+                        value: r#"{"path":"src/core/state_fact_ledger.rs"}"#.into(),
+                        source: ObservableInputSource::Raw,
+                    }),
+                    batch_context: ToolBatchContext {
+                        batch_index: 0,
+                        batch_size: 1,
+                        executed_in_batch: false,
+                    },
+                },
+                ToolExecutionRecord {
+                    tool_name: "Edit".into(),
+                    outcome: "Text".into(),
+                    kind: ToolExecutionOutcomeKind::Success,
+                    summary: "Edit succeeded".into(),
+                    detail: Some("updated ledger projection".into()),
+                    pending_approval: None,
+                    report_modifier: ToolReportModifier::None,
+                    observable_input: Some(ObservableInput {
+                        value: r#"{"path":"src/core/state_frame_projection.rs"}"#.into(),
+                        source: ObservableInputSource::Raw,
+                    }),
+                    batch_context: ToolBatchContext {
+                        batch_index: 0,
+                        batch_size: 1,
+                        executed_in_batch: false,
+                    },
+                },
+                ToolExecutionRecord {
+                    tool_name: "Bash".into(),
+                    outcome: "Text".into(),
+                    kind: ToolExecutionOutcomeKind::Success,
+                    summary: "Bash succeeded".into(),
+                    detail: Some("command: cargo test -p rust_agent boss_flow\nexit_code: 101\nstderr:\nassert failed".into()),
+                    pending_approval: None,
+                    report_modifier: ToolReportModifier::None,
+                    observable_input: Some(ObservableInput {
+                        value: r#"{"command":"cargo test -p rust_agent boss_flow"}"#.into(),
+                        source: ObservableInputSource::Raw,
+                    }),
+                    batch_context: ToolBatchContext {
+                        batch_index: 0,
+                        batch_size: 1,
+                        executed_in_batch: false,
+                    },
+                },
+            ],
+        };
+
+        let ledgers = build_step_fact_ledgers(&step);
+        assert!(ledgers.file_facts.iter().any(|item| {
+            item.source == "tool:Read" && item.path.ends_with("src/core/state_fact_ledger.rs")
+        }));
+        assert!(ledgers.change_refs.iter().any(|item| {
+            item.source == "tool:Edit" && item.path.ends_with("src/core/state_frame_projection.rs")
+        }));
+        assert!(
+            ledgers
+                .test_refs
+                .iter()
+                .any(|item| { item.source == "tool:Bash" && item.status == "failed" })
+        );
     }
 }

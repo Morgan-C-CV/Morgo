@@ -114,6 +114,7 @@ impl QueryContext {
     ) -> Self {
         let child_agent_id = agent_id.into();
         let mut app_state = self.app_state.clone();
+        app_state.active_session_id = child_agent_id.clone();
         app_state.runtime_role = RuntimeRole::Worker;
         app_state.worker_role = Some(config.worker_role);
         if !config.inherit_context {

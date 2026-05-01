@@ -351,6 +351,16 @@ fn store_step_result_diff(step: &mut BossPlanStep, primary: &str, fallback: Opti
     step.result_diff = Some(candidate.trim().to_string());
 }
 
+fn sync_step_tool_execution_records(
+    step: &mut BossPlanStep,
+    tasks: Option<&TaskManager>,
+    task_id: &str,
+) {
+    step.tool_execution_records = tasks
+        .map(|manager| manager.tool_execution_records(task_id))
+        .unwrap_or_default();
+}
+
 fn build_step_review_summary(
     step: &BossPlanStep,
     source: &str,
@@ -1424,6 +1434,7 @@ impl BossCoordinator {
                 last_review_summary: None,
                 last_correction: None,
                 review_task_id: None,
+                tool_execution_records: Vec::new(),
             }],
             accepted_by_user: true,
             auto_sequence: true,
@@ -1822,6 +1833,12 @@ impl BossCoordinator {
 
     /// Processes a task event to update the BossPlan by structured step identity.
     pub async fn on_task_event(&self, event: &TaskEvent) -> anyhow::Result<()> {
+        let tasks = self
+            .auto_advance_app_state
+            .read()
+            .await
+            .as_ref()
+            .and_then(|app_state| app_state.permission_context.task_manager.clone());
         // Group fan-in: task_id starts with "group-" and orchestration_group_id is B's task id.
         // Find the step whose worker_task_id matches the group_id (B's task id).
         if event.task_id.starts_with("group-") {
@@ -1900,6 +1917,7 @@ impl BossCoordinator {
                     None
                 } else {
                     step.worker_task_id = Some(event.task_id.clone());
+                    sync_step_tool_execution_records(step, tasks.as_deref(), &event.task_id);
                     store_step_result_diff(step, &event.result, Some(&event.summary));
                     if matches!(
                         step.status,
@@ -1930,6 +1948,7 @@ impl BossCoordinator {
                 step.completed = false;
                 step.status = BossPlanStepStatus::Failed;
                 step.worker_task_id = Some(event.task_id.clone());
+                sync_step_tool_execution_records(step, tasks.as_deref(), &event.task_id);
                 store_step_result_diff(step, &event.result, Some(&event.summary));
                 step.last_review_summary = step_artifact_verification_error(step)
                     .or_else(|| Some(event.result.clone()).filter(|text| !text.trim().is_empty()))
@@ -1940,6 +1959,7 @@ impl BossCoordinator {
             TaskStatus::Running => {
                 step.status = BossPlanStepStatus::Running;
                 step.worker_task_id = Some(event.task_id.clone());
+                sync_step_tool_execution_records(step, tasks.as_deref(), &event.task_id);
                 None
             }
             TaskStatus::Pending => None,
@@ -2148,6 +2168,12 @@ impl BossCoordinator {
             Some(id) => id,
             None => return Ok(()),
         };
+        let tasks = self
+            .auto_advance_app_state
+            .read()
+            .await
+            .as_ref()
+            .and_then(|app_state| app_state.permission_context.task_manager.clone());
 
         let mut plan_guard = self.plan.write().await;
         let Some(plan) = plan_guard.as_mut() else {
@@ -2173,6 +2199,9 @@ impl BossCoordinator {
                     None
                 } else {
                     step.worker_task_id = notification.task_id.clone();
+                    if let Some(task_id) = notification.task_id.as_deref() {
+                        sync_step_tool_execution_records(step, tasks.as_deref(), task_id);
+                    }
                     store_step_result_diff(
                         step,
                         notification.output_file.as_deref().unwrap_or_default(),
@@ -2221,6 +2250,9 @@ impl BossCoordinator {
                 step.completed = false;
                 step.status = BossPlanStepStatus::Failed;
                 step.worker_task_id = notification.task_id.clone();
+                if let Some(task_id) = notification.task_id.as_deref() {
+                    sync_step_tool_execution_records(step, tasks.as_deref(), task_id);
+                }
                 store_step_result_diff(
                     step,
                     notification.output_file.as_deref().unwrap_or_default(),
@@ -2251,6 +2283,9 @@ impl BossCoordinator {
             status if status.eq_ignore_ascii_case("running") => {
                 step.status = BossPlanStepStatus::Running;
                 step.worker_task_id = notification.task_id.clone();
+                if let Some(task_id) = notification.task_id.as_deref() {
+                    sync_step_tool_execution_records(step, tasks.as_deref(), task_id);
+                }
                 None
             }
             _ => None,
@@ -3975,6 +4010,7 @@ mod tests {
                 last_review_summary: None,
                 last_correction: None,
                 review_task_id: None,
+                tool_execution_records: Vec::new(),
             }],
             ..Default::default()
         };
@@ -4011,6 +4047,7 @@ mod tests {
                     last_review_summary: None,
                     last_correction: None,
                     review_task_id: None,
+                    tool_execution_records: Vec::new(),
                 }],
                 ..Default::default()
             });
@@ -4092,6 +4129,7 @@ mod tests {
                 last_review_summary: Some(format!("summary {id}")),
                 last_correction: None,
                 review_task_id: None,
+                tool_execution_records: Vec::new(),
             };
             if id == 4 {
                 step.status = BossPlanStepStatus::Pending;
@@ -4141,6 +4179,7 @@ mod tests {
             last_review_summary: None,
             last_correction: None,
             review_task_id: None,
+            tool_execution_records: Vec::new(),
         };
         let artifacts =
             collect_target_artifacts(&step, &["/tmp/report.md".into(), "/tmp/results/".into()]);
@@ -4173,6 +4212,7 @@ mod tests {
             last_review_summary: Some("tests are still failing".into()),
             last_correction: None,
             review_task_id: None,
+            tool_execution_records: Vec::new(),
         };
         assert_eq!(
             collect_blocked_items(&step),
@@ -4197,6 +4237,7 @@ mod tests {
             last_review_summary: None,
             last_correction: None,
             review_task_id: None,
+            tool_execution_records: Vec::new(),
         };
 
         store_step_result_diff(&mut step, "", Some("fallback summary"));

@@ -1,3 +1,4 @@
+use crate::tool::result::ToolExecutionRecord;
 use serde::{Deserialize, Serialize};
 use std::time::SystemTime;
 
@@ -159,6 +160,9 @@ pub struct BossPlanStep {
     /// Task id of the A review agent currently reviewing this step.
     #[serde(default)]
     pub review_task_id: Option<String>,
+    /// Real runtime tool records captured from the latest worker attempt.
+    #[serde(default)]
+    pub tool_execution_records: Vec<ToolExecutionRecord>,
 }
 
 fn default_retry_budget() -> u32 {

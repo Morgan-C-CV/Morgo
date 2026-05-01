@@ -12,6 +12,7 @@ use rust_agent::state::permission_context::{PermissionMode, ToolPermissionContex
 use rust_agent::task::manager::TaskManager;
 use rust_agent::task::types::{TaskEvent, TaskOwner, TaskStatus};
 use rust_agent::tool::builtin::agent::AgentTool;
+use rust_agent::tool::builtin::file_read::FileReadTool;
 use rust_agent::tool::builtin::send_message::SendMessageTool;
 use rust_agent::tool::builtin::task_create::TaskCreateTool;
 use rust_agent::tool::builtin::task_get::TaskGetTool;
@@ -725,6 +726,74 @@ async fn agent_tool_reuses_running_research_worker_and_respawns_terminal_worker(
     })
     .await
     .expect("replacement task should complete");
+}
+
+#[tokio::test]
+async fn agent_tool_records_runtime_tool_execution_records_for_spawned_worker() {
+    let manager = Arc::new(TaskManager::default());
+    let inherited_tools = rust_agent::tool::registry::ToolRegistry::new()
+        .register(Arc::new(AgentTool))
+        .register(Arc::new(FileReadTool));
+    let permissions = ToolPermissionContext::new(PermissionMode::Default)
+        .with_task_manager(manager.clone())
+        .with_active_session_id("session-tool-records")
+        .with_inherited_tool_registry(inherited_tools)
+        .with_subagent_scripted_turns(vec![
+            vec![
+                rust_agent::service::api::streaming::StreamEvent::MessageStart,
+                rust_agent::service::api::streaming::StreamEvent::ToolUse {
+                    tool_name: "Read".into(),
+                    input: r#"{"path":"src/task/manager.rs"}"#.into(),
+                },
+                rust_agent::service::api::streaming::StreamEvent::MessageStop {
+                    stop_reason: rust_agent::service::api::streaming::StopReason::ToolUse,
+                },
+            ],
+            vec![
+                rust_agent::service::api::streaming::StreamEvent::MessageStart,
+                rust_agent::service::api::streaming::StreamEvent::TextDelta("done".into()),
+                rust_agent::service::api::streaming::StreamEvent::MessageStop {
+                    stop_reason: rust_agent::service::api::streaming::StopReason::EndTurn,
+                },
+            ],
+        ]);
+
+    AgentTool
+        .invoke(
+            &ToolCall {
+                name: "Agent".into(),
+                input: serde_json::json!({
+                    "task": "inspect src/task/manager.rs",
+                    "role": "research"
+                })
+                .to_string(),
+            },
+            &permissions,
+        )
+        .await
+        .expect("spawn should succeed");
+
+    tokio::time::timeout(std::time::Duration::from_secs(4), async {
+        loop {
+            let task = manager.get("task-0").expect("task should exist");
+            if task.status == TaskStatus::Completed {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("worker should finish");
+
+    let records = manager.tool_execution_records("task-0");
+    assert!(records.iter().any(|record| {
+        record.tool_name == "Read"
+            && record
+                .observable_input
+                .as_ref()
+                .map(|input| input.value.contains("src/task/manager.rs"))
+                .unwrap_or(false)
+    }));
 }
 
 #[tokio::test]
