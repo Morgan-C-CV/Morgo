@@ -144,13 +144,17 @@ fn build_fact_ledger(
                 facts.push(fact_line(
                     "file_facts",
                     format!(
-                        "ref={} path={} kind={} source={} freshness={} confidence={}{} fact={}",
+                        "ref={} path={} kind={} source={} freshness={} confidence={} status={} invalidated_by={} supersedes={} conflicts_with={}{} fact={}",
                         item.ref_id,
                         item.path,
                         item.kind,
                         item.source,
                         item.freshness,
                         format_confidence(item.confidence_milli),
+                        item.lineage.status,
+                        summarize_list(&item.lineage.invalidated_by),
+                        summarize_list(&item.lineage.supersedes),
+                        summarize_list(&item.lineage.conflicts_with),
                         item.symbol
                             .as_deref()
                             .map(|symbol| format!(" symbol={symbol}"))
@@ -166,13 +170,16 @@ fn build_fact_ledger(
                 facts.push(fact_line(
                     "test_failures",
                     format!(
-                        "ref={} name={} status={} source={} freshness={} confidence={} summary={}",
+                        "ref={} name={} status={} source={} freshness={} confidence={} invalidated_by={} supersedes={} conflicts_with={} summary={}",
                         item.ref_id,
                         item.name,
                         item.status,
                         item.source,
                         item.freshness,
                         format_confidence(item.confidence_milli),
+                        summarize_list(&item.lineage.invalidated_by),
+                        summarize_list(&item.lineage.supersedes),
+                        summarize_list(&item.lineage.conflicts_with),
                         item.summary
                     ),
                 ));
@@ -184,12 +191,16 @@ fn build_fact_ledger(
                 facts.push(fact_line(
                     "recent_changes_in_files",
                     format!(
-                        "ref={} path={} source={} freshness={} confidence={} summary={}",
+                        "ref={} path={} source={} freshness={} confidence={} status={} invalidated_by={} supersedes={} conflicts_with={} summary={}",
                         item.ref_id,
                         item.path,
                         item.source,
                         item.freshness,
                         format_confidence(item.confidence_milli),
+                        item.lineage.status,
+                        summarize_list(&item.lineage.invalidated_by),
+                        summarize_list(&item.lineage.supersedes),
+                        summarize_list(&item.lineage.conflicts_with),
                         item.summary
                     ),
                 ));
@@ -201,12 +212,16 @@ fn build_fact_ledger(
                 facts.push(fact_line(
                     "review_verdicts",
                     format!(
-                        "ref={} verdict={} source={} freshness={} confidence={} summary={}{}",
+                        "ref={} verdict={} source={} freshness={} confidence={} status={} invalidated_by={} supersedes={} conflicts_with={} summary={}{}",
                         item.ref_id,
                         item.verdict,
                         item.source,
                         item.freshness,
                         format_confidence(item.confidence_milli),
+                        item.lineage.status,
+                        summarize_list(&item.lineage.invalidated_by),
+                        summarize_list(&item.lineage.supersedes),
+                        summarize_list(&item.lineage.conflicts_with),
                         item.summary,
                         item.correction
                             .as_deref()
@@ -222,7 +237,7 @@ fn build_fact_ledger(
                 facts.push(fact_line(
                     "artifact_status",
                     format!(
-                        "ref={} path={} kind={} status={} source={} freshness={} confidence={} summary={}",
+                        "ref={} path={} kind={} status={} source={} freshness={} confidence={} invalidated_by={} supersedes={} conflicts_with={} summary={}",
                         item.ref_id,
                         item.path,
                         item.kind,
@@ -230,6 +245,9 @@ fn build_fact_ledger(
                         item.source,
                         item.freshness,
                         format_confidence(item.confidence_milli),
+                        summarize_list(&item.lineage.invalidated_by),
+                        summarize_list(&item.lineage.supersedes),
+                        summarize_list(&item.lineage.conflicts_with),
                         item.summary
                     ),
                 ));

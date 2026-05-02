@@ -17,6 +17,7 @@ pub struct FileFactRecord {
     pub source_event_id: String,
     pub freshness: String,
     pub confidence_milli: u16,
+    pub lineage: LedgerLineage,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,6 +29,7 @@ pub struct ChangeRecord {
     pub source_event_id: String,
     pub freshness: String,
     pub confidence_milli: u16,
+    pub lineage: LedgerLineage,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,6 +42,7 @@ pub struct TestRecord {
     pub source_event_id: String,
     pub freshness: String,
     pub confidence_milli: u16,
+    pub lineage: LedgerLineage,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,6 +55,7 @@ pub struct ReviewRecord {
     pub source_event_id: String,
     pub freshness: String,
     pub confidence_milli: u16,
+    pub lineage: LedgerLineage,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,6 +69,7 @@ pub struct ArtifactRecord {
     pub source_event_id: String,
     pub freshness: String,
     pub confidence_milli: u16,
+    pub lineage: LedgerLineage,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -428,6 +433,7 @@ fn apply_runtime_tool_records(ledgers: &mut StepFactLedgers, step: &BossPlanStep
                         source_event_id: format!("tool-read:{}:{idx}", step.id),
                         freshness: "after-runtime-read".into(),
                         confidence_milli: 1000,
+                        lineage: active_lineage(),
                     },
                 );
             }
@@ -447,6 +453,7 @@ fn apply_runtime_tool_records(ledgers: &mut StepFactLedgers, step: &BossPlanStep
                     source_event_id: format!("tool-edit:{}:{idx}", step.id),
                     freshness: "after-runtime-edit".into(),
                     confidence_milli: 1000,
+                    lineage: active_lineage(),
                 });
                 push_file_fact(
                     ledgers,
@@ -460,6 +467,7 @@ fn apply_runtime_tool_records(ledgers: &mut StepFactLedgers, step: &BossPlanStep
                         source_event_id: format!("tool-edit:{}:{idx}", step.id),
                         freshness: "after-runtime-edit".into(),
                         confidence_milli: 1000,
+                        lineage: active_lineage(),
                     },
                 );
             }
@@ -489,6 +497,7 @@ fn apply_runtime_tool_records(ledgers: &mut StepFactLedgers, step: &BossPlanStep
                     source_event_id: format!("tool-bash:{}:{idx}", step.id),
                     freshness: "after-runtime-test".into(),
                     confidence_milli: 1000,
+                    lineage: active_lineage(),
                 });
             }
             "BossReview" => {
@@ -509,6 +518,7 @@ fn apply_runtime_tool_records(ledgers: &mut StepFactLedgers, step: &BossPlanStep
                         source_event_id: format!("tool-review:{}:{idx}", step.id),
                         freshness: "after-runtime-review".into(),
                         confidence_milli: 1000,
+                        lineage: active_lineage(),
                     },
                 );
             }
@@ -534,6 +544,7 @@ fn apply_runtime_tool_records(ledgers: &mut StepFactLedgers, step: &BossPlanStep
                         source_event_id: format!("tool-artifact:{}:{idx}", step.id),
                         freshness: "after-runtime-artifact-verify".into(),
                         confidence_milli: 1000,
+                        lineage: active_lineage(),
                     },
                 );
             }
@@ -613,6 +624,7 @@ fn build_review_ledgers(ledgers: &mut StepFactLedgers, step: &BossPlanStep) {
                     source_event_id: format!("review-summary:{}", step.id),
                     freshness: "after-review".into(),
                     confidence_milli: 950,
+                    lineage: active_lineage(),
                 },
             );
         }
@@ -639,6 +651,7 @@ fn build_review_ledgers(ledgers: &mut StepFactLedgers, step: &BossPlanStep) {
                     source_event_id: format!("review-correction:{}", step.id),
                     freshness: "after-review".into(),
                     confidence_milli: 1000,
+                    lineage: active_lineage(),
                 },
             );
         }
@@ -704,6 +717,7 @@ fn build_artifact_ledgers(ledgers: &mut StepFactLedgers, step: &BossPlanStep) {
                     "current".into()
                 },
                 confidence_milli,
+                lineage: active_lineage(),
             },
         );
     }
@@ -814,6 +828,7 @@ pub fn build_step_fact_ledgers(step: &BossPlanStep) -> StepFactLedgers {
                 source_event_id: format!("step-objective:{}", step.id),
                 freshness: "current".into(),
                 confidence_milli: 1000,
+                lineage: active_lineage(),
             },
         );
         if kind != "target_directory" {
@@ -832,6 +847,7 @@ pub fn build_step_fact_ledgers(step: &BossPlanStep) -> StepFactLedgers {
                         source_event_id: format!("workspace-snapshot:{}:{idx}", step.id),
                         freshness: "current".into(),
                         confidence_milli: 950,
+                        lineage: active_lineage(),
                     },
                 );
             }
@@ -870,6 +886,7 @@ pub fn build_step_fact_ledgers(step: &BossPlanStep) -> StepFactLedgers {
                         source_event_id: format!("worker-read:{}", step.id),
                         freshness: "after-worker-output".into(),
                         confidence_milli: 850,
+                        lineage: active_lineage(),
                     },
                 );
             }
@@ -885,6 +902,7 @@ pub fn build_step_fact_ledgers(step: &BossPlanStep) -> StepFactLedgers {
                     source_event_id: format!("worker-result:{}", step.id),
                     freshness: "after-worker-output".into(),
                     confidence_milli: 800,
+                    lineage: active_lineage(),
                 });
             }
         } else {
@@ -897,6 +915,7 @@ pub fn build_step_fact_ledgers(step: &BossPlanStep) -> StepFactLedgers {
                     source_event_id: format!("worker-result:{}", step.id),
                     freshness: "after-worker-output".into(),
                     confidence_milli: 900,
+                    lineage: active_lineage(),
                 });
             }
         }
@@ -910,6 +929,7 @@ pub fn build_step_fact_ledgers(step: &BossPlanStep) -> StepFactLedgers {
                 source_event_id: format!("worker-result:{}", step.id),
                 freshness: "after-worker-output".into(),
                 confidence_milli: 850,
+                lineage: active_lineage(),
             });
         }
     }
@@ -943,6 +963,7 @@ pub fn build_step_fact_ledgers(step: &BossPlanStep) -> StepFactLedgers {
                         source_event_id: format!("review-read:{}", step.id),
                         freshness: "after-review".into(),
                         confidence_milli: 800,
+                        lineage: active_lineage(),
                     },
                 );
             }
@@ -957,6 +978,7 @@ pub fn build_step_fact_ledgers(step: &BossPlanStep) -> StepFactLedgers {
                 source_event_id: format!("review-summary:{}", step.id),
                 freshness: "after-review".into(),
                 confidence_milli: 900,
+                lineage: active_lineage(),
             });
         }
     } else if step.completed
@@ -974,6 +996,7 @@ pub fn build_step_fact_ledgers(step: &BossPlanStep) -> StepFactLedgers {
             source_event_id: format!("acceptance:{}", step.id),
             freshness: "after-accept".into(),
             confidence_milli: 700,
+            lineage: active_lineage(),
         });
     }
 
@@ -986,7 +1009,7 @@ pub fn build_step_fact_ledgers(step: &BossPlanStep) -> StepFactLedgers {
 #[cfg(test)]
 mod tests {
     use super::{
-        ReviewRecord, build_blocker_records, build_open_item_records,
+        LedgerLineage, ReviewRecord, build_blocker_records, build_open_item_records,
         build_rejected_approach_records, build_step_fact_ledgers,
     };
     use crate::core::boss_state::{BossPlanStep, BossPlanStepStatus, BossStage};
@@ -1320,6 +1343,12 @@ mod tests {
                 source_event_id: "review-summary:12".into(),
                 freshness: "after-review".into(),
                 confidence_milli: 950,
+                lineage: LedgerLineage {
+                    status: "active".into(),
+                    invalidated_by: Vec::new(),
+                    supersedes: Vec::new(),
+                    conflicts_with: Vec::new(),
+                },
             }],
         );
         assert_eq!(open[0].lineage.status, "active");
