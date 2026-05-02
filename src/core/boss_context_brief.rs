@@ -74,6 +74,7 @@ pub struct BossStateFrame {
     pub status: BossPlanStepStatus,
     pub open_items: Vec<String>,
     pub blocked_items: Vec<String>,
+    pub recent_local_facts: Vec<String>,
     pub allowed_actions: Vec<String>,
     pub required_output_hint: Option<String>,
 }
@@ -168,6 +169,12 @@ impl BossStateFrame {
         if !self.blocked_items.is_empty() {
             lines.push("blocked_items:".into());
             for item in &self.blocked_items {
+                lines.push(format!("  - {item}"));
+            }
+        }
+        if !self.recent_local_facts.is_empty() {
+            lines.push("recent_local_facts:".into());
+            for item in &self.recent_local_facts {
                 lines.push(format!("  - {item}"));
             }
         }

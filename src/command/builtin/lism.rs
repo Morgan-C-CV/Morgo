@@ -65,6 +65,7 @@ impl Command for LisMCommand {
                         let mut total_mismatch: usize = 0;
                         let mut total_hydration: usize = 0;
                         let mut total_stale: usize = 0;
+                        let mut total_missing: usize = 0;
                         let mut total_input: usize = 0;
                         let mut total_uncached_input: usize = 0;
                         let mut total_output: usize = 0;
@@ -82,13 +83,14 @@ impl Command for LisMCommand {
                             total_mismatch += m.projection_mismatch_count.unwrap_or(0);
                             total_hydration += m.hydration_count.unwrap_or(0);
                             total_stale += m.stale_ref_count.unwrap_or(0);
+                            total_missing += m.hydration_ref_missing.unwrap_or(0);
                             total_input += m.input_tokens.unwrap_or(0);
                             total_uncached_input += m.uncached_input_tokens.unwrap_or(0);
                             total_output += m.output_tokens.unwrap_or(0);
                             total_sent_chars += m.sent_prompt_chars.unwrap_or(0);
                             total_original_chars += m.original_prompt_chars.unwrap_or(0);
                             lines.push(format!(
-                                "  step {id}: tier={tier} profile={profile} frame_size={size} cache_r={cr} cache_w={cw} input={inp} uncached_input={uinp} output={out} sent_chars={sent} original_chars={orig} fallback={fb} mismatch={mm} hydration={hydr} stale_refs={stale}",
+                                "  step {id}: tier={tier} profile={profile} frame_size={size} cache_r={cr} cache_w={cw} input={inp} uncached_input={uinp} output={out} sent_chars={sent} original_chars={orig} fallback={fb} mismatch={mm} hydration={hydr} stale_refs={stale} missing_refs={miss}",
                                 tier = m.model_tier.as_deref().unwrap_or("-"),
                                 profile = m.provider_profile_id.as_deref().unwrap_or("-"),
                                 size = m.state_frame_size.map(|n| n.to_string()).unwrap_or_else(|| "-".into()),
@@ -103,10 +105,11 @@ impl Command for LisMCommand {
                                 mm = m.projection_mismatch_count.map(|n| n.to_string()).unwrap_or_else(|| "-".into()),
                                 hydr = m.hydration_count.map(|n| n.to_string()).unwrap_or_else(|| "-".into()),
                                 stale = m.stale_ref_count.map(|n| n.to_string()).unwrap_or_else(|| "-".into()),
+                                miss = m.hydration_ref_missing.map(|n| n.to_string()).unwrap_or_else(|| "-".into()),
                             ));
                         }
                         lines.push(format!(
-                            "  total_steps_routed: {total_routed} override_hits: {override_hits} cache_r: {total_cache_r} cache_w: {total_cache_w} cache_hit_observed: {cache_hit_observed} tokens_saved: {total_cache_r} input: {total_input} uncached_input: {total_uncached_input} output: {total_output} sent_chars: {total_sent_chars} original_chars: {total_original_chars} fallback: {total_fallback} mismatch: {total_mismatch} hydration: {total_hydration} stale_refs: {total_stale}",
+                            "  total_steps_routed: {total_routed} override_hits: {override_hits} cache_r: {total_cache_r} cache_w: {total_cache_w} cache_hit_observed: {cache_hit_observed} tokens_saved: {total_cache_r} input: {total_input} uncached_input: {total_uncached_input} output: {total_output} sent_chars: {total_sent_chars} original_chars: {total_original_chars} fallback: {total_fallback} mismatch: {total_mismatch} hydration: {total_hydration} stale_refs: {total_stale} missing_refs: {total_missing}",
                             cache_hit_observed = total_cache_r > 0,
                         ));
                         lines.join("\n")

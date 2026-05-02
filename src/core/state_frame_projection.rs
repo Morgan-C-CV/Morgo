@@ -138,8 +138,32 @@ fn collect_fact_field_values(facts: &[String], fact_name: &str, field_name: &str
         .collect()
 }
 
+fn collect_all_ref_ids(facts: &[String]) -> Vec<String> {
+    facts
+        .iter()
+        .filter(|item| item.starts_with("fact: "))
+        .filter_map(|item| {
+            item.split_whitespace().find_map(|part| {
+                part.strip_prefix("ref=")
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty())
+            })
+        })
+        .collect()
+}
+
+fn split_ref_list(value: &str) -> Vec<String> {
+    value
+        .split('|')
+        .map(str::trim)
+        .filter(|item| !item.is_empty() && *item != "none" && *item != "none recorded")
+        .map(str::to_string)
+        .collect()
+}
+
 pub fn collect_projection_diagnostics(frame: &StateFrame) -> ProjectionDiagnostics {
     let mut warnings = Vec::new();
+    let all_refs = collect_all_ref_ids(&frame.recent_evidence);
 
     if !frame.open_items.is_empty()
         && has_none_recorded_fact(&frame.recent_evidence, "open_item_refs")
@@ -160,6 +184,28 @@ pub fn collect_projection_diagnostics(frame: &StateFrame) -> ProjectionDiagnosti
                 warnings.push(format!(
                     "rejected_approaches source_ref missing in review_verdicts: {source_ref}"
                 ));
+            }
+        }
+    }
+    for fact_name in [
+        "file_facts",
+        "test_failures",
+        "recent_changes_in_files",
+        "review_verdicts",
+        "artifact_status",
+        "open_item_refs",
+        "blocker_refs",
+        "rejected_approaches",
+    ] {
+        for field_name in ["invalidated_by", "supersedes", "conflicts_with"] {
+            for value in collect_fact_field_values(&frame.recent_evidence, fact_name, field_name) {
+                for ref_id in split_ref_list(&value) {
+                    if !all_refs.iter().any(|item| item == &ref_id) {
+                        warnings.push(format!(
+                            "{fact_name} {field_name} points to missing ref: {ref_id}"
+                        ));
+                    }
+                }
             }
         }
     }
@@ -605,6 +651,47 @@ mod tests {
                 .warnings
                 .iter()
                 .any(|item| item.contains("source_ref missing in review_verdicts"))
+        );
+    }
+
+    #[test]
+    fn projection_diagnostics_flags_missing_lineage_refs() {
+        let frame = StateFrame {
+            role: ActorRole::Worker,
+            state: AgentState::Executing,
+            objective: "check lineage".into(),
+            open_items: Vec::new(),
+            blocked_items: Vec::new(),
+            accepted_summary: Vec::new(),
+            recent_evidence: vec![
+                "fact: file_facts ref=filefact:1 path=src/lib.rs kind=target_file source=step_objective source_event_id=step-objective:1 freshness=current confidence=1.00 status=active invalidated_by=review:missing supersedes=change:missing conflicts_with=none symbol=Lib fact=target".into(),
+                "fact: blocker_refs ref=blocker:1 kind=blocked_by_review source=step_runtime source_event_id=step-runtime:1 freshness=current confidence=1.00 status=active invalidated_by=none supersedes=none conflicts_with=artifact:missing summary=waiting".into(),
+            ],
+            allowed_actions: vec![],
+            toolset_id: None,
+            skillset_id: None,
+            required_output_schema: Some("state_decision_v1".into()),
+            budget: StateBudget::default(),
+        };
+
+        let diagnostics = collect_projection_diagnostics(&frame);
+        assert!(
+            diagnostics
+                .warnings
+                .iter()
+                .any(|item| item.contains("invalidated_by points to missing ref: review:missing"))
+        );
+        assert!(
+            diagnostics
+                .warnings
+                .iter()
+                .any(|item| item.contains("supersedes points to missing ref: change:missing"))
+        );
+        assert!(
+            diagnostics
+                .warnings
+                .iter()
+                .any(|item| item.contains("conflicts_with points to missing ref: artifact:missing"))
         );
     }
 }

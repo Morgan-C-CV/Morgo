@@ -342,6 +342,87 @@ fn collect_blocked_items(step: &BossPlanStep) -> Vec<String> {
     blocked
 }
 
+fn collect_recent_local_facts(step: &BossPlanStep, limit: usize) -> Vec<String> {
+    let mut facts = Vec::new();
+    for record in step.tool_execution_records.iter().rev() {
+        match record.tool_name.as_str() {
+            "Read" => {
+                if let Some(path) = observable_path_local(record) {
+                    facts.push(format!("recent_read path={path}"));
+                }
+            }
+            "Edit" | "Write" => {
+                if let Some(path) = observable_path_local(record) {
+                    facts.push(format!("recent_edit path={path}"));
+                }
+            }
+            "Bash" => {
+                if let Some(command) = observable_bash_command_local(record) {
+                    facts.push(format!(
+                        "recent_test command={}",
+                        trim_runtime_excerpt(&command, 120)
+                    ));
+                }
+            }
+            _ => {}
+        }
+        if facts.len() >= limit {
+            break;
+        }
+    }
+    facts.reverse();
+    facts
+}
+
+fn render_recent_local_facts_section(facts: &[String]) -> String {
+    if facts.is_empty() {
+        String::new()
+    } else {
+        let mut lines = vec!["recent_local_facts:".to_string()];
+        for fact in facts {
+            lines.push(format!("  - {fact}"));
+        }
+        format!("\n{}", lines.join("\n"))
+    }
+}
+
+fn trim_runtime_excerpt(text: &str, max_chars: usize) -> String {
+    let trimmed = text.trim();
+    let mut iter = trimmed.chars();
+    let excerpt = iter.by_ref().take(max_chars).collect::<String>();
+    if iter.next().is_some() {
+        format!("{excerpt}...")
+    } else {
+        excerpt
+    }
+}
+
+fn observable_path_local(record: &ToolExecutionRecord) -> Option<String> {
+    record.observable_input.as_ref().and_then(|input| {
+        serde_json::from_str::<serde_json::Value>(&input.value)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("path")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string)
+            })
+    })
+}
+
+fn observable_bash_command_local(record: &ToolExecutionRecord) -> Option<String> {
+    record.observable_input.as_ref().and_then(|input| {
+        serde_json::from_str::<serde_json::Value>(&input.value)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("command")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string)
+            })
+    })
+}
+
 fn store_step_result_diff(step: &mut BossPlanStep, primary: &str, fallback: Option<&str>) {
     let candidate = if primary.trim().is_empty() {
         fallback.unwrap_or_default()
@@ -1617,6 +1698,7 @@ impl BossCoordinator {
                 summary.total_projection_mismatch_count += m.projection_mismatch_count.unwrap_or(0);
                 summary.total_hydration_count += m.hydration_count.unwrap_or(0);
                 summary.total_stale_ref_count += m.stale_ref_count.unwrap_or(0);
+                summary.total_hydration_ref_missing += m.hydration_ref_missing.unwrap_or(0);
                 summary.total_input_tokens += m.input_tokens.unwrap_or(0);
                 summary.total_uncached_input_tokens += m.uncached_input_tokens.unwrap_or(0);
                 summary.total_output_tokens += m.output_tokens.unwrap_or(0);
@@ -2614,6 +2696,7 @@ impl BossCoordinator {
                             ),
                             hydration_count: Some(0),
                             stale_ref_count: Some(0),
+                            hydration_ref_missing: Some(0),
                             input_tokens: Some(0),
                             uncached_input_tokens: Some(0),
                             output_tokens: Some(0),
@@ -2660,6 +2743,7 @@ impl BossCoordinator {
                                 projection_mismatch_count: Some(routed.projection_mismatch_count),
                                 hydration_count: Some(0),
                                 stale_ref_count: Some(0),
+                                hydration_ref_missing: Some(0),
                                 input_tokens: Some(0),
                                 uncached_input_tokens: Some(0),
                                 output_tokens: Some(0),
@@ -2706,6 +2790,8 @@ impl BossCoordinator {
                                     Some(usage.estimated_cost_micros_usd);
                                 routed_metadata.hydration_count = Some(usage.hydration_count);
                                 routed_metadata.stale_ref_count = Some(usage.stale_ref_count);
+                                routed_metadata.hydration_ref_missing =
+                                    Some(usage.hydration_ref_missing);
                             }
                             (outcome, routed_metadata)
                         };
@@ -2999,6 +3085,7 @@ impl BossCoordinator {
         &self,
         step_id: usize,
         parent_session_id: &str,
+        include_local_continuity: bool,
     ) -> anyhow::Result<ExecutorBAssignmentContract> {
         let plan_guard = self.plan.read().await;
         let plan = plan_guard
@@ -3021,6 +3108,11 @@ impl BossCoordinator {
             step.acceptance.clone()
         };
         let blocked_items = collect_blocked_items(step);
+        let recent_local_facts = if include_local_continuity {
+            collect_recent_local_facts(step, 3)
+        } else {
+            Vec::new()
+        };
         let allowed_tools = default_allowed_tools();
         let lism_policy = self.worker_lism_policy().await.as_str().to_string();
         let generated_at = format!(
@@ -3059,6 +3151,7 @@ impl BossCoordinator {
             status: step.status,
             open_items,
             blocked_items,
+            recent_local_facts,
             allowed_actions: vec!["implement".into()],
             required_output_hint: Some("return a unified diff or file edits".into()),
         };
@@ -3121,7 +3214,7 @@ impl BossCoordinator {
         parent_session_id: &str,
     ) -> anyhow::Result<ContinuePayloadBuild> {
         let contract = self
-            .build_executor_b_assignment_contract(step_id, parent_session_id)
+            .build_executor_b_assignment_contract(step_id, parent_session_id, true)
             .await?;
         let prior_assignment = {
             let guard = self.session.read().await;
@@ -3167,10 +3260,11 @@ refresh_reason: {}\n\n{}",
             )
         } else {
             format!(
-                "Boss step {step_id}\nplan_id: {}\nobjective: {}\nacceptance:\n{}",
+                "Boss step {step_id}\nplan_id: {}\nobjective: {}\nacceptance:\n{}{}",
                 contract.brief.plan_id,
                 contract.brief.objective,
                 format_acceptance_from_items(&contract.brief.acceptance),
+                render_recent_local_facts_section(&contract.state_frame.recent_local_facts),
             )
         };
         let plan_id = contract.brief.plan_id.clone();
@@ -3197,6 +3291,7 @@ refresh_reason: {}\n\n{}",
             } else {
                 None
             },
+            "recent_local_facts": contract.state_frame.recent_local_facts,
             "allowed_tools": contract.allowed_tools,
             "lism_policy": contract.lism_policy,
             "task_contains_boss_context": needs_refresh,
@@ -3231,7 +3326,7 @@ refresh_reason: {}\n\n{}",
         b_actor_id: &str,
     ) -> anyhow::Result<SpawnPayloadBuild> {
         let contract = self
-            .build_executor_b_assignment_contract(step_id, parent_session_id)
+            .build_executor_b_assignment_contract(step_id, parent_session_id, false)
             .await?;
         let plan_id = contract.brief.plan_id.clone();
         let objective = contract.brief.objective.clone();

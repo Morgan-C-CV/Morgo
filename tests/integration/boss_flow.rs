@@ -2073,6 +2073,13 @@ async fn boss_continue_payload_reuses_brief_when_assignment_contract_is_unchange
         .await
         .unwrap();
     let spawn_json: serde_json::Value = serde_json::from_str(&spawn_payload).unwrap();
+    assert!(
+        !spawn_json["task"]
+            .as_str()
+            .unwrap_or("")
+            .contains("recent_local_facts:"),
+        "spawn brief must not inherit prior worker-local runtime continuity"
+    );
     {
         let mut session = coordinator.session.write().await;
         let session = session.as_mut().unwrap();
@@ -2103,6 +2110,118 @@ async fn boss_continue_payload_reuses_brief_when_assignment_contract_is_unchange
             .unwrap_or("")
             .contains("Boss step 0"),
         "unchanged assignment should use the lightweight continue message"
+    );
+
+    let _ = std::fs::remove_file(plan_path);
+}
+
+#[tokio::test]
+async fn boss_continue_payload_carries_recent_local_facts_for_same_running_worker() {
+    let (coordinator, plan_path) = coordinator_with_plan(
+        boss_plan(vec![boss_step(0, "Step A")]),
+        "test_boss_flow_continue_recent_local_facts.json",
+    )
+    .await;
+
+    let spawn_payload = coordinator
+        .build_step_spawn_payload(0, "parent-ctx-session", "boss-plan-alpha-b")
+        .await
+        .unwrap();
+    let spawn_json: serde_json::Value = serde_json::from_str(&spawn_payload).unwrap();
+    {
+        let mut session = coordinator.session.write().await;
+        let session = session.as_mut().unwrap();
+        session.executor_b.task_id = Some("b-task-42".into());
+        session.executor_b.last_assignment_fingerprint = spawn_json["assignment_fingerprint"]
+            .as_str()
+            .map(str::to_string);
+        session.executor_b.last_assignment_plan_version =
+            spawn_json["plan_version"].as_str().map(str::to_string);
+        session.executor_b.last_assignment_step_revision =
+            spawn_json["step_revision"].as_str().map(str::to_string);
+    }
+    {
+        use rust_agent::tool::definition::{ObservableInput, ObservableInputSource};
+        use rust_agent::tool::result::{
+            ToolBatchContext, ToolExecutionOutcomeKind, ToolExecutionRecord, ToolReportModifier,
+        };
+        let mut plan = coordinator.plan.write().await;
+        let step = &mut plan.as_mut().unwrap().steps[0];
+        step.tool_execution_records = vec![
+            ToolExecutionRecord {
+                tool_name: "Read".into(),
+                outcome: "Text".into(),
+                kind: ToolExecutionOutcomeKind::Success,
+                summary: "read".into(),
+                detail: Some("read boss".into()),
+                pending_approval: None,
+                report_modifier: ToolReportModifier::None,
+                observable_input: Some(ObservableInput {
+                    value: r#"{"path":"src/core/boss.rs"}"#.into(),
+                    source: ObservableInputSource::Raw,
+                }),
+                batch_context: ToolBatchContext {
+                    batch_index: 0,
+                    batch_size: 1,
+                    executed_in_batch: false,
+                },
+            },
+            ToolExecutionRecord {
+                tool_name: "Edit".into(),
+                outcome: "Text".into(),
+                kind: ToolExecutionOutcomeKind::Success,
+                summary: "edit".into(),
+                detail: Some("edit projection".into()),
+                pending_approval: None,
+                report_modifier: ToolReportModifier::None,
+                observable_input: Some(ObservableInput {
+                    value: r#"{"path":"src/core/state_frame_projection.rs"}"#.into(),
+                    source: ObservableInputSource::Raw,
+                }),
+                batch_context: ToolBatchContext {
+                    batch_index: 0,
+                    batch_size: 1,
+                    executed_in_batch: false,
+                },
+            },
+            ToolExecutionRecord {
+                tool_name: "Bash".into(),
+                outcome: "Text".into(),
+                kind: ToolExecutionOutcomeKind::Success,
+                summary: "test".into(),
+                detail: Some("command: cargo test boss_flow\nexit_code: 0".into()),
+                pending_approval: None,
+                report_modifier: ToolReportModifier::None,
+                observable_input: Some(ObservableInput {
+                    value: r#"{"command":"cargo test boss_flow"}"#.into(),
+                    source: ObservableInputSource::Raw,
+                }),
+                batch_context: ToolBatchContext {
+                    batch_index: 0,
+                    batch_size: 1,
+                    executed_in_batch: false,
+                },
+            },
+        ];
+    }
+
+    let continue_payload = coordinator
+        .build_step_continue_payload(0, "b-task-42", "parent-ctx-session")
+        .await
+        .unwrap();
+    let continue_json: serde_json::Value = serde_json::from_str(&continue_payload).unwrap();
+    let message = continue_json["message"].as_str().unwrap_or("");
+    assert_eq!(continue_json["stale_brief_action"], "reuse");
+    assert!(message.contains("recent_local_facts:"));
+    assert!(message.contains("recent_read path=src/core/boss.rs"));
+    assert!(message.contains("recent_edit path=src/core/state_frame_projection.rs"));
+    assert!(message.contains("recent_test command=cargo test boss_flow"));
+    assert_eq!(
+        continue_json["recent_local_facts"]
+            .as_array()
+            .map(|items| items.len())
+            .unwrap_or_default(),
+        3
     );
 
     let _ = std::fs::remove_file(plan_path);
@@ -6836,6 +6955,7 @@ fn make_frame(step_id: usize) -> BossStateFrame {
         status: BossPlanStepStatus::Running,
         open_items: vec!["write tests".into()],
         blocked_items: Vec::new(),
+        recent_local_facts: Vec::new(),
         allowed_actions: vec!["implement".into()],
         required_output_hint: Some("return a unified diff".into()),
     }
@@ -6898,6 +7018,7 @@ fn t26_4_brief_fingerprint_stable_across_state_frame_changes() {
         status: BossPlanStepStatus::Running,
         open_items: vec!["DIFFERENT open item".into()],
         blocked_items: Vec::new(),
+        recent_local_facts: Vec::new(),
         allowed_actions: vec!["implement".into()],
         required_output_hint: None,
     };
@@ -9813,6 +9934,7 @@ async fn t27_r1_format_report_includes_hit_ratio_and_tokens_saved() {
         total_cache_write_tokens: 100,
         total_hydration_count: 0,
         total_stale_ref_count: 0,
+        total_hydration_ref_missing: 0,
         override_hit_count: 1,
         total_input_tokens: 0,
         total_uncached_input_tokens: 0,
@@ -9849,6 +9971,7 @@ async fn t27_r1_format_report_includes_hit_ratio_and_tokens_saved() {
                 projection_mismatch_count: Some(0),
                 hydration_count: Some(0),
                 stale_ref_count: Some(0),
+                hydration_ref_missing: Some(0),
                 input_tokens: Some(0),
                 uncached_input_tokens: Some(0),
                 output_tokens: Some(0),
