@@ -527,6 +527,16 @@ fn parse_bash_command(decision: &crate::core::state_frame::StateDecision) -> Opt
             return Some(trimmed.to_string());
         }
     }
+    if let Some(command) = next_action
+        .args
+        .get("Bash.command")
+        .and_then(|v| v.as_str())
+    {
+        let trimmed = command.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
     if let Some(command) = next_action.args.get("cmd").and_then(|v| v.as_str()) {
         let trimmed = command.trim();
         if !trimmed.is_empty() {
@@ -573,6 +583,38 @@ fn build_tool_backed_hydration_decision(
     }
 }
 
+fn fact_field_value(line: &str, key: &str) -> Option<String> {
+    let needle = format!("{key}=");
+    let start = line.find(&needle)? + needle.len();
+    let tail = &line[start..];
+    let end = tail.find(' ').unwrap_or(tail.len());
+    let value = tail[..end].trim();
+    (!value.is_empty() && value != "none").then(|| value.to_string())
+}
+
+fn initial_target_hydration_requests(frame: &StateFrame) -> Vec<String> {
+    let mut requests = Vec::new();
+    for line in &frame.recent_evidence {
+        if !line.starts_with("fact: artifact_status ") {
+            continue;
+        }
+        if !line.contains("source=artifact_expectation") {
+            continue;
+        }
+        let Some(path) = fact_field_value(line, "path") else {
+            continue;
+        };
+        if path.starts_with("command:") {
+            continue;
+        }
+        let request = format!("artifact:{path}");
+        if !requests.iter().any(|existing| existing == &request) {
+            requests.push(request);
+        }
+    }
+    requests
+}
+
 fn canonicalize_next_action_args(
     decision: &crate::core::state_frame::StateDecision,
 ) -> serde_json::Value {
@@ -585,7 +627,12 @@ fn canonicalize_next_action_args(
     };
     if next_action.action_type.eq_ignore_ascii_case("Bash") {
         if !obj.contains_key("command") {
-            if let Some(value) = obj.get("cmd").cloned() {
+            if let Some(value) = obj
+                .get("command")
+                .or_else(|| obj.get("Bash.command"))
+                .or_else(|| obj.get("cmd"))
+                .cloned()
+            {
                 obj.insert("command".into(), value);
             }
         }
@@ -595,19 +642,37 @@ fn canonicalize_next_action_args(
         || next_action.action_type.eq_ignore_ascii_case("Write")
     {
         if !obj.contains_key("file_path") {
-            if let Some(value) = obj.get("path").cloned() {
+            let dotted_key = format!("{}.file_path", next_action.action_type);
+            if let Some(value) = obj
+                .get("file_path")
+                .or_else(|| obj.get(dotted_key.as_str()))
+                .or_else(|| obj.get("path"))
+                .cloned()
+            {
                 obj.insert("file_path".into(), value);
             }
         }
     }
     if next_action.action_type.eq_ignore_ascii_case("Edit") {
         if !obj.contains_key("old_string") {
-            if let Some(value) = obj.get("old").cloned() {
+            if let Some(value) = obj
+                .get("old_string")
+                .or_else(|| obj.get("Edit.old_string"))
+                .or_else(|| obj.get("old"))
+                .or_else(|| obj.get("Edit.old"))
+                .cloned()
+            {
                 obj.insert("old_string".into(), value);
             }
         }
         if !obj.contains_key("new_string") {
-            if let Some(value) = obj.get("new").cloned() {
+            if let Some(value) = obj
+                .get("new_string")
+                .or_else(|| obj.get("Edit.new_string"))
+                .or_else(|| obj.get("new"))
+                .or_else(|| obj.get("Edit.new"))
+                .cloned()
+            {
                 obj.insert("new_string".into(), value);
             }
         }
@@ -942,6 +1007,11 @@ pub async fn run_decision_loop_with_tools(
     let mut total_usage = LoopUsage::default();
     let mut fallback_ladder = FallbackLadderState::default();
     let mut tool_dispatch_seq = 0usize;
+    let initial_requests = initial_target_hydration_requests(&frame);
+    let initial_hydration = hydrate_needed_context(&mut frame, &initial_requests);
+    total_usage.hydration_count += initial_hydration.hydrated.len();
+    total_usage.stale_ref_count += initial_hydration.stale.len();
+    total_usage.hydration_ref_missing += initial_hydration.unavailable.len();
 
     for _iter in 0..config.max_iterations {
         let prompt = format!(
@@ -1332,6 +1402,34 @@ mod tests {
     }
 
     #[test]
+    fn target_artifact_fact_is_hydrated_before_first_decision() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut frame = make_frame();
+        frame.recent_evidence.push(
+            "fact: artifact_status ref=artifact:step0:0 path=/tmp/example-site kind=directory status=missing_or_invalid source=artifact_expectation source_event_id=artifact-expectation:0:0 freshness=current confidence=1.00 lineage_status=active invalidated_by=none supersedes=none conflicts_with=none summary=target directory missing".into(),
+        );
+        let done_json = r#"{"state":"done","decision":"done"}"#;
+        let client =
+            ModelProviderClient::with_scripted_turns(vec![vec![StreamEvent::TextDelta(
+                done_json.into(),
+            )]]);
+        let outcome = rt
+            .block_on(run_decision_loop(
+                &client,
+                frame,
+                DecisionLoopConfig::default(),
+            ))
+            .expect("loop should not error");
+        match outcome {
+            LoopOutcome::Done { usage, .. } => {
+                assert_eq!(usage.hydration_count, 1);
+                assert_eq!(usage.hydration_ref_missing, 0);
+            }
+            other => panic!("expected Done, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn request_context_file_snippet_can_trigger_tool_backed_hydration() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let temp_path = unique_temp_path("request_context_read");
@@ -1663,6 +1761,48 @@ mod tests {
             LoopOutcome::Done { usage, .. } => {
                 assert_eq!(usage.tool_dispatch_count, 2);
                 assert_eq!(usage.tool_dispatch_success_count, 2);
+                assert_eq!(usage.tool_dispatch_failure_count, 0);
+            }
+            other => panic!("expected Done, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn call_tool_bash_dotted_command_alias_is_canonicalized() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let temp_path = unique_temp_path("call_tool_bash_dotted_alias");
+        let bash_json = format!(
+            r#"{{"state":"executing","decision":"call_tool","next_action":{{"action_type":"Bash","args":{{"Bash.command":"printf dotted-ok > \"{}\""}}}}}}"#,
+            temp_path.display()
+        );
+        let done_json = r#"{"state":"done","decision":"done"}"#;
+        let client = ModelProviderClient::with_scripted_turns(vec![
+            vec![StreamEvent::TextDelta(bash_json.into())],
+            vec![StreamEvent::TextDelta(done_json.into())],
+        ]);
+        let registry = ToolRegistry::new().register(Arc::new(BashTool));
+        let permissions = ToolPermissionContext::new(PermissionMode::Default);
+        permissions.add_always_allow_rule("Bash");
+        let tool_runtime = StateFrameToolRuntime {
+            registry,
+            permissions,
+        };
+        let outcome = rt
+            .block_on(run_decision_loop_with_tools(
+                &client,
+                make_frame(),
+                DecisionLoopConfig::default(),
+                Some(tool_runtime),
+            ))
+            .expect("loop should not error");
+        let content =
+            std::fs::read_to_string(&temp_path).expect("bash dotted alias should create file");
+        let _ = std::fs::remove_file(&temp_path);
+        assert_eq!(content, "dotted-ok");
+        match outcome {
+            LoopOutcome::Done { usage, .. } => {
+                assert_eq!(usage.tool_dispatch_count, 1);
+                assert_eq!(usage.tool_dispatch_success_count, 1);
                 assert_eq!(usage.tool_dispatch_failure_count, 0);
             }
             other => panic!("expected Done, got {other:?}"),
