@@ -162,6 +162,9 @@ Rules:\n\
 - Use \"decision\": \"call_tool\" when you need a concrete runtime action before you can continue; always include `next_action.action_type` and structured `next_action.args`\n\
 - In the current runtime, `call_tool` is expected to use real worker tools. Prefer narrow `Read` calls with exact `file_path`, use `Bash` only for concrete commands, and use `Edit` with exact `file_path` / `old_string` / `new_string`\n\
 - Never call `Edit` unless you already know the exact replacement span. If `old_string` is missing, empty, or uncertain, first `Read` the target file and then issue `Edit` with the exact `old_string`\n\
+- If a prior `call_tool` failed, read the `tool_feedback:` / `recent_output_ref:` lines in `recent_evidence`, diagnose the reason, and choose the next action accordingly\n\
+- You may retry a tool call when the failure looks transient or fixable, but do not blindly repeat the exact same failing action without changing args, path, command, or strategy\n\
+- If a `Read` says a target path does not exist yet, inspect the parent path or create the needed directory/file before retrying the same `Read`\n\
 - When using `needed_context`, prefer typed selectors like `file_snippet:path`, `test_failure`, `change_ref:path`, `review_ref:ref_id`, `artifact_ref:ref_id`, `open_item_ref:ref_id`, `blocker_ref:ref_id`, `rejected_approach:ref_id`, `artifact:path`, or `fact:name`\n\
 - When `recent_evidence` contains `fallback_context:` or `fallback_context_item:` lines, consume that fallback evidence before requesting the same context again\n\
 - The \"decision\" field MUST be one of the exact string values above — never use free text\n\
@@ -674,6 +677,103 @@ fn observable_path_from_input(input: Option<&ObservableInput>) -> Option<String>
         .map(str::to_string)
 }
 
+fn outcome_kind_label(kind: &crate::tool::result::ToolExecutionOutcomeKind) -> &'static str {
+    match kind {
+        crate::tool::result::ToolExecutionOutcomeKind::Success => "success",
+        crate::tool::result::ToolExecutionOutcomeKind::Denied => "denied",
+        crate::tool::result::ToolExecutionOutcomeKind::PendingApproval => "pending_approval",
+        crate::tool::result::ToolExecutionOutcomeKind::Interrupted => "interrupted",
+        crate::tool::result::ToolExecutionOutcomeKind::Progress => "progress",
+        crate::tool::result::ToolExecutionOutcomeKind::ResultTooLarge => "result_too_large",
+    }
+}
+
+fn push_tool_failure_feedback(
+    frame: &mut StateFrame,
+    decision: &crate::core::state_frame::StateDecision,
+    record: &ToolExecutionRecord,
+    dispatch_seq: usize,
+    reason: &str,
+) -> (bool, usize) {
+    let mut changed = false;
+    let category = classify_dispatch_failure(reason);
+    let detail = compact_tool_excerpt(
+        record
+            .detail
+            .as_deref()
+            .unwrap_or_else(|| record.summary.as_str()),
+        220,
+    );
+    let source_event_id = format!(
+        "tool-{}:{}",
+        record.tool_name.to_ascii_lowercase(),
+        dispatch_seq
+    );
+    changed |= push_unique(
+        &mut frame.recent_evidence,
+        format!(
+            "recent_output_ref: ref=tool_output:{} tool={} outcome={} category={} source_event_id={} excerpt={}",
+            dispatch_seq,
+            record.tool_name,
+            outcome_kind_label(&record.kind),
+            category,
+            source_event_id,
+            detail
+        ),
+    );
+
+    let mut feedback_tail = String::new();
+    if let Some(path) = parse_read_path(decision)
+        .or_else(|| parse_edit_path(decision))
+        .or_else(|| observable_path_from_input(record.observable_input.as_ref()))
+    {
+        feedback_tail.push_str(&format!(" path={path}"));
+    }
+    if let Some(command) = parse_bash_command(decision) {
+        feedback_tail.push_str(&format!(
+            " command_excerpt={}",
+            compact_tool_excerpt(&command, 120)
+        ));
+    }
+    if let Some(approval) = record.pending_approval.as_ref() {
+        if let Some(code) = approval.code.as_deref() {
+            feedback_tail.push_str(&format!(" approval_code={code}"));
+        }
+        if !approval.escalation_reasons.is_empty() {
+            feedback_tail.push_str(&format!(
+                " escalation_reasons={}",
+                approval.escalation_reasons.join("|")
+            ));
+        }
+    }
+    changed |= push_unique(
+        &mut frame.recent_evidence,
+        format!(
+            "tool_feedback: ref=tool_feedback:{} tool={} outcome={} category={} source_event_id={}{} summary={}",
+            dispatch_seq,
+            record.tool_name,
+            outcome_kind_label(&record.kind),
+            category,
+            source_event_id,
+            feedback_tail,
+            detail
+        ),
+    );
+
+    let mut ledgers = StepFactLedgers::default();
+    append_runtime_tool_record(
+        &mut ledgers,
+        record,
+        &format!("runtime:{}", dispatch_seq),
+    );
+    let fact_lines = fact_lines_from_ledgers(&ledgers);
+    let ref_write_count = fact_lines.len();
+    for line in fact_lines {
+        changed |= push_unique(&mut frame.recent_evidence, line);
+    }
+    (changed, ref_write_count)
+}
+
 fn classify_dispatch_failure(reason: &str) -> String {
     let lowered = reason.to_ascii_lowercase();
     if lowered.contains("runtime is unavailable") {
@@ -910,16 +1010,30 @@ pub async fn run_decision_loop_with_tools(
                     }
                     Err(error) => {
                         total_usage.tool_dispatch_failure_count += 1;
+                        let category = classify_dispatch_failure(&error.reason);
                         *total_usage
                             .tool_dispatch_failure_taxonomy
-                            .entry(classify_dispatch_failure(&error.reason))
+                            .entry(category)
                             .or_insert(0) += 1;
+                        let (changed, ref_write_count) = push_tool_failure_feedback(
+                            &mut frame,
+                            &decision,
+                            &error.record,
+                            tool_dispatch_seq,
+                            &error.reason,
+                        );
+                        total_usage.tool_dispatch_ref_write_count += ref_write_count;
                         total_usage.tool_execution_records.push(error.record);
-                        return Ok(LoopOutcome::ToolDispatchFailed {
-                            last_state: frame.state,
-                            reason: error.reason,
-                            usage: total_usage,
-                        });
+                        if !changed {
+                            return Ok(LoopOutcome::NoProgress {
+                                last_state: frame.state,
+                                reason: format!(
+                                    "call_tool failure feedback produced no StateFrame progress: {}",
+                                    error.reason
+                                ),
+                                usage: total_usage,
+                            });
+                        }
                     }
                 }
             }
@@ -1222,13 +1336,14 @@ mod tests {
     }
 
     #[test]
-    fn call_tool_unknown_tool_records_failure_taxonomy() {
+    fn call_tool_unknown_tool_records_failure_taxonomy_and_allows_recovery() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let request_json = r#"{"state":"executing","decision":"call_tool","next_action":{"action_type":"Nope","args":{"value":"x"}}}"#;
-        let client =
-            ModelProviderClient::with_scripted_turns(vec![vec![StreamEvent::TextDelta(
-                request_json.into(),
-            )]]);
+        let done_json = r#"{"state":"done","decision":"done"}"#;
+        let client = ModelProviderClient::with_scripted_turns(vec![
+            vec![StreamEvent::TextDelta(request_json.into())],
+            vec![StreamEvent::TextDelta(done_json.into())],
+        ]);
         let tool_runtime = StateFrameToolRuntime {
             registry: ToolRegistry::new().register(Arc::new(FileReadTool)),
             permissions: ToolPermissionContext::new(PermissionMode::Default),
@@ -1242,8 +1357,7 @@ mod tests {
             ))
             .expect("loop should not error");
         match outcome {
-            LoopOutcome::ToolDispatchFailed { usage, reason, .. } => {
-                assert!(reason.contains("did not produce usable text") || reason.contains("unknown tool"));
+            LoopOutcome::Done { usage, .. } => {
                 assert_eq!(usage.tool_dispatch_count, 1);
                 assert_eq!(usage.tool_dispatch_success_count, 0);
                 assert_eq!(usage.tool_dispatch_failure_count, 1);
@@ -1252,8 +1366,52 @@ mod tests {
                     Some(&1usize)
                 );
                 assert_eq!(usage.tool_execution_records.len(), 1);
+                assert_eq!(usage.fallback_count, 0);
             }
-            other => panic!("expected ToolDispatchFailed, got {other:?}"),
+            other => panic!("expected Done after recovery, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn call_tool_read_failure_is_returned_to_agent_for_next_turn() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let missing_path = unique_temp_path("call_tool_missing_read");
+        let read_json = format!(
+            r#"{{"state":"executing","decision":"call_tool","next_action":{{"action_type":"Read","args":{{"file_path":"{}"}}}}}}"#,
+            missing_path.display()
+        );
+        let done_json = r#"{"state":"done","decision":"done"}"#;
+        let client = ModelProviderClient::with_scripted_turns(vec![
+            vec![StreamEvent::TextDelta(read_json.into())],
+            vec![StreamEvent::TextDelta(done_json.into())],
+        ]);
+        let tool_runtime = StateFrameToolRuntime {
+            registry: ToolRegistry::new().register(Arc::new(FileReadTool)),
+            permissions: ToolPermissionContext::new(PermissionMode::Default),
+        };
+        let outcome = rt
+            .block_on(run_decision_loop_with_tools(
+                &client,
+                make_frame(),
+                DecisionLoopConfig {
+                    max_iterations: 3,
+                    ..DecisionLoopConfig::default()
+                },
+                Some(tool_runtime),
+            ))
+            .expect("loop should not error");
+        match outcome {
+            LoopOutcome::Done { usage, .. } => {
+                assert_eq!(usage.tool_dispatch_count, 1);
+                assert_eq!(usage.tool_dispatch_success_count, 0);
+                assert_eq!(usage.tool_dispatch_failure_count, 1);
+                assert_eq!(
+                    usage.tool_dispatch_failure_taxonomy.get("tool_result_empty"),
+                    Some(&1usize)
+                );
+                assert_eq!(usage.tool_execution_records.len(), 1);
+            }
+            other => panic!("expected Done after read failure feedback, got {other:?}"),
         }
     }
 
