@@ -1,7 +1,7 @@
 use crate::core::boss_acceptance::{
     BossArtifactKind, extract_artifact_expectations, verify_artifact_expectations,
 };
-use crate::core::boss_state::{BossPlanStep, BossPlanStepStatus};
+use crate::core::boss_state::{BossPlanStep, BossPlanStepStatus, BossStage};
 use crate::tool::result::{ToolExecutionOutcomeKind, ToolExecutionRecord};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -67,6 +67,49 @@ pub struct ArtifactRecord {
     pub confidence_milli: u16,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct LedgerLineage {
+    pub status: String,
+    pub invalidated_by: Vec<String>,
+    pub supersedes: Vec<String>,
+    pub conflicts_with: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenItemRecord {
+    pub ref_id: String,
+    pub summary: String,
+    pub source: String,
+    pub source_event_id: String,
+    pub freshness: String,
+    pub confidence_milli: u16,
+    pub lineage: LedgerLineage,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockerRecord {
+    pub ref_id: String,
+    pub summary: String,
+    pub source: String,
+    pub source_event_id: String,
+    pub freshness: String,
+    pub confidence_milli: u16,
+    pub lineage: LedgerLineage,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RejectedApproachRecord {
+    pub ref_id: String,
+    pub summary: String,
+    pub correction: Option<String>,
+    pub source: String,
+    pub source_ref: Option<String>,
+    pub source_event_id: String,
+    pub freshness: String,
+    pub confidence_milli: u16,
+    pub lineage: LedgerLineage,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StepFactLedgers {
     pub file_facts: Vec<FileFactRecord>,
@@ -74,6 +117,18 @@ pub struct StepFactLedgers {
     pub test_refs: Vec<TestRecord>,
     pub review_refs: Vec<ReviewRecord>,
     pub artifact_refs: Vec<ArtifactRecord>,
+    pub open_item_refs: Vec<OpenItemRecord>,
+    pub blocker_refs: Vec<BlockerRecord>,
+    pub rejected_approaches: Vec<RejectedApproachRecord>,
+}
+
+fn active_lineage() -> LedgerLineage {
+    LedgerLineage {
+        status: "active".into(),
+        invalidated_by: Vec::new(),
+        supersedes: Vec::new(),
+        conflicts_with: Vec::new(),
+    }
 }
 
 fn trim_excerpt(text: &str, max_chars: usize) -> String {
@@ -654,6 +709,80 @@ fn build_artifact_ledgers(ledgers: &mut StepFactLedgers, step: &BossPlanStep) {
     }
 }
 
+pub fn build_open_item_records(step: &BossPlanStep, open_items: &[String]) -> Vec<OpenItemRecord> {
+    open_items
+        .iter()
+        .enumerate()
+        .map(|(idx, item)| OpenItemRecord {
+            ref_id: format!("openitem:step{}:{idx}", step.id),
+            summary: item.clone(),
+            source: format!("acceptance:{idx}"),
+            source_event_id: format!("step-acceptance:{}:{idx}", step.id),
+            freshness: "current".into(),
+            confidence_milli: 1000,
+            lineage: active_lineage(),
+        })
+        .collect()
+}
+
+pub fn build_blocker_records(
+    step: Option<&BossPlanStep>,
+    stage: BossStage,
+    blocked_items: &[String],
+) -> Vec<BlockerRecord> {
+    let step_id = step.map(|item| item.id).unwrap_or_default();
+    blocked_items
+        .iter()
+        .enumerate()
+        .map(|(idx, item)| BlockerRecord {
+            ref_id: format!("blocker:step{step_id}:{idx}"),
+            summary: item.clone(),
+            source: format!("stage:{}", format!("{stage:?}").to_lowercase()),
+            source_event_id: format!("stage-blocker:{step_id}:{idx}"),
+            freshness: "current".into(),
+            confidence_milli: 1000,
+            lineage: active_lineage(),
+        })
+        .collect()
+}
+
+pub fn build_rejected_approach_records(
+    step: &BossPlanStep,
+    review_refs: &[ReviewRecord],
+) -> Vec<RejectedApproachRecord> {
+    let Some(correction) = step
+        .last_correction
+        .as_deref()
+        .filter(|text| !text.trim().is_empty())
+    else {
+        return Vec::new();
+    };
+    let source_ref = review_refs
+        .iter()
+        .find(|item| item.verdict == "rejected" || item.verdict == "replan_required")
+        .map(|item| item.ref_id.clone());
+    vec![RejectedApproachRecord {
+        ref_id: format!("rejected:step{}:0", step.id),
+        summary: step
+            .last_review_summary
+            .as_deref()
+            .unwrap_or("review requested a different approach")
+            .to_string(),
+        correction: Some(correction.to_string()),
+        source: "review_correction".into(),
+        source_ref: source_ref.clone(),
+        source_event_id: format!("review-correction:{}", step.id),
+        freshness: "after-review".into(),
+        confidence_milli: 1000,
+        lineage: LedgerLineage {
+            status: "active".into(),
+            invalidated_by: Vec::new(),
+            supersedes: Vec::new(),
+            conflicts_with: source_ref.into_iter().collect(),
+        },
+    }]
+}
+
 pub fn build_step_fact_ledgers(step: &BossPlanStep) -> StepFactLedgers {
     let mut ledgers = StepFactLedgers::default();
     apply_runtime_tool_records(&mut ledgers, step);
@@ -856,8 +985,11 @@ pub fn build_step_fact_ledgers(step: &BossPlanStep) -> StepFactLedgers {
 
 #[cfg(test)]
 mod tests {
-    use super::build_step_fact_ledgers;
-    use crate::core::boss_state::{BossPlanStep, BossPlanStepStatus};
+    use super::{
+        ReviewRecord, build_blocker_records, build_open_item_records,
+        build_rejected_approach_records, build_step_fact_ledgers,
+    };
+    use crate::core::boss_state::{BossPlanStep, BossPlanStepStatus, BossStage};
     use crate::tool::definition::{ObservableInput, ObservableInputSource};
     use crate::tool::result::{
         ToolBatchContext, ToolExecutionOutcomeKind, ToolExecutionRecord, ToolReportModifier,
@@ -1149,6 +1281,53 @@ mod tests {
                 .iter()
                 .all(|item| item.source != "review_summary"),
             "runtime review records should suppress fallback inferred review entries"
+        );
+    }
+
+    #[test]
+    fn helper_ledgers_build_open_blocker_and_rejected_records_with_lineage() {
+        let step = BossPlanStep {
+            id: 12,
+            description: "retry".into(),
+            objective: Some("fix auth".into()),
+            acceptance: vec!["tests pass".into()],
+            requires_approval: false,
+            status: BossPlanStepStatus::Rejected,
+            completed: false,
+            result_diff: None,
+            worker_task_id: None,
+            attempt_count: 1,
+            retry_budget: 3,
+            last_review_summary: Some("previous patch ignored edge cases".into()),
+            last_correction: Some("preserve the auth guard branch".into()),
+            review_task_id: None,
+            tool_execution_records: Vec::new(),
+        };
+        let open = build_open_item_records(&step, &["tests pass".into()]);
+        let blocked = build_blocker_records(
+            Some(&step),
+            BossStage::WaitingForApproval,
+            &["waiting for user approval".into()],
+        );
+        let rejected = build_rejected_approach_records(
+            &step,
+            &[ReviewRecord {
+                ref_id: "review:step12:summary".into(),
+                verdict: "rejected".into(),
+                summary: "previous patch ignored edge cases".into(),
+                correction: Some("preserve the auth guard branch".into()),
+                source: "review_summary".into(),
+                source_event_id: "review-summary:12".into(),
+                freshness: "after-review".into(),
+                confidence_milli: 950,
+            }],
+        );
+        assert_eq!(open[0].lineage.status, "active");
+        assert_eq!(blocked[0].lineage.status, "active");
+        assert_eq!(rejected[0].lineage.status, "active");
+        assert_eq!(
+            rejected[0].lineage.conflicts_with,
+            vec!["review:step12:summary".to_string()]
         );
     }
 }

@@ -1,5 +1,8 @@
 use crate::core::boss_state::{BossPlan, BossStage};
-use crate::core::state_fact_ledger::build_step_fact_ledgers;
+use crate::core::state_fact_ledger::{
+    build_blocker_records, build_open_item_records, build_rejected_approach_records,
+    build_step_fact_ledgers,
+};
 use crate::core::state_frame::{ActorRole, AgentState, StateBudget, StateFrame};
 use crate::core::state_frame_archive::{
     archive_to_summary, build_accepted_archive, retain_blocked_items, retain_open_items,
@@ -111,6 +114,9 @@ fn build_fact_ledger(
 
     if let Some(step) = current_step {
         let ledgers = build_step_fact_ledgers(step);
+        let open_item_ledgers = build_open_item_records(step, open_items);
+        let blocker_ledgers = build_blocker_records(Some(step), stage, blocked_items);
+        let rejected_ledgers = build_rejected_approach_records(step, &ledgers.review_refs);
         facts.push(fact_line(
             "current_step",
             format!(
@@ -230,50 +236,64 @@ fn build_fact_ledger(
             }
         }
         push_none_recorded_unless_present(&mut facts, "artifact_status");
-        for (idx, item) in open_items.iter().enumerate() {
+        for item in &open_item_ledgers {
             facts.push(fact_line(
                 "open_item_refs",
                 format!(
-                    "ref=openitem:step{}:{} source=acceptance:{} freshness=current confidence=1.00 summary={}",
-                    step.id, idx, idx, item
+                    "ref={} source={} freshness={} confidence={} status={} invalidated_by={} supersedes={} conflicts_with={} summary={}",
+                    item.ref_id,
+                    item.source,
+                    item.freshness,
+                    format_confidence(item.confidence_milli),
+                    item.lineage.status,
+                    summarize_list(&item.lineage.invalidated_by),
+                    summarize_list(&item.lineage.supersedes),
+                    summarize_list(&item.lineage.conflicts_with),
+                    item.summary
                 ),
             ));
         }
         push_none_recorded_unless_present(&mut facts, "open_item_refs");
-        for (idx, item) in blocked_items.iter().enumerate() {
+        for item in &blocker_ledgers {
             facts.push(fact_line(
                 "blocker_refs",
                 format!(
-                    "ref=blocker:step{}:{} source=stage:{} freshness=current confidence=1.00 summary={}",
-                    step.id,
-                    idx,
-                    format!("{stage:?}").to_lowercase(),
-                    item
+                    "ref={} source={} freshness={} confidence={} status={} invalidated_by={} supersedes={} conflicts_with={} summary={}",
+                    item.ref_id,
+                    item.source,
+                    item.freshness,
+                    format_confidence(item.confidence_milli),
+                    item.lineage.status,
+                    summarize_list(&item.lineage.invalidated_by),
+                    summarize_list(&item.lineage.supersedes),
+                    summarize_list(&item.lineage.conflicts_with),
+                    item.summary
                 ),
             ));
         }
         push_none_recorded_unless_present(&mut facts, "blocker_refs");
-        if let Some(correction) = step
-            .last_correction
-            .as_deref()
-            .filter(|text| !text.trim().is_empty())
-        {
-            let source_ref = ledgers
-                .review_refs
-                .iter()
-                .find(|item| item.verdict == "rejected" || item.verdict == "replan_required")
-                .map(|item| item.ref_id.as_str())
-                .unwrap_or("review:none");
+        for item in &rejected_ledgers {
             facts.push(fact_line(
                 "rejected_approaches",
                 format!(
-                    "ref=rejected:step{}:0 source=review_correction source_ref={} freshness=after-review confidence=1.00 summary={} correction={}",
-                    step.id,
-                    source_ref,
-                    step.last_review_summary
+                    "ref={} source={}{} freshness={} confidence={} status={} invalidated_by={} supersedes={} conflicts_with={} summary={}{}",
+                    item.ref_id,
+                    item.source,
+                    item.source_ref
                         .as_deref()
-                        .unwrap_or("review requested a different approach"),
-                    correction
+                        .map(|source_ref| format!(" source_ref={source_ref}"))
+                        .unwrap_or_default(),
+                    item.freshness,
+                    format_confidence(item.confidence_milli),
+                    item.lineage.status,
+                    summarize_list(&item.lineage.invalidated_by),
+                    summarize_list(&item.lineage.supersedes),
+                    summarize_list(&item.lineage.conflicts_with),
+                    item.summary,
+                    item.correction
+                        .as_deref()
+                        .map(|correction| format!(" correction={correction}"))
+                        .unwrap_or_default()
                 ),
             ));
         }
