@@ -144,11 +144,12 @@ fn build_fact_ledger(
                 facts.push(fact_line(
                     "file_facts",
                     format!(
-                        "ref={} path={} kind={} source={} freshness={} confidence={} status={} invalidated_by={} supersedes={} conflicts_with={}{} fact={}",
+                        "ref={} path={} kind={} source={} source_event_id={} freshness={} confidence={} status={} invalidated_by={} supersedes={} conflicts_with={}{} fact={}",
                         item.ref_id,
                         item.path,
                         item.kind,
                         item.source,
+                        item.source_event_id,
                         item.freshness,
                         format_confidence(item.confidence_milli),
                         item.lineage.status,
@@ -170,13 +171,15 @@ fn build_fact_ledger(
                 facts.push(fact_line(
                     "test_failures",
                     format!(
-                        "ref={} name={} status={} source={} freshness={} confidence={} invalidated_by={} supersedes={} conflicts_with={} summary={}",
+                        "ref={} name={} status={} source={} source_event_id={} freshness={} confidence={} lineage_status={} invalidated_by={} supersedes={} conflicts_with={} summary={}",
                         item.ref_id,
                         item.name,
                         item.status,
                         item.source,
+                        item.source_event_id,
                         item.freshness,
                         format_confidence(item.confidence_milli),
+                        item.lineage.status,
                         summarize_list(&item.lineage.invalidated_by),
                         summarize_list(&item.lineage.supersedes),
                         summarize_list(&item.lineage.conflicts_with),
@@ -191,10 +194,11 @@ fn build_fact_ledger(
                 facts.push(fact_line(
                     "recent_changes_in_files",
                     format!(
-                        "ref={} path={} source={} freshness={} confidence={} status={} invalidated_by={} supersedes={} conflicts_with={} summary={}",
+                        "ref={} path={} source={} source_event_id={} freshness={} confidence={} status={} invalidated_by={} supersedes={} conflicts_with={} summary={}",
                         item.ref_id,
                         item.path,
                         item.source,
+                        item.source_event_id,
                         item.freshness,
                         format_confidence(item.confidence_milli),
                         item.lineage.status,
@@ -212,10 +216,11 @@ fn build_fact_ledger(
                 facts.push(fact_line(
                     "review_verdicts",
                     format!(
-                        "ref={} verdict={} source={} freshness={} confidence={} status={} invalidated_by={} supersedes={} conflicts_with={} summary={}{}",
+                        "ref={} verdict={} source={} source_event_id={} freshness={} confidence={} status={} invalidated_by={} supersedes={} conflicts_with={} summary={}{}",
                         item.ref_id,
                         item.verdict,
                         item.source,
+                        item.source_event_id,
                         item.freshness,
                         format_confidence(item.confidence_milli),
                         item.lineage.status,
@@ -237,14 +242,16 @@ fn build_fact_ledger(
                 facts.push(fact_line(
                     "artifact_status",
                     format!(
-                        "ref={} path={} kind={} status={} source={} freshness={} confidence={} invalidated_by={} supersedes={} conflicts_with={} summary={}",
+                        "ref={} path={} kind={} status={} source={} source_event_id={} freshness={} confidence={} lineage_status={} invalidated_by={} supersedes={} conflicts_with={} summary={}",
                         item.ref_id,
                         item.path,
                         item.kind,
                         item.status,
                         item.source,
+                        item.source_event_id,
                         item.freshness,
                         format_confidence(item.confidence_milli),
+                        item.lineage.status,
                         summarize_list(&item.lineage.invalidated_by),
                         summarize_list(&item.lineage.supersedes),
                         summarize_list(&item.lineage.conflicts_with),
@@ -258,9 +265,10 @@ fn build_fact_ledger(
             facts.push(fact_line(
                 "open_item_refs",
                 format!(
-                    "ref={} source={} freshness={} confidence={} status={} invalidated_by={} supersedes={} conflicts_with={} summary={}",
+                    "ref={} source={} source_event_id={} freshness={} confidence={} status={} invalidated_by={} supersedes={} conflicts_with={} summary={}",
                     item.ref_id,
                     item.source,
+                    item.source_event_id,
                     item.freshness,
                     format_confidence(item.confidence_milli),
                     item.lineage.status,
@@ -276,9 +284,10 @@ fn build_fact_ledger(
             facts.push(fact_line(
                 "blocker_refs",
                 format!(
-                    "ref={} source={} freshness={} confidence={} status={} invalidated_by={} supersedes={} conflicts_with={} summary={}",
+                    "ref={} source={} source_event_id={} freshness={} confidence={} status={} invalidated_by={} supersedes={} conflicts_with={} summary={}",
                     item.ref_id,
                     item.source,
+                    item.source_event_id,
                     item.freshness,
                     format_confidence(item.confidence_milli),
                     item.lineage.status,
@@ -294,13 +303,14 @@ fn build_fact_ledger(
             facts.push(fact_line(
                 "rejected_approaches",
                 format!(
-                    "ref={} source={}{} freshness={} confidence={} status={} invalidated_by={} supersedes={} conflicts_with={} summary={}{}",
+                    "ref={} source={}{} source_event_id={} freshness={} confidence={} status={} invalidated_by={} supersedes={} conflicts_with={} summary={}{}",
                     item.ref_id,
                     item.source,
                     item.source_ref
                         .as_deref()
                         .map(|source_ref| format!(" source_ref={source_ref}"))
                         .unwrap_or_default(),
+                    item.source_event_id,
                     item.freshness,
                     format_confidence(item.confidence_milli),
                     item.lineage.status,

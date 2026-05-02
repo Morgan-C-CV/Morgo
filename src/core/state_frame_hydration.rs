@@ -1,4 +1,5 @@
 use crate::core::state_frame::StateFrame;
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NeededContextSelector {
@@ -22,6 +23,7 @@ pub struct HydrationSummary {
     pub hydrated: Vec<String>,
     pub unavailable: Vec<String>,
     pub deferred: Vec<String>,
+    pub stale: Vec<String>,
 }
 
 fn push_unique(items: &mut Vec<String>, value: String) -> bool {
@@ -201,22 +203,256 @@ pub fn parse_needed_context_selector(raw: &str) -> NeededContextSelector {
     }
 }
 
-fn find_recent_evidence<'a>(frame: &'a StateFrame, prefix: &str) -> impl Iterator<Item = &'a str> {
-    frame.recent_evidence.iter().filter_map(move |item| {
-        if item.starts_with(prefix) {
-            Some(item.as_str())
-        } else {
-            None
+#[derive(Debug, Clone)]
+struct ParsedEvidenceFact {
+    fact_name: String,
+    raw: String,
+    fields: HashMap<String, String>,
+    none_recorded: bool,
+}
+
+impl ParsedEvidenceFact {
+    fn field(&self, key: &str) -> Option<&str> {
+        self.fields.get(key).map(String::as_str)
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct TypedEvidenceIndex {
+    facts: Vec<ParsedEvidenceFact>,
+}
+
+impl TypedEvidenceIndex {
+    fn from_frame(frame: &StateFrame) -> Self {
+        Self {
+            facts: frame
+                .recent_evidence
+                .iter()
+                .filter_map(|item| parse_fact_line(item))
+                .collect(),
         }
+    }
+
+    fn facts_named<'a>(&'a self, fact_name: &str) -> impl Iterator<Item = &'a ParsedEvidenceFact> {
+        self.facts
+            .iter()
+            .filter(move |item| item.fact_name == fact_name && !item.none_recorded)
+    }
+}
+
+const FACT_FIELD_KEYS: &[&str] = &[
+    "ref",
+    "path",
+    "kind",
+    "source",
+    "source_ref",
+    "source_event_id",
+    "freshness",
+    "confidence",
+    "status",
+    "lineage_status",
+    "invalidated_by",
+    "supersedes",
+    "conflicts_with",
+    "symbol",
+    "name",
+    "verdict",
+    "required_state",
+    "summary",
+    "fact",
+    "correction",
+];
+
+fn parse_fact_line(raw: &str) -> Option<ParsedEvidenceFact> {
+    let rest = raw.strip_prefix("fact: ")?;
+    let (fact_name, body) = match rest.split_once(' ') {
+        Some((name, body)) => (name.trim().to_string(), body.trim()),
+        None => (rest.trim().to_string(), ""),
+    };
+    if body == "none recorded" {
+        return Some(ParsedEvidenceFact {
+            fact_name,
+            raw: raw.to_string(),
+            fields: HashMap::new(),
+            none_recorded: true,
+        });
+    }
+
+    let mut positions = Vec::new();
+    for key in FACT_FIELD_KEYS {
+        let needle = format!("{key}=");
+        let mut search_from = 0usize;
+        while let Some(found) = body[search_from..].find(&needle) {
+            let idx = search_from + found;
+            let boundary_ok = idx == 0 || body[..idx].ends_with(' ');
+            if boundary_ok {
+                positions.push((idx, *key));
+            }
+            search_from = idx + needle.len();
+        }
+    }
+    positions.sort_by_key(|(idx, _)| *idx);
+    positions.dedup_by_key(|(idx, _)| *idx);
+
+    let mut fields = HashMap::new();
+    for (i, (start, key)) in positions.iter().enumerate() {
+        let value_start = start + key.len() + 1;
+        let value_end = positions
+            .get(i + 1)
+            .map(|(next, _)| *next)
+            .unwrap_or(body.len());
+        let value = body[value_start..value_end].trim();
+        if !value.is_empty() {
+            fields.insert((*key).to_string(), value.to_string());
+        }
+    }
+
+    Some(ParsedEvidenceFact {
+        fact_name,
+        raw: raw.to_string(),
+        fields,
+        none_recorded: false,
     })
 }
 
-fn contains_path(item: &str, path: &str) -> bool {
-    item.contains(&format!("path={path}"))
+fn is_none_like(value: Option<&str>) -> bool {
+    matches!(
+        value.map(str::trim),
+        None | Some("") | Some("none") | Some("none recorded")
+    )
 }
 
-fn contains_ref(item: &str, ref_id: &str) -> bool {
-    item.contains(&format!("ref={ref_id}"))
+fn field_eq(item: &ParsedEvidenceFact, key: &str, expected: &str) -> bool {
+    item.field(key)
+        .map(|value| value.trim() == expected.trim())
+        .unwrap_or(false)
+}
+
+fn matches_any_query(item: &ParsedEvidenceFact, query: &str, keys: &[&str]) -> bool {
+    let query = query.trim();
+    keys.iter().any(|key| {
+        item.field(key)
+            .map(|value| value.trim() == query || value.contains(query))
+            .unwrap_or(false)
+    })
+}
+
+fn trace_string(item: &ParsedEvidenceFact) -> String {
+    format!(
+        "fact_name={} ref={} source={} source_event_id={} freshness={}",
+        item.fact_name,
+        item.field("ref").unwrap_or("none"),
+        item.field("source").unwrap_or("unknown"),
+        item.field("source_event_id").unwrap_or("unknown"),
+        item.field("freshness").unwrap_or("unknown"),
+    )
+}
+
+fn stale_reason(item: &ParsedEvidenceFact) -> Option<String> {
+    let lineage_status = item.field("lineage_status").or_else(|| {
+        (!matches!(item.fact_name.as_str(), "artifact_status" | "test_failures"))
+            .then(|| item.field("status"))
+            .flatten()
+    });
+    if let Some(status) = lineage_status {
+        if status != "active" {
+            return Some(format!("lineage_status={status}"));
+        }
+    }
+    if !is_none_like(item.field("invalidated_by")) {
+        return Some(format!(
+            "invalidated_by={}",
+            item.field("invalidated_by").unwrap_or("unknown")
+        ));
+    }
+    None
+}
+
+fn format_hydrated_line(
+    selector: &NeededContextSelector,
+    source: &str,
+    match_reason: &str,
+    item: &ParsedEvidenceFact,
+    excerpt_chars: usize,
+) -> String {
+    format!(
+        "hydrated_context: {} source={} match_reason={} trace={} excerpt={}",
+        selector_key(selector),
+        source,
+        match_reason,
+        trace_string(item),
+        compact_excerpt(&item.raw, excerpt_chars)
+    )
+}
+
+fn format_stale_line(
+    selector: &NeededContextSelector,
+    source: &str,
+    item: &ParsedEvidenceFact,
+    reason: &str,
+) -> String {
+    format!(
+        "context_stale: {} source={} stale_reason={} trace={}",
+        selector_key(selector),
+        source,
+        reason,
+        trace_string(item)
+    )
+}
+
+fn format_unavailable_line(selector: &NeededContextSelector, reason: &str, source: &str) -> String {
+    format!(
+        "context_unavailable: {} reason={} resolver={}",
+        selector_key(selector),
+        reason,
+        source
+    )
+}
+
+enum SelectorResolution {
+    Hydrated(String),
+    Stale(String),
+    Unavailable(String),
+}
+
+fn resolve_fact_match<F>(
+    index: &TypedEvidenceIndex,
+    fact_name: &str,
+    selector: &NeededContextSelector,
+    excerpt_chars: usize,
+    source: &str,
+    match_reason: &str,
+    predicate: F,
+) -> SelectorResolution
+where
+    F: Fn(&ParsedEvidenceFact) -> bool,
+{
+    let matches = index
+        .facts_named(fact_name)
+        .filter(|item| predicate(item))
+        .collect::<Vec<_>>();
+    if let Some(item) = matches
+        .iter()
+        .copied()
+        .find(|item| stale_reason(item).is_none())
+    {
+        return SelectorResolution::Hydrated(format_hydrated_line(
+            selector,
+            source,
+            match_reason,
+            item,
+            excerpt_chars,
+        ));
+    }
+    if let Some(item) = matches.first().copied() {
+        return SelectorResolution::Stale(format_stale_line(
+            selector,
+            source,
+            item,
+            &stale_reason(item).unwrap_or_else(|| "stale_match".into()),
+        ));
+    }
+    SelectorResolution::Unavailable(format_unavailable_line(selector, "no_match", "typed_index"))
 }
 
 fn estimate_excerpt_chars(frame: &StateFrame, selected_count: usize) -> usize {
@@ -261,246 +497,312 @@ fn select_context_requests(
     (selected, deferred)
 }
 
-fn selector_matches_symbol(item: &str, name: &str) -> bool {
-    item.contains(&format!("symbol={name}")) || item.contains(name)
-}
-
 fn hydrate_selector(
+    index: &TypedEvidenceIndex,
     frame: &StateFrame,
     selector: &NeededContextSelector,
     excerpt_chars: usize,
-) -> Option<String> {
+) -> SelectorResolution {
     match selector {
-        NeededContextSelector::FileSnippet { path } => {
-            find_recent_evidence(frame, "fact: file_facts")
-                .find(|item| contains_path(item, path))
-                .map(|item| {
-                    format!(
-                        "hydrated_context: {} source=fact_ledger excerpt={}",
-                        selector_key(selector),
-                        compact_excerpt(item, excerpt_chars)
-                    )
-                })
-                .or_else(|| {
-                    find_recent_evidence(frame, "fact: recent_changes_in_files")
-                        .find(|item| contains_path(item, path))
-                        .map(|item| {
-                            format!(
-                                "hydrated_context: {} source=change_ledger excerpt={}",
-                                selector_key(selector),
-                                compact_excerpt(item, excerpt_chars)
+        NeededContextSelector::FileSnippet { path } => match resolve_fact_match(
+            index,
+            "file_facts",
+            selector,
+            excerpt_chars,
+            "fact_ledger",
+            "path",
+            |item| field_eq(item, "path", path),
+        ) {
+            SelectorResolution::Unavailable(_) => resolve_fact_match(
+                index,
+                "recent_changes_in_files",
+                selector,
+                excerpt_chars,
+                "change_ledger",
+                "path",
+                |item| field_eq(item, "path", path),
+            ),
+            resolved => resolved,
+        },
+        NeededContextSelector::TestFailure { query } => resolve_fact_match(
+            index,
+            "test_failures",
+            selector,
+            excerpt_chars,
+            "test_ledger",
+            if query.is_some() {
+                "query"
+            } else {
+                "latest_failed_test"
+            },
+            |item| {
+                field_eq(item, "status", "failed")
+                    && query
+                        .as_ref()
+                        .map(|q| {
+                            matches_any_query(
+                                item,
+                                q,
+                                &["ref", "name", "source_event_id", "summary"],
                             )
                         })
-                })
-                .or_else(|| {
-                    frame.objective.contains(path).then(|| {
-                        format!(
-                            "hydrated_context: {} source=objective excerpt={}",
+                        .unwrap_or(true)
+            },
+        ),
+        NeededContextSelector::ChangeRef { path } => resolve_fact_match(
+            index,
+            "recent_changes_in_files",
+            selector,
+            excerpt_chars,
+            "change_ledger",
+            if path.is_some() {
+                "path_or_source_event"
+            } else {
+                "latest_change"
+            },
+            |item| {
+                path.as_ref()
+                    .map(|query| {
+                        matches_any_query(item, query, &["ref", "path", "source_event_id"])
+                    })
+                    .unwrap_or(true)
+            },
+        ),
+        NeededContextSelector::ReviewRef { query } => resolve_fact_match(
+            index,
+            "review_verdicts",
+            selector,
+            excerpt_chars,
+            "review_ledger",
+            if query.is_some() {
+                "ref_or_source_event"
+            } else {
+                "latest_review"
+            },
+            |item| {
+                query
+                    .as_ref()
+                    .map(|q| {
+                        matches_any_query(
+                            item,
+                            q,
+                            &["ref", "verdict", "source_event_id", "source", "summary"],
+                        )
+                    })
+                    .unwrap_or(true)
+            },
+        ),
+        NeededContextSelector::ArtifactRef { query } => resolve_fact_match(
+            index,
+            "artifact_status",
+            selector,
+            excerpt_chars,
+            "artifact_ledger",
+            if query.is_some() {
+                "ref_path_or_source_event"
+            } else {
+                "latest_artifact"
+            },
+            |item| {
+                query
+                    .as_ref()
+                    .map(|q| {
+                        matches_any_query(item, q, &["ref", "path", "source_event_id", "summary"])
+                    })
+                    .unwrap_or(true)
+            },
+        ),
+        NeededContextSelector::OpenItemRef { query } => resolve_fact_match(
+            index,
+            "open_item_refs",
+            selector,
+            excerpt_chars,
+            "open_item_ledger",
+            if query.is_some() {
+                "ref_or_source_event"
+            } else {
+                "latest_open_item"
+            },
+            |item| {
+                query
+                    .as_ref()
+                    .map(|q| matches_any_query(item, q, &["ref", "source_event_id", "summary"]))
+                    .unwrap_or(true)
+            },
+        ),
+        NeededContextSelector::BlockerRef { query } => resolve_fact_match(
+            index,
+            "blocker_refs",
+            selector,
+            excerpt_chars,
+            "blocker_ledger",
+            if query.is_some() {
+                "ref_or_source_event"
+            } else {
+                "latest_blocker"
+            },
+            |item| {
+                query
+                    .as_ref()
+                    .map(|q| matches_any_query(item, q, &["ref", "source_event_id", "summary"]))
+                    .unwrap_or(true)
+            },
+        ),
+        NeededContextSelector::RejectedApproach { query } => resolve_fact_match(
+            index,
+            "rejected_approaches",
+            selector,
+            excerpt_chars,
+            "rejected_approach_ledger",
+            if query.is_some() {
+                "ref_or_source_event"
+            } else {
+                "latest_rejected_approach"
+            },
+            |item| {
+                query
+                    .as_ref()
+                    .map(|q| {
+                        matches_any_query(
+                            item,
+                            q,
+                            &[
+                                "ref",
+                                "source_ref",
+                                "source_event_id",
+                                "summary",
+                                "correction",
+                            ],
+                        )
+                    })
+                    .unwrap_or(true)
+            },
+        ),
+        NeededContextSelector::Artifact { path } => {
+            let artifact_resolution = resolve_fact_match(
+                index,
+                "artifact_status",
+                selector,
+                excerpt_chars,
+                "artifact_ledger",
+                if path.is_some() {
+                    "path"
+                } else {
+                    "latest_artifact"
+                },
+                |item| {
+                    path.as_ref()
+                        .map(|p| field_eq(item, "path", p))
+                        .unwrap_or(true)
+                },
+            );
+            match artifact_resolution {
+                SelectorResolution::Unavailable(_) => match resolve_fact_match(
+                    index,
+                    "recent_changes_in_files",
+                    selector,
+                    excerpt_chars,
+                    "change_ledger",
+                    if path.is_some() {
+                        "artifact_change_path"
+                    } else {
+                        "latest_change"
+                    },
+                    |item| {
+                        path.as_ref()
+                            .map(|p| field_eq(item, "path", p))
+                            .unwrap_or(true)
+                    },
+                ) {
+                    SelectorResolution::Unavailable(_) => match resolve_fact_match(
+                        index,
+                        "file_facts",
+                        selector,
+                        excerpt_chars,
+                        "fact_ledger",
+                        if path.is_some() {
+                            "artifact_fact_path"
+                        } else {
+                            "latest_file_fact"
+                        },
+                        |item| {
+                            path.as_ref()
+                                .map(|p| field_eq(item, "path", p))
+                                .unwrap_or(true)
+                        },
+                    ) {
+                        SelectorResolution::Unavailable(_) => {
+                            if let Some(p) = path
+                                .as_ref()
+                                .filter(|p| frame.objective.contains(p.as_str()))
+                            {
+                                SelectorResolution::Hydrated(format!(
+                                    "hydrated_context: {} source=objective match_reason=objective_path excerpt={}",
+                                    selector_key(selector),
+                                    compact_excerpt(
+                                        &format!(
+                                            "objective references artifact path {p}; objective={}",
+                                            frame.objective
+                                        ),
+                                        excerpt_chars
+                                    )
+                                ))
+                            } else {
+                                SelectorResolution::Unavailable(format_unavailable_line(
+                                    selector,
+                                    "no_match",
+                                    "typed_index",
+                                ))
+                            }
+                        }
+                        resolved => resolved,
+                    },
+                    resolved => resolved,
+                },
+                resolved => resolved,
+            }
+        }
+        NeededContextSelector::Fact { name } => resolve_fact_match(
+            index,
+            name,
+            selector,
+            excerpt_chars,
+            "fact_ledger",
+            "fact_name",
+            |_| true,
+        ),
+        NeededContextSelector::Symbol { name } => {
+            let symbol_resolution = resolve_fact_match(
+                index,
+                "file_facts",
+                selector,
+                excerpt_chars,
+                "fact_ledger",
+                "symbol",
+                |item| field_eq(item, "symbol", name),
+            );
+            match symbol_resolution {
+                SelectorResolution::Unavailable(_) => {
+                    if frame.objective.contains(name) {
+                        SelectorResolution::Hydrated(format!(
+                            "hydrated_context: {} source=objective match_reason=objective_symbol excerpt={}",
                             selector_key(selector),
                             compact_excerpt(&frame.objective, excerpt_chars)
-                        )
-                    })
-                })
+                        ))
+                    } else {
+                        SelectorResolution::Unavailable(format_unavailable_line(
+                            selector,
+                            "no_symbol_match",
+                            "typed_index",
+                        ))
+                    }
+                }
+                resolved => resolved,
+            }
         }
-        NeededContextSelector::TestFailure { query } => {
-            find_recent_evidence(frame, "fact: test_failures")
-                .find(|item| {
-                    item.contains("status=failed")
-                        && query.as_ref().map(|q| item.contains(q)).unwrap_or(true)
-                })
-                .map(|item| {
-                    format!(
-                        "hydrated_context: {} source=test_ledger excerpt={}",
-                        selector_key(selector),
-                        compact_excerpt(item, excerpt_chars)
-                    )
-                })
-        }
-        NeededContextSelector::ChangeRef { path } => {
-            find_recent_evidence(frame, "fact: recent_changes_in_files")
-                .find(|item| {
-                    path.as_ref()
-                        .map(|p| contains_path(item, p))
-                        .unwrap_or(true)
-                })
-                .map(|item| {
-                    format!(
-                        "hydrated_context: {} source=change_ledger excerpt={}",
-                        selector_key(selector),
-                        compact_excerpt(item, excerpt_chars)
-                    )
-                })
-        }
-        NeededContextSelector::ReviewRef { query } => {
-            find_recent_evidence(frame, "fact: review_verdicts")
-                .find(|item| {
-                    query
-                        .as_ref()
-                        .map(|q| contains_ref(item, q) || item.contains(&format!("verdict={q}")))
-                        .unwrap_or(true)
-                })
-                .map(|item| {
-                    format!(
-                        "hydrated_context: {} source=review_ledger excerpt={}",
-                        selector_key(selector),
-                        compact_excerpt(item, excerpt_chars)
-                    )
-                })
-        }
-        NeededContextSelector::ArtifactRef { query } => {
-            find_recent_evidence(frame, "fact: artifact_status")
-                .find(|item| {
-                    query
-                        .as_ref()
-                        .map(|q| contains_ref(item, q) || contains_path(item, q))
-                        .unwrap_or(true)
-                })
-                .map(|item| {
-                    format!(
-                        "hydrated_context: {} source=artifact_ledger excerpt={}",
-                        selector_key(selector),
-                        compact_excerpt(item, excerpt_chars)
-                    )
-                })
-        }
-        NeededContextSelector::OpenItemRef { query } => {
-            find_recent_evidence(frame, "fact: open_item_refs")
-                .find(|item| {
-                    query
-                        .as_ref()
-                        .map(|q| contains_ref(item, q) || item.contains(q))
-                        .unwrap_or(true)
-                })
-                .map(|item| {
-                    format!(
-                        "hydrated_context: {} source=open_item_ledger excerpt={}",
-                        selector_key(selector),
-                        compact_excerpt(item, excerpt_chars)
-                    )
-                })
-        }
-        NeededContextSelector::BlockerRef { query } => {
-            find_recent_evidence(frame, "fact: blocker_refs")
-                .find(|item| {
-                    query
-                        .as_ref()
-                        .map(|q| contains_ref(item, q) || item.contains(q))
-                        .unwrap_or(true)
-                })
-                .map(|item| {
-                    format!(
-                        "hydrated_context: {} source=blocker_ledger excerpt={}",
-                        selector_key(selector),
-                        compact_excerpt(item, excerpt_chars)
-                    )
-                })
-        }
-        NeededContextSelector::RejectedApproach { query } => {
-            find_recent_evidence(frame, "fact: rejected_approaches")
-                .find(|item| {
-                    query
-                        .as_ref()
-                        .map(|q| contains_ref(item, q) || item.contains(q))
-                        .unwrap_or(true)
-                })
-                .map(|item| {
-                    format!(
-                        "hydrated_context: {} source=rejected_approach_ledger excerpt={}",
-                        selector_key(selector),
-                        compact_excerpt(item, excerpt_chars)
-                    )
-                })
-        }
-        NeededContextSelector::Artifact { path } => {
-            let match_in_artifacts = path.as_ref().and_then(|p| {
-                find_recent_evidence(frame, "fact: artifact_status")
-                    .find(|item| contains_path(item, p))
-                    .map(|item| {
-                        format!(
-                            "hydrated_context: {} source=artifact_ledger excerpt={}",
-                            selector_key(selector),
-                            compact_excerpt(item, excerpt_chars)
-                        )
-                    })
-            });
-            let match_in_changes = path.as_ref().and_then(|p| {
-                find_recent_evidence(frame, "fact: recent_changes_in_files")
-                    .find(|item| contains_path(item, p))
-                    .map(|item| {
-                        format!(
-                            "hydrated_context: {} source=change_ledger excerpt={}",
-                            selector_key(selector),
-                            compact_excerpt(item, excerpt_chars)
-                        )
-                    })
-            });
-            let match_in_objective = path
-                .as_ref()
-                .filter(|p| frame.objective.contains(p.as_str()))
-                .map(|p| {
-                    format!(
-                        "hydrated_context: {} source=objective excerpt={}",
-                        selector_key(selector),
-                        compact_excerpt(
-                            &format!(
-                                "objective references artifact path {p}; objective={}",
-                                frame.objective
-                            ),
-                            excerpt_chars
-                        )
-                    )
-                });
-            match_in_artifacts
-                .or(match_in_changes)
-                .or(match_in_objective)
-                .or_else(|| {
-                    find_recent_evidence(frame, "fact: file_facts")
-                        .find(|item| {
-                            path.as_ref()
-                                .map(|p| contains_path(item, p))
-                                .unwrap_or(true)
-                        })
-                        .map(|item| {
-                            format!(
-                                "hydrated_context: {} source=fact_ledger excerpt={}",
-                                selector_key(selector),
-                                compact_excerpt(item, excerpt_chars)
-                            )
-                        })
-                })
-        }
-        NeededContextSelector::Fact { name } => frame
-            .recent_evidence
-            .iter()
-            .find(|item| item.starts_with(&format!("fact: {name} ")))
-            .map(|item| {
-                format!(
-                    "hydrated_context: {} source=fact_ledger excerpt={}",
-                    selector_key(selector),
-                    compact_excerpt(item, excerpt_chars)
-                )
-            }),
-        NeededContextSelector::Symbol { name } => frame
-            .recent_evidence
-            .iter()
-            .find(|item| selector_matches_symbol(item, name))
-            .map(|item| {
-                format!(
-                    "hydrated_context: {} source=evidence_match excerpt={}",
-                    selector_key(selector),
-                    compact_excerpt(item, excerpt_chars)
-                )
-            })
-            .or_else(|| {
-                frame.objective.contains(name).then(|| {
-                    format!(
-                        "hydrated_context: {} source=objective excerpt={}",
-                        selector_key(selector),
-                        compact_excerpt(&frame.objective, excerpt_chars)
-                    )
-                })
-            }),
-        NeededContextSelector::Unknown { .. } => None,
+        NeededContextSelector::Unknown { .. } => SelectorResolution::Unavailable(
+            format_unavailable_line(selector, "unsupported_selector", "typed_index"),
+        ),
     }
 }
 
@@ -508,6 +810,7 @@ pub fn hydrate_needed_context(frame: &mut StateFrame, requested: &[String]) -> H
     let mut summary = HydrationSummary::default();
     let (selected, deferred) = select_context_requests(frame, requested);
     let excerpt_chars = estimate_excerpt_chars(frame, selected.len());
+    let index = TypedEvidenceIndex::from_frame(frame);
 
     for selector in deferred {
         let deferred_line = format!(
@@ -521,19 +824,26 @@ pub fn hydrate_needed_context(frame: &mut StateFrame, requested: &[String]) -> H
     }
 
     for selector in selected {
-        if let Some(hydrated) = hydrate_selector(frame, &selector, excerpt_chars) {
-            if push_unique(&mut frame.recent_evidence, hydrated.clone()) {
-                summary.changed = true;
+        match hydrate_selector(&index, frame, &selector, excerpt_chars) {
+            SelectorResolution::Hydrated(hydrated) => {
+                if push_unique(&mut frame.recent_evidence, hydrated.clone()) {
+                    summary.changed = true;
+                }
+                push_unique(&mut summary.hydrated, hydrated);
             }
-            push_unique(&mut summary.hydrated, hydrated);
-            continue;
+            SelectorResolution::Stale(stale) => {
+                if push_unique(&mut frame.recent_evidence, stale.clone()) {
+                    summary.changed = true;
+                }
+                push_unique(&mut summary.stale, stale);
+            }
+            SelectorResolution::Unavailable(unavailable) => {
+                if push_unique(&mut frame.recent_evidence, unavailable.clone()) {
+                    summary.changed = true;
+                }
+                push_unique(&mut summary.unavailable, unavailable);
+            }
         }
-
-        let unavailable = format!("context_unavailable: {}", selector_key(&selector));
-        if push_unique(&mut frame.recent_evidence, unavailable.clone()) {
-            summary.changed = true;
-        }
-        push_unique(&mut summary.unavailable, unavailable);
     }
 
     summary
@@ -555,14 +865,14 @@ mod tests {
             blocked_items: Vec::new(),
             accepted_summary: Vec::new(),
             recent_evidence: vec![
-                "fact: file_facts ref=filefact:1 path=src/core/state_frame_projection.rs kind=target_file source=step_objective freshness=current confidence=1.00 symbol=BossCoordinator fact=step objective names this path as concrete context: src/core/state_frame_projection.rs".into(),
-                "fact: recent_changes_in_files ref=change:1 path=src/core/state_frame_projection.rs source=worker_result freshness=after-worker-output confidence=0.90 summary=updated src/core/state_frame_projection.rs".into(),
-                "fact: test_failures ref=test:1 name=worker_reported_tests status=failed source=worker_result freshness=after-worker-output confidence=0.85 summary=tests failed in boss_flow".into(),
-                "fact: review_verdicts ref=review:step1:runtime:0 verdict=accepted source=tool:BossReview freshness=after-runtime-review confidence=1.00 summary=LGTM after targeted review".into(),
-                "fact: artifact_status ref=artifact:step1:runtime:0 path=/tmp/report.md kind=file status=verified source=tool:ArtifactVerify freshness=after-runtime-artifact-verify confidence=1.00 summary=artifact verification passed for /tmp/report.md".into(),
-                "fact: open_item_refs ref=openitem:step1:0 source=acceptance:0 freshness=current confidence=1.00 summary=tests pass".into(),
-                "fact: blocker_refs ref=blocker:step1:0 source=stage:waitingforapproval freshness=current confidence=1.00 summary=waiting for user approval".into(),
-                "fact: rejected_approaches ref=rejected:step1:0 source=review_correction source_ref=review:step1:runtime:1 freshness=after-review confidence=1.00 summary=previous patch ignored edge cases correction=preserve the auth guard branch".into(),
+                "fact: file_facts ref=filefact:1 path=src/core/state_frame_projection.rs kind=target_file source=step_objective source_event_id=step-objective:1 freshness=current confidence=1.00 status=active invalidated_by=none supersedes=none conflicts_with=none symbol=BossCoordinator fact=step objective names this path as concrete context: src/core/state_frame_projection.rs".into(),
+                "fact: recent_changes_in_files ref=change:1 path=src/core/state_frame_projection.rs source=worker_result source_event_id=worker-result:1 freshness=after-worker-output confidence=0.90 status=active invalidated_by=none supersedes=none conflicts_with=none summary=updated src/core/state_frame_projection.rs".into(),
+                "fact: test_failures ref=test:1 name=worker_reported_tests status=failed source=worker_result source_event_id=worker-result:1 freshness=after-worker-output confidence=0.85 lineage_status=active invalidated_by=none supersedes=none conflicts_with=none summary=tests failed in boss_flow".into(),
+                "fact: review_verdicts ref=review:step1:runtime:0 verdict=accepted source=tool:BossReview source_event_id=tool-review:1:0 freshness=after-runtime-review confidence=1.00 status=active invalidated_by=none supersedes=none conflicts_with=none summary=LGTM after targeted review".into(),
+                "fact: artifact_status ref=artifact:step1:runtime:0 path=/tmp/report.md kind=file status=verified source=tool:ArtifactVerify source_event_id=tool-artifact:1:0 freshness=after-runtime-artifact-verify confidence=1.00 lineage_status=active invalidated_by=none supersedes=none conflicts_with=none summary=artifact verification passed for /tmp/report.md".into(),
+                "fact: open_item_refs ref=openitem:step1:0 source=acceptance:0 source_event_id=step-acceptance:1:0 freshness=current confidence=1.00 status=active invalidated_by=none supersedes=none conflicts_with=none summary=tests pass".into(),
+                "fact: blocker_refs ref=blocker:step1:0 source=stage:waitingforapproval source_event_id=stage-blocker:1:0 freshness=current confidence=1.00 status=active invalidated_by=none supersedes=none conflicts_with=none summary=waiting for user approval".into(),
+                "fact: rejected_approaches ref=rejected:step1:0 source=review_correction source_ref=review:step1:runtime:1 source_event_id=review-correction:1 freshness=after-review confidence=1.00 status=active invalidated_by=none supersedes=none conflicts_with=review:step1:runtime:1 summary=previous patch ignored edge cases correction=preserve the auth guard branch".into(),
             ],
             allowed_actions: vec!["read_file".into()],
             toolset_id: None,
@@ -627,12 +937,15 @@ mod tests {
         assert_eq!(summary.hydrated.len(), 3);
         assert!(frame.recent_evidence.iter().any(|item| {
             item.contains("hydrated_context: file_snippet:src/core/state_frame_projection.rs")
+                && item.contains("match_reason=path")
+                && item.contains("source_event_id=step-objective:1")
         }));
         assert!(
             frame
                 .recent_evidence
                 .iter()
-                .any(|item| item.contains("hydrated_context: test_failure"))
+                .any(|item| item.contains("hydrated_context: test_failure")
+                    && item.contains("source=test_ledger"))
         );
     }
 
@@ -643,7 +956,9 @@ mod tests {
         assert!(summary.changed);
         assert_eq!(
             summary.unavailable,
-            vec!["context_unavailable: symbol:MissingSymbol"]
+            vec![
+                "context_unavailable: symbol:MissingSymbol reason=no_symbol_match resolver=typed_index"
+            ]
         );
     }
 
@@ -692,7 +1007,8 @@ mod tests {
             frame
                 .recent_evidence
                 .iter()
-                .any(|item| item.contains("source=review_ledger"))
+                .any(|item| item.contains("source=review_ledger")
+                    && item.contains("source_event_id=tool-review:1:0"))
         );
         assert!(frame.recent_evidence.iter().any(|item| {
             item.contains("hydrated_context: artifact_ref:artifact:step1:runtime:0")
@@ -701,7 +1017,8 @@ mod tests {
             frame
                 .recent_evidence
                 .iter()
-                .any(|item| item.contains("source=artifact_ledger"))
+                .any(|item| item.contains("source=artifact_ledger")
+                    && item.contains("source_event_id=tool-artifact:1:0"))
         );
     }
 
@@ -736,6 +1053,23 @@ mod tests {
                 .iter()
                 .any(|item| item.contains("source=rejected_approach_ledger"))
         );
+    }
+
+    #[test]
+    fn hydrate_needed_context_reports_stale_ref_reason() {
+        let mut frame = make_frame();
+        frame.recent_evidence.push(
+            "fact: review_verdicts ref=review:step1:stale verdict=rejected source=tool:BossReview source_event_id=tool-review:1:9 freshness=after-runtime-review confidence=1.00 status=stale invalidated_by=review:step1:runtime:0 supersedes=none conflicts_with=none summary=obsolete review verdict".into(),
+        );
+
+        let summary = hydrate_needed_context(&mut frame, &["review_ref:review:step1:stale".into()]);
+        assert!(summary.changed);
+        assert_eq!(summary.hydrated.len(), 0);
+        assert_eq!(summary.unavailable.len(), 0);
+        assert_eq!(summary.stale.len(), 1);
+        assert!(summary.stale[0].contains("context_stale: review_ref:review:step1:stale"));
+        assert!(summary.stale[0].contains("stale_reason=lineage_status=stale"));
+        assert!(summary.stale[0].contains("source_event_id=tool-review:1:9"));
     }
 
     #[test]
