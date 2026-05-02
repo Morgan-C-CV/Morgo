@@ -163,6 +163,8 @@ Rules:\n\
 - In the current runtime, `call_tool` is expected to use real worker tools. Prefer narrow `Read` calls with exact `file_path`, use `Bash` only for concrete commands, and use `Edit` with exact `file_path` / `old_string` / `new_string`\n\
 - Never call `Edit` unless you already know the exact replacement span. If `old_string` is missing, empty, or uncertain, first `Read` the target file and then issue `Edit` with the exact `old_string`\n\
 - If a prior `call_tool` failed, read the `tool_feedback:` / `recent_output_ref:` lines in `recent_evidence`, diagnose the reason, and choose the next action accordingly\n\
+- If `tool_feedback` says `category=schema_invalid`, rewrite the tool call using canonical argument names before retrying: `Bash.command`, `Read.file_path`, `Edit.file_path/old_string/new_string`\n\
+- If `tool_feedback` says `category=missing_path`, do not repeat the same failing `Read`; first inspect `parent_path` or create the missing directory/file scaffold, then continue\n\
 - You may retry a tool call when the failure looks transient or fixable, but do not blindly repeat the exact same failing action without changing args, path, command, or strategy\n\
 - If a `Read` says a target path does not exist yet, inspect the parent path or create the needed directory/file before retrying the same `Read`\n\
 - When using `needed_context`, prefer typed selectors like `file_snippet:path`, `test_failure`, `change_ref:path`, `review_ref:ref_id`, `artifact_ref:ref_id`, `open_item_ref:ref_id`, `blocker_ref:ref_id`, `rejected_approach:ref_id`, `artifact:path`, or `fact:name`\n\
@@ -461,6 +463,12 @@ fn parse_read_path(decision: &crate::core::state_frame::StateDecision) -> Option
             return Some(trimmed.to_string());
         }
     }
+    if let Some(path) = next_action.args.get("path").and_then(|v| v.as_str()) {
+        let trimmed = path.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
     let raw = next_action.args.as_str()?.trim();
     if raw.is_empty() {
         None
@@ -474,7 +482,11 @@ fn parse_edit_path(decision: &crate::core::state_frame::StateDecision) -> Option
     if !next_action.action_type.eq_ignore_ascii_case("Edit") {
         return None;
     }
-    let path = next_action.args.get("file_path").and_then(|v| v.as_str())?;
+    let path = next_action
+        .args
+        .get("file_path")
+        .and_then(|v| v.as_str())
+        .or_else(|| next_action.args.get("path").and_then(|v| v.as_str()))?;
     let trimmed = path.trim();
     if trimmed.is_empty() {
         None
@@ -488,7 +500,11 @@ fn parse_edit_old_string(decision: &crate::core::state_frame::StateDecision) -> 
     if !next_action.action_type.eq_ignore_ascii_case("Edit") {
         return None;
     }
-    let old_string = next_action.args.get("old_string").and_then(|v| v.as_str())?;
+    let old_string = next_action
+        .args
+        .get("old_string")
+        .and_then(|v| v.as_str())
+        .or_else(|| next_action.args.get("old").and_then(|v| v.as_str()))?;
     let trimmed = old_string.trim();
     if trimmed.is_empty() {
         None
@@ -508,12 +524,60 @@ fn parse_bash_command(decision: &crate::core::state_frame::StateDecision) -> Opt
             return Some(trimmed.to_string());
         }
     }
+    if let Some(command) = next_action.args.get("cmd").and_then(|v| v.as_str()) {
+        let trimmed = command.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
     let raw = next_action.args.as_str()?.trim();
     if raw.is_empty() {
         None
     } else {
         Some(raw.to_string())
     }
+}
+
+fn canonicalize_next_action_args(
+    decision: &crate::core::state_frame::StateDecision,
+) -> serde_json::Value {
+    let Some(next_action) = decision.next_action.as_ref() else {
+        return serde_json::Value::Null;
+    };
+    let mut args = next_action.args.clone();
+    let Some(obj) = args.as_object_mut() else {
+        return args;
+    };
+    if next_action.action_type.eq_ignore_ascii_case("Bash") {
+        if !obj.contains_key("command") {
+            if let Some(value) = obj.get("cmd").cloned() {
+                obj.insert("command".into(), value);
+            }
+        }
+    }
+    if next_action.action_type.eq_ignore_ascii_case("Read")
+        || next_action.action_type.eq_ignore_ascii_case("Edit")
+        || next_action.action_type.eq_ignore_ascii_case("Write")
+    {
+        if !obj.contains_key("file_path") {
+            if let Some(value) = obj.get("path").cloned() {
+                obj.insert("file_path".into(), value);
+            }
+        }
+    }
+    if next_action.action_type.eq_ignore_ascii_case("Edit") {
+        if !obj.contains_key("old_string") {
+            if let Some(value) = obj.get("old").cloned() {
+                obj.insert("old_string".into(), value);
+            }
+        }
+        if !obj.contains_key("new_string") {
+            if let Some(value) = obj.get("new").cloned() {
+                obj.insert("new_string".into(), value);
+            }
+        }
+    }
+    args
 }
 
 async fn execute_call_tool(
@@ -549,10 +613,11 @@ async fn execute_call_tool(
                 None,
             ),
         })?;
-    let input = if next_action.args.is_string() {
-        next_action.args.as_str().unwrap_or_default().to_string()
+    let canonical_args = canonicalize_next_action_args(decision);
+    let input = if canonical_args.is_string() {
+        canonical_args.as_str().unwrap_or_default().to_string()
     } else {
-        serde_json::to_string(&next_action.args)
+        serde_json::to_string(&canonical_args)
             .map_err(|error| CallToolDispatchError {
                 reason: format!("failed to serialize tool args: {error}"),
                 record: build_execution_record(
@@ -728,6 +793,14 @@ fn push_tool_failure_feedback(
         .or_else(|| observable_path_from_input(record.observable_input.as_ref()))
     {
         feedback_tail.push_str(&format!(" path={path}"));
+        if category == "missing_path" {
+            if let Some(parent) = std::path::Path::new(&path).parent() {
+                let parent = parent.to_string_lossy();
+                if !parent.trim().is_empty() {
+                    feedback_tail.push_str(&format!(" parent_path={parent}"));
+                }
+            }
+        }
     }
     if let Some(command) = parse_bash_command(decision) {
         feedback_tail.push_str(&format!(
@@ -780,6 +853,11 @@ fn classify_dispatch_failure(reason: &str) -> String {
         "tool_runtime_unavailable".into()
     } else if lowered.contains("unknown tool") {
         "tool_unavailable".into()
+    } else if lowered.contains("no such file or directory")
+        || lowered.contains("not found in ")
+        || lowered.contains("not available: no such file")
+    {
+        "missing_path".into()
     } else if lowered.contains("requires approval") || lowered.contains(" denied") {
         "permission_denied".into()
     } else if lowered.contains("invalid input")
@@ -1406,12 +1484,63 @@ mod tests {
                 assert_eq!(usage.tool_dispatch_success_count, 0);
                 assert_eq!(usage.tool_dispatch_failure_count, 1);
                 assert_eq!(
-                    usage.tool_dispatch_failure_taxonomy.get("tool_result_empty"),
+                    usage.tool_dispatch_failure_taxonomy.get("missing_path"),
                     Some(&1usize)
                 );
                 assert_eq!(usage.tool_execution_records.len(), 1);
             }
             other => panic!("expected Done after read failure feedback, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn call_tool_bash_cmd_alias_is_canonicalized() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let temp_path = unique_temp_path("call_tool_bash_cmd_alias");
+        let bash_json = format!(
+            r#"{{"state":"executing","decision":"call_tool","next_action":{{"action_type":"Bash","args":{{"cmd":"printf alias-ok > \"{}\""}}}}}}"#,
+            temp_path.display()
+        );
+        let read_json = format!(
+            r#"{{"state":"executing","decision":"call_tool","next_action":{{"action_type":"Read","args":{{"path":"{}"}}}}}}"#,
+            temp_path.display()
+        );
+        let done_json = r#"{"state":"done","decision":"done"}"#;
+        let client = ModelProviderClient::with_scripted_turns(vec![
+            vec![StreamEvent::TextDelta(bash_json.into())],
+            vec![StreamEvent::TextDelta(read_json.into())],
+            vec![StreamEvent::TextDelta(done_json.into())],
+        ]);
+        let registry = ToolRegistry::new()
+            .register(Arc::new(BashTool))
+            .register(Arc::new(FileReadTool));
+        let permissions = ToolPermissionContext::new(PermissionMode::Default);
+        permissions.add_always_allow_rule("Bash");
+        let tool_runtime = StateFrameToolRuntime {
+            registry,
+            permissions,
+        };
+        let outcome = rt
+            .block_on(run_decision_loop_with_tools(
+                &client,
+                make_frame(),
+                DecisionLoopConfig {
+                    max_iterations: 4,
+                    ..DecisionLoopConfig::default()
+                },
+                Some(tool_runtime),
+            ))
+            .expect("loop should not error");
+        let content = std::fs::read_to_string(&temp_path).expect("bash alias should create file");
+        let _ = std::fs::remove_file(&temp_path);
+        assert_eq!(content, "alias-ok");
+        match outcome {
+            LoopOutcome::Done { usage, .. } => {
+                assert_eq!(usage.tool_dispatch_count, 2);
+                assert_eq!(usage.tool_dispatch_success_count, 2);
+                assert_eq!(usage.tool_dispatch_failure_count, 0);
+            }
+            other => panic!("expected Done, got {other:?}"),
         }
     }
 
