@@ -5,6 +5,9 @@ use crate::core::state_frame::{
 use crate::core::state_frame_hydration::hydrate_needed_context;
 use crate::service::api::client::ModelProviderClient;
 use crate::service::api::streaming::StreamEvent;
+use crate::state::permission_context::ToolPermissionContext;
+use crate::tool::definition::{ToolCall, ToolResult};
+use crate::tool::registry::ToolRegistry;
 
 #[derive(Debug, Clone)]
 pub struct DecisionLoopConfig {
@@ -40,6 +43,12 @@ pub struct LoopUsage {
     pub hydration_count: usize,
     pub stale_ref_count: usize,
     pub hydration_ref_missing: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct StateFrameToolRuntime {
+    pub registry: ToolRegistry,
+    pub permissions: ToolPermissionContext,
 }
 
 #[derive(Debug, Clone)]
@@ -97,7 +106,7 @@ StateDecision schema:\n\
 {\n\
   \"state\": \"<one of: planning, executing, reviewing, correcting, verifying, blocked, done>\",\n\
   \"decision\": \"<one of: continue, request_context, call_tool, handoff, accept, reject, done>\",\n\
-  \"next_action\": null,\n\
+  \"next_action\": {\"action_type\": \"Read\", \"args\": {\"file_path\": \"path/to/file.rs\"}},\n\
   \"needed_context\": [],\n\
   \"state_patch\": {\n\
     \"open_items_add\": [],\n\
@@ -119,6 +128,8 @@ Rules:\n\
 - Treat `recent_evidence` entries prefixed with `fact:` as the authoritative Fact Ledger for this turn\n\
 - If a fact entry already says `none`, `none recorded`, `absent`, or equivalent, do NOT request that same context again\n\
 - Only use \"decision\": \"request_context\" when the missing fact is not already present in objective/open_items/blocked_items/accepted_summary/recent_evidence\n\
+- Use \"decision\": \"call_tool\" when you need a concrete runtime action before you can continue; always include `next_action.action_type` and structured `next_action.args`\n\
+- In the current runtime, `call_tool` is expected to use real worker tools. Prefer narrow `Read` calls with exact `file_path`, and only request the smallest excerpt needed\n\
 - When using `needed_context`, prefer typed selectors like `file_snippet:path`, `test_failure`, `change_ref:path`, `review_ref:ref_id`, `artifact_ref:ref_id`, `open_item_ref:ref_id`, `blocker_ref:ref_id`, `rejected_approach:ref_id`, `artifact:path`, or `fact:name`\n\
 - When `recent_evidence` contains `fallback_context:` or `fallback_context_item:` lines, consume that fallback evidence before requesting the same context again\n\
 - The \"decision\" field MUST be one of the exact string values above — never use free text\n\
@@ -325,6 +336,20 @@ fn validate_decision_for_frame(
     decision: &crate::core::state_frame::StateDecision,
 ) -> Result<(), RepairNeeded> {
     if !requires_readonly_audit_contract(frame) {
+        if decision.decision == DecisionKind::CallTool {
+            let Some(next_action) = decision.next_action.as_ref() else {
+                return Err(RepairNeeded {
+                    reason: "call_tool requires next_action".into(),
+                    raw_json: String::new(),
+                });
+            };
+            if next_action.action_type.trim().is_empty() {
+                return Err(RepairNeeded {
+                    reason: "call_tool requires non-empty next_action.action_type".into(),
+                    raw_json: String::new(),
+                });
+            }
+        }
         return Ok(());
     }
 
@@ -371,6 +396,119 @@ fn parse_and_validate_decision(
     Ok(decision)
 }
 
+fn compact_tool_excerpt(text: &str, max_chars: usize) -> String {
+    let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut iter = compact.chars();
+    let excerpt = iter.by_ref().take(max_chars).collect::<String>();
+    if iter.next().is_some() {
+        format!("{excerpt}...")
+    } else {
+        excerpt
+    }
+}
+
+fn parse_read_path(decision: &crate::core::state_frame::StateDecision) -> Option<String> {
+    let next_action = decision.next_action.as_ref()?;
+    if !next_action.action_type.eq_ignore_ascii_case("Read") {
+        return None;
+    }
+    if let Some(path) = next_action.args.get("file_path").and_then(|v| v.as_str()) {
+        let trimmed = path.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+    let raw = next_action.args.as_str()?.trim();
+    if raw.is_empty() {
+        None
+    } else {
+        Some(raw.to_string())
+    }
+}
+
+async fn execute_call_tool(
+    frame: &mut StateFrame,
+    decision: &crate::core::state_frame::StateDecision,
+    tool_runtime: Option<&StateFrameToolRuntime>,
+    dispatch_seq: &mut usize,
+) -> Result<bool, String> {
+    let tool_runtime = tool_runtime.ok_or_else(|| {
+        "call_tool requested but StateFrame tool runtime is unavailable".to_string()
+    })?;
+    let next_action = decision
+        .next_action
+        .as_ref()
+        .ok_or_else(|| "call_tool requested without next_action".to_string())?;
+    let input = if next_action.args.is_string() {
+        next_action.args.as_str().unwrap_or_default().to_string()
+    } else {
+        serde_json::to_string(&next_action.args)
+            .map_err(|error| format!("failed to serialize tool args: {error}"))?
+    };
+    let call = ToolCall::new(next_action.action_type.clone(), input);
+    let result = tool_runtime
+        .registry
+        .invoke(&call, &tool_runtime.permissions)
+        .await
+        .map_err(|error| format!("tool dispatch failed: {error}"))?;
+    *dispatch_seq += 1;
+    let source_event_id = format!(
+        "tool-{}:{}",
+        next_action.action_type.to_ascii_lowercase(),
+        *dispatch_seq
+    );
+    match result {
+        ToolResult::Text(text) => {
+            let mut changed = false;
+            let excerpt = compact_tool_excerpt(&text, 220);
+            changed |= push_unique(
+                &mut frame.recent_evidence,
+                format!(
+                    "recent_output_ref: ref=tool_output:{} tool={} source_event_id={} excerpt={}",
+                    dispatch_seq, next_action.action_type, source_event_id, excerpt
+                ),
+            );
+            if let Some(path) = parse_read_path(decision) {
+                changed |= push_unique(
+                    &mut frame.recent_evidence,
+                    format!(
+                        "fact: file_facts ref=filefact:runtime:read:{} path={} kind=source_file source=tool:{} source_event_id={} freshness=after-runtime confidence=1.00 status=active invalidated_by=none supersedes=none conflicts_with=none fact=runtime read observed concrete file context: {}",
+                        dispatch_seq,
+                        path,
+                        next_action.action_type,
+                        source_event_id,
+                        path
+                    ),
+                );
+                changed |= push_unique(
+                    &mut frame.recent_evidence,
+                    format!(
+                        "hydrated_context: file_snippet:{} source=tool:{} match_reason=call_tool_read trace=fact_name=file_facts ref=filefact:runtime:read:{} source=tool:{} source_event_id={} freshness=after-runtime excerpt={}",
+                        path,
+                        next_action.action_type,
+                        dispatch_seq,
+                        next_action.action_type,
+                        source_event_id,
+                        excerpt
+                    ),
+                );
+            }
+            Ok(changed)
+        }
+        ToolResult::ResultTooLarge(message)
+        | ToolResult::Interrupted(message)
+        | ToolResult::Denied(message)
+        | ToolResult::Progress(message) => Err(format!(
+            "call_tool {} did not produce usable text: {}",
+            next_action.action_type, message
+        )),
+        ToolResult::PendingApproval { message, .. } => Err(format!(
+            "call_tool {} requires approval: {}",
+            next_action.action_type, message
+        )),
+    }
+}
+
 /// Run a stateless JSON decision loop.
 ///
 /// Each iteration:
@@ -382,11 +520,21 @@ fn parse_and_validate_decision(
 /// Pure function — no AppState, no session actors, no side effects beyond the provider calls.
 pub async fn run_decision_loop(
     client: &ModelProviderClient,
+    frame: StateFrame,
+    config: DecisionLoopConfig,
+) -> anyhow::Result<LoopOutcome> {
+    run_decision_loop_with_tools(client, frame, config, None).await
+}
+
+pub async fn run_decision_loop_with_tools(
+    client: &ModelProviderClient,
     mut frame: StateFrame,
     config: DecisionLoopConfig,
+    tool_runtime: Option<StateFrameToolRuntime>,
 ) -> anyhow::Result<LoopOutcome> {
     let mut total_usage = LoopUsage::default();
     let mut fallback_ladder = FallbackLadderState::default();
+    let mut tool_dispatch_seq = 0usize;
 
     for _iter in 0..config.max_iterations {
         let prompt = format!(
@@ -524,7 +672,24 @@ pub async fn run_decision_loop(
                     });
                 }
             }
-            // Unsupported kinds: advance state, continue loop (observable via MaxIterationsReached).
+            DecisionKind::CallTool => {
+                frame.state = decision.state;
+                let changed = execute_call_tool(
+                    &mut frame,
+                    &decision,
+                    tool_runtime.as_ref(),
+                    &mut tool_dispatch_seq,
+                )
+                .await
+                .map_err(anyhow::Error::msg)?;
+                if !changed {
+                    return Ok(LoopOutcome::NoProgress {
+                        last_state: frame.state,
+                        reason: "call_tool decision produced no StateFrame progress".into(),
+                        usage: total_usage,
+                    });
+                }
+            }
             _ => {
                 frame.state = decision.state;
             }
@@ -539,10 +704,17 @@ pub async fn run_decision_loop(
 
 #[cfg(test)]
 mod tests {
-    use super::{DecisionLoopConfig, LoopOutcome, run_decision_loop};
+    use super::{
+        DecisionLoopConfig, LoopOutcome, StateFrameToolRuntime, run_decision_loop,
+        run_decision_loop_with_tools,
+    };
     use crate::core::state_frame::{ActorRole, AgentState, StateBudget, StateFrame};
     use crate::service::api::client::ModelProviderClient;
     use crate::service::api::streaming::StreamEvent;
+    use crate::state::permission_context::{PermissionMode, ToolPermissionContext};
+    use crate::tool::builtin::file_read::FileReadTool;
+    use crate::tool::registry::ToolRegistry;
+    use std::sync::Arc;
 
     fn make_frame() -> StateFrame {
         StateFrame {
@@ -624,6 +796,50 @@ mod tests {
                     usage.fallback_reason.as_deref(),
                     Some("request_context_escalated:symbol:MissingSymbol")
                 );
+            }
+            other => panic!("expected Done, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn call_tool_read_writes_typed_recent_evidence_and_completes() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let temp_path = std::env::temp_dir().join(format!(
+            "stateframe_call_tool_read_{}.txt",
+            std::process::id()
+        ));
+        std::fs::write(
+            &temp_path,
+            "fn important_symbol() {\n    println!(\"hello\");\n}\n",
+        )
+        .expect("temp file should be written");
+        let request_json = format!(
+            r#"{{"state":"executing","decision":"call_tool","next_action":{{"action_type":"Read","args":{{"file_path":"{}"}}}}}}"#,
+            temp_path.display()
+        );
+        let done_json = r#"{"state":"done","decision":"done"}"#;
+        let client = ModelProviderClient::with_scripted_turns(vec![
+            vec![StreamEvent::TextDelta(request_json.into())],
+            vec![StreamEvent::TextDelta(done_json.into())],
+        ]);
+        let registry = ToolRegistry::new().register(Arc::new(FileReadTool));
+        let tool_runtime = StateFrameToolRuntime {
+            registry,
+            permissions: ToolPermissionContext::new(PermissionMode::Default),
+        };
+        let outcome = rt
+            .block_on(run_decision_loop_with_tools(
+                &client,
+                make_frame(),
+                DecisionLoopConfig::default(),
+                Some(tool_runtime),
+            ))
+            .expect("loop should not error");
+        let _ = std::fs::remove_file(&temp_path);
+        match outcome {
+            LoopOutcome::Done { usage, .. } => {
+                assert_eq!(usage.hydration_count, 0);
+                assert_eq!(usage.fallback_count, 0);
             }
             other => panic!("expected Done, got {other:?}"),
         }

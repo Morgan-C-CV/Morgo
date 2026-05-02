@@ -10870,6 +10870,7 @@ async fn t27_5_runtime_override_live_seam_uses_resolved_snapshot_client() {
         inherited_snapshot: &inherited,
         model_registry: Some(&registry),
         observability: rust_agent::service::observability::ServiceObservabilityTracker::default(),
+        tool_runtime: None,
     };
 
     let outcome = run_routed_step_with_runtime(routed, DecisionLoopConfig::default(), runtime)
@@ -10920,6 +10921,7 @@ fn t27_5_runtime_override_missing_registry_fails_step_without_mutating_parent_sn
         inherited_snapshot: &inherited,
         model_registry: None,
         observability: rust_agent::service::observability::ServiceObservabilityTracker::default(),
+        tool_runtime: None,
     };
 
     let error = rt
@@ -10978,6 +10980,7 @@ fn t27_5_runtime_override_unknown_profile_fails_step_without_mutating_parent_sna
         inherited_snapshot: &inherited,
         model_registry: Some(&registry),
         observability: rust_agent::service::observability::ServiceObservabilityTracker::default(),
+        tool_runtime: None,
     };
 
     let error = rt
@@ -12605,6 +12608,7 @@ async fn t27_9_boss_production_path_override_hit_uses_resolved_runtime_not_inher
         inherited_snapshot: &inherited,
         model_registry: Some(&registry),
         observability: rust_agent::service::observability::ServiceObservabilityTracker::default(),
+        tool_runtime: None,
     };
 
     let outcome = run_routed_step_with_runtime(routed, DecisionLoopConfig::default(), runtime)
@@ -12654,6 +12658,7 @@ async fn t27_9_boss_production_path_override_missing_registry_step_fails_with_ob
         inherited_snapshot: &inherited,
         model_registry: None, // registry missing → must fail, not silently fall back
         observability: rust_agent::service::observability::ServiceObservabilityTracker::default(),
+        tool_runtime: None,
     };
 
     let error = run_routed_step_with_runtime(routed, DecisionLoopConfig::default(), runtime)
@@ -12709,6 +12714,7 @@ async fn t27_9_boss_production_path_override_rejected_decision_step_fails_with_o
         inherited_snapshot: &inherited,
         model_registry: Some(&registry),
         observability: rust_agent::service::observability::ServiceObservabilityTracker::default(),
+        tool_runtime: None,
     };
 
     let outcome = run_routed_step_with_runtime(routed, DecisionLoopConfig::default(), runtime)

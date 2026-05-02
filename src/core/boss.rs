@@ -20,7 +20,7 @@ use crate::core::context::WorkerLisMPolicy;
 use crate::core::lism_ab_sample::SharedLisMAbSampleSink;
 use crate::core::prompt_budget::{BudgetDecision, evaluate_message_budget};
 use crate::core::state_frame::ActorRole;
-use crate::core::state_frame_loop::DecisionLoopConfig;
+use crate::core::state_frame_loop::{DecisionLoopConfig, StateFrameToolRuntime};
 use crate::core::state_frame_model_router::ModelTier;
 use crate::core::state_frame_orchestrator::{
     StepOutcome, StepRuntimeResolutionContext, build_routed_state_frame_with_model_route,
@@ -2824,10 +2824,18 @@ impl BossCoordinator {
                             let model_registry = resolve_config_root(&cwd).ok().and_then(|root| {
                                 load_model_profiles_registry_from_root(&root).ok().flatten()
                             });
+                            let tool_runtime = match &app_state.runtime_tool_registry {
+                                Some(registry) => Some(StateFrameToolRuntime {
+                                    registry: registry.read().await.clone(),
+                                    permissions: app_state.permission_context.clone(),
+                                }),
+                                None => None,
+                            };
                             let runtime = StepRuntimeResolutionContext {
                                 inherited_snapshot,
                                 model_registry: model_registry.as_ref(),
                                 observability: app_state.service_observability_tracker.clone(),
+                                tool_runtime,
                             };
                             let outcome = run_routed_step_with_runtime(
                                 routed,

@@ -2,7 +2,8 @@ use crate::bootstrap::model_profiles::ModelProfileRegistry;
 use crate::core::boss_state::{BossPlan, BossStage};
 use crate::core::state_frame::{ActorRole, StateFrame};
 use crate::core::state_frame_loop::{
-    DecisionLoopConfig, LoopOutcome, LoopUsage, run_decision_loop,
+    DecisionLoopConfig, LoopOutcome, LoopUsage, StateFrameToolRuntime, run_decision_loop,
+    run_decision_loop_with_tools,
 };
 use crate::core::state_frame_model_resolver::resolve_step_model;
 use crate::core::state_frame_model_router::{ModelRoute, route_model_tier};
@@ -113,12 +114,14 @@ pub struct StepRuntimeResolutionContext<'a> {
     pub inherited_snapshot: &'a ActiveModelRuntimeSnapshot,
     pub model_registry: Option<&'a ModelProfileRegistry>,
     pub observability: ServiceObservabilityTracker,
+    pub tool_runtime: Option<StateFrameToolRuntime>,
 }
 
 #[derive(Debug, Clone)]
 pub struct ResolvedRoutedStep {
     pub routed: RoutedStateFrame,
     pub resolved_snapshot: ActiveModelRuntimeSnapshot,
+    pub tool_runtime: Option<StateFrameToolRuntime>,
 }
 
 pub async fn run_step_with_state_frame(
@@ -150,10 +153,11 @@ pub async fn run_step_with_state_frame_and_runtime<'a>(
         return Ok(external_tool_execution_unsupported());
     }
     let resolved = resolve_routed_step_runtime(routed, runtime)?;
-    let outcome = run_decision_loop(
+    let outcome = run_decision_loop_with_tools(
         &resolved.resolved_snapshot.client,
         resolved.routed.frame,
         config,
+        resolved.tool_runtime,
     )
     .await?;
     Ok(map_loop_outcome_with_pricing(
@@ -175,6 +179,7 @@ pub fn resolve_routed_step_runtime<'a>(
     Ok(ResolvedRoutedStep {
         routed,
         resolved_snapshot: resolved.snapshot,
+        tool_runtime: runtime.tool_runtime,
     })
 }
 
@@ -187,10 +192,11 @@ pub async fn run_routed_step_with_runtime<'a>(
         return Ok(external_tool_execution_unsupported());
     }
     let resolved = resolve_routed_step_runtime(routed, runtime)?;
-    let outcome = run_decision_loop(
+    let outcome = run_decision_loop_with_tools(
         &resolved.resolved_snapshot.client,
         resolved.routed.frame,
         config,
+        resolved.tool_runtime,
     )
     .await?;
     Ok(map_loop_outcome_with_pricing(
