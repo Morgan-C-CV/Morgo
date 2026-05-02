@@ -129,7 +129,7 @@ Rules:\n\
 - If a fact entry already says `none`, `none recorded`, `absent`, or equivalent, do NOT request that same context again\n\
 - Only use \"decision\": \"request_context\" when the missing fact is not already present in objective/open_items/blocked_items/accepted_summary/recent_evidence\n\
 - Use \"decision\": \"call_tool\" when you need a concrete runtime action before you can continue; always include `next_action.action_type` and structured `next_action.args`\n\
-- In the current runtime, `call_tool` is expected to use real worker tools. Prefer narrow `Read` calls with exact `file_path`, and only request the smallest excerpt needed\n\
+- In the current runtime, `call_tool` is expected to use real worker tools. Prefer narrow `Read` calls with exact `file_path`, use `Bash` only for concrete commands, and use `Edit` with exact `file_path` / `old_string` / `new_string`\n\
 - When using `needed_context`, prefer typed selectors like `file_snippet:path`, `test_failure`, `change_ref:path`, `review_ref:ref_id`, `artifact_ref:ref_id`, `open_item_ref:ref_id`, `blocker_ref:ref_id`, `rejected_approach:ref_id`, `artifact:path`, or `fact:name`\n\
 - When `recent_evidence` contains `fallback_context:` or `fallback_context_item:` lines, consume that fallback evidence before requesting the same context again\n\
 - The \"decision\" field MUST be one of the exact string values above — never use free text\n\
@@ -426,6 +426,39 @@ fn parse_read_path(decision: &crate::core::state_frame::StateDecision) -> Option
     }
 }
 
+fn parse_edit_path(decision: &crate::core::state_frame::StateDecision) -> Option<String> {
+    let next_action = decision.next_action.as_ref()?;
+    if !next_action.action_type.eq_ignore_ascii_case("Edit") {
+        return None;
+    }
+    let path = next_action.args.get("file_path").and_then(|v| v.as_str())?;
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn parse_bash_command(decision: &crate::core::state_frame::StateDecision) -> Option<String> {
+    let next_action = decision.next_action.as_ref()?;
+    if !next_action.action_type.eq_ignore_ascii_case("Bash") {
+        return None;
+    }
+    if let Some(command) = next_action.args.get("command").and_then(|v| v.as_str()) {
+        let trimmed = command.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+    let raw = next_action.args.as_str()?.trim();
+    if raw.is_empty() {
+        None
+    } else {
+        Some(raw.to_string())
+    }
+}
+
 async fn execute_call_tool(
     frame: &mut StateFrame,
     decision: &crate::core::state_frame::StateDecision,
@@ -487,6 +520,55 @@ async fn execute_call_tool(
                         path,
                         next_action.action_type,
                         dispatch_seq,
+                        next_action.action_type,
+                        source_event_id,
+                        excerpt
+                    ),
+                );
+            }
+            if let Some(path) = parse_edit_path(decision) {
+                changed |= push_unique(
+                    &mut frame.recent_evidence,
+                    format!(
+                        "fact: recent_changes_in_files ref=change:runtime:edit:{} path={} source=tool:{} source_event_id={} freshness=after-runtime confidence=1.00 status=active invalidated_by=none supersedes=none conflicts_with=none summary=runtime edit changed {}",
+                        dispatch_seq,
+                        path,
+                        next_action.action_type,
+                        source_event_id,
+                        path
+                    ),
+                );
+                changed |= push_unique(
+                    &mut frame.recent_evidence,
+                    format!(
+                        "fact: file_facts ref=filefact:runtime:edit:{} path={} kind=source_file source=tool:{} source_event_id={} freshness=after-runtime confidence=1.00 status=active invalidated_by=none supersedes=none conflicts_with=none fact=runtime edit produced updated concrete file context: {}",
+                        dispatch_seq,
+                        path,
+                        next_action.action_type,
+                        source_event_id,
+                        path
+                    ),
+                );
+                changed |= push_unique(
+                    &mut frame.recent_evidence,
+                    format!(
+                        "hydrated_context: file_snippet:{} source=tool:{} match_reason=call_tool_edit trace=fact_name=file_facts ref=filefact:runtime:edit:{} source=tool:{} source_event_id={} freshness=after-runtime excerpt={}",
+                        path,
+                        next_action.action_type,
+                        dispatch_seq,
+                        next_action.action_type,
+                        source_event_id,
+                        excerpt
+                    ),
+                );
+            }
+            if let Some(command) = parse_bash_command(decision) {
+                changed |= push_unique(
+                    &mut frame.recent_evidence,
+                    format!(
+                        "fact: artifact_status ref=artifact:runtime:bash:{} path=command:{} kind=command_output status=observed source=tool:{} source_event_id={} freshness=after-runtime confidence=1.00 lineage_status=active invalidated_by=none supersedes=none conflicts_with=none summary={}",
+                        dispatch_seq,
+                        compact_tool_excerpt(&command, 80),
                         next_action.action_type,
                         source_event_id,
                         excerpt
@@ -705,16 +787,21 @@ pub async fn run_decision_loop_with_tools(
 #[cfg(test)]
 mod tests {
     use super::{
-        DecisionLoopConfig, LoopOutcome, StateFrameToolRuntime, run_decision_loop,
-        run_decision_loop_with_tools,
+        DecisionLoopConfig, LoopOutcome, StateFrameToolRuntime, execute_call_tool,
+        run_decision_loop, run_decision_loop_with_tools,
     };
+    use crate::core::state_frame::validate_state_decision;
     use crate::core::state_frame::{ActorRole, AgentState, StateBudget, StateFrame};
+    use crate::core::state_frame_hydration::hydrate_needed_context;
     use crate::service::api::client::ModelProviderClient;
     use crate::service::api::streaming::StreamEvent;
     use crate::state::permission_context::{PermissionMode, ToolPermissionContext};
+    use crate::tool::builtin::bash::BashTool;
+    use crate::tool::builtin::file_edit::FileEditTool;
     use crate::tool::builtin::file_read::FileReadTool;
     use crate::tool::registry::ToolRegistry;
     use std::sync::Arc;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn make_frame() -> StateFrame {
         StateFrame {
@@ -734,6 +821,19 @@ mod tests {
             required_output_schema: Some("state_decision_v1".into()),
             budget: StateBudget::default(),
         }
+    }
+
+    fn unique_temp_path(label: &str) -> std::path::PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "stateframe_{}_{}_{}.txt",
+            label,
+            std::process::id(),
+            nonce
+        ))
     }
 
     #[test]
@@ -843,5 +943,111 @@ mod tests {
             }
             other => panic!("expected Done, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn call_tool_bash_can_create_file_then_read_confirms_side_effect() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let temp_path = unique_temp_path("call_tool_bash");
+        let bash_json = format!(
+            r#"{{"state":"executing","decision":"call_tool","next_action":{{"action_type":"Bash","args":{{"command":"printf 'from bash\n' > \"{}\"","description":"write temp file"}}}}}}"#,
+            temp_path.display()
+        );
+        let read_json = format!(
+            r#"{{"state":"executing","decision":"call_tool","next_action":{{"action_type":"Read","args":{{"file_path":"{}"}}}}}}"#,
+            temp_path.display()
+        );
+        let done_json = r#"{"state":"done","decision":"done"}"#;
+        let client = ModelProviderClient::with_scripted_turns(vec![
+            vec![StreamEvent::TextDelta(bash_json.into())],
+            vec![StreamEvent::TextDelta(read_json.into())],
+            vec![StreamEvent::TextDelta(done_json.into())],
+        ]);
+        let registry = ToolRegistry::new()
+            .register(Arc::new(BashTool))
+            .register(Arc::new(FileReadTool));
+        let permissions = ToolPermissionContext::new(PermissionMode::Default);
+        permissions.add_always_allow_rule("Bash");
+        let tool_runtime = StateFrameToolRuntime {
+            registry,
+            permissions,
+        };
+        let outcome = rt
+            .block_on(run_decision_loop_with_tools(
+                &client,
+                make_frame(),
+                DecisionLoopConfig {
+                    max_iterations: 4,
+                    ..DecisionLoopConfig::default()
+                },
+                Some(tool_runtime),
+            ))
+            .expect("loop should not error");
+        let content = std::fs::read_to_string(&temp_path).expect("bash should create temp file");
+        let _ = std::fs::remove_file(&temp_path);
+        assert_eq!(content, "from bash\n");
+        match outcome {
+            LoopOutcome::Done { usage, .. } => {
+                assert_eq!(usage.fallback_count, 0);
+            }
+            other => panic!("expected Done, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn call_tool_edit_writes_change_fact_and_hydrates_change_ref() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let temp_path = unique_temp_path("call_tool_edit");
+        std::fs::write(&temp_path, "alpha\nbeta\n").expect("temp file should be written");
+        let decision_json = format!(
+            r#"{{"state":"executing","decision":"call_tool","next_action":{{"action_type":"Edit","args":{{"file_path":"{}","old_string":"alpha","new_string":"omega"}}}}}}"#,
+            temp_path.display()
+        );
+        let decision = validate_state_decision(&decision_json).expect("decision json should parse");
+        let registry = ToolRegistry::new()
+            .register(Arc::new(FileEditTool))
+            .register(Arc::new(FileReadTool));
+        let permissions = ToolPermissionContext::new(PermissionMode::Default);
+        permissions.add_always_allow_rule("Edit");
+        let tool_runtime = StateFrameToolRuntime {
+            registry,
+            permissions,
+        };
+        let mut frame = make_frame();
+        let changed = rt
+            .block_on(execute_call_tool(
+                &mut frame,
+                &decision,
+                Some(&tool_runtime),
+                &mut 0usize,
+            ))
+            .expect("edit tool dispatch should succeed");
+        assert!(changed, "edit dispatch should append typed evidence");
+        let content = std::fs::read_to_string(&temp_path).expect("edit should update temp file");
+        assert_eq!(content, "omega\nbeta\n");
+        let hydration = hydrate_needed_context(
+            &mut frame,
+            &[
+                format!("change_ref:{}", temp_path.display()),
+                format!("file_snippet:{}", temp_path.display()),
+            ],
+        );
+        let _ = std::fs::remove_file(&temp_path);
+        assert!(hydration.changed, "hydration should record typed matches");
+        assert_eq!(hydration.unavailable.len(), 0);
+        assert!(
+            hydration
+                .hydrated
+                .iter()
+                .any(|item| item.contains("change_ref:") && item.contains("match_reason=path")),
+            "expected change_ref hydration from recent edit fact"
+        );
+        assert!(
+            hydration
+                .hydrated
+                .iter()
+                .any(|item| item.contains("file_snippet:") && item.contains("match_reason=path")),
+            "expected file_snippet hydration from recent edit file fact"
+        );
     }
 }
