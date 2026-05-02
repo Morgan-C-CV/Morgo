@@ -6,7 +6,7 @@ use crate::core::state_frame_loop::{
 };
 use crate::core::state_frame_model_resolver::resolve_step_model;
 use crate::core::state_frame_model_router::{ModelRoute, route_model_tier};
-use crate::core::state_frame_projection::project_state_frame;
+use crate::core::state_frame_projection::{collect_projection_diagnostics, project_state_frame};
 use crate::core::state_frame_router::{apply_route, route_toolset};
 use crate::service::api::client::{ModelPricing, ModelProviderClient};
 use crate::service::observability::ServiceObservabilityTracker;
@@ -28,6 +28,7 @@ pub enum StepOutcome {
 pub struct RoutedStateFrame {
     pub frame: StateFrame,
     pub model_route: ModelRoute,
+    pub projection_mismatch_count: usize,
 }
 
 fn contains_external_effect_marker(text: &str) -> bool {
@@ -92,10 +93,15 @@ pub fn build_routed_state_frame_with_model_route(
     role: ActorRole,
 ) -> RoutedStateFrame {
     let mut frame = project_state_frame(plan, stage, Some(step_id), role);
+    let projection_mismatch_count = collect_projection_diagnostics(&frame).mismatch_count;
     let route = route_toolset(&frame);
     apply_route(&mut frame, route);
     let model_route = route_model_tier(frame.budget.effort, frame.role, frame.state);
-    RoutedStateFrame { frame, model_route }
+    RoutedStateFrame {
+        frame,
+        model_route,
+        projection_mismatch_count,
+    }
 }
 
 /// Run a single plan step through the StateFrame decision loop.

@@ -9466,6 +9466,8 @@ async fn report_progress_includes_lism_routed_metadata_for_completed_step() {
     assert_eq!(meta.cache_write_tokens, Some(0));
     assert_eq!(meta.fallback_count, Some(0));
     assert_eq!(meta.projection_mismatch_count, Some(0));
+    assert_eq!(meta.hydration_count, Some(0));
+    assert_eq!(meta.stale_ref_count, Some(0));
 
     server.await.expect("mock provider server finished");
     let _ = std::fs::remove_file(plan_path);
@@ -9547,6 +9549,8 @@ async fn t27_r1_worker_override_hit_report_shows_routed_metadata() {
     );
     assert_eq!(meta.fallback_count, Some(0));
     assert_eq!(meta.projection_mismatch_count, Some(0));
+    assert_eq!(meta.hydration_count, Some(0));
+    assert_eq!(meta.stale_ref_count, Some(0));
     assert_eq!(meta.cache_read_tokens, Some(0));
     assert_eq!(meta.cache_write_tokens, Some(0));
 
@@ -9611,6 +9615,8 @@ async fn t27_r1_report_observability_summary_aggregates_routed_steps() {
     );
     assert_eq!(summary.total_fallback_count, 0);
     assert_eq!(summary.total_projection_mismatch_count, 0);
+    assert_eq!(summary.total_hydration_count, 0);
+    assert_eq!(summary.total_stale_ref_count, 0);
 
     server.await.expect("mock server finished");
     let _ = std::fs::remove_file(plan_path);
@@ -9805,6 +9811,8 @@ async fn t27_r1_format_report_includes_hit_ratio_and_tokens_saved() {
         total_steps_routed: 1,
         total_cache_read_tokens: 400,
         total_cache_write_tokens: 100,
+        total_hydration_count: 0,
+        total_stale_ref_count: 0,
         override_hit_count: 1,
         total_input_tokens: 0,
         total_uncached_input_tokens: 0,
@@ -9839,6 +9847,8 @@ async fn t27_r1_format_report_includes_hit_ratio_and_tokens_saved() {
                 cache_write_tokens: Some(100),
                 fallback_count: Some(0),
                 projection_mismatch_count: Some(0),
+                hydration_count: Some(0),
+                stale_ref_count: Some(0),
                 input_tokens: Some(0),
                 uncached_input_tokens: Some(0),
                 output_tokens: Some(0),
@@ -9868,6 +9878,14 @@ async fn t27_r1_format_report_includes_hit_ratio_and_tokens_saved() {
     assert!(
         report.contains("output=0"),
         "expected output= in report, got: {report}"
+    );
+    assert!(
+        report.contains("hydration=0"),
+        "expected hydration= in report, got: {report}"
+    );
+    assert!(
+        report.contains("stale_refs=0"),
+        "expected stale_refs= in report, got: {report}"
     );
 }
 
@@ -10752,6 +10770,7 @@ fn t27_5_runtime_override_unknown_profile_fails_step_without_mutating_parent_sna
             tier: routed.model_route.tier,
             provider_profile_id: Some("missing-profile".into()),
         },
+        projection_mismatch_count: routed.projection_mismatch_count,
     };
 
     let runtime = StepRuntimeResolutionContext {

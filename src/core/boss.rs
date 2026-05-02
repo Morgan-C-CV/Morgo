@@ -1615,6 +1615,8 @@ impl BossCoordinator {
                 summary.total_cache_write_tokens += m.cache_write_tokens.unwrap_or(0);
                 summary.total_fallback_count += m.fallback_count.unwrap_or(0);
                 summary.total_projection_mismatch_count += m.projection_mismatch_count.unwrap_or(0);
+                summary.total_hydration_count += m.hydration_count.unwrap_or(0);
+                summary.total_stale_ref_count += m.stale_ref_count.unwrap_or(0);
                 summary.total_input_tokens += m.input_tokens.unwrap_or(0);
                 summary.total_uncached_input_tokens += m.uncached_input_tokens.unwrap_or(0);
                 summary.total_output_tokens += m.output_tokens.unwrap_or(0);
@@ -2607,7 +2609,11 @@ impl BossCoordinator {
                             cache_read_tokens: Some(0),
                             cache_write_tokens: Some(0),
                             fallback_count: Some(1),
-                            projection_mismatch_count: Some(0),
+                            projection_mismatch_count: Some(
+                                routed_preview.projection_mismatch_count,
+                            ),
+                            hydration_count: Some(0),
+                            stale_ref_count: Some(0),
                             input_tokens: Some(0),
                             uncached_input_tokens: Some(0),
                             output_tokens: Some(0),
@@ -2651,7 +2657,9 @@ impl BossCoordinator {
                                 cache_read_tokens: Some(0),
                                 cache_write_tokens: Some(0),
                                 fallback_count: Some(0),
-                                projection_mismatch_count: Some(0),
+                                projection_mismatch_count: Some(routed.projection_mismatch_count),
+                                hydration_count: Some(0),
+                                stale_ref_count: Some(0),
                                 input_tokens: Some(0),
                                 uncached_input_tokens: Some(0),
                                 output_tokens: Some(0),
@@ -2696,6 +2704,8 @@ impl BossCoordinator {
                                 routed_metadata.sent_prompt_chars = Some(usage.sent_prompt_chars);
                                 routed_metadata.estimated_cost_micros_usd =
                                     Some(usage.estimated_cost_micros_usd);
+                                routed_metadata.hydration_count = Some(usage.hydration_count);
+                                routed_metadata.stale_ref_count = Some(usage.stale_ref_count);
                             }
                             (outcome, routed_metadata)
                         };

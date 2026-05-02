@@ -34,6 +34,8 @@ pub struct LoopUsage {
     pub original_prompt_chars: usize,
     pub sent_prompt_chars: usize,
     pub estimated_cost_micros_usd: u64,
+    pub hydration_count: usize,
+    pub stale_ref_count: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -321,6 +323,8 @@ pub async fn run_decision_loop(
             }
             DecisionKind::RequestContext => {
                 let summary = hydrate_needed_context(&mut frame, &decision.needed_context);
+                total_usage.hydration_count += summary.hydrated.len();
+                total_usage.stale_ref_count += summary.stale.len();
                 frame.state = decision.state;
                 if !summary.changed {
                     return Ok(LoopOutcome::NoProgress {

@@ -189,6 +189,10 @@ pub struct BossStepRoutedMetadata {
     pub fallback_count: Option<usize>,
     #[serde(default)]
     pub projection_mismatch_count: Option<usize>,
+    #[serde(default)]
+    pub hydration_count: Option<usize>,
+    #[serde(default)]
+    pub stale_ref_count: Option<usize>,
     /// Total input tokens billed for this step (v1 stub: always 0).
     #[serde(default)]
     pub input_tokens: Option<usize>,
@@ -231,6 +235,10 @@ pub struct BossObservabilitySummary {
     pub total_cache_write_tokens: usize,
     pub total_fallback_count: usize,
     pub total_projection_mismatch_count: usize,
+    #[serde(default)]
+    pub total_hydration_count: usize,
+    #[serde(default)]
+    pub total_stale_ref_count: usize,
     /// Steps where provider_profile_id is Some (i.e. a non-inherited model profile was used).
     pub override_hit_count: usize,
     pub model_tier_counts: std::collections::HashMap<String, usize>,
@@ -311,7 +319,7 @@ impl BossReportPayload {
         for step in &self.steps {
             let m = step.routed_metadata.as_ref();
             lines.push(format!(
-                "  step {:>3}: status={:?} tier={} profile={} frame={}B cache_r={} cache_w={} input={} uncached_input={} output={} sent_chars={} original_chars={} fb={} mm={}",
+                "  step {:>3}: status={:?} tier={} profile={} frame={}B cache_r={} cache_w={} input={} uncached_input={} output={} sent_chars={} original_chars={} fb={} mm={} hydr={} stale={}",
                 step.id,
                 step.status,
                 m.and_then(|m| m.model_tier.as_deref()).unwrap_or("-"),
@@ -326,6 +334,8 @@ impl BossReportPayload {
                 m.and_then(|m| m.original_prompt_chars).map(|n| n.to_string()).unwrap_or_else(|| "-".into()),
                 m.and_then(|m| m.fallback_count).map(|n| n.to_string()).unwrap_or_else(|| "-".into()),
                 m.and_then(|m| m.projection_mismatch_count).map(|n| n.to_string()).unwrap_or_else(|| "-".into()),
+                m.and_then(|m| m.hydration_count).map(|n| n.to_string()).unwrap_or_else(|| "-".into()),
+                m.and_then(|m| m.stale_ref_count).map(|n| n.to_string()).unwrap_or_else(|| "-".into()),
             ));
         }
         if let Some(s) = &self.observability_summary {
@@ -334,7 +344,7 @@ impl BossReportPayload {
                 .map(|r| format!("{:.1}%", r * 100.0))
                 .unwrap_or_else(|| "-".into());
             lines.push(format!(
-                "  summary: routed={} override_hits={} cache_r={} cache_w={} cache_hit_observed={} hit_ratio={} tokens_saved={} input={} uncached_input={} output={} chars={}/{} cost_micros_usd={} fallback={} mismatch={} tiers={:?}",
+                "  summary: routed={} override_hits={} cache_r={} cache_w={} cache_hit_observed={} hit_ratio={} tokens_saved={} input={} uncached_input={} output={} chars={}/{} cost_micros_usd={} fallback={} mismatch={} hydration={} stale_refs={} tiers={:?}",
                 s.total_steps_routed,
                 s.override_hit_count,
                 s.total_cache_read_tokens,
@@ -350,6 +360,8 @@ impl BossReportPayload {
                 s.estimated_cost_micros_usd,
                 s.total_fallback_count,
                 s.total_projection_mismatch_count,
+                s.total_hydration_count,
+                s.total_stale_ref_count,
                 s.model_tier_counts,
             ));
         }

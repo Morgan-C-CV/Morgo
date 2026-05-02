@@ -92,6 +92,102 @@ fn push_none_recorded_unless_present(facts: &mut Vec<String>, fact_name: &str) {
     }
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProjectionDiagnostics {
+    pub mismatch_count: usize,
+    pub warnings: Vec<String>,
+}
+
+fn has_none_recorded_fact(facts: &[String], fact_name: &str) -> bool {
+    facts
+        .iter()
+        .any(|item| item == &format!("fact: {fact_name} none recorded"))
+}
+
+fn has_ref_fact(facts: &[String], fact_name: &str) -> bool {
+    facts
+        .iter()
+        .any(|item| item.starts_with(&format!("fact: {fact_name} ")) && item.contains(" ref="))
+}
+
+fn collect_fact_refs(facts: &[String], fact_name: &str) -> Vec<String> {
+    facts
+        .iter()
+        .filter(|item| item.starts_with(&format!("fact: {fact_name} ")))
+        .filter_map(|item| {
+            item.split_whitespace().find_map(|part| {
+                part.strip_prefix("ref=")
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty())
+            })
+        })
+        .collect()
+}
+
+fn collect_fact_field_values(facts: &[String], fact_name: &str, field_name: &str) -> Vec<String> {
+    facts
+        .iter()
+        .filter(|item| item.starts_with(&format!("fact: {fact_name} ")))
+        .filter_map(|item| {
+            item.split_whitespace().find_map(|part| {
+                part.strip_prefix(&format!("{field_name}="))
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty() && value != "none")
+            })
+        })
+        .collect()
+}
+
+pub fn collect_projection_diagnostics(frame: &StateFrame) -> ProjectionDiagnostics {
+    let mut warnings = Vec::new();
+
+    if !frame.open_items.is_empty()
+        && has_none_recorded_fact(&frame.recent_evidence, "open_item_refs")
+    {
+        warnings.push("open_items present but open_item_refs projected as none recorded".into());
+    }
+    if !frame.blocked_items.is_empty()
+        && has_none_recorded_fact(&frame.recent_evidence, "blocker_refs")
+    {
+        warnings.push("blocked_items present but blocker_refs projected as none recorded".into());
+    }
+    if has_ref_fact(&frame.recent_evidence, "rejected_approaches") {
+        let review_refs = collect_fact_refs(&frame.recent_evidence, "review_verdicts");
+        for source_ref in
+            collect_fact_field_values(&frame.recent_evidence, "rejected_approaches", "source_ref")
+        {
+            if !review_refs.iter().any(|item| item == &source_ref) {
+                warnings.push(format!(
+                    "rejected_approaches source_ref missing in review_verdicts: {source_ref}"
+                ));
+            }
+        }
+    }
+    for fact_name in [
+        "file_facts",
+        "test_failures",
+        "recent_changes_in_files",
+        "review_verdicts",
+        "artifact_status",
+        "open_item_refs",
+        "blocker_refs",
+        "rejected_approaches",
+    ] {
+        let has_ref = has_ref_fact(&frame.recent_evidence, fact_name);
+        let has_none = has_none_recorded_fact(&frame.recent_evidence, fact_name);
+        if has_ref && has_none {
+            warnings.push(format!(
+                "{fact_name} contains both ref-backed facts and none recorded sentinel"
+            ));
+        }
+    }
+
+    ProjectionDiagnostics {
+        mismatch_count: warnings.len(),
+        warnings,
+    }
+}
+
 fn build_fact_ledger(
     plan: &BossPlan,
     stage: BossStage,
@@ -438,7 +534,7 @@ pub fn project_state_frame(
 
     let allowed_actions = allowed_actions_for_state(state, readonly_analysis);
 
-    StateFrame {
+    let mut frame = StateFrame {
         role,
         state,
         objective,
@@ -455,5 +551,60 @@ pub fn project_state_frame(
             "state_decision_v1".into()
         }),
         budget: StateBudget::default(),
+    };
+    let diagnostics = collect_projection_diagnostics(&frame);
+    frame.recent_evidence.push(fact_line(
+        "projection_invariants",
+        format!("mismatch_count={}", diagnostics.mismatch_count),
+    ));
+    for warning in diagnostics.warnings {
+        frame.recent_evidence.push(fact_line(
+            "projection_invariants",
+            format!("warning={warning}"),
+        ));
+    }
+    frame
+}
+
+#[cfg(test)]
+mod tests {
+    use super::collect_projection_diagnostics;
+    use crate::core::state_frame::{ActorRole, AgentState, StateBudget, StateFrame};
+
+    #[test]
+    fn projection_diagnostics_flags_open_items_without_refs_and_missing_review_source_ref() {
+        let frame = StateFrame {
+            role: ActorRole::Worker,
+            state: AgentState::Executing,
+            objective: "fix worker context".into(),
+            open_items: vec!["tests pass".into()],
+            blocked_items: Vec::new(),
+            accepted_summary: Vec::new(),
+            recent_evidence: vec![
+                "fact: open_item_refs none recorded".into(),
+                "fact: review_verdicts ref=review:step1:0 verdict=accepted source=tool:BossReview source_event_id=tool-review:1:0 freshness=current confidence=1.00 status=active invalidated_by=none supersedes=none conflicts_with=none summary=ok".into(),
+                "fact: rejected_approaches ref=rejected:step1:0 source=review_correction source_ref=review:step1:missing source_event_id=review-correction:1 freshness=after-review confidence=1.00 status=active invalidated_by=none supersedes=none conflicts_with=review:step1:missing summary=bad path".into(),
+            ],
+            allowed_actions: vec![],
+            toolset_id: None,
+            skillset_id: None,
+            required_output_schema: Some("state_decision_v1".into()),
+            budget: StateBudget::default(),
+        };
+
+        let diagnostics = collect_projection_diagnostics(&frame);
+        assert_eq!(diagnostics.mismatch_count, 2);
+        assert!(
+            diagnostics
+                .warnings
+                .iter()
+                .any(|item| item.contains("open_items present but open_item_refs"))
+        );
+        assert!(
+            diagnostics
+                .warnings
+                .iter()
+                .any(|item| item.contains("source_ref missing in review_verdicts"))
+        );
     }
 }

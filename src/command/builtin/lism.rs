@@ -63,6 +63,8 @@ impl Command for LisMCommand {
                         let mut total_cache_w: usize = 0;
                         let mut total_fallback: usize = 0;
                         let mut total_mismatch: usize = 0;
+                        let mut total_hydration: usize = 0;
+                        let mut total_stale: usize = 0;
                         let mut total_input: usize = 0;
                         let mut total_uncached_input: usize = 0;
                         let mut total_output: usize = 0;
@@ -78,13 +80,15 @@ impl Command for LisMCommand {
                             total_cache_w += m.cache_write_tokens.unwrap_or(0);
                             total_fallback += m.fallback_count.unwrap_or(0);
                             total_mismatch += m.projection_mismatch_count.unwrap_or(0);
+                            total_hydration += m.hydration_count.unwrap_or(0);
+                            total_stale += m.stale_ref_count.unwrap_or(0);
                             total_input += m.input_tokens.unwrap_or(0);
                             total_uncached_input += m.uncached_input_tokens.unwrap_or(0);
                             total_output += m.output_tokens.unwrap_or(0);
                             total_sent_chars += m.sent_prompt_chars.unwrap_or(0);
                             total_original_chars += m.original_prompt_chars.unwrap_or(0);
                             lines.push(format!(
-                                "  step {id}: tier={tier} profile={profile} frame_size={size} cache_r={cr} cache_w={cw} input={inp} uncached_input={uinp} output={out} sent_chars={sent} original_chars={orig} fallback={fb} mismatch={mm}",
+                                "  step {id}: tier={tier} profile={profile} frame_size={size} cache_r={cr} cache_w={cw} input={inp} uncached_input={uinp} output={out} sent_chars={sent} original_chars={orig} fallback={fb} mismatch={mm} hydration={hydr} stale_refs={stale}",
                                 tier = m.model_tier.as_deref().unwrap_or("-"),
                                 profile = m.provider_profile_id.as_deref().unwrap_or("-"),
                                 size = m.state_frame_size.map(|n| n.to_string()).unwrap_or_else(|| "-".into()),
@@ -97,10 +101,12 @@ impl Command for LisMCommand {
                                 orig = m.original_prompt_chars.map(|n| n.to_string()).unwrap_or_else(|| "-".into()),
                                 fb = m.fallback_count.map(|n| n.to_string()).unwrap_or_else(|| "-".into()),
                                 mm = m.projection_mismatch_count.map(|n| n.to_string()).unwrap_or_else(|| "-".into()),
+                                hydr = m.hydration_count.map(|n| n.to_string()).unwrap_or_else(|| "-".into()),
+                                stale = m.stale_ref_count.map(|n| n.to_string()).unwrap_or_else(|| "-".into()),
                             ));
                         }
                         lines.push(format!(
-                            "  total_steps_routed: {total_routed} override_hits: {override_hits} cache_r: {total_cache_r} cache_w: {total_cache_w} cache_hit_observed: {cache_hit_observed} tokens_saved: {total_cache_r} input: {total_input} uncached_input: {total_uncached_input} output: {total_output} sent_chars: {total_sent_chars} original_chars: {total_original_chars} fallback: {total_fallback} mismatch: {total_mismatch}",
+                            "  total_steps_routed: {total_routed} override_hits: {override_hits} cache_r: {total_cache_r} cache_w: {total_cache_w} cache_hit_observed: {cache_hit_observed} tokens_saved: {total_cache_r} input: {total_input} uncached_input: {total_uncached_input} output: {total_output} sent_chars: {total_sent_chars} original_chars: {total_original_chars} fallback: {total_fallback} mismatch: {total_mismatch} hydration: {total_hydration} stale_refs: {total_stale}",
                             cache_hit_observed = total_cache_r > 0,
                         ));
                         lines.join("\n")
@@ -124,6 +130,6 @@ fn usage() -> String {
 fn explain(enabled: bool) -> String {
     let mode = if enabled { "enabled" } else { "disabled" };
     format!(
-        "LisM is currently {mode}.\n\nAvailable building blocks:\n- StateFrame schema and StateDecision validation\n- BossPlan -> StateFrame projection\n- Stateless JSON decision loop\n- StateFrame orchestrator seam\n- Toolset / skillset router is attached to the live LisM -> /boss production path\n- Model-tier router and provider_profile_id routing are connected to the production path\n- Per-step routed metadata (tier, profile, frame_size, cache, fallback) is recorded and visible in /LisM status and /boss report\n- Archive / retention for accepted and open items\n- Production-path tests for the current StateFrame orchestration pipeline\n\nDeferred items:\n- cache_read/write_tokens, fallback_count, projection_mismatch_count are v1 stubs (always 0; real counters not yet wired)\n- /LisM persistence is not yet connected\n- fallback ladder expansion is still deferred"
+        "LisM is currently {mode}.\n\nAvailable building blocks:\n- StateFrame schema and StateDecision validation\n- BossPlan -> StateFrame projection\n- Stateless JSON decision loop\n- Typed evidence hydration with source trace / unresolved reason / stale reason\n- Toolset / skillset router is attached to the live LisM -> /boss production path\n- Model-tier router and provider_profile_id routing are connected to the production path\n- Per-step routed metadata (tier, profile, frame_size, cache, fallback, mismatch, hydration, stale refs) is recorded and visible in /LisM status and /boss report\n- Archive / retention for accepted and open items\n- Production-path tests for the current StateFrame orchestration pipeline\n\nDeferred items:\n- /LisM persistence is not yet connected\n- fallback ladder expansion is still deferred"
     )
 }

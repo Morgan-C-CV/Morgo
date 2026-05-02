@@ -166,6 +166,8 @@ fn make_drill_report(completed: bool, cost_micros: u64) -> BossReportPayload {
             total_cache_write_tokens: 400,
             total_fallback_count: 0,
             total_projection_mismatch_count: 0,
+            total_hydration_count: 0,
+            total_stale_ref_count: 0,
             override_hit_count: 0,
             model_tier_counts: Default::default(),
             total_input_tokens: 1000,
