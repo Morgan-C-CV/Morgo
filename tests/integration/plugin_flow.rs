@@ -144,6 +144,7 @@ async fn plugin_runtime_exposes_command_hook_tool_and_diagnostics() {
         lism_ab_summarize: None,
         lism_policy: None,
         worker_lism_policy: None,
+        disable_full_worker_dispatch_fallback: false,
         boss_task: None,
         boss_task_timeout_secs: 900,
     })

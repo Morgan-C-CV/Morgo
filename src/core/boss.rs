@@ -59,6 +59,7 @@ pub struct BossCoordinator {
     runtime_owner: Arc<BossRuntimeOwner>,
     lism_policy: Arc<RwLock<BossLisMPolicy>>,
     worker_lism_policy: Arc<RwLock<WorkerLisMPolicy>>,
+    full_worker_dispatch_fallback_enabled: Arc<RwLock<bool>>,
     lism_ab_sink: Option<SharedLisMAbSampleSink>,
 }
 
@@ -604,6 +605,7 @@ impl BossCoordinator {
             runtime_owner,
             lism_policy: Arc::new(RwLock::new(BossLisMPolicy::Inherit)),
             worker_lism_policy: Arc::new(RwLock::new(WorkerLisMPolicy::ForceOn)),
+            full_worker_dispatch_fallback_enabled: Arc::new(RwLock::new(true)),
             lism_ab_sink: None,
         }
     }
@@ -796,6 +798,9 @@ impl BossCoordinator {
             runtime_owner: self.runtime_owner.clone(),
             lism_policy: self.lism_policy.clone(),
             worker_lism_policy: self.worker_lism_policy.clone(),
+            full_worker_dispatch_fallback_enabled: self
+                .full_worker_dispatch_fallback_enabled
+                .clone(),
             lism_ab_sink: self.lism_ab_sink.clone(),
         }
     }
@@ -1582,6 +1587,20 @@ impl BossCoordinator {
 
     pub async fn worker_lism_policy(&self) -> WorkerLisMPolicy {
         *self.worker_lism_policy.read().await
+    }
+
+    pub async fn set_full_worker_dispatch_fallback_enabled(&self, enabled: bool) {
+        *self.full_worker_dispatch_fallback_enabled.write().await = enabled;
+    }
+
+    pub fn init_full_worker_dispatch_fallback_enabled(&mut self, enabled: bool) {
+        if let Ok(mut guard) = self.full_worker_dispatch_fallback_enabled.try_write() {
+            *guard = enabled;
+        }
+    }
+
+    pub async fn full_worker_dispatch_fallback_enabled(&self) -> bool {
+        *self.full_worker_dispatch_fallback_enabled.read().await
     }
 
     /// Attach a LisM A/B sample sink. Call before the first `advance_plan`.
@@ -2702,6 +2721,8 @@ impl BossCoordinator {
                 );
 
                 if lism_enabled {
+                    let full_worker_dispatch_fallback_enabled =
+                        self.full_worker_dispatch_fallback_enabled().await;
                     let routed_preview = {
                         let plan_guard = self.plan.read().await;
                         let plan = plan_guard
@@ -2714,7 +2735,9 @@ impl BossCoordinator {
                             ActorRole::Worker,
                         )
                     };
-                    if requires_external_tool_execution(&routed_preview.frame) {
+                    if full_worker_dispatch_fallback_enabled
+                        && requires_external_tool_execution(&routed_preview.frame)
+                    {
                         let state_frame_size = serde_json::to_string(&routed_preview.frame)
                             .map(|s| s.len())
                             .ok();

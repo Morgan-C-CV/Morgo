@@ -123,6 +123,7 @@ async fn bootstrap_env_policy_is_attached_and_enforced_by_file_tools() {
         lism_ab_summarize: None,
         lism_policy: None,
         worker_lism_policy: None,
+        disable_full_worker_dispatch_fallback: false,
         boss_task: None,
         boss_task_timeout_secs: 900,
     })

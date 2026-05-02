@@ -309,6 +309,10 @@ pub struct BootstrapCli {
     /// One of: inherit, force-on, force-off.
     #[arg(long, value_name = "POLICY")]
     pub worker_lism_policy: Option<String>,
+    /// Experimental: disable the Boss LisM escape hatch that falls back to full worker dispatch
+    /// when a step appears to require filesystem or shell side effects.
+    #[arg(long, default_value_t = false)]
+    pub disable_full_worker_dispatch_fallback: bool,
     /// Run a single boss task non-interactively. Creates a one-step plan, executes it
     /// to completion, records the LisM A/B sample if --lism-ab-sample is set, then exits.
     #[arg(long, value_name = "TASK")]
@@ -336,6 +340,7 @@ impl Default for BootstrapCli {
             lism_ab_conclude: None,
             lism_policy: None,
             worker_lism_policy: None,
+            disable_full_worker_dispatch_fallback: false,
             boss_task: None,
             boss_task_timeout_secs: DEFAULT_BOSS_TASK_TIMEOUT_SECS,
         }
@@ -1023,6 +1028,10 @@ impl RuntimeBootstrap {
         // Apply boss-spawned worker LisM policy override if requested via CLI.
         if let Some(policy_str) = &self.cli.worker_lism_policy {
             boss_coordinator.init_worker_lism_policy(parse_worker_lism_policy(policy_str));
+        }
+
+        if self.cli.disable_full_worker_dispatch_fallback {
+            boss_coordinator.init_full_worker_dispatch_fallback_enabled(false);
         }
 
         let boss_coordinator = Arc::new(boss_coordinator);
@@ -2097,5 +2106,11 @@ mod tests {
     fn bootstrap_cli_default_boss_task_timeout_is_extended_for_e2e_runs() {
         let cli = BootstrapCli::default();
         assert_eq!(cli.boss_task_timeout_secs, DEFAULT_BOSS_TASK_TIMEOUT_SECS);
+    }
+
+    #[test]
+    fn bootstrap_cli_default_full_worker_dispatch_fallback_remains_enabled() {
+        let cli = BootstrapCli::default();
+        assert!(!cli.disable_full_worker_dispatch_fallback);
     }
 }
