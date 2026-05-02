@@ -8,6 +8,9 @@ pub enum NeededContextSelector {
     ChangeRef { path: Option<String> },
     ReviewRef { query: Option<String> },
     ArtifactRef { query: Option<String> },
+    OpenItemRef { query: Option<String> },
+    BlockerRef { query: Option<String> },
+    RejectedApproach { query: Option<String> },
     Artifact { path: Option<String> },
     Fact { name: String },
     Unknown { raw: String },
@@ -56,6 +59,16 @@ fn selector_key(selector: &NeededContextSelector) -> String {
             format!("artifact_ref:{query}")
         }
         NeededContextSelector::ArtifactRef { query: None } => "artifact_ref".into(),
+        NeededContextSelector::OpenItemRef { query: Some(query) } => {
+            format!("open_item_ref:{query}")
+        }
+        NeededContextSelector::OpenItemRef { query: None } => "open_item_ref".into(),
+        NeededContextSelector::BlockerRef { query: Some(query) } => format!("blocker_ref:{query}"),
+        NeededContextSelector::BlockerRef { query: None } => "blocker_ref".into(),
+        NeededContextSelector::RejectedApproach { query: Some(query) } => {
+            format!("rejected_approach:{query}")
+        }
+        NeededContextSelector::RejectedApproach { query: None } => "rejected_approach".into(),
         NeededContextSelector::Artifact { path: Some(path) } => format!("artifact:{path}"),
         NeededContextSelector::Artifact { path: None } => "artifact".into(),
         NeededContextSelector::Fact { name } => format!("fact:{name}"),
@@ -69,11 +82,14 @@ fn selector_priority(selector: &NeededContextSelector) -> usize {
         NeededContextSelector::ChangeRef { .. } => 1,
         NeededContextSelector::ReviewRef { .. } => 2,
         NeededContextSelector::ArtifactRef { .. } => 3,
-        NeededContextSelector::FileSnippet { .. } => 4,
-        NeededContextSelector::Artifact { .. } => 5,
-        NeededContextSelector::Fact { .. } => 6,
-        NeededContextSelector::Symbol { .. } => 7,
-        NeededContextSelector::Unknown { .. } => 8,
+        NeededContextSelector::OpenItemRef { .. } => 4,
+        NeededContextSelector::BlockerRef { .. } => 5,
+        NeededContextSelector::RejectedApproach { .. } => 6,
+        NeededContextSelector::FileSnippet { .. } => 7,
+        NeededContextSelector::Artifact { .. } => 8,
+        NeededContextSelector::Fact { .. } => 9,
+        NeededContextSelector::Symbol { .. } => 10,
+        NeededContextSelector::Unknown { .. } => 11,
     }
 }
 
@@ -83,6 +99,9 @@ fn selector_estimated_tokens(selector: &NeededContextSelector) -> u64 {
         NeededContextSelector::ChangeRef { .. } => 140,
         NeededContextSelector::ReviewRef { .. } => 120,
         NeededContextSelector::ArtifactRef { .. } => 140,
+        NeededContextSelector::OpenItemRef { .. } => 100,
+        NeededContextSelector::BlockerRef { .. } => 100,
+        NeededContextSelector::RejectedApproach { .. } => 120,
         NeededContextSelector::FileSnippet { .. } => 180,
         NeededContextSelector::Artifact { .. } => 180,
         NeededContextSelector::Fact { .. } => 120,
@@ -139,6 +158,30 @@ pub fn parse_needed_context_selector(raw: &str) -> NeededContextSelector {
     }
     if trimmed == "artifact_ref" {
         return NeededContextSelector::ArtifactRef { query: None };
+    }
+    if let Some(query) = trimmed.strip_prefix("open_item_ref:") {
+        return NeededContextSelector::OpenItemRef {
+            query: Some(query.trim().to_string()),
+        };
+    }
+    if trimmed == "open_item_ref" {
+        return NeededContextSelector::OpenItemRef { query: None };
+    }
+    if let Some(query) = trimmed.strip_prefix("blocker_ref:") {
+        return NeededContextSelector::BlockerRef {
+            query: Some(query.trim().to_string()),
+        };
+    }
+    if trimmed == "blocker_ref" {
+        return NeededContextSelector::BlockerRef { query: None };
+    }
+    if let Some(query) = trimmed.strip_prefix("rejected_approach:") {
+        return NeededContextSelector::RejectedApproach {
+            query: Some(query.trim().to_string()),
+        };
+    }
+    if trimmed == "rejected_approach" {
+        return NeededContextSelector::RejectedApproach { query: None };
     }
     if let Some(path) = trimmed.strip_prefix("artifact:") {
         return NeededContextSelector::Artifact {
@@ -320,6 +363,54 @@ fn hydrate_selector(
                     )
                 })
         }
+        NeededContextSelector::OpenItemRef { query } => {
+            find_recent_evidence(frame, "fact: open_item_refs")
+                .find(|item| {
+                    query
+                        .as_ref()
+                        .map(|q| contains_ref(item, q) || item.contains(q))
+                        .unwrap_or(true)
+                })
+                .map(|item| {
+                    format!(
+                        "hydrated_context: {} source=open_item_ledger excerpt={}",
+                        selector_key(selector),
+                        compact_excerpt(item, excerpt_chars)
+                    )
+                })
+        }
+        NeededContextSelector::BlockerRef { query } => {
+            find_recent_evidence(frame, "fact: blocker_refs")
+                .find(|item| {
+                    query
+                        .as_ref()
+                        .map(|q| contains_ref(item, q) || item.contains(q))
+                        .unwrap_or(true)
+                })
+                .map(|item| {
+                    format!(
+                        "hydrated_context: {} source=blocker_ledger excerpt={}",
+                        selector_key(selector),
+                        compact_excerpt(item, excerpt_chars)
+                    )
+                })
+        }
+        NeededContextSelector::RejectedApproach { query } => {
+            find_recent_evidence(frame, "fact: rejected_approaches")
+                .find(|item| {
+                    query
+                        .as_ref()
+                        .map(|q| contains_ref(item, q) || item.contains(q))
+                        .unwrap_or(true)
+                })
+                .map(|item| {
+                    format!(
+                        "hydrated_context: {} source=rejected_approach_ledger excerpt={}",
+                        selector_key(selector),
+                        compact_excerpt(item, excerpt_chars)
+                    )
+                })
+        }
         NeededContextSelector::Artifact { path } => {
             let match_in_artifacts = path.as_ref().and_then(|p| {
                 find_recent_evidence(frame, "fact: artifact_status")
@@ -469,6 +560,9 @@ mod tests {
                 "fact: test_failures ref=test:1 name=worker_reported_tests status=failed source=worker_result freshness=after-worker-output confidence=0.85 summary=tests failed in boss_flow".into(),
                 "fact: review_verdicts ref=review:step1:runtime:0 verdict=accepted source=tool:BossReview freshness=after-runtime-review confidence=1.00 summary=LGTM after targeted review".into(),
                 "fact: artifact_status ref=artifact:step1:runtime:0 path=/tmp/report.md kind=file status=verified source=tool:ArtifactVerify freshness=after-runtime-artifact-verify confidence=1.00 summary=artifact verification passed for /tmp/report.md".into(),
+                "fact: open_item_refs ref=openitem:step1:0 source=acceptance:0 freshness=current confidence=1.00 summary=tests pass".into(),
+                "fact: blocker_refs ref=blocker:step1:0 source=stage:waitingforapproval freshness=current confidence=1.00 summary=waiting for user approval".into(),
+                "fact: rejected_approaches ref=rejected:step1:0 source=review_correction source_ref=review:step1:runtime:1 freshness=after-review confidence=1.00 summary=previous patch ignored edge cases correction=preserve the auth guard branch".into(),
             ],
             allowed_actions: vec!["read_file".into()],
             toolset_id: None,
@@ -499,6 +593,20 @@ mod tests {
         assert_eq!(
             parse_needed_context_selector("artifact_ref"),
             NeededContextSelector::ArtifactRef { query: None }
+        );
+        assert_eq!(
+            parse_needed_context_selector("open_item_ref"),
+            NeededContextSelector::OpenItemRef { query: None }
+        );
+        assert_eq!(
+            parse_needed_context_selector("blocker_ref:blocker:step1:0"),
+            NeededContextSelector::BlockerRef {
+                query: Some("blocker:step1:0".into())
+            }
+        );
+        assert_eq!(
+            parse_needed_context_selector("rejected_approach"),
+            NeededContextSelector::RejectedApproach { query: None }
         );
     }
 
@@ -594,6 +702,39 @@ mod tests {
                 .recent_evidence
                 .iter()
                 .any(|item| item.contains("source=artifact_ledger"))
+        );
+    }
+
+    #[test]
+    fn hydrate_needed_context_resolves_open_blocker_and_rejected_refs() {
+        let mut frame = make_frame();
+        let summary = hydrate_needed_context(
+            &mut frame,
+            &[
+                "open_item_ref:openitem:step1:0".into(),
+                "blocker_ref:blocker:step1:0".into(),
+                "rejected_approach:rejected:step1:0".into(),
+            ],
+        );
+        assert!(summary.changed);
+        assert_eq!(summary.unavailable.len(), 0);
+        assert!(
+            frame
+                .recent_evidence
+                .iter()
+                .any(|item| item.contains("source=open_item_ledger"))
+        );
+        assert!(
+            frame
+                .recent_evidence
+                .iter()
+                .any(|item| item.contains("source=blocker_ledger"))
+        );
+        assert!(
+            frame
+                .recent_evidence
+                .iter()
+                .any(|item| item.contains("source=rejected_approach_ledger"))
         );
     }
 

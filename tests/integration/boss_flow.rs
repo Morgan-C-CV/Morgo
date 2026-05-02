@@ -8293,6 +8293,13 @@ fn t27_3_execution_stage_with_step_maps_objective_and_open_items() {
             .any(|item| item.contains("fact: immutable_plan")),
         "projection should carry immutable plan facts"
     );
+    assert!(
+        frame
+            .recent_evidence
+            .iter()
+            .any(|item| item.contains("fact: open_item_refs ref=openitem:step0:0")),
+        "projection should emit ref-backed open items"
+    );
 }
 
 #[test]
@@ -8383,6 +8390,58 @@ fn t27_3_waiting_for_approval_maps_to_blocked_with_blocked_item() {
     assert_eq!(frame.state, AgentState::Blocked);
     assert_eq!(frame.blocked_items, vec!["waiting for user approval"]);
     assert!(frame.allowed_actions.is_empty());
+    assert!(
+        frame
+            .recent_evidence
+            .iter()
+            .any(|item| item.contains("fact: blocker_refs none recorded")),
+        "without a current step, blocker refs should explicitly report no recorded refs"
+    );
+}
+
+#[test]
+fn t27_3_projection_emits_rejected_approach_fact_from_review_correction() {
+    use rust_agent::core::boss_state::{BossPlan, BossPlanStep, BossPlanStepStatus, BossStage};
+    use rust_agent::core::state_frame::ActorRole;
+    use rust_agent::core::state_frame_projection::project_state_frame;
+
+    let step = BossPlanStep {
+        id: 0,
+        description: "retry auth patch".into(),
+        objective: Some("fix auth patch".into()),
+        acceptance: vec!["tests pass".into()],
+        requires_approval: false,
+        status: BossPlanStepStatus::Rejected,
+        completed: false,
+        result_diff: None,
+        worker_task_id: None,
+        attempt_count: 1,
+        retry_budget: 3,
+        last_review_summary: Some("previous patch ignored edge cases".into()),
+        last_correction: Some("preserve the auth guard branch".into()),
+        review_task_id: None,
+        tool_execution_records: Vec::new(),
+    };
+    let plan = BossPlan {
+        plan_id: "p-rejected".into(),
+        task_description: "repair patch".into(),
+        document_spec: String::new(),
+        pseudo_code: String::new(),
+        steps: vec![step],
+        accepted_by_user: true,
+        auto_sequence: true,
+        ..Default::default()
+    };
+
+    let frame = project_state_frame(&plan, BossStage::Execution, Some(0), ActorRole::Worker);
+    assert!(
+        frame.recent_evidence.iter().any(|item| {
+            item.contains("fact: rejected_approaches")
+                && item.contains("ref=rejected:step0:0")
+                && item.contains("correction=preserve the auth guard branch")
+        }),
+        "projection should emit ref-backed rejected approaches from review corrections"
+    );
 }
 
 #[test]

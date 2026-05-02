@@ -191,7 +191,7 @@ fn build_fact_ledger(
         }
         push_none_recorded_unless_present(&mut facts, "recent_changes_in_files");
         if !ledgers.review_refs.is_empty() {
-            for item in ledgers.review_refs {
+            for item in &ledgers.review_refs {
                 facts.push(fact_line(
                     "review_verdicts",
                     format!(
@@ -212,7 +212,7 @@ fn build_fact_ledger(
         }
         push_none_recorded_unless_present(&mut facts, "review_verdicts");
         if !ledgers.artifact_refs.is_empty() {
-            for item in ledgers.artifact_refs {
+            for item in &ledgers.artifact_refs {
                 facts.push(fact_line(
                     "artifact_status",
                     format!(
@@ -230,6 +230,54 @@ fn build_fact_ledger(
             }
         }
         push_none_recorded_unless_present(&mut facts, "artifact_status");
+        for (idx, item) in open_items.iter().enumerate() {
+            facts.push(fact_line(
+                "open_item_refs",
+                format!(
+                    "ref=openitem:step{}:{} source=acceptance:{} freshness=current confidence=1.00 summary={}",
+                    step.id, idx, idx, item
+                ),
+            ));
+        }
+        push_none_recorded_unless_present(&mut facts, "open_item_refs");
+        for (idx, item) in blocked_items.iter().enumerate() {
+            facts.push(fact_line(
+                "blocker_refs",
+                format!(
+                    "ref=blocker:step{}:{} source=stage:{} freshness=current confidence=1.00 summary={}",
+                    step.id,
+                    idx,
+                    format!("{stage:?}").to_lowercase(),
+                    item
+                ),
+            ));
+        }
+        push_none_recorded_unless_present(&mut facts, "blocker_refs");
+        if let Some(correction) = step
+            .last_correction
+            .as_deref()
+            .filter(|text| !text.trim().is_empty())
+        {
+            let source_ref = ledgers
+                .review_refs
+                .iter()
+                .find(|item| item.verdict == "rejected" || item.verdict == "replan_required")
+                .map(|item| item.ref_id.as_str())
+                .unwrap_or("review:none");
+            facts.push(fact_line(
+                "rejected_approaches",
+                format!(
+                    "ref=rejected:step{}:0 source=review_correction source_ref={} freshness=after-review confidence=1.00 summary={} correction={}",
+                    step.id,
+                    source_ref,
+                    step.last_review_summary
+                        .as_deref()
+                        .unwrap_or("review requested a different approach"),
+                    correction
+                ),
+            ));
+        }
+        push_none_recorded_unless_present(&mut facts, "rejected_approaches");
     } else {
         facts.push(fact_line("accepted_constraints", "none recorded"));
         facts.push(fact_line("reject_correction", "none recorded"));
@@ -239,6 +287,9 @@ fn build_fact_ledger(
         facts.push(fact_line("recent_changes_in_files", "none recorded"));
         facts.push(fact_line("review_verdicts", "none recorded"));
         facts.push(fact_line("artifact_status", "none recorded"));
+        facts.push(fact_line("open_item_refs", "none recorded"));
+        facts.push(fact_line("blocker_refs", "none recorded"));
+        facts.push(fact_line("rejected_approaches", "none recorded"));
     }
 
     facts.push(fact_line(
