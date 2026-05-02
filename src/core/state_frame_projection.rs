@@ -80,6 +80,15 @@ fn format_confidence(confidence_milli: u16) -> String {
     format!("{:.2}", confidence_milli as f32 / 1000.0)
 }
 
+fn push_none_recorded_unless_present(facts: &mut Vec<String>, fact_name: &str) {
+    if !facts
+        .iter()
+        .any(|item| item.starts_with(&format!("fact: {fact_name} ")))
+    {
+        facts.push(fact_line(fact_name, "none recorded"));
+    }
+}
+
 fn build_fact_ledger(
     plan: &BossPlan,
     stage: BossStage,
@@ -124,9 +133,7 @@ fn build_fact_ledger(
             "recent_diff",
             step.result_diff.as_deref().unwrap_or("none recorded"),
         ));
-        if ledgers.file_facts.is_empty() {
-            facts.push(fact_line("file_facts", "none recorded"));
-        } else {
+        if !ledgers.file_facts.is_empty() {
             for item in ledgers.file_facts {
                 facts.push(fact_line(
                     "file_facts",
@@ -147,9 +154,8 @@ fn build_fact_ledger(
                 ));
             }
         }
-        if ledgers.test_refs.is_empty() {
-            facts.push(fact_line("test_failures", "none recorded"));
-        } else {
+        push_none_recorded_unless_present(&mut facts, "file_facts");
+        if !ledgers.test_refs.is_empty() {
             for item in ledgers.test_refs {
                 facts.push(fact_line(
                     "test_failures",
@@ -166,9 +172,8 @@ fn build_fact_ledger(
                 ));
             }
         }
-        if ledgers.change_refs.is_empty() {
-            facts.push(fact_line("recent_changes_in_files", "none recorded"));
-        } else {
+        push_none_recorded_unless_present(&mut facts, "test_failures");
+        if !ledgers.change_refs.is_empty() {
             for item in ledgers.change_refs {
                 facts.push(fact_line(
                     "recent_changes_in_files",
@@ -184,6 +189,47 @@ fn build_fact_ledger(
                 ));
             }
         }
+        push_none_recorded_unless_present(&mut facts, "recent_changes_in_files");
+        if !ledgers.review_refs.is_empty() {
+            for item in ledgers.review_refs {
+                facts.push(fact_line(
+                    "review_verdicts",
+                    format!(
+                        "ref={} verdict={} source={} freshness={} confidence={} summary={}{}",
+                        item.ref_id,
+                        item.verdict,
+                        item.source,
+                        item.freshness,
+                        format_confidence(item.confidence_milli),
+                        item.summary,
+                        item.correction
+                            .as_deref()
+                            .map(|correction| format!(" correction={correction}"))
+                            .unwrap_or_default()
+                    ),
+                ));
+            }
+        }
+        push_none_recorded_unless_present(&mut facts, "review_verdicts");
+        if !ledgers.artifact_refs.is_empty() {
+            for item in ledgers.artifact_refs {
+                facts.push(fact_line(
+                    "artifact_status",
+                    format!(
+                        "ref={} path={} kind={} status={} source={} freshness={} confidence={} summary={}",
+                        item.ref_id,
+                        item.path,
+                        item.kind,
+                        item.status,
+                        item.source,
+                        item.freshness,
+                        format_confidence(item.confidence_milli),
+                        item.summary
+                    ),
+                ));
+            }
+        }
+        push_none_recorded_unless_present(&mut facts, "artifact_status");
     } else {
         facts.push(fact_line("accepted_constraints", "none recorded"));
         facts.push(fact_line("reject_correction", "none recorded"));
@@ -191,6 +237,8 @@ fn build_fact_ledger(
         facts.push(fact_line("file_facts", "none recorded"));
         facts.push(fact_line("test_failures", "none recorded"));
         facts.push(fact_line("recent_changes_in_files", "none recorded"));
+        facts.push(fact_line("review_verdicts", "none recorded"));
+        facts.push(fact_line("artifact_status", "none recorded"));
     }
 
     facts.push(fact_line(

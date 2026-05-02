@@ -8550,6 +8550,79 @@ fn t27_3_projection_emits_file_fact_when_worker_reports_reading_a_file() {
     );
 }
 
+#[test]
+fn t27_3_projection_suppresses_none_recorded_when_matching_ledgers_exist() {
+    use rust_agent::core::boss_state::{BossPlan, BossPlanStep, BossPlanStepStatus, BossStage};
+    use rust_agent::core::state_frame::ActorRole;
+    use rust_agent::core::state_frame_projection::project_state_frame;
+
+    let artifact_path = std::env::temp_dir().join(format!(
+        "projection-artifact-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock should be after epoch")
+            .as_nanos()
+    ));
+    std::fs::write(&artifact_path, "artifact").expect("artifact should be written");
+
+    let step = BossPlanStep {
+        id: 0,
+        description: "project full ledgers".into(),
+        objective: Some(format!(
+            "任务目标：\n- 目标文件：src/core/state_fact_ledger.rs\n- 目标文件：{}",
+            artifact_path.display()
+        )),
+        acceptance: vec![
+            "tests pass".into(),
+            "artifact file exists and is non-empty".into(),
+        ],
+        requires_approval: false,
+        status: BossPlanStepStatus::Completed,
+        completed: true,
+        result_diff: Some(format!(
+            "read src/core/state_fact_ledger.rs; updated {}; cargo test boss_flow passed",
+            artifact_path.display()
+        )),
+        worker_task_id: None,
+        attempt_count: 1,
+        retry_budget: 3,
+        last_review_summary: Some("ACCEPT: artifact verified and tests passed".into()),
+        last_correction: None,
+        review_task_id: None,
+        tool_execution_records: Vec::new(),
+    };
+    let plan = BossPlan {
+        plan_id: "p-no-none-recorded".into(),
+        task_description: "suppress fake placeholders".into(),
+        document_spec: String::new(),
+        pseudo_code: String::new(),
+        steps: vec![step],
+        accepted_by_user: true,
+        auto_sequence: true,
+        ..Default::default()
+    };
+
+    let frame = project_state_frame(&plan, BossStage::Execution, Some(0), ActorRole::Worker);
+    let evidence = frame.recent_evidence.join("\n");
+    for fact_name in [
+        "file_facts",
+        "test_failures",
+        "recent_changes_in_files",
+        "review_verdicts",
+        "artifact_status",
+    ] {
+        assert!(
+            !evidence.contains(&format!("fact: {fact_name} none recorded")),
+            "matching {fact_name} should suppress placeholder"
+        );
+    }
+    assert!(evidence.contains("fact: review_verdicts"));
+    assert!(evidence.contains("verdict=accepted"));
+    assert!(evidence.contains("fact: artifact_status"));
+
+    let _ = std::fs::remove_file(artifact_path);
+}
+
 #[tokio::test]
 async fn t27_5_on_task_event_persists_runtime_tool_records_into_step_ledgers() {
     let task_manager = Arc::new(TaskManager::default());

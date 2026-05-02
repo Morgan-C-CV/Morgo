@@ -1,4 +1,7 @@
-use crate::core::boss_state::BossPlanStep;
+use crate::core::boss_acceptance::{
+    BossArtifactKind, extract_artifact_expectations, verify_artifact_expectations,
+};
+use crate::core::boss_state::{BossPlanStep, BossPlanStepStatus};
 use crate::tool::result::{ToolExecutionOutcomeKind, ToolExecutionRecord};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -39,11 +42,38 @@ pub struct TestRecord {
     pub confidence_milli: u16,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewRecord {
+    pub ref_id: String,
+    pub verdict: String,
+    pub summary: String,
+    pub correction: Option<String>,
+    pub source: String,
+    pub source_event_id: String,
+    pub freshness: String,
+    pub confidence_milli: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtifactRecord {
+    pub ref_id: String,
+    pub path: String,
+    pub kind: String,
+    pub status: String,
+    pub summary: String,
+    pub source: String,
+    pub source_event_id: String,
+    pub freshness: String,
+    pub confidence_milli: u16,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StepFactLedgers {
     pub file_facts: Vec<FileFactRecord>,
     pub change_refs: Vec<ChangeRecord>,
     pub test_refs: Vec<TestRecord>,
+    pub review_refs: Vec<ReviewRecord>,
+    pub artifact_refs: Vec<ArtifactRecord>,
 }
 
 fn trim_excerpt(text: &str, max_chars: usize) -> String {
@@ -259,6 +289,31 @@ fn observable_bash_command(record: &ToolExecutionRecord) -> Option<String> {
         .map(str::to_string)
 }
 
+fn push_review_record(ledger: &mut StepFactLedgers, record: ReviewRecord) {
+    let duplicate = ledger.review_refs.iter().any(|existing| {
+        existing.verdict == record.verdict
+            && existing.summary == record.summary
+            && existing.correction == record.correction
+            && existing.source == record.source
+    });
+    if !duplicate {
+        ledger.review_refs.push(record);
+    }
+}
+
+fn push_artifact_record(ledger: &mut StepFactLedgers, record: ArtifactRecord) {
+    let duplicate = ledger.artifact_refs.iter().any(|existing| {
+        existing.path == record.path
+            && existing.kind == record.kind
+            && existing.status == record.status
+            && existing.source == record.source
+            && existing.summary == record.summary
+    });
+    if !duplicate {
+        ledger.artifact_refs.push(record);
+    }
+}
+
 fn normalize_runtime_path(path: &str) -> String {
     normalize_candidate_path(path, std::env::current_dir().ok().as_deref())
         .unwrap_or_else(|| path.to_string())
@@ -400,6 +455,143 @@ fn infer_test_status(text: &str) -> Option<&'static str> {
         }
     }
     None
+}
+
+fn infer_review_verdict(step: &BossPlanStep, review: &str) -> &'static str {
+    match step.status {
+        BossPlanStepStatus::Completed => "accepted",
+        BossPlanStepStatus::Rejected => "rejected",
+        BossPlanStepStatus::ReplanRequired => "replan_required",
+        BossPlanStepStatus::Failed => "failed",
+        _ => {
+            let lowered = review.to_lowercase();
+            if step.last_correction.is_some()
+                || lowered.contains("correction")
+                || lowered.contains("fix ")
+                || lowered.contains("not good enough")
+                || lowered.contains("failed")
+                || lowered.contains("artifact verification failed")
+            {
+                "rejected"
+            } else if lowered.contains("replan") {
+                "replan_required"
+            } else if lowered.contains("accept")
+                || lowered.contains("lgtm")
+                || lowered.contains("looks good")
+            {
+                "accepted"
+            } else {
+                "reviewed"
+            }
+        }
+    }
+}
+
+fn build_review_ledgers(ledgers: &mut StepFactLedgers, step: &BossPlanStep) {
+    if let Some(review) = step
+        .last_review_summary
+        .as_deref()
+        .filter(|text| !text.trim().is_empty())
+    {
+        push_review_record(
+            ledgers,
+            ReviewRecord {
+                ref_id: format!("review:step{}:summary", step.id),
+                verdict: infer_review_verdict(step, review).into(),
+                summary: trim_excerpt(review, 180),
+                correction: step.last_correction.clone(),
+                source: "review_summary".into(),
+                source_event_id: format!("review-summary:{}", step.id),
+                freshness: "after-review".into(),
+                confidence_milli: 950,
+            },
+        );
+    }
+
+    if let Some(correction) = step
+        .last_correction
+        .as_deref()
+        .filter(|text| !text.trim().is_empty())
+    {
+        push_review_record(
+            ledgers,
+            ReviewRecord {
+                ref_id: format!("review:step{}:correction", step.id),
+                verdict: "rejected".into(),
+                summary: step
+                    .last_review_summary
+                    .as_deref()
+                    .map(|text| trim_excerpt(text, 180))
+                    .unwrap_or_else(|| "review requested a correction".into()),
+                correction: Some(trim_excerpt(correction, 180)),
+                source: "review_correction".into(),
+                source_event_id: format!("review-correction:{}", step.id),
+                freshness: "after-review".into(),
+                confidence_milli: 1000,
+            },
+        );
+    }
+}
+
+fn build_artifact_ledgers(ledgers: &mut StepFactLedgers, step: &BossPlanStep) {
+    let verification_error = verify_artifact_expectations(step.objective()).err();
+    for (idx, expectation) in extract_artifact_expectations(step.objective())
+        .into_iter()
+        .enumerate()
+    {
+        let path = expectation.path.to_string_lossy().to_string();
+        let kind = match expectation.kind {
+            BossArtifactKind::File => "file",
+            BossArtifactKind::Directory => "directory",
+        }
+        .to_string();
+        let touched_by_runtime = ledgers.change_refs.iter().any(|item| item.path == path)
+            || ledgers.file_facts.iter().any(|item| item.path == path);
+        let (status, summary, confidence_milli) = if let Some(reason) = verification_error.as_ref()
+        {
+            (
+                "missing_or_invalid",
+                format!("artifact verification failed for {path}: {reason}"),
+                1000,
+            )
+        } else if step.completed {
+            (
+                "verified",
+                format!("artifact expectation verified for {path}"),
+                1000,
+            )
+        } else if touched_by_runtime {
+            (
+                "touched",
+                format!("runtime activity touched artifact candidate {path}"),
+                900,
+            )
+        } else {
+            (
+                "expected",
+                format!("step objective requires artifact {path}"),
+                950,
+            )
+        };
+        push_artifact_record(
+            ledgers,
+            ArtifactRecord {
+                ref_id: format!("artifact:step{}:{idx}", step.id),
+                path,
+                kind,
+                status: status.into(),
+                summary,
+                source: "artifact_expectation".into(),
+                source_event_id: format!("artifact-expectation:{}:{idx}", step.id),
+                freshness: if step.completed {
+                    "after-review".into()
+                } else {
+                    "current".into()
+                },
+                confidence_milli,
+            },
+        );
+    }
 }
 
 pub fn build_step_fact_ledgers(step: &BossPlanStep) -> StepFactLedgers {
@@ -596,6 +788,9 @@ pub fn build_step_fact_ledgers(step: &BossPlanStep) -> StepFactLedgers {
         });
     }
 
+    build_review_ledgers(&mut ledgers, step);
+    build_artifact_ledgers(&mut ledgers, step);
+
     ledgers
 }
 
@@ -770,5 +965,50 @@ mod tests {
                 .iter()
                 .any(|item| { item.source == "tool:Bash" && item.status == "failed" })
         );
+    }
+
+    #[test]
+    fn build_step_fact_ledgers_emits_review_and_artifact_ledgers() {
+        let artifact_path = std::env::temp_dir().join(format!(
+            "ledger-artifact-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock should be after epoch")
+                .as_nanos()
+        ));
+        std::fs::write(&artifact_path, "artifact").expect("artifact should be written");
+        let step = BossPlanStep {
+            id: 10,
+            description: "artifact review".into(),
+            objective: Some(format!(
+                "任务目标：\n- 目标文件：{}",
+                artifact_path.display()
+            )),
+            acceptance: vec!["artifact file exists and is non-empty".into()],
+            requires_approval: false,
+            status: BossPlanStepStatus::Completed,
+            completed: true,
+            result_diff: Some(format!("wrote {}", artifact_path.display())),
+            worker_task_id: None,
+            attempt_count: 1,
+            retry_budget: 3,
+            last_review_summary: Some("ACCEPT: artifact verified".into()),
+            last_correction: None,
+            review_task_id: None,
+            tool_execution_records: Vec::new(),
+        };
+
+        let ledgers = build_step_fact_ledgers(&step);
+        assert!(
+            ledgers
+                .review_refs
+                .iter()
+                .any(|item| item.verdict == "accepted")
+        );
+        assert!(ledgers.artifact_refs.iter().any(|item| {
+            item.path == artifact_path.to_string_lossy() && item.status == "verified"
+        }));
+
+        let _ = std::fs::remove_file(artifact_path);
     }
 }
