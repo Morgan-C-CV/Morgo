@@ -254,11 +254,13 @@ fn extract_relevant_file_handles(text: &str, step_revision: &str) -> Vec<Relevan
             let candidate = normalize_relevant_file_hint(candidate, cwd.as_deref())
                 .unwrap_or_else(|| candidate.to_string());
             let kind = classify_relevant_file_handle(&candidate, trimmed);
-            if let Some(existing) = handles.iter_mut().find(|existing| existing.path == candidate) {
+            if let Some(existing) = handles
+                .iter_mut()
+                .find(|existing| existing.path == candidate)
+            {
                 if relevant_file_handle_rank(&kind) > relevant_file_handle_rank(&existing.kind) {
                     existing.kind = kind.clone();
-                    existing.why_relevant =
-                        build_file_handle_relevance(&kind, trimmed, &candidate);
+                    existing.why_relevant = build_file_handle_relevance(&kind, trimmed, &candidate);
                     existing.step_revision = step_revision.to_string();
                 }
                 continue;
@@ -3006,7 +3008,9 @@ impl BossCoordinator {
                                     .steps
                                     .iter_mut()
                                     .find(|step| step.id == step_id)
-                                    .ok_or_else(|| anyhow::anyhow!("Unknown boss step {step_id}"))?;
+                                    .ok_or_else(|| {
+                                        anyhow::anyhow!("Unknown boss step {step_id}")
+                                    })?;
                                 for record in &usage.tool_execution_records {
                                     append_step_runtime_record(step, record.clone());
                                 }
@@ -4583,15 +4587,14 @@ mod tests {
         );
         assert!(!handles.iter().any(|handle| handle.path == "/boss"));
         assert!(!handles.iter().any(|handle| handle.path == "/mcp"));
+        assert!(handles.iter().any(
+            |handle| handle.path == "/tmp/example/output/" && handle.kind == "target_directory"
+        ));
         assert!(
             handles
                 .iter()
-                .any(|handle| handle.path == "/tmp/example/output/" && handle.kind == "target_directory")
-        );
-        assert!(
-            handles
-                .iter()
-                .any(|handle| handle.path == "/tmp/example/report.md" && handle.kind == "target_file")
+                .any(|handle| handle.path == "/tmp/example/report.md"
+                    && handle.kind == "target_file")
         );
     }
 

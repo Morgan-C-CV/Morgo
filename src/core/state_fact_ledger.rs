@@ -540,7 +540,8 @@ pub fn append_runtime_tool_record(
             if record.kind != ToolExecutionOutcomeKind::Success {
                 return;
             }
-            let Some(path) = observable_path(record).map(|path| normalize_runtime_path(&path)) else {
+            let Some(path) = observable_path(record).map(|path| normalize_runtime_path(&path))
+            else {
                 return;
             };
             push_file_fact(
@@ -550,7 +551,10 @@ pub fn append_runtime_tool_record(
                     path: path.clone(),
                     kind: "read_observation".into(),
                     fact: format!("runtime Read succeeded for {path}"),
-                    symbol: extract_symbol_for_path(&path, &[record.detail.as_deref().unwrap_or_default()]),
+                    symbol: extract_symbol_for_path(
+                        &path,
+                        &[record.detail.as_deref().unwrap_or_default()],
+                    ),
                     source: "tool:Read".into(),
                     source_event_id: format!("tool-read:{ref_namespace}"),
                     freshness: "after-runtime-read".into(),
@@ -563,7 +567,8 @@ pub fn append_runtime_tool_record(
             if record.kind != ToolExecutionOutcomeKind::Success {
                 return;
             }
-            let Some(path) = observable_path(record).map(|path| normalize_runtime_path(&path)) else {
+            let Some(path) = observable_path(record).map(|path| normalize_runtime_path(&path))
+            else {
                 return;
             };
             ledgers.change_refs.push(ChangeRecord {

@@ -95,16 +95,15 @@ fn infer_preferred_deployment_mode(objective: &str) -> &'static str {
     }
 }
 
-fn build_permission_facts(
-    step_id: usize,
-    objective: &str,
-    readonly_analysis: bool,
-) -> Vec<String> {
+fn build_permission_facts(step_id: usize, objective: &str, readonly_analysis: bool) -> Vec<String> {
     if readonly_analysis {
         return Vec::new();
     }
     let mut facts = Vec::new();
-    for (idx, expectation) in extract_artifact_expectations(objective).into_iter().enumerate() {
+    for (idx, expectation) in extract_artifact_expectations(objective)
+        .into_iter()
+        .enumerate()
+    {
         let path = expectation.path.to_string_lossy().to_string();
         facts.push(fact_line(
             &format!("permission_to_create_and_write:{path}"),
@@ -785,11 +784,12 @@ mod tests {
 
         let frame = project_state_frame(&plan, BossStage::Execution, Some(0), ActorRole::Worker);
         assert!(frame.recent_evidence.iter().any(|item| {
-            item.contains("fact: preferred_deployment_mode")
-                && item.contains("summary=static_site")
+            item.contains("fact: preferred_deployment_mode") && item.contains("summary=static_site")
         }));
-        assert!(frame.recent_evidence.iter().any(|item| {
-            item.contains("fact: permission_to_create_and_write:/tmp/demo-site")
-        }));
+        assert!(
+            frame.recent_evidence.iter().any(|item| {
+                item.contains("fact: permission_to_create_and_write:/tmp/demo-site")
+            })
+        );
     }
 }

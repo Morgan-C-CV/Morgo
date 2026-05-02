@@ -1,5 +1,7 @@
 use crate::core::message::Message;
-use crate::core::state_fact_ledger::{StepFactLedgers, append_runtime_tool_record, fact_lines_from_ledgers};
+use crate::core::state_fact_ledger::{
+    StepFactLedgers, append_runtime_tool_record, fact_lines_from_ledgers,
+};
 use crate::core::state_frame::{
     AgentState, DecisionKind, RepairNeeded, StateFrame, StatePatch, validate_state_decision,
 };
@@ -555,17 +557,20 @@ fn parse_bash_command(decision: &crate::core::state_frame::StateDecision) -> Opt
 }
 
 fn tool_backed_hydration_path(requested: &[String]) -> Option<String> {
-    requested.iter().find_map(|raw| match parse_needed_context_selector(raw) {
-        NeededContextSelector::FileSnippet { path } => {
-            let trimmed = path.trim();
-            (!trimmed.is_empty()).then(|| trimmed.to_string())
-        }
-        NeededContextSelector::Artifact { path: Some(path) } => {
-            let trimmed = path.trim();
-            (!trimmed.is_empty()).then(|| trimmed.to_string())
-        }
-        _ => None,
-    })
+    requested
+        .iter()
+        .find_map(|raw| match parse_needed_context_selector(raw) {
+            NeededContextSelector::FileSnippet { path } => {
+                let trimmed = path.trim();
+                (!trimmed.is_empty()).then(|| trimmed.to_string())
+            }
+            NeededContextSelector::Artifact { path: Some(path) } => {
+                let trimmed = path.trim();
+                (!trimmed.is_empty() && !trimmed.ends_with(":exists_confirmation"))
+                    .then(|| trimmed.to_string())
+            }
+            _ => None,
+        })
 }
 
 fn build_tool_backed_hydration_decision(
@@ -689,21 +694,19 @@ async fn execute_call_tool(
     tool_runtime: Option<&StateFrameToolRuntime>,
     dispatch_seq: &mut usize,
 ) -> Result<(bool, ToolExecutionRecord, usize), CallToolDispatchError> {
-    let tool_runtime = tool_runtime.ok_or_else(|| {
-        CallToolDispatchError {
-            reason: "call_tool requested but StateFrame tool runtime is unavailable".to_string(),
-            record: build_execution_record(
-                decision
-                    .next_action
-                    .as_ref()
-                    .map(|action| action.action_type.clone())
-                    .unwrap_or_else(|| "unknown".into()),
-                &ToolResult::Interrupted(
-                    "call_tool requested but StateFrame tool runtime is unavailable".into(),
-                ),
-                None,
+    let tool_runtime = tool_runtime.ok_or_else(|| CallToolDispatchError {
+        reason: "call_tool requested but StateFrame tool runtime is unavailable".to_string(),
+        record: build_execution_record(
+            decision
+                .next_action
+                .as_ref()
+                .map(|action| action.action_type.clone())
+                .unwrap_or_else(|| "unknown".into()),
+            &ToolResult::Interrupted(
+                "call_tool requested but StateFrame tool runtime is unavailable".into(),
             ),
-        }
+            None,
+        ),
     })?;
     let next_action = decision
         .next_action
@@ -720,15 +723,14 @@ async fn execute_call_tool(
     let input = if canonical_args.is_string() {
         canonical_args.as_str().unwrap_or_default().to_string()
     } else {
-        serde_json::to_string(&canonical_args)
-            .map_err(|error| CallToolDispatchError {
-                reason: format!("failed to serialize tool args: {error}"),
-                record: build_execution_record(
-                    next_action.action_type.clone(),
-                    &ToolResult::Interrupted(format!("failed to serialize tool args: {error}")),
-                    None,
-                ),
-            })?
+        serde_json::to_string(&canonical_args).map_err(|error| CallToolDispatchError {
+            reason: format!("failed to serialize tool args: {error}"),
+            record: build_execution_record(
+                next_action.action_type.clone(),
+                &ToolResult::Interrupted(format!("failed to serialize tool args: {error}")),
+                None,
+            ),
+        })?
     };
     let call = ToolCall::new(next_action.action_type.clone(), input);
     let observable_input = tool_runtime.registry.observable_input(&call);
@@ -774,7 +776,9 @@ async fn execute_call_tool(
             for line in fact_lines {
                 changed |= push_unique(&mut frame.recent_evidence, line);
             }
-            if let Some(path) = parse_read_path(decision).or_else(|| observable_path_from_input(observable_input.as_ref())) {
+            if let Some(path) = parse_read_path(decision)
+                .or_else(|| observable_path_from_input(observable_input.as_ref()))
+            {
                 changed |= push_unique(
                     &mut frame.recent_evidence,
                     format!(
@@ -788,7 +792,9 @@ async fn execute_call_tool(
                     ),
                 );
             }
-            if let Some(path) = parse_edit_path(decision).or_else(|| observable_path_from_input(observable_input.as_ref())) {
+            if let Some(path) = parse_edit_path(decision)
+                .or_else(|| observable_path_from_input(observable_input.as_ref()))
+            {
                 changed |= push_unique(
                     &mut frame.recent_evidence,
                     format!(
@@ -937,11 +943,7 @@ fn push_tool_failure_feedback(
     );
 
     let mut ledgers = StepFactLedgers::default();
-    append_runtime_tool_record(
-        &mut ledgers,
-        record,
-        &format!("runtime:{}", dispatch_seq),
-    );
+    append_runtime_tool_record(&mut ledgers, record, &format!("runtime:{}", dispatch_seq));
     let fact_lines = fact_lines_from_ledgers(&ledgers);
     let ref_write_count = fact_lines.len();
     for line in fact_lines {
@@ -1164,8 +1166,10 @@ pub async fn run_decision_loop_with_tools(
                                 total_usage.tool_dispatch_ref_write_count += ref_write_count;
                                 total_usage.tool_execution_records.push(record);
                                 if changed {
-                                    summary =
-                                        hydrate_needed_context(&mut frame, &decision.needed_context);
+                                    summary = hydrate_needed_context(
+                                        &mut frame,
+                                        &decision.needed_context,
+                                    );
                                     total_usage.hydration_count += summary.hydrated.len();
                                     total_usage.stale_ref_count += summary.stale.len();
                                     total_usage.hydration_ref_missing += summary.unavailable.len();
@@ -1188,8 +1192,10 @@ pub async fn run_decision_loop_with_tools(
                                 total_usage.tool_dispatch_ref_write_count += ref_write_count;
                                 total_usage.tool_execution_records.push(error.record);
                                 if changed {
-                                    summary =
-                                        hydrate_needed_context(&mut frame, &decision.needed_context);
+                                    summary = hydrate_needed_context(
+                                        &mut frame,
+                                        &decision.needed_context,
+                                    );
                                     total_usage.hydration_count += summary.hydrated.len();
                                     total_usage.stale_ref_count += summary.stale.len();
                                     total_usage.hydration_ref_missing += summary.unavailable.len();
@@ -1292,6 +1298,7 @@ mod tests {
     use super::{
         DecisionLoopConfig, LoopOutcome, StateFrameToolRuntime, execute_call_tool,
         parse_and_validate_decision, run_decision_loop, run_decision_loop_with_tools,
+        tool_backed_hydration_path,
     };
     use crate::core::state_frame::validate_state_decision;
     use crate::core::state_frame::{ActorRole, AgentState, StateBudget, StateFrame};
@@ -1425,10 +1432,9 @@ mod tests {
             "fact: artifact_status ref=artifact:step0:0 path=/tmp/example-site kind=directory status=missing_or_invalid source=artifact_expectation source_event_id=artifact-expectation:0:0 freshness=current confidence=1.00 lineage_status=active invalidated_by=none supersedes=none conflicts_with=none summary=target directory missing".into(),
         );
         let done_json = r#"{"state":"done","decision":"done"}"#;
-        let client =
-            ModelProviderClient::with_scripted_turns(vec![vec![StreamEvent::TextDelta(
-                done_json.into(),
-            )]]);
+        let client = ModelProviderClient::with_scripted_turns(vec![vec![StreamEvent::TextDelta(
+            done_json.into(),
+        )]]);
         let outcome = rt
             .block_on(run_decision_loop(
                 &client,
@@ -1481,6 +1487,18 @@ mod tests {
             }
             other => panic!("expected Done, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn request_context_artifact_exists_confirmation_does_not_trigger_synthetic_read() {
+        assert_eq!(
+            tool_backed_hydration_path(&["artifact:/tmp/demo-site:exists_confirmation".into()]),
+            None
+        );
+        assert_eq!(
+            tool_backed_hydration_path(&["artifact:/tmp/demo-site".into()]),
+            Some("/tmp/demo-site".into())
+        );
     }
 
     #[test]
@@ -1637,9 +1655,14 @@ mod tests {
                 assert_eq!(usage.tool_dispatch_count, 4);
                 assert_eq!(usage.tool_dispatch_success_count, 2);
                 assert_eq!(usage.tool_dispatch_failure_count, 2);
-                assert_eq!(usage.tool_dispatch_failure_taxonomy.get("missing_path"), Some(&1));
                 assert_eq!(
-                    usage.tool_dispatch_failure_taxonomy.get("tool_result_empty"),
+                    usage.tool_dispatch_failure_taxonomy.get("missing_path"),
+                    Some(&1)
+                );
+                assert_eq!(
+                    usage
+                        .tool_dispatch_failure_taxonomy
+                        .get("tool_result_empty"),
                     Some(&1)
                 );
             }
@@ -1895,16 +1918,15 @@ mod tests {
     #[test]
     fn provider_stream_error_is_reported_instead_of_json_eof() {
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let client = ModelProviderClient::with_scripted_turns(vec![vec![StreamEvent::Error(
-            StreamError {
+        let client =
+            ModelProviderClient::with_scripted_turns(vec![vec![StreamEvent::Error(StreamError {
                 provider_id: "openai".into(),
                 kind: "empty_response_body".into(),
                 message: "provider returned empty response body".into(),
                 retryable: false,
                 disposition: ProviderFailureDisposition::PreStreamTerminal,
                 status_code: None,
-            },
-        )]]);
+            })]]);
         let outcome = rt
             .block_on(run_decision_loop(
                 &client,

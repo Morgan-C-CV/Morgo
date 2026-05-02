@@ -337,6 +337,21 @@ fn matches_any_query(item: &ParsedEvidenceFact, query: &str, keys: &[&str]) -> b
     })
 }
 
+fn artifact_lookup_query(raw: &str) -> &str {
+    raw.trim()
+        .strip_suffix(":exists_confirmation")
+        .unwrap_or_else(|| raw.trim())
+}
+
+fn matches_artifact_query(item: &ParsedEvidenceFact, query: &str) -> bool {
+    let normalized = artifact_lookup_query(query);
+    matches_any_query(
+        item,
+        normalized,
+        &["ref", "path", "source_event_id", "summary"],
+    )
+}
+
 fn trace_string(item: &ParsedEvidenceFact) -> String {
     format!(
         "fact_name={} ref={} source={} source_event_id={} freshness={}",
@@ -606,9 +621,7 @@ fn hydrate_selector(
             |item| {
                 query
                     .as_ref()
-                    .map(|q| {
-                        matches_any_query(item, q, &["ref", "path", "source_event_id", "summary"])
-                    })
+                    .map(|q| matches_artifact_query(item, q))
                     .unwrap_or(true)
             },
         ),
@@ -692,7 +705,7 @@ fn hydrate_selector(
                 },
                 |item| {
                     path.as_ref()
-                        .map(|p| field_eq(item, "path", p))
+                        .map(|p| field_eq(item, "path", artifact_lookup_query(p)))
                         .unwrap_or(true)
                 },
             );
@@ -710,7 +723,7 @@ fn hydrate_selector(
                     },
                     |item| {
                         path.as_ref()
-                            .map(|p| field_eq(item, "path", p))
+                            .map(|p| field_eq(item, "path", artifact_lookup_query(p)))
                             .unwrap_or(true)
                     },
                 ) {
@@ -727,14 +740,15 @@ fn hydrate_selector(
                         },
                         |item| {
                             path.as_ref()
-                                .map(|p| field_eq(item, "path", p))
+                                .map(|p| field_eq(item, "path", artifact_lookup_query(p)))
                                 .unwrap_or(true)
                         },
                     ) {
                         SelectorResolution::Unavailable(_) => {
                             if let Some(p) = path
                                 .as_ref()
-                                .filter(|p| frame.objective.contains(p.as_str()))
+                                .map(|p| artifact_lookup_query(p.as_str()))
+                                .filter(|p| frame.objective.contains(*p))
                             {
                                 SelectorResolution::Hydrated(format!(
                                     "hydrated_context: {} source=objective match_reason=objective_path excerpt={}",
@@ -1022,6 +1036,31 @@ mod tests {
                 .any(|item| item.contains("source=artifact_ledger")
                     && item.contains("source_event_id=tool-artifact:1:0"))
         );
+    }
+
+    #[test]
+    fn hydrate_needed_context_resolves_artifact_exists_confirmation_requests() {
+        let mut frame = make_frame();
+        let summary = hydrate_needed_context(
+            &mut frame,
+            &[
+                "artifact:/tmp/report.md:exists_confirmation".into(),
+                "artifact_ref:/tmp/report.md:exists_confirmation".into(),
+            ],
+        );
+
+        assert!(summary.changed);
+        assert_eq!(summary.unavailable.len(), 0);
+        assert_eq!(summary.hydrated.len(), 2);
+        assert!(frame.recent_evidence.iter().any(|item| {
+            item.contains("hydrated_context: artifact:/tmp/report.md:exists_confirmation")
+                && item.contains("source=artifact_ledger")
+                && item.contains("match_reason=path")
+        }));
+        assert!(frame.recent_evidence.iter().any(|item| {
+            item.contains("hydrated_context: artifact_ref:/tmp/report.md:exists_confirmation")
+                && item.contains("source=artifact_ledger")
+        }));
     }
 
     #[test]
