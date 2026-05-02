@@ -147,6 +147,12 @@ def summarize(samples_dir: Path):
 
 
 def render_report(grouped):
+    sample_dir_label = render_report.samples_dir
+    global_telemetry = any(
+        stats["telemetry_available"]
+        for mode_stats in grouped.values()
+        for stats in mode_stats.values()
+    )
     lines = []
     lines.append("# Boss Mode `u6-u9` Rollout Metric Alignment")
     lines.append("")
@@ -166,19 +172,23 @@ def render_report(grouped):
     lines.append("")
     lines.append("## 2. 当前样本可用性")
     lines.append("")
-    lines.append(
-        "当前 `/tmp/rustagent-boss-worker-lism-u6u9-20260501/samples` 里的样本属于旧 schema。"
-    )
+    lines.append(f"当前样本目录：`{sample_dir_label}`")
     lines.append("")
-    lines.append(
-        "- `completion / cost / input / uncached input` 可用"
-    )
-    lines.append(
-        "- `fallback_count / hydration_count / hydration_ref_missing / stale_ref_count / context_tier / fallback_tier` 基本缺失"
-    )
-    lines.append(
-        "- 因此这份报告能先把策略和 completion/cost 对齐，但不能把 fallback/hydration 做成最终结论"
-    )
+    lines.append("- `completion / cost / input / uncached input` 可用")
+    if global_telemetry:
+        lines.append(
+            "- `fallback_count / hydration_count / hydration_ref_missing / stale_ref_count / context_tier / fallback_tier` 已可用"
+        )
+        lines.append(
+            "- 因此这份报告可以同时对齐 completion/cost 与 fallback/hydration/missing_refs"
+        )
+    else:
+        lines.append(
+            "- `fallback_count / hydration_count / hydration_ref_missing / stale_ref_count / context_tier / fallback_tier` 基本缺失"
+        )
+        lines.append(
+            "- 因此这份报告能先把策略和 completion/cost 对齐，但不能把 fallback/hydration 做成最终结论"
+        )
     lines.append("")
     lines.append("## 3. 策略对齐表")
     lines.append("")
@@ -234,49 +244,92 @@ def render_report(grouped):
                 f"avg_fallback={format_float(stats['avg_fallback_count'], 2)}, "
                 f"avg_hydration={format_float(stats['avg_hydration_count'], 2)}, "
                 f"avg_missing_refs={format_float(stats['avg_missing_refs'], 2)}, "
-                f"avg_stale_refs={format_float(stats['avg_stale_refs'], 2)}"
+                f"avg_stale_refs={format_float(stats['avg_stale_refs'], 2)}, "
+                f"context_tier={next(iter(stats['dominant_context_tier']), 'n/a')}, "
+                f"fallback_tier={next(iter(stats['dominant_fallback_tier']), 'n/a')}"
             )
         if telemetry_missing:
             lines.append(
                 "- 结论：当前只能确认 completion/cost 方向，无法证明 fallback/hydration 是否支撑了这个模式优势。"
             )
         else:
-            lines.append(
-                "- 结论：当前样本已带 telemetry，可继续比较 fallback/hydration 与 completion 的相关性。"
-            )
+            best_stats = grouped[usecase].get(best)
+            if best_stats is not None and (best_stats["avg_hydration_count"] or 0) > 0:
+                lines.append(
+                    "- 结论：最优模式已出现 typed hydration 命中，可以继续比较 hydration 与 completion/cost 的关系。"
+                )
+            elif best_stats is not None and (best_stats["avg_fallback_count"] or 0) > 0:
+                lines.append(
+                    "- 结论：最优模式的收益不是来自 typed hydration 命中，而是来自 boss 压缩后再升级到 full worker dispatch。"
+                )
+            else:
+                lines.append(
+                    "- 结论：当前样本已带 telemetry，但最佳模式没有显式 hydration 命中，需要结合 context tier/fallback 看解释。"
+                )
         lines.append("")
     lines.append("## 5. 当前可确认的事")
     lines.append("")
-    lines.append(
-        "- `u6/u8` 的策略表与既有真实结果一致：它们当前都指向 `all_on`。"
-    )
-    lines.append(
-        "- `u7/u9` 的策略表与既有真实结果一致：它们当前都指向 `boss_on_only`。"
-    )
-    lines.append(
-        "- 但这仍然只是 completion/cost 层面的对齐，不足以证明是 `fallback_rate` 或 `hydration_rate` 导致。"
-    )
+    aligned = []
+    changed = []
+    for usecase in sorted(grouped):
+        expected = EXPECTED_BEST_MODE.get(usecase, "n/a")
+        best = pick_best_mode(grouped[usecase]) or "n/a"
+        item = f"`{usecase}`: expected `{expected}` vs observed `{best}`"
+        if expected == best:
+            aligned.append(item)
+        else:
+            changed.append(item)
+    if aligned:
+        lines.append("- 策略仍然成立的 use case：")
+        for item in aligned:
+            lines.append(f"  {item}")
+    if changed:
+        lines.append("- 策略发生翻转、需要更新的 use case：")
+        for item in changed:
+            lines.append(f"  {item}")
+    if global_telemetry:
+        lines.append(
+            "- 这轮真实 rerun 显示：boss 开 LisM 的模式几乎都伴随 `fallback_count=1`、`context_tier=fallback:full_worker_dispatch`，而 `hydration_count=0`。"
+        )
+        lines.append(
+            "- 当前收益主要来自 boss brief/projection/refresh，而不是 worker 侧 typed hydration 真正承接实现。"
+        )
+    else:
+        lines.append(
+            "- 但这仍然只是 completion/cost 层面的对齐，不足以证明是 `fallback_rate` 或 `hydration_rate` 导致。"
+        )
     lines.append("")
     lines.append("## 6. 当前不能确认的事")
     lines.append("")
-    lines.append(
-        "- 不能从这批旧 sample 里回答 `u6/u8` 是否因为 worker LisM 带来更低 `fallback_count`。"
-    )
-    lines.append(
-        "- 不能从这批旧 sample 里回答 `u7/u9` 是否因为 worker full-context 带来更低 `missing_refs`。"
-    )
-    lines.append(
-        "- 不能从这批旧 sample 里比较 `context_tier` 分布，因为字段尚未写入。"
-    )
+    if global_telemetry:
+        lines.append(
+            "- 仍然不能证明 worker typed hydration 已进入主要收益路径，因为 `hydration_count` 仍为 `0`。"
+        )
+        lines.append(
+            "- 仍然不能区分“worker LisM 真有帮助”和“boss brief 足够好，所以 fallback 到 full worker 也能赢”，因为当前主要命中的是 fallback ladder。"
+        )
+        lines.append(
+            "- `missing_refs` 与 `stale_ref_count` 目前均为 `0`，所以这轮不能用它们解释模式差异。"
+        )
+    else:
+        lines.append(
+            "- 不能从这批旧 sample 里回答 `u6/u8` 是否因为 worker LisM 带来更低 `fallback_count`。"
+        )
+        lines.append(
+            "- 不能从这批旧 sample 里回答 `u7/u9` 是否因为 worker full-context 带来更低 `missing_refs`。"
+        )
+        lines.append(
+            "- 不能从这批旧 sample 里比较 `context_tier` 分布，因为字段尚未写入。"
+        )
     lines.append("")
     lines.append("## 7. 下一步 rerun 要求")
     lines.append("")
-    lines.append("下一轮真实 `u6-u9` matrix 必须满足：")
+    lines.append("下一步验证建议：")
     lines.append("")
-    lines.append("- 使用当前代码重新生成 sample，确保 sample record 带上 `fallback_count / hydration_count / hydration_ref_missing / stale_ref_count / context_tier / fallback_tier`")
-    lines.append("- 继续保留 3 模式：`all_off / boss_on_only / all_on`")
-    lines.append("- 至少保留 `u7` 和 `u9` 作为 worker full-context 候选的对照集")
-    lines.append("- rerun 后用同一脚本重生这份报告，避免人工抄表")
+    lines.append("- 保留 3 模式：`all_off / boss_on_only / all_on`，但后续至少做 3+3 重复，避免单次成本波动误导结论")
+    lines.append("- 增加一个“禁用 full_worker_dispatch fallback”的对照实验，单独验证 worker typed hydration 是否能真正支撑实现")
+    lines.append("- 对 `u6/u8` 这类产物生成任务，继续观察 boss brief 改善后是否仍然需要 worker `force-on`")
+    lines.append("- 对 `u7/u9` 这类代码/工具任务，继续观察 `all_on` 与 `boss_on_only` 的差距是否稳定复现")
     lines.append("")
     return "\n".join(lines) + "\n"
 
@@ -286,6 +339,7 @@ def main():
     samples_dir = Path(args.samples_dir)
     output = Path(args.output)
     grouped = summarize(samples_dir)
+    render_report.samples_dir = str(samples_dir)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(render_report(grouped), encoding="utf-8")
     print(f"wrote {output}")
