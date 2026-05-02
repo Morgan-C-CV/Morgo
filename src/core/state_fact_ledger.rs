@@ -243,7 +243,12 @@ fn extract_path_candidates_with_mode(text: &str, objective_only: bool) -> Vec<(S
 }
 
 fn extract_path_candidates(text: &str) -> Vec<(String, String)> {
-    extract_path_candidates_with_mode(text, true)
+    let strict = extract_path_candidates_with_mode(text, true);
+    if strict.is_empty() {
+        extract_path_candidates_with_mode(text, false)
+    } else {
+        strict
+    }
 }
 
 fn extract_path_candidates_anywhere(text: &str) -> Vec<(String, String)> {
@@ -1060,6 +1065,36 @@ mod tests {
                 .iter()
                 .any(|item| item.kind == "workspace_snapshot")
         );
+    }
+
+    #[test]
+    fn build_step_fact_ledgers_extracts_plain_sentence_objective_paths() {
+        let step = BossPlanStep {
+            id: 7,
+            description: "fix worker ledger".into(),
+            objective: Some(
+                "修复 src/core/state_frame_projection.rs 中的 worker ledger 映射，并让 boss_flow 测试通过"
+                    .into(),
+            ),
+            acceptance: vec!["tests pass".into()],
+            requires_approval: false,
+            status: BossPlanStepStatus::Running,
+            completed: false,
+            result_diff: None,
+            worker_task_id: None,
+            attempt_count: 0,
+            retry_budget: 3,
+            last_review_summary: None,
+            last_correction: None,
+            review_task_id: None,
+            tool_execution_records: Vec::new(),
+        };
+
+        let ledgers = build_step_fact_ledgers(&step);
+        assert!(ledgers.file_facts.iter().any(|item| {
+            item.path == "RustAgent/Agent/src/core/state_frame_projection.rs"
+                || item.path == "src/core/state_frame_projection.rs"
+        }));
     }
 
     #[test]

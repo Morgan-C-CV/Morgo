@@ -615,7 +615,13 @@ fn r1_1_summarize_context_tier_and_hydration_metrics_per_arm() {
     });
 
     sink.record_run("on-ctx", true, &on_report, BossTestRunOutcome::Completed, 0);
-    sink.record_run("off-ctx", false, &off_report, BossTestRunOutcome::Completed, 0);
+    sink.record_run(
+        "off-ctx",
+        false,
+        &off_report,
+        BossTestRunOutcome::Completed,
+        0,
+    );
 
     let summary = sink.summarize();
     assert_eq!(summary.on_avg_fallback_count, 2);

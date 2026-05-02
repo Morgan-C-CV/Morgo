@@ -277,6 +277,37 @@ async fn run_openai_text_only_mock_server(
     stream.flush().await.expect("flush response");
 }
 
+async fn run_openai_scripted_json_sequence_server(
+    listener: TcpListener,
+    request_bodies: Arc<std::sync::Mutex<Vec<String>>>,
+    json_contents: Vec<String>,
+) {
+    for content_json in json_contents {
+        let (mut stream, _) = listener.accept().await.expect("accept request");
+        let mut buffer = vec![0_u8; 32 * 1024];
+        let bytes_read = stream.read(&mut buffer).await.expect("read request");
+        let request = String::from_utf8_lossy(&buffer[..bytes_read]).to_string();
+        request_bodies
+            .lock()
+            .expect("request bodies poisoned")
+            .push(request);
+        let escaped = content_json.replace('\\', "\\\\").replace('"', "\\\"");
+        let response_body = format!(
+            "data: {{\"choices\":[{{\"delta\":{{\"content\":\"{escaped}\"}}}}]}}\n\ndata: [DONE]\n\n"
+        );
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+            response_body.len(),
+            response_body
+        );
+        stream
+            .write_all(response.as_bytes())
+            .await
+            .expect("write response");
+        stream.flush().await.expect("flush response");
+    }
+}
+
 fn make_openai_runtime_snapshot_for_base_url(
     base_url: &str,
     observability: rust_agent::service::observability::ServiceObservabilityTracker,
@@ -12279,6 +12310,256 @@ async fn r0_boss_full_worker_text_only_completion_fails_artifact_verification() 
     server.await.expect("mock provider server finished");
     let _ = std::fs::remove_file(plan_path);
     let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn r2_1_31_real_boss_mode_worker_prompt_carries_precise_target_file_context() {
+    let task_manager = Arc::new(TaskManager::default());
+    let mut step = boss_step(0, "worker precise target file context");
+    step.objective = Some(
+        "修复 src/core/state_frame_projection.rs 中的 worker ledger 映射，并让 boss_flow 测试通过"
+            .into(),
+    );
+    step.acceptance = vec!["tests pass".into()];
+    let (coordinator, plan_path) = coordinator_with_plan(
+        boss_plan(vec![step]),
+        "test_r2_1_31_precise_target_file_context.json",
+    )
+    .await;
+
+    let request_bodies = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(run_openai_scripted_json_sequence_server(
+        listener,
+        request_bodies.clone(),
+        vec![r#"{"state":"done","decision":"done"}"#.into()],
+    ));
+
+    let config_dir = std::env::temp_dir().join("r2_1_31_precise_target_file_context");
+    write_worker_override_models_toml(&config_dir, &format!("http://{addr}"));
+
+    let mut app = (*app_state_with_tasks("r2-1-31-session", task_manager.clone())).clone();
+    app.permission_context.set_lism_enabled(true);
+    app.permission_context.inherited_active_model_snapshot =
+        Some(make_inherited_runtime_snapshot_with_scripted_turns(vec![]));
+    app.session = Some(SessionSnapshot {
+        session_id: SessionId("r2-1-31-session".into()),
+        surface: InteractionSurface::Cli,
+        session_mode: SessionMode::Headless,
+        cwd: config_dir.to_string_lossy().to_string(),
+        last_turn_at: None,
+        prompt_seed: None,
+    });
+    let app_state = Arc::new(app);
+
+    coordinator.advance_plan(&app_state).await.unwrap();
+    let report = coordinator.report_progress(&task_manager).await.unwrap();
+    assert_eq!(report.steps[0].status, BossPlanStepStatus::Completed);
+    let summary = report
+        .observability_summary
+        .as_ref()
+        .expect("lism path should produce observability");
+    assert_eq!(summary.total_fallback_count, 0);
+    assert_eq!(summary.total_hydration_count, 0);
+
+    let bodies = request_bodies.lock().expect("request bodies poisoned");
+    assert_eq!(
+        bodies.len(),
+        1,
+        "single done decision should need one request"
+    );
+    assert!(
+        bodies[0].contains("src/core/state_frame_projection.rs"),
+        "worker prompt must carry the exact target file path, got: {}",
+        bodies[0]
+    );
+    assert!(
+        bodies[0].contains("fact: file_facts ref="),
+        "worker prompt must carry typed file facts, got: {}",
+        bodies[0]
+    );
+    assert!(
+        !bodies[0].contains("fact: file_facts none recorded"),
+        "precise file facts must replace placeholder none recorded"
+    );
+    drop(bodies);
+
+    server.await.expect("mock provider server finished");
+    let _ = std::fs::remove_file(plan_path);
+    let _ = std::fs::remove_dir_all(config_dir);
+}
+
+#[tokio::test]
+async fn r2_1_32_real_boss_mode_request_context_receives_hydrated_evidence() {
+    let task_manager = Arc::new(TaskManager::default());
+    let mut step = boss_step(0, "request context hydration");
+    step.objective = Some("update src/core/state_frame_projection.rs".into());
+    step.acceptance = vec!["tests pass".into()];
+    let (coordinator, plan_path) = coordinator_with_plan(
+        boss_plan(vec![step]),
+        "test_r2_1_32_request_context_hydration.json",
+    )
+    .await;
+
+    let request_bodies = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(run_openai_scripted_json_sequence_server(
+        listener,
+        request_bodies.clone(),
+        vec![
+            r#"{"state":"executing","decision":"request_context","needed_context":["file_snippet:src/core/state_frame_projection.rs"]}"#.into(),
+            r#"{"state":"done","decision":"done"}"#.into(),
+        ],
+    ));
+
+    let config_dir = std::env::temp_dir().join("r2_1_32_request_context_hydration");
+    write_worker_override_models_toml(&config_dir, &format!("http://{addr}"));
+
+    let mut app = (*app_state_with_tasks("r2-1-32-session", task_manager.clone())).clone();
+    app.permission_context.set_lism_enabled(true);
+    app.permission_context.inherited_active_model_snapshot =
+        Some(make_inherited_runtime_snapshot_with_scripted_turns(vec![]));
+    app.session = Some(SessionSnapshot {
+        session_id: SessionId("r2-1-32-session".into()),
+        surface: InteractionSurface::Cli,
+        session_mode: SessionMode::Headless,
+        cwd: config_dir.to_string_lossy().to_string(),
+        last_turn_at: None,
+        prompt_seed: None,
+    });
+    let app_state = Arc::new(app);
+
+    coordinator.advance_plan(&app_state).await.unwrap();
+    let report = coordinator.report_progress(&task_manager).await.unwrap();
+    assert_eq!(report.steps[0].status, BossPlanStepStatus::Completed);
+    let meta = report.steps[0]
+        .routed_metadata
+        .as_ref()
+        .expect("routed metadata should exist");
+    assert_eq!(meta.fallback_count, Some(0));
+    assert_eq!(meta.hydration_count, Some(1));
+    assert_eq!(meta.hydration_ref_missing, Some(0));
+
+    let bodies = request_bodies.lock().expect("request bodies poisoned");
+    assert_eq!(
+        bodies.len(),
+        2,
+        "request_context should drive a second turn"
+    );
+    assert!(
+        bodies[1].contains("hydrated_context: file_snippet:src/core/state_frame_projection.rs"),
+        "second request must carry hydrated evidence, got: {}",
+        bodies[1]
+    );
+    assert!(
+        !bodies[1].contains("context_unavailable: file_snippet:src/core/state_frame_projection.rs"),
+        "hydrated selector must not degrade into context_unavailable"
+    );
+    drop(bodies);
+
+    server.await.expect("mock provider server finished");
+    let _ = std::fs::remove_file(plan_path);
+    let _ = std::fs::remove_dir_all(config_dir);
+}
+
+#[tokio::test]
+async fn r2_1_33_real_boss_mode_missing_hydration_triggers_fallback_ladder_in_prompt() {
+    let task_manager = Arc::new(TaskManager::default());
+    let mut step = boss_step(0, "fallback ladder prompt evidence");
+    step.objective = Some(
+        "update src/core/state_frame_projection.rs around BossCoordinator and get tests passing"
+            .into(),
+    );
+    step.acceptance = vec!["tests pass".into()];
+    let (coordinator, plan_path) = coordinator_with_plan(
+        boss_plan(vec![step]),
+        "test_r2_1_33_fallback_ladder_prompt.json",
+    )
+    .await;
+
+    let request_bodies = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(run_openai_scripted_json_sequence_server(
+        listener,
+        request_bodies.clone(),
+        vec![
+            r#"{"state":"executing","decision":"request_context","needed_context":["symbol:MissingSymbol"]}"#.into(),
+            r#"{"state":"executing","decision":"request_context","needed_context":["symbol:MissingSymbol"],"escalate":true}"#.into(),
+            r#"{"state":"done","decision":"done"}"#.into(),
+        ],
+    ));
+
+    let config_dir = std::env::temp_dir().join("r2_1_33_fallback_ladder_prompt");
+    write_worker_override_models_toml(&config_dir, &format!("http://{addr}"));
+
+    let mut app = (*app_state_with_tasks("r2-1-33-session", task_manager.clone())).clone();
+    app.permission_context.set_lism_enabled(true);
+    app.permission_context.inherited_active_model_snapshot =
+        Some(make_inherited_runtime_snapshot_with_scripted_turns(vec![]));
+    app.session = Some(SessionSnapshot {
+        session_id: SessionId("r2-1-33-session".into()),
+        surface: InteractionSurface::Cli,
+        session_mode: SessionMode::Headless,
+        cwd: config_dir.to_string_lossy().to_string(),
+        last_turn_at: None,
+        prompt_seed: None,
+    });
+    let app_state = Arc::new(app);
+
+    coordinator.advance_plan(&app_state).await.unwrap();
+    let report = coordinator.report_progress(&task_manager).await.unwrap();
+    assert_eq!(report.steps[0].status, BossPlanStepStatus::Completed);
+    let meta = report.steps[0]
+        .routed_metadata
+        .as_ref()
+        .expect("routed metadata should exist");
+    assert_eq!(meta.fallback_count, Some(2));
+    assert_eq!(meta.fallback_tier.as_deref(), Some("full_context"));
+    assert_eq!(
+        meta.fallback_reason.as_deref(),
+        Some("request_context_escalated:symbol:MissingSymbol")
+    );
+    assert_eq!(meta.hydration_ref_missing, Some(2));
+
+    let summary = report
+        .observability_summary
+        .as_ref()
+        .expect("lism path should produce observability");
+    assert_eq!(summary.total_fallback_count, 2);
+    assert_eq!(summary.total_hydration_ref_missing, 2);
+    assert_eq!(
+        summary.fallback_tier_counts.get("full_context").copied(),
+        Some(1)
+    );
+
+    let bodies = request_bodies.lock().expect("request bodies poisoned");
+    assert_eq!(
+        bodies.len(),
+        3,
+        "fallback ladder should require three turns"
+    );
+    assert!(
+        bodies[1].contains("fallback_context: tier=recent_local_history"),
+        "second request must carry recent_local_history fallback, got: {}",
+        bodies[1]
+    );
+    assert!(
+        bodies[2].contains("fallback_context: tier=full_context"),
+        "third request must carry full_context fallback, got: {}",
+        bodies[2]
+    );
+    assert!(
+        bodies[2].contains("fallback_context_item: tier=full_context source=objective"),
+        "full_context fallback must include objective excerpt"
+    );
+    drop(bodies);
+
+    server.await.expect("mock provider server finished");
+    let _ = std::fs::remove_file(plan_path);
+    let _ = std::fs::remove_dir_all(config_dir);
 }
 
 // ── T27.9 Boss production-path override contract ──────────────────────────
