@@ -1,4 +1,5 @@
 use crate::core::message::Message;
+use crate::core::state_fact_ledger::{StepFactLedgers, append_runtime_tool_record, fact_lines_from_ledgers};
 use crate::core::state_frame::{
     AgentState, DecisionKind, RepairNeeded, StateFrame, StatePatch, validate_state_decision,
 };
@@ -6,8 +7,12 @@ use crate::core::state_frame_hydration::hydrate_needed_context;
 use crate::service::api::client::ModelProviderClient;
 use crate::service::api::streaming::StreamEvent;
 use crate::state::permission_context::ToolPermissionContext;
+use crate::tool::definition::ObservableInput;
 use crate::tool::definition::{ToolCall, ToolResult};
+use crate::tool::orchestrator::build_execution_record;
 use crate::tool::registry::ToolRegistry;
+use crate::tool::result::ToolExecutionRecord;
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone)]
 pub struct DecisionLoopConfig {
@@ -43,6 +48,12 @@ pub struct LoopUsage {
     pub hydration_count: usize,
     pub stale_ref_count: usize,
     pub hydration_ref_missing: usize,
+    pub tool_dispatch_count: usize,
+    pub tool_dispatch_success_count: usize,
+    pub tool_dispatch_failure_count: usize,
+    pub tool_dispatch_ref_write_count: usize,
+    pub tool_dispatch_failure_taxonomy: BTreeMap<String, usize>,
+    pub tool_execution_records: Vec<ToolExecutionRecord>,
 }
 
 #[derive(Debug, Clone)]
@@ -70,6 +81,11 @@ pub enum LoopOutcome {
         reason: String,
         usage: LoopUsage,
     },
+    ToolDispatchFailed {
+        last_state: AgentState,
+        reason: String,
+        usage: LoopUsage,
+    },
     RepairExhausted {
         raw_json: String,
         reason: String,
@@ -77,10 +93,17 @@ pub enum LoopOutcome {
     },
 }
 
+#[derive(Debug, Clone)]
+struct CallToolDispatchError {
+    reason: String,
+    record: ToolExecutionRecord,
+}
+
 /// Collect text and token usage from a stream of events.
-fn collect_text_and_usage(events: Vec<StreamEvent>) -> (String, LoopUsage) {
+fn collect_text_and_usage(events: Vec<StreamEvent>) -> (String, LoopUsage, Option<String>) {
     let mut text = String::new();
     let mut usage = LoopUsage::default();
+    let mut error_reason = None;
     for event in events {
         match event {
             StreamEvent::TextDelta(t) => text.push_str(&t),
@@ -92,10 +115,18 @@ fn collect_text_and_usage(events: Vec<StreamEvent>) -> (String, LoopUsage) {
                 usage.cache_read_tokens += u.cache_read_input_tokens;
                 usage.cache_write_tokens += u.cache_creation_input_tokens;
             }
+            StreamEvent::Error(error) => {
+                if error_reason.is_none() {
+                    error_reason = Some(format!(
+                        "provider_error provider={} kind={} message={} disposition={:?}",
+                        error.provider_id, error.kind, error.message, error.disposition
+                    ));
+                }
+            }
             _ => {}
         }
     }
-    (text, usage)
+    (text, usage, error_reason)
 }
 
 const STATE_DECISION_INSTRUCTION: &str = "\
@@ -464,26 +495,66 @@ async fn execute_call_tool(
     decision: &crate::core::state_frame::StateDecision,
     tool_runtime: Option<&StateFrameToolRuntime>,
     dispatch_seq: &mut usize,
-) -> Result<bool, String> {
+) -> Result<(bool, ToolExecutionRecord, usize), CallToolDispatchError> {
     let tool_runtime = tool_runtime.ok_or_else(|| {
-        "call_tool requested but StateFrame tool runtime is unavailable".to_string()
+        CallToolDispatchError {
+            reason: "call_tool requested but StateFrame tool runtime is unavailable".to_string(),
+            record: build_execution_record(
+                decision
+                    .next_action
+                    .as_ref()
+                    .map(|action| action.action_type.clone())
+                    .unwrap_or_else(|| "unknown".into()),
+                &ToolResult::Interrupted(
+                    "call_tool requested but StateFrame tool runtime is unavailable".into(),
+                ),
+                None,
+            ),
+        }
     })?;
     let next_action = decision
         .next_action
         .as_ref()
-        .ok_or_else(|| "call_tool requested without next_action".to_string())?;
+        .ok_or_else(|| CallToolDispatchError {
+            reason: "call_tool requested without next_action".to_string(),
+            record: build_execution_record(
+                "unknown",
+                &ToolResult::Interrupted("call_tool requested without next_action".into()),
+                None,
+            ),
+        })?;
     let input = if next_action.args.is_string() {
         next_action.args.as_str().unwrap_or_default().to_string()
     } else {
         serde_json::to_string(&next_action.args)
-            .map_err(|error| format!("failed to serialize tool args: {error}"))?
+            .map_err(|error| CallToolDispatchError {
+                reason: format!("failed to serialize tool args: {error}"),
+                record: build_execution_record(
+                    next_action.action_type.clone(),
+                    &ToolResult::Interrupted(format!("failed to serialize tool args: {error}")),
+                    None,
+                ),
+            })?
     };
     let call = ToolCall::new(next_action.action_type.clone(), input);
+    let observable_input = tool_runtime.registry.observable_input(&call);
     let result = tool_runtime
         .registry
         .invoke(&call, &tool_runtime.permissions)
         .await
-        .map_err(|error| format!("tool dispatch failed: {error}"))?;
+        .map_err(|error| CallToolDispatchError {
+            reason: format!("tool dispatch failed: {error}"),
+            record: build_execution_record(
+                next_action.action_type.clone(),
+                &ToolResult::Interrupted(format!("tool dispatch failed: {error}")),
+                observable_input.clone(),
+            ),
+        })?;
+    let record = build_execution_record(
+        next_action.action_type.clone(),
+        &result,
+        observable_input.clone(),
+    );
     *dispatch_seq += 1;
     let source_event_id = format!(
         "tool-{}:{}",
@@ -493,6 +564,7 @@ async fn execute_call_tool(
     match result {
         ToolResult::Text(text) => {
             let mut changed = false;
+            let mut ref_write_count = 0usize;
             let excerpt = compact_tool_excerpt(&text, 220);
             changed |= push_unique(
                 &mut frame.recent_evidence,
@@ -501,63 +573,37 @@ async fn execute_call_tool(
                     dispatch_seq, next_action.action_type, source_event_id, excerpt
                 ),
             );
-            if let Some(path) = parse_read_path(decision) {
+            let mut ledgers = StepFactLedgers::default();
+            append_runtime_tool_record(&mut ledgers, &record, &format!("runtime:{}", dispatch_seq));
+            let fact_lines = fact_lines_from_ledgers(&ledgers);
+            ref_write_count += fact_lines.len();
+            for line in fact_lines {
+                changed |= push_unique(&mut frame.recent_evidence, line);
+            }
+            if let Some(path) = parse_read_path(decision).or_else(|| observable_path_from_input(observable_input.as_ref())) {
                 changed |= push_unique(
                     &mut frame.recent_evidence,
                     format!(
-                        "fact: file_facts ref=filefact:runtime:read:{} path={} kind=source_file source=tool:{} source_event_id={} freshness=after-runtime confidence=1.00 status=active invalidated_by=none supersedes=none conflicts_with=none fact=runtime read observed concrete file context: {}",
-                        dispatch_seq,
-                        path,
-                        next_action.action_type,
-                        source_event_id,
-                        path
-                    ),
-                );
-                changed |= push_unique(
-                    &mut frame.recent_evidence,
-                    format!(
-                        "hydrated_context: file_snippet:{} source=tool:{} match_reason=call_tool_read trace=fact_name=file_facts ref=filefact:runtime:read:{} source=tool:{} source_event_id={} freshness=after-runtime excerpt={}",
+                        "hydrated_context: file_snippet:{} source=tool:{} match_reason=call_tool_read trace=fact_name=file_facts ref=filefact:runtime:{}:read source=tool:{} source_event_id=tool-read:runtime:{} freshness=after-runtime-read excerpt={}",
                         path,
                         next_action.action_type,
                         dispatch_seq,
                         next_action.action_type,
-                        source_event_id,
+                        dispatch_seq,
                         excerpt
                     ),
                 );
             }
-            if let Some(path) = parse_edit_path(decision) {
+            if let Some(path) = parse_edit_path(decision).or_else(|| observable_path_from_input(observable_input.as_ref())) {
                 changed |= push_unique(
                     &mut frame.recent_evidence,
                     format!(
-                        "fact: recent_changes_in_files ref=change:runtime:edit:{} path={} source=tool:{} source_event_id={} freshness=after-runtime confidence=1.00 status=active invalidated_by=none supersedes=none conflicts_with=none summary=runtime edit changed {}",
-                        dispatch_seq,
-                        path,
-                        next_action.action_type,
-                        source_event_id,
-                        path
-                    ),
-                );
-                changed |= push_unique(
-                    &mut frame.recent_evidence,
-                    format!(
-                        "fact: file_facts ref=filefact:runtime:edit:{} path={} kind=source_file source=tool:{} source_event_id={} freshness=after-runtime confidence=1.00 status=active invalidated_by=none supersedes=none conflicts_with=none fact=runtime edit produced updated concrete file context: {}",
-                        dispatch_seq,
-                        path,
-                        next_action.action_type,
-                        source_event_id,
-                        path
-                    ),
-                );
-                changed |= push_unique(
-                    &mut frame.recent_evidence,
-                    format!(
-                        "hydrated_context: file_snippet:{} source=tool:{} match_reason=call_tool_edit trace=fact_name=file_facts ref=filefact:runtime:edit:{} source=tool:{} source_event_id={} freshness=after-runtime excerpt={}",
+                        "hydrated_context: file_snippet:{} source=tool:{} match_reason=call_tool_edit trace=fact_name=file_facts ref=filefact:runtime:{}:edit source=tool:{} source_event_id=tool-edit:runtime:{} freshness=after-runtime-edit excerpt={}",
                         path,
                         next_action.action_type,
                         dispatch_seq,
                         next_action.action_type,
-                        source_event_id,
+                        dispatch_seq,
                         excerpt
                     ),
                 );
@@ -566,28 +612,71 @@ async fn execute_call_tool(
                 changed |= push_unique(
                     &mut frame.recent_evidence,
                     format!(
-                        "fact: artifact_status ref=artifact:runtime:bash:{} path=command:{} kind=command_output status=observed source=tool:{} source_event_id={} freshness=after-runtime confidence=1.00 lineage_status=active invalidated_by=none supersedes=none conflicts_with=none summary={}",
+                        "recent_output_ref: ref=artifact:runtime:{}:bash tool={} source_event_id={} command_excerpt={}",
                         dispatch_seq,
-                        compact_tool_excerpt(&command, 80),
                         next_action.action_type,
                         source_event_id,
-                        excerpt
+                        compact_tool_excerpt(&command, 80)
                     ),
                 );
             }
-            Ok(changed)
+            Ok((changed, record, ref_write_count))
         }
         ToolResult::ResultTooLarge(message)
         | ToolResult::Interrupted(message)
         | ToolResult::Denied(message)
-        | ToolResult::Progress(message) => Err(format!(
-            "call_tool {} did not produce usable text: {}",
-            next_action.action_type, message
-        )),
-        ToolResult::PendingApproval { message, .. } => Err(format!(
-            "call_tool {} requires approval: {}",
-            next_action.action_type, message
-        )),
+        | ToolResult::Progress(message) => Err(CallToolDispatchError {
+            reason: format!(
+                "call_tool {} did not produce usable text: {}",
+                next_action.action_type, message
+            ),
+            record,
+        }),
+        ToolResult::PendingApproval { message, .. } => Err(CallToolDispatchError {
+            reason: format!(
+                "call_tool {} requires approval: {}",
+                next_action.action_type, message
+            ),
+            record,
+        }),
+    }
+}
+
+fn observable_path_from_input(input: Option<&ObservableInput>) -> Option<String> {
+    let raw = input?.value.as_str();
+    let json: serde_json::Value = serde_json::from_str(raw).ok()?;
+    json.get("file_path")
+        .and_then(|value| value.as_str())
+        .or_else(|| json.get("path").and_then(|value| value.as_str()))
+        .map(str::to_string)
+}
+
+fn classify_dispatch_failure(reason: &str) -> String {
+    let lowered = reason.to_ascii_lowercase();
+    if lowered.contains("runtime is unavailable") {
+        "tool_runtime_unavailable".into()
+    } else if lowered.contains("unknown tool") {
+        "tool_unavailable".into()
+    } else if lowered.contains("requires approval") || lowered.contains(" denied") {
+        "permission_denied".into()
+    } else if lowered.contains("invalid input")
+        || lowered.contains("serialize tool args")
+        || lowered.contains("json-structured input")
+        || lowered.contains("without next_action")
+    {
+        "schema_invalid".into()
+    } else if lowered.contains("sandbox")
+        || lowered.contains("capability")
+        || lowered.contains("not allowed in plan mode")
+    {
+        "sandbox_blocked".into()
+    } else if lowered.contains("did not produce usable text")
+        || lowered.contains("no output")
+        || lowered.contains("result too large")
+    {
+        "tool_result_empty".into()
+    } else {
+        "tool_interrupted".into()
     }
 }
 
@@ -628,12 +717,21 @@ pub async fn run_decision_loop_with_tools(
         total_usage.original_prompt_chars += prompt_chars;
         total_usage.sent_prompt_chars += prompt_chars;
         let events = client.stream_message(&Message::user(prompt)).await;
-        let (text, iter_usage) = collect_text_and_usage(events);
+        let (text, iter_usage, stream_error) = collect_text_and_usage(events);
         total_usage.input_tokens += iter_usage.input_tokens;
         total_usage.uncached_input_tokens += iter_usage.uncached_input_tokens;
         total_usage.output_tokens += iter_usage.output_tokens;
         total_usage.cache_read_tokens += iter_usage.cache_read_tokens;
         total_usage.cache_write_tokens += iter_usage.cache_write_tokens;
+        if let Some(reason) = stream_error {
+            if text.trim().is_empty() {
+                return Ok(LoopOutcome::ToolDispatchFailed {
+                    last_state: frame.state,
+                    reason,
+                    usage: total_usage,
+                });
+            }
+        }
 
         // Repair loop: retry on JSON parse failure.
         let decision = match parse_and_validate_decision(&frame, &text) {
@@ -653,12 +751,22 @@ pub async fn run_decision_loop_with_tools(
                     total_usage.original_prompt_chars += repair_prompt_chars;
                     total_usage.sent_prompt_chars += repair_prompt_chars;
                     let repair_events = client.stream_message(&Message::user(repair_prompt)).await;
-                    let (repaired_text, repair_usage) = collect_text_and_usage(repair_events);
+                    let (repaired_text, repair_usage, repair_error) =
+                        collect_text_and_usage(repair_events);
                     total_usage.input_tokens += repair_usage.input_tokens;
                     total_usage.uncached_input_tokens += repair_usage.uncached_input_tokens;
                     total_usage.output_tokens += repair_usage.output_tokens;
                     total_usage.cache_read_tokens += repair_usage.cache_read_tokens;
                     total_usage.cache_write_tokens += repair_usage.cache_write_tokens;
+                    if let Some(reason) = repair_error {
+                        if repaired_text.trim().is_empty() {
+                            return Ok(LoopOutcome::ToolDispatchFailed {
+                                last_state: frame.state,
+                                reason,
+                                usage: total_usage,
+                            });
+                        }
+                    }
                     match parse_and_validate_decision(&frame, &repaired_text) {
                         Ok(d) => {
                             resolved = Some(d);
@@ -756,20 +864,40 @@ pub async fn run_decision_loop_with_tools(
             }
             DecisionKind::CallTool => {
                 frame.state = decision.state;
-                let changed = execute_call_tool(
+                total_usage.tool_dispatch_count += 1;
+                match execute_call_tool(
                     &mut frame,
                     &decision,
                     tool_runtime.as_ref(),
                     &mut tool_dispatch_seq,
                 )
                 .await
-                .map_err(anyhow::Error::msg)?;
-                if !changed {
-                    return Ok(LoopOutcome::NoProgress {
-                        last_state: frame.state,
-                        reason: "call_tool decision produced no StateFrame progress".into(),
-                        usage: total_usage,
-                    });
+                {
+                    Ok((changed, record, ref_write_count)) => {
+                        total_usage.tool_dispatch_success_count += 1;
+                        total_usage.tool_dispatch_ref_write_count += ref_write_count;
+                        total_usage.tool_execution_records.push(record);
+                        if !changed {
+                            return Ok(LoopOutcome::NoProgress {
+                                last_state: frame.state,
+                                reason: "call_tool decision produced no StateFrame progress".into(),
+                                usage: total_usage,
+                            });
+                        }
+                    }
+                    Err(error) => {
+                        total_usage.tool_dispatch_failure_count += 1;
+                        *total_usage
+                            .tool_dispatch_failure_taxonomy
+                            .entry(classify_dispatch_failure(&error.reason))
+                            .or_insert(0) += 1;
+                        total_usage.tool_execution_records.push(error.record);
+                        return Ok(LoopOutcome::ToolDispatchFailed {
+                            last_state: frame.state,
+                            reason: error.reason,
+                            usage: total_usage,
+                        });
+                    }
                 }
             }
             _ => {
@@ -794,7 +922,7 @@ mod tests {
     use crate::core::state_frame::{ActorRole, AgentState, StateBudget, StateFrame};
     use crate::core::state_frame_hydration::hydrate_needed_context;
     use crate::service::api::client::ModelProviderClient;
-    use crate::service::api::streaming::StreamEvent;
+    use crate::service::api::streaming::{ProviderFailureDisposition, StreamError, StreamEvent};
     use crate::state::permission_context::{PermissionMode, ToolPermissionContext};
     use crate::tool::builtin::bash::BashTool;
     use crate::tool::builtin::file_edit::FileEditTool;
@@ -989,6 +1117,10 @@ mod tests {
         match outcome {
             LoopOutcome::Done { usage, .. } => {
                 assert_eq!(usage.fallback_count, 0);
+                assert_eq!(usage.tool_dispatch_count, 2);
+                assert_eq!(usage.tool_dispatch_success_count, 2);
+                assert_eq!(usage.tool_dispatch_failure_count, 0);
+                assert!(usage.tool_dispatch_ref_write_count >= 2);
             }
             other => panic!("expected Done, got {other:?}"),
         }
@@ -1014,7 +1146,7 @@ mod tests {
             permissions,
         };
         let mut frame = make_frame();
-        let changed = rt
+        let (changed, record, ref_write_count) = rt
             .block_on(execute_call_tool(
                 &mut frame,
                 &decision,
@@ -1023,6 +1155,8 @@ mod tests {
             ))
             .expect("edit tool dispatch should succeed");
         assert!(changed, "edit dispatch should append typed evidence");
+        assert_eq!(record.tool_name, "Edit");
+        assert!(ref_write_count >= 2);
         let content = std::fs::read_to_string(&temp_path).expect("edit should update temp file");
         assert_eq!(content, "omega\nbeta\n");
         let hydration = hydrate_needed_context(
@@ -1049,5 +1183,70 @@ mod tests {
                 .any(|item| item.contains("file_snippet:") && item.contains("match_reason=path")),
             "expected file_snippet hydration from recent edit file fact"
         );
+    }
+
+    #[test]
+    fn call_tool_unknown_tool_records_failure_taxonomy() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let request_json = r#"{"state":"executing","decision":"call_tool","next_action":{"action_type":"Nope","args":{"value":"x"}}}"#;
+        let client =
+            ModelProviderClient::with_scripted_turns(vec![vec![StreamEvent::TextDelta(
+                request_json.into(),
+            )]]);
+        let tool_runtime = StateFrameToolRuntime {
+            registry: ToolRegistry::new().register(Arc::new(FileReadTool)),
+            permissions: ToolPermissionContext::new(PermissionMode::Default),
+        };
+        let outcome = rt
+            .block_on(run_decision_loop_with_tools(
+                &client,
+                make_frame(),
+                DecisionLoopConfig::default(),
+                Some(tool_runtime),
+            ))
+            .expect("loop should not error");
+        match outcome {
+            LoopOutcome::ToolDispatchFailed { usage, reason, .. } => {
+                assert!(reason.contains("did not produce usable text") || reason.contains("unknown tool"));
+                assert_eq!(usage.tool_dispatch_count, 1);
+                assert_eq!(usage.tool_dispatch_success_count, 0);
+                assert_eq!(usage.tool_dispatch_failure_count, 1);
+                assert_eq!(
+                    usage.tool_dispatch_failure_taxonomy.get("tool_unavailable"),
+                    Some(&1usize)
+                );
+                assert_eq!(usage.tool_execution_records.len(), 1);
+            }
+            other => panic!("expected ToolDispatchFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn provider_stream_error_is_reported_instead_of_json_eof() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let client = ModelProviderClient::with_scripted_turns(vec![vec![StreamEvent::Error(
+            StreamError {
+                provider_id: "openai".into(),
+                kind: "empty_response_body".into(),
+                message: "provider returned empty response body".into(),
+                retryable: false,
+                disposition: ProviderFailureDisposition::PreStreamTerminal,
+                status_code: None,
+            },
+        )]]);
+        let outcome = rt
+            .block_on(run_decision_loop(
+                &client,
+                make_frame(),
+                DecisionLoopConfig::default(),
+            ))
+            .expect("loop should not error");
+        match outcome {
+            LoopOutcome::ToolDispatchFailed { reason, .. } => {
+                assert!(reason.contains("provider_error"));
+                assert!(reason.contains("empty response body"));
+            }
+            other => panic!("expected ToolDispatchFailed, got {other:?}"),
+        }
     }
 }

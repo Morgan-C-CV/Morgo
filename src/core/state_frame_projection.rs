@@ -639,7 +639,7 @@ mod tests {
         };
 
         let diagnostics = collect_projection_diagnostics(&frame);
-        assert_eq!(diagnostics.mismatch_count, 2);
+        assert_eq!(diagnostics.mismatch_count, 3);
         assert!(
             diagnostics
                 .warnings

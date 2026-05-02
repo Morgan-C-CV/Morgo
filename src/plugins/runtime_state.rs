@@ -151,7 +151,12 @@ pub fn build_runtime_plugin_snapshot(app_state: &AppState) -> RuntimePluginSnaps
         app_state,
         plugin_load_result.as_ref(),
     ));
-    let runtime_tool_registry = Arc::new(RwLock::new(coordinator_tools.clone()));
+    let runtime_tool_registry = Arc::new(RwLock::new(tool_inventory.assemble(
+        crate::tool::registry::ToolAssemblyContext::worker(
+            app_state.surface,
+            app_state.session_mode,
+        ),
+    )));
     let mut notification_dispatcher = app_state.notification_dispatcher.clone();
     notification_dispatcher.set_hook_registry(hook_registry.clone());
 

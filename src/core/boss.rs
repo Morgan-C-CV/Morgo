@@ -1756,6 +1756,19 @@ impl BossCoordinator {
                 summary.total_hydration_count += m.hydration_count.unwrap_or(0);
                 summary.total_stale_ref_count += m.stale_ref_count.unwrap_or(0);
                 summary.total_hydration_ref_missing += m.hydration_ref_missing.unwrap_or(0);
+                summary.total_tool_dispatch_count += m.tool_dispatch_count.unwrap_or(0);
+                summary.total_tool_dispatch_success_count +=
+                    m.tool_dispatch_success_count.unwrap_or(0);
+                summary.total_tool_dispatch_failure_count +=
+                    m.tool_dispatch_failure_count.unwrap_or(0);
+                summary.total_tool_dispatch_ref_write_count +=
+                    m.tool_dispatch_ref_write_count.unwrap_or(0);
+                for (reason, count) in &m.tool_dispatch_failure_taxonomy {
+                    *summary
+                        .tool_dispatch_failure_taxonomy
+                        .entry(reason.clone())
+                        .or_insert(0) += count;
+                }
                 summary.total_input_tokens += m.input_tokens.unwrap_or(0);
                 summary.total_uncached_input_tokens += m.uncached_input_tokens.unwrap_or(0);
                 summary.total_output_tokens += m.output_tokens.unwrap_or(0);
@@ -2736,7 +2749,10 @@ impl BossCoordinator {
                         )
                     };
                     if full_worker_dispatch_fallback_enabled
-                        && requires_external_tool_execution(&routed_preview.frame)
+                        && requires_external_tool_execution(
+                            &routed_preview.frame,
+                            app_state.runtime_tool_registry.is_some(),
+                        )
                     {
                         let state_frame_size = serde_json::to_string(&routed_preview.frame)
                             .map(|s| s.len())
@@ -2760,6 +2776,11 @@ impl BossCoordinator {
                             hydration_count: Some(0),
                             stale_ref_count: Some(0),
                             hydration_ref_missing: Some(0),
+                            tool_dispatch_count: Some(0),
+                            tool_dispatch_success_count: Some(0),
+                            tool_dispatch_failure_count: Some(0),
+                            tool_dispatch_ref_write_count: Some(0),
+                            tool_dispatch_failure_taxonomy: std::collections::BTreeMap::new(),
                             input_tokens: Some(0),
                             uncached_input_tokens: Some(0),
                             output_tokens: Some(0),
@@ -2809,6 +2830,11 @@ impl BossCoordinator {
                                 hydration_count: Some(0),
                                 stale_ref_count: Some(0),
                                 hydration_ref_missing: Some(0),
+                                tool_dispatch_count: Some(0),
+                                tool_dispatch_success_count: Some(0),
+                                tool_dispatch_failure_count: Some(0),
+                                tool_dispatch_ref_write_count: Some(0),
+                                tool_dispatch_failure_taxonomy: std::collections::BTreeMap::new(),
                                 input_tokens: Some(0),
                                 uncached_input_tokens: Some(0),
                                 output_tokens: Some(0),
@@ -2868,12 +2894,44 @@ impl BossCoordinator {
                                 routed_metadata.stale_ref_count = Some(usage.stale_ref_count);
                                 routed_metadata.hydration_ref_missing =
                                     Some(usage.hydration_ref_missing);
+                                routed_metadata.tool_dispatch_count =
+                                    Some(usage.tool_dispatch_count);
+                                routed_metadata.tool_dispatch_success_count =
+                                    Some(usage.tool_dispatch_success_count);
+                                routed_metadata.tool_dispatch_failure_count =
+                                    Some(usage.tool_dispatch_failure_count);
+                                routed_metadata.tool_dispatch_ref_write_count =
+                                    Some(usage.tool_dispatch_ref_write_count);
+                                routed_metadata.tool_dispatch_failure_taxonomy =
+                                    usage.tool_dispatch_failure_taxonomy.clone();
                             }
                             (outcome, routed_metadata)
                         };
                         {
                             let mut routed_step_metadata = self.routed_step_metadata.write().await;
                             routed_step_metadata.insert(step_id, routed_metadata);
+                        }
+                        if let Some(usage) = match &outcome {
+                            StepOutcome::Completed { usage } => Some(usage),
+                            StepOutcome::Failed {
+                                usage: Some(usage), ..
+                            } => Some(usage),
+                            StepOutcome::Failed { usage: None, .. } => None,
+                        } {
+                            if !usage.tool_execution_records.is_empty() {
+                                let mut plan_guard = self.plan.write().await;
+                                let plan = plan_guard
+                                    .as_mut()
+                                    .ok_or_else(|| anyhow::anyhow!("No plan loaded"))?;
+                                let step = plan
+                                    .steps
+                                    .iter_mut()
+                                    .find(|step| step.id == step_id)
+                                    .ok_or_else(|| anyhow::anyhow!("Unknown boss step {step_id}"))?;
+                                for record in &usage.tool_execution_records {
+                                    append_step_runtime_record(step, record.clone());
+                                }
+                            }
                         }
 
                         match outcome {

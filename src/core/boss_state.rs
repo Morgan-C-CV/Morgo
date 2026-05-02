@@ -169,7 +169,7 @@ fn default_retry_budget() -> u32 {
     3
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct BossStepRoutedMetadata {
     #[serde(default)]
     pub toolset_id: Option<String>,
@@ -199,6 +199,16 @@ pub struct BossStepRoutedMetadata {
     pub stale_ref_count: Option<usize>,
     #[serde(default)]
     pub hydration_ref_missing: Option<usize>,
+    #[serde(default)]
+    pub tool_dispatch_count: Option<usize>,
+    #[serde(default)]
+    pub tool_dispatch_success_count: Option<usize>,
+    #[serde(default)]
+    pub tool_dispatch_failure_count: Option<usize>,
+    #[serde(default)]
+    pub tool_dispatch_ref_write_count: Option<usize>,
+    #[serde(default)]
+    pub tool_dispatch_failure_taxonomy: std::collections::BTreeMap<String, usize>,
     /// Total input tokens billed for this step (v1 stub: always 0).
     #[serde(default)]
     pub input_tokens: Option<usize>,
@@ -251,6 +261,16 @@ pub struct BossObservabilitySummary {
     pub total_stale_ref_count: usize,
     #[serde(default)]
     pub total_hydration_ref_missing: usize,
+    #[serde(default)]
+    pub total_tool_dispatch_count: usize,
+    #[serde(default)]
+    pub total_tool_dispatch_success_count: usize,
+    #[serde(default)]
+    pub total_tool_dispatch_failure_count: usize,
+    #[serde(default)]
+    pub total_tool_dispatch_ref_write_count: usize,
+    #[serde(default)]
+    pub tool_dispatch_failure_taxonomy: std::collections::BTreeMap<String, usize>,
     /// Steps where provider_profile_id is Some (i.e. a non-inherited model profile was used).
     pub override_hit_count: usize,
     pub model_tier_counts: std::collections::HashMap<String, usize>,

@@ -72,7 +72,7 @@ impl ToolAssemblyContext {
             environment: ToolAssemblyEnvironment::Restricted,
             include_deferred_tools: false,
             include_interactive_tools: false,
-            include_open_world_tools: false,
+            include_open_world_tools: true,
             boss_actor_policy: None,
         }
     }

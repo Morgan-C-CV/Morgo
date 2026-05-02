@@ -176,6 +176,31 @@ fn build_outcome(
     }
 }
 
+pub fn build_execution_record(
+    tool_name: impl Into<String>,
+    result: &ToolResult,
+    observable_input: Option<crate::tool::definition::ObservableInput>,
+) -> ToolExecutionRecord {
+    let tool_name = tool_name.into();
+    let (kind, summary, detail, pending_approval, report_modifier) =
+        summarize_result(&tool_name, result);
+    ToolExecutionRecord {
+        tool_name,
+        outcome: format!("{:?}", result),
+        kind,
+        summary,
+        detail,
+        pending_approval,
+        report_modifier,
+        observable_input,
+        batch_context: crate::tool::result::ToolBatchContext {
+            batch_index: 0,
+            batch_size: 1,
+            executed_in_batch: false,
+        },
+    }
+}
+
 fn should_stop_serial_execution(
     interrupt_behavior: &InterruptBehavior,
     result: &ToolResult,

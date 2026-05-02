@@ -136,6 +136,10 @@ fn active_lineage() -> LedgerLineage {
     }
 }
 
+pub fn active_ledger_lineage() -> LedgerLineage {
+    active_lineage()
+}
+
 fn trim_excerpt(text: &str, max_chars: usize) -> String {
     let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
     let mut iter = compact.chars();
@@ -398,6 +402,230 @@ fn tool_record_summary(record: &ToolExecutionRecord) -> String {
     )
 }
 
+fn summarize_list(items: &[String]) -> String {
+    if items.is_empty() {
+        "none".into()
+    } else {
+        items.join(" | ")
+    }
+}
+
+fn format_confidence(confidence_milli: u16) -> String {
+    format!("{:.2}", confidence_milli as f32 / 1000.0)
+}
+
+pub fn format_file_fact_line(item: &FileFactRecord) -> String {
+    format!(
+        "fact: file_facts ref={} path={} kind={} source={} source_event_id={} freshness={} confidence={} status={} invalidated_by={} supersedes={} conflicts_with={}{} fact={}",
+        item.ref_id,
+        item.path,
+        item.kind,
+        item.source,
+        item.source_event_id,
+        item.freshness,
+        format_confidence(item.confidence_milli),
+        item.lineage.status,
+        summarize_list(&item.lineage.invalidated_by),
+        summarize_list(&item.lineage.supersedes),
+        summarize_list(&item.lineage.conflicts_with),
+        item.symbol
+            .as_deref()
+            .map(|symbol| format!(" symbol={symbol}"))
+            .unwrap_or_default(),
+        item.fact
+    )
+}
+
+pub fn format_change_fact_line(item: &ChangeRecord) -> String {
+    format!(
+        "fact: recent_changes_in_files ref={} path={} source={} source_event_id={} freshness={} confidence={} status={} invalidated_by={} supersedes={} conflicts_with={} summary={}",
+        item.ref_id,
+        item.path,
+        item.source,
+        item.source_event_id,
+        item.freshness,
+        format_confidence(item.confidence_milli),
+        item.lineage.status,
+        summarize_list(&item.lineage.invalidated_by),
+        summarize_list(&item.lineage.supersedes),
+        summarize_list(&item.lineage.conflicts_with),
+        item.summary
+    )
+}
+
+pub fn format_test_fact_line(item: &TestRecord) -> String {
+    format!(
+        "fact: test_failures ref={} name={} status={} source={} source_event_id={} freshness={} confidence={} lineage_status={} invalidated_by={} supersedes={} conflicts_with={} summary={}",
+        item.ref_id,
+        item.name,
+        item.status,
+        item.source,
+        item.source_event_id,
+        item.freshness,
+        format_confidence(item.confidence_milli),
+        item.lineage.status,
+        summarize_list(&item.lineage.invalidated_by),
+        summarize_list(&item.lineage.supersedes),
+        summarize_list(&item.lineage.conflicts_with),
+        item.summary
+    )
+}
+
+pub fn format_artifact_fact_line(item: &ArtifactRecord) -> String {
+    format!(
+        "fact: artifact_status ref={} path={} kind={} status={} source={} source_event_id={} freshness={} confidence={} lineage_status={} invalidated_by={} supersedes={} conflicts_with={} summary={}",
+        item.ref_id,
+        item.path,
+        item.kind,
+        item.status,
+        item.source,
+        item.source_event_id,
+        item.freshness,
+        format_confidence(item.confidence_milli),
+        item.lineage.status,
+        summarize_list(&item.lineage.invalidated_by),
+        summarize_list(&item.lineage.supersedes),
+        summarize_list(&item.lineage.conflicts_with),
+        item.summary
+    )
+}
+
+pub fn fact_lines_from_ledgers(ledgers: &StepFactLedgers) -> Vec<String> {
+    let mut facts = Vec::new();
+    for item in &ledgers.file_facts {
+        facts.push(format_file_fact_line(item));
+    }
+    for item in &ledgers.change_refs {
+        facts.push(format_change_fact_line(item));
+    }
+    for item in &ledgers.test_refs {
+        facts.push(format_test_fact_line(item));
+    }
+    for item in &ledgers.artifact_refs {
+        facts.push(format_artifact_fact_line(item));
+    }
+    facts
+}
+
+fn bash_artifact_status(record: &ToolExecutionRecord) -> &'static str {
+    match record.kind {
+        ToolExecutionOutcomeKind::Success => "observed",
+        ToolExecutionOutcomeKind::Denied => "denied",
+        ToolExecutionOutcomeKind::PendingApproval => "pending_approval",
+        ToolExecutionOutcomeKind::Interrupted => "interrupted",
+        ToolExecutionOutcomeKind::Progress => "in_progress",
+        ToolExecutionOutcomeKind::ResultTooLarge => "result_too_large",
+    }
+}
+
+fn bash_test_status(record: &ToolExecutionRecord) -> &'static str {
+    let detail = record.detail.as_deref().unwrap_or_default();
+    match record.kind {
+        ToolExecutionOutcomeKind::Success if !detail.contains("exit_code:") => "passed",
+        ToolExecutionOutcomeKind::Success if detail.contains("exit_code: 0") => "passed",
+        ToolExecutionOutcomeKind::PendingApproval => "pending_approval",
+        ToolExecutionOutcomeKind::Denied => "denied",
+        ToolExecutionOutcomeKind::ResultTooLarge => "result_too_large",
+        _ => "failed",
+    }
+}
+
+pub fn append_runtime_tool_record(
+    ledgers: &mut StepFactLedgers,
+    record: &ToolExecutionRecord,
+    ref_namespace: &str,
+) {
+    match record.tool_name.as_str() {
+        "Read" => {
+            if record.kind != ToolExecutionOutcomeKind::Success {
+                return;
+            }
+            let Some(path) = observable_path(record).map(|path| normalize_runtime_path(&path)) else {
+                return;
+            };
+            push_file_fact(
+                ledgers,
+                FileFactRecord {
+                    ref_id: format!("filefact:{ref_namespace}:read"),
+                    path: path.clone(),
+                    kind: "read_observation".into(),
+                    fact: format!("runtime Read succeeded for {path}"),
+                    symbol: extract_symbol_for_path(&path, &[record.detail.as_deref().unwrap_or_default()]),
+                    source: "tool:Read".into(),
+                    source_event_id: format!("tool-read:{ref_namespace}"),
+                    freshness: "after-runtime-read".into(),
+                    confidence_milli: 1000,
+                    lineage: active_lineage(),
+                },
+            );
+        }
+        "Edit" | "Write" => {
+            if record.kind != ToolExecutionOutcomeKind::Success {
+                return;
+            }
+            let Some(path) = observable_path(record).map(|path| normalize_runtime_path(&path)) else {
+                return;
+            };
+            ledgers.change_refs.push(ChangeRecord {
+                ref_id: format!("change:{ref_namespace}:edit"),
+                path: path.clone(),
+                summary: tool_record_summary(record),
+                source: format!("tool:{}", record.tool_name),
+                source_event_id: format!("tool-edit:{ref_namespace}"),
+                freshness: "after-runtime-edit".into(),
+                confidence_milli: 1000,
+                lineage: active_lineage(),
+            });
+            push_file_fact(
+                ledgers,
+                FileFactRecord {
+                    ref_id: format!("filefact:{ref_namespace}:edit"),
+                    path,
+                    kind: "edited_file".into(),
+                    fact: format!("runtime {} succeeded for this file", record.tool_name),
+                    symbol: None,
+                    source: format!("tool:{}", record.tool_name),
+                    source_event_id: format!("tool-edit:{ref_namespace}"),
+                    freshness: "after-runtime-edit".into(),
+                    confidence_milli: 1000,
+                    lineage: active_lineage(),
+                },
+            );
+        }
+        "Bash" => {
+            let Some(command) = observable_bash_command(record) else {
+                return;
+            };
+            ledgers.artifact_refs.push(ArtifactRecord {
+                ref_id: format!("artifact:{ref_namespace}:bash"),
+                path: format!("command:{}", trim_excerpt(&command, 80)),
+                kind: "command_output".into(),
+                status: bash_artifact_status(record).into(),
+                summary: tool_record_summary(record),
+                source: "tool:Bash".into(),
+                source_event_id: format!("tool-bash:{ref_namespace}"),
+                freshness: "after-runtime-bash".into(),
+                confidence_milli: 1000,
+                lineage: active_lineage(),
+            });
+            if is_test_command(&command) {
+                ledgers.test_refs.push(TestRecord {
+                    ref_id: format!("test:{ref_namespace}:bash"),
+                    name: trim_excerpt(&command, 60),
+                    status: bash_test_status(record).into(),
+                    summary: tool_record_summary(record),
+                    source: "tool:Bash".into(),
+                    source_event_id: format!("tool-bash:{ref_namespace}"),
+                    freshness: "after-runtime-test".into(),
+                    confidence_milli: 1000,
+                    lineage: active_lineage(),
+                });
+            }
+        }
+        _ => {}
+    }
+}
+
 fn is_test_command(command: &str) -> bool {
     let lowered = command.to_lowercase();
     lowered.contains("cargo test")
@@ -415,95 +643,8 @@ fn is_test_command(command: &str) -> bool {
 fn apply_runtime_tool_records(ledgers: &mut StepFactLedgers, step: &BossPlanStep) {
     for (idx, record) in step.tool_execution_records.iter().enumerate() {
         match record.tool_name.as_str() {
-            "Read" => {
-                if record.kind != ToolExecutionOutcomeKind::Success {
-                    continue;
-                }
-                let Some(path) = observable_path(record).map(|path| normalize_runtime_path(&path))
-                else {
-                    continue;
-                };
-                push_file_fact(
-                    ledgers,
-                    FileFactRecord {
-                        ref_id: format!("filefact:step{}:runtime-read:{idx}", step.id),
-                        path: path.clone(),
-                        kind: "read_observation".into(),
-                        fact: format!("runtime Read succeeded for {path}"),
-                        symbol: extract_symbol_for_path(
-                            &path,
-                            &[record.detail.as_deref().unwrap_or_default()],
-                        ),
-                        source: "tool:Read".into(),
-                        source_event_id: format!("tool-read:{}:{idx}", step.id),
-                        freshness: "after-runtime-read".into(),
-                        confidence_milli: 1000,
-                        lineage: active_lineage(),
-                    },
-                );
-            }
-            "Edit" | "Write" => {
-                if record.kind != ToolExecutionOutcomeKind::Success {
-                    continue;
-                }
-                let Some(path) = observable_path(record).map(|path| normalize_runtime_path(&path))
-                else {
-                    continue;
-                };
-                ledgers.change_refs.push(ChangeRecord {
-                    ref_id: format!("change:step{}:runtime:{idx}", step.id),
-                    path: path.clone(),
-                    summary: tool_record_summary(record),
-                    source: format!("tool:{}", record.tool_name),
-                    source_event_id: format!("tool-edit:{}:{idx}", step.id),
-                    freshness: "after-runtime-edit".into(),
-                    confidence_milli: 1000,
-                    lineage: active_lineage(),
-                });
-                push_file_fact(
-                    ledgers,
-                    FileFactRecord {
-                        ref_id: format!("filefact:step{}:edited:{idx}", step.id),
-                        path,
-                        kind: "edited_file".into(),
-                        fact: format!("runtime {} succeeded for this file", record.tool_name),
-                        symbol: None,
-                        source: format!("tool:{}", record.tool_name),
-                        source_event_id: format!("tool-edit:{}:{idx}", step.id),
-                        freshness: "after-runtime-edit".into(),
-                        confidence_milli: 1000,
-                        lineage: active_lineage(),
-                    },
-                );
-            }
-            "Bash" => {
-                let Some(command) = observable_bash_command(record) else {
-                    continue;
-                };
-                if !is_test_command(&command) {
-                    continue;
-                }
-                let detail = record.detail.as_deref().unwrap_or_default();
-                let status = if record.kind == ToolExecutionOutcomeKind::Success
-                    && !detail.contains("exit_code:")
-                {
-                    "passed"
-                } else if detail.contains("exit_code: 0") {
-                    "passed"
-                } else {
-                    "failed"
-                };
-                ledgers.test_refs.push(TestRecord {
-                    ref_id: format!("test:step{}:runtime:{idx}", step.id),
-                    name: trim_excerpt(&command, 60),
-                    status: status.into(),
-                    summary: tool_record_summary(record),
-                    source: "tool:Bash".into(),
-                    source_event_id: format!("tool-bash:{}:{idx}", step.id),
-                    freshness: "after-runtime-test".into(),
-                    confidence_milli: 1000,
-                    lineage: active_lineage(),
-                });
+            "Read" | "Edit" | "Write" | "Bash" => {
+                append_runtime_tool_record(ledgers, record, &format!("step{}:{idx}", step.id));
             }
             "BossReview" => {
                 let verdict =

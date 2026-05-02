@@ -1006,7 +1006,10 @@ impl RuntimeBootstrap {
             state.surface,
             state.session_mode,
         ));
-        let runtime_tool_registry = Arc::new(RwLock::new(coordinator_tools.clone()));
+        let runtime_tool_registry = Arc::new(RwLock::new(
+            tool_inventory
+                .assemble(ToolAssemblyContext::worker(state.surface, state.session_mode)),
+        ));
 
         let boss_runtime_host = BossRuntimeHost::new();
         let mut boss_coordinator =

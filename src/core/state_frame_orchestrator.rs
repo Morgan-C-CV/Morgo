@@ -62,8 +62,12 @@ fn contains_external_effect_marker(text: &str) -> bool {
 /// The current StateFrame loop can decide, summarize, and request context, but it does not
 /// execute read/write/shell tool calls. Until tool dispatch is wired, direct LisM execution must
 /// reject tasks whose success depends on filesystem or command side effects.
-pub fn requires_external_tool_execution(frame: &StateFrame) -> bool {
+pub fn requires_external_tool_execution(
+    frame: &StateFrame,
+    direct_tool_runtime_available: bool,
+) -> bool {
     frame.role == ActorRole::Worker
+        && !direct_tool_runtime_available
         && !matches!(
             frame.required_output_schema.as_deref(),
             Some("readonly_audit_4_paragraphs_v1")
@@ -133,7 +137,7 @@ pub async fn run_step_with_state_frame(
     config: DecisionLoopConfig,
 ) -> anyhow::Result<StepOutcome> {
     let routed = build_routed_state_frame_with_model_route(plan, stage, step_id, role);
-    if requires_external_tool_execution(&routed.frame) {
+    if requires_external_tool_execution(&routed.frame, false) {
         return Ok(external_tool_execution_unsupported());
     }
     let outcome = run_decision_loop(client, routed.frame, config).await?;
@@ -149,7 +153,7 @@ pub async fn run_step_with_state_frame_and_runtime<'a>(
     runtime: StepRuntimeResolutionContext<'a>,
 ) -> anyhow::Result<StepOutcome> {
     let routed = build_routed_state_frame_with_model_route(plan, stage, step_id, role);
-    if requires_external_tool_execution(&routed.frame) {
+    if requires_external_tool_execution(&routed.frame, runtime.tool_runtime.is_some()) {
         return Ok(external_tool_execution_unsupported());
     }
     let resolved = resolve_routed_step_runtime(routed, runtime)?;
@@ -188,7 +192,7 @@ pub async fn run_routed_step_with_runtime<'a>(
     config: DecisionLoopConfig,
     runtime: StepRuntimeResolutionContext<'a>,
 ) -> anyhow::Result<StepOutcome> {
-    if requires_external_tool_execution(&routed.frame) {
+    if requires_external_tool_execution(&routed.frame, runtime.tool_runtime.is_some()) {
         return Ok(external_tool_execution_unsupported());
     }
     let resolved = resolve_routed_step_runtime(routed, runtime)?;
@@ -222,6 +226,14 @@ fn map_loop_outcome(outcome: LoopOutcome) -> StepOutcome {
             usage,
         } => StepOutcome::Failed {
             reason: format!("{reason}; last state: {last_state:?}"),
+            usage: Some(usage),
+        },
+        LoopOutcome::ToolDispatchFailed {
+            last_state,
+            reason,
+            usage,
+        } => StepOutcome::Failed {
+            reason: format!("tool dispatch failed: {reason}; last state: {last_state:?}"),
             usage: Some(usage),
         },
         LoopOutcome::RepairExhausted {
@@ -262,4 +274,41 @@ fn estimate_loop_usage_cost_micros(usage: &LoopUsage, pricing: &ModelPricing) ->
         + (usage.cache_write_tokens as f64 / 1_000_000.0) * pricing.cache_write_per_million_usd
         + (usage.cache_read_tokens as f64 / 1_000_000.0) * pricing.cache_read_per_million_usd;
     (estimated_cost_usd * 1_000_000.0).round() as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::requires_external_tool_execution;
+    use crate::core::state_frame::{ActorRole, AgentState, StateBudget, StateFrame};
+
+    fn worker_frame(objective: &str) -> StateFrame {
+        StateFrame {
+            role: ActorRole::Worker,
+            state: AgentState::Executing,
+            objective: objective.into(),
+            open_items: Vec::new(),
+            blocked_items: Vec::new(),
+            accepted_summary: Vec::new(),
+            recent_evidence: Vec::new(),
+            allowed_actions: vec!["read_file".into(), "edit_file".into(), "run_test".into()],
+            toolset_id: None,
+            skillset_id: None,
+            required_output_schema: Some("state_decision_v1".into()),
+            budget: StateBudget::default(),
+        }
+    }
+
+    #[test]
+    fn external_tool_gate_blocks_worker_only_without_runtime() {
+        let frame = worker_frame("修改文件 src/core/boss.rs 并运行命令 cargo test");
+        assert!(requires_external_tool_execution(&frame, false));
+        assert!(!requires_external_tool_execution(&frame, true));
+    }
+
+    #[test]
+    fn external_tool_gate_skips_readonly_contract() {
+        let mut frame = worker_frame("read-only review run");
+        frame.required_output_schema = Some("readonly_audit_4_paragraphs_v1".into());
+        assert!(!requires_external_tool_execution(&frame, false));
+    }
 }

@@ -67,6 +67,14 @@ pub struct LisMAbSampleRecord {
     pub stale_ref_count: usize,
     #[serde(default)]
     pub hydration_ref_missing: usize,
+    #[serde(default)]
+    pub tool_dispatch_count: usize,
+    #[serde(default)]
+    pub tool_dispatch_failure_count: usize,
+    #[serde(default)]
+    pub tool_dispatch_ref_write_count: usize,
+    #[serde(default)]
+    pub tool_dispatch_failure_taxonomy: BTreeMap<String, usize>,
     pub pending_approval_count: usize,
     pub outcome: BossTestRunOutcome,
 }
@@ -133,6 +141,18 @@ pub struct LisMAbSummary {
     pub on_avg_hydration_ref_missing: usize,
     #[serde(default)]
     pub off_avg_hydration_ref_missing: usize,
+    #[serde(default)]
+    pub on_avg_tool_dispatch_count: usize,
+    #[serde(default)]
+    pub off_avg_tool_dispatch_count: usize,
+    #[serde(default)]
+    pub on_avg_tool_dispatch_failure_count: usize,
+    #[serde(default)]
+    pub off_avg_tool_dispatch_failure_count: usize,
+    #[serde(default)]
+    pub on_avg_tool_dispatch_ref_write_count: usize,
+    #[serde(default)]
+    pub off_avg_tool_dispatch_ref_write_count: usize,
     #[serde(default)]
     pub on_hydration_resolution_rate: Option<f64>,
     #[serde(default)]
@@ -714,6 +734,16 @@ fn build_ab_record(
         hydration_count: obs.map(|o| o.total_hydration_count).unwrap_or(0),
         stale_ref_count: obs.map(|o| o.total_stale_ref_count).unwrap_or(0),
         hydration_ref_missing: obs.map(|o| o.total_hydration_ref_missing).unwrap_or(0),
+        tool_dispatch_count: obs.map(|o| o.total_tool_dispatch_count).unwrap_or(0),
+        tool_dispatch_failure_count: obs
+            .map(|o| o.total_tool_dispatch_failure_count)
+            .unwrap_or(0),
+        tool_dispatch_ref_write_count: obs
+            .map(|o| o.total_tool_dispatch_ref_write_count)
+            .unwrap_or(0),
+        tool_dispatch_failure_taxonomy: obs
+            .map(|o| o.tool_dispatch_failure_taxonomy.clone())
+            .unwrap_or_default(),
         pending_approval_count,
         outcome,
     }
@@ -758,6 +788,12 @@ fn summarize_records(records: &[LisMAbSampleRecord]) -> LisMAbSummary {
         off_avg_stale_ref_count: avg_stale_ref_count(&off),
         on_avg_hydration_ref_missing: avg_hydration_ref_missing(&on),
         off_avg_hydration_ref_missing: avg_hydration_ref_missing(&off),
+        on_avg_tool_dispatch_count: avg_tool_dispatch_count(&on),
+        off_avg_tool_dispatch_count: avg_tool_dispatch_count(&off),
+        on_avg_tool_dispatch_failure_count: avg_tool_dispatch_failure_count(&on),
+        off_avg_tool_dispatch_failure_count: avg_tool_dispatch_failure_count(&off),
+        on_avg_tool_dispatch_ref_write_count: avg_tool_dispatch_ref_write_count(&on),
+        off_avg_tool_dispatch_ref_write_count: avg_tool_dispatch_ref_write_count(&off),
         on_hydration_resolution_rate: hydration_resolution_rate(&on),
         off_hydration_resolution_rate: hydration_resolution_rate(&off),
         on_context_tier_counts: context_tier_counts(&on),
@@ -828,6 +864,18 @@ fn avg_stale_ref_count(records: &[&LisMAbSampleRecord]) -> usize {
 
 fn avg_hydration_ref_missing(records: &[&LisMAbSampleRecord]) -> usize {
     avg_usize(records, |r| r.hydration_ref_missing)
+}
+
+fn avg_tool_dispatch_count(records: &[&LisMAbSampleRecord]) -> usize {
+    avg_usize(records, |r| r.tool_dispatch_count)
+}
+
+fn avg_tool_dispatch_failure_count(records: &[&LisMAbSampleRecord]) -> usize {
+    avg_usize(records, |r| r.tool_dispatch_failure_count)
+}
+
+fn avg_tool_dispatch_ref_write_count(records: &[&LisMAbSampleRecord]) -> usize {
+    avg_usize(records, |r| r.tool_dispatch_ref_write_count)
 }
 
 fn hit_run_rate(records: &[&LisMAbSampleRecord]) -> Option<f64> {
