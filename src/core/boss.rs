@@ -150,6 +150,67 @@ fn assignment_fingerprint(material: &serde_json::Value) -> String {
     format!("{:016x}", hasher.finish())
 }
 
+fn strip_to_path_start(candidate: &str) -> &str {
+    if candidate.starts_with("./") || candidate.starts_with("../") || candidate.starts_with('/') {
+        return candidate;
+    }
+    candidate
+        .find('/')
+        .map(|idx| &candidate[idx..])
+        .unwrap_or(candidate)
+}
+
+fn is_probably_filesystem_hint(candidate: &str) -> bool {
+    let trimmed = candidate.trim();
+    if trimmed.is_empty() || trimmed == "/" {
+        return false;
+    }
+    let lowered = trimmed.to_ascii_lowercase();
+    if matches!(
+        lowered.as_str(),
+        "/boss" | "/mcp" | "/skills" | "/lism" | "/effort" | "/status"
+    ) {
+        return false;
+    }
+    if trimmed.starts_with('/') {
+        let path = Path::new(trimmed);
+        let slash_count = trimmed.matches('/').count();
+        let has_extension = path.extension().is_some();
+        let looks_like_dir = trimmed.ends_with('/');
+        let under_known_root = [
+            "/tmp/",
+            "/private/tmp/",
+            "/Users/",
+            "/private/var/",
+            "/var/",
+            "/etc/",
+            "/usr/",
+        ]
+        .iter()
+        .any(|prefix| trimmed.starts_with(prefix));
+        if (slash_count < 2 && !has_extension && !looks_like_dir)
+            || (!path.exists() && !has_extension && !looks_like_dir && !under_known_root)
+        {
+            return false;
+        }
+    }
+    if trimmed.contains('`') {
+        return false;
+    }
+    true
+}
+
+fn relevant_file_handle_rank(kind: &str) -> usize {
+    match kind {
+        "target_directory" => 5,
+        "target_file" => 4,
+        "source_file" => 3,
+        "document" => 2,
+        "data_or_log" => 1,
+        _ => 0,
+    }
+}
+
 fn extract_relevant_file_handles(text: &str, step_revision: &str) -> Vec<RelevantFileHandle> {
     let mut handles: Vec<RelevantFileHandle> = Vec::new();
     let cwd = std::env::current_dir().ok();
@@ -169,12 +230,17 @@ fn extract_relevant_file_handles(text: &str, step_revision: &str) -> Vec<Relevan
                 .trim_matches('-')
                 .trim_matches('：')
                 .trim_end_matches(['，', ',', '。', '.', ';', '；', ')', '）', ']']);
+            let candidate = strip_to_path_start(candidate);
             let candidate = candidate
                 .rsplit_once(['：', ':'])
                 .map(|(_, suffix)| suffix)
                 .filter(|suffix| suffix.contains('/'))
                 .unwrap_or(candidate);
-            if candidate.is_empty() || candidate == "/" || !candidate.contains('/') {
+            if candidate.is_empty()
+                || candidate == "/"
+                || !candidate.contains('/')
+                || !is_probably_filesystem_hint(candidate)
+            {
                 continue;
             }
             if !(candidate.ends_with(".rs")
@@ -187,8 +253,17 @@ fn extract_relevant_file_handles(text: &str, step_revision: &str) -> Vec<Relevan
             }
             let candidate = normalize_relevant_file_hint(candidate, cwd.as_deref())
                 .unwrap_or_else(|| candidate.to_string());
+            let kind = classify_relevant_file_handle(&candidate, trimmed);
+            if let Some(existing) = handles.iter_mut().find(|existing| existing.path == candidate) {
+                if relevant_file_handle_rank(&kind) > relevant_file_handle_rank(&existing.kind) {
+                    existing.kind = kind.clone();
+                    existing.why_relevant =
+                        build_file_handle_relevance(&kind, trimmed, &candidate);
+                    existing.step_revision = step_revision.to_string();
+                }
+                continue;
+            }
             if !handles.iter().any(|existing| existing.path == candidate) {
-                let kind = classify_relevant_file_handle(&candidate, trimmed);
                 handles.push(RelevantFileHandle {
                     path: candidate.clone(),
                     kind: kind.clone(),
@@ -4495,6 +4570,26 @@ mod tests {
                 && handle.kind == "target_file"
                 && handle.step_revision == "step-1-attempt-0"
         }));
+    }
+
+    #[test]
+    fn extract_relevant_file_handles_filters_slash_commands_and_malformed_path_tokens() {
+        let handles = extract_relevant_file_handles(
+            "任务目标：\n- /boss\n- /mcp\n- 已完成，`/tmp/example/report.md\n- 目标目录：/tmp/example/output/\n- 目标文件：/tmp/example/report.md",
+            "step-1-attempt-1",
+        );
+        assert!(!handles.iter().any(|handle| handle.path == "/boss"));
+        assert!(!handles.iter().any(|handle| handle.path == "/mcp"));
+        assert!(
+            handles
+                .iter()
+                .any(|handle| handle.path == "/tmp/example/output/" && handle.kind == "target_directory")
+        );
+        assert!(
+            handles
+                .iter()
+                .any(|handle| handle.path == "/tmp/example/report.md" && handle.kind == "target_file")
+        );
     }
 
     #[test]

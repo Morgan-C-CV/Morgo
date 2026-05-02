@@ -3,7 +3,9 @@ use crate::core::state_fact_ledger::{StepFactLedgers, append_runtime_tool_record
 use crate::core::state_frame::{
     AgentState, DecisionKind, RepairNeeded, StateFrame, StatePatch, validate_state_decision,
 };
-use crate::core::state_frame_hydration::hydrate_needed_context;
+use crate::core::state_frame_hydration::{
+    NeededContextSelector, hydrate_needed_context, parse_needed_context_selector,
+};
 use crate::service::api::client::ModelProviderClient;
 use crate::service::api::streaming::StreamEvent;
 use crate::state::permission_context::ToolPermissionContext;
@@ -168,6 +170,7 @@ Rules:\n\
 - You may retry a tool call when the failure looks transient or fixable, but do not blindly repeat the exact same failing action without changing args, path, command, or strategy\n\
 - If a `Read` says a target path does not exist yet, inspect the parent path or create the needed directory/file before retrying the same `Read`\n\
 - When using `needed_context`, prefer typed selectors like `file_snippet:path`, `test_failure`, `change_ref:path`, `review_ref:ref_id`, `artifact_ref:ref_id`, `open_item_ref:ref_id`, `blocker_ref:ref_id`, `rejected_approach:ref_id`, `artifact:path`, or `fact:name`\n\
+- For implement tasks, do not use broad `Glob`/`Grep` exploration when a target path is already named; prefer `request_context:file_snippet:<path>` or a direct narrow `Read`\n\
 - When `recent_evidence` contains `fallback_context:` or `fallback_context_item:` lines, consume that fallback evidence before requesting the same context again\n\
 - The \"decision\" field MUST be one of the exact string values above — never use free text\n\
 - Respond with JSON only, no prose or explanation\n\
@@ -535,6 +538,38 @@ fn parse_bash_command(decision: &crate::core::state_frame::StateDecision) -> Opt
         None
     } else {
         Some(raw.to_string())
+    }
+}
+
+fn tool_backed_hydration_path(requested: &[String]) -> Option<String> {
+    requested.iter().find_map(|raw| match parse_needed_context_selector(raw) {
+        NeededContextSelector::FileSnippet { path } => {
+            let trimmed = path.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_string())
+        }
+        NeededContextSelector::Artifact { path: Some(path) } => {
+            let trimmed = path.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_string())
+        }
+        _ => None,
+    })
+}
+
+fn build_tool_backed_hydration_decision(
+    state: AgentState,
+    file_path: String,
+) -> crate::core::state_frame::StateDecision {
+    crate::core::state_frame::StateDecision {
+        state,
+        decision: DecisionKind::CallTool,
+        next_action: Some(crate::core::state_frame::NextAction {
+            action_type: "Read".into(),
+            args: serde_json::json!({ "file_path": file_path }),
+        }),
+        needed_context: Vec::new(),
+        state_patch: StatePatch::default(),
+        confidence: 1.0,
+        escalate: false,
     }
 }
 
@@ -1033,26 +1068,78 @@ pub async fn run_decision_loop_with_tools(
                 }
             }
             DecisionKind::RequestContext => {
-                let summary = hydrate_needed_context(&mut frame, &decision.needed_context);
+                let mut summary = hydrate_needed_context(&mut frame, &decision.needed_context);
                 total_usage.hydration_count += summary.hydrated.len();
                 total_usage.stale_ref_count += summary.stale.len();
                 total_usage.hydration_ref_missing += summary.unavailable.len();
                 frame.state = decision.state;
                 if summary.hydrated.is_empty() {
-                    if let Some(fallback_tier) = activate_fallback_tier(
-                        &mut frame,
-                        &decision.needed_context,
-                        &mut fallback_ladder,
-                        decision.escalate,
-                    ) {
-                        total_usage.fallback_count += 1;
-                        total_usage.fallback_tier = Some(fallback_tier.as_str().to_string());
-                        total_usage.fallback_reason = Some(fallback_reason_label(
-                            fallback_tier,
+                    if let Some(file_path) = tool_backed_hydration_path(&decision.needed_context) {
+                        let synthetic_read =
+                            build_tool_backed_hydration_decision(decision.state, file_path);
+                        total_usage.tool_dispatch_count += 1;
+                        match execute_call_tool(
+                            &mut frame,
+                            &synthetic_read,
+                            tool_runtime.as_ref(),
+                            &mut tool_dispatch_seq,
+                        )
+                        .await
+                        {
+                            Ok((changed, record, ref_write_count)) => {
+                                total_usage.tool_dispatch_success_count += 1;
+                                total_usage.tool_dispatch_ref_write_count += ref_write_count;
+                                total_usage.tool_execution_records.push(record);
+                                if changed {
+                                    summary =
+                                        hydrate_needed_context(&mut frame, &decision.needed_context);
+                                    total_usage.hydration_count += summary.hydrated.len();
+                                    total_usage.stale_ref_count += summary.stale.len();
+                                    total_usage.hydration_ref_missing += summary.unavailable.len();
+                                }
+                            }
+                            Err(error) => {
+                                total_usage.tool_dispatch_failure_count += 1;
+                                let category = classify_dispatch_failure(&error.reason);
+                                *total_usage
+                                    .tool_dispatch_failure_taxonomy
+                                    .entry(category)
+                                    .or_insert(0) += 1;
+                                let (changed, ref_write_count) = push_tool_failure_feedback(
+                                    &mut frame,
+                                    &synthetic_read,
+                                    &error.record,
+                                    tool_dispatch_seq,
+                                    &error.reason,
+                                );
+                                total_usage.tool_dispatch_ref_write_count += ref_write_count;
+                                total_usage.tool_execution_records.push(error.record);
+                                if changed {
+                                    summary =
+                                        hydrate_needed_context(&mut frame, &decision.needed_context);
+                                    total_usage.hydration_count += summary.hydrated.len();
+                                    total_usage.stale_ref_count += summary.stale.len();
+                                    total_usage.hydration_ref_missing += summary.unavailable.len();
+                                }
+                            }
+                        }
+                    }
+                    if summary.hydrated.is_empty() {
+                        if let Some(fallback_tier) = activate_fallback_tier(
+                            &mut frame,
                             &decision.needed_context,
+                            &mut fallback_ladder,
                             decision.escalate,
-                        ));
-                        continue;
+                        ) {
+                            total_usage.fallback_count += 1;
+                            total_usage.fallback_tier = Some(fallback_tier.as_str().to_string());
+                            total_usage.fallback_reason = Some(fallback_reason_label(
+                                fallback_tier,
+                                &decision.needed_context,
+                                decision.escalate,
+                            ));
+                            continue;
+                        }
                     }
                 }
                 if !summary.changed {
@@ -1239,6 +1326,44 @@ mod tests {
                     usage.fallback_reason.as_deref(),
                     Some("request_context_escalated:symbol:MissingSymbol")
                 );
+            }
+            other => panic!("expected Done, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn request_context_file_snippet_can_trigger_tool_backed_hydration() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let temp_path = unique_temp_path("request_context_read");
+        std::fs::write(&temp_path, "alpha\nbeta\n").expect("temp file should be written");
+        let request_json = format!(
+            r#"{{"state":"executing","decision":"request_context","needed_context":["file_snippet:{}"]}}"#,
+            temp_path.display()
+        );
+        let done_json = r#"{"state":"done","decision":"done"}"#;
+        let client = ModelProviderClient::with_scripted_turns(vec![
+            vec![StreamEvent::TextDelta(request_json.into())],
+            vec![StreamEvent::TextDelta(done_json.into())],
+        ]);
+        let tool_runtime = StateFrameToolRuntime {
+            registry: ToolRegistry::new().register(Arc::new(FileReadTool)),
+            permissions: ToolPermissionContext::new(PermissionMode::Default),
+        };
+        let outcome = rt
+            .block_on(run_decision_loop_with_tools(
+                &client,
+                make_frame(),
+                DecisionLoopConfig::default(),
+                Some(tool_runtime),
+            ))
+            .expect("loop should not error");
+        let _ = std::fs::remove_file(&temp_path);
+        match outcome {
+            LoopOutcome::Done { usage, .. } => {
+                assert!(usage.hydration_count >= 1);
+                assert_eq!(usage.fallback_count, 0);
+                assert_eq!(usage.tool_dispatch_count, 1);
+                assert_eq!(usage.tool_dispatch_success_count, 1);
             }
             other => panic!("expected Done, got {other:?}"),
         }
