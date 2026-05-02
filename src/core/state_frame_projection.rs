@@ -1,3 +1,4 @@
+use crate::core::boss_acceptance::extract_artifact_expectations;
 use crate::core::boss_state::{BossPlan, BossStage};
 use crate::core::state_fact_ledger::{
     build_blocker_records, build_open_item_records, build_rejected_approach_records,
@@ -77,6 +78,42 @@ fn summarize_list(items: &[String]) -> String {
     } else {
         items.join(" | ")
     }
+}
+
+fn infer_preferred_deployment_mode(objective: &str) -> &'static str {
+    let lowered = objective.to_lowercase();
+    if lowered.contains("静态网站") || lowered.contains("static site") {
+        "static_site"
+    } else if lowered.contains("python") && lowered.contains("demo") {
+        "python_demo"
+    } else if lowered.contains("jsonl") || lowered.contains("analyzer") {
+        "local_tool"
+    } else if lowered.contains("report") || lowered.contains("报告") {
+        "local_report_artifact"
+    } else {
+        "local_artifact"
+    }
+}
+
+fn build_permission_facts(
+    step_id: usize,
+    objective: &str,
+    readonly_analysis: bool,
+) -> Vec<String> {
+    if readonly_analysis {
+        return Vec::new();
+    }
+    let mut facts = Vec::new();
+    for (idx, expectation) in extract_artifact_expectations(objective).into_iter().enumerate() {
+        let path = expectation.path.to_string_lossy().to_string();
+        facts.push(fact_line(
+            &format!("permission_to_create_and_write:{path}"),
+            format!(
+                "ref=permission:step{step_id}:{idx} source=permission_scope source_event_id=permission-scope:{step_id}:{idx} freshness=current confidence=1.00 status=active invalidated_by=none supersedes=none conflicts_with=none summary=worker may create and write the declared target artifact path {path}"
+            ),
+        ));
+    }
+    facts
 }
 
 fn format_confidence(confidence_milli: u16) -> String {
@@ -271,6 +308,15 @@ fn build_fact_ledger(
             summarize_list(&step.acceptance),
         ));
         facts.push(fact_line(
+            "preferred_deployment_mode",
+            format!(
+                "ref=deploymode:step{} source=objective_inference source_event_id=deploymode:{} freshness=current confidence=0.85 status=active invalidated_by=none supersedes=none conflicts_with=none summary={}",
+                step.id,
+                step.id,
+                infer_preferred_deployment_mode(step.objective())
+            ),
+        ));
+        facts.push(fact_line(
             "reject_correction",
             step.last_correction
                 .as_deref()
@@ -280,6 +326,11 @@ fn build_fact_ledger(
         facts.push(fact_line(
             "recent_diff",
             step.result_diff.as_deref().unwrap_or("none recorded"),
+        ));
+        facts.extend(build_permission_facts(
+            step.id,
+            step.objective(),
+            readonly_analysis,
         ));
         if !ledgers.file_facts.is_empty() {
             for item in ledgers.file_facts {
@@ -614,7 +665,8 @@ pub fn project_state_frame(
 
 #[cfg(test)]
 mod tests {
-    use super::collect_projection_diagnostics;
+    use super::{collect_projection_diagnostics, project_state_frame};
+    use crate::core::boss_state::{BossPlan, BossPlanStep, BossPlanStepStatus, BossStage};
     use crate::core::state_frame::{ActorRole, AgentState, StateBudget, StateFrame};
 
     #[test]
@@ -693,5 +745,51 @@ mod tests {
                 .iter()
                 .any(|item| item.contains("conflicts_with points to missing ref: artifact:missing"))
         );
+    }
+
+    #[test]
+    fn project_state_frame_emits_permission_and_deployment_facts_for_artifact_tasks() {
+        let plan = BossPlan {
+            plan_id: "plan-1".into(),
+            task_description: "build site".into(),
+            document_spec: String::new(),
+            pseudo_code: String::new(),
+            draft_spec: None,
+            review_feedback: None,
+            revision_notes: None,
+            finalized: false,
+            documentation_feedback: Vec::new(),
+            steps: vec![BossPlanStep {
+                id: 0,
+                description: "site".into(),
+                objective: Some(
+                    "在目标目录创建一个可直接打开的静态网站：\n- 目标目录：/tmp/demo-site".into(),
+                ),
+                acceptance: vec!["write README".into()],
+                requires_approval: false,
+                status: BossPlanStepStatus::Running,
+                completed: false,
+                result_diff: None,
+                worker_task_id: None,
+                attempt_count: 0,
+                retry_budget: 3,
+                last_review_summary: None,
+                last_correction: None,
+                review_task_id: None,
+                tool_execution_records: Vec::new(),
+            }],
+            accepted_by_user: true,
+            auto_sequence: false,
+            session_snapshot: None,
+        };
+
+        let frame = project_state_frame(&plan, BossStage::Execution, Some(0), ActorRole::Worker);
+        assert!(frame.recent_evidence.iter().any(|item| {
+            item.contains("fact: preferred_deployment_mode")
+                && item.contains("summary=static_site")
+        }));
+        assert!(frame.recent_evidence.iter().any(|item| {
+            item.contains("fact: permission_to_create_and_write:/tmp/demo-site")
+        }));
     }
 }

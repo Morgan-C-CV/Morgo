@@ -870,6 +870,8 @@ mod tests {
                 "fact: test_failures ref=test:1 name=worker_reported_tests status=failed source=worker_result source_event_id=worker-result:1 freshness=after-worker-output confidence=0.85 lineage_status=active invalidated_by=none supersedes=none conflicts_with=none summary=tests failed in boss_flow".into(),
                 "fact: review_verdicts ref=review:step1:runtime:0 verdict=accepted source=tool:BossReview source_event_id=tool-review:1:0 freshness=after-runtime-review confidence=1.00 status=active invalidated_by=none supersedes=none conflicts_with=none summary=LGTM after targeted review".into(),
                 "fact: artifact_status ref=artifact:step1:runtime:0 path=/tmp/report.md kind=file status=verified source=tool:ArtifactVerify source_event_id=tool-artifact:1:0 freshness=after-runtime-artifact-verify confidence=1.00 lineage_status=active invalidated_by=none supersedes=none conflicts_with=none summary=artifact verification passed for /tmp/report.md".into(),
+                "fact: preferred_deployment_mode ref=deploymode:step1 source=objective_inference source_event_id=deploymode:1 freshness=current confidence=0.85 status=active invalidated_by=none supersedes=none conflicts_with=none summary=static_site".into(),
+                "fact: permission_to_create_and_write:/tmp/report.md ref=permission:step1:0 source=permission_scope source_event_id=permission-scope:1:0 freshness=current confidence=1.00 status=active invalidated_by=none supersedes=none conflicts_with=none summary=worker may create and write the declared target artifact path /tmp/report.md".into(),
                 "fact: open_item_refs ref=openitem:step1:0 source=acceptance:0 source_event_id=step-acceptance:1:0 freshness=current confidence=1.00 status=active invalidated_by=none supersedes=none conflicts_with=none summary=tests pass".into(),
                 "fact: blocker_refs ref=blocker:step1:0 source=stage:waitingforapproval source_event_id=stage-blocker:1:0 freshness=current confidence=1.00 status=active invalidated_by=none supersedes=none conflicts_with=none summary=waiting for user approval".into(),
                 "fact: rejected_approaches ref=rejected:step1:0 source=review_correction source_ref=review:step1:runtime:1 source_event_id=review-correction:1 freshness=after-review confidence=1.00 status=active invalidated_by=none supersedes=none conflicts_with=review:step1:runtime:1 summary=previous patch ignored edge cases correction=preserve the auth guard branch".into(),
@@ -1020,6 +1022,29 @@ mod tests {
                 .any(|item| item.contains("source=artifact_ledger")
                     && item.contains("source_event_id=tool-artifact:1:0"))
         );
+    }
+
+    #[test]
+    fn hydrate_needed_context_resolves_permission_and_deployment_fact_requests() {
+        let mut frame = make_frame();
+        let summary = hydrate_needed_context(
+            &mut frame,
+            &[
+                "fact:preferred_deployment_mode".into(),
+                "fact:permission_to_create_and_write:/tmp/report.md".into(),
+            ],
+        );
+        assert!(summary.changed);
+        assert_eq!(summary.unavailable.len(), 0);
+        assert!(
+            frame
+                .recent_evidence
+                .iter()
+                .any(|item| item.contains("hydrated_context: fact:preferred_deployment_mode"))
+        );
+        assert!(frame.recent_evidence.iter().any(|item| {
+            item.contains("hydrated_context: fact:permission_to_create_and_write:/tmp/report.md")
+        }));
     }
 
     #[test]
