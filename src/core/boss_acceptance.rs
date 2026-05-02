@@ -62,15 +62,103 @@ fn is_artifact_scope_boundary(line: &str) -> bool {
         || trimmed.starts_with("实现摘录")
 }
 
+fn line_requires_artifact_output(line: &str) -> bool {
+    let lowered = line.to_lowercase();
+    [
+        "输出",
+        "生成",
+        "创建",
+        "产出",
+        "写入",
+        "包含",
+        "必须有",
+        "必须包含",
+        "write",
+        "create",
+        "generate",
+        "produce",
+        "output",
+        "include",
+        "contains",
+    ]
+    .iter()
+    .any(|marker| lowered.contains(marker))
+}
+
+fn relative_artifact_tokens(line: &str) -> Vec<PathBuf> {
+    let mut artifacts = Vec::new();
+    for raw in line.split(|ch: char| {
+        ch.is_whitespace()
+            || matches!(
+                ch,
+                '，' | ','
+                    | '。'
+                    | ';'
+                    | '；'
+                    | '、'
+                    | ':'
+                    | '：'
+                    | '('
+                    | ')'
+                    | '（'
+                    | '）'
+                    | '['
+                    | ']'
+            )
+    }) {
+        let token = clean_path_token(raw);
+        if token.is_empty() || token.starts_with('/') {
+            continue;
+        }
+        let lowered = token.to_lowercase();
+        let is_named_artifact = lowered == "readme"
+            || lowered == "readme.md"
+            || [
+                ".md", ".html", ".css", ".js", ".mjs", ".ts", ".tsx", ".jsx", ".py", ".rs",
+                ".json", ".toml", ".yaml", ".yml", ".txt", ".sh",
+            ]
+            .iter()
+            .any(|suffix| lowered.ends_with(suffix));
+        if !is_named_artifact {
+            continue;
+        }
+        let path = if lowered == "readme" {
+            PathBuf::from("README.md")
+        } else {
+            PathBuf::from(token)
+        };
+        if !artifacts.iter().any(|item| item == &path) {
+            artifacts.push(path);
+        }
+    }
+    artifacts
+}
+
 pub fn extract_artifact_expectations(text: &str) -> Vec<BossArtifactExpectation> {
     let mut expectations = Vec::new();
+    let mut relative_file_expectations = Vec::new();
     for line in text.lines() {
         if is_artifact_scope_boundary(line) {
             break;
         }
-        let (kind, path_offset) = if let Some(offset) = target_file_marker(line) {
+        let target_file_offset = target_file_marker(line);
+        let target_dir_offset = target_dir_marker(line);
+        if target_file_offset.is_none()
+            && target_dir_offset.is_none()
+            && line_requires_artifact_output(line)
+        {
+            for artifact in relative_artifact_tokens(line) {
+                if !relative_file_expectations
+                    .iter()
+                    .any(|item| item == &artifact)
+                {
+                    relative_file_expectations.push(artifact);
+                }
+            }
+        }
+        let (kind, path_offset) = if let Some(offset) = target_file_offset {
             (BossArtifactKind::File, offset)
-        } else if let Some(offset) = target_dir_marker(line) {
+        } else if let Some(offset) = target_dir_offset {
             (BossArtifactKind::Directory, offset)
         } else {
             continue;
@@ -83,6 +171,27 @@ pub fn extract_artifact_expectations(text: &str) -> Vec<BossArtifactExpectation>
             .any(|item: &BossArtifactExpectation| item.path == path && item.kind == kind)
         {
             expectations.push(BossArtifactExpectation { path, kind });
+        }
+    }
+    if !relative_file_expectations.is_empty() {
+        let target_dirs = expectations
+            .iter()
+            .filter(|item| item.kind == BossArtifactKind::Directory)
+            .map(|item| item.path.clone())
+            .collect::<Vec<_>>();
+        for dir in target_dirs {
+            for relative_path in &relative_file_expectations {
+                let path = dir.join(relative_path);
+                if !expectations
+                    .iter()
+                    .any(|item| item.path == path && item.kind == BossArtifactKind::File)
+                {
+                    expectations.push(BossArtifactExpectation {
+                        path,
+                        kind: BossArtifactKind::File,
+                    });
+                }
+            }
         }
     }
     expectations
@@ -187,6 +296,62 @@ mod tests {
         assert_eq!(expectations.len(), 1);
         assert_eq!(expectations[0].kind, BossArtifactKind::Directory);
         assert_eq!(expectations[0].path, PathBuf::from("/tmp/agent-site"));
+    }
+
+    #[test]
+    fn derives_readme_file_expectation_for_target_directory_tasks() {
+        let text = "\
+任务目标：
+- 目标目录：/tmp/agent-site
+- 生成 index.html、styles.css
+- 输出一个简短 README，说明如何打开与查看。
+
+参考材料摘录：
+- README in reference material should not create another target.";
+
+        let expectations = extract_artifact_expectations(text);
+        assert!(expectations.iter().any(|item| {
+            item.kind == BossArtifactKind::Directory
+                && item.path == PathBuf::from("/tmp/agent-site")
+        }));
+        assert!(expectations.iter().any(|item| {
+            item.kind == BossArtifactKind::File
+                && item.path == PathBuf::from("/tmp/agent-site/README.md")
+        }));
+        assert!(expectations.iter().any(|item| {
+            item.kind == BossArtifactKind::File
+                && item.path == PathBuf::from("/tmp/agent-site/index.html")
+        }));
+        assert!(expectations.iter().any(|item| {
+            item.kind == BossArtifactKind::File
+                && item.path == PathBuf::from("/tmp/agent-site/styles.css")
+        }));
+        assert!(!expectations.iter().any(|item| {
+            item.kind == BossArtifactKind::File
+                && item.path == PathBuf::from("/tmp/agent-site/material.md")
+        }));
+    }
+
+    #[test]
+    fn derives_relative_file_expectations_only_from_output_scope() {
+        let text = "\
+任务目标：
+- 目标目录：/tmp/demo
+- 必须包含 demo.py README.md config.json
+
+参考材料摘录：
+- 旧产物包含 stale.py";
+
+        let expectations = extract_artifact_expectations(text);
+        for expected in ["demo.py", "README.md", "config.json"] {
+            assert!(expectations.iter().any(|item| {
+                item.kind == BossArtifactKind::File
+                    && item.path == PathBuf::from("/tmp/demo").join(expected)
+            }));
+        }
+        assert!(!expectations.iter().any(|item| {
+            item.kind == BossArtifactKind::File && item.path == PathBuf::from("/tmp/demo/stale.py")
+        }));
     }
 
     #[test]

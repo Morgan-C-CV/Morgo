@@ -4543,6 +4543,19 @@ mod tests {
     }
 
     #[test]
+    fn seed_step_acceptance_adds_readme_expectation_for_target_directory_tasks() {
+        let acceptance = seed_step_acceptance(
+            "任务目标：\n- 目标目录：/tmp/example-agent-site\n- 输出一个简短 README，说明如何打开与查看。",
+        );
+        assert!(acceptance.iter().any(|item| {
+            item == "target directory exists and is non-empty: /tmp/example-agent-site"
+        }));
+        assert!(acceptance.iter().any(|item| {
+            item == "target file exists and is non-empty: /tmp/example-agent-site/README.md"
+        }));
+    }
+
+    #[test]
     fn extract_relevant_file_handles_normalizes_agent_relative_paths() {
         let repo_root = Path::new("/Users/wangmorgan/MProject/LearnCCfromCC");
         assert_eq!(
