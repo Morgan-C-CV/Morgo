@@ -34,6 +34,7 @@ pub struct LoopUsage {
     pub original_prompt_chars: usize,
     pub sent_prompt_chars: usize,
     pub estimated_cost_micros_usd: u64,
+    pub fallback_count: usize,
     pub hydration_count: usize,
     pub stale_ref_count: usize,
     pub hydration_ref_missing: usize,
@@ -117,6 +118,7 @@ Rules:\n\
 - If a fact entry already says `none`, `none recorded`, `absent`, or equivalent, do NOT request that same context again\n\
 - Only use \"decision\": \"request_context\" when the missing fact is not already present in objective/open_items/blocked_items/accepted_summary/recent_evidence\n\
 - When using `needed_context`, prefer typed selectors like `file_snippet:path`, `test_failure`, `change_ref:path`, `review_ref:ref_id`, `artifact_ref:ref_id`, `open_item_ref:ref_id`, `blocker_ref:ref_id`, `rejected_approach:ref_id`, `artifact:path`, or `fact:name`\n\
+- When `recent_evidence` contains `fallback_context:` or `fallback_context_item:` lines, consume that fallback evidence before requesting the same context again\n\
 - The \"decision\" field MUST be one of the exact string values above — never use free text\n\
 - Respond with JSON only, no prose or explanation\n\
 \n\
@@ -128,6 +130,154 @@ fn push_unique(items: &mut Vec<String>, value: String) -> bool {
     }
     items.push(value);
     true
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FallbackTier {
+    RecentLocalHistory,
+    FullContext,
+}
+
+#[derive(Debug, Default)]
+struct FallbackLadderState {
+    recent_local_history_activated: bool,
+    full_context_activated: bool,
+}
+
+fn compact_excerpt(text: &str, max_chars: usize) -> String {
+    let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut iter = compact.chars();
+    let excerpt = iter.by_ref().take(max_chars).collect::<String>();
+    if iter.next().is_some() {
+        format!("{excerpt}...")
+    } else {
+        excerpt
+    }
+}
+
+fn local_history_candidates(frame: &StateFrame, limit: usize) -> Vec<String> {
+    let mut items = Vec::new();
+    for line in frame.recent_evidence.iter().rev() {
+        let looks_local = line.starts_with("hydrated_context:")
+            || line.contains("source_event_id=tool-")
+            || line.contains("freshness=after-runtime")
+            || line.contains("freshness=after-worker-output")
+            || line.contains("recent_output_ref");
+        if !looks_local {
+            continue;
+        }
+        let excerpt = compact_excerpt(line, 180);
+        if !items.iter().any(|existing| existing == &excerpt) {
+            items.push(excerpt);
+        }
+        if items.len() >= limit {
+            break;
+        }
+    }
+    items.reverse();
+    items
+}
+
+fn activate_recent_local_history_fallback(frame: &mut StateFrame, requested: &[String]) -> bool {
+    let requested_summary = if requested.is_empty() {
+        "none".to_string()
+    } else {
+        requested.join("|")
+    };
+    let mut changed = push_unique(
+        &mut frame.recent_evidence,
+        format!(
+            "fallback_context: tier=recent_local_history reason=request_context_unresolved requested={requested_summary}"
+        ),
+    );
+    for item in local_history_candidates(frame, 3) {
+        changed |= push_unique(
+            &mut frame.recent_evidence,
+            format!(
+                "fallback_context_item: tier=recent_local_history source=recent_evidence excerpt={item}"
+            ),
+        );
+    }
+    changed
+}
+
+fn activate_full_context_fallback(frame: &mut StateFrame, requested: &[String]) -> bool {
+    let requested_summary = if requested.is_empty() {
+        "none".to_string()
+    } else {
+        requested.join("|")
+    };
+    let mut changed = push_unique(
+        &mut frame.recent_evidence,
+        format!(
+            "fallback_context: tier=full_context reason=request_context_exhausted requested={requested_summary}"
+        ),
+    );
+    changed |= push_unique(
+        &mut frame.recent_evidence,
+        format!(
+            "fallback_context_item: tier=full_context source=objective excerpt={}",
+            compact_excerpt(&frame.objective, 180)
+        ),
+    );
+    if !frame.open_items.is_empty() {
+        changed |= push_unique(
+            &mut frame.recent_evidence,
+            format!(
+                "fallback_context_item: tier=full_context source=open_items excerpt={}",
+                compact_excerpt(&frame.open_items.join(" | "), 180)
+            ),
+        );
+    }
+    if !frame.blocked_items.is_empty() {
+        changed |= push_unique(
+            &mut frame.recent_evidence,
+            format!(
+                "fallback_context_item: tier=full_context source=blocked_items excerpt={}",
+                compact_excerpt(&frame.blocked_items.join(" | "), 180)
+            ),
+        );
+    }
+    if !frame.accepted_summary.is_empty() {
+        changed |= push_unique(
+            &mut frame.recent_evidence,
+            format!(
+                "fallback_context_item: tier=full_context source=accepted_summary excerpt={}",
+                compact_excerpt(&frame.accepted_summary.join(" | "), 180)
+            ),
+        );
+    }
+    changed
+}
+
+fn activate_fallback_tier(
+    frame: &mut StateFrame,
+    requested: &[String],
+    ladder: &mut FallbackLadderState,
+    escalate: bool,
+) -> Option<FallbackTier> {
+    if escalate && !ladder.full_context_activated {
+        if activate_full_context_fallback(frame, requested) {
+            ladder.full_context_activated = true;
+            return Some(FallbackTier::FullContext);
+        }
+        ladder.full_context_activated = true;
+    }
+    if !ladder.recent_local_history_activated {
+        if activate_recent_local_history_fallback(frame, requested) {
+            ladder.recent_local_history_activated = true;
+            return Some(FallbackTier::RecentLocalHistory);
+        }
+        ladder.recent_local_history_activated = true;
+    }
+    if !ladder.full_context_activated {
+        if activate_full_context_fallback(frame, requested) {
+            ladder.full_context_activated = true;
+            return Some(FallbackTier::FullContext);
+        }
+        ladder.full_context_activated = true;
+    }
+    None
 }
 
 fn apply_state_patch(frame: &mut StateFrame, patch: &StatePatch) -> bool {
@@ -216,6 +366,7 @@ pub async fn run_decision_loop(
     config: DecisionLoopConfig,
 ) -> anyhow::Result<LoopOutcome> {
     let mut total_usage = LoopUsage::default();
+    let mut fallback_ladder = FallbackLadderState::default();
 
     for _iter in 0..config.max_iterations {
         let prompt = format!(
@@ -328,6 +479,18 @@ pub async fn run_decision_loop(
                 total_usage.stale_ref_count += summary.stale.len();
                 total_usage.hydration_ref_missing += summary.unavailable.len();
                 frame.state = decision.state;
+                if summary.hydrated.is_empty()
+                    && activate_fallback_tier(
+                        &mut frame,
+                        &decision.needed_context,
+                        &mut fallback_ladder,
+                        decision.escalate,
+                    )
+                    .is_some()
+                {
+                    total_usage.fallback_count += 1;
+                    continue;
+                }
                 if !summary.changed {
                     return Ok(LoopOutcome::NoProgress {
                         last_state: frame.state,
@@ -347,4 +510,87 @@ pub async fn run_decision_loop(
         last_state: frame.state,
         usage: total_usage,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DecisionLoopConfig, LoopOutcome, run_decision_loop};
+    use crate::core::state_frame::{ActorRole, AgentState, StateBudget, StateFrame};
+    use crate::service::api::client::ModelProviderClient;
+    use crate::service::api::streaming::StreamEvent;
+
+    fn make_frame() -> StateFrame {
+        StateFrame {
+            role: ActorRole::Worker,
+            state: AgentState::Executing,
+            objective: "update src/core/state_frame_projection.rs and get tests passing".into(),
+            open_items: vec!["tests pass".into()],
+            blocked_items: Vec::new(),
+            accepted_summary: vec!["worker must preserve prior review signal".into()],
+            recent_evidence: vec![
+                "fact: recent_changes_in_files ref=change:1 path=src/core/state_frame_projection.rs source=worker_result source_event_id=worker-result:1 freshness=after-worker-output confidence=0.90 status=active invalidated_by=none supersedes=none conflicts_with=none summary=updated src/core/state_frame_projection.rs".into(),
+                "fact: test_failures ref=test:1 name=worker_reported_tests status=failed source=worker_result source_event_id=worker-result:2 freshness=after-worker-output confidence=0.85 status=active invalidated_by=none supersedes=none conflicts_with=none summary=tests failed in boss_flow".into(),
+            ],
+            allowed_actions: vec!["read_file".into()],
+            toolset_id: None,
+            skillset_id: None,
+            required_output_schema: Some("state_decision_v1".into()),
+            budget: StateBudget::default(),
+        }
+    }
+
+    #[test]
+    fn request_context_unresolved_activates_recent_local_history_fallback() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let request_json = r#"{"state":"executing","decision":"request_context","needed_context":["symbol:MissingSymbol"]}"#;
+        let done_json = r#"{"state":"done","decision":"done"}"#;
+        let client = ModelProviderClient::with_scripted_turns(vec![
+            vec![StreamEvent::TextDelta(request_json.into())],
+            vec![StreamEvent::TextDelta(done_json.into())],
+        ]);
+        let outcome = rt
+            .block_on(run_decision_loop(
+                &client,
+                make_frame(),
+                DecisionLoopConfig::default(),
+            ))
+            .expect("loop should not error");
+        match outcome {
+            LoopOutcome::Done { usage, .. } => {
+                assert_eq!(usage.fallback_count, 1);
+                assert_eq!(usage.hydration_ref_missing, 1);
+            }
+            other => panic!("expected Done, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn repeated_request_context_or_escalate_reaches_full_context_fallback() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let request_json = r#"{"state":"executing","decision":"request_context","needed_context":["symbol:MissingSymbol"]}"#;
+        let escalate_json = r#"{"state":"executing","decision":"request_context","needed_context":["symbol:MissingSymbol"],"escalate":true}"#;
+        let done_json = r#"{"state":"done","decision":"done"}"#;
+        let client = ModelProviderClient::with_scripted_turns(vec![
+            vec![StreamEvent::TextDelta(request_json.into())],
+            vec![StreamEvent::TextDelta(escalate_json.into())],
+            vec![StreamEvent::TextDelta(done_json.into())],
+        ]);
+        let outcome = rt
+            .block_on(run_decision_loop(
+                &client,
+                make_frame(),
+                DecisionLoopConfig {
+                    max_iterations: 6,
+                    ..DecisionLoopConfig::default()
+                },
+            ))
+            .expect("loop should not error");
+        match outcome {
+            LoopOutcome::Done { usage, .. } => {
+                assert_eq!(usage.fallback_count, 2);
+                assert_eq!(usage.hydration_ref_missing, 2);
+            }
+            other => panic!("expected Done, got {other:?}"),
+        }
+    }
 }

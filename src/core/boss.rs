@@ -2814,6 +2814,7 @@ impl BossCoordinator {
                                 routed_metadata.sent_prompt_chars = Some(usage.sent_prompt_chars);
                                 routed_metadata.estimated_cost_micros_usd =
                                     Some(usage.estimated_cost_micros_usd);
+                                routed_metadata.fallback_count = Some(usage.fallback_count);
                                 routed_metadata.hydration_count = Some(usage.hydration_count);
                                 routed_metadata.stale_ref_count = Some(usage.stale_ref_count);
                                 routed_metadata.hydration_ref_missing =
