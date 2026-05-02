@@ -515,6 +515,134 @@ fn r1_1_summarize_avg_tokens_saved_computed_per_arm() {
 }
 
 #[test]
+fn r1_1_summarize_context_tier_and_hydration_metrics_per_arm() {
+    use rust_agent::core::boss_state::{BossPlanStepStatus, BossStepRoutedMetadata};
+
+    let sink = LisMAbSampleSink::in_memory();
+
+    let mut on_report = make_report(1, 1, 0, 0, 0);
+    on_report.observability_summary = Some(BossObservabilitySummary {
+        total_steps_routed: 1,
+        total_cache_read_tokens: 0,
+        total_cache_write_tokens: 0,
+        total_fallback_count: 2,
+        fallback_tier_counts: std::iter::once(("full_context".into(), 1)).collect(),
+        fallback_reason_counts: std::iter::once((
+            "request_context_escalated:symbol:MissingSymbol".into(),
+            1,
+        ))
+        .collect(),
+        total_projection_mismatch_count: 0,
+        total_hydration_count: 3,
+        total_stale_ref_count: 1,
+        total_hydration_ref_missing: 2,
+        override_hit_count: 0,
+        model_tier_counts: std::iter::once(("medium".into(), 1)).collect(),
+        total_input_tokens: 0,
+        total_uncached_input_tokens: 0,
+        total_output_tokens: 0,
+        estimated_cost_micros_usd: 0,
+        total_original_chars: 0,
+        total_sent_chars: 0,
+    });
+    on_report.steps[0].status = BossPlanStepStatus::Completed;
+    on_report.steps[0].routed_metadata = Some(BossStepRoutedMetadata {
+        toolset_id: None,
+        skillset_id: None,
+        model_tier: Some("medium".into()),
+        provider_profile_id: None,
+        state_frame_size: None,
+        cache_read_tokens: Some(0),
+        cache_write_tokens: Some(0),
+        fallback_count: Some(2),
+        fallback_tier: Some("full_context".into()),
+        fallback_reason: Some("request_context_escalated:symbol:MissingSymbol".into()),
+        projection_mismatch_count: Some(0),
+        hydration_count: Some(3),
+        stale_ref_count: Some(1),
+        hydration_ref_missing: Some(2),
+        input_tokens: Some(0),
+        uncached_input_tokens: Some(0),
+        output_tokens: Some(0),
+        original_prompt_chars: Some(0),
+        sent_prompt_chars: Some(0),
+        estimated_cost_micros_usd: Some(0),
+    });
+
+    let mut off_report = make_report(1, 1, 0, 0, 0);
+    off_report.observability_summary = Some(BossObservabilitySummary {
+        total_steps_routed: 1,
+        total_cache_read_tokens: 0,
+        total_cache_write_tokens: 0,
+        total_fallback_count: 0,
+        fallback_tier_counts: Default::default(),
+        fallback_reason_counts: Default::default(),
+        total_projection_mismatch_count: 0,
+        total_hydration_count: 4,
+        total_stale_ref_count: 0,
+        total_hydration_ref_missing: 1,
+        override_hit_count: 0,
+        model_tier_counts: std::iter::once(("small".into(), 1)).collect(),
+        total_input_tokens: 0,
+        total_uncached_input_tokens: 0,
+        total_output_tokens: 0,
+        estimated_cost_micros_usd: 0,
+        total_original_chars: 0,
+        total_sent_chars: 0,
+    });
+    off_report.steps[0].status = BossPlanStepStatus::Completed;
+    off_report.steps[0].routed_metadata = Some(BossStepRoutedMetadata {
+        toolset_id: None,
+        skillset_id: None,
+        model_tier: Some("small".into()),
+        provider_profile_id: None,
+        state_frame_size: None,
+        cache_read_tokens: Some(0),
+        cache_write_tokens: Some(0),
+        fallback_count: Some(0),
+        fallback_tier: None,
+        fallback_reason: None,
+        projection_mismatch_count: Some(0),
+        hydration_count: Some(4),
+        stale_ref_count: Some(0),
+        hydration_ref_missing: Some(1),
+        input_tokens: Some(0),
+        uncached_input_tokens: Some(0),
+        output_tokens: Some(0),
+        original_prompt_chars: Some(0),
+        sent_prompt_chars: Some(0),
+        estimated_cost_micros_usd: Some(0),
+    });
+
+    sink.record_run("on-ctx", true, &on_report, BossTestRunOutcome::Completed, 0);
+    sink.record_run("off-ctx", false, &off_report, BossTestRunOutcome::Completed, 0);
+
+    let summary = sink.summarize();
+    assert_eq!(summary.on_avg_fallback_count, 2);
+    assert_eq!(summary.off_avg_fallback_count, 0);
+    assert_eq!(summary.on_fallback_run_rate, Some(1.0));
+    assert_eq!(summary.off_fallback_run_rate, Some(0.0));
+    assert_eq!(summary.on_avg_hydration_count, 3);
+    assert_eq!(summary.off_avg_hydration_count, 4);
+    assert_eq!(summary.on_avg_stale_ref_count, 1);
+    assert_eq!(summary.off_avg_stale_ref_count, 0);
+    assert_eq!(summary.on_avg_hydration_ref_missing, 2);
+    assert_eq!(summary.off_avg_hydration_ref_missing, 1);
+    assert_eq!(summary.on_hydration_resolution_rate, Some(0.6));
+    assert_eq!(summary.off_hydration_resolution_rate, Some(0.8));
+    assert_eq!(
+        summary.on_context_tier_counts.get("fallback:full_context"),
+        Some(&1)
+    );
+    assert_eq!(
+        summary.off_context_tier_counts.get("typed_hydration"),
+        Some(&1)
+    );
+    assert_eq!(summary.on_model_tier_counts.get("medium"), Some(&1));
+    assert_eq!(summary.off_model_tier_counts.get("small"), Some(&1));
+}
+
+#[test]
 fn r1_1_summarize_multi_run_averages_correctly() {
     let sink = LisMAbSampleSink::in_memory();
     // on arm: two runs with ratios 0.6 and 0.8 → avg 0.7
@@ -1005,6 +1133,10 @@ fn r1_4_conclude_display_contains_recommendation_and_reason() {
     let output = format!("{conclusion}");
     assert!(output.contains("ForceOn"), "display should mention ForceOn");
     assert!(output.contains("cache"), "display should mention cache");
+    assert!(
+        output.contains("Δ fallback/run"),
+        "display should mention fallback deltas"
+    );
 }
 
 #[test]

@@ -10049,6 +10049,14 @@ async fn t27_r1_format_report_includes_hit_ratio_and_tokens_saved() {
         report.contains("stale_refs=0"),
         "expected stale_refs= in report, got: {report}"
     );
+    assert!(
+        report.contains("fallback_step_rate=100.0%"),
+        "expected fallback_step_rate in report, got: {report}"
+    );
+    assert!(
+        report.contains("dominant_fallback_tier=full_context"),
+        "expected dominant_fallback_tier in report, got: {report}"
+    );
 }
 
 // ── BossLisMPolicy precedence tests ─────────────────────────────────────────

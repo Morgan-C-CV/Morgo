@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -56,6 +57,16 @@ pub struct LisMAbSampleRecord {
     pub fallback_tier: Option<String>,
     #[serde(default)]
     pub fallback_reason: Option<String>,
+    #[serde(default)]
+    pub context_tier: String,
+    #[serde(default)]
+    pub model_tier_counts: BTreeMap<String, usize>,
+    #[serde(default)]
+    pub hydration_count: usize,
+    #[serde(default)]
+    pub stale_ref_count: usize,
+    #[serde(default)]
+    pub hydration_ref_missing: usize,
     pub pending_approval_count: usize,
     pub outcome: BossTestRunOutcome,
 }
@@ -102,6 +113,38 @@ pub struct LisMAbSummary {
     pub off_avg_sent_prompt_chars: usize,
     pub on_avg_tokens_saved: usize,
     pub off_avg_tokens_saved: usize,
+    #[serde(default)]
+    pub on_avg_fallback_count: usize,
+    #[serde(default)]
+    pub off_avg_fallback_count: usize,
+    #[serde(default)]
+    pub on_fallback_run_rate: Option<f64>,
+    #[serde(default)]
+    pub off_fallback_run_rate: Option<f64>,
+    #[serde(default)]
+    pub on_avg_hydration_count: usize,
+    #[serde(default)]
+    pub off_avg_hydration_count: usize,
+    #[serde(default)]
+    pub on_avg_stale_ref_count: usize,
+    #[serde(default)]
+    pub off_avg_stale_ref_count: usize,
+    #[serde(default)]
+    pub on_avg_hydration_ref_missing: usize,
+    #[serde(default)]
+    pub off_avg_hydration_ref_missing: usize,
+    #[serde(default)]
+    pub on_hydration_resolution_rate: Option<f64>,
+    #[serde(default)]
+    pub off_hydration_resolution_rate: Option<f64>,
+    #[serde(default)]
+    pub on_context_tier_counts: BTreeMap<String, usize>,
+    #[serde(default)]
+    pub off_context_tier_counts: BTreeMap<String, usize>,
+    #[serde(default)]
+    pub on_model_tier_counts: BTreeMap<String, usize>,
+    #[serde(default)]
+    pub off_model_tier_counts: BTreeMap<String, usize>,
     /// Fraction of on-runs that completed (vs aborted/rolled-back).
     pub on_completion_rate: Option<f64>,
     /// Fraction of off-runs that completed.
@@ -144,6 +187,36 @@ impl LisMAbSummary {
         self.on_avg_sent_prompt_chars as i64 - self.off_avg_sent_prompt_chars as i64
     }
 
+    /// Difference in average fallback count (on - off). Positive means LisM falls back more often.
+    pub fn fallback_count_delta(&self) -> i64 {
+        self.on_avg_fallback_count as i64 - self.off_avg_fallback_count as i64
+    }
+
+    /// Difference in fallback run rate (on - off). Positive means LisM needs fallback on more runs.
+    pub fn fallback_run_rate_delta(&self) -> Option<f64> {
+        Some(self.on_fallback_run_rate? - self.off_fallback_run_rate?)
+    }
+
+    /// Difference in average hydration hits (on - off). Positive means LisM resolves more typed context.
+    pub fn hydration_count_delta(&self) -> i64 {
+        self.on_avg_hydration_count as i64 - self.off_avg_hydration_count as i64
+    }
+
+    /// Difference in average stale refs (on - off). Positive means LisM carries more stale evidence.
+    pub fn stale_ref_count_delta(&self) -> i64 {
+        self.on_avg_stale_ref_count as i64 - self.off_avg_stale_ref_count as i64
+    }
+
+    /// Difference in average hydration misses (on - off). Positive means LisM leaves more refs unresolved.
+    pub fn hydration_ref_missing_delta(&self) -> i64 {
+        self.on_avg_hydration_ref_missing as i64 - self.off_avg_hydration_ref_missing as i64
+    }
+
+    /// Difference in hydration resolution rate (on - off). Positive means LisM resolves more selectors.
+    pub fn hydration_resolution_rate_delta(&self) -> Option<f64> {
+        Some(self.on_hydration_resolution_rate? - self.off_hydration_resolution_rate?)
+    }
+
     /// Derive a rollout conclusion from the summary data.
     ///
     /// Requires at least `min_runs_per_arm` in each arm to produce a non-Inconclusive result.
@@ -172,6 +245,12 @@ impl LisMAbSummary {
                 cost_delta_micros: self.cost_delta_micros(),
                 input_token_delta: self.input_token_delta(),
                 sent_prompt_char_delta: self.sent_prompt_char_delta(),
+                fallback_count_delta: self.fallback_count_delta(),
+                fallback_run_rate_delta: self.fallback_run_rate_delta(),
+                hydration_count_delta: self.hydration_count_delta(),
+                stale_ref_count_delta: self.stale_ref_count_delta(),
+                hydration_ref_missing_delta: self.hydration_ref_missing_delta(),
+                hydration_resolution_rate_delta: self.hydration_resolution_rate_delta(),
                 on_completion_rate: self.on_completion_rate,
                 off_completion_rate: self.off_completion_rate,
             };
@@ -205,6 +284,12 @@ impl LisMAbSummary {
                 cost_delta_micros: cost_delta,
                 input_token_delta: self.input_token_delta(),
                 sent_prompt_char_delta: self.sent_prompt_char_delta(),
+                fallback_count_delta: self.fallback_count_delta(),
+                fallback_run_rate_delta: self.fallback_run_rate_delta(),
+                hydration_count_delta: self.hydration_count_delta(),
+                stale_ref_count_delta: self.stale_ref_count_delta(),
+                hydration_ref_missing_delta: self.hydration_ref_missing_delta(),
+                hydration_resolution_rate_delta: self.hydration_resolution_rate_delta(),
                 on_completion_rate: self.on_completion_rate,
                 off_completion_rate: self.off_completion_rate,
             };
@@ -234,11 +319,17 @@ impl LisMAbSummary {
             };
             return LisMRolloutConclusion {
                 recommendation: LisMPolicyRecommendation::ForceOff,
-                reason,
+                reason: append_quality_signal(reason, self),
                 cache_hit_ratio_delta: cache_delta,
                 cost_delta_micros: cost_delta,
                 input_token_delta: self.input_token_delta(),
                 sent_prompt_char_delta: self.sent_prompt_char_delta(),
+                fallback_count_delta: self.fallback_count_delta(),
+                fallback_run_rate_delta: self.fallback_run_rate_delta(),
+                hydration_count_delta: self.hydration_count_delta(),
+                stale_ref_count_delta: self.stale_ref_count_delta(),
+                hydration_ref_missing_delta: self.hydration_ref_missing_delta(),
+                hydration_resolution_rate_delta: self.hydration_resolution_rate_delta(),
                 on_completion_rate: self.on_completion_rate,
                 off_completion_rate: self.off_completion_rate,
             };
@@ -260,16 +351,25 @@ impl LisMAbSummary {
         if cache_helps && cost_within_penalty {
             return LisMRolloutConclusion {
                 recommendation: LisMPolicyRecommendation::ForceOn,
-                reason: format!(
-                    "LisM improves cache hit signal ({:+.3}) and keeps cost delta within threshold ({:+}μ <= {}μ); recommend ForceOn",
-                    cache_delta.unwrap_or(0.0),
-                    cost_delta,
-                    cost_penalty_threshold_micros
+                reason: append_quality_signal(
+                    format!(
+                        "LisM improves cache hit signal ({:+.3}) and keeps cost delta within threshold ({:+}μ <= {}μ); recommend ForceOn",
+                        cache_delta.unwrap_or(0.0),
+                        cost_delta,
+                        cost_penalty_threshold_micros
+                    ),
+                    self,
                 ),
                 cache_hit_ratio_delta: cache_delta,
                 cost_delta_micros: cost_delta,
                 input_token_delta: input_delta,
                 sent_prompt_char_delta: self.sent_prompt_char_delta(),
+                fallback_count_delta: self.fallback_count_delta(),
+                fallback_run_rate_delta: self.fallback_run_rate_delta(),
+                hydration_count_delta: self.hydration_count_delta(),
+                stale_ref_count_delta: self.stale_ref_count_delta(),
+                hydration_ref_missing_delta: self.hydration_ref_missing_delta(),
+                hydration_resolution_rate_delta: self.hydration_resolution_rate_delta(),
                 on_completion_rate: self.on_completion_rate,
                 off_completion_rate: self.off_completion_rate,
             };
@@ -278,9 +378,12 @@ impl LisMAbSummary {
         if input_token_saves && cache_not_hurt && cost_within_penalty {
             return LisMRolloutConclusion {
                 recommendation: LisMPolicyRecommendation::ForceOn,
-                reason: format!(
-                    "LisM reduces input tokens via lower uncached input ({:+}) and keeps cost delta within threshold ({:+}μ <= {}μ); recommend ForceOn",
-                    uncached_input_delta, cost_delta, cost_penalty_threshold_micros
+                reason: append_quality_signal(
+                    format!(
+                        "LisM reduces input tokens via lower uncached input ({:+}) and keeps cost delta within threshold ({:+}μ <= {}μ); recommend ForceOn",
+                        uncached_input_delta, cost_delta, cost_penalty_threshold_micros
+                    ),
+                    self,
                 ),
                 cache_hit_ratio_delta: cache_delta,
                 cost_delta_micros: cost_delta,
@@ -290,6 +393,12 @@ impl LisMAbSummary {
                     input_delta
                 },
                 sent_prompt_char_delta: self.sent_prompt_char_delta(),
+                fallback_count_delta: self.fallback_count_delta(),
+                fallback_run_rate_delta: self.fallback_run_rate_delta(),
+                hydration_count_delta: self.hydration_count_delta(),
+                stale_ref_count_delta: self.stale_ref_count_delta(),
+                hydration_ref_missing_delta: self.hydration_ref_missing_delta(),
+                hydration_resolution_rate_delta: self.hydration_resolution_rate_delta(),
                 on_completion_rate: self.on_completion_rate,
                 off_completion_rate: self.off_completion_rate,
             };
@@ -298,15 +407,24 @@ impl LisMAbSummary {
         // Mixed or noisy signal → keep session-level Inherit
         LisMRolloutConclusion {
             recommendation: LisMPolicyRecommendation::Inherit,
-            reason: format!(
-                "Mixed signal: cache delta {}, cost delta {}μ — keep per-session Inherit policy",
-                cache_delta.map_or("n/a".into(), |d| format!("{:+.3}", d)),
-                cost_delta
+            reason: append_quality_signal(
+                format!(
+                    "Mixed signal: cache delta {}, cost delta {}μ — keep per-session Inherit policy",
+                    cache_delta.map_or("n/a".into(), |d| format!("{:+.3}", d)),
+                    cost_delta
+                ),
+                self,
             ),
             cache_hit_ratio_delta: cache_delta,
             cost_delta_micros: cost_delta,
             input_token_delta: self.input_token_delta(),
             sent_prompt_char_delta: self.sent_prompt_char_delta(),
+            fallback_count_delta: self.fallback_count_delta(),
+            fallback_run_rate_delta: self.fallback_run_rate_delta(),
+            hydration_count_delta: self.hydration_count_delta(),
+            stale_ref_count_delta: self.stale_ref_count_delta(),
+            hydration_ref_missing_delta: self.hydration_ref_missing_delta(),
+            hydration_resolution_rate_delta: self.hydration_resolution_rate_delta(),
             on_completion_rate: self.on_completion_rate,
             off_completion_rate: self.off_completion_rate,
         }
@@ -338,6 +456,12 @@ pub struct LisMRolloutConclusion {
     pub cost_delta_micros: i64,
     pub input_token_delta: i64,
     pub sent_prompt_char_delta: i64,
+    pub fallback_count_delta: i64,
+    pub fallback_run_rate_delta: Option<f64>,
+    pub hydration_count_delta: i64,
+    pub stale_ref_count_delta: i64,
+    pub hydration_ref_missing_delta: i64,
+    pub hydration_resolution_rate_delta: Option<f64>,
     pub on_completion_rate: Option<f64>,
     pub off_completion_rate: Option<f64>,
 }
@@ -368,6 +492,20 @@ impl std::fmt::Display for LisMRolloutConclusion {
         writeln!(f, "  Δ cost           : {:+}μ", self.cost_delta_micros)?;
         writeln!(f, "  Δ input tokens   : {:+}", self.input_token_delta)?;
         writeln!(f, "  Δ sent chars     : {:+}", self.sent_prompt_char_delta)?;
+        writeln!(f, "  Δ fallback/run   : {:+}", self.fallback_count_delta)?;
+        if let Some(d) = self.fallback_run_rate_delta {
+            writeln!(f, "  Δ fallback rate  : {:+.3}", d)?;
+        }
+        writeln!(f, "  Δ hydration hits : {:+}", self.hydration_count_delta)?;
+        writeln!(f, "  Δ stale refs     : {:+}", self.stale_ref_count_delta)?;
+        writeln!(
+            f,
+            "  Δ missing refs   : {:+}",
+            self.hydration_ref_missing_delta
+        )?;
+        if let Some(d) = self.hydration_resolution_rate_delta {
+            writeln!(f, "  Δ hydration rate : {:+.3}", d)?;
+        }
         if let (Some(on), Some(off)) = (self.on_completion_rate, self.off_completion_rate) {
             writeln!(f, "  completion on/off: {:.2} / {:.2}", on, off)?;
         }
@@ -561,6 +699,21 @@ fn build_ab_record(
         fallback_reason: last_fallback
             .as_ref()
             .and_then(|(_, reason)| reason.clone()),
+        context_tier: derive_context_tier(
+            obs,
+            last_fallback.as_ref().and_then(|(tier, _)| tier.as_deref()),
+        ),
+        model_tier_counts: obs
+            .map(|o| {
+                o.model_tier_counts
+                    .iter()
+                    .map(|(k, v)| (k.clone(), *v))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        hydration_count: obs.map(|o| o.total_hydration_count).unwrap_or(0),
+        stale_ref_count: obs.map(|o| o.total_stale_ref_count).unwrap_or(0),
+        hydration_ref_missing: obs.map(|o| o.total_hydration_ref_missing).unwrap_or(0),
         pending_approval_count,
         outcome,
     }
@@ -595,6 +748,22 @@ fn summarize_records(records: &[LisMAbSampleRecord]) -> LisMAbSummary {
         off_avg_sent_prompt_chars: avg_sent_prompt_chars(&off),
         on_avg_tokens_saved: avg_tokens_saved(&on),
         off_avg_tokens_saved: avg_tokens_saved(&off),
+        on_avg_fallback_count: avg_fallback_count(&on),
+        off_avg_fallback_count: avg_fallback_count(&off),
+        on_fallback_run_rate: fallback_run_rate(&on),
+        off_fallback_run_rate: fallback_run_rate(&off),
+        on_avg_hydration_count: avg_hydration_count(&on),
+        off_avg_hydration_count: avg_hydration_count(&off),
+        on_avg_stale_ref_count: avg_stale_ref_count(&on),
+        off_avg_stale_ref_count: avg_stale_ref_count(&off),
+        on_avg_hydration_ref_missing: avg_hydration_ref_missing(&on),
+        off_avg_hydration_ref_missing: avg_hydration_ref_missing(&off),
+        on_hydration_resolution_rate: hydration_resolution_rate(&on),
+        off_hydration_resolution_rate: hydration_resolution_rate(&off),
+        on_context_tier_counts: context_tier_counts(&on),
+        off_context_tier_counts: context_tier_counts(&off),
+        on_model_tier_counts: aggregate_model_tier_counts(&on),
+        off_model_tier_counts: aggregate_model_tier_counts(&off),
         on_completion_rate: completion_rate(&on),
         off_completion_rate: completion_rate(&off),
     }
@@ -645,6 +814,22 @@ fn avg_tokens_saved(records: &[&LisMAbSampleRecord]) -> usize {
     avg_usize(records, |r| r.estimated_tokens_saved)
 }
 
+fn avg_fallback_count(records: &[&LisMAbSampleRecord]) -> usize {
+    avg_usize(records, |r| r.fallback_count)
+}
+
+fn avg_hydration_count(records: &[&LisMAbSampleRecord]) -> usize {
+    avg_usize(records, |r| r.hydration_count)
+}
+
+fn avg_stale_ref_count(records: &[&LisMAbSampleRecord]) -> usize {
+    avg_usize(records, |r| r.stale_ref_count)
+}
+
+fn avg_hydration_ref_missing(records: &[&LisMAbSampleRecord]) -> usize {
+    avg_usize(records, |r| r.hydration_ref_missing)
+}
+
 fn hit_run_rate(records: &[&LisMAbSampleRecord]) -> Option<f64> {
     let with_cache_obs: Vec<&LisMAbSampleRecord> = records
         .iter()
@@ -659,6 +844,28 @@ fn hit_run_rate(records: &[&LisMAbSampleRecord]) -> Option<f64> {
         .filter(|r| r.cache_hit_observed)
         .count();
     Some(hits as f64 / with_cache_obs.len() as f64)
+}
+
+fn fallback_run_rate(records: &[&LisMAbSampleRecord]) -> Option<f64> {
+    if records.is_empty() {
+        return None;
+    }
+    let runs_with_fallback = records
+        .iter()
+        .filter(|r| r.fallback_count > 0 || r.fallback_tier.is_some())
+        .count();
+    Some(runs_with_fallback as f64 / records.len() as f64)
+}
+
+fn hydration_resolution_rate(records: &[&LisMAbSampleRecord]) -> Option<f64> {
+    let hydrated: usize = records.iter().map(|r| r.hydration_count).sum();
+    let missing: usize = records.iter().map(|r| r.hydration_ref_missing).sum();
+    let total = hydrated + missing;
+    if total == 0 {
+        None
+    } else {
+        Some(hydrated as f64 / total as f64)
+    }
 }
 
 fn cache_read_distribution(records: &[&LisMAbSampleRecord]) -> Option<TokenDistributionStats> {
@@ -699,6 +906,55 @@ fn completion_rate(records: &[&LisMAbSampleRecord]) -> Option<f64> {
         .filter(|r| r.outcome == BossTestRunOutcome::Completed)
         .count();
     Some(completed as f64 / records.len() as f64)
+}
+
+fn context_tier_counts(records: &[&LisMAbSampleRecord]) -> BTreeMap<String, usize> {
+    let mut counts = BTreeMap::new();
+    for record in records {
+        *counts.entry(record.context_tier.clone()).or_insert(0) += 1;
+    }
+    counts
+}
+
+fn aggregate_model_tier_counts(records: &[&LisMAbSampleRecord]) -> BTreeMap<String, usize> {
+    let mut counts = BTreeMap::new();
+    for record in records {
+        for (tier, count) in &record.model_tier_counts {
+            *counts.entry(tier.clone()).or_insert(0) += *count;
+        }
+    }
+    counts
+}
+
+fn derive_context_tier(
+    obs: Option<&crate::core::boss_state::BossObservabilitySummary>,
+    fallback_tier: Option<&str>,
+) -> String {
+    if let Some(tier) = fallback_tier {
+        return format!("fallback:{tier}");
+    }
+    match obs {
+        Some(summary) if summary.total_hydration_count > 0 => "typed_hydration".into(),
+        Some(_) => "state_frame_only".into(),
+        None => "no_observability".into(),
+    }
+}
+
+fn append_quality_signal(reason: String, summary: &LisMAbSummary) -> String {
+    let fallback_delta = summary.fallback_count_delta();
+    let missing_delta = summary.hydration_ref_missing_delta();
+    let stale_delta = summary.stale_ref_count_delta();
+    let resolution_delta = summary.hydration_resolution_rate_delta();
+    if fallback_delta == 0 && missing_delta == 0 && stale_delta == 0 && resolution_delta.is_none() {
+        return reason;
+    }
+    let resolution_note = resolution_delta
+        .map(|d| format!("{:+.3}", d))
+        .unwrap_or_else(|| "n/a".into());
+    format!(
+        "{reason}; context quality deltas fallback/run {:+}, missing_refs {:+}, stale_refs {:+}, hydration_rate {}",
+        fallback_delta, missing_delta, stale_delta, resolution_note
+    )
 }
 
 fn percentile_index(len: usize, percentile: f64) -> usize {

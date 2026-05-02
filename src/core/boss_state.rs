@@ -296,6 +296,36 @@ impl BossObservabilitySummary {
     pub fn estimated_tokens_saved(&self) -> usize {
         self.total_cache_read_tokens
     }
+
+    /// Fraction of routed steps that escalated beyond typed-only context.
+    pub fn fallback_step_rate(&self) -> Option<f64> {
+        if self.total_steps_routed == 0 {
+            None
+        } else {
+            let fallback_steps: usize = self.fallback_tier_counts.values().sum();
+            Some(fallback_steps as f64 / self.total_steps_routed as f64)
+        }
+    }
+
+    /// Fraction of typed hydration selectors that resolved to concrete evidence.
+    pub fn hydration_resolution_rate(&self) -> Option<f64> {
+        let total = self.total_hydration_count + self.total_hydration_ref_missing;
+        if total == 0 {
+            None
+        } else {
+            Some(self.total_hydration_count as f64 / total as f64)
+        }
+    }
+
+    /// Fraction of hydrated refs that were stale after resolution.
+    pub fn stale_ref_rate(&self) -> Option<f64> {
+        let total = self.total_hydration_count + self.total_stale_ref_count;
+        if total == 0 {
+            None
+        } else {
+            Some(self.total_stale_ref_count as f64 / total as f64)
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -358,8 +388,22 @@ impl BossReportPayload {
                 .cache_hit_ratio()
                 .map(|r| format!("{:.1}%", r * 100.0))
                 .unwrap_or_else(|| "-".into());
+            let fallback_step_rate = s
+                .fallback_step_rate()
+                .map(|r| format!("{:.1}%", r * 100.0))
+                .unwrap_or_else(|| "-".into());
+            let hydration_resolution_rate = s
+                .hydration_resolution_rate()
+                .map(|r| format!("{:.1}%", r * 100.0))
+                .unwrap_or_else(|| "-".into());
+            let stale_ref_rate = s
+                .stale_ref_rate()
+                .map(|r| format!("{:.1}%", r * 100.0))
+                .unwrap_or_else(|| "-".into());
+            let dominant_fallback_tier = dominant_count_key(&s.fallback_tier_counts).unwrap_or("-");
+            let dominant_model_tier = dominant_count_key(&s.model_tier_counts).unwrap_or("-");
             lines.push(format!(
-                "  summary: routed={} override_hits={} cache_r={} cache_w={} cache_hit_observed={} hit_ratio={} tokens_saved={} input={} uncached_input={} output={} chars={}/{} cost_micros_usd={} fallback={} fallback_tiers={:?} fallback_reasons={:?} mismatch={} hydration={} stale_refs={} missing_refs={} tiers={:?}",
+                "  summary: routed={} override_hits={} cache_r={} cache_w={} cache_hit_observed={} hit_ratio={} tokens_saved={} input={} uncached_input={} output={} chars={}/{} cost_micros_usd={} fallback={} fallback_step_rate={} dominant_fallback_tier={} fallback_tiers={:?} fallback_reasons={:?} mismatch={} hydration={} hydration_rate={} stale_refs={} stale_rate={} missing_refs={} dominant_model_tier={} tiers={:?}",
                 s.total_steps_routed,
                 s.override_hit_count,
                 s.total_cache_read_tokens,
@@ -374,17 +418,33 @@ impl BossReportPayload {
                 s.total_original_chars,
                 s.estimated_cost_micros_usd,
                 s.total_fallback_count,
+                fallback_step_rate,
+                dominant_fallback_tier,
                 s.fallback_tier_counts,
                 s.fallback_reason_counts,
                 s.total_projection_mismatch_count,
                 s.total_hydration_count,
+                hydration_resolution_rate,
                 s.total_stale_ref_count,
+                stale_ref_rate,
                 s.total_hydration_ref_missing,
+                dominant_model_tier,
                 s.model_tier_counts,
             ));
         }
         lines.join("\n")
     }
+}
+
+fn dominant_count_key(counts: &std::collections::HashMap<String, usize>) -> Option<&str> {
+    counts
+        .iter()
+        .max_by(|(left_key, left_count), (right_key, right_count)| {
+            left_count
+                .cmp(right_count)
+                .then_with(|| right_key.cmp(left_key))
+        })
+        .map(|(key, _)| key.as_str())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

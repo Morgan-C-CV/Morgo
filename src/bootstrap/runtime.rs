@@ -1966,7 +1966,7 @@ fn print_lism_ab_summary(
         })
         .unwrap_or_else(|| "n/a".into());
     println!(
-        "LisM ON       : {} runs | completion {:.2} | avg gross_input {} | avg uncached_input {} | avg output {} | hit_run_rate {} | avg cache_read {} | cache_read_dist {} | avg cost {}μ | avg tokens_saved {} | avg sent_chars {}",
+        "LisM ON       : {} runs | completion {:.2} | avg gross_input {} | avg uncached_input {} | avg output {} | hit_run_rate {} | avg cache_read {} | cache_read_dist {} | avg cost {}μ | avg tokens_saved {} | avg sent_chars {} | avg fallback/run {} | fallback_run_rate {} | avg hydration {} | avg missing {} | avg stale {} | hydration_rate {} | context_tiers {:?} | model_tiers {:?}",
         summary.on_runs,
         summary
             .on_completion_rate
@@ -1982,9 +1982,21 @@ fn print_lism_ab_summary(
         summary.on_avg_cost_micros_usd,
         summary.on_avg_tokens_saved,
         summary.on_avg_sent_prompt_chars,
+        summary.on_avg_fallback_count,
+        summary
+            .on_fallback_run_rate
+            .map_or_else(|| "n/a".into(), |r| format!("{:.3}", r)),
+        summary.on_avg_hydration_count,
+        summary.on_avg_hydration_ref_missing,
+        summary.on_avg_stale_ref_count,
+        summary
+            .on_hydration_resolution_rate
+            .map_or_else(|| "n/a".into(), |r| format!("{:.3}", r)),
+        summary.on_context_tier_counts,
+        summary.on_model_tier_counts,
     );
     println!(
-        "LisM OFF      : {} runs | completion {:.2} | avg gross_input {} | avg uncached_input {} | avg output {} | hit_run_rate {} | avg cache_read {} | cache_read_dist {} | avg cost {}μ | avg tokens_saved {} | avg sent_chars {}",
+        "LisM OFF      : {} runs | completion {:.2} | avg gross_input {} | avg uncached_input {} | avg output {} | hit_run_rate {} | avg cache_read {} | cache_read_dist {} | avg cost {}μ | avg tokens_saved {} | avg sent_chars {} | avg fallback/run {} | fallback_run_rate {} | avg hydration {} | avg missing {} | avg stale {} | hydration_rate {} | context_tiers {:?} | model_tiers {:?}",
         summary.off_runs,
         summary
             .off_completion_rate
@@ -2000,6 +2012,18 @@ fn print_lism_ab_summary(
         summary.off_avg_cost_micros_usd,
         summary.off_avg_tokens_saved,
         summary.off_avg_sent_prompt_chars,
+        summary.off_avg_fallback_count,
+        summary
+            .off_fallback_run_rate
+            .map_or_else(|| "n/a".into(), |r| format!("{:.3}", r)),
+        summary.off_avg_hydration_count,
+        summary.off_avg_hydration_ref_missing,
+        summary.off_avg_stale_ref_count,
+        summary
+            .off_hydration_resolution_rate
+            .map_or_else(|| "n/a".into(), |r| format!("{:.3}", r)),
+        summary.off_context_tier_counts,
+        summary.off_model_tier_counts,
     );
     if summary.has_both_arms() {
         println!("---");

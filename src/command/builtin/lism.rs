@@ -121,8 +121,18 @@ impl Command for LisMCommand {
                             ));
                         }
                         lines.push(format!(
-                            "  total_steps_routed: {total_routed} override_hits: {override_hits} cache_r: {total_cache_r} cache_w: {total_cache_w} cache_hit_observed: {cache_hit_observed} tokens_saved: {total_cache_r} input: {total_input} uncached_input: {total_uncached_input} output: {total_output} sent_chars: {total_sent_chars} original_chars: {total_original_chars} fallback: {total_fallback} mismatch: {total_mismatch} hydration: {total_hydration} stale_refs: {total_stale} missing_refs: {total_missing}",
+                            "  total_steps_routed: {total_routed} override_hits: {override_hits} cache_r: {total_cache_r} cache_w: {total_cache_w} cache_hit_observed: {cache_hit_observed} tokens_saved: {total_cache_r} input: {total_input} uncached_input: {total_uncached_input} output: {total_output} sent_chars: {total_sent_chars} original_chars: {total_original_chars} fallback: {total_fallback} fallback_step_rate: {fallback_step_rate} mismatch: {total_mismatch} hydration: {total_hydration} hydration_rate: {hydration_rate} stale_refs: {total_stale} missing_refs: {total_missing}",
                             cache_hit_observed = total_cache_r > 0,
+                            fallback_step_rate = if total_routed == 0 {
+                                "-".to_string()
+                            } else {
+                                format!("{:.1}%", (fallback_tier_counts.values().sum::<usize>() as f64 / total_routed as f64) * 100.0)
+                            },
+                            hydration_rate = if total_hydration + total_missing == 0 {
+                                "-".to_string()
+                            } else {
+                                format!("{:.1}%", (total_hydration as f64 / (total_hydration + total_missing) as f64) * 100.0)
+                            },
                         ));
                         if !fallback_tier_counts.is_empty() || !fallback_reason_counts.is_empty() {
                             lines.push(format!(
@@ -150,6 +160,6 @@ fn usage() -> String {
 fn explain(enabled: bool) -> String {
     let mode = if enabled { "enabled" } else { "disabled" };
     format!(
-        "LisM is currently {mode}.\n\nAvailable building blocks:\n- StateFrame schema and StateDecision validation\n- BossPlan -> StateFrame projection\n- Stateless JSON decision loop\n- Typed evidence hydration with source trace / unresolved reason / stale reason\n- `request_context` fallback ladder now upgrades targeted evidence misses into recent local history and then full-context summaries\n- Per-step fallback telemetry now records count, tier, and reason in routed metadata, /LisM status, /boss report, and A/B samples\n- Toolset / skillset router is attached to the live LisM -> /boss production path\n- Model-tier router and provider_profile_id routing are connected to the production path\n- Archive / retention for accepted and open items\n- Production-path tests for the current StateFrame orchestration pipeline\n\nDeferred items:\n- /LisM persistence is not yet connected\n- fallback analytics can still be expanded beyond latest-tier/latest-reason run summaries"
+        "LisM is currently {mode}.\n\nAvailable building blocks:\n- StateFrame schema and StateDecision validation\n- BossPlan -> StateFrame projection\n- Stateless JSON decision loop\n- Typed evidence hydration with source trace / unresolved reason / stale reason\n- `request_context` fallback ladder now upgrades targeted evidence misses into recent local history and then full-context summaries\n- Per-step fallback telemetry now records count, tier, and reason in routed metadata, /LisM status, /boss report, and A/B samples\n- A/B summary now compares context tiers, fallback rates, hydration hit rate, stale refs, and missing refs across ON/OFF arms\n- Toolset / skillset router is attached to the live LisM -> /boss production path\n- Model-tier router and provider_profile_id routing are connected to the production path\n- Archive / retention for accepted and open items\n- Production-path tests for the current StateFrame orchestration pipeline\n\nDeferred items:\n- /LisM persistence is not yet connected"
     )
 }
