@@ -10,7 +10,7 @@ name = "rust_agent"
 path = "src/lib.rs"
 
 [[bin]]
-name = "rust-agent"
+name = "morgo"
 path = "src/main.rs"
 
 [dependencies]

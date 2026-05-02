@@ -986,7 +986,7 @@ fn worker_tool_filter_excludes_agent_and_interactive_tools() {
     assert!(names.contains(&"TaskUpdate"));
     assert!(!names.contains(&"Agent"));
     assert!(!names.contains(&"AskUserQuestion"));
-    assert!(!names.contains(&"Bash"));
+    assert!(names.contains(&"Bash"));
     assert!(!names.contains(&"WebSearch"));
 }
 
@@ -1008,7 +1008,7 @@ fn assembly_context_controls_deferred_and_interactive_visibility() {
         .collect::<Vec<_>>();
 
     assert!(names.contains(&"Read"));
-    assert!(!names.contains(&"Bash"));
+    assert!(names.contains(&"Bash"));
     assert!(!names.contains(&"WebSearch"));
 }
 

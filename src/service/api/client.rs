@@ -69,18 +69,29 @@ struct ProviderCompatibilityProfile {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderProtocol {
-    Anthropic,
+    MessagesApi,
     OpenAICompatible,
     GeminiNative,
 }
 
+impl ProviderProtocol {
+    #[allow(non_upper_case_globals)]
+    pub const Anthropic: ProviderProtocol = ProviderProtocol::MessagesApi;
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderCompatibilityProfileKind {
-    Anthropic,
+    MessagesApi,
     TextOnly,
     Batch,
     OpenAICompatible,
     GeminiNativeUnsupported,
+}
+
+impl ProviderCompatibilityProfileKind {
+    #[allow(non_upper_case_globals)]
+    pub const Anthropic: ProviderCompatibilityProfileKind =
+        ProviderCompatibilityProfileKind::MessagesApi;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -192,8 +203,8 @@ impl Default for ModelProviderConfig {
     fn default() -> Self {
         Self {
             provider_id: "default-provider".into(),
-            protocol: ProviderProtocol::Anthropic,
-            compatibility_profile: ProviderCompatibilityProfileKind::Anthropic,
+            protocol: ProviderProtocol::MessagesApi,
+            compatibility_profile: ProviderCompatibilityProfileKind::MessagesApi,
             base_url: "http://localhost".into(),
             chat_completions_path: "/v1/chat/completions".into(),
             auth_strategy: ProviderAuthStrategy::NoAuth,
@@ -745,7 +756,7 @@ fn normalized_request_message(input: &Message) -> Value {
     json!({"role": "user", "content": content_blocks})
 }
 
-struct AnthropicAdapter;
+struct MessagesApiAdapter;
 struct OpenAICompatibleAdapter;
 struct GeminiNativeAdapter;
 
@@ -791,9 +802,9 @@ pub fn validate_provider_config(config: &ModelProviderConfig) -> Result<(), ApiE
     }
 
     match (config.protocol, config.compatibility_profile) {
-        (ProviderProtocol::Anthropic, ProviderCompatibilityProfileKind::Anthropic)
-        | (ProviderProtocol::Anthropic, ProviderCompatibilityProfileKind::TextOnly)
-        | (ProviderProtocol::Anthropic, ProviderCompatibilityProfileKind::Batch)
+        (ProviderProtocol::MessagesApi, ProviderCompatibilityProfileKind::MessagesApi)
+        | (ProviderProtocol::MessagesApi, ProviderCompatibilityProfileKind::TextOnly)
+        | (ProviderProtocol::MessagesApi, ProviderCompatibilityProfileKind::Batch)
         | (
             ProviderProtocol::OpenAICompatible,
             ProviderCompatibilityProfileKind::OpenAICompatible,
@@ -814,7 +825,7 @@ fn adapter_for_config(
 ) -> Result<&'static dyn ProviderAdapter, ApiError> {
     validate_provider_config(config)?;
     match config.protocol {
-        ProviderProtocol::Anthropic => Ok(&AnthropicAdapter),
+        ProviderProtocol::MessagesApi => Ok(&MessagesApiAdapter),
         ProviderProtocol::OpenAICompatible => Ok(&OpenAICompatibleAdapter),
         ProviderProtocol::GeminiNative => Ok(&GeminiNativeAdapter),
     }
@@ -840,7 +851,7 @@ fn validate_chat_completions_path(path: &str) -> Result<&str, ApiError> {
     Ok(trimmed)
 }
 
-impl ProviderAdapter for AnthropicAdapter {
+impl ProviderAdapter for MessagesApiAdapter {
     fn messages_url(&self, config: &ModelProviderConfig) -> Result<String, ApiError> {
         Ok(format!(
             "{}/v1/messages",
@@ -894,7 +905,7 @@ impl ProviderAdapter for AnthropicAdapter {
         body: &str,
         default_model: &str,
     ) -> Result<Vec<StreamEvent>, ApiError> {
-        parse_anthropic_sse_response(&config.provider_id, body, default_model)
+        parse_messages_api_sse_response(&config.provider_id, body, default_model)
     }
 }
 
@@ -1031,7 +1042,7 @@ fn profile_for_provider(
     config: &ModelProviderConfig,
 ) -> Result<ProviderCompatibilityProfile, ApiError> {
     match config.protocol {
-        ProviderProtocol::Anthropic | ProviderProtocol::OpenAICompatible => {
+        ProviderProtocol::MessagesApi | ProviderProtocol::OpenAICompatible => {
             Ok(compatibility_profile_for_kind(config.compatibility_profile))
         }
         ProviderProtocol::GeminiNative => Err(ApiError::capability_unsupported(format!(
@@ -1172,16 +1183,16 @@ fn expected_contract_for_provider_id(
     provider_id: &str,
 ) -> Option<(ProviderProtocol, ProviderCompatibilityProfileKind)> {
     match normalized_provider_id(provider_id) {
-        "anthropic" | "default-provider" => Some((
-            ProviderProtocol::Anthropic,
-            ProviderCompatibilityProfileKind::Anthropic,
+        "morgo" | "anthropic" | "default-provider" => Some((
+            ProviderProtocol::MessagesApi,
+            ProviderCompatibilityProfileKind::MessagesApi,
         )),
         "text-only-provider" => Some((
-            ProviderProtocol::Anthropic,
+            ProviderProtocol::MessagesApi,
             ProviderCompatibilityProfileKind::TextOnly,
         )),
         "batch-provider" => Some((
-            ProviderProtocol::Anthropic,
+            ProviderProtocol::MessagesApi,
             ProviderCompatibilityProfileKind::Batch,
         )),
         "openai" | "openai-compatible" | "openai_compatible" | "kimi" | "glm" | "minimax" => {
@@ -1210,7 +1221,7 @@ fn compatibility_profile_for_kind(
     profile: ProviderCompatibilityProfileKind,
 ) -> ProviderCompatibilityProfile {
     match profile {
-        ProviderCompatibilityProfileKind::Anthropic => ProviderCompatibilityProfile {
+        ProviderCompatibilityProfileKind::MessagesApi => ProviderCompatibilityProfile {
             supports_tools: true,
             supports_streaming: true,
             supports_temperature: true,
@@ -1248,7 +1259,7 @@ fn compatibility_profile_for_kind(
     }
 }
 
-pub fn parse_anthropic_sse_response(
+pub fn parse_messages_api_sse_response(
     provider_id: &str,
     body: &str,
     default_model: &str,
@@ -1315,6 +1326,14 @@ pub fn parse_anthropic_sse_response(
 
     parser.finish(&mut events)?;
     Ok(events)
+}
+
+pub fn parse_anthropic_sse_response(
+    provider_id: &str,
+    body: &str,
+    default_model: &str,
+) -> Result<Vec<StreamEvent>, ApiError> {
+    parse_messages_api_sse_response(provider_id, body, default_model)
 }
 
 pub fn parse_openai_compatible_sse_response(
@@ -2155,7 +2174,7 @@ fn normalize_usage(usage: &Value, _default_model: &str) -> NormalizedUsage {
             .and_then(Value::as_u64)
             .map(|value| value as usize),
         // OpenAI Chat Completions: cached_tokens lives inside prompt_tokens_details.
-        // Anthropic-style flat fields (cache_read_input_tokens etc.) are kept as fallback.
+        // Messages-API-style flat fields (cache_read_input_tokens etc.) are kept as fallback.
         cache_read_input_tokens: usage
             .get("prompt_tokens_details")
             .and_then(|d| d.get("cached_tokens"))
@@ -2310,7 +2329,7 @@ mod tests {
         build_request_payload_for_provider, build_request_payload_with_options,
         classify_retry_policy, classify_stream_error, classify_stream_error_disposition,
         extract_error_detail, map_openai_finish_reason, map_stop_reason, merge_usage,
-        normalize_json_like_value, normalize_usage, parse_anthropic_sse_response,
+        normalize_json_like_value, normalize_usage, parse_messages_api_sse_response,
         parse_openai_compatible_sse_response, parse_retry_after_ms,
         parse_stream_response_for_provider, parse_usage, profile_for_provider,
         validate_streaming_response_headers,
@@ -2357,11 +2376,11 @@ mod tests {
     }
 
     #[test]
-    fn anthropic_adapter_text_only_message_serializes_as_text_block() {
+    fn messages_api_adapter_text_only_message_serializes_as_text_block() {
         use crate::core::message::Message;
         let config = test_provider(
-            ProviderProtocol::Anthropic,
-            ProviderCompatibilityProfileKind::Anthropic,
+            ProviderProtocol::MessagesApi,
+            ProviderCompatibilityProfileKind::MessagesApi,
         );
         let msg = Message::user("hello");
         let payload = build_request_payload_for_provider(&config, &msg).unwrap();
@@ -2371,11 +2390,11 @@ mod tests {
     }
 
     #[test]
-    fn anthropic_adapter_image_block_serializes_as_base64_source() {
+    fn messages_api_adapter_image_block_serializes_as_base64_source() {
         use crate::core::message::{ContentBlock, Message};
         let config = test_provider(
-            ProviderProtocol::Anthropic,
-            ProviderCompatibilityProfileKind::Anthropic,
+            ProviderProtocol::MessagesApi,
+            ProviderCompatibilityProfileKind::MessagesApi,
         );
         let msg = Message {
             role: crate::core::message::Role::User,
@@ -2471,7 +2490,7 @@ mod tests {
     fn parses_standard_sse_stream_into_stream_events() {
         let body = concat!(
             "event: message\n",
-            "data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-test\",\"usage\":{\"input_tokens\":12}}}\n\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"model\":\"morgo-test\",\"usage\":{\"input_tokens\":12}}}\n\n",
             "event: message\n",
             "data: {\"type\":\"content_block_delta\",\"delta\":{\"text\":\"hello \"}}\n\n",
             "event: message\n",
@@ -2482,7 +2501,7 @@ mod tests {
             "data: {\"type\":\"message_stop\"}\n\n"
         );
 
-        let events = parse_anthropic_sse_response("anthropic", body, "default-model")
+        let events = parse_messages_api_sse_response("morgo", body, "default-model")
             .expect("sse should parse");
         assert!(matches!(events[0], StreamEvent::MessageStart));
         assert!(
@@ -2495,7 +2514,7 @@ mod tests {
             events
                 .iter()
                 .any(|event| matches!(event, StreamEvent::Usage(usage)
-            if usage.model == "claude-test"
+            if usage.model == "morgo-test"
                 && usage.input_tokens == 12
                 && usage.output_tokens == 7))
         );
@@ -2578,9 +2597,9 @@ mod tests {
     #[test]
     fn request_payload_uses_normalized_envelope_shape() {
         let config = ModelProviderConfig {
-            provider_id: "anthropic".into(),
-            protocol: ProviderProtocol::Anthropic,
-            compatibility_profile: ProviderCompatibilityProfileKind::Anthropic,
+            provider_id: "morgo".into(),
+            protocol: ProviderProtocol::MessagesApi,
+            compatibility_profile: ProviderCompatibilityProfileKind::MessagesApi,
             auth_strategy: ProviderAuthStrategy::NoAuth,
             model_id: "test-model".into(),
             ..ModelProviderConfig::default()
@@ -2608,14 +2627,14 @@ mod tests {
 
     #[test]
     fn provider_compatibility_profiles_match_expected_capabilities() {
-        let anthropic =
-            profile_for_provider(&ModelProviderConfig::from_legacy_provider_id("anthropic"))
-                .expect("anthropic profile");
-        assert!(anthropic.supports_tools);
-        assert!(anthropic.supports_streaming);
-        assert!(anthropic.supports_temperature);
-        assert!(anthropic.supports_top_p);
-        assert!(anthropic.supports_stop_sequences);
+        let morgo =
+            profile_for_provider(&ModelProviderConfig::from_legacy_provider_id("morgo"))
+                .expect("morgo profile");
+        assert!(morgo.supports_tools);
+        assert!(morgo.supports_streaming);
+        assert!(morgo.supports_temperature);
+        assert!(morgo.supports_top_p);
+        assert!(morgo.supports_stop_sequences);
 
         let text_only = profile_for_provider(&ModelProviderConfig::from_legacy_provider_id(
             "text-only-provider",
@@ -2641,9 +2660,9 @@ mod tests {
     #[test]
     fn supported_provider_keeps_request_options_intact() {
         let config = ModelProviderConfig {
-            provider_id: "anthropic".into(),
-            protocol: ProviderProtocol::Anthropic,
-            compatibility_profile: ProviderCompatibilityProfileKind::Anthropic,
+            provider_id: "morgo".into(),
+            protocol: ProviderProtocol::MessagesApi,
+            compatibility_profile: ProviderCompatibilityProfileKind::MessagesApi,
             auth_strategy: ProviderAuthStrategy::NoAuth,
             ..ModelProviderConfig::default()
         };
@@ -2674,11 +2693,11 @@ mod tests {
     }
 
     #[test]
-    fn anthropic_payload_includes_tools_when_present() {
+    fn messages_api_payload_includes_tools_when_present() {
         let config = ModelProviderConfig {
-            provider_id: "anthropic".into(),
-            protocol: ProviderProtocol::Anthropic,
-            compatibility_profile: ProviderCompatibilityProfileKind::Anthropic,
+            provider_id: "morgo".into(),
+            protocol: ProviderProtocol::MessagesApi,
+            compatibility_profile: ProviderCompatibilityProfileKind::MessagesApi,
             auth_strategy: ProviderAuthStrategy::NoAuth,
             ..ModelProviderConfig::default()
         };
@@ -2702,7 +2721,7 @@ mod tests {
                 ..RequestOptions::default()
             },
         )
-        .expect("anthropic payload should build");
+        .expect("messages api payload should build");
 
         assert_eq!(payload["tools"][0]["name"].as_str(), Some("Read"));
         assert_eq!(
@@ -2759,7 +2778,7 @@ mod tests {
     fn unsupported_optional_request_options_are_dropped() {
         let config = ModelProviderConfig {
             provider_id: "text-only-provider".into(),
-            protocol: ProviderProtocol::Anthropic,
+            protocol: ProviderProtocol::MessagesApi,
             compatibility_profile: ProviderCompatibilityProfileKind::TextOnly,
             auth_strategy: ProviderAuthStrategy::NoAuth,
             ..ModelProviderConfig::default()
@@ -2791,7 +2810,7 @@ mod tests {
     fn unsupported_streaming_returns_typed_capability_failure() {
         let config = ModelProviderConfig {
             provider_id: "batch-provider".into(),
-            protocol: ProviderProtocol::Anthropic,
+            protocol: ProviderProtocol::MessagesApi,
             compatibility_profile: ProviderCompatibilityProfileKind::Batch,
             auth_strategy: ProviderAuthStrategy::NoAuth,
             ..ModelProviderConfig::default()
@@ -2815,7 +2834,7 @@ mod tests {
     fn unsupported_tools_returns_typed_capability_failure() {
         let config = ModelProviderConfig {
             provider_id: "text-only-provider".into(),
-            protocol: ProviderProtocol::Anthropic,
+            protocol: ProviderProtocol::MessagesApi,
             compatibility_profile: ProviderCompatibilityProfileKind::TextOnly,
             auth_strategy: ProviderAuthStrategy::NoAuth,
             ..ModelProviderConfig::default()
@@ -2842,9 +2861,9 @@ mod tests {
     #[test]
     fn invalid_numeric_options_return_typed_failure() {
         let config = ModelProviderConfig {
-            provider_id: "anthropic".into(),
-            protocol: ProviderProtocol::Anthropic,
-            compatibility_profile: ProviderCompatibilityProfileKind::Anthropic,
+            provider_id: "morgo".into(),
+            protocol: ProviderProtocol::MessagesApi,
+            compatibility_profile: ProviderCompatibilityProfileKind::MessagesApi,
             auth_strategy: ProviderAuthStrategy::NoAuth,
             ..ModelProviderConfig::default()
         };
@@ -2991,8 +3010,8 @@ mod tests {
     fn rejects_provider_protocol_profile_mismatch_for_request_and_parse_paths() {
         let config = ModelProviderConfig {
             provider_id: "gemini".into(),
-            protocol: ProviderProtocol::Anthropic,
-            compatibility_profile: ProviderCompatibilityProfileKind::Anthropic,
+            protocol: ProviderProtocol::MessagesApi,
+            compatibility_profile: ProviderCompatibilityProfileKind::MessagesApi,
             auth_strategy: ProviderAuthStrategy::NoAuth,
             ..ModelProviderConfig::default()
         };
@@ -3005,8 +3024,8 @@ mod tests {
         let parse_error = parse_stream_response_for_provider(
             &ModelProviderConfig {
                 provider_id: "gemini".into(),
-                protocol: ProviderProtocol::Anthropic,
-                compatibility_profile: ProviderCompatibilityProfileKind::Anthropic,
+                protocol: ProviderProtocol::MessagesApi,
+                compatibility_profile: ProviderCompatibilityProfileKind::MessagesApi,
                 auth_strategy: ProviderAuthStrategy::NoAuth,
                 ..ModelProviderConfig::default()
             },
@@ -3025,12 +3044,12 @@ mod tests {
             "data: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"provider exploded\"}}\n\n"
         );
 
-        let events = parse_anthropic_sse_response("anthropic", body, "default-model")
+        let events = parse_messages_api_sse_response("morgo", body, "default-model")
             .expect("sse should parse");
         assert!(matches!(
             &events[0],
             StreamEvent::Error(error)
-                if error.provider_id == "anthropic"
+                if error.provider_id == "morgo"
                     && error.kind == "overloaded_error"
                     && error.message == "provider exploded"
                     && error.retryable
@@ -3043,17 +3062,17 @@ mod tests {
     fn message_start_accepts_usage_at_top_level() {
         let body = concat!(
             "event: message\n",
-            "data: {\"type\":\"message_start\",\"model\":\"claude-alt\",\"usage\":{\"inputTokens\":12}}\n\n",
+            "data: {\"type\":\"message_start\",\"model\":\"morgo-alt\",\"usage\":{\"inputTokens\":12}}\n\n",
             "event: message\n",
             "data: {\"type\":\"message_stop\"}\n\n"
         );
 
-        let events = parse_anthropic_sse_response("anthropic", body, "default-model")
+        let events = parse_messages_api_sse_response("morgo", body, "default-model")
             .expect("top-level usage should parse");
         assert!(matches!(
             &events[1],
             StreamEvent::Usage(usage)
-                if usage.model == "claude-alt" && usage.input_tokens == 12
+                if usage.model == "morgo-alt" && usage.input_tokens == 12
         ));
     }
 
@@ -3061,14 +3080,14 @@ mod tests {
     fn message_delta_accepts_usage_nested_under_delta() {
         let body = concat!(
             "event: message\n",
-            "data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-test\"}}\n\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"model\":\"morgo-test\"}}\n\n",
             "event: message\n",
             "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"usage\":{\"outputTokens\":9}}}\n\n",
             "event: message\n",
             "data: {\"type\":\"message_stop\"}\n\n"
         );
 
-        let events = parse_anthropic_sse_response("anthropic", body, "default-model")
+        let events = parse_messages_api_sse_response("morgo", body, "default-model")
             .expect("delta usage should parse");
         assert!(events.iter().any(|event| matches!(
             event,
@@ -3081,7 +3100,7 @@ mod tests {
     fn assembles_partial_tool_use_payloads_across_deltas() {
         let body = concat!(
             "event: message\n",
-            "data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-test\"}}\n\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"model\":\"morgo-test\"}}\n\n",
             "event: message\n",
             "data: {\"type\":\"content_block_start\",\"content_block\":{\"type\":\"tool_use\",\"name\":\"Read\"}}\n\n",
             "event: message\n",
@@ -3096,7 +3115,7 @@ mod tests {
             "data: {\"type\":\"message_stop\"}\n\n"
         );
 
-        let events = parse_anthropic_sse_response("anthropic", body, "default-model")
+        let events = parse_messages_api_sse_response("morgo", body, "default-model")
             .expect("partial tool payload should parse");
         assert!(events.iter().any(|event| matches!(
             event,
@@ -3115,7 +3134,7 @@ mod tests {
     fn rejects_incomplete_tool_use_payload_at_end_of_stream() {
         let body = concat!(
             "event: message\n",
-            "data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-test\"}}\n\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"model\":\"morgo-test\"}}\n\n",
             "event: message\n",
             "data: {\"type\":\"content_block_start\",\"content_block\":{\"type\":\"tool_use\",\"name\":\"Read\"}}\n\n",
             "event: message\n",
@@ -3124,7 +3143,7 @@ mod tests {
             "data: {\"type\":\"message_stop\"}\n\n"
         );
 
-        let error = parse_anthropic_sse_response("anthropic", body, "default-model")
+        let error = parse_messages_api_sse_response("morgo", body, "default-model")
             .expect_err("incomplete tool payload should fail");
         assert_eq!(error.kind_label(), "tool_use_protocol");
         assert_eq!(
@@ -3142,7 +3161,7 @@ mod tests {
     fn normalizes_tool_use_alias_and_null_payload_variants() {
         let body = concat!(
             "event: message\n",
-            "data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-test\"}}\n\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"model\":\"morgo-test\"}}\n\n",
             "event: message\n",
             "data: {\"type\":\"content_block_start\",\"content_block\":{\"type\":\"tool_use\",\"name\":\"Read\",\"arguments\":null}}\n\n",
             "event: message\n",
@@ -3151,7 +3170,7 @@ mod tests {
             "data: {\"type\":\"message_stop\"}\n\n"
         );
 
-        let events = parse_anthropic_sse_response("anthropic", body, "default-model")
+        let events = parse_messages_api_sse_response("morgo", body, "default-model")
             .expect("null tool payload should normalize");
         assert!(events.iter().any(|event| matches!(
             event,
@@ -3164,7 +3183,7 @@ mod tests {
     fn parses_stringified_tool_use_payload_from_alias_field() {
         let body = concat!(
             "event: message\n",
-            "data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-test\"}}\n\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"model\":\"morgo-test\"}}\n\n",
             "event: message\n",
             "data: {\"type\":\"content_block_start\",\"content_block\":{\"type\":\"tool_use\",\"name\":\"Read\",\"args\":\"{\\\"path\\\":\\\"foo\\\"}\"}}\n\n",
             "event: message\n",
@@ -3173,7 +3192,7 @@ mod tests {
             "data: {\"type\":\"message_stop\"}\n\n"
         );
 
-        let events = parse_anthropic_sse_response("anthropic", body, "default-model")
+        let events = parse_messages_api_sse_response("morgo", body, "default-model")
             .expect("stringified tool payload should parse");
         assert!(events.iter().any(|event| matches!(
             event,
@@ -3186,14 +3205,14 @@ mod tests {
     fn rejects_tool_stop_without_payload_as_typed_protocol_error() {
         let body = concat!(
             "event: message\n",
-            "data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-test\"}}\n\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"model\":\"morgo-test\"}}\n\n",
             "event: message\n",
             "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"}}\n\n",
             "event: message\n",
             "data: {\"type\":\"message_stop\"}\n\n"
         );
 
-        let error = parse_anthropic_sse_response("anthropic", body, "default-model")
+        let error = parse_messages_api_sse_response("morgo", body, "default-model")
             .expect_err("tool stop without payload should fail");
         assert_eq!(error.kind_label(), "tool_use_protocol");
         assert_eq!(
@@ -3207,7 +3226,7 @@ mod tests {
     fn accepts_structured_output_block_with_stringified_json() {
         let body = concat!(
             "event: message\n",
-            "data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-test\"}}\n\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"model\":\"morgo-test\"}}\n\n",
             "event: message\n",
             "data: {\"type\":\"content_block_start\",\"content_block\":{\"type\":\"structured_output\",\"value\":\"{\\\"answer\\\":42}\"}}\n\n",
             "event: message\n",
@@ -3216,7 +3235,7 @@ mod tests {
             "data: {\"type\":\"message_stop\"}\n\n"
         );
 
-        let events = parse_anthropic_sse_response("anthropic", body, "default-model")
+        let events = parse_messages_api_sse_response("morgo", body, "default-model")
             .expect("structured output should parse");
         assert!(events.iter().any(|event| matches!(
             event,
@@ -3228,7 +3247,7 @@ mod tests {
     fn rejects_incomplete_structured_output_payload_at_end_of_stream() {
         let body = concat!(
             "event: message\n",
-            "data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-test\"}}\n\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"model\":\"morgo-test\"}}\n\n",
             "event: message\n",
             "data: {\"type\":\"content_block_start\",\"content_block\":{\"type\":\"structured_output\"}}\n\n",
             "event: message\n",
@@ -3237,7 +3256,7 @@ mod tests {
             "data: {\"type\":\"message_stop\"}\n\n"
         );
 
-        let error = parse_anthropic_sse_response("anthropic", body, "default-model")
+        let error = parse_messages_api_sse_response("morgo", body, "default-model")
             .expect_err("incomplete structured output should fail");
         assert_eq!(error.kind_label(), "structured_output_invalid");
         assert_eq!(
@@ -3261,7 +3280,7 @@ mod tests {
 
     #[test]
     fn rejects_empty_response_body() {
-        let error = parse_anthropic_sse_response("anthropic", "   ", "default-model")
+        let error = parse_messages_api_sse_response("morgo", "   ", "default-model")
             .expect_err("empty body should fail");
         assert_eq!(error.kind_label(), "empty_body");
         assert_eq!(
@@ -3272,8 +3291,8 @@ mod tests {
 
     #[test]
     fn rejects_truncated_sse_stream() {
-        let pre_stream_error = parse_anthropic_sse_response(
-            "anthropic",
+        let pre_stream_error = parse_messages_api_sse_response(
+            "morgo",
             "event: message\ndata: {\"type\":",
             "default-model",
         )
@@ -3290,11 +3309,11 @@ mod tests {
                     .contains("invalid SSE JSON payload")
         );
 
-        let mid_stream_error = parse_anthropic_sse_response(
-            "anthropic",
+        let mid_stream_error = parse_messages_api_sse_response(
+            "morgo",
             concat!(
                 "event: message\n",
-                "data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-test\"}}\n\n",
+                "data: {\"type\":\"message_start\",\"message\":{\"model\":\"morgo-test\"}}\n\n",
                 "event: message\n",
                 "data: {\"type\":\"content_block_delta\",\"delta\":{\"text\":\"partial\"}}"
             ),
@@ -3346,8 +3365,8 @@ mod tests {
 
     #[test]
     fn distinguishes_pre_stream_and_mid_stream_sse_protocol_failures() {
-        let pre_stream_error = parse_anthropic_sse_response(
-            "anthropic",
+        let pre_stream_error = parse_messages_api_sse_response(
+            "morgo",
             "event: message\ndata: {not-json}\n\n",
             "default-model",
         )
@@ -3358,11 +3377,11 @@ mod tests {
             ProviderFailureDisposition::PreStreamTerminal
         );
 
-        let mid_stream_error = parse_anthropic_sse_response(
-            "anthropic",
+        let mid_stream_error = parse_messages_api_sse_response(
+            "morgo",
             concat!(
                 "event: message\n",
-                "data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-test\"}}\n\n",
+                "data: {\"type\":\"message_start\",\"message\":{\"model\":\"morgo-test\"}}\n\n",
                 "event: message\n",
                 "data: {not-json}\n\n"
             ),
@@ -3403,13 +3422,13 @@ mod tests {
     #[test]
     fn classifies_stream_errors_with_retryable_flag_from_disposition() {
         let (kind, disposition, retryable) =
-            classify_stream_error("anthropic", Some("overloaded_error"), Some(529));
+            classify_stream_error("morgo", Some("overloaded_error"), Some(529));
         assert_eq!(kind, "overloaded_error");
         assert_eq!(disposition, ProviderFailureDisposition::StreamInterrupted);
         assert!(retryable);
 
         let (kind, disposition, retryable) =
-            classify_stream_error("anthropic", Some("invalid_request_error"), Some(400));
+            classify_stream_error("morgo", Some("invalid_request_error"), Some(400));
         assert_eq!(kind, "invalid_request_error");
         assert_eq!(disposition, ProviderFailureDisposition::StreamTerminal);
         assert!(!retryable);
@@ -3440,10 +3459,10 @@ mod tests {
                 "cacheCreationInputTokens": 2,
                 "cacheReadInputTokens": 1,
             }),
-            "claude-test",
+            "morgo-test",
         );
 
-        assert_eq!(usage.model, "claude-test");
+        assert_eq!(usage.model, "morgo-test");
         assert_eq!(usage.input_tokens, 7);
         assert_eq!(usage.output_tokens, 3);
         assert_eq!(usage.cache_creation_input_tokens, 2);
@@ -3459,7 +3478,7 @@ mod tests {
                 "cache_write_tokens": 2,
                 "cache_read_tokens": 1,
             }),
-            "claude-test",
+            "morgo-test",
         );
         assert_eq!(prompt_completion.input_tokens, 9);
         assert_eq!(prompt_completion.output_tokens, 4);
@@ -3470,7 +3489,7 @@ mod tests {
             &serde_json::json!({
                 "total_tokens": 13,
             }),
-            "claude-test",
+            "morgo-test",
         );
         assert_eq!(total_only.input_tokens, 13);
         assert_eq!(total_only.output_tokens, 0);
@@ -3501,7 +3520,7 @@ mod tests {
 
     #[test]
     fn parse_usage_flat_cache_fields_still_work_as_fallback() {
-        // Anthropic-style flat fields must remain valid when nested path is absent.
+        // Flat cache fields must remain valid when nested path is absent.
         let usage = parse_usage(
             &serde_json::json!({
                 "input_tokens": 50,
@@ -3509,7 +3528,7 @@ mod tests {
                 "cache_creation_input_tokens": 5,
                 "cache_read_input_tokens": 3,
             }),
-            "claude-3",
+            "morgo-3",
         );
         assert_eq!(usage.cache_read_input_tokens, 3);
         assert_eq!(usage.cache_creation_input_tokens, 5);
@@ -3518,7 +3537,7 @@ mod tests {
     #[test]
     fn merge_usage_latest_wins_without_clearing_missing_fields() {
         let existing = NormalizedUsage {
-            model: Some("claude-test".into()),
+            model: Some("morgo-test".into()),
             input_tokens: Some(10),
             output_tokens: Some(3),
             cache_creation_input_tokens: Some(2),
@@ -3535,7 +3554,7 @@ mod tests {
         };
 
         let merged = merge_usage(existing, incoming);
-        assert_eq!(merged.model.as_deref(), Some("claude-test"));
+        assert_eq!(merged.model.as_deref(), Some("morgo-test"));
         assert_eq!(merged.input_tokens, Some(10));
         assert_eq!(merged.output_tokens, Some(6));
         assert_eq!(merged.cache_creation_input_tokens, Some(2));
@@ -3549,26 +3568,26 @@ mod tests {
             &serde_json::json!({
                 "outputTokens": 8,
             }),
-            "claude-test",
+            "morgo-test",
         )
-        .into_usage_event("claude-test")
+        .into_usage_event("morgo-test")
         .expect("terminal usage should normalize");
         assert_eq!(terminal.output_tokens, 8);
 
         let response_body = concat!(
             "event: message\n",
-            "data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-test\"}}\n\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"model\":\"morgo-test\"}}\n\n",
             "event: message\n",
             "data: {\"type\":\"content_block_delta\",\"delta\":{\"text\":\"hello\"}}\n\n",
             "event: message\n",
             "data: {\"type\":\"message_stop\",\"response\":{\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2}}}\n\n"
         );
-        let events = parse_anthropic_sse_response("anthropic", response_body, "claude-test")
+        let events = parse_messages_api_sse_response("morgo", response_body, "morgo-test")
             .expect("response envelope usage should parse");
         assert!(events.iter().any(|event| matches!(
             event,
             StreamEvent::Usage(usage)
-                if usage.model == "claude-test" && usage.input_tokens == 10 && usage.output_tokens == 2
+                if usage.model == "morgo-test" && usage.input_tokens == 10 && usage.output_tokens == 2
         )));
     }
 
@@ -3576,7 +3595,7 @@ mod tests {
     fn multiple_usage_deltas_latest_wins() {
         let body = concat!(
             "event: message\n",
-            "data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-test\",\"usage\":{\"input_tokens\":10}}}\n\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"model\":\"morgo-test\",\"usage\":{\"input_tokens\":10}}}\n\n",
             "event: message\n",
             "data: {\"type\":\"content_block_delta\",\"delta\":{\"text\":\"hello\"}}\n\n",
             "event: message\n",
@@ -3587,7 +3606,7 @@ mod tests {
             "data: {\"type\":\"message_stop\"}\n\n"
         );
 
-        let events = parse_anthropic_sse_response("anthropic", body, "claude-test")
+        let events = parse_messages_api_sse_response("morgo", body, "morgo-test")
             .expect("usage deltas should parse");
         let usages = events
             .iter()
@@ -3605,7 +3624,7 @@ mod tests {
     fn usage_before_stop_reason_and_after_content_delta_is_preserved() {
         let body = concat!(
             "event: message\n",
-            "data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-test\",\"usage\":{\"input_tokens\":7}}}\n\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"model\":\"morgo-test\",\"usage\":{\"input_tokens\":7}}}\n\n",
             "event: message\n",
             "data: {\"type\":\"content_block_delta\",\"delta\":{\"text\":\"partial\"}}\n\n",
             "event: message\n",
@@ -3616,7 +3635,7 @@ mod tests {
             "data: {\"type\":\"message_stop\",\"terminal\":{\"usage\":{\"cache_read_tokens\":1}}}\n\n"
         );
 
-        let events = parse_anthropic_sse_response("anthropic", body, "claude-test")
+        let events = parse_messages_api_sse_response("morgo", body, "morgo-test")
             .expect("usage ordering should parse");
         assert!(events.iter().any(|event| matches!(
             event,

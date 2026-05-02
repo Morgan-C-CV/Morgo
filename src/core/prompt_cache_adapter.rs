@@ -3,13 +3,13 @@ use serde_json::{Value, json};
 use crate::core::prompt_budget::{PromptCacheCapability, ProviderProfile};
 use crate::core::prompt_segment::PromptAssembly;
 
-/// Inject Anthropic ephemeral cache-control blocks into an already-constructed payload.
+/// Inject messages-API ephemeral cache-control blocks into an already-constructed payload.
 ///
 /// Cacheable segments → `system` array; the last cacheable block gets
 /// `"cache_control": { "type": "ephemeral" }`.
 /// Dynamic segments → `messages[0].content` array (replaces the existing entry).
 /// If there are no cacheable segments the payload is left unchanged.
-pub fn apply_anthropic_cache_control(assembly: &PromptAssembly, payload: &mut Value) {
+pub fn apply_messages_api_cache_control(assembly: &PromptAssembly, payload: &mut Value) {
     let cacheable: Vec<_> = assembly
         .segments()
         .iter()
@@ -55,8 +55,8 @@ pub fn apply_cache_control(
     payload: &mut Value,
 ) {
     match profile.prompt_cache {
-        PromptCacheCapability::AnthropicEphemeral => {
-            apply_anthropic_cache_control(assembly, payload)
+        PromptCacheCapability::MessagesApiEphemeral => {
+            apply_messages_api_cache_control(assembly, payload)
         }
         PromptCacheCapability::Unsupported
         | PromptCacheCapability::ManualNone

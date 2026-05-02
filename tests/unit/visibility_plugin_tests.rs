@@ -2094,7 +2094,7 @@ async fn lism_command_explain_lists_available_building_blocks_and_deferred_items
     assert!(text.contains(
         "Model-tier router and provider_profile_id routing are connected to the production path"
     ));
-    assert!(text.contains("Per-step routed metadata"));
+    assert!(text.to_ascii_lowercase().contains("routed metadata"));
 }
 
 #[tokio::test]

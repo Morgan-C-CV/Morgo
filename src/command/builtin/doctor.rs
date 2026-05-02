@@ -13,7 +13,7 @@ impl Command for DoctorCommand {
     fn metadata(&self) -> CommandMetadata {
         CommandMetadata {
             name: "doctor".into(),
-            description: "Diagnose and verify your Claude Code installation and settings".into(),
+            description: "Diagnose and verify your Morgo installation and settings".into(),
             source: CommandSource::Builtin,
             category: "core".into(),
             command_type: CommandType::Local,

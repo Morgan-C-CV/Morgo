@@ -295,7 +295,9 @@ fn validate_chat_completions_path(path: &str, name: &str) -> anyhow::Result<()> 
 
 fn parse_protocol(value: &str) -> anyhow::Result<ProviderProtocol> {
     match value.trim() {
-        "anthropic" => Ok(ProviderProtocol::Anthropic),
+        "morgo" | "messages-api" | "messages_api" | "anthropic" => {
+            Ok(ProviderProtocol::MessagesApi)
+        }
         "openai" | "openai-compatible" | "openai_compatible" => {
             Ok(ProviderProtocol::OpenAICompatible)
         }
@@ -306,7 +308,9 @@ fn parse_protocol(value: &str) -> anyhow::Result<ProviderProtocol> {
 
 fn parse_compatibility_profile(value: &str) -> anyhow::Result<ProviderCompatibilityProfileKind> {
     match value.trim() {
-        "anthropic" => Ok(ProviderCompatibilityProfileKind::Anthropic),
+        "morgo" | "messages-api" | "messages_api" | "anthropic" => {
+            Ok(ProviderCompatibilityProfileKind::MessagesApi)
+        }
         "text-only" | "text_only" | "textonly" => Ok(ProviderCompatibilityProfileKind::TextOnly),
         "batch" => Ok(ProviderCompatibilityProfileKind::Batch),
         "openai" | "openai-compatible" | "openai_compatible" => {

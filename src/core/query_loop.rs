@@ -2461,7 +2461,7 @@ mod tests {
     #[test]
     fn should_return_terminal_after_recovery_exhausted_for_terminal_like_failures() {
         let timeout = crate::service::api::streaming::StreamError {
-            provider_id: "anthropic".into(),
+            provider_id: "morgo".into(),
             kind: "timeout".into(),
             message: "provider request timed out".into(),
             retryable: true,
@@ -2474,7 +2474,7 @@ mod tests {
         ));
 
         let protocol = crate::service::api::streaming::StreamError {
-            provider_id: "anthropic".into(),
+            provider_id: "morgo".into(),
             kind: "sse_protocol".into(),
             message: "provider returned truncated SSE frame".into(),
             retryable: false,
@@ -2487,7 +2487,7 @@ mod tests {
         ));
 
         let interrupted = crate::service::api::streaming::StreamError {
-            provider_id: "anthropic".into(),
+            provider_id: "morgo".into(),
             kind: "provider_stream".into(),
             message: "provider overloaded".into(),
             retryable: true,

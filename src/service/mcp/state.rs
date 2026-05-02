@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::bootstrap::config_root::preferred_workspace_config_root;
+
 #[derive(Debug, Clone)]
 pub struct McpGovernanceStateLoadResult {
     pub path: PathBuf,
@@ -37,11 +39,11 @@ pub struct McpGovernanceStateEntry {
 }
 
 pub fn mcp_governance_state_path(cwd: &Path) -> PathBuf {
-    cwd.join(".claude").join("mcp-governance.json")
+    preferred_workspace_config_root(cwd).join("mcp-governance.json")
 }
 
 pub fn load_mcp_governance_state_with_diagnostics(cwd: &Path) -> McpGovernanceStateLoadResult {
-    load_mcp_governance_state_from_root(&cwd.join(".claude"))
+    load_mcp_governance_state_from_root(&preferred_workspace_config_root(cwd))
 }
 
 pub fn load_mcp_governance_state_from_root(config_root: &Path) -> McpGovernanceStateLoadResult {
@@ -61,7 +63,8 @@ pub fn load_mcp_governance_state_from_root(config_root: &Path) -> McpGovernanceS
             },
             Err(error) => {
                 diagnostics.push(format!(
-                    "Failed to parse .claude/mcp-governance.json: {error}; using default MCP governance state."
+                    "Failed to parse {}: {error}; using default MCP governance state.",
+                    path.display()
                 ));
                 McpGovernanceStateLoadResult {
                     path,
@@ -72,10 +75,10 @@ pub fn load_mcp_governance_state_from_root(config_root: &Path) -> McpGovernanceS
             }
         },
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            diagnostics.push(
-                "No .claude/mcp-governance.json found; MCP servers require review by default."
-                    .to_string(),
-            );
+            diagnostics.push(format!(
+                "No {} found; MCP servers require review by default.",
+                path.display()
+            ));
             McpGovernanceStateLoadResult {
                 path,
                 source: McpGovernanceStateSource::Defaults,
@@ -85,7 +88,8 @@ pub fn load_mcp_governance_state_from_root(config_root: &Path) -> McpGovernanceS
         }
         Err(error) => {
             diagnostics.push(format!(
-                "Failed to read .claude/mcp-governance.json: {error}; using default MCP governance state."
+                "Failed to read {}: {error}; using default MCP governance state.",
+                path.display()
             ));
             McpGovernanceStateLoadResult {
                 path,

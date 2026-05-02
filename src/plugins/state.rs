@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::bootstrap::config_root::preferred_workspace_config_root;
 use crate::plugins::types::{PluginGovernanceSource, PluginGovernanceState};
 
 #[derive(Debug, Clone)]
@@ -29,11 +30,11 @@ impl PluginStateSource {
 }
 
 pub fn plugin_state_path(cwd: &Path) -> PathBuf {
-    cwd.join(".claude").join("plugin-state.json")
+    preferred_workspace_config_root(cwd).join("plugin-state.json")
 }
 
 pub fn load_plugin_state_with_diagnostics(cwd: &Path) -> PluginStateLoadResult {
-    load_plugin_state_from_root(&cwd.join(".claude"))
+    load_plugin_state_from_root(&preferred_workspace_config_root(cwd))
 }
 
 pub fn load_plugin_state_from_root(config_root: &Path) -> PluginStateLoadResult {
@@ -62,7 +63,8 @@ pub fn load_plugin_state_from_root(config_root: &Path) -> PluginStateLoadResult 
             },
             Err(error) => {
                 diagnostics.push(format!(
-                    "Failed to parse .claude/plugin-state.json: {error}; using default plugin governance state."
+                    "Failed to parse {}: {error}; using default plugin governance state.",
+                    path.display()
                 ));
                 PluginStateLoadResult {
                     path,
@@ -73,10 +75,10 @@ pub fn load_plugin_state_from_root(config_root: &Path) -> PluginStateLoadResult 
             }
         },
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            diagnostics.push(
-                "No .claude/plugin-state.json found; using default enabled plugin governance state."
-                    .to_string(),
-            );
+            diagnostics.push(format!(
+                "No {} found; using default enabled plugin governance state.",
+                path.display()
+            ));
             PluginStateLoadResult {
                 path,
                 source: PluginStateSource::Defaults,
@@ -86,7 +88,8 @@ pub fn load_plugin_state_from_root(config_root: &Path) -> PluginStateLoadResult 
         }
         Err(error) => {
             diagnostics.push(format!(
-                "Failed to read .claude/plugin-state.json: {error}; using default plugin governance state."
+                "Failed to read {}: {error}; using default plugin governance state.",
+                path.display()
             ));
             PluginStateLoadResult {
                 path,

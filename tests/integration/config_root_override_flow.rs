@@ -93,7 +93,7 @@ fn relative_config_root_is_rejected() {
 
 /// Verifies that when RUST_AGENT_CONFIG_ROOT is unset, cwd/.claude is used (no regression).
 #[test]
-fn unset_config_root_falls_back_to_cwd_dot_claude() {
+fn unset_config_root_falls_back_to_cwd_dot_morgo() {
     let _guard = lock_env();
 
     remove_env("RUST_AGENT_CONFIG_ROOT");
@@ -101,5 +101,5 @@ fn unset_config_root_falls_back_to_cwd_dot_claude() {
     let resolved = rust_agent::bootstrap::config_root::resolve_config_root(&cwd)
         .expect("resolve_config_root should succeed");
 
-    assert_eq!(resolved, PathBuf::from("/tmp/fake-project/.claude"));
+    assert_eq!(resolved, PathBuf::from("/tmp/fake-project/.morgo"));
 }

@@ -36,7 +36,7 @@ impl Command for ConfigCommand {
         // 需拉起手动 /confirm，执行状态快照落盘并重启外围大循环以应用改动。
         if input.command_args.is_empty() {
             Ok(CommandResult::Message(
-                "Config & Model switching:\nCurrently running in standard mode. \nTo change models (e.g. from Claude-3.5-Sonnet to Haiku for fast tasks), restart the agent with appropriate environment variables.\n(Dynamic TUI model switching requires 'LocalTui' component rendering interface)".into(),
+                "Config & Model switching:\nCurrently running in standard mode. \nTo change models (e.g. from Reasoning to Fast for lighter tasks), restart the agent with appropriate environment variables.\n(Dynamic TUI model switching requires 'LocalTui' component rendering interface)".into(),
             ))
         } else {
             Ok(CommandResult::Message(format!(

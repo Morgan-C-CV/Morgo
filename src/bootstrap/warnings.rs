@@ -8,7 +8,7 @@ pub enum StartupWarning {
     ProviderBaseUrlIsLocalhost,
     /// One or more MCP server configs failed to parse.
     McpConfigParseFailure { count: usize, messages: Vec<String> },
-    /// RUST_AGENT_CONFIG_ROOT is unset; using cwd/.claude as config root.
+    /// RUST_AGENT_CONFIG_ROOT is unset; using the default managed config root.
     ConfigRootIsDefault { path: String },
     /// No filesystem policy found; running with no-policy (all paths allowed).
     FilesystemPolicyMissing,

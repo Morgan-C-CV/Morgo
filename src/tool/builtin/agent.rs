@@ -726,8 +726,8 @@ fn build_parent_query_context(permissions: ToolPermissionContext) -> QueryContex
             .map(|snapshot| snapshot.summary.clone())
             .unwrap_or(ActiveModelProviderSummary {
                 provider_id: "default-provider".into(),
-                protocol: "Anthropic".into(),
-                compatibility_profile: "Anthropic".into(),
+                protocol: "MessagesApi".into(),
+                compatibility_profile: "MessagesApi".into(),
                 base_url_host: "localhost".into(),
                 model: "default-model".into(),
                 auth_status: "env:OPENAI_API_KEY(unset)".into(),

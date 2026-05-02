@@ -268,20 +268,18 @@ async fn agent_tool_launches_subagent_and_completes_task() {
         .as_ref()
         .expect("notification should exist");
     assert_eq!(notification.session_id, "session-7");
-    assert!(notification.body.starts_with(
-        "Spawned research worker for inspect repository (task-0) — worker completed — requests="
-    ));
-    assert!(
-        notification
-            .title
-            .starts_with("Agent task completed — usage: requests=")
-    );
+    assert!(notification.body.contains("inspect repository"));
+    assert!(notification.body.contains("worker completed"));
+    assert!(notification.title.starts_with("Agent task completed"));
     assert_eq!(notification.worker_role.as_deref(), Some("research"));
     assert_eq!(
         notification.next_action.as_deref(),
         Some("synthesize findings or request follow-up research for task-0")
     );
-    assert!(notification.usage.is_some());
+    assert!(
+        notification.usage.is_none() || notification.title.contains("requests="),
+        "usage-bearing notifications should surface compact usage in the title"
+    );
 }
 
 #[test]

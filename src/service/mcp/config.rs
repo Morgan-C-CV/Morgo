@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use crate::bootstrap::config_root::preferred_workspace_config_root;
 use crate::service::mcp::types::{McpServerConfig, McpTransportKind};
 
 #[derive(Debug, Clone)]
@@ -31,7 +32,7 @@ pub fn load_server_configs(cwd: &Path) -> Vec<McpServerConfig> {
 }
 
 pub fn load_server_configs_with_diagnostics(cwd: &Path) -> McpConfigLoadResult {
-    load_server_configs_from_root(&cwd.join(".claude"))
+    load_server_configs_from_root(&preferred_workspace_config_root(cwd))
 }
 
 pub fn load_server_configs_from_root(config_root: &Path) -> McpConfigLoadResult {
@@ -57,7 +58,8 @@ pub fn load_server_configs_from_root(config_root: &Path) -> McpConfigLoadResult 
             }
             Err(error) => {
                 diagnostics.push(format!(
-                    "Failed to parse .claude/mcp_servers.json: {error}; using bundled defaults."
+                    "Failed to parse {}: {error}; using bundled defaults.",
+                    path.display()
                 ));
                 McpConfigLoadResult {
                     path,
@@ -68,8 +70,10 @@ pub fn load_server_configs_from_root(config_root: &Path) -> McpConfigLoadResult 
             }
         },
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            diagnostics
-                .push("No .claude/mcp_servers.json found; using bundled defaults.".to_string());
+            diagnostics.push(format!(
+                "No {} found; using bundled defaults.",
+                path.display()
+            ));
             McpConfigLoadResult {
                 path,
                 source: McpConfigSource::Defaults,
@@ -79,7 +83,8 @@ pub fn load_server_configs_from_root(config_root: &Path) -> McpConfigLoadResult 
         }
         Err(error) => {
             diagnostics.push(format!(
-                "Failed to read .claude/mcp_servers.json: {error}; using bundled defaults."
+                "Failed to read {}: {error}; using bundled defaults.",
+                path.display()
             ));
             McpConfigLoadResult {
                 path,

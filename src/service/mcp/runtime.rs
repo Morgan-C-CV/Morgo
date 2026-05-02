@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use tokio::sync::RwLock;
 
+use crate::bootstrap::config_root::PRIMARY_CONFIG_DIR;
 use crate::service::mcp::client::{McpClient, RoutingMcpClient};
 use crate::service::mcp::config::{McpConfigLoadResult, McpConfigSource, default_server_configs};
 use crate::service::mcp::state::{
@@ -46,7 +47,7 @@ impl Default for McpRuntime {
         Self::new_with_config_result(
             Arc::new(RoutingMcpClient::default()),
             McpConfigLoadResult {
-                path: std::path::PathBuf::from(".claude/mcp_servers.json"),
+                path: std::path::PathBuf::from(format!("{PRIMARY_CONFIG_DIR}/mcp_servers.json")),
                 source: McpConfigSource::Defaults,
                 configs: default_server_configs(),
                 diagnostics: Vec::new(),
@@ -68,7 +69,7 @@ impl McpRuntime {
         Self::new_with_config_result_and_observability(
             client,
             McpConfigLoadResult {
-                path: std::path::PathBuf::from(".claude/mcp_servers.json"),
+                path: std::path::PathBuf::from(format!("{PRIMARY_CONFIG_DIR}/mcp_servers.json")),
                 source: McpConfigSource::Defaults,
                 configs,
                 diagnostics: Vec::new(),
@@ -97,7 +98,9 @@ impl McpRuntime {
             client,
             config_load_result,
             McpGovernanceStateLoadResult {
-                path: std::path::PathBuf::from(".claude/mcp-governance.json"),
+                path: std::path::PathBuf::from(format!(
+                    "{PRIMARY_CONFIG_DIR}/mcp-governance.json"
+                )),
                 source: McpGovernanceStateSource::Defaults,
                 states: BTreeMap::new(),
                 diagnostics: Vec::new(),
@@ -515,7 +518,7 @@ impl McpRuntime {
         self.governance_load_result
             .path
             .parent()
-            .unwrap_or_else(|| Path::new(".claude"))
+            .unwrap_or_else(|| Path::new(PRIMARY_CONFIG_DIR))
     }
 
     async fn ensure_connected(&self, server: &str) -> anyhow::Result<()> {

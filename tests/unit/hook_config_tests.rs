@@ -43,7 +43,7 @@ fn hook_loader_reads_external_rules_from_project_config() {
     assert_eq!(load_result.source, HookConfigSource::File);
     assert!(
         load_result.diagnostics.iter().any(
-            |line| line.contains("Loaded 1 hook rule(s) from .claude/hooks.json (layer=file).")
+            |line| line.contains("Loaded 1 hook rule(s) from") && line.contains("hooks.json")
         )
     );
     assert_eq!(registry.rules().len(), 1);
@@ -84,7 +84,7 @@ fn hook_loader_reports_parse_failures_and_uses_empty_defaults() {
         load_result
             .diagnostics
             .iter()
-            .any(|line| line.contains("Failed to parse .claude/hooks.json"))
+            .any(|line| line.contains("Failed to parse") && line.contains("hooks.json"))
     );
 
     fs::remove_dir_all(root).expect("cleanup invalid hooks root");
@@ -105,7 +105,7 @@ fn hook_registry_without_external_file_uses_empty_defaults() {
         load_result
             .diagnostics
             .iter()
-            .any(|line| line.contains("No .claude/hooks.json found"))
+            .any(|line| line.contains("hooks.json"))
     );
     assert_eq!(
         run_hook(&registry, HookEvent::Setup).decision,
@@ -147,7 +147,7 @@ fn hook_loader_ignores_unknown_events_and_keeps_valid_rules() {
     );
     assert!(
         load_result.diagnostics.iter().any(
-            |line| line.contains("Loaded 1 hook rule(s) from .claude/hooks.json (layer=file).")
+            |line| line.contains("Loaded 1 hook rule(s) from") && line.contains("hooks.json")
         )
     );
 

@@ -16,7 +16,7 @@ REPO_ROOT="$(
 )"
 DOCS_DIR="$REPO_ROOT/RustAgent/docs"
 ENV_LOADER="$REPO_ROOT/load-env.sh"
-BIN_PATH="$AGENT_DIR/target/debug/rust-agent"
+BIN_PATH="$AGENT_DIR/target/debug/morgo"
 DEFAULT_OUT_DIR="${TMPDIR:-/tmp}/rustagent-boss-ab-$(date +%Y%m%d-%H%M%S)"
 MODEL_ID="${RUST_AGENT_AB_MODEL:-gpt-5-mini-2025-08-07}"
 RUNS_PER_ARM="${RUST_AGENT_AB_RUNS_PER_ARM:-3}"
@@ -47,8 +47,8 @@ fi
 
 ensure_binary() {
   if [ ! -x "$BIN_PATH" ]; then
-    echo "binary missing at $BIN_PATH; building rust-agent" >&2
-    cargo build --manifest-path "$AGENT_DIR/Cargo.toml" --bin rust-agent
+    echo "binary missing at $BIN_PATH; building morgo" >&2
+    cargo build --manifest-path "$AGENT_DIR/Cargo.toml" --bin morgo
   fi
 }
 

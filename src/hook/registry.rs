@@ -3,6 +3,8 @@ use std::sync::{Arc, RwLock};
 
 use serde::Deserialize;
 
+use crate::bootstrap::config_root::preferred_workspace_config_root;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HookEvent {
     SessionStart,
@@ -173,7 +175,7 @@ pub fn load_hook_registry_from_root(config_root: &Path) -> HookRegistry {
 }
 
 pub fn load_hook_rules_with_diagnostics(cwd: &Path) -> HookConfigLoadResult {
-    load_hook_rules_from_root(&cwd.join(".claude"))
+    load_hook_rules_from_root(&preferred_workspace_config_root(cwd))
 }
 
 pub fn load_hook_rules_from_root(config_root: &Path) -> HookConfigLoadResult {
@@ -191,8 +193,9 @@ pub fn load_hook_rules_from_root(config_root: &Path) -> HookConfigLoadResult {
                     }
                 }
                 diagnostics.push(format!(
-                    "Loaded {} hook rule(s) from .claude/hooks.json (layer=file).",
-                    rules.len()
+                    "Loaded {} hook rule(s) from {} (layer=file).",
+                    rules.len(),
+                    path.display()
                 ));
                 HookConfigLoadResult {
                     path,
@@ -213,7 +216,8 @@ pub fn load_hook_rules_from_root(config_root: &Path) -> HookConfigLoadResult {
             }
             Err(error) => {
                 diagnostics.push(format!(
-                    "Failed to parse .claude/hooks.json: {error}; using no external hook rules."
+                    "Failed to parse {}: {error}; using no external hook rules.",
+                    path.display()
                 ));
                 HookConfigLoadResult {
                     path,
@@ -224,8 +228,10 @@ pub fn load_hook_rules_from_root(config_root: &Path) -> HookConfigLoadResult {
             }
         },
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            diagnostics
-                .push("No .claude/hooks.json found; using no external hook rules.".to_string());
+            diagnostics.push(format!(
+                "No {} found; using no external hook rules.",
+                path.display()
+            ));
             HookConfigLoadResult {
                 path,
                 source: HookConfigSource::Defaults,
@@ -235,7 +241,8 @@ pub fn load_hook_rules_from_root(config_root: &Path) -> HookConfigLoadResult {
         }
         Err(error) => {
             diagnostics.push(format!(
-                "Failed to read .claude/hooks.json: {error}; using no external hook rules."
+                "Failed to read {}: {error}; using no external hook rules.",
+                path.display()
             ));
             HookConfigLoadResult {
                 path,
@@ -270,7 +277,7 @@ impl HookRuleConfig {
     fn into_rule_with_diagnostics(self) -> Result<HookRule, String> {
         let event_value = self.event.clone();
         let event = parse_event_matcher(&event_value).ok_or_else(|| {
-            format!("Ignored hook rule with unknown event '{event_value}' in .claude/hooks.json")
+            format!("Ignored hook rule with unknown event '{event_value}' in hooks.json")
         })?;
         Ok(HookRule {
             event,

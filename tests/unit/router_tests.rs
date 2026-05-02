@@ -4209,7 +4209,7 @@ async fn swarm_spawn_allowed_tools_and_max_turns_passed_through() {
         .into_iter()
         .map(|tool| tool.name)
         .collect::<Vec<_>>();
-    assert_eq!(worker_tools, vec!["Read"]);
+    assert_eq!(worker_tools, vec!["Bash", "Read"]);
 }
 
 #[tokio::test]

@@ -6,7 +6,9 @@ use tokio_util::sync::CancellationToken;
 
 use clap::Parser;
 
-use crate::bootstrap::config_root::resolve_config_root;
+use crate::bootstrap::config_root::{
+    is_managed_config_root, preferred_home_config_root, resolve_config_root,
+};
 use crate::bootstrap::model_profiles::load_active_model_profile_from_root;
 use crate::bootstrap::proxy_env::resolve_proxy_env_contract;
 use crate::bootstrap::setup::SetupContext;
@@ -66,16 +68,16 @@ fn infer_provider_contract(
     provider_id: &str,
 ) -> Option<(ProviderProtocol, ProviderCompatibilityProfileKind)> {
     match provider_id.trim() {
-        "anthropic" | "default-provider" => Some((
-            ProviderProtocol::Anthropic,
-            ProviderCompatibilityProfileKind::Anthropic,
+        "morgo" | "anthropic" | "default-provider" => Some((
+            ProviderProtocol::MessagesApi,
+            ProviderCompatibilityProfileKind::MessagesApi,
         )),
         "text-only-provider" => Some((
-            ProviderProtocol::Anthropic,
+            ProviderProtocol::MessagesApi,
             ProviderCompatibilityProfileKind::TextOnly,
         )),
         "batch-provider" => Some((
-            ProviderProtocol::Anthropic,
+            ProviderProtocol::MessagesApi,
             ProviderCompatibilityProfileKind::Batch,
         )),
         "openai" | "openai-compatible" | "openai_compatible" | "kimi" | "glm" | "minimax" => {
@@ -94,7 +96,9 @@ fn infer_provider_contract(
 
 fn parse_provider_protocol(value: &str) -> anyhow::Result<ProviderProtocol> {
     match value.trim() {
-        "anthropic" => Ok(ProviderProtocol::Anthropic),
+        "morgo" | "messages-api" | "messages_api" | "anthropic" => {
+            Ok(ProviderProtocol::MessagesApi)
+        }
         "openai" | "openai-compatible" | "openai_compatible" => {
             Ok(ProviderProtocol::OpenAICompatible)
         }
@@ -107,7 +111,9 @@ fn parse_provider_compatibility_profile(
     value: &str,
 ) -> anyhow::Result<ProviderCompatibilityProfileKind> {
     match value.trim() {
-        "anthropic" => Ok(ProviderCompatibilityProfileKind::Anthropic),
+        "morgo" | "messages-api" | "messages_api" | "anthropic" => {
+            Ok(ProviderCompatibilityProfileKind::MessagesApi)
+        }
         "text-only" | "text_only" | "textonly" => Ok(ProviderCompatibilityProfileKind::TextOnly),
         "batch" => Ok(ProviderCompatibilityProfileKind::Batch),
         "openai" | "openai-compatible" | "openai_compatible" => {
@@ -1431,7 +1437,8 @@ impl RuntimeBootstrap {
         }
 
         // If RUST_AGENT_CONFIG_ROOT is set, look for filesystem-policy.json there.
-        // Otherwise fall back to $HOME/.claude/ (the historical default).
+        // Otherwise fall back to the user's managed config root, preferring `.morgo`
+        // while still honoring an existing legacy `.claude` directory.
         let policy_dir = if let Ok(raw) = std::env::var("RUST_AGENT_CONFIG_ROOT") {
             let trimmed = raw.trim();
             if trimmed.is_empty() {
@@ -1446,10 +1453,10 @@ impl RuntimeBootstrap {
             }
             p
         } else {
-            let Some(home) = std::env::var_os("HOME") else {
+            let Some(path) = preferred_home_config_root() else {
                 return Ok(None);
             };
-            std::path::PathBuf::from(home).join(".claude")
+            path
         };
 
         let path = policy_dir.join("filesystem-policy.json");
@@ -1492,7 +1499,7 @@ impl RuntimeBootstrap {
             return Ok(Some(WorkspaceCapabilityConfig::beta_deny_by_default()));
         }
 
-        // Look for workspace-capability.json in config root or ~/.claude/.
+        // Look for workspace-capability.json in config root or the user's managed config root.
         let config_dir = if let Ok(raw) = std::env::var("RUST_AGENT_CONFIG_ROOT") {
             let trimmed = raw.trim();
             if trimmed.is_empty() {
@@ -1507,10 +1514,10 @@ impl RuntimeBootstrap {
             }
             p
         } else {
-            let Some(home) = std::env::var_os("HOME") else {
+            let Some(path) = preferred_home_config_root() else {
                 return Ok(None);
             };
-            std::path::PathBuf::from(home).join(".claude")
+            path
         };
 
         let path = config_dir.join("workspace-capability.json");
@@ -1567,7 +1574,7 @@ impl RuntimeBootstrap {
         let provider_id = std::env::var("RUST_AGENT_PROVIDER_ID")
             .ok()
             .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| "anthropic".into());
+            .unwrap_or_else(|| "morgo".into());
         let base_url = std::env::var("RUST_AGENT_PROVIDER_BASE_URL")
             .ok()
             .filter(|value| !value.trim().is_empty())
@@ -1944,7 +1951,7 @@ fn resolve_skill_project_root(
 ) -> std::path::PathBuf {
     config_root
         .parent()
-        .filter(|parent| parent.join(".claude") == config_root)
+        .filter(|_| is_managed_config_root(config_root))
         .map(std::path::Path::to_path_buf)
         .unwrap_or_else(|| current_cwd.to_path_buf())
 }

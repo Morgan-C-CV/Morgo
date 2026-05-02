@@ -14,7 +14,7 @@ impl Command for StatusCommand {
     fn metadata(&self) -> CommandMetadata {
         CommandMetadata {
             name: "status".into(),
-            description: "Show Claude Code status including session, role, and connectivity".into(),
+            description: "Show Morgo status including session, role, and connectivity".into(),
             source: CommandSource::Builtin,
             category: "core".into(),
             command_type: CommandType::Local,

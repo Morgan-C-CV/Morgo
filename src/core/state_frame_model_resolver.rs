@@ -120,11 +120,11 @@ model = "default-model"
 auth_strategy = "none"
 
 [profiles.high-tier]
-provider_id = "anthropic"
-protocol = "anthropic"
-compatibility_profile = "anthropic"
-base_url = "https://api.anthropic.com"
-model = "claude-sonnet-4-6"
+provider_id = "morgo"
+protocol = "messages-api"
+compatibility_profile = "messages-api"
+base_url = "https://api.morgo.invalid"
+model = "morgo-sonnet-4-6"
 auth_strategy = "none"
 request_timeout_ms = 9000
 stream_timeout_ms = 9000
@@ -191,10 +191,10 @@ retry_max_backoff_ms = 100
             resolved.snapshot.active_profile_name.as_deref(),
             Some("high-tier")
         );
-        assert_eq!(resolved.snapshot.config.provider_id, "anthropic");
-        assert_eq!(resolved.snapshot.config.model_id, "claude-sonnet-4-6");
-        assert_eq!(resolved.snapshot.summary.provider_id, "anthropic");
-        assert_eq!(resolved.snapshot.summary.model, "claude-sonnet-4-6");
+        assert_eq!(resolved.snapshot.config.provider_id, "morgo");
+        assert_eq!(resolved.snapshot.config.model_id, "morgo-sonnet-4-6");
+        assert_eq!(resolved.snapshot.summary.provider_id, "morgo");
+        assert_eq!(resolved.snapshot.summary.model, "morgo-sonnet-4-6");
         assert_eq!(
             inherited.active_profile_name.as_deref(),
             Some("inherited-fast")

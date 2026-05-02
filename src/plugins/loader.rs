@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::bootstrap::config_root::preferred_workspace_config_root;
 use crate::command::types::CommandAvailability;
 use crate::hook::registry::HookEventMatcher;
 use crate::plugins::state::load_plugin_state_from_root;
@@ -13,7 +14,7 @@ use crate::plugins::types::{
 };
 
 pub fn load_plugins(cwd: &Path) -> PluginLoadResult {
-    load_plugins_from_root(&cwd.join(".claude"), cwd)
+    load_plugins_from_root(&preferred_workspace_config_root(cwd), cwd)
 }
 
 pub fn load_plugins_from_root(config_root: &Path, _cwd: &Path) -> PluginLoadResult {

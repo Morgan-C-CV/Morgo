@@ -1361,7 +1361,9 @@ impl BossCoordinator {
 
     /// Returns the default path for the immutable planning cache.
     pub fn default_plan_path(root: &std::path::Path) -> std::path::PathBuf {
-        root.join(".claude").join("boss").join("planning.json")
+        root.join(crate::bootstrap::config_root::PRIMARY_CONFIG_DIR)
+            .join("boss")
+            .join("planning.json")
     }
 
     /// Records one Documentation-stage red/blue loop pass.
@@ -2847,6 +2849,47 @@ impl BossCoordinator {
                             fallback_count: Some(1),
                             fallback_tier: Some("full_worker_dispatch".into()),
                             fallback_reason: Some("external_tool_execution_required".into()),
+                            projection_mismatch_count: Some(
+                                routed_preview.projection_mismatch_count,
+                            ),
+                            hydration_count: Some(0),
+                            stale_ref_count: Some(0),
+                            hydration_ref_missing: Some(0),
+                            tool_dispatch_count: Some(0),
+                            tool_dispatch_success_count: Some(0),
+                            tool_dispatch_failure_count: Some(0),
+                            tool_dispatch_ref_write_count: Some(0),
+                            tool_dispatch_failure_taxonomy: std::collections::BTreeMap::new(),
+                            input_tokens: Some(0),
+                            uncached_input_tokens: Some(0),
+                            output_tokens: Some(0),
+                            original_prompt_chars: Some(0),
+                            sent_prompt_chars: Some(0),
+                            estimated_cost_micros_usd: Some(0),
+                        };
+                        let mut routed_step_metadata = self.routed_step_metadata.write().await;
+                        routed_step_metadata.insert(step_id, routed_metadata);
+                    } else if app_state
+                        .permission_context
+                        .inherited_active_model_snapshot
+                        .is_none()
+                    {
+                        let state_frame_size = serde_json::to_string(&routed_preview.frame)
+                            .map(|s| s.len())
+                            .ok();
+                        let routed_metadata = BossStepRoutedMetadata {
+                            toolset_id: routed_preview.frame.toolset_id.clone(),
+                            skillset_id: routed_preview.frame.skillset_id.clone(),
+                            model_tier: Some(
+                                model_tier_label(routed_preview.model_route.tier).to_string(),
+                            ),
+                            provider_profile_id: routed_preview.model_route.provider_profile_id,
+                            state_frame_size,
+                            cache_read_tokens: Some(0),
+                            cache_write_tokens: Some(0),
+                            fallback_count: Some(1),
+                            fallback_tier: Some("full_worker_dispatch".into()),
+                            fallback_reason: Some("missing_active_model_snapshot".into()),
                             projection_mismatch_count: Some(
                                 routed_preview.projection_mismatch_count,
                             ),
@@ -4426,12 +4469,12 @@ mod tests {
     }
 
     #[test]
-    fn test_default_plan_path_uses_claude_boss_dir() {
+    fn test_default_plan_path_uses_morgo_boss_dir() {
         let root = std::path::Path::new("/home/user/project");
         let path = BossCoordinator::default_plan_path(root);
         assert_eq!(
             path,
-            std::path::Path::new("/home/user/project/.claude/boss/planning.json")
+            std::path::Path::new("/home/user/project/.morgo/boss/planning.json")
         );
     }
 

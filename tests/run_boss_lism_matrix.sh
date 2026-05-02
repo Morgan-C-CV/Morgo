@@ -17,7 +17,7 @@ REPO_ROOT="$(
 ENV_LOADER="$REPO_ROOT/load-env.sh"
 ENV_FILE="$REPO_ROOT/.env"
 PREPARE_SCRIPT="$AGENT_DIR/scripts/boss_ab_matrix.sh"
-BIN_PATH="$AGENT_DIR/target/debug/rust-agent"
+BIN_PATH="$AGENT_DIR/target/debug/morgo"
 
 DEFAULT_OUT_DIR="${TMPDIR:-/tmp}/rustagent-boss-lism-matrix-$(date +%Y%m%d-%H%M%S)"
 DEFAULT_MODEL="${RUST_AGENT_AB_MODEL:-gpt-5-mini-2025-08-07}"
@@ -96,8 +96,8 @@ die() {
 
 ensure_binary() {
   if [ ! -x "$BIN_PATH" ]; then
-    echo "binary missing at $BIN_PATH; building rust-agent" >&2
-    cargo build --manifest-path "$AGENT_DIR/Cargo.toml" --bin rust-agent
+    echo "binary missing at $BIN_PATH; building morgo" >&2
+    cargo build --manifest-path "$AGENT_DIR/Cargo.toml" --bin morgo
   fi
 }
 

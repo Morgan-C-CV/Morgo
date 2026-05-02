@@ -282,7 +282,7 @@ async fn plugin_runtime_exposes_command_hook_tool_and_diagnostics() {
     );
 
     std::env::set_current_dir(previous_cwd).expect("should restore cwd");
-    fs::remove_dir_all(root).expect("temp plugin root should be removed");
+    let _ = fs::remove_dir_all(root);
 }
 
 #[tokio::test]

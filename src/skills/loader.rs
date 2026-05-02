@@ -3,6 +3,7 @@ use std::fs;
 use std::hash::Hash;
 use std::path::{Path, PathBuf};
 
+use crate::bootstrap::config_root::{preferred_workspace_config_root, PRIMARY_CONFIG_DIR};
 use crate::skills::frontmatter::parse_frontmatter;
 use crate::skills::types::{SkillDefinition, SkillSource};
 
@@ -73,12 +74,16 @@ fn load_skills_with_fingerprint(
 fn skill_roots(root: &Path) -> Vec<(PathBuf, SkillSource)> {
     let mut roots = Vec::new();
     if let Ok(home) = std::env::var("HOME") {
-        let user_root = PathBuf::from(home).join(".claude").join("skills");
-        if user_root != root.join(".claude").join("skills") {
+        let user_root = PathBuf::from(home).join(PRIMARY_CONFIG_DIR).join("skills");
+        let workspace_root = preferred_workspace_config_root(root).join("skills");
+        if user_root != workspace_root {
             roots.push((user_root, SkillSource::User));
         }
     }
-    roots.push((root.join(".claude").join("skills"), SkillSource::Filesystem));
+    roots.push((
+        preferred_workspace_config_root(root).join("skills"),
+        SkillSource::Filesystem,
+    ));
     roots
 }
 

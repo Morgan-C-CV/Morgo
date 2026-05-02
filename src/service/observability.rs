@@ -486,10 +486,10 @@ mod tests {
             .collect(),
             retryable_count: 1,
             terminal_count: 1,
-            by_provider_kind: [("anthropic".to_string(), 1)].into_iter().collect(),
+            by_provider_kind: [("morgo".to_string(), 1)].into_iter().collect(),
             compact_recovery_hits: [("reactive_compact".to_string(), 1)].into_iter().collect(),
             api_errors_by_kind: [("http_status".to_string(), 1)].into_iter().collect(),
-            api_errors_by_provider: [("anthropic".to_string(), 1)].into_iter().collect(),
+            api_errors_by_provider: [("morgo".to_string(), 1)].into_iter().collect(),
             api_errors_by_status: [("503".to_string(), 1)].into_iter().collect(),
             mcp_failures_by_kind: [("list_tools".to_string(), 1)].into_iter().collect(),
             mcp_failures_by_server: [("filesystem".to_string(), 1)].into_iter().collect(),
@@ -506,7 +506,7 @@ mod tests {
                 ServiceObservabilityEventRecord {
                     category: "service_failure",
                     key: "api_provider_http_5xx".into(),
-                    detail: "provider=anthropic retryable=true".into(),
+                    detail: "provider=morgo retryable=true".into(),
                 },
                 ServiceObservabilityEventRecord {
                     category: "mcp_server_failure",
@@ -532,10 +532,10 @@ mod tests {
             vec![
                 ("by_failure_code", "api_provider_http_5xx".into(), 1),
                 ("by_failure_code", "api_stream_terminal".into(), 1),
-                ("by_provider_kind", "anthropic".into(), 1),
+                ("by_provider_kind", "morgo".into(), 1),
                 ("compact_recovery_hits", "reactive_compact".into(), 1),
                 ("api_errors_by_kind", "http_status".into(), 1),
-                ("api_errors_by_provider", "anthropic".into(), 1),
+                ("api_errors_by_provider", "morgo".into(), 1),
                 ("api_errors_by_status", "503".into(), 1),
                 ("mcp_failures_by_kind", "list_tools".into(), 1),
                 ("mcp_failures_by_server", "filesystem".into(), 1),
@@ -559,14 +559,14 @@ mod tests {
         let tracker = ServiceObservabilityTracker::default();
         tracker.record_service_failure(&ServiceFailureNotice {
             service_failure_code: ServiceFailureCode::ApiProviderHttp5xx,
-            provider_kind: Some("anthropic".into()),
+            provider_kind: Some("morgo".into()),
             status_code: Some(503),
             retryable: true,
             surface_visible: true,
         });
         tracker.record_compact_recovery_hit(&CompactPlanKind::ReactiveCompact);
         tracker.record_api_client_error(
-            "anthropic",
+            "morgo",
             &ApiError::http_status(503, "provider request failed with status 503"),
         );
         tracker.record_mcp_server_failure("filesystem", "list_tools");

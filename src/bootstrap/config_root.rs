@@ -1,11 +1,51 @@
 use std::path::{Path, PathBuf};
 
+pub const PRIMARY_CONFIG_DIR: &str = ".morgo";
+pub const LEGACY_CONFIG_DIR: &str = ".claude";
+
+pub fn preferred_workspace_config_root(cwd: &Path) -> PathBuf {
+    let primary = cwd.join(PRIMARY_CONFIG_DIR);
+    if primary.exists() {
+        return primary;
+    }
+
+    let legacy = cwd.join(LEGACY_CONFIG_DIR);
+    if legacy.exists() {
+        return legacy;
+    }
+
+    primary
+}
+
+pub fn preferred_home_config_root() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME")?;
+    let primary = PathBuf::from(&home).join(PRIMARY_CONFIG_DIR);
+    if primary.exists() {
+        return Some(primary);
+    }
+
+    let legacy = PathBuf::from(home).join(LEGACY_CONFIG_DIR);
+    if legacy.exists() {
+        return Some(legacy);
+    }
+
+    Some(primary)
+}
+
+pub fn is_managed_config_root(path: &Path) -> bool {
+    matches!(
+        path.file_name().and_then(|value| value.to_str()),
+        Some(PRIMARY_CONFIG_DIR | LEGACY_CONFIG_DIR)
+    )
+}
+
 /// Resolves the agent config root directory.
 ///
 /// If `RUST_AGENT_CONFIG_ROOT` is set, it must be an absolute path — relative paths
 /// are rejected with an error to prevent silent misconfiguration.
 ///
-/// If unset, falls back to `cwd/.claude` (existing behavior, unchanged).
+/// If unset, falls back to `cwd/.morgo`, while still preferring an existing legacy
+/// `cwd/.claude` directory for compatibility.
 pub fn resolve_config_root(cwd: &Path) -> anyhow::Result<PathBuf> {
     if let Ok(raw) = std::env::var("RUST_AGENT_CONFIG_ROOT") {
         let trimmed = raw.trim();
@@ -21,7 +61,7 @@ pub fn resolve_config_root(cwd: &Path) -> anyhow::Result<PathBuf> {
         }
         return Ok(path);
     }
-    Ok(cwd.join(".claude"))
+    Ok(preferred_workspace_config_root(cwd))
 }
 
 #[cfg(test)]
@@ -40,13 +80,26 @@ mod tests {
     }
 
     #[test]
-    fn unset_falls_back_to_cwd_dot_claude() {
+    fn unset_falls_back_to_cwd_dot_morgo() {
         let _guard = lock_env();
         // SAFETY: serialized by env_lock.
         unsafe { std::env::remove_var("RUST_AGENT_CONFIG_ROOT") };
         let cwd = Path::new("/some/project");
         let root = resolve_config_root(cwd).unwrap();
-        assert_eq!(root, Path::new("/some/project/.claude"));
+        assert_eq!(root, Path::new("/some/project/.morgo"));
+    }
+
+    #[test]
+    fn legacy_claude_dir_is_still_preferred_when_present() {
+        let _guard = lock_env();
+        unsafe { std::env::remove_var("RUST_AGENT_CONFIG_ROOT") };
+        let temp = tempfile::tempdir().unwrap();
+        let cwd = temp.path();
+        std::fs::create_dir_all(cwd.join(".claude")).unwrap();
+
+        let root = resolve_config_root(cwd).unwrap();
+
+        assert_eq!(root, cwd.join(".claude"));
     }
 
     #[test]
