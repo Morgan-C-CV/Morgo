@@ -344,7 +344,7 @@ fn collect_blocked_items(step: &BossPlanStep) -> Vec<String> {
 
 fn collect_recent_local_facts(step: &BossPlanStep, limit: usize) -> Vec<String> {
     let mut facts = Vec::new();
-    for record in step.tool_execution_records.iter().rev() {
+    for (idx, record) in step.tool_execution_records.iter().enumerate().rev() {
         match record.tool_name.as_str() {
             "Read" => {
                 if let Some(path) = observable_path_local(record) {
@@ -366,12 +366,38 @@ fn collect_recent_local_facts(step: &BossPlanStep, limit: usize) -> Vec<String> 
             }
             _ => {}
         }
+        if let Some(output_fact) = recent_large_output_fact(step.id, idx, record) {
+            facts.push(output_fact);
+        }
         if facts.len() >= limit {
             break;
         }
     }
     facts.reverse();
     facts
+}
+
+fn recent_large_output_fact(
+    step_id: usize,
+    record_index: usize,
+    record: &ToolExecutionRecord,
+) -> Option<String> {
+    let detail = record.detail.as_ref()?.trim();
+    if detail.is_empty() {
+        return None;
+    }
+    let is_large = matches!(record.kind, ToolExecutionOutcomeKind::ResultTooLarge)
+        || detail.len() > 160
+        || detail.lines().count() > 4;
+    if !is_large {
+        return None;
+    }
+    let source_event_id = format!("tool-output:{step_id}:{record_index}");
+    let ref_id = format!("output:step{step_id}:{record_index}");
+    Some(format!(
+        "recent_output_ref ref={ref_id} source_event_id={source_event_id} excerpt={}",
+        trim_runtime_excerpt(detail, 140)
+    ))
 }
 
 fn render_recent_local_facts_section(facts: &[String]) -> String {
@@ -3109,7 +3135,7 @@ impl BossCoordinator {
         };
         let blocked_items = collect_blocked_items(step);
         let recent_local_facts = if include_local_continuity {
-            collect_recent_local_facts(step, 3)
+            collect_recent_local_facts(step, 5)
         } else {
             Vec::new()
         };
