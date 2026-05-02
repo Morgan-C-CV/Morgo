@@ -4010,10 +4010,13 @@ refresh_reason: {}\n\n{}",
             .unwrap_or_default();
         let parent_session_id = app_state.active_session_id.clone();
         Ok(json!({
-            "task": format!("Designer A review session for plan {plan_id}"),
+            "task": format!(
+                "Designer A review session for plan {plan_id}. Stay idle until the coordinator sends the actual review/spec content. Do not search the repository, and do not use Glob/Grep just to locate the plan id."
+            ),
             "role": "research",
+            "allowed_tools": ["Read"],
             "boss_plan_id": plan_id,
-            "step_objective": "Review and approve boss plan steps as Designer A",
+            "step_objective": "Review and approve boss plan steps as Designer A. Use only the text provided in-session unless a later message explicitly names a file path to inspect.",
             "parent_session_id": parent_session_id,
             "reuse_strategy": "running_only",
         })
