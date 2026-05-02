@@ -195,6 +195,18 @@ fn build_sample_record(
             )
         })
         .count();
+    let last_fallback = report.steps.iter().rev().find_map(|step| {
+        step.routed_metadata.as_ref().and_then(|meta| {
+            if meta.fallback_count.unwrap_or(0) > 0
+                || meta.fallback_tier.is_some()
+                || meta.fallback_reason.is_some()
+            {
+                Some((meta.fallback_tier.clone(), meta.fallback_reason.clone()))
+            } else {
+                None
+            }
+        })
+    });
 
     let provider_profile = report
         .steps
@@ -220,6 +232,11 @@ fn build_sample_record(
         cost_micros_usd,
         cache_hit_ratio,
         estimated_tokens_saved,
+        fallback_count: obs.map(|o| o.total_fallback_count).unwrap_or(0),
+        fallback_tier: last_fallback.as_ref().and_then(|(tier, _)| tier.clone()),
+        fallback_reason: last_fallback
+            .as_ref()
+            .and_then(|(_, reason)| reason.clone()),
         mcp_failure_count,
         pending_approval_count,
         rollback_triggers,

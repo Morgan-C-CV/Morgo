@@ -35,6 +35,8 @@ pub struct LoopUsage {
     pub sent_prompt_chars: usize,
     pub estimated_cost_micros_usd: u64,
     pub fallback_count: usize,
+    pub fallback_tier: Option<String>,
+    pub fallback_reason: Option<String>,
     pub hydration_count: usize,
     pub stale_ref_count: usize,
     pub hydration_ref_missing: usize,
@@ -138,6 +140,15 @@ enum FallbackTier {
     FullContext,
 }
 
+impl FallbackTier {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::RecentLocalHistory => "recent_local_history",
+            Self::FullContext => "full_context",
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 struct FallbackLadderState {
     recent_local_history_activated: bool,
@@ -179,11 +190,7 @@ fn local_history_candidates(frame: &StateFrame, limit: usize) -> Vec<String> {
 }
 
 fn activate_recent_local_history_fallback(frame: &mut StateFrame, requested: &[String]) -> bool {
-    let requested_summary = if requested.is_empty() {
-        "none".to_string()
-    } else {
-        requested.join("|")
-    };
+    let requested_summary = fallback_requested_summary(requested);
     let mut changed = push_unique(
         &mut frame.recent_evidence,
         format!(
@@ -202,11 +209,7 @@ fn activate_recent_local_history_fallback(frame: &mut StateFrame, requested: &[S
 }
 
 fn activate_full_context_fallback(frame: &mut StateFrame, requested: &[String]) -> bool {
-    let requested_summary = if requested.is_empty() {
-        "none".to_string()
-    } else {
-        requested.join("|")
-    };
+    let requested_summary = fallback_requested_summary(requested);
     let mut changed = push_unique(
         &mut frame.recent_evidence,
         format!(
@@ -278,6 +281,23 @@ fn activate_fallback_tier(
         ladder.full_context_activated = true;
     }
     None
+}
+
+fn fallback_requested_summary(requested: &[String]) -> String {
+    if requested.is_empty() {
+        "none".to_string()
+    } else {
+        requested.join("|")
+    }
+}
+
+fn fallback_reason_label(tier: FallbackTier, requested: &[String], escalate: bool) -> String {
+    let base = match tier {
+        FallbackTier::RecentLocalHistory => "request_context_unresolved",
+        FallbackTier::FullContext if escalate => "request_context_escalated",
+        FallbackTier::FullContext => "request_context_exhausted",
+    };
+    format!("{base}:{}", fallback_requested_summary(requested))
 }
 
 fn apply_state_patch(frame: &mut StateFrame, patch: &StatePatch) -> bool {
@@ -479,17 +499,22 @@ pub async fn run_decision_loop(
                 total_usage.stale_ref_count += summary.stale.len();
                 total_usage.hydration_ref_missing += summary.unavailable.len();
                 frame.state = decision.state;
-                if summary.hydrated.is_empty()
-                    && activate_fallback_tier(
+                if summary.hydrated.is_empty() {
+                    if let Some(fallback_tier) = activate_fallback_tier(
                         &mut frame,
                         &decision.needed_context,
                         &mut fallback_ladder,
                         decision.escalate,
-                    )
-                    .is_some()
-                {
-                    total_usage.fallback_count += 1;
-                    continue;
+                    ) {
+                        total_usage.fallback_count += 1;
+                        total_usage.fallback_tier = Some(fallback_tier.as_str().to_string());
+                        total_usage.fallback_reason = Some(fallback_reason_label(
+                            fallback_tier,
+                            &decision.needed_context,
+                            decision.escalate,
+                        ));
+                        continue;
+                    }
                 }
                 if !summary.changed {
                     return Ok(LoopOutcome::NoProgress {
@@ -559,6 +584,11 @@ mod tests {
             LoopOutcome::Done { usage, .. } => {
                 assert_eq!(usage.fallback_count, 1);
                 assert_eq!(usage.hydration_ref_missing, 1);
+                assert_eq!(usage.fallback_tier.as_deref(), Some("recent_local_history"));
+                assert_eq!(
+                    usage.fallback_reason.as_deref(),
+                    Some("request_context_unresolved:symbol:MissingSymbol")
+                );
             }
             other => panic!("expected Done, got {other:?}"),
         }
@@ -589,6 +619,11 @@ mod tests {
             LoopOutcome::Done { usage, .. } => {
                 assert_eq!(usage.fallback_count, 2);
                 assert_eq!(usage.hydration_ref_missing, 2);
+                assert_eq!(usage.fallback_tier.as_deref(), Some("full_context"));
+                assert_eq!(
+                    usage.fallback_reason.as_deref(),
+                    Some("request_context_escalated:symbol:MissingSymbol")
+                );
             }
             other => panic!("expected Done, got {other:?}"),
         }

@@ -50,6 +50,12 @@ pub struct LisMAbSampleRecord {
     pub cache_hit_ratio: Option<f64>,
     pub estimated_tokens_saved: usize,
     pub cost_micros_usd: u64,
+    #[serde(default)]
+    pub fallback_count: usize,
+    #[serde(default)]
+    pub fallback_tier: Option<String>,
+    #[serde(default)]
+    pub fallback_reason: Option<String>,
     pub pending_approval_count: usize,
     pub outcome: BossTestRunOutcome,
 }
@@ -520,6 +526,18 @@ fn build_ab_record(
             )
         })
         .count();
+    let last_fallback = report.steps.iter().rev().find_map(|step| {
+        step.routed_metadata.as_ref().and_then(|meta| {
+            if meta.fallback_count.unwrap_or(0) > 0
+                || meta.fallback_tier.is_some()
+                || meta.fallback_reason.is_some()
+            {
+                Some((meta.fallback_tier.clone(), meta.fallback_reason.clone()))
+            } else {
+                None
+            }
+        })
+    });
 
     LisMAbSampleRecord {
         run_id,
@@ -538,6 +556,11 @@ fn build_ab_record(
         cache_hit_ratio: obs.and_then(|o| o.cache_hit_ratio()),
         estimated_tokens_saved: obs.map(|o| o.estimated_tokens_saved()).unwrap_or(0),
         cost_micros_usd: obs.map(|o| o.estimated_cost_micros_usd).unwrap_or(0),
+        fallback_count: obs.map(|o| o.total_fallback_count).unwrap_or(0),
+        fallback_tier: last_fallback.as_ref().and_then(|(tier, _)| tier.clone()),
+        fallback_reason: last_fallback
+            .as_ref()
+            .and_then(|(_, reason)| reason.clone()),
         pending_approval_count,
         outcome,
     }

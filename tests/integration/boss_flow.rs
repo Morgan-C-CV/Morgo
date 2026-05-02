@@ -9954,6 +9954,13 @@ async fn t27_r1_format_report_includes_hit_ratio_and_tokens_saved() {
         total_steps_routed: 1,
         total_cache_read_tokens: 400,
         total_cache_write_tokens: 100,
+        total_fallback_count: 1,
+        fallback_tier_counts: std::iter::once(("full_context".into(), 1)).collect(),
+        fallback_reason_counts: std::iter::once((
+            "request_context_escalated:symbol:MissingSymbol".into(),
+            1,
+        ))
+        .collect(),
         total_hydration_count: 0,
         total_stale_ref_count: 0,
         total_hydration_ref_missing: 0,
@@ -9989,7 +9996,9 @@ async fn t27_r1_format_report_includes_hit_ratio_and_tokens_saved() {
                 state_frame_size: Some(512),
                 cache_read_tokens: Some(400),
                 cache_write_tokens: Some(100),
-                fallback_count: Some(0),
+                fallback_count: Some(1),
+                fallback_tier: Some("full_context".into()),
+                fallback_reason: Some("request_context_escalated:symbol:MissingSymbol".into()),
                 projection_mismatch_count: Some(0),
                 hydration_count: Some(0),
                 stale_ref_count: Some(0),
@@ -10015,6 +10024,14 @@ async fn t27_r1_format_report_includes_hit_ratio_and_tokens_saved() {
     assert!(
         report.contains("tokens_saved=400"),
         "expected tokens_saved in report, got: {report}"
+    );
+    assert!(
+        report.contains("fb_tier=full_context"),
+        "expected fallback tier in report, got: {report}"
+    );
+    assert!(
+        report.contains("fb_reason=request_context_escalated:symbol:MissingSymbol"),
+        "expected fallback reason in report, got: {report}"
     );
     assert!(
         report.contains("input=0"),

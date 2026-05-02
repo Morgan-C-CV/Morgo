@@ -71,6 +71,10 @@ impl Command for LisMCommand {
                         let mut total_output: usize = 0;
                         let mut total_sent_chars: usize = 0;
                         let mut total_original_chars: usize = 0;
+                        let mut fallback_tier_counts: std::collections::BTreeMap<String, usize> =
+                            std::collections::BTreeMap::new();
+                        let mut fallback_reason_counts: std::collections::BTreeMap<String, usize> =
+                            std::collections::BTreeMap::new();
                         for id in step_ids {
                             let m = &metadata[&id];
                             total_routed += 1;
@@ -89,8 +93,14 @@ impl Command for LisMCommand {
                             total_output += m.output_tokens.unwrap_or(0);
                             total_sent_chars += m.sent_prompt_chars.unwrap_or(0);
                             total_original_chars += m.original_prompt_chars.unwrap_or(0);
+                            if let Some(tier) = &m.fallback_tier {
+                                *fallback_tier_counts.entry(tier.clone()).or_insert(0) += 1;
+                            }
+                            if let Some(reason) = &m.fallback_reason {
+                                *fallback_reason_counts.entry(reason.clone()).or_insert(0) += 1;
+                            }
                             lines.push(format!(
-                                "  step {id}: tier={tier} profile={profile} frame_size={size} cache_r={cr} cache_w={cw} input={inp} uncached_input={uinp} output={out} sent_chars={sent} original_chars={orig} fallback={fb} mismatch={mm} hydration={hydr} stale_refs={stale} missing_refs={miss}",
+                                "  step {id}: tier={tier} profile={profile} frame_size={size} cache_r={cr} cache_w={cw} input={inp} uncached_input={uinp} output={out} sent_chars={sent} original_chars={orig} fallback={fb} fallback_tier={fb_tier} fallback_reason={fb_reason} mismatch={mm} hydration={hydr} stale_refs={stale} missing_refs={miss}",
                                 tier = m.model_tier.as_deref().unwrap_or("-"),
                                 profile = m.provider_profile_id.as_deref().unwrap_or("-"),
                                 size = m.state_frame_size.map(|n| n.to_string()).unwrap_or_else(|| "-".into()),
@@ -102,6 +112,8 @@ impl Command for LisMCommand {
                                 sent = m.sent_prompt_chars.map(|n| n.to_string()).unwrap_or_else(|| "-".into()),
                                 orig = m.original_prompt_chars.map(|n| n.to_string()).unwrap_or_else(|| "-".into()),
                                 fb = m.fallback_count.map(|n| n.to_string()).unwrap_or_else(|| "-".into()),
+                                fb_tier = m.fallback_tier.as_deref().unwrap_or("-"),
+                                fb_reason = m.fallback_reason.as_deref().unwrap_or("-"),
                                 mm = m.projection_mismatch_count.map(|n| n.to_string()).unwrap_or_else(|| "-".into()),
                                 hydr = m.hydration_count.map(|n| n.to_string()).unwrap_or_else(|| "-".into()),
                                 stale = m.stale_ref_count.map(|n| n.to_string()).unwrap_or_else(|| "-".into()),
@@ -112,6 +124,11 @@ impl Command for LisMCommand {
                             "  total_steps_routed: {total_routed} override_hits: {override_hits} cache_r: {total_cache_r} cache_w: {total_cache_w} cache_hit_observed: {cache_hit_observed} tokens_saved: {total_cache_r} input: {total_input} uncached_input: {total_uncached_input} output: {total_output} sent_chars: {total_sent_chars} original_chars: {total_original_chars} fallback: {total_fallback} mismatch: {total_mismatch} hydration: {total_hydration} stale_refs: {total_stale} missing_refs: {total_missing}",
                             cache_hit_observed = total_cache_r > 0,
                         ));
+                        if !fallback_tier_counts.is_empty() || !fallback_reason_counts.is_empty() {
+                            lines.push(format!(
+                                "  fallback_summary: tiers={fallback_tier_counts:?} reasons={fallback_reason_counts:?}"
+                            ));
+                        }
                         lines.join("\n")
                     }
                 } else {
@@ -133,6 +150,6 @@ fn usage() -> String {
 fn explain(enabled: bool) -> String {
     let mode = if enabled { "enabled" } else { "disabled" };
     format!(
-        "LisM is currently {mode}.\n\nAvailable building blocks:\n- StateFrame schema and StateDecision validation\n- BossPlan -> StateFrame projection\n- Stateless JSON decision loop\n- Typed evidence hydration with source trace / unresolved reason / stale reason\n- `request_context` fallback ladder now upgrades targeted evidence misses into recent local history and then full-context summaries\n- Toolset / skillset router is attached to the live LisM -> /boss production path\n- Model-tier router and provider_profile_id routing are connected to the production path\n- Per-step routed metadata (tier, profile, frame_size, cache, fallback, mismatch, hydration, stale refs) is recorded and visible in /LisM status and /boss report\n- Archive / retention for accepted and open items\n- Production-path tests for the current StateFrame orchestration pipeline\n\nDeferred items:\n- /LisM persistence is not yet connected\n- fallback tier / reason telemetry is still being expanded"
+        "LisM is currently {mode}.\n\nAvailable building blocks:\n- StateFrame schema and StateDecision validation\n- BossPlan -> StateFrame projection\n- Stateless JSON decision loop\n- Typed evidence hydration with source trace / unresolved reason / stale reason\n- `request_context` fallback ladder now upgrades targeted evidence misses into recent local history and then full-context summaries\n- Per-step fallback telemetry now records count, tier, and reason in routed metadata, /LisM status, /boss report, and A/B samples\n- Toolset / skillset router is attached to the live LisM -> /boss production path\n- Model-tier router and provider_profile_id routing are connected to the production path\n- Archive / retention for accepted and open items\n- Production-path tests for the current StateFrame orchestration pipeline\n\nDeferred items:\n- /LisM persistence is not yet connected\n- fallback analytics can still be expanded beyond latest-tier/latest-reason run summaries"
     )
 }

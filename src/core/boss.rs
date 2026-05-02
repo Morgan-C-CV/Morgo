@@ -1721,6 +1721,18 @@ impl BossCoordinator {
                 summary.total_cache_read_tokens += m.cache_read_tokens.unwrap_or(0);
                 summary.total_cache_write_tokens += m.cache_write_tokens.unwrap_or(0);
                 summary.total_fallback_count += m.fallback_count.unwrap_or(0);
+                if let Some(tier) = &m.fallback_tier {
+                    *summary
+                        .fallback_tier_counts
+                        .entry(tier.clone())
+                        .or_insert(0) += 1;
+                }
+                if let Some(reason) = &m.fallback_reason {
+                    *summary
+                        .fallback_reason_counts
+                        .entry(reason.clone())
+                        .or_insert(0) += 1;
+                }
                 summary.total_projection_mismatch_count += m.projection_mismatch_count.unwrap_or(0);
                 summary.total_hydration_count += m.hydration_count.unwrap_or(0);
                 summary.total_stale_ref_count += m.stale_ref_count.unwrap_or(0);
@@ -2717,6 +2729,8 @@ impl BossCoordinator {
                             cache_read_tokens: Some(0),
                             cache_write_tokens: Some(0),
                             fallback_count: Some(1),
+                            fallback_tier: Some("full_worker_dispatch".into()),
+                            fallback_reason: Some("external_tool_execution_required".into()),
                             projection_mismatch_count: Some(
                                 routed_preview.projection_mismatch_count,
                             ),
@@ -2766,6 +2780,8 @@ impl BossCoordinator {
                                 cache_read_tokens: Some(0),
                                 cache_write_tokens: Some(0),
                                 fallback_count: Some(0),
+                                fallback_tier: None,
+                                fallback_reason: None,
                                 projection_mismatch_count: Some(routed.projection_mismatch_count),
                                 hydration_count: Some(0),
                                 stale_ref_count: Some(0),
@@ -2815,6 +2831,8 @@ impl BossCoordinator {
                                 routed_metadata.estimated_cost_micros_usd =
                                     Some(usage.estimated_cost_micros_usd);
                                 routed_metadata.fallback_count = Some(usage.fallback_count);
+                                routed_metadata.fallback_tier = usage.fallback_tier.clone();
+                                routed_metadata.fallback_reason = usage.fallback_reason.clone();
                                 routed_metadata.hydration_count = Some(usage.hydration_count);
                                 routed_metadata.stale_ref_count = Some(usage.stale_ref_count);
                                 routed_metadata.hydration_ref_missing =

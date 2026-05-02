@@ -50,6 +50,8 @@ fn make_report(
             total_cache_read_tokens: cache_read,
             total_cache_write_tokens: cache_write,
             total_fallback_count: 0,
+            fallback_tier_counts: Default::default(),
+            fallback_reason_counts: Default::default(),
             total_projection_mismatch_count: 0,
             total_hydration_count: 0,
             total_stale_ref_count: 0,
@@ -94,6 +96,8 @@ fn make_report_with_usage(
         total_cache_read_tokens: 0,
         total_cache_write_tokens: 0,
         total_fallback_count: 0,
+        fallback_tier_counts: Default::default(),
+        fallback_reason_counts: Default::default(),
         total_projection_mismatch_count: 0,
         total_hydration_count: 0,
         total_stale_ref_count: 0,
@@ -186,6 +190,86 @@ fn r1_1_record_extracts_usage_and_prompt_size_fields() {
     assert_eq!(record.total_output_tokens, 56);
     assert_eq!(record.sent_prompt_chars, 7890);
     assert_eq!(record.original_prompt_chars, 7890);
+}
+
+#[test]
+fn r1_1_record_carries_fallback_tier_and_reason() {
+    use rust_agent::core::boss_state::{
+        BossPlanStepStatus, BossStepReport, BossStepRoutedMetadata,
+    };
+
+    let sink = LisMAbSampleSink::in_memory();
+    let mut report = make_report(1, 0, 0, 0, 0);
+    report.observability_summary = Some(BossObservabilitySummary {
+        total_steps_routed: 1,
+        total_cache_read_tokens: 0,
+        total_cache_write_tokens: 0,
+        total_fallback_count: 2,
+        fallback_tier_counts: std::iter::once(("full_context".into(), 1)).collect(),
+        fallback_reason_counts: std::iter::once((
+            "request_context_escalated:symbol:MissingSymbol".into(),
+            1,
+        ))
+        .collect(),
+        total_projection_mismatch_count: 0,
+        total_hydration_count: 0,
+        total_stale_ref_count: 0,
+        total_hydration_ref_missing: 2,
+        override_hit_count: 0,
+        model_tier_counts: Default::default(),
+        total_input_tokens: 0,
+        total_uncached_input_tokens: 0,
+        total_output_tokens: 0,
+        estimated_cost_micros_usd: 0,
+        total_original_chars: 0,
+        total_sent_chars: 0,
+    });
+    report.steps = vec![BossStepReport {
+        id: 0,
+        status: BossPlanStepStatus::Failed,
+        worker_task_id: None,
+        attempt_count: 1,
+        last_review_summary: None,
+        action_required: None,
+        blocker_reason: None,
+        routed_metadata: Some(BossStepRoutedMetadata {
+            toolset_id: None,
+            skillset_id: None,
+            model_tier: Some("medium".into()),
+            provider_profile_id: Some("worker-override".into()),
+            state_frame_size: Some(256),
+            cache_read_tokens: Some(0),
+            cache_write_tokens: Some(0),
+            fallback_count: Some(2),
+            fallback_tier: Some("full_context".into()),
+            fallback_reason: Some("request_context_escalated:symbol:MissingSymbol".into()),
+            projection_mismatch_count: Some(0),
+            hydration_count: Some(0),
+            stale_ref_count: Some(0),
+            hydration_ref_missing: Some(2),
+            input_tokens: Some(0),
+            uncached_input_tokens: Some(0),
+            output_tokens: Some(0),
+            original_prompt_chars: Some(0),
+            sent_prompt_chars: Some(0),
+            estimated_cost_micros_usd: Some(0),
+        }),
+    }];
+    sink.record_run(
+        "fallback-run",
+        true,
+        &report,
+        BossTestRunOutcome::Completed,
+        0,
+    );
+
+    let record = &sink.records()[0];
+    assert_eq!(record.fallback_count, 2);
+    assert_eq!(record.fallback_tier.as_deref(), Some("full_context"));
+    assert_eq!(
+        record.fallback_reason.as_deref(),
+        Some("request_context_escalated:symbol:MissingSymbol")
+    );
 }
 
 #[test]

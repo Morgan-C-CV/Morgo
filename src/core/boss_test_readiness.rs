@@ -283,6 +283,12 @@ pub struct BossTestSampleRecord {
     pub cost_micros_usd: u64,
     pub cache_hit_ratio: Option<f64>,
     pub estimated_tokens_saved: usize,
+    #[serde(default)]
+    pub fallback_count: usize,
+    #[serde(default)]
+    pub fallback_tier: Option<String>,
+    #[serde(default)]
+    pub fallback_reason: Option<String>,
     pub mcp_failure_count: usize,
     pub pending_approval_count: usize,
     pub rollback_triggers: Vec<String>,
@@ -310,7 +316,7 @@ impl BossTestRunOutcome {
 impl BossTestSampleRecord {
     pub fn render_summary(&self) -> String {
         format!(
-            "run={} outcome={} steps={}/{} cost_micros={} cache_hit={} tokens_saved={} mcp_failures={} pending_approvals={} rollback_triggers={}",
+            "run={} outcome={} steps={}/{} cost_micros={} cache_hit={} tokens_saved={} fallback={} fallback_tier={} fallback_reason={} mcp_failures={} pending_approvals={} rollback_triggers={}",
             self.run_id,
             self.outcome.as_str(),
             self.completed_steps,
@@ -320,6 +326,9 @@ impl BossTestSampleRecord {
                 .map(|r| format!("{:.1}%", r * 100.0))
                 .unwrap_or_else(|| "-".into()),
             self.estimated_tokens_saved,
+            self.fallback_count,
+            self.fallback_tier.as_deref().unwrap_or("-"),
+            self.fallback_reason.as_deref().unwrap_or("-"),
             self.mcp_failure_count,
             self.pending_approval_count,
             self.rollback_triggers.len(),
