@@ -124,6 +124,22 @@ pub fn parse_needed_context_selector(raw: &str) -> NeededContextSelector {
     if trimmed == "change_ref" {
         return NeededContextSelector::ChangeRef { path: None };
     }
+    if let Some(query) = trimmed.strip_prefix("review_ref:") {
+        return NeededContextSelector::ReviewRef {
+            query: Some(query.trim().to_string()),
+        };
+    }
+    if trimmed == "review_ref" {
+        return NeededContextSelector::ReviewRef { query: None };
+    }
+    if let Some(query) = trimmed.strip_prefix("artifact_ref:") {
+        return NeededContextSelector::ArtifactRef {
+            query: Some(query.trim().to_string()),
+        };
+    }
+    if trimmed == "artifact_ref" {
+        return NeededContextSelector::ArtifactRef { query: None };
+    }
     if let Some(path) = trimmed.strip_prefix("artifact:") {
         return NeededContextSelector::Artifact {
             path: Some(path.trim().to_string()),
@@ -154,6 +170,10 @@ fn find_recent_evidence<'a>(frame: &'a StateFrame, prefix: &str) -> impl Iterato
 
 fn contains_path(item: &str, path: &str) -> bool {
     item.contains(&format!("path={path}"))
+}
+
+fn contains_ref(item: &str, ref_id: &str) -> bool {
+    item.contains(&format!("ref={ref_id}"))
 }
 
 fn estimate_excerpt_chars(frame: &StateFrame, selected_count: usize) -> usize {
@@ -268,7 +288,50 @@ fn hydrate_selector(
                     )
                 })
         }
+        NeededContextSelector::ReviewRef { query } => {
+            find_recent_evidence(frame, "fact: review_verdicts")
+                .find(|item| {
+                    query
+                        .as_ref()
+                        .map(|q| contains_ref(item, q) || item.contains(&format!("verdict={q}")))
+                        .unwrap_or(true)
+                })
+                .map(|item| {
+                    format!(
+                        "hydrated_context: {} source=review_ledger excerpt={}",
+                        selector_key(selector),
+                        compact_excerpt(item, excerpt_chars)
+                    )
+                })
+        }
+        NeededContextSelector::ArtifactRef { query } => {
+            find_recent_evidence(frame, "fact: artifact_status")
+                .find(|item| {
+                    query
+                        .as_ref()
+                        .map(|q| contains_ref(item, q) || contains_path(item, q))
+                        .unwrap_or(true)
+                })
+                .map(|item| {
+                    format!(
+                        "hydrated_context: {} source=artifact_ledger excerpt={}",
+                        selector_key(selector),
+                        compact_excerpt(item, excerpt_chars)
+                    )
+                })
+        }
         NeededContextSelector::Artifact { path } => {
+            let match_in_artifacts = path.as_ref().and_then(|p| {
+                find_recent_evidence(frame, "fact: artifact_status")
+                    .find(|item| contains_path(item, p))
+                    .map(|item| {
+                        format!(
+                            "hydrated_context: {} source=artifact_ledger excerpt={}",
+                            selector_key(selector),
+                            compact_excerpt(item, excerpt_chars)
+                        )
+                    })
+            });
             let match_in_changes = path.as_ref().and_then(|p| {
                 find_recent_evidence(frame, "fact: recent_changes_in_files")
                     .find(|item| contains_path(item, p))
@@ -296,21 +359,24 @@ fn hydrate_selector(
                         )
                     )
                 });
-            match_in_changes.or(match_in_objective).or_else(|| {
-                find_recent_evidence(frame, "fact: file_facts")
-                    .find(|item| {
-                        path.as_ref()
-                            .map(|p| contains_path(item, p))
-                            .unwrap_or(true)
-                    })
-                    .map(|item| {
-                        format!(
-                            "hydrated_context: {} source=fact_ledger excerpt={}",
-                            selector_key(selector),
-                            compact_excerpt(item, excerpt_chars)
-                        )
-                    })
-            })
+            match_in_artifacts
+                .or(match_in_changes)
+                .or(match_in_objective)
+                .or_else(|| {
+                    find_recent_evidence(frame, "fact: file_facts")
+                        .find(|item| {
+                            path.as_ref()
+                                .map(|p| contains_path(item, p))
+                                .unwrap_or(true)
+                        })
+                        .map(|item| {
+                            format!(
+                                "hydrated_context: {} source=fact_ledger excerpt={}",
+                                selector_key(selector),
+                                compact_excerpt(item, excerpt_chars)
+                            )
+                        })
+                })
         }
         NeededContextSelector::Fact { name } => frame
             .recent_evidence
@@ -401,6 +467,8 @@ mod tests {
                 "fact: file_facts ref=filefact:1 path=src/core/state_frame_projection.rs kind=target_file source=step_objective freshness=current confidence=1.00 symbol=BossCoordinator fact=step objective names this path as concrete context: src/core/state_frame_projection.rs".into(),
                 "fact: recent_changes_in_files ref=change:1 path=src/core/state_frame_projection.rs source=worker_result freshness=after-worker-output confidence=0.90 summary=updated src/core/state_frame_projection.rs".into(),
                 "fact: test_failures ref=test:1 name=worker_reported_tests status=failed source=worker_result freshness=after-worker-output confidence=0.85 summary=tests failed in boss_flow".into(),
+                "fact: review_verdicts ref=review:step1:runtime:0 verdict=accepted source=tool:BossReview freshness=after-runtime-review confidence=1.00 summary=LGTM after targeted review".into(),
+                "fact: artifact_status ref=artifact:step1:runtime:0 path=/tmp/report.md kind=file status=verified source=tool:ArtifactVerify freshness=after-runtime-artifact-verify confidence=1.00 summary=artifact verification passed for /tmp/report.md".into(),
             ],
             allowed_actions: vec!["read_file".into()],
             toolset_id: None,
@@ -421,6 +489,16 @@ mod tests {
         assert_eq!(
             parse_needed_context_selector("test_failure"),
             NeededContextSelector::TestFailure { query: None }
+        );
+        assert_eq!(
+            parse_needed_context_selector("review_ref:review:step1:runtime:0"),
+            NeededContextSelector::ReviewRef {
+                query: Some("review:step1:runtime:0".into())
+            }
+        );
+        assert_eq!(
+            parse_needed_context_selector("artifact_ref"),
+            NeededContextSelector::ArtifactRef { query: None }
         );
     }
 
@@ -482,6 +560,41 @@ mod tests {
         assert!(frame.recent_evidence.iter().any(|item| {
             item.contains("hydrated_context: artifact:src/core/state_frame_projection.rs")
         }));
+    }
+
+    #[test]
+    fn hydrate_needed_context_resolves_review_ref_and_artifact_ref_requests() {
+        let mut frame = make_frame();
+        let summary = hydrate_needed_context(
+            &mut frame,
+            &[
+                "review_ref:review:step1:runtime:0".into(),
+                "artifact_ref:artifact:step1:runtime:0".into(),
+            ],
+        );
+        assert!(summary.changed);
+        assert_eq!(summary.unavailable.len(), 0);
+        assert!(
+            frame
+                .recent_evidence
+                .iter()
+                .any(|item| item.contains("hydrated_context: review_ref:review:step1:runtime:0"))
+        );
+        assert!(
+            frame
+                .recent_evidence
+                .iter()
+                .any(|item| item.contains("source=review_ledger"))
+        );
+        assert!(frame.recent_evidence.iter().any(|item| {
+            item.contains("hydrated_context: artifact_ref:artifact:step1:runtime:0")
+        }));
+        assert!(
+            frame
+                .recent_evidence
+                .iter()
+                .any(|item| item.contains("source=artifact_ledger"))
+        );
     }
 
     #[test]

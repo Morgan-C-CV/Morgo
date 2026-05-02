@@ -113,7 +113,7 @@ Rules:\n\
 - Treat `recent_evidence` entries prefixed with `fact:` as the authoritative Fact Ledger for this turn\n\
 - If a fact entry already says `none`, `none recorded`, `absent`, or equivalent, do NOT request that same context again\n\
 - Only use \"decision\": \"request_context\" when the missing fact is not already present in objective/open_items/blocked_items/accepted_summary/recent_evidence\n\
-- When using `needed_context`, prefer typed selectors like `file_snippet:path`, `test_failure`, `change_ref:path`, `artifact:path`, or `fact:name`\n\
+- When using `needed_context`, prefer typed selectors like `file_snippet:path`, `test_failure`, `change_ref:path`, `review_ref:ref_id`, `artifact_ref:ref_id`, `artifact:path`, or `fact:name`\n\
 - The \"decision\" field MUST be one of the exact string values above — never use free text\n\
 - Respond with JSON only, no prose or explanation\n\
 \n\
