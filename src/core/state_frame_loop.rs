@@ -27,7 +27,10 @@ pub struct DecisionLoopConfig {
 impl Default for DecisionLoopConfig {
     fn default() -> Self {
         Self {
-            max_iterations: 5,
+            // Direct StateFrame workers can spend a few turns on recoverable tool
+            // failures before they produce the artifact and still need one turn
+            // to verify/finish.
+            max_iterations: 8,
             repair_budget: 2,
         }
     }
@@ -1336,6 +1339,19 @@ mod tests {
         ))
     }
 
+    fn unique_temp_dir(label: &str) -> std::path::PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "stateframe_{}_{}_{}",
+            label,
+            std::process::id(),
+            nonce
+        ))
+    }
+
     #[test]
     fn request_context_unresolved_activates_recent_local_history_fallback() {
         let rt = tokio::runtime::Runtime::new().unwrap();
@@ -1561,6 +1577,73 @@ mod tests {
                 assert!(usage.tool_dispatch_ref_write_count >= 2);
             }
             other => panic!("expected Done, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn direct_tool_recovery_has_budget_to_finish_after_artifact_write() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let temp_dir = unique_temp_dir("direct_tool_recovery_site");
+        let index_path = temp_dir.join("index.html");
+        let read_dir_json = format!(
+            r#"{{"state":"executing","decision":"call_tool","next_action":{{"action_type":"Read","args":{{"file_path":"{}"}}}}}}"#,
+            temp_dir.display()
+        );
+        let mkdir_json = format!(
+            r#"{{"state":"executing","decision":"call_tool","next_action":{{"action_type":"Bash","args":{{"Bash.command":"mkdir -p \"{}\""}}}}}}"#,
+            temp_dir.display()
+        );
+        let planning_json = format!(
+            r#"{{"state":"planning","decision":"continue","state_patch":{{"open_items_add":["create static site files in {}"],"accepted_summary_add":["target directory exists; create files next"]}}}}"#,
+            temp_dir.display()
+        );
+        let write_json = format!(
+            r#"{{"state":"executing","decision":"call_tool","next_action":{{"action_type":"Bash","args":{{"command":"cat > \"{}\" <<'HTML'\n<!doctype html><title>RustAgent</title>\nHTML\n"}}}}}}"#,
+            index_path.display()
+        );
+        let done_json = r#"{"state":"done","decision":"done"}"#;
+        let client = ModelProviderClient::with_scripted_turns(vec![
+            vec![StreamEvent::TextDelta(read_dir_json.clone().into())],
+            vec![StreamEvent::TextDelta(mkdir_json.into())],
+            vec![StreamEvent::TextDelta(read_dir_json.into())],
+            vec![StreamEvent::TextDelta(planning_json.into())],
+            vec![StreamEvent::TextDelta(write_json.into())],
+            vec![StreamEvent::TextDelta(done_json.into())],
+        ]);
+        let registry = ToolRegistry::new()
+            .register(Arc::new(BashTool))
+            .register(Arc::new(FileReadTool));
+        let permissions = ToolPermissionContext::new(PermissionMode::Default);
+        permissions.add_always_allow_rule("Bash");
+        let tool_runtime = StateFrameToolRuntime {
+            registry,
+            permissions,
+        };
+
+        let outcome = rt
+            .block_on(run_decision_loop_with_tools(
+                &client,
+                make_frame(),
+                DecisionLoopConfig::default(),
+                Some(tool_runtime),
+            ))
+            .expect("loop should not error");
+
+        let content = std::fs::read_to_string(&index_path).expect("bash should create index.html");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        assert!(content.contains("RustAgent"));
+        match outcome {
+            LoopOutcome::Done { usage, .. } => {
+                assert_eq!(usage.tool_dispatch_count, 4);
+                assert_eq!(usage.tool_dispatch_success_count, 2);
+                assert_eq!(usage.tool_dispatch_failure_count, 2);
+                assert_eq!(usage.tool_dispatch_failure_taxonomy.get("missing_path"), Some(&1));
+                assert_eq!(
+                    usage.tool_dispatch_failure_taxonomy.get("tool_result_empty"),
+                    Some(&1)
+                );
+            }
+            other => panic!("expected Done after direct tool recovery, got {other:?}"),
         }
     }
 
