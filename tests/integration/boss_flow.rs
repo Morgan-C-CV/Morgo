@@ -2764,6 +2764,13 @@ async fn boss_a_review_accepts_diff_before_step_completion() {
         step.last_review_summary.as_deref(),
         Some("LGTM, all acceptance criteria met")
     );
+    assert!(step.tool_execution_records.iter().any(|record| {
+        record.tool_name == "BossReview"
+            && record
+                .observable_input
+                .as_ref()
+                .is_some_and(|input| input.value.contains("\"verdict\":\"accepted\""))
+    }));
 
     let _ = std::fs::remove_file(plan_path);
 }
@@ -8717,7 +8724,25 @@ async fn t27_5_on_task_event_persists_runtime_tool_records_into_step_ledgers() {
 
     let plan_guard = coordinator.plan.read().await;
     let step = &plan_guard.as_ref().unwrap().steps[0];
-    assert_eq!(step.tool_execution_records.len(), 3);
+    assert!(
+        step.tool_execution_records.len() >= 3,
+        "step should retain worker runtime records even if boss adds review/artifact synthetic records"
+    );
+    assert!(
+        step.tool_execution_records
+            .iter()
+            .any(|record| record.tool_name == "Read")
+    );
+    assert!(
+        step.tool_execution_records
+            .iter()
+            .any(|record| record.tool_name == "Edit")
+    );
+    assert!(
+        step.tool_execution_records
+            .iter()
+            .any(|record| record.tool_name == "Bash")
+    );
 
     let ledgers = rust_agent::core::state_fact_ledger::build_step_fact_ledgers(step);
     assert!(
@@ -11978,6 +12003,13 @@ async fn r0_boss_full_worker_text_only_completion_fails_artifact_verification() 
             .is_some_and(|summary| summary.contains("artifact verification failed")),
         "boss must surface artifact verification failure"
     );
+    assert!(step.tool_execution_records.iter().any(|record| {
+        record.tool_name == "ArtifactVerify"
+            && record
+                .observable_input
+                .as_ref()
+                .is_some_and(|input| input.value.contains("\"status\":\"missing_or_invalid\""))
+    }));
     assert!(
         !step.completed,
         "failed verification must not mark completed"

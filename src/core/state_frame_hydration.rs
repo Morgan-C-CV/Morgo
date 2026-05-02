@@ -6,6 +6,8 @@ pub enum NeededContextSelector {
     Symbol { name: String },
     TestFailure { query: Option<String> },
     ChangeRef { path: Option<String> },
+    ReviewRef { query: Option<String> },
+    ArtifactRef { query: Option<String> },
     Artifact { path: Option<String> },
     Fact { name: String },
     Unknown { raw: String },
@@ -48,6 +50,12 @@ fn selector_key(selector: &NeededContextSelector) -> String {
         NeededContextSelector::TestFailure { query: None } => "test_failure".into(),
         NeededContextSelector::ChangeRef { path: Some(path) } => format!("change_ref:{path}"),
         NeededContextSelector::ChangeRef { path: None } => "change_ref".into(),
+        NeededContextSelector::ReviewRef { query: Some(query) } => format!("review_ref:{query}"),
+        NeededContextSelector::ReviewRef { query: None } => "review_ref".into(),
+        NeededContextSelector::ArtifactRef { query: Some(query) } => {
+            format!("artifact_ref:{query}")
+        }
+        NeededContextSelector::ArtifactRef { query: None } => "artifact_ref".into(),
         NeededContextSelector::Artifact { path: Some(path) } => format!("artifact:{path}"),
         NeededContextSelector::Artifact { path: None } => "artifact".into(),
         NeededContextSelector::Fact { name } => format!("fact:{name}"),
@@ -59,11 +67,13 @@ fn selector_priority(selector: &NeededContextSelector) -> usize {
     match selector {
         NeededContextSelector::TestFailure { .. } => 0,
         NeededContextSelector::ChangeRef { .. } => 1,
-        NeededContextSelector::FileSnippet { .. } => 2,
-        NeededContextSelector::Artifact { .. } => 3,
-        NeededContextSelector::Fact { .. } => 4,
-        NeededContextSelector::Symbol { .. } => 5,
-        NeededContextSelector::Unknown { .. } => 6,
+        NeededContextSelector::ReviewRef { .. } => 2,
+        NeededContextSelector::ArtifactRef { .. } => 3,
+        NeededContextSelector::FileSnippet { .. } => 4,
+        NeededContextSelector::Artifact { .. } => 5,
+        NeededContextSelector::Fact { .. } => 6,
+        NeededContextSelector::Symbol { .. } => 7,
+        NeededContextSelector::Unknown { .. } => 8,
     }
 }
 
@@ -71,6 +81,8 @@ fn selector_estimated_tokens(selector: &NeededContextSelector) -> u64 {
     match selector {
         NeededContextSelector::TestFailure { .. } => 160,
         NeededContextSelector::ChangeRef { .. } => 140,
+        NeededContextSelector::ReviewRef { .. } => 120,
+        NeededContextSelector::ArtifactRef { .. } => 140,
         NeededContextSelector::FileSnippet { .. } => 180,
         NeededContextSelector::Artifact { .. } => 180,
         NeededContextSelector::Fact { .. } => 120,

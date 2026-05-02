@@ -30,7 +30,10 @@ use crate::history::session::SessionHistory;
 use crate::interaction::dispatcher::NotificationDispatcher;
 use crate::task::manager::TaskManager;
 use crate::task::types::{TaskEvent, TaskStatus, TaskUsageSummary};
-use crate::tool::definition::{Tool, ToolCall};
+use crate::tool::definition::{ObservableInput, ObservableInputSource, Tool, ToolCall};
+use crate::tool::result::{
+    ToolBatchContext, ToolExecutionOutcomeKind, ToolExecutionRecord, ToolReportModifier,
+};
 use serde_json::json;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -359,6 +362,98 @@ fn sync_step_tool_execution_records(
     step.tool_execution_records = tasks
         .map(|manager| manager.tool_execution_records(task_id))
         .unwrap_or_default();
+}
+
+fn append_step_runtime_record(step: &mut BossPlanStep, record: ToolExecutionRecord) {
+    let duplicate = step.tool_execution_records.iter().any(|existing| {
+        existing.tool_name == record.tool_name
+            && existing.kind == record.kind
+            && existing.summary == record.summary
+            && existing.detail == record.detail
+            && existing.observable_input == record.observable_input
+    });
+    if !duplicate {
+        step.tool_execution_records.push(record);
+    }
+}
+
+fn observable_input_json(value: serde_json::Value) -> ObservableInput {
+    ObservableInput {
+        value: value.to_string(),
+        source: ObservableInputSource::Raw,
+    }
+}
+
+fn append_review_runtime_record(
+    step: &mut BossPlanStep,
+    verdict: &str,
+    summary: &str,
+    correction: Option<&str>,
+) {
+    append_step_runtime_record(
+        step,
+        ToolExecutionRecord {
+            tool_name: "BossReview".into(),
+            outcome: "Text".into(),
+            kind: ToolExecutionOutcomeKind::Success,
+            summary: format!("Boss review verdict: {verdict}"),
+            detail: Some(summary.to_string()),
+            pending_approval: None,
+            report_modifier: ToolReportModifier::None,
+            observable_input: Some(observable_input_json(json!({
+                "step_id": step.id,
+                "verdict": verdict,
+                "correction": correction,
+            }))),
+            batch_context: ToolBatchContext {
+                batch_index: 0,
+                batch_size: 1,
+                executed_in_batch: false,
+            },
+        },
+    );
+}
+
+fn append_artifact_verification_runtime_records(
+    step: &mut BossPlanStep,
+    status: &str,
+    summary_prefix: &str,
+) {
+    for expectation in extract_artifact_expectations(step.objective()) {
+        let path = expectation.path.to_string_lossy().to_string();
+        let kind = match expectation.kind {
+            crate::core::boss_acceptance::BossArtifactKind::File => "file",
+            crate::core::boss_acceptance::BossArtifactKind::Directory => "directory",
+        };
+        let summary = format!("{summary_prefix}: {path}");
+        append_step_runtime_record(
+            step,
+            ToolExecutionRecord {
+                tool_name: "ArtifactVerify".into(),
+                outcome: "Text".into(),
+                kind: if status == "missing_or_invalid" {
+                    ToolExecutionOutcomeKind::Interrupted
+                } else {
+                    ToolExecutionOutcomeKind::Success
+                },
+                summary,
+                detail: Some(format!("artifact verification status={status} path={path}")),
+                pending_approval: None,
+                report_modifier: ToolReportModifier::None,
+                observable_input: Some(observable_input_json(json!({
+                    "step_id": step.id,
+                    "path": path,
+                    "kind": kind,
+                    "status": status,
+                }))),
+                batch_context: ToolBatchContext {
+                    batch_index: 0,
+                    batch_size: 1,
+                    executed_in_batch: false,
+                },
+            },
+        );
+    }
 }
 
 fn build_step_review_summary(
@@ -1909,6 +2004,12 @@ impl BossCoordinator {
                     step.status = BossPlanStepStatus::Failed;
                     step.worker_task_id = Some(event.task_id.clone());
                     step.last_review_summary = Some(reason.clone());
+                    sync_step_tool_execution_records(step, tasks.as_deref(), &event.task_id);
+                    append_artifact_verification_runtime_records(
+                        step,
+                        "missing_or_invalid",
+                        &reason,
+                    );
                     tracing::warn!(
                         "BossPlan: Step {} failed artifact verification: {}",
                         step_id,
@@ -1951,6 +2052,14 @@ impl BossCoordinator {
                 sync_step_tool_execution_records(step, tasks.as_deref(), &event.task_id);
                 store_step_result_diff(step, &event.result, Some(&event.summary));
                 step.last_review_summary = step_artifact_verification_error(step)
+                    .map(|reason| {
+                        append_artifact_verification_runtime_records(
+                            step,
+                            "missing_or_invalid",
+                            &reason,
+                        );
+                        reason
+                    })
                     .or_else(|| Some(event.result.clone()).filter(|text| !text.trim().is_empty()))
                     .or_else(|| Some(event.summary.clone()).filter(|text| !text.trim().is_empty()));
                 tracing::warn!("BossPlan: Step {} marked as failed", step_id);
@@ -2081,12 +2190,24 @@ impl BossCoordinator {
             match decision {
                 crate::core::boss_actor_runtime::ReviewDecision::Accept { summary } => {
                     if let Some(reason) = step_artifact_verification_error(step) {
+                        append_review_runtime_record(step, "accepted", summary, None);
+                        append_artifact_verification_runtime_records(
+                            step,
+                            "missing_or_invalid",
+                            &reason,
+                        );
                         step.last_review_summary = Some(reason);
                         step.completed = false;
                         step.status = BossPlanStepStatus::Failed;
                         step.last_correction = None;
                         false
                     } else {
+                        append_review_runtime_record(step, "accepted", summary, None);
+                        append_artifact_verification_runtime_records(
+                            step,
+                            "verified",
+                            "artifact verification passed",
+                        );
                         step.last_review_summary = Some(summary.clone());
                         step.completed = true;
                         step.status = BossPlanStepStatus::Completed;
@@ -2098,6 +2219,7 @@ impl BossCoordinator {
                     summary,
                     correction,
                 } => {
+                    append_review_runtime_record(step, "rejected", summary, correction.as_deref());
                     step.last_review_summary = Some(summary.clone());
                     step.attempt_count += 1;
                     if step.attempt_count >= step.retry_budget {
@@ -2109,6 +2231,12 @@ impl BossCoordinator {
                     false
                 }
                 crate::core::boss_actor_runtime::ReviewDecision::ReplanStep { summary, reason } => {
+                    append_review_runtime_record(
+                        step,
+                        "replan_required",
+                        summary,
+                        Some(reason.as_str()),
+                    );
                     step.last_review_summary = Some(summary.clone());
                     step.status = BossPlanStepStatus::ReplanRequired;
                     step.last_correction = Some(format!("replan required: {reason}"));
@@ -2191,6 +2319,14 @@ impl BossCoordinator {
                     step.status = BossPlanStepStatus::Failed;
                     step.worker_task_id = notification.task_id.clone();
                     step.last_review_summary = Some(reason.clone());
+                    if let Some(task_id) = notification.task_id.as_deref() {
+                        sync_step_tool_execution_records(step, tasks.as_deref(), task_id);
+                    }
+                    append_artifact_verification_runtime_records(
+                        step,
+                        "missing_or_invalid",
+                        &reason,
+                    );
                     tracing::warn!(
                         "BossPlan: Step {} failed artifact verification via notification: {}",
                         step_id,
@@ -2259,6 +2395,14 @@ impl BossCoordinator {
                     Some(notification.body.as_str()),
                 );
                 step.last_review_summary = step_artifact_verification_error(step)
+                    .map(|reason| {
+                        append_artifact_verification_runtime_records(
+                            step,
+                            "missing_or_invalid",
+                            &reason,
+                        );
+                        reason
+                    })
                     .or_else(|| {
                         notification
                             .body

@@ -289,6 +289,13 @@ fn observable_bash_command(record: &ToolExecutionRecord) -> Option<String> {
         .map(str::to_string)
 }
 
+fn observable_string_field(record: &ToolExecutionRecord, key: &str) -> Option<String> {
+    let json = observable_input_json(record)?;
+    json.get(key)
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
+}
+
 fn push_review_record(ledger: &mut StepFactLedgers, record: ReviewRecord) {
     let duplicate = ledger.review_refs.iter().any(|existing| {
         existing.verdict == record.verdict
@@ -429,6 +436,52 @@ fn apply_runtime_tool_records(ledgers: &mut StepFactLedgers, step: &BossPlanStep
                     confidence_milli: 1000,
                 });
             }
+            "BossReview" => {
+                let verdict =
+                    observable_string_field(record, "verdict").unwrap_or_else(|| "reviewed".into());
+                let correction = observable_string_field(record, "correction");
+                push_review_record(
+                    ledgers,
+                    ReviewRecord {
+                        ref_id: format!("review:step{}:runtime:{idx}", step.id),
+                        verdict,
+                        summary: trim_excerpt(
+                            record.detail.as_deref().unwrap_or(record.summary.as_str()),
+                            180,
+                        ),
+                        correction,
+                        source: "tool:BossReview".into(),
+                        source_event_id: format!("tool-review:{}:{idx}", step.id),
+                        freshness: "after-runtime-review".into(),
+                        confidence_milli: 1000,
+                    },
+                );
+            }
+            "ArtifactVerify" => {
+                let Some(path) = observable_path(record) else {
+                    continue;
+                };
+                let status =
+                    observable_string_field(record, "status").unwrap_or_else(|| "verified".into());
+                let kind = observable_string_field(record, "kind").unwrap_or_else(|| "file".into());
+                push_artifact_record(
+                    ledgers,
+                    ArtifactRecord {
+                        ref_id: format!("artifact:step{}:runtime:{idx}", step.id),
+                        path,
+                        kind,
+                        status,
+                        summary: trim_excerpt(
+                            record.detail.as_deref().unwrap_or(record.summary.as_str()),
+                            180,
+                        ),
+                        source: "tool:ArtifactVerify".into(),
+                        source_event_id: format!("tool-artifact:{}:{idx}", step.id),
+                        freshness: "after-runtime-artifact-verify".into(),
+                        confidence_milli: 1000,
+                    },
+                );
+            }
             _ => {}
         }
     }
@@ -488,52 +541,59 @@ fn infer_review_verdict(step: &BossPlanStep, review: &str) -> &'static str {
 }
 
 fn build_review_ledgers(ledgers: &mut StepFactLedgers, step: &BossPlanStep) {
-    if let Some(review) = step
-        .last_review_summary
-        .as_deref()
-        .filter(|text| !text.trim().is_empty())
-    {
-        push_review_record(
-            ledgers,
-            ReviewRecord {
-                ref_id: format!("review:step{}:summary", step.id),
-                verdict: infer_review_verdict(step, review).into(),
-                summary: trim_excerpt(review, 180),
-                correction: step.last_correction.clone(),
-                source: "review_summary".into(),
-                source_event_id: format!("review-summary:{}", step.id),
-                freshness: "after-review".into(),
-                confidence_milli: 950,
-            },
-        );
+    if ledgers.review_refs.is_empty() {
+        if let Some(review) = step
+            .last_review_summary
+            .as_deref()
+            .filter(|text| !text.trim().is_empty())
+        {
+            push_review_record(
+                ledgers,
+                ReviewRecord {
+                    ref_id: format!("review:step{}:summary", step.id),
+                    verdict: infer_review_verdict(step, review).into(),
+                    summary: trim_excerpt(review, 180),
+                    correction: step.last_correction.clone(),
+                    source: "review_summary".into(),
+                    source_event_id: format!("review-summary:{}", step.id),
+                    freshness: "after-review".into(),
+                    confidence_milli: 950,
+                },
+            );
+        }
     }
 
-    if let Some(correction) = step
-        .last_correction
-        .as_deref()
-        .filter(|text| !text.trim().is_empty())
-    {
-        push_review_record(
-            ledgers,
-            ReviewRecord {
-                ref_id: format!("review:step{}:correction", step.id),
-                verdict: "rejected".into(),
-                summary: step
-                    .last_review_summary
-                    .as_deref()
-                    .map(|text| trim_excerpt(text, 180))
-                    .unwrap_or_else(|| "review requested a correction".into()),
-                correction: Some(trim_excerpt(correction, 180)),
-                source: "review_correction".into(),
-                source_event_id: format!("review-correction:{}", step.id),
-                freshness: "after-review".into(),
-                confidence_milli: 1000,
-            },
-        );
+    if ledgers.review_refs.is_empty() {
+        if let Some(correction) = step
+            .last_correction
+            .as_deref()
+            .filter(|text| !text.trim().is_empty())
+        {
+            push_review_record(
+                ledgers,
+                ReviewRecord {
+                    ref_id: format!("review:step{}:correction", step.id),
+                    verdict: "rejected".into(),
+                    summary: step
+                        .last_review_summary
+                        .as_deref()
+                        .map(|text| trim_excerpt(text, 180))
+                        .unwrap_or_else(|| "review requested a correction".into()),
+                    correction: Some(trim_excerpt(correction, 180)),
+                    source: "review_correction".into(),
+                    source_event_id: format!("review-correction:{}", step.id),
+                    freshness: "after-review".into(),
+                    confidence_milli: 1000,
+                },
+            );
+        }
     }
 }
 
 fn build_artifact_ledgers(ledgers: &mut StepFactLedgers, step: &BossPlanStep) {
+    if !ledgers.artifact_refs.is_empty() {
+        return;
+    }
     let verification_error = verify_artifact_expectations(step.objective()).err();
     for (idx, expectation) in extract_artifact_expectations(step.objective())
         .into_iter()
@@ -1010,5 +1070,85 @@ mod tests {
         }));
 
         let _ = std::fs::remove_file(artifact_path);
+    }
+
+    #[test]
+    fn build_step_fact_ledgers_prefers_runtime_review_and_artifact_records() {
+        let step = BossPlanStep {
+            id: 11,
+            description: "runtime review artifact".into(),
+            objective: Some("任务目标：\n- 目标文件：/tmp/runtime-artifact.txt".into()),
+            acceptance: vec!["artifact file exists and is non-empty".into()],
+            requires_approval: false,
+            status: BossPlanStepStatus::Completed,
+            completed: true,
+            result_diff: None,
+            worker_task_id: None,
+            attempt_count: 1,
+            retry_budget: 3,
+            last_review_summary: Some("fallback review summary".into()),
+            last_correction: None,
+            review_task_id: None,
+            tool_execution_records: vec![
+                ToolExecutionRecord {
+                    tool_name: "BossReview".into(),
+                    outcome: "Text".into(),
+                    kind: ToolExecutionOutcomeKind::Success,
+                    summary: "Boss review verdict: accepted".into(),
+                    detail: Some("LGTM from runtime review".into()),
+                    pending_approval: None,
+                    report_modifier: ToolReportModifier::None,
+                    observable_input: Some(ObservableInput {
+                        value: r#"{"step_id":11,"verdict":"accepted","correction":null}"#.into(),
+                        source: ObservableInputSource::Raw,
+                    }),
+                    batch_context: ToolBatchContext {
+                        batch_index: 0,
+                        batch_size: 1,
+                        executed_in_batch: false,
+                    },
+                },
+                ToolExecutionRecord {
+                    tool_name: "ArtifactVerify".into(),
+                    outcome: "Text".into(),
+                    kind: ToolExecutionOutcomeKind::Success,
+                    summary: "artifact verification passed: /tmp/runtime-artifact.txt".into(),
+                    detail: Some(
+                        "artifact verification status=verified path=/tmp/runtime-artifact.txt"
+                            .into(),
+                    ),
+                    pending_approval: None,
+                    report_modifier: ToolReportModifier::None,
+                    observable_input: Some(ObservableInput {
+                        value: r#"{"step_id":11,"path":"/tmp/runtime-artifact.txt","kind":"file","status":"verified"}"#.into(),
+                        source: ObservableInputSource::Raw,
+                    }),
+                    batch_context: ToolBatchContext {
+                        batch_index: 0,
+                        batch_size: 1,
+                        executed_in_batch: false,
+                    },
+                },
+            ],
+        };
+
+        let ledgers = build_step_fact_ledgers(&step);
+        assert!(ledgers.review_refs.iter().any(|item| {
+            item.source == "tool:BossReview"
+                && item.verdict == "accepted"
+                && item.summary.contains("runtime review")
+        }));
+        assert!(ledgers.artifact_refs.iter().any(|item| {
+            item.source == "tool:ArtifactVerify"
+                && item.path == "/tmp/runtime-artifact.txt"
+                && item.status == "verified"
+        }));
+        assert!(
+            ledgers
+                .review_refs
+                .iter()
+                .all(|item| item.source != "review_summary"),
+            "runtime review records should suppress fallback inferred review entries"
+        );
     }
 }
