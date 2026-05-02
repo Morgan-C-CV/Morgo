@@ -2851,10 +2851,14 @@ impl BossCoordinator {
                                 load_model_profiles_registry_from_root(&root).ok().flatten()
                             });
                             let tool_runtime = match &app_state.runtime_tool_registry {
-                                Some(registry) => Some(StateFrameToolRuntime {
-                                    registry: registry.read().await.clone(),
-                                    permissions: app_state.permission_context.clone(),
-                                }),
+                                Some(registry) => {
+                                    let mut permissions = app_state.permission_context.clone();
+                                    permissions = permissions.with_interactive_tools(true);
+                                    Some(StateFrameToolRuntime {
+                                        registry: registry.read().await.clone(),
+                                        permissions,
+                                    })
+                                }
                                 None => None,
                             };
                             let runtime = StepRuntimeResolutionContext {

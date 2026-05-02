@@ -228,6 +228,40 @@ fn initialized_tool_names(
         .collect()
 }
 
+fn initialized_runtime_tool_names(
+    surface: InteractionSurface,
+    session_mode: SessionMode,
+    init_only: bool,
+) -> Vec<String> {
+    let runtime = runtime_for_surface(
+        match surface {
+            InteractionSurface::Cli => "cli",
+            InteractionSurface::Remote => "remote",
+            InteractionSurface::Telegram => "telegram",
+        },
+        matches!(session_mode, SessionMode::Interactive),
+        init_only,
+    );
+    let mut state = BootstrapState::new(surface, session_mode, false);
+    state.current_cwd = std::env::current_dir().expect("cwd available");
+    let bundle = runtime
+        .initialize_runtime(
+            &state,
+            format!("runtime-session-{surface:?}-{session_mode:?}"),
+            Arc::new(rust_agent::task::manager::TaskManager::default()),
+            Arc::new(rust_agent::task::list_manager::TaskListManager::default()),
+            Arc::new(rust_agent::plan::manager::PlanManager::default()),
+        )
+        .expect("runtime should initialize");
+    bundle
+        .runtime_tool_registry
+        .blocking_read()
+        .all_metadata()
+        .iter()
+        .map(|tool| tool.name.to_string())
+        .collect()
+}
+
 fn unique_temp_path(prefix: &str) -> std::path::PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -2168,6 +2202,22 @@ fn initialize_runtime_matrix_locks_surface_mode_env_flag_visibility() {
     assert!(!cli_init_only.contains(&"WebSearch"));
     assert!(!cli_init_only.contains(&"WebFetch"));
     assert!(!cli_init_only.contains(&"Mcp"));
+}
+
+#[test]
+fn cli_headless_runtime_tool_registry_exposes_bash_for_worker_runtime() {
+    let runtime_tools =
+        initialized_runtime_tool_names(InteractionSurface::Cli, SessionMode::Headless, false);
+    assert!(
+        runtime_tools.iter().any(|name| name == "Bash"),
+        "worker runtime registry should include Bash in cli headless mode, got {:?}",
+        runtime_tools
+    );
+    assert!(
+        !runtime_tools.iter().any(|name| name == "AskUserQuestion"),
+        "worker runtime registry should stay non-interactive beyond Bash, got {:?}",
+        runtime_tools
+    );
 }
 
 #[test]

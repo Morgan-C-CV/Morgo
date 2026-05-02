@@ -203,6 +203,11 @@ impl ToolRegistry {
                             return context.is_boss_executor_b()
                                 && is_tool_allowed(&metadata, &permissions);
                         }
+                        if metadata.name == "Bash" {
+                            // Production worker execution needs Bash in headless LisM mode, but
+                            // actual invocation remains gated later by permission/workspace policy.
+                            return context.include_open_world_tools;
+                        }
                         is_tool_allowed(&metadata, &permissions)
                     }
                 }
