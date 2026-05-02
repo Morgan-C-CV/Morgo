@@ -390,14 +390,27 @@ fn format_hydrated_line(
     item: &ParsedEvidenceFact,
     excerpt_chars: usize,
 ) -> String {
-    format!(
+    let selector = selector_key(selector);
+    let mut line = format!(
         "hydrated_context: {} source={} match_reason={} trace={} excerpt={}",
-        selector_key(selector),
+        selector,
         source,
         match_reason,
         trace_string(item),
         compact_excerpt(&item.raw, excerpt_chars)
-    )
+    );
+    if selector.ends_with(":exists_confirmation") && item.fact_name == "artifact_status" {
+        line.push_str(" selector_note=existence_confirmation_not_readable_path");
+        if item.field("kind") == Some("directory")
+            && matches!(
+                item.field("status"),
+                Some("expected") | Some("missing_or_invalid") | Some("touched")
+            )
+        {
+            line.push_str(" action_hint=create_directory_then_write_files");
+        }
+    }
+    line
 }
 
 fn format_stale_line(
@@ -1041,11 +1054,14 @@ mod tests {
     #[test]
     fn hydrate_needed_context_resolves_artifact_exists_confirmation_requests() {
         let mut frame = make_frame();
+        frame.recent_evidence.push(
+            "fact: artifact_status ref=artifact:step1:target path=/tmp/demo-site kind=directory status=missing_or_invalid source=artifact_expectation source_event_id=artifact-expectation:1:0 freshness=current confidence=1.00 lineage_status=active invalidated_by=none supersedes=none conflicts_with=none summary=target directory missing".into(),
+        );
         let summary = hydrate_needed_context(
             &mut frame,
             &[
                 "artifact:/tmp/report.md:exists_confirmation".into(),
-                "artifact_ref:/tmp/report.md:exists_confirmation".into(),
+                "artifact_ref:/tmp/demo-site:exists_confirmation".into(),
             ],
         );
 
@@ -1056,10 +1072,12 @@ mod tests {
             item.contains("hydrated_context: artifact:/tmp/report.md:exists_confirmation")
                 && item.contains("source=artifact_ledger")
                 && item.contains("match_reason=path")
+                && item.contains("selector_note=existence_confirmation_not_readable_path")
         }));
         assert!(frame.recent_evidence.iter().any(|item| {
-            item.contains("hydrated_context: artifact_ref:/tmp/report.md:exists_confirmation")
+            item.contains("hydrated_context: artifact_ref:/tmp/demo-site:exists_confirmation")
                 && item.contains("source=artifact_ledger")
+                && item.contains("action_hint=create_directory_then_write_files")
         }));
     }
 

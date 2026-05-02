@@ -172,6 +172,7 @@ Rules:\n\
 - If a prior `call_tool` failed, read the `tool_feedback:` / `recent_output_ref:` lines in `recent_evidence`, diagnose the reason, and choose the next action accordingly\n\
 - If `tool_feedback` says `category=schema_invalid`, rewrite the tool call using canonical argument names before retrying: `Bash.command`, `Read.file_path`, `Edit.file_path/old_string/new_string`\n\
 - If `tool_feedback` says `category=missing_path`, do not repeat the same failing `Read`; first inspect `parent_path` or create the missing directory/file scaffold, then continue\n\
+- If `hydrated_context` says `selector_note=existence_confirmation_not_readable_path`, do not call `Read` on that selector; if the artifact is a writable target directory, create the directory and write the required files\n\
 - You may retry a tool call when the failure looks transient or fixable, but do not blindly repeat the exact same failing action without changing args, path, command, or strategy\n\
 - If a `Read` says a target path does not exist yet, inspect the parent path or create the needed directory/file before retrying the same `Read`\n\
 - When using `needed_context`, prefer typed selectors like `file_snippet:path`, `test_failure`, `change_ref:path`, `review_ref:ref_id`, `artifact_ref:ref_id`, `open_item_ref:ref_id`, `blocker_ref:ref_id`, `rejected_approach:ref_id`, `artifact:path`, or `fact:name`\n\
@@ -694,6 +695,20 @@ async fn execute_call_tool(
     tool_runtime: Option<&StateFrameToolRuntime>,
     dispatch_seq: &mut usize,
 ) -> Result<(bool, ToolExecutionRecord, usize), CallToolDispatchError> {
+    if let Some(path) = parse_read_path(decision) {
+        if path.trim().ends_with(":exists_confirmation") {
+            return Err(CallToolDispatchError {
+                reason: "invalid input: artifact exists_confirmation selector is not a filesystem path; use typed artifact context, then create the writable target directory or write the required artifact files".into(),
+                record: build_execution_record(
+                    "Read",
+                    &ToolResult::Interrupted(
+                        "artifact exists_confirmation selector is not a filesystem path".into(),
+                    ),
+                    None,
+                ),
+            });
+        }
+    }
     let tool_runtime = tool_runtime.ok_or_else(|| CallToolDispatchError {
         reason: "call_tool requested but StateFrame tool runtime is unavailable".to_string(),
         record: build_execution_record(
@@ -851,6 +866,14 @@ fn observable_path_from_input(input: Option<&ObservableInput>) -> Option<String>
         .map(str::to_string)
 }
 
+fn has_create_permission_for_path(frame: &StateFrame, path: &str) -> bool {
+    let marker = format!("fact: permission_to_create_and_write:{path} ");
+    frame
+        .recent_evidence
+        .iter()
+        .any(|line| line.starts_with(&marker))
+}
+
 fn outcome_kind_label(kind: &crate::tool::result::ToolExecutionOutcomeKind) -> &'static str {
     match kind {
         crate::tool::result::ToolExecutionOutcomeKind::Success => "success",
@@ -908,6 +931,9 @@ fn push_tool_failure_feedback(
                 if !parent.trim().is_empty() {
                     feedback_tail.push_str(&format!(" parent_path={parent}"));
                 }
+            }
+            if has_create_permission_for_path(frame, &path) {
+                feedback_tail.push_str(" recovery_hint=create_directory_then_write_files");
             }
         }
     }
@@ -1297,8 +1323,8 @@ pub async fn run_decision_loop_with_tools(
 mod tests {
     use super::{
         DecisionLoopConfig, LoopOutcome, StateFrameToolRuntime, execute_call_tool,
-        parse_and_validate_decision, run_decision_loop, run_decision_loop_with_tools,
-        tool_backed_hydration_path,
+        parse_and_validate_decision, push_tool_failure_feedback, run_decision_loop,
+        run_decision_loop_with_tools, tool_backed_hydration_path,
     };
     use crate::core::state_frame::validate_state_decision;
     use crate::core::state_frame::{ActorRole, AgentState, StateBudget, StateFrame};
@@ -1309,6 +1335,8 @@ mod tests {
     use crate::tool::builtin::bash::BashTool;
     use crate::tool::builtin::file_edit::FileEditTool;
     use crate::tool::builtin::file_read::FileReadTool;
+    use crate::tool::definition::ToolResult;
+    use crate::tool::orchestrator::build_execution_record;
     use crate::tool::registry::ToolRegistry;
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -1499,6 +1527,42 @@ mod tests {
             tool_backed_hydration_path(&["artifact:/tmp/demo-site".into()]),
             Some("/tmp/demo-site".into())
         );
+    }
+
+    #[test]
+    fn call_tool_read_exists_confirmation_selector_returns_recovery_feedback() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let read_json = r#"{"state":"executing","decision":"call_tool","next_action":{"action_type":"Read","args":{"file_path":"/tmp/demo-site:exists_confirmation"}}}"#;
+        let done_json = r#"{"state":"done","decision":"done"}"#;
+        let client = ModelProviderClient::with_scripted_turns(vec![
+            vec![StreamEvent::TextDelta(read_json.into())],
+            vec![StreamEvent::TextDelta(done_json.into())],
+        ]);
+        let tool_runtime = StateFrameToolRuntime {
+            registry: ToolRegistry::new().register(Arc::new(FileReadTool)),
+            permissions: ToolPermissionContext::new(PermissionMode::Default),
+        };
+
+        let outcome = rt
+            .block_on(run_decision_loop_with_tools(
+                &client,
+                make_frame(),
+                DecisionLoopConfig::default(),
+                Some(tool_runtime),
+            ))
+            .expect("loop should not error");
+
+        match outcome {
+            LoopOutcome::Done { usage, .. } => {
+                assert_eq!(usage.tool_dispatch_count, 1);
+                assert_eq!(usage.tool_dispatch_failure_count, 1);
+                assert_eq!(
+                    usage.tool_dispatch_failure_taxonomy.get("schema_invalid"),
+                    Some(&1)
+                );
+            }
+            other => panic!("expected Done after recovery feedback, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1820,6 +1884,40 @@ mod tests {
             }
             other => panic!("expected Done after read failure feedback, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn missing_path_feedback_carries_directory_recovery_hint_when_permission_exists() {
+        let target_dir = unique_temp_dir("missing_path_recovery_hint");
+        let read_json = format!(
+            r#"{{"state":"executing","decision":"call_tool","next_action":{{"action_type":"Read","args":{{"file_path":"{}"}}}}}}"#,
+            target_dir.display()
+        );
+        let decision = validate_state_decision(&read_json).expect("decision should parse");
+        let mut frame = make_frame();
+        frame.recent_evidence.push(format!(
+            "fact: permission_to_create_and_write:{} ref=permission:step0:0 source=permission_scope source_event_id=permission-scope:0:0 freshness=current confidence=1.00 status=active invalidated_by=none supersedes=none conflicts_with=none summary=worker may create and write the declared target artifact path {}",
+            target_dir.display(),
+            target_dir.display()
+        ));
+        let record = build_execution_record(
+            "Read",
+            &ToolResult::Interrupted("No such file or directory (os error 2)".into()),
+            None,
+        );
+        let (changed, _) = push_tool_failure_feedback(
+            &mut frame,
+            &decision,
+            &record,
+            1,
+            "tool dispatch failed: No such file or directory (os error 2)",
+        );
+        assert!(changed);
+        assert!(frame.recent_evidence.iter().any(|line| {
+            line.contains("tool_feedback:")
+                && line.contains("recovery_hint=create_directory_then_write_files")
+        }));
+        let _ = std::fs::remove_dir_all(&target_dir);
     }
 
     #[test]
