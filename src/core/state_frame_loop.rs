@@ -1053,10 +1053,15 @@ fn classify_tool_outcome(
             Some("request_approval_or_adjust_permission_scope".into());
         return outcome;
     }
+    if lowered.contains("old_string not found") {
+        outcome.kind = ToolOutcomeKind::UserError;
+        outcome.recoverable = true;
+        outcome.recommended_next_action = Some("read_before_edit".into());
+        return outcome;
+    }
     if lowered.contains("no such file or directory")
         || lowered.contains("failed to read")
         || lowered.contains("failed to access")
-        || lowered.contains("old_string not found")
     {
         outcome.kind = ToolOutcomeKind::MissingPath;
         if let Some(path) = path.as_deref() {
@@ -1466,6 +1471,7 @@ pub async fn run_decision_loop_with_tools(
                                 total_usage.tool_dispatch_ref_write_count += ref_write_count;
                                 total_usage.last_effective_tool_action =
                                     Some(record.tool_name.clone());
+                                total_usage.last_failure_outcome = None;
                                 total_usage.tool_execution_records.push(record);
                                 if changed {
                                     summary = hydrate_needed_context(
@@ -1550,6 +1556,7 @@ pub async fn run_decision_loop_with_tools(
                         total_usage.tool_dispatch_success_count += 1;
                         total_usage.tool_dispatch_ref_write_count += ref_write_count;
                         total_usage.last_effective_tool_action = Some(record.tool_name.clone());
+                        total_usage.last_failure_outcome = None;
                         total_usage.tool_execution_records.push(record);
                         if !changed {
                             return Ok(LoopOutcome::NoProgress {
@@ -2323,6 +2330,40 @@ mod tests {
         assert_eq!(
             outcome.recommended_next_action.as_deref(),
             Some("use_canonical_args:Edit.file_path/old_string/new_string")
+        );
+    }
+
+    #[test]
+    fn tool_outcome_old_string_not_found_requires_read_before_edit() {
+        let mut frame = make_frame();
+        let path = std::env::temp_dir().join("p1_edit_drift.rs");
+        frame.recent_evidence.push(format!(
+            "fact: permission_to_create_and_write:{} ref=permission:step0:0 source=permission_scope source_event_id=permission-scope:0:0 freshness=current confidence=1.00 status=active invalidated_by=none supersedes=none conflicts_with=none summary=worker may create and write the declared target artifact path {}",
+            path.display(),
+            path.display()
+        ));
+        let decision = validate_state_decision(&format!(
+            r#"{{"state":"executing","decision":"call_tool","next_action":{{"action_type":"Edit","args":{{"file_path":"{}","old_string":"alpha","new_string":"omega"}}}}}}"#,
+            path.display()
+        ))
+        .expect("decision");
+        let record = build_execution_record(
+            "Edit",
+            &ToolResult::Interrupted("old_string not found".into()),
+            None,
+        );
+        let outcome = classify_tool_outcome(
+            &frame,
+            &decision,
+            &record,
+            "old_string not found in target file",
+            1,
+        );
+        assert_eq!(outcome.kind.as_str(), "user_error");
+        assert!(outcome.recoverable);
+        assert_eq!(
+            outcome.recommended_next_action.as_deref(),
+            Some("read_before_edit")
         );
     }
 

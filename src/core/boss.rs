@@ -1836,6 +1836,13 @@ impl BossCoordinator {
             routed_metadata.last_failure_evidence_ref = outcome.evidence_ref.clone();
             routed_metadata.last_failure_bounded_excerpt = outcome.bounded_excerpt.clone();
             routed_metadata.last_failure_truncated = Some(outcome.truncated);
+        } else {
+            routed_metadata.last_failure_kind = None;
+            routed_metadata.last_failure_recoverable = None;
+            routed_metadata.last_recommended_repair = None;
+            routed_metadata.last_failure_evidence_ref = None;
+            routed_metadata.last_failure_bounded_excerpt = None;
+            routed_metadata.last_failure_truncated = None;
         }
     }
 
@@ -4540,6 +4547,38 @@ mod tests {
             routed_metadata.last_failure_evidence_ref.as_deref(),
             Some("tool_feedback:3")
         );
+    }
+
+    #[test]
+    fn boss_metadata_clears_stale_failure_after_later_success() {
+        let mut routed_metadata = BossStepRoutedMetadata {
+            last_effective_tool_action: Some("Edit".into()),
+            last_failure_kind: Some("missing_path".into()),
+            last_failure_recoverable: Some(true),
+            last_recommended_repair: Some("create_file".into()),
+            last_failure_evidence_ref: Some("tool_feedback:7".into()),
+            last_failure_bounded_excerpt: Some("stale failure".into()),
+            last_failure_truncated: Some(false),
+            ..BossStepRoutedMetadata::default()
+        };
+        let usage = LoopUsage {
+            last_effective_tool_action: Some("Read".into()),
+            last_failure_outcome: None,
+            ..LoopUsage::default()
+        };
+
+        BossCoordinator::apply_loop_usage_to_routed_metadata(&mut routed_metadata, &usage);
+
+        assert_eq!(
+            routed_metadata.last_effective_tool_action.as_deref(),
+            Some("Read")
+        );
+        assert_eq!(routed_metadata.last_failure_kind, None);
+        assert_eq!(routed_metadata.last_failure_recoverable, None);
+        assert_eq!(routed_metadata.last_recommended_repair, None);
+        assert_eq!(routed_metadata.last_failure_evidence_ref, None);
+        assert_eq!(routed_metadata.last_failure_bounded_excerpt, None);
+        assert_eq!(routed_metadata.last_failure_truncated, None);
     }
 
     #[tokio::test]
