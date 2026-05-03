@@ -248,6 +248,20 @@ pub struct BossStepRoutedMetadata {
     pub tool_contract_mismatch_count: Option<usize>,
     #[serde(default)]
     pub tool_contract_mismatch: Option<ToolContractMismatch>,
+    #[serde(default)]
+    pub last_effective_tool_action: Option<String>,
+    #[serde(default)]
+    pub last_failure_kind: Option<String>,
+    #[serde(default)]
+    pub last_failure_recoverable: Option<bool>,
+    #[serde(default)]
+    pub last_recommended_repair: Option<String>,
+    #[serde(default)]
+    pub last_failure_evidence_ref: Option<String>,
+    #[serde(default)]
+    pub last_failure_bounded_excerpt: Option<String>,
+    #[serde(default)]
+    pub last_failure_truncated: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

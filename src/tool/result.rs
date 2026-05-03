@@ -3,6 +3,49 @@ use serde::{Deserialize, Serialize};
 use crate::tool::definition::ObservableInput;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ToolOutcomeKind {
+    Success,
+    UserError,
+    RuntimeError,
+    PermissionDenied,
+    MissingPath,
+    SchemaInvalid,
+    Timeout,
+    ResultTooLarge,
+    ExternalBlocker,
+}
+
+impl ToolOutcomeKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::UserError => "user_error",
+            Self::RuntimeError => "runtime_error",
+            Self::PermissionDenied => "permission_denied",
+            Self::MissingPath => "missing_path",
+            Self::SchemaInvalid => "schema_invalid",
+            Self::Timeout => "timeout",
+            Self::ResultTooLarge => "result_too_large",
+            Self::ExternalBlocker => "external_blocker",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ToolOutcome {
+    pub kind: ToolOutcomeKind,
+    pub recoverable: bool,
+    #[serde(default)]
+    pub recommended_next_action: Option<String>,
+    #[serde(default)]
+    pub evidence_ref: Option<String>,
+    #[serde(default)]
+    pub bounded_excerpt: Option<String>,
+    #[serde(default)]
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PendingApprovalPayload {
     pub code: Option<String>,
     pub summary: String,

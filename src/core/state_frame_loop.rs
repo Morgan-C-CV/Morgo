@@ -15,7 +15,7 @@ use crate::tool::definition::ObservableInput;
 use crate::tool::definition::{ToolCall, ToolResult};
 use crate::tool::orchestrator::build_execution_record;
 use crate::tool::registry::ToolRegistry;
-use crate::tool::result::ToolExecutionRecord;
+use crate::tool::result::{ToolExecutionRecord, ToolOutcome, ToolOutcomeKind};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
@@ -62,6 +62,8 @@ pub struct LoopUsage {
     pub tool_dispatch_ref_write_count: usize,
     pub tool_dispatch_failure_taxonomy: BTreeMap<String, usize>,
     pub tool_execution_records: Vec<ToolExecutionRecord>,
+    pub last_effective_tool_action: Option<String>,
+    pub last_failure_outcome: Option<ToolOutcome>,
 }
 
 #[derive(Debug, Clone)]
@@ -107,6 +109,7 @@ pub enum LoopOutcome {
 struct CallToolDispatchError {
     reason: String,
     record: ToolExecutionRecord,
+    outcome: ToolOutcome,
 }
 
 /// Collect text and token usage from a stream of events.
@@ -174,6 +177,7 @@ Rules:\n\
 - In the current runtime, `call_tool` is expected to use real worker tools. Prefer narrow `Read` calls with exact `file_path`, use `Bash` only for concrete commands, and use `Edit` with exact `file_path` / `old_string` / `new_string`\n\
 - Never call `Edit` unless you already know the exact replacement span. If `old_string` is missing, empty, or uncertain, first `Read` the target file and then issue `Edit` with the exact `old_string`\n\
 - If a prior `call_tool` failed, read the `tool_feedback:` / `recent_output_ref:` lines in `recent_evidence`, diagnose the reason, and choose the next action accordingly\n\
+- Prefer `tool_outcome:` lines for typed recovery hints such as recoverable, recommended_next_action, and evidence_ref\n\
 - If `tool_feedback` says `category=schema_invalid`, rewrite the tool call using canonical argument names before retrying: `Bash.command`, `Read.file_path`, `Edit.file_path/old_string/new_string`\n\
 - If `tool_feedback` says `category=missing_path`, do not repeat the same failing `Read`; first inspect `parent_path` or create the missing directory/file scaffold, then continue\n\
 - If `hydrated_context` says `selector_note=existence_confirmation_not_readable_path`, do not call `Read` on that selector; if the artifact is a writable target directory, create the directory and write the required files\n\
@@ -701,15 +705,23 @@ async fn execute_call_tool(
 ) -> Result<(bool, ToolExecutionRecord, usize), CallToolDispatchError> {
     if let Some(path) = parse_read_path(decision) {
         if path.trim().ends_with(":exists_confirmation") {
+            let record = build_execution_record(
+                "Read",
+                &ToolResult::Interrupted(
+                    "artifact exists_confirmation selector is not a filesystem path".into(),
+                ),
+                None,
+            );
             return Err(CallToolDispatchError {
                 reason: "invalid input: artifact exists_confirmation selector is not a filesystem path; use typed artifact context, then create the writable target directory or write the required artifact files".into(),
-                record: build_execution_record(
-                    "Read",
-                    &ToolResult::Interrupted(
-                        "artifact exists_confirmation selector is not a filesystem path".into(),
-                    ),
-                    None,
+                outcome: classify_tool_outcome(
+                    frame,
+                    decision,
+                    &record,
+                    "invalid input: artifact exists_confirmation selector is not a filesystem path",
+                    dispatch_seq.saturating_add(1),
                 ),
+                record,
             });
         }
     }
@@ -726,6 +738,23 @@ async fn execute_call_tool(
             ),
             None,
         ),
+        outcome: classify_tool_outcome(
+            frame,
+            decision,
+            &build_execution_record(
+                decision
+                    .next_action
+                    .as_ref()
+                    .map(|action| action.action_type.clone())
+                    .unwrap_or_else(|| "unknown".into()),
+                &ToolResult::Interrupted(
+                    "call_tool requested but StateFrame tool runtime is unavailable".into(),
+                ),
+                None,
+            ),
+            "call_tool requested but StateFrame tool runtime is unavailable",
+            dispatch_seq.saturating_add(1),
+        ),
     })?;
     let next_action = decision
         .next_action
@@ -736,6 +765,17 @@ async fn execute_call_tool(
                 "unknown",
                 &ToolResult::Interrupted("call_tool requested without next_action".into()),
                 None,
+            ),
+            outcome: classify_tool_outcome(
+                frame,
+                decision,
+                &build_execution_record(
+                    "unknown",
+                    &ToolResult::Interrupted("call_tool requested without next_action".into()),
+                    None,
+                ),
+                "call_tool requested without next_action",
+                dispatch_seq.saturating_add(1),
             ),
         })?;
     let canonical_args = canonicalize_next_action_args(decision);
@@ -748,6 +788,17 @@ async fn execute_call_tool(
                 next_action.action_type.clone(),
                 &ToolResult::Interrupted(format!("failed to serialize tool args: {error}")),
                 None,
+            ),
+            outcome: classify_tool_outcome(
+                frame,
+                decision,
+                &build_execution_record(
+                    next_action.action_type.clone(),
+                    &ToolResult::Interrupted(format!("failed to serialize tool args: {error}")),
+                    None,
+                ),
+                &format!("failed to serialize tool args: {error}"),
+                dispatch_seq.saturating_add(1),
             ),
         })?
     };
@@ -764,6 +815,17 @@ async fn execute_call_tool(
                 &ToolResult::Interrupted(format!("tool dispatch failed: {error}")),
                 observable_input.clone(),
             ),
+            outcome: classify_tool_outcome(
+                frame,
+                decision,
+                &build_execution_record(
+                    next_action.action_type.clone(),
+                    &ToolResult::Interrupted(format!("tool dispatch failed: {error}")),
+                    observable_input.clone(),
+                ),
+                &format!("tool dispatch failed: {error}"),
+                dispatch_seq.saturating_add(1),
+            ),
         })?;
     let record = build_execution_record(
         next_action.action_type.clone(),
@@ -776,6 +838,13 @@ async fn execute_call_tool(
         next_action.action_type.to_ascii_lowercase(),
         *dispatch_seq
     );
+    let tool_outcome = classify_tool_outcome(
+        frame,
+        decision,
+        &record,
+        record.summary.as_str(),
+        *dispatch_seq,
+    );
     match result {
         ToolResult::Text(text) => {
             let mut changed = false;
@@ -787,6 +856,16 @@ async fn execute_call_tool(
                     "recent_output_ref: ref=tool_output:{} tool={} source_event_id={} excerpt={}",
                     dispatch_seq, next_action.action_type, source_event_id, excerpt
                 ),
+            );
+            let mut success_outcome = tool_outcome.clone();
+            success_outcome.evidence_ref = Some(format!("tool_output:{dispatch_seq}"));
+            success_outcome.bounded_excerpt = Some(excerpt.clone());
+            changed |= push_tool_outcome_evidence(
+                frame,
+                &record,
+                &success_outcome,
+                *dispatch_seq,
+                &source_event_id,
             );
             let mut ledgers = StepFactLedgers::default();
             append_runtime_tool_record(&mut ledgers, &record, &format!("runtime:{}", dispatch_seq));
@@ -841,22 +920,42 @@ async fn execute_call_tool(
             }
             Ok((changed, record, ref_write_count))
         }
-        ToolResult::ResultTooLarge(message)
-        | ToolResult::Interrupted(message)
-        | ToolResult::Denied(message)
-        | ToolResult::Progress(message) => Err(CallToolDispatchError {
+        ToolResult::ResultTooLarge(ref message)
+        | ToolResult::Interrupted(ref message)
+        | ToolResult::Denied(ref message)
+        | ToolResult::Progress(ref message) => Err(CallToolDispatchError {
             reason: format!(
                 "call_tool {} did not produce usable text: {}",
                 next_action.action_type, message
             ),
-            record,
+            record: record.clone(),
+            outcome: classify_tool_outcome(
+                frame,
+                decision,
+                &record,
+                &format!(
+                    "call_tool {} did not produce usable text: {}",
+                    next_action.action_type, message
+                ),
+                *dispatch_seq,
+            ),
         }),
-        ToolResult::PendingApproval { message, .. } => Err(CallToolDispatchError {
+        ToolResult::PendingApproval { ref message, .. } => Err(CallToolDispatchError {
             reason: format!(
                 "call_tool {} requires approval: {}",
                 next_action.action_type, message
             ),
-            record,
+            record: record.clone(),
+            outcome: classify_tool_outcome(
+                frame,
+                decision,
+                &record,
+                &format!(
+                    "call_tool {} requires approval: {}",
+                    next_action.action_type, message
+                ),
+                *dispatch_seq,
+            ),
         }),
     }
 }
@@ -870,12 +969,177 @@ fn observable_path_from_input(input: Option<&ObservableInput>) -> Option<String>
         .map(str::to_string)
 }
 
+fn canonical_arg_shape(tool_name: &str) -> Option<&'static str> {
+    match tool_name {
+        "Read" => Some("Read.file_path"),
+        "Edit" => Some("Edit.file_path/old_string/new_string"),
+        "Write" => Some("Write.file_path/content"),
+        "Bash" => Some("Bash.command"),
+        _ => None,
+    }
+}
+
 fn has_create_permission_for_path(frame: &StateFrame, path: &str) -> bool {
     let marker = format!("fact: permission_to_create_and_write:{path} ");
     frame
         .recent_evidence
         .iter()
         .any(|line| line.starts_with(&marker))
+}
+
+fn outcome_excerpt(text: &str) -> String {
+    compact_tool_excerpt(text, 220)
+}
+
+fn classify_tool_outcome(
+    frame: &StateFrame,
+    decision: &crate::core::state_frame::StateDecision,
+    record: &ToolExecutionRecord,
+    reason: &str,
+    dispatch_seq: usize,
+) -> ToolOutcome {
+    let tool_name = record.tool_name.as_str();
+    let path = parse_read_path(decision)
+        .or_else(|| parse_edit_path(decision))
+        .or_else(|| observable_path_from_input(record.observable_input.as_ref()));
+    let excerpt = outcome_excerpt(
+        record
+            .detail
+            .as_deref()
+            .unwrap_or_else(|| record.summary.as_str()),
+    );
+    let mut outcome = ToolOutcome {
+        kind: ToolOutcomeKind::RuntimeError,
+        recoverable: false,
+        recommended_next_action: None,
+        evidence_ref: Some(format!("tool_feedback:{dispatch_seq}")),
+        bounded_excerpt: Some(excerpt),
+        truncated: matches!(
+            record.kind,
+            crate::tool::result::ToolExecutionOutcomeKind::ResultTooLarge
+        ),
+    };
+    let lowered = reason.to_ascii_lowercase();
+    if matches!(
+        record.kind,
+        crate::tool::result::ToolExecutionOutcomeKind::Success
+    ) {
+        outcome.kind = ToolOutcomeKind::Success;
+        outcome.recoverable = false;
+        outcome.evidence_ref = Some(format!("tool_output:{dispatch_seq}"));
+        return outcome;
+    }
+    if matches!(
+        record.kind,
+        crate::tool::result::ToolExecutionOutcomeKind::ResultTooLarge
+    ) {
+        outcome.kind = ToolOutcomeKind::ResultTooLarge;
+        outcome.recoverable = true;
+        outcome.recommended_next_action = Some(if tool_name == "Read" {
+            "use_narrower_read_or_local_script".into()
+        } else {
+            "inspect_bounded_excerpt_and_follow_evidence_ref".into()
+        });
+        return outcome;
+    }
+    if matches!(
+        record.kind,
+        crate::tool::result::ToolExecutionOutcomeKind::Denied
+            | crate::tool::result::ToolExecutionOutcomeKind::PendingApproval
+    ) {
+        outcome.kind = ToolOutcomeKind::PermissionDenied;
+        outcome.recoverable = false;
+        outcome.recommended_next_action =
+            Some("request_approval_or_adjust_permission_scope".into());
+        return outcome;
+    }
+    if lowered.contains("no such file or directory")
+        || lowered.contains("failed to read")
+        || lowered.contains("failed to access")
+        || lowered.contains("old_string not found")
+    {
+        outcome.kind = ToolOutcomeKind::MissingPath;
+        if let Some(path) = path.as_deref() {
+            if has_create_permission_for_path(frame, path) {
+                outcome.recoverable = true;
+                let recommended = if std::path::Path::new(path).extension().is_some() {
+                    "create_file"
+                } else {
+                    "create_directory"
+                };
+                outcome.recommended_next_action = Some(recommended.into());
+            } else {
+                outcome.recoverable = false;
+                outcome.recommended_next_action = Some("context_unavailable".into());
+            }
+        } else {
+            outcome.recommended_next_action = Some("context_unavailable".into());
+        }
+        return outcome;
+    }
+    if lowered.contains("invalid input")
+        || lowered.contains("requires json-structured input")
+        || lowered.contains("call_tool requested without next_action")
+        || lowered.contains("artifact exists_confirmation selector")
+    {
+        outcome.kind = ToolOutcomeKind::SchemaInvalid;
+        outcome.recoverable = true;
+        outcome.recommended_next_action =
+            canonical_arg_shape(tool_name).map(|shape| format!("use_canonical_args:{shape}"));
+        return outcome;
+    }
+    if lowered.contains("unknown tool") {
+        outcome.kind = ToolOutcomeKind::UserError;
+        outcome.recoverable = true;
+        outcome.recommended_next_action = Some("use_one_of_allowed_tools".into());
+        return outcome;
+    }
+    if lowered.contains("timeout") {
+        outcome.kind = ToolOutcomeKind::Timeout;
+        outcome.recoverable = true;
+        outcome.recommended_next_action = Some("retry_with_shorter_or_narrower_command".into());
+        return outcome;
+    }
+    if lowered.contains("requires approval") || lowered.contains("permission") {
+        outcome.kind = ToolOutcomeKind::PermissionDenied;
+        outcome.recoverable = false;
+        outcome.recommended_next_action =
+            Some("request_approval_or_adjust_permission_scope".into());
+        return outcome;
+    }
+    if lowered.contains("runtime is unavailable") {
+        outcome.kind = ToolOutcomeKind::ExternalBlocker;
+        outcome.recoverable = false;
+        outcome.recommended_next_action = Some("runtime_unavailable".into());
+        return outcome;
+    }
+    outcome
+}
+
+fn push_tool_outcome_evidence(
+    frame: &mut StateFrame,
+    record: &ToolExecutionRecord,
+    outcome: &ToolOutcome,
+    dispatch_seq: usize,
+    source_event_id: &str,
+) -> bool {
+    let recommended_next_action = outcome.recommended_next_action.as_deref().unwrap_or("none");
+    let evidence_ref = outcome.evidence_ref.as_deref().unwrap_or("none");
+    let bounded_excerpt = outcome.bounded_excerpt.as_deref().unwrap_or("none");
+    push_unique(
+        &mut frame.recent_evidence,
+        format!(
+            "tool_outcome: ref=tool_outcome:{dispatch_seq} tool={} kind={} recoverable={} recommended_next_action={} evidence_ref={} source_event_id={} truncated={} bounded_excerpt={}",
+            record.tool_name,
+            outcome.kind.as_str(),
+            outcome.recoverable,
+            recommended_next_action,
+            evidence_ref,
+            source_event_id,
+            outcome.truncated,
+            bounded_excerpt
+        ),
+    )
 }
 
 fn outcome_kind_label(kind: &crate::tool::result::ToolExecutionOutcomeKind) -> &'static str {
@@ -893,6 +1157,7 @@ fn push_tool_failure_feedback(
     frame: &mut StateFrame,
     decision: &crate::core::state_frame::StateDecision,
     record: &ToolExecutionRecord,
+    outcome: &ToolOutcome,
     dispatch_seq: usize,
     reason: &str,
 ) -> (bool, usize) {
@@ -922,6 +1187,7 @@ fn push_tool_failure_feedback(
             detail
         ),
     );
+    changed |= push_tool_outcome_evidence(frame, record, outcome, dispatch_seq, &source_event_id);
 
     let mut feedback_tail = String::new();
     if let Some(path) = parse_read_path(decision)
@@ -961,11 +1227,15 @@ fn push_tool_failure_feedback(
     changed |= push_unique(
         &mut frame.recent_evidence,
         format!(
-            "tool_feedback: ref=tool_feedback:{} tool={} outcome={} category={} source_event_id={}{} summary={}",
+            "tool_feedback: ref=tool_feedback:{} tool={} outcome={} category={} recoverable={} recommended_next_action={} evidence_ref={} truncated={} source_event_id={}{} summary={}",
             dispatch_seq,
             record.tool_name,
             outcome_kind_label(&record.kind),
             category,
+            outcome.recoverable,
+            outcome.recommended_next_action.as_deref().unwrap_or("none"),
+            outcome.evidence_ref.as_deref().unwrap_or("none"),
+            outcome.truncated,
             source_event_id,
             feedback_tail,
             detail
@@ -1194,6 +1464,8 @@ pub async fn run_decision_loop_with_tools(
                             Ok((changed, record, ref_write_count)) => {
                                 total_usage.tool_dispatch_success_count += 1;
                                 total_usage.tool_dispatch_ref_write_count += ref_write_count;
+                                total_usage.last_effective_tool_action =
+                                    Some(record.tool_name.clone());
                                 total_usage.tool_execution_records.push(record);
                                 if changed {
                                     summary = hydrate_needed_context(
@@ -1216,10 +1488,14 @@ pub async fn run_decision_loop_with_tools(
                                     &mut frame,
                                     &synthetic_read,
                                     &error.record,
+                                    &error.outcome,
                                     tool_dispatch_seq,
                                     &error.reason,
                                 );
                                 total_usage.tool_dispatch_ref_write_count += ref_write_count;
+                                total_usage.last_effective_tool_action =
+                                    Some(error.record.tool_name.clone());
+                                total_usage.last_failure_outcome = Some(error.outcome.clone());
                                 total_usage.tool_execution_records.push(error.record);
                                 if changed {
                                     summary = hydrate_needed_context(
@@ -1273,6 +1549,7 @@ pub async fn run_decision_loop_with_tools(
                     Ok((changed, record, ref_write_count)) => {
                         total_usage.tool_dispatch_success_count += 1;
                         total_usage.tool_dispatch_ref_write_count += ref_write_count;
+                        total_usage.last_effective_tool_action = Some(record.tool_name.clone());
                         total_usage.tool_execution_records.push(record);
                         if !changed {
                             return Ok(LoopOutcome::NoProgress {
@@ -1293,10 +1570,14 @@ pub async fn run_decision_loop_with_tools(
                             &mut frame,
                             &decision,
                             &error.record,
+                            &error.outcome,
                             tool_dispatch_seq,
                             &error.reason,
                         );
                         total_usage.tool_dispatch_ref_write_count += ref_write_count;
+                        total_usage.last_effective_tool_action =
+                            Some(error.record.tool_name.clone());
+                        total_usage.last_failure_outcome = Some(error.outcome.clone());
                         total_usage.tool_execution_records.push(error.record);
                         if !changed {
                             return Ok(LoopOutcome::NoProgress {
@@ -1326,9 +1607,10 @@ pub async fn run_decision_loop_with_tools(
 #[cfg(test)]
 mod tests {
     use super::{
-        DecisionLoopConfig, LoopOutcome, StateFrameToolRuntime, execute_call_tool,
-        parse_and_validate_decision, push_tool_failure_feedback, run_decision_loop,
-        run_decision_loop_with_tools, tool_backed_hydration_path,
+        DecisionLoopConfig, LoopOutcome, StateFrameToolRuntime, classify_tool_outcome,
+        execute_call_tool, parse_and_validate_decision, push_tool_failure_feedback,
+        push_tool_outcome_evidence, run_decision_loop, run_decision_loop_with_tools,
+        tool_backed_hydration_path,
     };
     use crate::core::state_frame::validate_state_decision;
     use crate::core::state_frame::{ActorRole, AgentState, StateBudget, StateFrame};
@@ -1342,6 +1624,7 @@ mod tests {
     use crate::tool::definition::ToolResult;
     use crate::tool::orchestrator::build_execution_record;
     use crate::tool::registry::ToolRegistry;
+    use crate::tool::result::{ToolOutcome, ToolOutcomeKind};
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1932,10 +2215,19 @@ mod tests {
             &ToolResult::Interrupted("No such file or directory (os error 2)".into()),
             None,
         );
+        let outcome = ToolOutcome {
+            kind: ToolOutcomeKind::MissingPath,
+            recoverable: true,
+            recommended_next_action: Some("create_directory".into()),
+            evidence_ref: Some("tool_feedback:1".into()),
+            bounded_excerpt: Some("No such file or directory (os error 2)".into()),
+            truncated: false,
+        };
         let (changed, _) = push_tool_failure_feedback(
             &mut frame,
             &decision,
             &record,
+            &outcome,
             1,
             "tool dispatch failed: No such file or directory (os error 2)",
         );
@@ -1945,6 +2237,121 @@ mod tests {
                 && line.contains("recovery_hint=create_directory_then_write_files")
         }));
         let _ = std::fs::remove_dir_all(&target_dir);
+    }
+
+    #[test]
+    fn tool_outcome_missing_path_on_writable_target_is_recoverable_create_hint() {
+        let mut frame = make_frame();
+        let path = std::env::temp_dir().join("p1_outcome_writable.md");
+        frame.recent_evidence.push(format!(
+            "fact: permission_to_create_and_write:{} ref=permission:step0:0 source=permission_scope source_event_id=permission-scope:0:0 freshness=current confidence=1.00 status=active invalidated_by=none supersedes=none conflicts_with=none summary=worker may create and write the declared target artifact path {}",
+            path.display(),
+            path.display()
+        ));
+        let decision = validate_state_decision(&format!(
+            r#"{{"state":"executing","decision":"call_tool","next_action":{{"action_type":"Read","args":{{"file_path":"{}"}}}}}}"#,
+            path.display()
+        ))
+        .expect("decision");
+        let record = build_execution_record(
+            "Read",
+            &ToolResult::Interrupted("failed to read missing path".into()),
+            None,
+        );
+        let outcome = classify_tool_outcome(
+            &frame,
+            &decision,
+            &record,
+            "failed to read /tmp/p1_outcome_writable.md: No such file or directory (os error 2)",
+            1,
+        );
+        assert_eq!(outcome.kind.as_str(), "missing_path");
+        assert!(outcome.recoverable);
+        assert_eq!(
+            outcome.recommended_next_action.as_deref(),
+            Some("create_file")
+        );
+    }
+
+    #[test]
+    fn tool_outcome_missing_path_on_readonly_evidence_is_context_unavailable() {
+        let frame = make_frame();
+        let decision = validate_state_decision(
+            r#"{"state":"executing","decision":"call_tool","next_action":{"action_type":"Read","args":{"file_path":"/tmp/p1_readonly.log"}}}"#,
+        )
+        .expect("decision");
+        let record = build_execution_record(
+            "Read",
+            &ToolResult::Interrupted("failed to read missing path".into()),
+            None,
+        );
+        let outcome = classify_tool_outcome(
+            &frame,
+            &decision,
+            &record,
+            "failed to read /tmp/p1_readonly.log: No such file or directory (os error 2)",
+            1,
+        );
+        assert_eq!(outcome.kind.as_str(), "missing_path");
+        assert!(!outcome.recoverable);
+        assert_eq!(
+            outcome.recommended_next_action.as_deref(),
+            Some("context_unavailable")
+        );
+    }
+
+    #[test]
+    fn tool_outcome_schema_invalid_returns_canonical_shape() {
+        let frame = make_frame();
+        let decision = validate_state_decision(
+            r#"{"state":"executing","decision":"call_tool","next_action":{"action_type":"Edit","args":{"file_path":"src/lib.rs","new_string":"patched"}}}"#,
+        )
+        .expect("decision");
+        let record = build_execution_record(
+            "Edit",
+            &ToolResult::Interrupted("invalid input for Edit: old_string cannot be empty".into()),
+            None,
+        );
+        let outcome = classify_tool_outcome(
+            &frame,
+            &decision,
+            &record,
+            "invalid input for Edit: old_string cannot be empty",
+            1,
+        );
+        assert_eq!(outcome.kind.as_str(), "schema_invalid");
+        assert_eq!(
+            outcome.recommended_next_action.as_deref(),
+            Some("use_canonical_args:Edit.file_path/old_string/new_string")
+        );
+    }
+
+    #[test]
+    fn tool_outcome_large_output_is_bounded_and_tracked_by_ref() {
+        let mut frame = make_frame();
+        let decision = validate_state_decision(
+            r#"{"state":"executing","decision":"call_tool","next_action":{"action_type":"Read","args":{"file_path":"/tmp/large.log"}}}"#,
+        )
+        .expect("decision");
+        let record =
+            build_execution_record("Read", &ToolResult::ResultTooLarge("x".repeat(1000)), None);
+        let outcome = classify_tool_outcome(&frame, &decision, &record, "too large", 1);
+        let changed = push_tool_outcome_evidence(&mut frame, &record, &outcome, 1, "tool-read:1");
+        assert!(changed);
+        assert_eq!(outcome.kind.as_str(), "result_too_large");
+        assert!(outcome.truncated);
+        assert!(
+            outcome
+                .evidence_ref
+                .as_deref()
+                .unwrap_or_default()
+                .contains("tool_feedback")
+        );
+        assert!(
+            frame.recent_evidence.iter().any(
+                |line| line.contains("tool_outcome:") && line.contains("kind=result_too_large")
+            )
+        );
     }
 
     #[test]

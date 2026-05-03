@@ -93,6 +93,10 @@ pub struct LisMAbSampleRecord {
     pub workspace_capabilities: Vec<String>,
     #[serde(default)]
     pub tool_contract_mismatch_count: usize,
+    #[serde(default)]
+    pub last_failure_kinds: Vec<String>,
+    #[serde(default)]
+    pub last_recommended_repairs: Vec<String>,
     pub pending_approval_count: usize,
     pub outcome: BossTestRunOutcome,
 }
@@ -723,6 +727,8 @@ fn build_ab_record(
     let mut config_roots = BTreeMap::new();
     let mut workspace_capabilities = BTreeMap::new();
     let mut tool_contract_mismatch_count = 0usize;
+    let mut last_failure_kinds = BTreeMap::new();
+    let mut last_recommended_repairs = BTreeMap::new();
     for step in &report.steps {
         let Some(meta) = step.routed_metadata.as_ref() else {
             continue;
@@ -752,6 +758,12 @@ fn build_ab_record(
             workspace_capabilities.insert(capability.clone(), ());
         }
         tool_contract_mismatch_count += meta.tool_contract_mismatch_count.unwrap_or(0);
+        if let Some(kind) = meta.last_failure_kind.as_ref() {
+            last_failure_kinds.insert(kind.clone(), ());
+        }
+        if let Some(repair) = meta.last_recommended_repair.as_ref() {
+            last_recommended_repairs.insert(repair.clone(), ());
+        }
     }
 
     LisMAbSampleRecord {
@@ -810,6 +822,8 @@ fn build_ab_record(
         config_roots: config_roots.into_keys().collect(),
         workspace_capabilities: workspace_capabilities.into_keys().collect(),
         tool_contract_mismatch_count,
+        last_failure_kinds: last_failure_kinds.into_keys().collect(),
+        last_recommended_repairs: last_recommended_repairs.into_keys().collect(),
         pending_approval_count,
         outcome,
     }

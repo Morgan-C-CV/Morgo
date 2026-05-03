@@ -1804,6 +1804,41 @@ impl BossCoordinator {
             || m.estimated_cost_micros_usd.unwrap_or(0) > 0
     }
 
+    fn apply_loop_usage_to_routed_metadata(
+        routed_metadata: &mut BossStepRoutedMetadata,
+        usage: &crate::core::state_frame_loop::LoopUsage,
+    ) {
+        routed_metadata.input_tokens = Some(usage.input_tokens);
+        routed_metadata.uncached_input_tokens = Some(usage.uncached_input_tokens);
+        routed_metadata.output_tokens = Some(usage.output_tokens);
+        routed_metadata.cache_read_tokens = Some(usage.cache_read_tokens);
+        routed_metadata.cache_write_tokens = Some(usage.cache_write_tokens);
+        routed_metadata.original_prompt_chars = Some(usage.original_prompt_chars);
+        routed_metadata.sent_prompt_chars = Some(usage.sent_prompt_chars);
+        routed_metadata.estimated_cost_micros_usd = Some(usage.estimated_cost_micros_usd);
+        routed_metadata.fallback_count = Some(usage.fallback_count);
+        routed_metadata.fallback_tier = usage.fallback_tier.clone();
+        routed_metadata.fallback_reason = usage.fallback_reason.clone();
+        routed_metadata.hydration_count = Some(usage.hydration_count);
+        routed_metadata.stale_ref_count = Some(usage.stale_ref_count);
+        routed_metadata.hydration_ref_missing = Some(usage.hydration_ref_missing);
+        routed_metadata.tool_dispatch_count = Some(usage.tool_dispatch_count);
+        routed_metadata.tool_dispatch_success_count = Some(usage.tool_dispatch_success_count);
+        routed_metadata.tool_dispatch_failure_count = Some(usage.tool_dispatch_failure_count);
+        routed_metadata.tool_dispatch_ref_write_count = Some(usage.tool_dispatch_ref_write_count);
+        routed_metadata.tool_dispatch_failure_taxonomy =
+            usage.tool_dispatch_failure_taxonomy.clone();
+        routed_metadata.last_effective_tool_action = usage.last_effective_tool_action.clone();
+        if let Some(outcome) = usage.last_failure_outcome.as_ref() {
+            routed_metadata.last_failure_kind = Some(outcome.kind.as_str().to_string());
+            routed_metadata.last_failure_recoverable = Some(outcome.recoverable);
+            routed_metadata.last_recommended_repair = outcome.recommended_next_action.clone();
+            routed_metadata.last_failure_evidence_ref = outcome.evidence_ref.clone();
+            routed_metadata.last_failure_bounded_excerpt = outcome.bounded_excerpt.clone();
+            routed_metadata.last_failure_truncated = Some(outcome.truncated);
+        }
+    }
+
     fn build_observability_summary(
         steps: &[BossStepReport],
         tasks: Option<&TaskManager>,
@@ -2876,6 +2911,13 @@ impl BossCoordinator {
                             workspace_capabilities: Vec::new(),
                             tool_contract_mismatch_count: Some(0),
                             tool_contract_mismatch: None,
+                            last_effective_tool_action: None,
+                            last_failure_kind: None,
+                            last_failure_recoverable: None,
+                            last_recommended_repair: None,
+                            last_failure_evidence_ref: None,
+                            last_failure_bounded_excerpt: None,
+                            last_failure_truncated: None,
                         };
                         let mut routed_step_metadata = self.routed_step_metadata.write().await;
                         routed_step_metadata.insert(step_id, routed_metadata);
@@ -2927,6 +2969,13 @@ impl BossCoordinator {
                             workspace_capabilities: Vec::new(),
                             tool_contract_mismatch_count: Some(0),
                             tool_contract_mismatch: None,
+                            last_effective_tool_action: None,
+                            last_failure_kind: None,
+                            last_failure_recoverable: None,
+                            last_recommended_repair: None,
+                            last_failure_evidence_ref: None,
+                            last_failure_bounded_excerpt: None,
+                            last_failure_truncated: None,
                         };
                         let mut routed_step_metadata = self.routed_step_metadata.write().await;
                         routed_step_metadata.insert(step_id, routed_metadata);
@@ -2991,6 +3040,13 @@ impl BossCoordinator {
                                 workspace_capabilities: Vec::new(),
                                 tool_contract_mismatch_count: Some(0),
                                 tool_contract_mismatch: None,
+                                last_effective_tool_action: None,
+                                last_failure_kind: None,
+                                last_failure_recoverable: None,
+                                last_recommended_repair: None,
+                                last_failure_evidence_ref: None,
+                                last_failure_bounded_excerpt: None,
+                                last_failure_truncated: None,
                             };
                             let cwd = app_state
                                 .session
@@ -3032,34 +3088,10 @@ impl BossCoordinator {
                                 } => Some(usage),
                                 StepOutcome::Failed { usage: None, .. } => None,
                             } {
-                                routed_metadata.input_tokens = Some(usage.input_tokens);
-                                routed_metadata.uncached_input_tokens =
-                                    Some(usage.uncached_input_tokens);
-                                routed_metadata.output_tokens = Some(usage.output_tokens);
-                                routed_metadata.cache_read_tokens = Some(usage.cache_read_tokens);
-                                routed_metadata.cache_write_tokens = Some(usage.cache_write_tokens);
-                                routed_metadata.original_prompt_chars =
-                                    Some(usage.original_prompt_chars);
-                                routed_metadata.sent_prompt_chars = Some(usage.sent_prompt_chars);
-                                routed_metadata.estimated_cost_micros_usd =
-                                    Some(usage.estimated_cost_micros_usd);
-                                routed_metadata.fallback_count = Some(usage.fallback_count);
-                                routed_metadata.fallback_tier = usage.fallback_tier.clone();
-                                routed_metadata.fallback_reason = usage.fallback_reason.clone();
-                                routed_metadata.hydration_count = Some(usage.hydration_count);
-                                routed_metadata.stale_ref_count = Some(usage.stale_ref_count);
-                                routed_metadata.hydration_ref_missing =
-                                    Some(usage.hydration_ref_missing);
-                                routed_metadata.tool_dispatch_count =
-                                    Some(usage.tool_dispatch_count);
-                                routed_metadata.tool_dispatch_success_count =
-                                    Some(usage.tool_dispatch_success_count);
-                                routed_metadata.tool_dispatch_failure_count =
-                                    Some(usage.tool_dispatch_failure_count);
-                                routed_metadata.tool_dispatch_ref_write_count =
-                                    Some(usage.tool_dispatch_ref_write_count);
-                                routed_metadata.tool_dispatch_failure_taxonomy =
-                                    usage.tool_dispatch_failure_taxonomy.clone();
+                                Self::apply_loop_usage_to_routed_metadata(
+                                    &mut routed_metadata,
+                                    usage,
+                                );
                             }
                             match &outcome {
                                 StepOutcome::Completed {
@@ -4405,6 +4437,8 @@ impl BossCoordinator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::state_frame_loop::LoopUsage;
+    use crate::tool::result::{ToolOutcome, ToolOutcomeKind};
 
     #[tokio::test]
     async fn test_boss_coordinator_initial_stage_is_documentation() {
@@ -4468,6 +4502,44 @@ mod tests {
             .unwrap();
         assert!(!rejected);
         assert_eq!(coordinator.get_stage().await, BossStage::Documentation);
+    }
+
+    #[test]
+    fn boss_metadata_records_last_failure_kind_and_recommended_repair() {
+        let mut routed_metadata = BossStepRoutedMetadata::default();
+        let mut usage = LoopUsage {
+            last_effective_tool_action: Some("Read".into()),
+            last_failure_outcome: Some(ToolOutcome {
+                kind: ToolOutcomeKind::MissingPath,
+                recoverable: true,
+                recommended_next_action: Some("create_file".into()),
+                evidence_ref: Some("tool_feedback:3".into()),
+                bounded_excerpt: Some("No such file or directory".into()),
+                truncated: false,
+            }),
+            ..LoopUsage::default()
+        };
+        usage.tool_dispatch_failure_count = 1;
+
+        BossCoordinator::apply_loop_usage_to_routed_metadata(&mut routed_metadata, &usage);
+
+        assert_eq!(
+            routed_metadata.last_effective_tool_action.as_deref(),
+            Some("Read")
+        );
+        assert_eq!(
+            routed_metadata.last_failure_kind.as_deref(),
+            Some("missing_path")
+        );
+        assert_eq!(routed_metadata.last_failure_recoverable, Some(true));
+        assert_eq!(
+            routed_metadata.last_recommended_repair.as_deref(),
+            Some("create_file")
+        );
+        assert_eq!(
+            routed_metadata.last_failure_evidence_ref.as_deref(),
+            Some("tool_feedback:3")
+        );
     }
 
     #[tokio::test]
