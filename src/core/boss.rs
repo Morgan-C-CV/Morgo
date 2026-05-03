@@ -29,6 +29,7 @@ use crate::core::state_frame_orchestrator::{
 };
 use crate::history::session::SessionHistory;
 use crate::interaction::dispatcher::NotificationDispatcher;
+use crate::state::app_state::WorkerRole;
 use crate::task::manager::TaskManager;
 use crate::task::types::{TaskEvent, TaskStatus, TaskUsageSummary};
 use crate::tool::definition::{ObservableInput, ObservableInputSource, Tool, ToolCall};
@@ -148,6 +149,7 @@ struct ExecutorBAssignmentContract {
     state_frame: BossStateFrame,
     allowed_tools: Vec<String>,
     lism_policy: String,
+    worker_role: WorkerRole,
     assignment_fingerprint: String,
 }
 
@@ -172,6 +174,8 @@ struct StepRolloutExecutionPolicy {
     forced_worker_lism_policy: WorkerLisMPolicy,
     fallback_tier: &'static str,
     fallback_reason: &'static str,
+    worker_role: WorkerRole,
+    force_fresh_spawn: bool,
     affected_gaps: Vec<crate::core::state_frame::CompletionEvidenceGap>,
 }
 
@@ -2034,13 +2038,26 @@ impl BossCoordinator {
                 forced_worker_lism_policy: WorkerLisMPolicy::ForceOff,
                 fallback_tier: "full_worker_dispatch",
                 fallback_reason: "rollout_policy_exact_artifact_gap",
+                worker_role: WorkerRole::Implement,
+                force_fresh_spawn: false,
+                affected_gaps,
+            })
+        } else if metadata.fallback_tier.as_deref() == Some("verification_first") {
+            Some(StepRolloutExecutionPolicy {
+                forced_worker_lism_policy: WorkerLisMPolicy::ForceOff,
+                fallback_tier: "full_worker_dispatch",
+                fallback_reason: "rollout_policy_test_evidence_gap_escalated",
+                worker_role: WorkerRole::Implement,
+                force_fresh_spawn: false,
                 affected_gaps,
             })
         } else {
             Some(StepRolloutExecutionPolicy {
                 forced_worker_lism_policy: WorkerLisMPolicy::ForceOff,
-                fallback_tier: "full_worker_dispatch",
+                fallback_tier: "verification_first",
                 fallback_reason: "rollout_policy_test_evidence_gap",
+                worker_role: WorkerRole::Verify,
+                force_fresh_spawn: true,
                 affected_gaps,
             })
         }
@@ -3632,13 +3649,20 @@ impl BossCoordinator {
                     }
                 }
 
+                let force_fresh_spawn_from_policy = step_rollout_execution_policy
+                    .as_ref()
+                    .map(|policy| policy.force_fresh_spawn)
+                    .unwrap_or(false);
+
                 let tasks = app_state
                     .permission_context
                     .task_manager
                     .as_ref()
                     .ok_or_else(|| anyhow::anyhow!("task manager not configured"))?;
 
-                let running_b = {
+                let running_b = if force_fresh_spawn_from_policy {
+                    None
+                } else {
                     let guard = self.session.read().await;
                     guard
                         .as_ref()
@@ -3829,6 +3853,10 @@ impl BossCoordinator {
             Vec::new()
         };
         let allowed_tools = default_allowed_tools();
+        let worker_role = rollout_execution_policy
+            .as_ref()
+            .map(|policy| policy.worker_role)
+            .unwrap_or(WorkerRole::Implement);
         let lism_policy = if let Some(policy) = rollout_execution_policy.as_ref() {
             policy.forced_worker_lism_policy.as_str().to_string()
         } else {
@@ -3907,6 +3935,7 @@ impl BossCoordinator {
             state_frame,
             allowed_tools,
             lism_policy,
+            worker_role,
             assignment_fingerprint,
         })
     }
@@ -4059,12 +4088,16 @@ refresh_reason: {}\n\n{}",
                 &contract.state_frame,
             ),
             "task_contains_boss_context": true,
-            "role": "implement",
+            "role": contract.worker_role.as_str(),
             "inherit_context": false,
             "allowed_tools": contract.allowed_tools,
             "lism_policy": contract.lism_policy,
             "context_strategy": "brief",
-            "reuse_strategy": "running_only",
+            "reuse_strategy": match contract.worker_role {
+                WorkerRole::Verify => "fresh",
+                WorkerRole::Implement => "running_only",
+                WorkerRole::Research => "running_only",
+            },
             "step_id": contract.brief.step_id,
             "boss_plan_id": plan_id,
             "step_objective": objective,
@@ -5189,8 +5222,10 @@ mod tests {
             .expect("execution policy");
 
         assert_eq!(policy.forced_worker_lism_policy, WorkerLisMPolicy::ForceOff);
-        assert_eq!(policy.fallback_tier, "full_worker_dispatch");
+        assert_eq!(policy.fallback_tier, "verification_first");
         assert_eq!(policy.fallback_reason, "rollout_policy_test_evidence_gap");
+        assert_eq!(policy.worker_role, WorkerRole::Verify);
+        assert!(policy.force_fresh_spawn);
         assert_eq!(policy.affected_gaps.len(), 1);
         assert_eq!(policy.affected_gaps[0].target_ref, "artifact:contract:test");
     }
@@ -5224,6 +5259,97 @@ mod tests {
             policy.affected_gaps[0].target_path.as_deref(),
             Some("/tmp/b.md")
         );
+    }
+
+    #[tokio::test]
+    async fn verify_first_spawn_payload_uses_verify_role_and_force_off_lism() {
+        let coordinator = BossCoordinator::new();
+        {
+            let mut plan = coordinator.plan.write().await;
+            *plan = Some(BossPlan {
+                plan_id: "plan-verify-first".into(),
+                accepted_by_user: true,
+                auto_sequence: true,
+                steps: vec![BossPlanStep {
+                    id: 1,
+                    description: "verify target".into(),
+                    objective: Some("Run verification on /tmp/report.md".into()),
+                    acceptance: vec!["verification evidence recorded".into()],
+                    requires_approval: false,
+                    status: BossPlanStepStatus::Pending,
+                    completed: false,
+                    result_diff: None,
+                    worker_task_id: None,
+                    attempt_count: 0,
+                    retry_budget: 3,
+                    last_review_summary: None,
+                    last_correction: None,
+                    review_task_id: None,
+                    tool_execution_records: Vec::new(),
+                }],
+                ..BossPlan::default()
+            });
+        }
+        {
+            let mut routed = coordinator.routed_step_metadata.write().await;
+            routed.insert(
+                1,
+                BossStepRoutedMetadata {
+                    completion_evidence_gaps: vec![CompletionEvidenceGap {
+                        target_ref: "artifact:contract:test".into(),
+                        target_path: Some("/tmp/report.md".into()),
+                        missing_artifact_evidence: false,
+                        missing_test_evidence: true,
+                        missing_verification_evidence: false,
+                        recommended_action: "run_verification".into(),
+                    }],
+                    ..BossStepRoutedMetadata::default()
+                },
+            );
+        }
+
+        let payload = coordinator
+            .build_step_spawn_payload(1, "parent-session", "boss-b")
+            .await
+            .expect("spawn payload");
+        let json: serde_json::Value = serde_json::from_str(&payload).expect("json payload");
+
+        assert_eq!(json.get("role").and_then(|v| v.as_str()), Some("verify"));
+        assert_eq!(
+            json.get("lism_policy").and_then(|v| v.as_str()),
+            Some("force-off")
+        );
+        assert_eq!(
+            json.get("reuse_strategy").and_then(|v| v.as_str()),
+            Some("fresh")
+        );
+    }
+
+    #[test]
+    fn rollout_execution_policy_escalates_test_only_gap_after_verification_first() {
+        let metadata = BossStepRoutedMetadata {
+            fallback_tier: Some("verification_first".into()),
+            completion_evidence_gaps: vec![CompletionEvidenceGap {
+                target_ref: "artifact:contract:test".into(),
+                target_path: Some("/tmp/report.md".into()),
+                missing_artifact_evidence: false,
+                missing_test_evidence: true,
+                missing_verification_evidence: false,
+                recommended_action: "run_verification".into(),
+            }],
+            ..BossStepRoutedMetadata::default()
+        };
+
+        let policy = BossCoordinator::resolve_step_rollout_execution_policy(Some(&metadata))
+            .expect("execution policy");
+
+        assert_eq!(policy.fallback_tier, "full_worker_dispatch");
+        assert_eq!(
+            policy.fallback_reason,
+            "rollout_policy_test_evidence_gap_escalated"
+        );
+        assert_eq!(policy.worker_role, WorkerRole::Implement);
+        assert!(!policy.force_fresh_spawn);
     }
 
     #[tokio::test]
