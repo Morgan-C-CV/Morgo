@@ -2267,6 +2267,77 @@ impl BossCoordinator {
         has_observability.then_some(summary)
     }
 
+    fn routed_metadata_for_report(
+        plan: &BossPlan,
+        step: &BossPlanStep,
+        routed_step_metadata: &std::collections::HashMap<usize, BossStepRoutedMetadata>,
+    ) -> Option<BossStepRoutedMetadata> {
+        routed_step_metadata.get(&step.id).cloned().or_else(|| {
+            if !step.completed || routed_step_metadata.is_empty() {
+                return None;
+            }
+            let routed = build_routed_state_frame_with_model_route(
+                plan,
+                BossStage::Execution,
+                step.id,
+                ActorRole::Worker,
+            );
+            let state_frame_size = serde_json::to_string(&routed.frame).ok().map(|s| s.len());
+            Some(BossStepRoutedMetadata {
+                toolset_id: routed.frame.toolset_id.clone(),
+                skillset_id: routed.frame.skillset_id.clone(),
+                model_tier: Some(model_tier_label(routed.model_route.tier).to_string()),
+                provider_profile_id: routed.model_route.provider_profile_id,
+                state_frame_size,
+                cache_read_tokens: Some(0),
+                cache_write_tokens: Some(0),
+                fallback_count: Some(0),
+                fallback_tier: None,
+                fallback_reason: None,
+                projection_mismatch_count: Some(routed.projection_mismatch_count),
+                hydration_count: Some(0),
+                stale_ref_count: Some(0),
+                hydration_ref_missing: Some(0),
+                tool_dispatch_count: Some(0),
+                tool_dispatch_success_count: Some(0),
+                tool_dispatch_failure_count: Some(0),
+                tool_dispatch_ref_write_count: Some(0),
+                tool_dispatch_failure_taxonomy: std::collections::BTreeMap::new(),
+                input_tokens: Some(0),
+                uncached_input_tokens: Some(0),
+                output_tokens: Some(0),
+                original_prompt_chars: Some(0),
+                sent_prompt_chars: Some(0),
+                estimated_cost_micros_usd: Some(0),
+                visible_tools: Vec::new(),
+                allowed_actions: routed.frame.allowed_actions.clone(),
+                schema_hash: None,
+                permission_hash: None,
+                actor_role: Some(format!("{:?}", routed.frame.role).to_ascii_lowercase()),
+                cwd: None,
+                config_root: None,
+                workspace_capabilities: Vec::new(),
+                tool_contract_mismatch_count: Some(0),
+                tool_contract_mismatch: None,
+                last_effective_tool_action: None,
+                last_failure_kind: None,
+                last_failure_recoverable: None,
+                last_recommended_repair: None,
+                last_failure_evidence_ref: None,
+                last_failure_bounded_excerpt: None,
+                last_failure_truncated: None,
+                recovery_attempted: None,
+                recovery_tier: None,
+                recovery_outcome: None,
+                terminal_blocker_kind: None,
+                completion_evidence_status: None,
+                completion_evidence_gaps: Vec::new(),
+                worker_report: None,
+                success_classification: None,
+            })
+        })
+    }
+
     /// Build a `BossReportPayload` snapshot suitable for LisM sampling.
     /// `tasks` is optional so LisM direct execution can still report routed metadata,
     /// while full-context worker runs can contribute persisted task usage.
@@ -2290,7 +2361,11 @@ impl BossCoordinator {
                         last_review_summary: step.last_review_summary.clone(),
                         action_required: None,
                         blocker_reason: None,
-                        routed_metadata: routed_step_metadata.get(&step.id).cloned(),
+                        routed_metadata: Self::routed_metadata_for_report(
+                            plan,
+                            step,
+                            &routed_step_metadata,
+                        ),
                         stage_execution_contract: StageExecutionContract::default(),
                     })
                     .collect::<Vec<_>>()
@@ -2360,7 +2435,7 @@ impl BossCoordinator {
             .map(|plan| {
                 plan.steps
                     .iter()
-                .map(|step| BossStepReport {
+                    .map(|step| BossStepReport {
                         id: step.id,
                         status: step.status,
                         worker_task_id: step.worker_task_id.clone(),
@@ -2381,7 +2456,11 @@ impl BossCoordinator {
                         } else {
                             None
                         },
-                        routed_metadata: routed_step_metadata.get(&step.id).cloned(),
+                        routed_metadata: Self::routed_metadata_for_report(
+                            plan,
+                            step,
+                            &routed_step_metadata,
+                        ),
                         stage_execution_contract: StageExecutionContract::default(),
                     })
                     .collect::<Vec<_>>()

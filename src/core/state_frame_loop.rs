@@ -375,6 +375,21 @@ fn fact_field_value_by_ref(
 }
 
 fn artifact_contract_target(frame: &StateFrame, ref_id: &str) -> Option<(String, String)> {
+    if let Some(artifact) = frame
+        .stage_execution_contract
+        .declared_artifacts
+        .iter()
+        .find(|item| item.ref_id == ref_id)
+    {
+        if !artifact.path.trim().is_empty() {
+            let kind = if artifact.kind.trim().is_empty() {
+                "file".to_string()
+            } else {
+                artifact.kind.clone()
+            };
+            return Some((artifact.path.clone(), kind));
+        }
+    }
     let path = fact_field_value_by_ref(frame, "artifact_status", ref_id, "path")?;
     let kind = fact_field_value_by_ref(frame, "artifact_status", ref_id, "kind")
         .unwrap_or_else(|| "file".into());
@@ -2430,8 +2445,8 @@ mod tests {
     };
     use crate::core::state_frame::validate_state_decision;
     use crate::core::state_frame::{
-        ActorRole, AgentState, CompletionEvidenceStatus, StageExecutionContract, StateBudget,
-        StateFrame,
+        ActorRole, AgentState, CompletionEvidenceStatus, DeclaredArtifactContract,
+        StageExecutionContract, StateBudget, StateFrame, TestContract, VerificationContract,
     };
     use crate::core::state_frame_hydration::hydrate_needed_context;
     use crate::service::api::client::ModelProviderClient;
@@ -2565,6 +2580,77 @@ mod tests {
                 verification_refs.join("|")
             },
         ));
+        frame.stage_execution_contract.required_actions.clear();
+        frame.stage_execution_contract.required_evidence.clear();
+        for artifact_ref in artifact_refs {
+            if frame
+                .stage_execution_contract
+                .declared_artifacts
+                .iter()
+                .all(|artifact| artifact.ref_id != *artifact_ref)
+            {
+                frame
+                    .stage_execution_contract
+                    .declared_artifacts
+                    .push(DeclaredArtifactContract {
+                        ref_id: (*artifact_ref).to_string(),
+                        path: String::new(),
+                        kind: "file".into(),
+                        required_actions: vec!["create".into(), "write".into()],
+                        required_evidence: vec![(*artifact_ref).to_string()],
+                    });
+            }
+        }
+        frame.stage_execution_contract.tests = test_refs
+            .iter()
+            .map(|item| TestContract {
+                name: (*item).to_string(),
+                required_actions: vec!["run_test".into()],
+                required_evidence: vec![(*item).to_string()],
+            })
+            .collect();
+        frame.stage_execution_contract.verifications = verification_refs
+            .iter()
+            .map(|item| {
+                let target_path = frame
+                    .stage_execution_contract
+                    .declared_artifacts
+                    .iter()
+                    .find(|artifact| artifact.ref_id == *item)
+                    .map(|artifact| artifact.path.clone());
+                VerificationContract {
+                    target_ref: (*item).to_string(),
+                    target_path,
+                    required_actions: vec!["verify".into()],
+                    required_evidence: vec![(*item).to_string()],
+                }
+            })
+            .collect();
+        if !artifact_refs.is_empty() {
+            frame
+                .stage_execution_contract
+                .required_actions
+                .extend(["create".into(), "write".into()]);
+        }
+        if !test_refs.is_empty() {
+            frame
+                .stage_execution_contract
+                .required_actions
+                .push("run_test".into());
+        }
+        if !verification_refs.is_empty() {
+            frame
+                .stage_execution_contract
+                .required_actions
+                .push("verify".into());
+        }
+        frame.stage_execution_contract.required_evidence.extend(
+            artifact_refs
+                .iter()
+                .chain(test_refs.iter())
+                .chain(verification_refs.iter())
+                .map(|item| (*item).to_string()),
+        );
     }
 
     fn push_completion_contract(
@@ -2597,6 +2683,42 @@ mod tests {
         frame.recent_evidence.push(format!(
             "fact: artifact_status ref={ref_id} path={path} kind={kind} status=expected source=artifact_expectation source_event_id=artifact-expectation:test freshness=current confidence=1.00 lineage_status=active invalidated_by=none supersedes=none conflicts_with=none summary=target artifact declared"
         ));
+        if let Some(existing) = frame
+            .stage_execution_contract
+            .declared_artifacts
+            .iter_mut()
+            .find(|item| item.ref_id == ref_id)
+        {
+            existing.path = path.to_string();
+            existing.kind = kind.to_string();
+            if existing.required_actions.is_empty() {
+                existing.required_actions = vec!["create".into(), "write".into()];
+            }
+            if existing.required_evidence.is_empty() {
+                existing.required_evidence =
+                    vec![ref_id.to_string(), path.to_string(), kind.to_string()];
+            }
+        } else {
+            frame
+                .stage_execution_contract
+                .declared_artifacts
+                .push(DeclaredArtifactContract {
+                    ref_id: ref_id.to_string(),
+                    path: path.to_string(),
+                    kind: kind.to_string(),
+                    required_actions: vec!["create".into(), "write".into()],
+                    required_evidence: vec![
+                        ref_id.to_string(),
+                        path.to_string(),
+                        kind.to_string(),
+                    ],
+                });
+        }
+        for verification in frame.stage_execution_contract.verifications.iter_mut() {
+            if verification.target_ref == ref_id {
+                verification.target_path = Some(path.to_string());
+            }
+        }
     }
 
     #[test]

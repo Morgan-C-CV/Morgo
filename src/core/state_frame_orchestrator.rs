@@ -72,9 +72,6 @@ fn infer_preflight_requirements_from_state_frame(frame: &StateFrame) -> ToolCont
     ) {
         return spec;
     }
-    spec.required_visible_tools.push("Read".into());
-    spec.required_allowed_actions.push("read_file".into());
-    spec.permission_probe_tools.push("Read".into());
     if frame.role == ActorRole::ExecutorB {
         spec.required_visible_tools.push("Agent".into());
         spec.required_allowed_actions.push("spawn_agent".into());

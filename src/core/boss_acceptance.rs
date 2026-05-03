@@ -52,6 +52,21 @@ fn first_absolute_path_after(line: &str, offset: usize) -> Option<PathBuf> {
     (!token.is_empty()).then(|| PathBuf::from(token))
 }
 
+fn absolute_artifact_tokens(line: &str) -> Vec<PathBuf> {
+    let mut artifacts = Vec::new();
+    for raw in line.split_whitespace() {
+        let token = clean_path_token(raw);
+        if !token.starts_with('/') {
+            continue;
+        }
+        let path = PathBuf::from(&token);
+        if !artifacts.iter().any(|item| item == &path) {
+            artifacts.push(path);
+        }
+    }
+    artifacts
+}
+
 fn is_artifact_scope_boundary(line: &str) -> bool {
     let trimmed = line.trim();
     trimmed.starts_with("参考材料")
@@ -147,6 +162,17 @@ pub fn extract_artifact_expectations(text: &str) -> Vec<BossArtifactExpectation>
             && target_dir_offset.is_none()
             && line_requires_artifact_output(line)
         {
+            for artifact in absolute_artifact_tokens(line) {
+                if !expectations
+                    .iter()
+                    .any(|item: &BossArtifactExpectation| item.path == artifact)
+                {
+                    expectations.push(BossArtifactExpectation {
+                        path: artifact,
+                        kind: BossArtifactKind::File,
+                    });
+                }
+            }
             for artifact in relative_artifact_tokens(line) {
                 if !relative_file_expectations
                     .iter()

@@ -11,6 +11,7 @@ use crate::core::state_frame::{
 use crate::core::state_frame_archive::{
     archive_to_summary, build_accepted_archive, retain_blocked_items, retain_open_items,
 };
+use crate::core::state_frame_router::{apply_route, route_toolset};
 
 fn contains_any(haystack: &str, needles: &[&str]) -> bool {
     needles.iter().any(|needle| haystack.contains(needle))
@@ -113,11 +114,16 @@ fn push_none_recorded_unless_present(facts: &mut Vec<String>, fact_name: &str) {
 
 fn open_item_requires_test(summary: &str) -> bool {
     let lowered = summary.to_ascii_lowercase();
-    lowered.contains("test")
-        || lowered.contains("cargo test")
+    lowered.contains("cargo test")
+        || lowered.contains("run test")
+        || lowered.contains("run tests")
+        || lowered.contains("pytest")
+        || lowered.contains("unit test")
+        || lowered.contains("integration test")
         || lowered.contains("pytest")
         || lowered.contains("run verification")
-        || summary.contains("测试")
+        || summary.contains("运行测试")
+        || summary.contains("执行测试")
 }
 
 fn open_item_requires_verification(summary: &str) -> bool {
@@ -199,7 +205,7 @@ fn build_stage_execution_contract(
     open_item_ledgers: &[crate::core::state_fact_ledger::OpenItemRecord],
     readonly_analysis: bool,
 ) -> StageExecutionContract {
-    let declared_artifacts = artifact_ledgers
+    let mut declared_artifacts = artifact_ledgers
         .iter()
         .map(|item| DeclaredArtifactContract {
             ref_id: item.ref_id.clone(),
@@ -213,17 +219,61 @@ fn build_stage_execution_contract(
             required_evidence: vec![item.ref_id.clone(), item.path.clone(), item.kind.clone()],
         })
         .collect::<Vec<_>>();
+    if let Some(step) = step {
+        for (idx, expectation) in extract_artifact_expectations(step.objective())
+            .into_iter()
+            .enumerate()
+        {
+            let path = expectation.path.to_string_lossy().to_string();
+            if declared_artifacts.iter().any(|item| item.path == path) {
+                continue;
+            }
+            let kind = match expectation.kind {
+                crate::core::boss_acceptance::BossArtifactKind::File => "file",
+                crate::core::boss_acceptance::BossArtifactKind::Directory => "directory",
+            }
+            .to_string();
+            declared_artifacts.push(DeclaredArtifactContract {
+                ref_id: format!("artifact:step{}:{idx}", step.id),
+                path: path.clone(),
+                kind: kind.clone(),
+                required_actions: if readonly_analysis {
+                    Vec::new()
+                } else {
+                    vec!["create".into(), "write".into()]
+                },
+                required_evidence: vec![
+                    format!("artifact:step{}:{idx}", step.id),
+                    path,
+                    kind,
+                ],
+            });
+        }
+    }
     let verifications = artifact_ledgers
         .iter()
-        .map(|item| VerificationContract {
-            target_ref: item.ref_id.clone(),
-            target_path: Some(item.path.clone()),
+        .map(|item| (item.ref_id.clone(), item.path.clone()))
+        .chain(
+            declared_artifacts
+                .iter()
+                .map(|item| (item.ref_id.clone(), item.path.clone())),
+        )
+        .fold(Vec::<(String, String)>::new(), |mut acc, item| {
+            if !acc.iter().any(|(ref_id, _)| ref_id == &item.0) {
+                acc.push(item);
+            }
+            acc
+        })
+        .into_iter()
+        .map(|(target_ref, target_path)| VerificationContract {
+            target_ref: target_ref.clone(),
+            target_path: Some(target_path.clone()),
             required_actions: if readonly_analysis {
                 Vec::new()
             } else {
                 vec!["verify".into()]
             },
-            required_evidence: vec![item.ref_id.clone(), item.path.clone()],
+            required_evidence: vec![target_ref, target_path],
         })
         .collect::<Vec<_>>();
     let tests = open_item_ledgers
@@ -878,6 +928,8 @@ pub fn project_state_frame(
         }),
         budget: StateBudget::default(),
     };
+    let route = route_toolset(&frame);
+    apply_route(&mut frame, route);
     let diagnostics = collect_projection_diagnostics(&frame);
     frame.recent_evidence.push(fact_line(
         "projection_invariants",

@@ -7,6 +7,27 @@ pub struct ToolsetRoute {
     pub skillset_id: Option<String>,
 }
 
+fn allowed_actions_for_route(route: &ToolsetRoute) -> Vec<String> {
+    match route.toolset_id.as_deref() {
+        Some("designer-planning") => vec!["read_file".into(), "write_spec".into()],
+        Some("designer-review") => vec!["read_file".into(), "summarize_findings".into()],
+        Some("executor-edit") => vec![
+            "read_file".into(),
+            "edit_file".into(),
+            "run_test".into(),
+        ],
+        Some("worker-minimal") => vec![
+            "read_file".into(),
+            "edit_file".into(),
+            "run_test".into(),
+        ],
+        Some("verifier-readonly") => vec!["read_file".into(), "summarize_findings".into()],
+        Some("summarizer-readonly") => vec!["read_file".into(), "summarize_findings".into()],
+        None => vec!["read_file".into()],
+        Some(_) => vec!["read_file".into()],
+    }
+}
+
 /// Route a StateFrame to its minimal toolset and skillset.
 ///
 /// Pure static mapping on role + state — no runtime calls, no side effects.
@@ -18,6 +39,15 @@ pub fn route_toolset(frame: &StateFrame) -> ToolsetRoute {
         return ToolsetRoute {
             toolset_id: None,
             skillset_id: None,
+        };
+    }
+    if matches!(
+        frame.required_output_schema.as_deref(),
+        Some("readonly_audit_4_paragraphs_v1")
+    ) {
+        return ToolsetRoute {
+            toolset_id: Some("summarizer-readonly".into()),
+            skillset_id: Some("context-summarizer".into()),
         };
     }
 
@@ -104,6 +134,12 @@ fn conservative_fallback() -> ToolsetRoute {
 
 /// Apply a `ToolsetRoute` back onto a `StateFrame` in place.
 pub fn apply_route(frame: &mut StateFrame, route: ToolsetRoute) {
+    let allowed_actions = if matches!(frame.state, AgentState::Blocked | AgentState::Done) {
+        Vec::new()
+    } else {
+        allowed_actions_for_route(&route)
+    };
     frame.toolset_id = route.toolset_id;
     frame.skillset_id = route.skillset_id;
+    frame.allowed_actions = allowed_actions;
 }
