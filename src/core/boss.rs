@@ -1844,6 +1844,11 @@ impl BossCoordinator {
             routed_metadata.last_failure_bounded_excerpt = None;
             routed_metadata.last_failure_truncated = None;
         }
+        routed_metadata.completion_evidence_status = usage
+            .completion_evidence_status
+            .as_ref()
+            .map(|status| status.as_str().to_string());
+        routed_metadata.worker_report = usage.worker_report.clone();
     }
 
     fn build_observability_summary(
@@ -2925,6 +2930,8 @@ impl BossCoordinator {
                             last_failure_evidence_ref: None,
                             last_failure_bounded_excerpt: None,
                             last_failure_truncated: None,
+                            completion_evidence_status: None,
+                            worker_report: None,
                         };
                         let mut routed_step_metadata = self.routed_step_metadata.write().await;
                         routed_step_metadata.insert(step_id, routed_metadata);
@@ -2983,6 +2990,8 @@ impl BossCoordinator {
                             last_failure_evidence_ref: None,
                             last_failure_bounded_excerpt: None,
                             last_failure_truncated: None,
+                            completion_evidence_status: None,
+                            worker_report: None,
                         };
                         let mut routed_step_metadata = self.routed_step_metadata.write().await;
                         routed_step_metadata.insert(step_id, routed_metadata);
@@ -3054,6 +3063,8 @@ impl BossCoordinator {
                                 last_failure_evidence_ref: None,
                                 last_failure_bounded_excerpt: None,
                                 last_failure_truncated: None,
+                                completion_evidence_status: None,
+                                worker_report: None,
                             };
                             let cwd = app_state
                                 .session
@@ -4444,6 +4455,7 @@ impl BossCoordinator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::state_frame::{AgentState, CompletionEvidenceStatus, WorkerStructuredReport};
     use crate::core::state_frame_loop::LoopUsage;
     use crate::tool::result::{ToolOutcome, ToolOutcomeKind};
 
@@ -4579,6 +4591,43 @@ mod tests {
         assert_eq!(routed_metadata.last_failure_evidence_ref, None);
         assert_eq!(routed_metadata.last_failure_bounded_excerpt, None);
         assert_eq!(routed_metadata.last_failure_truncated, None);
+    }
+
+    #[test]
+    fn boss_report_surfaces_worker_structured_report() {
+        let mut routed_metadata = BossStepRoutedMetadata::default();
+        let usage = LoopUsage {
+            completion_evidence_status: Some(CompletionEvidenceStatus::Sufficient),
+            worker_report: Some(WorkerStructuredReport {
+                worker_state: AgentState::Done,
+                last_tool_action: Some("Bash".into()),
+                files_changed: vec!["/tmp/report.md".into()],
+                tests_run: vec!["cargo_test:passed".into()],
+                artifact_status: "verified".into(),
+                test_status: "passed".into(),
+                verification_status: "verified".into(),
+                evidence_refs: vec!["tool_output:1".into(), "artifact:step1:runtime:0".into()],
+                remaining_risks: Vec::new(),
+                completion_evidence_status: CompletionEvidenceStatus::Sufficient,
+            }),
+            ..LoopUsage::default()
+        };
+
+        BossCoordinator::apply_loop_usage_to_routed_metadata(&mut routed_metadata, &usage);
+
+        assert_eq!(
+            routed_metadata.completion_evidence_status.as_deref(),
+            Some("sufficient")
+        );
+        let report = routed_metadata.worker_report.expect("worker report");
+        assert_eq!(report.worker_state, AgentState::Done);
+        assert_eq!(report.artifact_status, "verified");
+        assert!(
+            report
+                .evidence_refs
+                .iter()
+                .any(|reference| reference == "tool_output:1")
+        );
     }
 
     #[tokio::test]

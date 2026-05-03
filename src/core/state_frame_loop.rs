@@ -3,7 +3,8 @@ use crate::core::state_fact_ledger::{
     StepFactLedgers, append_runtime_tool_record, fact_lines_from_ledgers,
 };
 use crate::core::state_frame::{
-    AgentState, DecisionKind, RepairNeeded, StateFrame, StatePatch, validate_state_decision,
+    AgentState, CompletionEvidenceStatus, DecisionKind, RepairNeeded, StateFrame, StatePatch,
+    WorkerStructuredReport, validate_state_decision,
 };
 use crate::core::state_frame_hydration::{
     NeededContextSelector, hydrate_needed_context, parse_needed_context_selector,
@@ -64,6 +65,8 @@ pub struct LoopUsage {
     pub tool_execution_records: Vec<ToolExecutionRecord>,
     pub last_effective_tool_action: Option<String>,
     pub last_failure_outcome: Option<ToolOutcome>,
+    pub worker_report: Option<WorkerStructuredReport>,
+    pub completion_evidence_status: Option<CompletionEvidenceStatus>,
 }
 
 #[derive(Debug, Clone)]
@@ -197,6 +200,217 @@ fn push_unique(items: &mut Vec<String>, value: String) -> bool {
     }
     items.push(value);
     true
+}
+
+fn evidence_field_value(line: &str, field_name: &str) -> Option<String> {
+    let prefix = format!("{field_name}=");
+    line.split_whitespace()
+        .find_map(|part| part.strip_prefix(&prefix))
+        .map(|value| value.trim().trim_matches(',').to_string())
+        .filter(|value| !value.is_empty() && value != "none" && value != "none recorded")
+}
+
+fn collect_fact_field_values(frame: &StateFrame, fact_name: &str, field_name: &str) -> Vec<String> {
+    frame
+        .recent_evidence
+        .iter()
+        .filter(|line| line.starts_with(&format!("fact: {fact_name} ")))
+        .filter_map(|line| evidence_field_value(line, field_name))
+        .collect()
+}
+
+fn collect_evidence_refs(frame: &StateFrame) -> Vec<String> {
+    let mut refs = Vec::new();
+    for line in &frame.recent_evidence {
+        if let Some(reference) = evidence_field_value(line, "ref") {
+            if !refs.iter().any(|existing| existing == &reference) {
+                refs.push(reference);
+            }
+        }
+    }
+    refs
+}
+
+fn has_completion_verification_signal(frame: &StateFrame) -> bool {
+    frame.recent_evidence.iter().any(|line| {
+        line.contains("artifact verification passed")
+            || line.contains("status=verified")
+            || line.contains("review_verdict")
+    })
+}
+
+fn frame_requires_tests(frame: &StateFrame) -> bool {
+    frame
+        .recent_evidence
+        .iter()
+        .any(|line| line.contains("fact: test_") || line.contains("worker_reported_tests"))
+        || frame.open_items.iter().any(|item| {
+            let lowered = item.to_ascii_lowercase();
+            lowered.contains("test") || lowered.contains("verify")
+        })
+        || frame.accepted_summary.iter().any(|item| {
+            let lowered = item.to_ascii_lowercase();
+            lowered.contains("test") || lowered.contains("verify")
+        })
+        || frame.objective.to_ascii_lowercase().contains("test")
+        || frame.objective.to_ascii_lowercase().contains("verify")
+}
+
+fn frame_requires_artifact_evidence(frame: &StateFrame) -> bool {
+    frame.recent_evidence.iter().any(|line| {
+        line.starts_with("fact: permission_to_create_and_write:")
+            || line.contains("artifact_status")
+            || line.contains("target artifact")
+            || line.contains("target file")
+            || line.contains("target directory")
+    }) || frame.open_items.iter().any(|item| {
+        let lowered = item.to_ascii_lowercase();
+        lowered.contains("artifact")
+            || lowered.contains("file")
+            || lowered.contains("directory")
+            || lowered.contains("output")
+    }) || frame.accepted_summary.iter().any(|item| {
+        let lowered = item.to_ascii_lowercase();
+        lowered.contains("artifact")
+            || lowered.contains("file")
+            || lowered.contains("directory")
+            || lowered.contains("output")
+    }) || frame.objective.to_ascii_lowercase().contains("artifact")
+        || frame.objective.to_ascii_lowercase().contains("file")
+        || frame.objective.to_ascii_lowercase().contains("directory")
+        || frame.objective.to_ascii_lowercase().contains("output")
+}
+
+fn summarize_artifact_status(frame: &StateFrame) -> String {
+    let statuses = collect_fact_field_values(frame, "artifact_status", "status");
+    if statuses.iter().any(|status| status == "verified") {
+        "verified".into()
+    } else if let Some(status) = statuses
+        .iter()
+        .find(|status| status.as_str() != "none recorded")
+    {
+        status.clone()
+    } else if statuses.is_empty() {
+        "missing".into()
+    } else {
+        statuses.last().cloned().unwrap_or_else(|| "missing".into())
+    }
+}
+
+fn summarize_test_status(frame: &StateFrame) -> String {
+    let statuses = collect_fact_field_values(frame, "test_failures", "status");
+    if statuses.is_empty() {
+        "not_run".into()
+    } else {
+        statuses.last().cloned().unwrap_or_else(|| "not_run".into())
+    }
+}
+
+fn summarize_verification_status(frame: &StateFrame) -> String {
+    if has_completion_verification_signal(frame) {
+        "verified".into()
+    } else if frame_requires_artifact_evidence(frame) {
+        "unverified".into()
+    } else {
+        "not_required".into()
+    }
+}
+
+fn collect_tests_run(frame: &StateFrame) -> Vec<String> {
+    let mut items = Vec::new();
+    for line in frame
+        .recent_evidence
+        .iter()
+        .filter(|line| line.starts_with("fact: test_failures "))
+    {
+        let name = evidence_field_value(line, "name").unwrap_or_else(|| "unknown_test".into());
+        let status = evidence_field_value(line, "status").unwrap_or_else(|| "unknown".into());
+        let entry = format!("{name}:{status}");
+        if !items.iter().any(|existing| existing == &entry) {
+            items.push(entry);
+        }
+    }
+    items
+}
+
+fn collect_files_changed(frame: &StateFrame) -> Vec<String> {
+    let mut items = Vec::new();
+    for line in frame
+        .recent_evidence
+        .iter()
+        .filter(|line| line.starts_with("fact: recent_changes_in_files "))
+    {
+        if let Some(path) = evidence_field_value(line, "path") {
+            if !items.iter().any(|existing| existing == &path) {
+                items.push(path);
+            }
+        }
+    }
+    items
+}
+
+fn collect_remaining_risks(
+    frame: &StateFrame,
+    completion: &CompletionEvidenceStatus,
+) -> Vec<String> {
+    let mut items = Vec::new();
+    for item in frame.open_items.iter().chain(frame.blocked_items.iter()) {
+        if !items.iter().any(|existing| existing == item) {
+            items.push(item.clone());
+        }
+    }
+    if !matches!(completion, CompletionEvidenceStatus::Sufficient) {
+        items.push(format!(
+            "completion_evidence_status={}",
+            completion.as_str()
+        ));
+    }
+    items
+}
+
+fn evaluate_completion_evidence(
+    frame: &StateFrame,
+    _usage: &LoopUsage,
+) -> CompletionEvidenceStatus {
+    if frame_requires_artifact_evidence(frame)
+        && collect_fact_field_values(frame, "artifact_status", "status").is_empty()
+    {
+        return CompletionEvidenceStatus::MissingArtifactEvidence;
+    }
+    if frame_requires_tests(frame)
+        && collect_fact_field_values(frame, "test_failures", "status").is_empty()
+    {
+        return CompletionEvidenceStatus::MissingTestEvidence;
+    }
+    if frame_requires_artifact_evidence(frame) && !has_completion_verification_signal(frame) {
+        return CompletionEvidenceStatus::MissingVerificationEvidence;
+    }
+    CompletionEvidenceStatus::Sufficient
+}
+
+fn build_worker_structured_report(
+    frame: &StateFrame,
+    usage: &LoopUsage,
+    completion: CompletionEvidenceStatus,
+) -> WorkerStructuredReport {
+    WorkerStructuredReport {
+        worker_state: frame.state,
+        last_tool_action: usage.last_effective_tool_action.clone(),
+        files_changed: collect_files_changed(frame),
+        tests_run: collect_tests_run(frame),
+        artifact_status: summarize_artifact_status(frame),
+        test_status: summarize_test_status(frame),
+        verification_status: summarize_verification_status(frame),
+        evidence_refs: collect_evidence_refs(frame),
+        remaining_risks: collect_remaining_risks(frame, &completion),
+        completion_evidence_status: completion,
+    }
+}
+
+fn finalize_worker_usage_report(frame: &StateFrame, usage: &mut LoopUsage) {
+    let completion = evaluate_completion_evidence(frame, usage);
+    usage.completion_evidence_status = Some(completion.clone());
+    usage.worker_report = Some(build_worker_structured_report(frame, usage, completion));
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1341,6 +1555,7 @@ pub async fn run_decision_loop_with_tools(
         total_usage.cache_write_tokens += iter_usage.cache_write_tokens;
         if let Some(reason) = stream_error {
             if text.trim().is_empty() {
+                finalize_worker_usage_report(&frame, &mut total_usage);
                 return Ok(LoopOutcome::ToolDispatchFailed {
                     last_state: frame.state,
                     reason,
@@ -1376,6 +1591,7 @@ pub async fn run_decision_loop_with_tools(
                     total_usage.cache_write_tokens += repair_usage.cache_write_tokens;
                     if let Some(reason) = repair_error {
                         if repaired_text.trim().is_empty() {
+                            finalize_worker_usage_report(&frame, &mut total_usage);
                             return Ok(LoopOutcome::ToolDispatchFailed {
                                 last_state: frame.state,
                                 reason,
@@ -1394,6 +1610,7 @@ pub async fn run_decision_loop_with_tools(
                 match resolved {
                     Some(d) => d,
                     None => {
+                        finalize_worker_usage_report(&frame, &mut total_usage);
                         return Ok(LoopOutcome::RepairExhausted {
                             raw_json: last_repair.raw_json,
                             reason: last_repair.reason,
@@ -1406,6 +1623,8 @@ pub async fn run_decision_loop_with_tools(
 
         match decision.decision {
             DecisionKind::Done => {
+                frame.state = decision.state;
+                finalize_worker_usage_report(&frame, &mut total_usage);
                 return Ok(LoopOutcome::Done {
                     final_state: decision.state,
                     usage: total_usage,
@@ -1419,6 +1638,8 @@ pub async fn run_decision_loop_with_tools(
                     .and_then(|v| v.as_str())
                     .unwrap_or("rejected by model")
                     .to_string();
+                frame.state = decision.state;
+                finalize_worker_usage_report(&frame, &mut total_usage);
                 return Ok(LoopOutcome::Rejected {
                     reason,
                     usage: total_usage,
@@ -1433,6 +1654,7 @@ pub async fn run_decision_loop_with_tools(
                     && frame.open_items.is_empty()
                     && frame.blocked_items.is_empty()
                 {
+                    finalize_worker_usage_report(&frame, &mut total_usage);
                     return Ok(LoopOutcome::Done {
                         final_state: AgentState::Done,
                         usage: total_usage,
@@ -1440,6 +1662,7 @@ pub async fn run_decision_loop_with_tools(
                 }
                 let after = frame.to_prompt_segment().content;
                 if before == after {
+                    finalize_worker_usage_report(&frame, &mut total_usage);
                     return Ok(LoopOutcome::NoProgress {
                         last_state: frame.state,
                         reason: "continue decision made no StateFrame progress".into(),
@@ -1534,6 +1757,7 @@ pub async fn run_decision_loop_with_tools(
                     }
                 }
                 if !summary.changed {
+                    finalize_worker_usage_report(&frame, &mut total_usage);
                     return Ok(LoopOutcome::NoProgress {
                         last_state: frame.state,
                         reason: "request_context decision produced no hydration progress".into(),
@@ -1559,6 +1783,7 @@ pub async fn run_decision_loop_with_tools(
                         total_usage.last_failure_outcome = None;
                         total_usage.tool_execution_records.push(record);
                         if !changed {
+                            finalize_worker_usage_report(&frame, &mut total_usage);
                             return Ok(LoopOutcome::NoProgress {
                                 last_state: frame.state,
                                 reason: "call_tool decision produced no StateFrame progress".into(),
@@ -1587,6 +1812,7 @@ pub async fn run_decision_loop_with_tools(
                         total_usage.last_failure_outcome = Some(error.outcome.clone());
                         total_usage.tool_execution_records.push(error.record);
                         if !changed {
+                            finalize_worker_usage_report(&frame, &mut total_usage);
                             return Ok(LoopOutcome::NoProgress {
                                 last_state: frame.state,
                                 reason: format!(
@@ -1605,6 +1831,7 @@ pub async fn run_decision_loop_with_tools(
         }
     }
 
+    finalize_worker_usage_report(&frame, &mut total_usage);
     Ok(LoopOutcome::MaxIterationsReached {
         last_state: frame.state,
         usage: total_usage,
@@ -1614,10 +1841,10 @@ pub async fn run_decision_loop_with_tools(
 #[cfg(test)]
 mod tests {
     use super::{
-        DecisionLoopConfig, LoopOutcome, StateFrameToolRuntime, classify_tool_outcome,
-        execute_call_tool, parse_and_validate_decision, push_tool_failure_feedback,
-        push_tool_outcome_evidence, run_decision_loop, run_decision_loop_with_tools,
-        tool_backed_hydration_path,
+        DecisionLoopConfig, LoopOutcome, LoopUsage, StateFrameToolRuntime, classify_tool_outcome,
+        evaluate_completion_evidence, execute_call_tool, parse_and_validate_decision,
+        push_tool_failure_feedback, push_tool_outcome_evidence, run_decision_loop,
+        run_decision_loop_with_tools, tool_backed_hydration_path,
     };
     use crate::core::state_frame::validate_state_decision;
     use crate::core::state_frame::{ActorRole, AgentState, StateBudget, StateFrame};
@@ -2393,6 +2620,111 @@ mod tests {
                 |line| line.contains("tool_outcome:") && line.contains("kind=result_too_large")
             )
         );
+    }
+
+    #[test]
+    fn completion_evidence_evaluator_flags_missing_artifact_evidence() {
+        let mut frame = make_frame();
+        frame.objective = "write output file and run tests".into();
+        frame.recent_evidence.push(
+            "fact: test_failures ref=test:2 name=cargo_test status=passed source=tool:Bash source_event_id=tool-bash:2 freshness=after-runtime-test confidence=1.00 lineage_status=active invalidated_by=none supersedes=none conflicts_with=none summary=cargo test passed".into(),
+        );
+        let usage = LoopUsage::default();
+        let status = evaluate_completion_evidence(&frame, &usage);
+        assert_eq!(status.as_str(), "missing_artifact_evidence");
+    }
+
+    #[test]
+    fn worker_done_report_includes_artifact_and_test_status() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut frame = make_frame();
+        frame.objective = "write report artifact and run tests".into();
+        frame.recent_evidence.push(
+            "fact: artifact_status ref=artifact:step1:runtime:0 path=/tmp/report.md kind=file status=verified source=tool:ArtifactVerify source_event_id=tool-artifact:1:0 freshness=after-runtime-artifact-verify confidence=1.00 lineage_status=active invalidated_by=none supersedes=none conflicts_with=none summary=artifact verification passed for /tmp/report.md".into(),
+        );
+        frame.recent_evidence.push(
+            "fact: recent_changes_in_files ref=change:step1:0 path=/tmp/report.md source=worker_result source_event_id=worker-result:1 freshness=after-worker-output confidence=0.90 status=active invalidated_by=none supersedes=none conflicts_with=none summary=updated /tmp/report.md".into(),
+        );
+        frame.recent_evidence.push(
+            "fact: test_failures ref=test:step1:worker name=cargo_test status=passed source=worker_result source_event_id=worker-result:1 freshness=after-worker-output confidence=0.85 lineage_status=active invalidated_by=none supersedes=none conflicts_with=none summary=cargo test passed".into(),
+        );
+        let done_json = r#"{"state":"done","decision":"done"}"#;
+        let client = ModelProviderClient::with_scripted_turns(vec![vec![StreamEvent::TextDelta(
+            done_json.into(),
+        )]]);
+        let outcome = rt
+            .block_on(run_decision_loop(
+                &client,
+                frame,
+                DecisionLoopConfig::default(),
+            ))
+            .expect("loop should not error");
+        match outcome {
+            LoopOutcome::Done { usage, .. } => {
+                let report = usage.worker_report.expect("worker report");
+                assert_eq!(report.worker_state, AgentState::Done);
+                assert_eq!(report.artifact_status, "verified");
+                assert_eq!(report.test_status, "passed");
+                assert_eq!(report.verification_status, "verified");
+                assert!(
+                    report
+                        .files_changed
+                        .iter()
+                        .any(|path| path == "/tmp/report.md")
+                );
+                assert!(
+                    report
+                        .tests_run
+                        .iter()
+                        .any(|item| item == "cargo_test:passed")
+                );
+                assert_eq!(report.completion_evidence_status.as_str(), "sufficient");
+            }
+            other => panic!("expected Done, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn worker_report_preserves_evidence_refs_after_tool_success() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let temp_path = unique_temp_path("worker_report_refs");
+        std::fs::write(&temp_path, "alpha\n").expect("temp file should be written");
+        let read_json = format!(
+            r#"{{"state":"executing","decision":"call_tool","next_action":{{"action_type":"Read","args":{{"file_path":"{}"}}}}}}"#,
+            temp_path.display()
+        );
+        let done_json = r#"{"state":"done","decision":"done"}"#;
+        let client = ModelProviderClient::with_scripted_turns(vec![
+            vec![StreamEvent::TextDelta(read_json.into())],
+            vec![StreamEvent::TextDelta(done_json.into())],
+        ]);
+        let tool_runtime = StateFrameToolRuntime {
+            registry: ToolRegistry::new().register(Arc::new(FileReadTool)),
+            permissions: ToolPermissionContext::new(PermissionMode::Default),
+            cwd: test_runtime_paths().0,
+            config_root: test_runtime_paths().1,
+        };
+        let outcome = rt
+            .block_on(run_decision_loop_with_tools(
+                &client,
+                make_frame(),
+                DecisionLoopConfig::default(),
+                Some(tool_runtime),
+            ))
+            .expect("loop should not error");
+        let _ = std::fs::remove_file(&temp_path);
+        match outcome {
+            LoopOutcome::Done { usage, .. } => {
+                let report = usage.worker_report.expect("worker report");
+                assert!(
+                    report
+                        .evidence_refs
+                        .iter()
+                        .any(|reference| reference == "tool_output:1")
+                );
+            }
+            other => panic!("expected Done, got {other:?}"),
+        }
     }
 
     #[test]

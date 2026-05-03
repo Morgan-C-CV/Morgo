@@ -29,6 +29,45 @@ pub enum AgentState {
     Done,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompletionEvidenceStatus {
+    Sufficient,
+    MissingArtifactEvidence,
+    MissingTestEvidence,
+    MissingVerificationEvidence,
+}
+
+impl CompletionEvidenceStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Sufficient => "sufficient",
+            Self::MissingArtifactEvidence => "missing_artifact_evidence",
+            Self::MissingTestEvidence => "missing_test_evidence",
+            Self::MissingVerificationEvidence => "missing_verification_evidence",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkerStructuredReport {
+    pub worker_state: AgentState,
+    #[serde(default)]
+    pub last_tool_action: Option<String>,
+    #[serde(default)]
+    pub files_changed: Vec<String>,
+    #[serde(default)]
+    pub tests_run: Vec<String>,
+    pub artifact_status: String,
+    pub test_status: String,
+    pub verification_status: String,
+    #[serde(default)]
+    pub evidence_refs: Vec<String>,
+    #[serde(default)]
+    pub remaining_risks: Vec<String>,
+    pub completion_evidence_status: CompletionEvidenceStatus,
+}
+
 /// Cost/performance effort tier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EffortLevel {

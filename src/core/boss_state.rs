@@ -1,3 +1,4 @@
+use crate::core::state_frame::WorkerStructuredReport;
 use crate::tool::registry::ToolContractMismatch;
 use crate::tool::result::ToolExecutionRecord;
 use serde::{Deserialize, Serialize};
@@ -262,6 +263,10 @@ pub struct BossStepRoutedMetadata {
     pub last_failure_bounded_excerpt: Option<String>,
     #[serde(default)]
     pub last_failure_truncated: Option<bool>,
+    #[serde(default)]
+    pub completion_evidence_status: Option<String>,
+    #[serde(default)]
+    pub worker_report: Option<WorkerStructuredReport>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -415,8 +420,9 @@ impl BossReportPayload {
         ));
         for step in &self.steps {
             let m = step.routed_metadata.as_ref();
+            let worker_report = m.and_then(|m| m.worker_report.as_ref());
             lines.push(format!(
-                "  step {:>3}: status={:?} tier={} profile={} frame={}B cache_r={} cache_w={} input={} uncached_input={} output={} sent_chars={} original_chars={} fb={} fb_tier={} fb_reason={} mm={} hydr={} stale={} miss={}",
+                "  step {:>3}: status={:?} tier={} profile={} frame={}B cache_r={} cache_w={} input={} uncached_input={} output={} sent_chars={} original_chars={} fb={} fb_tier={} fb_reason={} mm={} hydr={} stale={} miss={} worker_state={} artifact={} test={} verify={}",
                 step.id,
                 step.status,
                 m.and_then(|m| m.model_tier.as_deref()).unwrap_or("-"),
@@ -436,6 +442,18 @@ impl BossReportPayload {
                 m.and_then(|m| m.hydration_count).map(|n| n.to_string()).unwrap_or_else(|| "-".into()),
                 m.and_then(|m| m.stale_ref_count).map(|n| n.to_string()).unwrap_or_else(|| "-".into()),
                 m.and_then(|m| m.hydration_ref_missing).map(|n| n.to_string()).unwrap_or_else(|| "-".into()),
+                worker_report
+                    .map(|report| format!("{:?}", report.worker_state).to_ascii_lowercase())
+                    .unwrap_or_else(|| "-".into()),
+                worker_report
+                    .map(|report| report.artifact_status.clone())
+                    .unwrap_or_else(|| "-".into()),
+                worker_report
+                    .map(|report| report.test_status.clone())
+                    .unwrap_or_else(|| "-".into()),
+                worker_report
+                    .map(|report| report.verification_status.clone())
+                    .unwrap_or_else(|| "-".into()),
             ));
         }
         if let Some(s) = &self.observability_summary {
