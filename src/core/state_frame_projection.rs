@@ -125,6 +125,14 @@ fn open_item_requires_verification(summary: &str) -> bool {
         || summary.contains("验证")
 }
 
+fn join_contract_refs(refs: &[String]) -> String {
+    if refs.is_empty() {
+        "none".into()
+    } else {
+        refs.join("|")
+    }
+}
+
 fn build_completion_contract_fact(
     permission_facts: &[String],
     artifact_ledgers: &[crate::core::state_fact_ledger::ArtifactRecord],
@@ -133,33 +141,50 @@ fn build_completion_contract_fact(
 ) -> String {
     let artifact_required =
         !readonly_analysis && (!permission_facts.is_empty() || !artifact_ledgers.is_empty());
-    let test_required = open_item_ledgers
+    let artifact_refs = artifact_ledgers
         .iter()
-        .any(|item| open_item_requires_test(&item.summary));
-    let verification_required = !readonly_analysis
-        && (artifact_required
-            || open_item_ledgers
-                .iter()
-                .any(|item| open_item_requires_verification(&item.summary)));
+        .map(|item| item.ref_id.clone())
+        .collect::<Vec<_>>();
+    let test_refs = open_item_ledgers
+        .iter()
+        .filter(|item| open_item_requires_test(&item.summary))
+        .map(|item| item.ref_id.clone())
+        .collect::<Vec<_>>();
+    let verification_refs = if readonly_analysis {
+        Vec::new()
+    } else if artifact_required {
+        artifact_refs.clone()
+    } else {
+        open_item_ledgers
+            .iter()
+            .filter(|item| open_item_requires_verification(&item.summary))
+            .map(|item| item.ref_id.clone())
+            .collect::<Vec<_>>()
+    };
+    let test_required = !test_refs.is_empty();
+    let verification_required = !verification_refs.is_empty();
     fact_line(
         "completion_contract",
         format!(
-            "artifact_evidence={} test_evidence={} verification_evidence={}",
+            "artifact_evidence={} artifact_refs={} test_evidence={} test_refs={} verification_evidence={} verification_refs={}",
             if artifact_required {
                 "required"
             } else {
                 "not_required"
             },
+            join_contract_refs(&artifact_refs),
             if test_required {
                 "required"
             } else {
                 "not_required"
             },
+            join_contract_refs(&test_refs),
             if verification_required {
                 "required"
             } else {
                 "not_required"
-            }
+            },
+            join_contract_refs(&verification_refs)
         ),
     )
 }
@@ -571,7 +596,7 @@ fn build_fact_ledger(
         facts.push(fact_line("rejected_approaches", "none recorded"));
         facts.push(fact_line(
             "completion_contract",
-            "artifact_evidence=not_required test_evidence=not_required verification_evidence=not_required",
+            "artifact_evidence=not_required artifact_refs=none test_evidence=not_required test_refs=none verification_evidence=not_required verification_refs=none",
         ));
     }
 
@@ -835,5 +860,10 @@ mod tests {
                 item.contains("fact: permission_to_create_and_write:/tmp/demo-site")
             })
         );
+        assert!(frame.recent_evidence.iter().any(|item| {
+            item.contains("fact: completion_contract ")
+                && item.contains("artifact_refs=artifact:step0:0")
+                && item.contains("verification_refs=artifact:step0:0")
+        }));
     }
 }

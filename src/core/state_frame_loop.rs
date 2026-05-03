@@ -240,6 +240,15 @@ fn collect_fact_field_values(frame: &StateFrame, fact_name: &str, field_name: &s
         .collect()
 }
 
+fn split_contract_refs(value: &str) -> Vec<String> {
+    value
+        .split('|')
+        .map(str::trim)
+        .filter(|item| !item.is_empty() && *item != "none" && *item != "none recorded")
+        .map(str::to_string)
+        .collect()
+}
+
 fn completion_contract_requirement(frame: &StateFrame, field_name: &str) -> bool {
     frame.recent_evidence.iter().any(|line| {
         line.starts_with("fact: completion_contract ")
@@ -247,8 +256,35 @@ fn completion_contract_requirement(frame: &StateFrame, field_name: &str) -> bool
     })
 }
 
-fn collect_completion_gate_refs(frame: &StateFrame, fact_name: &str) -> Vec<String> {
-    collect_fact_field_values(frame, fact_name, "ref")
+fn completion_contract_refs(frame: &StateFrame, field_name: &str) -> Vec<String> {
+    frame
+        .recent_evidence
+        .iter()
+        .filter(|line| line.starts_with("fact: completion_contract "))
+        .filter_map(|line| evidence_field_value(line, field_name))
+        .flat_map(|value| split_contract_refs(&value))
+        .collect()
+}
+
+fn fact_field_value_by_ref(
+    frame: &StateFrame,
+    fact_name: &str,
+    ref_id: &str,
+    field_name: &str,
+) -> Option<String> {
+    frame
+        .recent_evidence
+        .iter()
+        .filter(|line| line.starts_with(&format!("fact: {fact_name} ")))
+        .find(|line| evidence_field_value(line, "ref").as_deref() == Some(ref_id))
+        .and_then(|line| evidence_field_value(line, field_name))
+}
+
+fn artifact_contract_target(frame: &StateFrame, ref_id: &str) -> Option<(String, String)> {
+    let path = fact_field_value_by_ref(frame, "artifact_status", ref_id, "path")?;
+    let kind = fact_field_value_by_ref(frame, "artifact_status", ref_id, "kind")
+        .unwrap_or_else(|| "file".into());
+    Some((path, kind))
 }
 
 fn permission_target_path(line: &str) -> Option<String> {
@@ -275,61 +311,88 @@ fn collect_evidence_refs(frame: &StateFrame) -> Vec<String> {
 
 fn infer_artifact_repair_turn(
     frame: &StateFrame,
+    missing_artifact_ref: &str,
     missing_reason: &str,
 ) -> Option<ArtifactRepairTurn> {
-    for line in &frame.recent_evidence {
-        if !line.starts_with("fact: permission_to_create_and_write:") {
-            continue;
-        }
-        let target_path = permission_target_path(line)?;
-        let permission_ref = evidence_field_value(line, "ref").unwrap_or_else(|| "none".into());
-        let parent_dir = std::path::Path::new(&target_path)
-            .parent()
-            .map(|path| path.display().to_string())
-            .filter(|path| !path.trim().is_empty())
-            .unwrap_or_else(|| ".".into());
-        let recommended_write_strategy = if std::path::Path::new(&target_path).extension().is_some()
-        {
-            "write_exact_target_file".to_string()
-        } else {
-            "create_directory_then_write_files".to_string()
-        };
-        return Some(ArtifactRepairTurn {
-            target_path,
-            parent_dir,
-            permission_ref,
-            missing_reason: missing_reason.to_string(),
-            recommended_write_strategy,
-        });
-    }
-
-    let target_path = collect_fact_field_values(frame, "artifact_status", "path")
-        .into_iter()
-        .find(|path| !path.trim().is_empty())?;
+    let (target_path, kind) = artifact_contract_target(frame, missing_artifact_ref)?;
+    let permission_ref = frame
+        .recent_evidence
+        .iter()
+        .filter(|line| line.starts_with("fact: permission_to_create_and_write:"))
+        .find(|line| permission_target_path(line).as_deref() == Some(target_path.as_str()))
+        .and_then(|line| evidence_field_value(line, "ref"))
+        .unwrap_or_else(|| "none".into());
     let parent_dir = std::path::Path::new(&target_path)
         .parent()
         .map(|path| path.display().to_string())
         .filter(|path| !path.trim().is_empty())
         .unwrap_or_else(|| ".".into());
-    let recommended_write_strategy = if std::path::Path::new(&target_path).extension().is_some() {
-        "write_exact_target_file".to_string()
-    } else {
-        "create_directory_then_write_files".to_string()
-    };
+    let recommended_write_strategy =
+        if kind == "directory" || std::path::Path::new(&target_path).extension().is_none() {
+            "create_directory_then_write_files".to_string()
+        } else {
+            "write_exact_target_file".to_string()
+        };
     Some(ArtifactRepairTurn {
         target_path,
         parent_dir,
-        permission_ref: "none".into(),
+        permission_ref,
         missing_reason: missing_reason.to_string(),
         recommended_write_strategy,
     })
 }
 
-fn has_completion_verification_signal(frame: &StateFrame) -> bool {
+fn has_verified_artifact_for_path(frame: &StateFrame, path: &str) -> bool {
     frame.recent_evidence.iter().any(|line| {
-        line.contains("artifact verification passed")
-            || line.contains("status=verified")
-            || line.contains("review_verdict")
+        line.starts_with("fact: artifact_status ")
+            && evidence_field_value(line, "path").as_deref() == Some(path)
+            && evidence_field_value(line, "status").as_deref() == Some("verified")
+            && (evidence_field_value(line, "source").as_deref() == Some("tool:ArtifactVerify")
+                || line.contains("artifact verification passed"))
+    })
+}
+
+fn has_explicit_verification_fact(frame: &StateFrame, target_ref: &str) -> bool {
+    frame.recent_evidence.iter().any(|line| {
+        line.starts_with("fact: verification_status ")
+            && evidence_field_value(line, "target_ref").as_deref() == Some(target_ref)
+            && evidence_field_value(line, "status").as_deref() == Some("verified")
+    })
+}
+
+fn has_completion_verification_signal(frame: &StateFrame) -> bool {
+    let verification_refs = completion_contract_refs(frame, "verification_refs");
+    !verification_refs.is_empty()
+        && verification_refs.into_iter().all(|verification_ref| {
+            artifact_contract_target(frame, &verification_ref)
+                .map(|(path, _)| has_verified_artifact_for_path(frame, &path))
+                .unwrap_or_else(|| has_explicit_verification_fact(frame, &verification_ref))
+        })
+}
+
+fn artifact_path_has_material_evidence(frame: &StateFrame, path: &str, kind: &str) -> bool {
+    let is_directory = kind == "directory";
+    let path_matches = |candidate: &str| {
+        candidate == path || (is_directory && candidate.starts_with(&format!("{path}/")))
+    };
+    let acceptable_status =
+        |status: &str| matches!(status, "created" | "touched" | "verified" | "observed");
+
+    frame.recent_evidence.iter().any(|line| {
+        if line.starts_with("fact: recent_changes_in_files ") {
+            return evidence_field_value(line, "path")
+                .as_deref()
+                .is_some_and(path_matches);
+        }
+        if line.starts_with("fact: artifact_status ") {
+            return evidence_field_value(line, "path")
+                .as_deref()
+                .is_some_and(path_matches)
+                && evidence_field_value(line, "status")
+                    .as_deref()
+                    .is_some_and(acceptable_status);
+        }
+        false
     })
 }
 
@@ -420,25 +483,59 @@ fn collect_remaining_risks(
     items
 }
 
+fn missing_artifact_evidence_refs(frame: &StateFrame) -> Vec<String> {
+    completion_contract_refs(frame, "artifact_refs")
+        .into_iter()
+        .filter(|artifact_ref| {
+            artifact_contract_target(frame, artifact_ref)
+                .map(|(path, kind)| !artifact_path_has_material_evidence(frame, &path, &kind))
+                .unwrap_or(true)
+        })
+        .collect()
+}
+
+fn missing_test_evidence_refs(frame: &StateFrame) -> Vec<String> {
+    let contract_refs = completion_contract_refs(frame, "test_refs");
+    if contract_refs.is_empty()
+        || frame.recent_evidence.iter().any(|line| {
+            line.starts_with("fact: test_failures ")
+                && evidence_field_value(line, "ref").is_some()
+                && evidence_field_value(line, "status").is_some()
+        })
+    {
+        Vec::new()
+    } else {
+        contract_refs
+    }
+}
+
+fn missing_verification_evidence_refs(frame: &StateFrame) -> Vec<String> {
+    completion_contract_refs(frame, "verification_refs")
+        .into_iter()
+        .filter(|verification_ref| {
+            artifact_contract_target(frame, verification_ref)
+                .map(|(path, _)| !has_verified_artifact_for_path(frame, &path))
+                .unwrap_or_else(|| !has_explicit_verification_fact(frame, verification_ref))
+        })
+        .collect()
+}
+
 fn evaluate_completion_evidence(
     frame: &StateFrame,
     _usage: &LoopUsage,
 ) -> CompletionEvidenceStatus {
     if completion_contract_requirement(frame, "artifact_evidence")
-        && collect_fact_field_values(frame, "artifact_status", "status")
-            .into_iter()
-            .all(|status| status == "missing_or_invalid")
-        && collect_fact_field_values(frame, "recent_changes_in_files", "path").is_empty()
+        && !missing_artifact_evidence_refs(frame).is_empty()
     {
         return CompletionEvidenceStatus::MissingArtifactEvidence;
     }
     if completion_contract_requirement(frame, "test_evidence")
-        && collect_fact_field_values(frame, "test_failures", "status").is_empty()
+        && !missing_test_evidence_refs(frame).is_empty()
     {
         return CompletionEvidenceStatus::MissingTestEvidence;
     }
     if completion_contract_requirement(frame, "verification_evidence")
-        && !has_completion_verification_signal(frame)
+        && !missing_verification_evidence_refs(frame).is_empty()
     {
         return CompletionEvidenceStatus::MissingVerificationEvidence;
     }
@@ -469,7 +566,11 @@ fn inject_completion_gate_block(frame: &mut StateFrame, block: &CompletionGateBl
         ),
     );
     if block.required_action == "write_artifact" {
-        if let Some(repair_turn) = infer_artifact_repair_turn(frame, &block.reason) {
+        if let Some(repair_turn) = block
+            .missing_evidence_refs
+            .iter()
+            .find_map(|missing_ref| infer_artifact_repair_turn(frame, missing_ref, &block.reason))
+        {
             push_unique(
                 &mut frame.open_items,
                 format!(
@@ -514,7 +615,10 @@ fn record_completion_gate_recovery(
     usage.last_recovery_attempt = Some(RecoveryAttempt {
         failure_kind: block.status.as_str().to_string(),
         recommended_next_action: block.required_action.clone(),
-        target_path: infer_artifact_repair_turn(frame, &block.reason)
+        target_path: block
+            .missing_evidence_refs
+            .iter()
+            .find_map(|missing_ref| infer_artifact_repair_turn(frame, missing_ref, &block.reason))
             .map(|repair_turn| repair_turn.target_path),
     });
 }
@@ -528,38 +632,26 @@ fn enforce_completion_gate(
         return Ok(());
     }
     usage.completion_evidence_status = Some(status.clone());
-    let (required_action, reason, mut missing_evidence_refs) = match status {
+    let (required_action, reason, missing_evidence_refs) = match status {
         CompletionEvidenceStatus::MissingArtifactEvidence => (
             "write_artifact".to_string(),
             "completion gate blocked done because required artifact evidence is missing"
                 .to_string(),
-            collect_completion_gate_refs(frame, "artifact_status"),
+            missing_artifact_evidence_refs(frame),
         ),
         CompletionEvidenceStatus::MissingTestEvidence => (
             "run_verification".to_string(),
             "completion gate blocked done because required test evidence is missing".to_string(),
-            collect_completion_gate_refs(frame, "open_item_refs"),
+            missing_test_evidence_refs(frame),
         ),
         CompletionEvidenceStatus::MissingVerificationEvidence => (
             "verify_artifact".to_string(),
             "completion gate blocked done because required verification evidence is missing"
                 .to_string(),
-            collect_completion_gate_refs(frame, "artifact_status"),
+            missing_verification_evidence_refs(frame),
         ),
         CompletionEvidenceStatus::Sufficient => unreachable!(),
     };
-    for line in &frame.recent_evidence {
-        if line.starts_with("fact: permission_to_create_and_write:") {
-            if let Some(reference) = evidence_field_value(line, "ref") {
-                if !missing_evidence_refs
-                    .iter()
-                    .any(|existing| existing == &reference)
-                {
-                    missing_evidence_refs.push(reference);
-                }
-            }
-        }
-    }
     Err(CompletionGateBlock {
         status,
         required_action,
@@ -2134,7 +2226,9 @@ mod tests {
         run_decision_loop_with_tools, tool_backed_hydration_path,
     };
     use crate::core::state_frame::validate_state_decision;
-    use crate::core::state_frame::{ActorRole, AgentState, StateBudget, StateFrame};
+    use crate::core::state_frame::{
+        ActorRole, AgentState, CompletionEvidenceStatus, StateBudget, StateFrame,
+    };
     use crate::core::state_frame_hydration::hydrate_needed_context;
     use crate::service::api::client::ModelProviderClient;
     use crate::service::api::streaming::{ProviderFailureDisposition, StreamError, StreamEvent};
@@ -2202,29 +2296,76 @@ mod tests {
         (cwd, config_root)
     }
 
+    fn push_completion_contract_with_refs(
+        frame: &mut StateFrame,
+        artifact_refs: &[&str],
+        test_refs: &[&str],
+        verification_refs: &[&str],
+    ) {
+        frame.recent_evidence.push(format!(
+            "fact: completion_contract artifact_evidence={} artifact_refs={} test_evidence={} test_refs={} verification_evidence={} verification_refs={}",
+            if artifact_refs.is_empty() {
+                "not_required"
+            } else {
+                "required"
+            },
+            if artifact_refs.is_empty() {
+                "none".to_string()
+            } else {
+                artifact_refs.join("|")
+            },
+            if test_refs.is_empty() {
+                "not_required"
+            } else {
+                "required"
+            },
+            if test_refs.is_empty() {
+                "none".to_string()
+            } else {
+                test_refs.join("|")
+            },
+            if verification_refs.is_empty() {
+                "not_required"
+            } else {
+                "required"
+            },
+            if verification_refs.is_empty() {
+                "none".to_string()
+            } else {
+                verification_refs.join("|")
+            },
+        ));
+    }
+
     fn push_completion_contract(
         frame: &mut StateFrame,
         artifact_required: bool,
         test_required: bool,
         verification_required: bool,
     ) {
-        frame.recent_evidence.push(format!(
-            "fact: completion_contract artifact_evidence={} test_evidence={} verification_evidence={}",
+        push_completion_contract_with_refs(
+            frame,
             if artifact_required {
-                "required"
+                &["artifact:contract:0"]
             } else {
-                "not_required"
+                &[]
             },
             if test_required {
-                "required"
+                &["openitem:test:0"]
             } else {
-                "not_required"
+                &[]
             },
             if verification_required {
-                "required"
+                &["artifact:contract:0"]
             } else {
-                "not_required"
+                &[]
             },
+        );
+    }
+
+    fn push_artifact_target_fact(frame: &mut StateFrame, ref_id: &str, path: &str, kind: &str) {
+        frame.recent_evidence.push(format!(
+            "fact: artifact_status ref={ref_id} path={path} kind={kind} status=expected source=artifact_expectation source_event_id=artifact-expectation:test freshness=current confidence=1.00 lineage_status=active invalidated_by=none supersedes=none conflicts_with=none summary=target artifact declared"
         ));
     }
 
@@ -2941,6 +3082,7 @@ mod tests {
         frame.recent_evidence.clear();
         frame.objective = "write output file and run tests".into();
         push_completion_contract(&mut frame, true, true, true);
+        push_artifact_target_fact(&mut frame, "artifact:contract:0", "/tmp/report.md", "file");
         frame.recent_evidence.push(
             "fact: test_failures ref=test:2 name=cargo_test status=passed source=tool:Bash source_event_id=tool-bash:2 freshness=after-runtime-test confidence=1.00 lineage_status=active invalidated_by=none supersedes=none conflicts_with=none summary=cargo test passed".into(),
         );
@@ -2955,6 +3097,7 @@ mod tests {
         let mut frame = make_frame();
         frame.objective = "write report artifact and run tests".into();
         push_completion_contract(&mut frame, true, true, true);
+        push_artifact_target_fact(&mut frame, "artifact:contract:0", "/tmp/report.md", "file");
         frame.recent_evidence.push(
             "fact: artifact_status ref=artifact:step1:runtime:0 path=/tmp/report.md kind=file status=verified source=tool:ArtifactVerify source_event_id=tool-artifact:1:0 freshness=after-runtime-artifact-verify confidence=1.00 lineage_status=active invalidated_by=none supersedes=none conflicts_with=none summary=artifact verification passed for /tmp/report.md".into(),
         );
@@ -3051,6 +3194,12 @@ mod tests {
         let mut frame = make_frame();
         frame.recent_evidence.clear();
         push_completion_contract(&mut frame, true, false, false);
+        push_artifact_target_fact(
+            &mut frame,
+            "artifact:contract:0",
+            "/tmp/missing.txt",
+            "file",
+        );
         frame.recent_evidence.push(
             "fact: permission_to_create_and_write:/tmp/missing.txt ref=permission:1 source=permission_scope source_event_id=permission:1 freshness=current confidence=1.00 status=active invalidated_by=none supersedes=none conflicts_with=none summary=write target".into(),
         );
@@ -3094,6 +3243,7 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let mut frame = make_frame();
         push_completion_contract(&mut frame, true, false, true);
+        push_artifact_target_fact(&mut frame, "artifact:contract:0", "/tmp/report.md", "file");
         frame.recent_evidence.push(
             "fact: artifact_status ref=artifact:1 path=/tmp/report.md kind=file status=created source=tool:Write source_event_id=tool-write:1 freshness=after-runtime confidence=1.00 lineage_status=active invalidated_by=none supersedes=none conflicts_with=none summary=artifact created".into(),
         );
@@ -3137,6 +3287,7 @@ mod tests {
         let mut frame = make_frame();
         frame.recent_evidence.clear();
         push_completion_contract(&mut frame, true, false, true);
+        push_artifact_target_fact(&mut frame, "artifact:contract:0", "/tmp/report.md", "file");
         frame.recent_evidence.push(
             "fact: artifact_status ref=artifact:needs-verify path=/tmp/report.md kind=file status=created source=tool:Write source_event_id=tool-write:1 freshness=after-runtime confidence=1.00 lineage_status=active invalidated_by=none supersedes=none conflicts_with=none summary=artifact created".into(),
         );
@@ -3164,7 +3315,7 @@ mod tests {
     fn artifact_gate_block_triggers_repair_turn_with_exact_target_path() {
         let mut frame = make_frame();
         frame.recent_evidence.clear();
-        push_completion_contract(&mut frame, true, false, false);
+        push_completion_contract_with_refs(&mut frame, &["artifact:missing"], &[], &[]);
         frame.recent_evidence.push(
             "fact: artifact_status ref=artifact:missing path=/tmp/report.md kind=file status=missing_or_invalid source=artifact_expectation source_event_id=artifact-expectation:1 freshness=current confidence=1.00 lineage_status=active invalidated_by=none supersedes=none conflicts_with=none summary=target file missing".into(),
         );
@@ -3193,10 +3344,101 @@ mod tests {
     }
 
     #[test]
+    fn completion_evidence_requires_every_declared_artifact_ref() {
+        let mut frame = make_frame();
+        frame.recent_evidence.clear();
+        push_completion_contract_with_refs(
+            &mut frame,
+            &["artifact:contract:0", "artifact:contract:1"],
+            &[],
+            &[],
+        );
+        push_artifact_target_fact(&mut frame, "artifact:contract:0", "/tmp/one.md", "file");
+        push_artifact_target_fact(&mut frame, "artifact:contract:1", "/tmp/two.md", "file");
+        frame.recent_evidence.push(
+            "fact: recent_changes_in_files ref=change:1 path=/tmp/one.md source=tool:Write source_event_id=tool-write:1 freshness=after-runtime confidence=1.00 status=active invalidated_by=none supersedes=none conflicts_with=none summary=updated /tmp/one.md".into(),
+        );
+
+        let status = evaluate_completion_evidence(&frame, &LoopUsage::default());
+        assert_eq!(status, CompletionEvidenceStatus::MissingArtifactEvidence);
+        let missing_refs = super::missing_artifact_evidence_refs(&frame);
+        assert_eq!(missing_refs, vec!["artifact:contract:1".to_string()]);
+    }
+
+    #[test]
+    fn review_verdict_does_not_satisfy_verification_evidence() {
+        let mut frame = make_frame();
+        frame.recent_evidence.clear();
+        push_completion_contract(&mut frame, true, false, true);
+        push_artifact_target_fact(&mut frame, "artifact:contract:0", "/tmp/report.md", "file");
+        frame.recent_evidence.push(
+            "fact: recent_changes_in_files ref=change:1 path=/tmp/report.md source=tool:Write source_event_id=tool-write:1 freshness=after-runtime confidence=1.00 status=active invalidated_by=none supersedes=none conflicts_with=none summary=updated /tmp/report.md".into(),
+        );
+        frame.recent_evidence.push(
+            "fact: review_verdicts ref=review:1 verdict=accepted source=tool:BossReview source_event_id=tool-review:1 freshness=after-runtime-review confidence=1.00 status=active invalidated_by=none supersedes=none conflicts_with=none summary=LGTM".into(),
+        );
+
+        let status = evaluate_completion_evidence(&frame, &LoopUsage::default());
+        assert_eq!(
+            status,
+            CompletionEvidenceStatus::MissingVerificationEvidence
+        );
+    }
+
+    #[test]
+    fn artifact_repair_turn_uses_missing_artifact_ref_not_first_permission_fact() {
+        let mut frame = make_frame();
+        frame.recent_evidence.clear();
+        push_completion_contract_with_refs(
+            &mut frame,
+            &["artifact:contract:0", "artifact:contract:1"],
+            &[],
+            &[],
+        );
+        push_artifact_target_fact(
+            &mut frame,
+            "artifact:contract:0",
+            "/tmp/first-output.md",
+            "file",
+        );
+        push_artifact_target_fact(
+            &mut frame,
+            "artifact:contract:1",
+            "/tmp/second-output.md",
+            "file",
+        );
+        frame.recent_evidence.push(
+            "fact: permission_to_create_and_write:/tmp/first-output.md ref=permission:first source=permission_scope source_event_id=permission:1 freshness=current confidence=1.00 status=active invalidated_by=none supersedes=none conflicts_with=none summary=write first".into(),
+        );
+        frame.recent_evidence.push(
+            "fact: permission_to_create_and_write:/tmp/second-output.md ref=permission:second source=permission_scope source_event_id=permission:2 freshness=current confidence=1.00 status=active invalidated_by=none supersedes=none conflicts_with=none summary=write second".into(),
+        );
+        frame.recent_evidence.push(
+            "fact: recent_changes_in_files ref=change:first path=/tmp/first-output.md source=tool:Write source_event_id=tool-write:1 freshness=after-runtime confidence=1.00 status=active invalidated_by=none supersedes=none conflicts_with=none summary=updated first".into(),
+        );
+        let mut usage = LoopUsage::default();
+        let block =
+            super::enforce_completion_gate(&mut frame, &mut usage).expect_err("gate should block");
+        assert_eq!(
+            block.missing_evidence_refs,
+            vec!["artifact:contract:1".to_string()]
+        );
+        super::inject_completion_gate_block(&mut frame, &block);
+        let repair_line = frame
+            .recent_evidence
+            .iter()
+            .find(|line| line.starts_with("fact: repair_turn "))
+            .expect("repair turn evidence");
+        assert!(repair_line.contains("target_path=/tmp/second-output.md"));
+        assert!(repair_line.contains("permission_ref=permission:second"));
+    }
+
+    #[test]
     fn done_passes_when_completion_evidence_is_sufficient() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let mut frame = make_frame();
         push_completion_contract(&mut frame, true, true, true);
+        push_artifact_target_fact(&mut frame, "artifact:contract:0", "/tmp/report.md", "file");
         frame.recent_evidence.push(
             "fact: artifact_status ref=artifact:ok path=/tmp/report.md kind=file status=verified source=tool:ArtifactVerify source_event_id=tool-artifact:1 freshness=after-runtime confidence=1.00 lineage_status=active invalidated_by=none supersedes=none conflicts_with=none summary=artifact verification passed".into(),
         );
