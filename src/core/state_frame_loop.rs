@@ -3,8 +3,8 @@ use crate::core::state_fact_ledger::{
     StepFactLedgers, append_runtime_tool_record, fact_lines_from_ledgers,
 };
 use crate::core::state_frame::{
-    AgentState, CompletionEvidenceStatus, DecisionKind, RepairNeeded, StateFrame, StatePatch,
-    WorkerStructuredReport, validate_state_decision,
+    AgentState, CompletionEvidenceStatus, CompletionGateBlock, DecisionKind, RepairNeeded,
+    StateFrame, StatePatch, WorkerStructuredReport, validate_state_decision,
 };
 use crate::core::state_frame_hydration::{
     NeededContextSelector, hydrate_needed_context, parse_needed_context_selector,
@@ -219,6 +219,17 @@ fn collect_fact_field_values(frame: &StateFrame, fact_name: &str, field_name: &s
         .collect()
 }
 
+fn completion_contract_requirement(frame: &StateFrame, field_name: &str) -> bool {
+    frame.recent_evidence.iter().any(|line| {
+        line.starts_with("fact: completion_contract ")
+            && evidence_field_value(line, field_name).as_deref() == Some("required")
+    })
+}
+
+fn collect_completion_gate_refs(frame: &StateFrame, fact_name: &str) -> Vec<String> {
+    collect_fact_field_values(frame, fact_name, "ref")
+}
+
 fn collect_evidence_refs(frame: &StateFrame) -> Vec<String> {
     let mut refs = Vec::new();
     for line in &frame.recent_evidence {
@@ -237,48 +248,6 @@ fn has_completion_verification_signal(frame: &StateFrame) -> bool {
             || line.contains("status=verified")
             || line.contains("review_verdict")
     })
-}
-
-fn frame_requires_tests(frame: &StateFrame) -> bool {
-    frame
-        .recent_evidence
-        .iter()
-        .any(|line| line.contains("fact: test_") || line.contains("worker_reported_tests"))
-        || frame.open_items.iter().any(|item| {
-            let lowered = item.to_ascii_lowercase();
-            lowered.contains("test") || lowered.contains("verify")
-        })
-        || frame.accepted_summary.iter().any(|item| {
-            let lowered = item.to_ascii_lowercase();
-            lowered.contains("test") || lowered.contains("verify")
-        })
-        || frame.objective.to_ascii_lowercase().contains("test")
-        || frame.objective.to_ascii_lowercase().contains("verify")
-}
-
-fn frame_requires_artifact_evidence(frame: &StateFrame) -> bool {
-    frame.recent_evidence.iter().any(|line| {
-        line.starts_with("fact: permission_to_create_and_write:")
-            || line.contains("artifact_status")
-            || line.contains("target artifact")
-            || line.contains("target file")
-            || line.contains("target directory")
-    }) || frame.open_items.iter().any(|item| {
-        let lowered = item.to_ascii_lowercase();
-        lowered.contains("artifact")
-            || lowered.contains("file")
-            || lowered.contains("directory")
-            || lowered.contains("output")
-    }) || frame.accepted_summary.iter().any(|item| {
-        let lowered = item.to_ascii_lowercase();
-        lowered.contains("artifact")
-            || lowered.contains("file")
-            || lowered.contains("directory")
-            || lowered.contains("output")
-    }) || frame.objective.to_ascii_lowercase().contains("artifact")
-        || frame.objective.to_ascii_lowercase().contains("file")
-        || frame.objective.to_ascii_lowercase().contains("directory")
-        || frame.objective.to_ascii_lowercase().contains("output")
 }
 
 fn summarize_artifact_status(frame: &StateFrame) -> String {
@@ -309,7 +278,7 @@ fn summarize_test_status(frame: &StateFrame) -> String {
 fn summarize_verification_status(frame: &StateFrame) -> String {
     if has_completion_verification_signal(frame) {
         "verified".into()
-    } else if frame_requires_artifact_evidence(frame) {
+    } else if completion_contract_requirement(frame, "verification_evidence") {
         "unverified".into()
     } else {
         "not_required".into()
@@ -372,20 +341,104 @@ fn evaluate_completion_evidence(
     frame: &StateFrame,
     _usage: &LoopUsage,
 ) -> CompletionEvidenceStatus {
-    if frame_requires_artifact_evidence(frame)
-        && collect_fact_field_values(frame, "artifact_status", "status").is_empty()
+    if completion_contract_requirement(frame, "artifact_evidence")
+        && collect_fact_field_values(frame, "artifact_status", "status")
+            .into_iter()
+            .all(|status| status == "missing_or_invalid")
+        && collect_fact_field_values(frame, "recent_changes_in_files", "path").is_empty()
     {
         return CompletionEvidenceStatus::MissingArtifactEvidence;
     }
-    if frame_requires_tests(frame)
+    if completion_contract_requirement(frame, "test_evidence")
         && collect_fact_field_values(frame, "test_failures", "status").is_empty()
     {
         return CompletionEvidenceStatus::MissingTestEvidence;
     }
-    if frame_requires_artifact_evidence(frame) && !has_completion_verification_signal(frame) {
+    if completion_contract_requirement(frame, "verification_evidence")
+        && !has_completion_verification_signal(frame)
+    {
         return CompletionEvidenceStatus::MissingVerificationEvidence;
     }
     CompletionEvidenceStatus::Sufficient
+}
+
+fn inject_completion_gate_block(frame: &mut StateFrame, block: &CompletionGateBlock) {
+    let missing_refs = if block.missing_evidence_refs.is_empty() {
+        "none".to_string()
+    } else {
+        block.missing_evidence_refs.join("|")
+    };
+    push_unique(
+        &mut frame.open_items,
+        format!(
+            "required_action:{} reason={} missing_refs={}",
+            block.required_action, block.reason, missing_refs
+        ),
+    );
+    push_unique(
+        &mut frame.recent_evidence,
+        format!(
+            "completion_gate: status={} required_action={} reason={} missing_evidence_refs={}",
+            block.status.as_str(),
+            block.required_action,
+            block.reason,
+            missing_refs
+        ),
+    );
+    frame.state = match block.required_action.as_str() {
+        "write_artifact" => AgentState::Executing,
+        "run_verification" | "verify_artifact" => AgentState::Verifying,
+        _ => AgentState::Correcting,
+    };
+}
+
+fn enforce_completion_gate(
+    frame: &mut StateFrame,
+    usage: &mut LoopUsage,
+) -> Result<(), CompletionGateBlock> {
+    let status = evaluate_completion_evidence(frame, usage);
+    if matches!(status, CompletionEvidenceStatus::Sufficient) {
+        return Ok(());
+    }
+    usage.completion_evidence_status = Some(status.clone());
+    let (required_action, reason, mut missing_evidence_refs) = match status {
+        CompletionEvidenceStatus::MissingArtifactEvidence => (
+            "write_artifact".to_string(),
+            "completion gate blocked done because required artifact evidence is missing"
+                .to_string(),
+            collect_completion_gate_refs(frame, "artifact_status"),
+        ),
+        CompletionEvidenceStatus::MissingTestEvidence => (
+            "run_verification".to_string(),
+            "completion gate blocked done because required test evidence is missing".to_string(),
+            collect_completion_gate_refs(frame, "open_item_refs"),
+        ),
+        CompletionEvidenceStatus::MissingVerificationEvidence => (
+            "verify_artifact".to_string(),
+            "completion gate blocked done because required verification evidence is missing"
+                .to_string(),
+            collect_completion_gate_refs(frame, "artifact_status"),
+        ),
+        CompletionEvidenceStatus::Sufficient => unreachable!(),
+    };
+    for line in &frame.recent_evidence {
+        if line.starts_with("fact: permission_to_create_and_write:") {
+            if let Some(reference) = evidence_field_value(line, "ref") {
+                if !missing_evidence_refs
+                    .iter()
+                    .any(|existing| existing == &reference)
+                {
+                    missing_evidence_refs.push(reference);
+                }
+            }
+        }
+    }
+    Err(CompletionGateBlock {
+        status,
+        required_action,
+        reason,
+        missing_evidence_refs,
+    })
 }
 
 fn build_worker_structured_report(
@@ -1624,6 +1677,10 @@ pub async fn run_decision_loop_with_tools(
         match decision.decision {
             DecisionKind::Done => {
                 frame.state = decision.state;
+                if let Err(block) = enforce_completion_gate(&mut frame, &mut total_usage) {
+                    inject_completion_gate_block(&mut frame, &block);
+                    continue;
+                }
                 finalize_worker_usage_report(&frame, &mut total_usage);
                 return Ok(LoopOutcome::Done {
                     final_state: decision.state,
@@ -1654,6 +1711,10 @@ pub async fn run_decision_loop_with_tools(
                     && frame.open_items.is_empty()
                     && frame.blocked_items.is_empty()
                 {
+                    if let Err(block) = enforce_completion_gate(&mut frame, &mut total_usage) {
+                        inject_completion_gate_block(&mut frame, &block);
+                        continue;
+                    }
                     finalize_worker_usage_report(&frame, &mut total_usage);
                     return Ok(LoopOutcome::Done {
                         final_state: AgentState::Done,
@@ -1913,6 +1974,32 @@ mod tests {
         let cwd = std::env::temp_dir().join("state_frame_loop_tests");
         let config_root = Some(cwd.join(".morgo"));
         (cwd, config_root)
+    }
+
+    fn push_completion_contract(
+        frame: &mut StateFrame,
+        artifact_required: bool,
+        test_required: bool,
+        verification_required: bool,
+    ) {
+        frame.recent_evidence.push(format!(
+            "fact: completion_contract artifact_evidence={} test_evidence={} verification_evidence={}",
+            if artifact_required {
+                "required"
+            } else {
+                "not_required"
+            },
+            if test_required {
+                "required"
+            } else {
+                "not_required"
+            },
+            if verification_required {
+                "required"
+            } else {
+                "not_required"
+            },
+        ));
     }
 
     #[test]
@@ -2625,7 +2712,9 @@ mod tests {
     #[test]
     fn completion_evidence_evaluator_flags_missing_artifact_evidence() {
         let mut frame = make_frame();
+        frame.recent_evidence.clear();
         frame.objective = "write output file and run tests".into();
+        push_completion_contract(&mut frame, true, true, true);
         frame.recent_evidence.push(
             "fact: test_failures ref=test:2 name=cargo_test status=passed source=tool:Bash source_event_id=tool-bash:2 freshness=after-runtime-test confidence=1.00 lineage_status=active invalidated_by=none supersedes=none conflicts_with=none summary=cargo test passed".into(),
         );
@@ -2639,6 +2728,7 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let mut frame = make_frame();
         frame.objective = "write report artifact and run tests".into();
+        push_completion_contract(&mut frame, true, true, true);
         frame.recent_evidence.push(
             "fact: artifact_status ref=artifact:step1:runtime:0 path=/tmp/report.md kind=file status=verified source=tool:ArtifactVerify source_event_id=tool-artifact:1:0 freshness=after-runtime-artifact-verify confidence=1.00 lineage_status=active invalidated_by=none supersedes=none conflicts_with=none summary=artifact verification passed for /tmp/report.md".into(),
         );
@@ -2689,6 +2779,8 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let temp_path = unique_temp_path("worker_report_refs");
         std::fs::write(&temp_path, "alpha\n").expect("temp file should be written");
+        let mut frame = make_frame();
+        push_completion_contract(&mut frame, false, false, false);
         let read_json = format!(
             r#"{{"state":"executing","decision":"call_tool","next_action":{{"action_type":"Read","args":{{"file_path":"{}"}}}}}}"#,
             temp_path.display()
@@ -2707,7 +2799,7 @@ mod tests {
         let outcome = rt
             .block_on(run_decision_loop_with_tools(
                 &client,
-                make_frame(),
+                frame,
                 DecisionLoopConfig::default(),
                 Some(tool_runtime),
             ))
@@ -2721,6 +2813,157 @@ mod tests {
                         .evidence_refs
                         .iter()
                         .any(|reference| reference == "tool_output:1")
+                );
+            }
+            other => panic!("expected Done, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn done_is_blocked_when_artifact_evidence_missing() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut frame = make_frame();
+        frame.recent_evidence.clear();
+        push_completion_contract(&mut frame, true, false, false);
+        frame.recent_evidence.push(
+            "fact: permission_to_create_and_write:/tmp/missing.txt ref=permission:1 source=permission_scope source_event_id=permission:1 freshness=current confidence=1.00 status=active invalidated_by=none supersedes=none conflicts_with=none summary=write target".into(),
+        );
+        let done_json = r#"{"state":"done","decision":"done"}"#;
+        let client = ModelProviderClient::with_scripted_turns(vec![vec![StreamEvent::TextDelta(
+            done_json.into(),
+        )]]);
+        let outcome = rt
+            .block_on(run_decision_loop(
+                &client,
+                frame,
+                DecisionLoopConfig {
+                    max_iterations: 1,
+                    ..DecisionLoopConfig::default()
+                },
+            ))
+            .expect("loop should not error");
+        match outcome {
+            LoopOutcome::MaxIterationsReached { usage, .. } => {
+                assert_eq!(
+                    usage
+                        .completion_evidence_status
+                        .as_ref()
+                        .map(|s| s.as_str()),
+                    Some("missing_artifact_evidence")
+                );
+                let report = usage.worker_report.expect("worker report");
+                assert!(
+                    report
+                        .remaining_risks
+                        .iter()
+                        .any(|item| item.contains("required_action:write_artifact"))
+                );
+            }
+            other => panic!("expected MaxIterationsReached, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn implicit_done_after_continue_is_blocked_when_verification_missing() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut frame = make_frame();
+        push_completion_contract(&mut frame, true, false, true);
+        frame.recent_evidence.push(
+            "fact: artifact_status ref=artifact:1 path=/tmp/report.md kind=file status=created source=tool:Write source_event_id=tool-write:1 freshness=after-runtime confidence=1.00 lineage_status=active invalidated_by=none supersedes=none conflicts_with=none summary=artifact created".into(),
+        );
+        let continue_json = r#"{"state":"executing","decision":"continue","state_patch":{"open_items_remove":["tests pass"]}}"#;
+        let client = ModelProviderClient::with_scripted_turns(vec![vec![StreamEvent::TextDelta(
+            continue_json.into(),
+        )]]);
+        let outcome = rt
+            .block_on(run_decision_loop(
+                &client,
+                frame,
+                DecisionLoopConfig {
+                    max_iterations: 1,
+                    ..DecisionLoopConfig::default()
+                },
+            ))
+            .expect("loop should not error");
+        match outcome {
+            LoopOutcome::MaxIterationsReached { usage, .. } => {
+                assert_eq!(
+                    usage
+                        .completion_evidence_status
+                        .as_ref()
+                        .map(|s| s.as_str()),
+                    Some("missing_verification_evidence")
+                );
+                let report = usage.worker_report.expect("worker report");
+                assert!(
+                    report
+                        .remaining_risks
+                        .iter()
+                        .any(|item| item.contains("required_action:verify_artifact"))
+                );
+            }
+            other => panic!("expected MaxIterationsReached, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn completion_gate_injects_required_action_into_stateframe() {
+        let mut frame = make_frame();
+        frame.recent_evidence.clear();
+        push_completion_contract(&mut frame, true, false, true);
+        frame.recent_evidence.push(
+            "fact: artifact_status ref=artifact:needs-verify path=/tmp/report.md kind=file status=created source=tool:Write source_event_id=tool-write:1 freshness=after-runtime confidence=1.00 lineage_status=active invalidated_by=none supersedes=none conflicts_with=none summary=artifact created".into(),
+        );
+        let mut usage = LoopUsage::default();
+        let block =
+            super::enforce_completion_gate(&mut frame, &mut usage).expect_err("gate should block");
+        super::inject_completion_gate_block(&mut frame, &block);
+        assert_eq!(block.required_action, "verify_artifact");
+        assert!(
+            frame
+                .open_items
+                .iter()
+                .any(|item| item.contains("required_action:verify_artifact"))
+        );
+        assert!(
+            frame
+                .recent_evidence
+                .iter()
+                .any(|line| line.contains("completion_gate:")
+                    && line.contains("required_action=verify_artifact"))
+        );
+    }
+
+    #[test]
+    fn done_passes_when_completion_evidence_is_sufficient() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut frame = make_frame();
+        push_completion_contract(&mut frame, true, true, true);
+        frame.recent_evidence.push(
+            "fact: artifact_status ref=artifact:ok path=/tmp/report.md kind=file status=verified source=tool:ArtifactVerify source_event_id=tool-artifact:1 freshness=after-runtime confidence=1.00 lineage_status=active invalidated_by=none supersedes=none conflicts_with=none summary=artifact verification passed".into(),
+        );
+        frame.recent_evidence.push(
+            "fact: test_failures ref=test:ok name=cargo_test status=passed source=tool:Bash source_event_id=tool-bash:1 freshness=after-runtime-test confidence=1.00 lineage_status=active invalidated_by=none supersedes=none conflicts_with=none summary=cargo test passed".into(),
+        );
+        let done_json = r#"{"state":"done","decision":"done"}"#;
+        let client = ModelProviderClient::with_scripted_turns(vec![vec![StreamEvent::TextDelta(
+            done_json.into(),
+        )]]);
+        let outcome = rt
+            .block_on(run_decision_loop(
+                &client,
+                frame,
+                DecisionLoopConfig::default(),
+            ))
+            .expect("loop should not error");
+        match outcome {
+            LoopOutcome::Done { usage, .. } => {
+                assert_eq!(
+                    usage
+                        .completion_evidence_status
+                        .as_ref()
+                        .map(|s| s.as_str()),
+                    Some("sufficient")
                 );
             }
             other => panic!("expected Done, got {other:?}"),

@@ -108,6 +108,62 @@ fn push_none_recorded_unless_present(facts: &mut Vec<String>, fact_name: &str) {
     }
 }
 
+fn open_item_requires_test(summary: &str) -> bool {
+    let lowered = summary.to_ascii_lowercase();
+    lowered.contains("test")
+        || lowered.contains("cargo test")
+        || lowered.contains("pytest")
+        || lowered.contains("run verification")
+        || summary.contains("测试")
+}
+
+fn open_item_requires_verification(summary: &str) -> bool {
+    let lowered = summary.to_ascii_lowercase();
+    lowered.contains("verify")
+        || lowered.contains("verification")
+        || lowered.contains("artifact check")
+        || summary.contains("验证")
+}
+
+fn build_completion_contract_fact(
+    permission_facts: &[String],
+    artifact_ledgers: &[crate::core::state_fact_ledger::ArtifactRecord],
+    open_item_ledgers: &[crate::core::state_fact_ledger::OpenItemRecord],
+    readonly_analysis: bool,
+) -> String {
+    let artifact_required =
+        !readonly_analysis && (!permission_facts.is_empty() || !artifact_ledgers.is_empty());
+    let test_required = open_item_ledgers
+        .iter()
+        .any(|item| open_item_requires_test(&item.summary));
+    let verification_required = !readonly_analysis
+        && (artifact_required
+            || open_item_ledgers
+                .iter()
+                .any(|item| open_item_requires_verification(&item.summary)));
+    fact_line(
+        "completion_contract",
+        format!(
+            "artifact_evidence={} test_evidence={} verification_evidence={}",
+            if artifact_required {
+                "required"
+            } else {
+                "not_required"
+            },
+            if test_required {
+                "required"
+            } else {
+                "not_required"
+            },
+            if verification_required {
+                "required"
+            } else {
+                "not_required"
+            }
+        ),
+    )
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProjectionDiagnostics {
     pub mismatch_count: usize,
@@ -306,11 +362,8 @@ fn build_fact_ledger(
             "recent_diff",
             step.result_diff.as_deref().unwrap_or("none recorded"),
         ));
-        facts.extend(build_permission_facts(
-            step.id,
-            step.objective(),
-            readonly_analysis,
-        ));
+        let permission_facts = build_permission_facts(step.id, step.objective(), readonly_analysis);
+        facts.extend(permission_facts.iter().cloned());
         if !ledgers.file_facts.is_empty() {
             for item in ledgers.file_facts {
                 facts.push(fact_line(
@@ -498,6 +551,12 @@ fn build_fact_ledger(
             ));
         }
         push_none_recorded_unless_present(&mut facts, "rejected_approaches");
+        facts.push(build_completion_contract_fact(
+            &permission_facts,
+            &ledgers.artifact_refs,
+            &open_item_ledgers,
+            readonly_analysis,
+        ));
     } else {
         facts.push(fact_line("accepted_constraints", "none recorded"));
         facts.push(fact_line("reject_correction", "none recorded"));
@@ -510,6 +569,10 @@ fn build_fact_ledger(
         facts.push(fact_line("open_item_refs", "none recorded"));
         facts.push(fact_line("blocker_refs", "none recorded"));
         facts.push(fact_line("rejected_approaches", "none recorded"));
+        facts.push(fact_line(
+            "completion_contract",
+            "artifact_evidence=not_required test_evidence=not_required verification_evidence=not_required",
+        ));
     }
 
     facts.push(fact_line(

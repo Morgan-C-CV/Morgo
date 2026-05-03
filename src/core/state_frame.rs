@@ -68,6 +68,15 @@ pub struct WorkerStructuredReport {
     pub completion_evidence_status: CompletionEvidenceStatus,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CompletionGateBlock {
+    pub status: CompletionEvidenceStatus,
+    pub required_action: String,
+    pub reason: String,
+    #[serde(default)]
+    pub missing_evidence_refs: Vec<String>,
+}
+
 /// Cost/performance effort tier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EffortLevel {
