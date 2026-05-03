@@ -167,6 +167,14 @@ struct SpawnPayloadBuild {
     step_revision: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StepRolloutExecutionPolicy {
+    forced_worker_lism_policy: WorkerLisMPolicy,
+    fallback_tier: &'static str,
+    fallback_reason: &'static str,
+    affected_gaps: Vec<crate::core::state_frame::CompletionEvidenceGap>,
+}
+
 fn assignment_fingerprint(material: &serde_json::Value) -> String {
     let mut hasher = DefaultHasher::new();
     material.to_string().hash(&mut hasher);
@@ -2001,6 +2009,43 @@ impl BossCoordinator {
         })
     }
 
+    fn resolve_step_rollout_execution_policy(
+        metadata: Option<&BossStepRoutedMetadata>,
+    ) -> Option<StepRolloutExecutionPolicy> {
+        let metadata = metadata?;
+        let affected_gaps = metadata
+            .completion_evidence_gaps
+            .iter()
+            .filter(|gap| {
+                gap.missing_artifact_evidence
+                    || gap.missing_verification_evidence
+                    || gap.missing_test_evidence
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if affected_gaps.is_empty() {
+            return None;
+        }
+        let has_artifact_or_verification_gap = affected_gaps
+            .iter()
+            .any(|gap| gap.missing_artifact_evidence || gap.missing_verification_evidence);
+        if has_artifact_or_verification_gap {
+            Some(StepRolloutExecutionPolicy {
+                forced_worker_lism_policy: WorkerLisMPolicy::ForceOff,
+                fallback_tier: "full_worker_dispatch",
+                fallback_reason: "rollout_policy_exact_artifact_gap",
+                affected_gaps,
+            })
+        } else {
+            Some(StepRolloutExecutionPolicy {
+                forced_worker_lism_policy: WorkerLisMPolicy::ForceOff,
+                fallback_tier: "full_worker_dispatch",
+                fallback_reason: "rollout_policy_test_evidence_gap",
+                affected_gaps,
+            })
+        }
+    }
+
     fn build_observability_summary(
         steps: &[BossStepReport],
         tasks: Option<&TaskManager>,
@@ -3093,8 +3138,16 @@ impl BossCoordinator {
                     self.lism_policy().await,
                     app_state.permission_context.lism_enabled(),
                 );
+                let step_rollout_execution_policy = {
+                    let routed_step_metadata = self.routed_step_metadata.read().await;
+                    routed_step_metadata.get(&step_id).and_then(|metadata| {
+                        Self::resolve_step_rollout_execution_policy(Some(metadata))
+                    })
+                };
+                let force_full_worker_dispatch_from_policy =
+                    step_rollout_execution_policy.is_some();
 
-                if lism_enabled {
+                if lism_enabled && !force_full_worker_dispatch_from_policy {
                     let full_worker_dispatch_fallback_enabled =
                         self.full_worker_dispatch_fallback_enabled().await;
                     let routed_preview = {
@@ -3552,6 +3605,33 @@ impl BossCoordinator {
                     }
                 }
 
+                if let Some(policy) = step_rollout_execution_policy.as_ref() {
+                    let step_size = {
+                        let plan_guard = self.plan.read().await;
+                        plan_guard.as_ref().and_then(|plan| {
+                            let frame = build_routed_state_frame_with_model_route(
+                                plan,
+                                BossStage::Execution,
+                                step_id,
+                                ActorRole::Worker,
+                            )
+                            .frame;
+                            serde_json::to_string(&frame).ok().map(|s| s.len())
+                        })
+                    };
+                    let mut routed_step_metadata = self.routed_step_metadata.write().await;
+                    let metadata = routed_step_metadata.entry(step_id).or_default();
+                    metadata.fallback_count = Some(metadata.fallback_count.unwrap_or(0) + 1);
+                    metadata.fallback_tier = Some(policy.fallback_tier.into());
+                    metadata.fallback_reason = Some(policy.fallback_reason.into());
+                    if metadata.state_frame_size.is_none() {
+                        metadata.state_frame_size = step_size;
+                    }
+                    if metadata.completion_evidence_gaps.is_empty() {
+                        metadata.completion_evidence_gaps = policy.affected_gaps.clone();
+                    }
+                }
+
                 let tasks = app_state
                     .permission_context
                     .task_manager
@@ -3725,6 +3805,12 @@ impl BossCoordinator {
             .iter()
             .find(|step| step.id == step_id)
             .ok_or_else(|| anyhow::anyhow!("Unknown boss step {step_id}"))?;
+        let rollout_execution_policy = {
+            let routed_step_metadata = self.routed_step_metadata.read().await;
+            routed_step_metadata
+                .get(&step_id)
+                .and_then(|metadata| Self::resolve_step_rollout_execution_policy(Some(metadata)))
+        };
         let plan_version = format!("{}:steps={}", plan.plan_id, plan.steps.len());
         let step_revision = format!("step-{}-attempt-{}", step.id, step.attempt_count);
         let relevant_file_handles = extract_relevant_file_handles(step.objective(), &step_revision);
@@ -3743,7 +3829,11 @@ impl BossCoordinator {
             Vec::new()
         };
         let allowed_tools = default_allowed_tools();
-        let lism_policy = self.worker_lism_policy().await.as_str().to_string();
+        let lism_policy = if let Some(policy) = rollout_execution_policy.as_ref() {
+            policy.forced_worker_lism_policy.as_str().to_string()
+        } else {
+            self.worker_lism_policy().await.as_str().to_string()
+        };
         let generated_at = format!(
             "{}",
             std::time::SystemTime::now()
@@ -5055,6 +5145,85 @@ mod tests {
         }];
 
         assert!(BossCoordinator::derive_rollout_policy_decision(&steps).is_none());
+    }
+
+    #[test]
+    fn rollout_execution_policy_forces_full_dispatch_for_exact_artifact_gap() {
+        let metadata = BossStepRoutedMetadata {
+            completion_evidence_gaps: vec![CompletionEvidenceGap {
+                target_ref: "artifact:contract:2".into(),
+                target_path: Some("/tmp/two.md".into()),
+                missing_artifact_evidence: true,
+                missing_test_evidence: false,
+                missing_verification_evidence: false,
+                recommended_action: "write_artifact".into(),
+            }],
+            ..BossStepRoutedMetadata::default()
+        };
+
+        let policy = BossCoordinator::resolve_step_rollout_execution_policy(Some(&metadata))
+            .expect("execution policy");
+
+        assert_eq!(policy.forced_worker_lism_policy, WorkerLisMPolicy::ForceOff);
+        assert_eq!(policy.fallback_tier, "full_worker_dispatch");
+        assert_eq!(policy.fallback_reason, "rollout_policy_exact_artifact_gap");
+        assert_eq!(policy.affected_gaps.len(), 1);
+        assert_eq!(policy.affected_gaps[0].target_ref, "artifact:contract:2");
+    }
+
+    #[test]
+    fn rollout_execution_policy_routes_test_only_gap_to_verification_or_full_dispatch() {
+        let metadata = BossStepRoutedMetadata {
+            completion_evidence_gaps: vec![CompletionEvidenceGap {
+                target_ref: "artifact:contract:test".into(),
+                target_path: Some("/tmp/report.md".into()),
+                missing_artifact_evidence: false,
+                missing_test_evidence: true,
+                missing_verification_evidence: false,
+                recommended_action: "run_verification".into(),
+            }],
+            ..BossStepRoutedMetadata::default()
+        };
+
+        let policy = BossCoordinator::resolve_step_rollout_execution_policy(Some(&metadata))
+            .expect("execution policy");
+
+        assert_eq!(policy.forced_worker_lism_policy, WorkerLisMPolicy::ForceOff);
+        assert_eq!(policy.fallback_tier, "full_worker_dispatch");
+        assert_eq!(policy.fallback_reason, "rollout_policy_test_evidence_gap");
+        assert_eq!(policy.affected_gaps.len(), 1);
+        assert_eq!(policy.affected_gaps[0].target_ref, "artifact:contract:test");
+    }
+
+    #[test]
+    fn rollout_execution_policy_clears_when_gap_is_gone() {
+        let metadata = BossStepRoutedMetadata::default();
+        assert!(BossCoordinator::resolve_step_rollout_execution_policy(Some(&metadata)).is_none());
+    }
+
+    #[test]
+    fn rollout_execution_policy_is_step_scoped_for_multi_artifact_history() {
+        let metadata = BossStepRoutedMetadata {
+            completion_evidence_gaps: vec![CompletionEvidenceGap {
+                target_ref: "artifact:contract:b".into(),
+                target_path: Some("/tmp/b.md".into()),
+                missing_artifact_evidence: false,
+                missing_test_evidence: false,
+                missing_verification_evidence: true,
+                recommended_action: "verify_artifact".into(),
+            }],
+            ..BossStepRoutedMetadata::default()
+        };
+
+        let policy = BossCoordinator::resolve_step_rollout_execution_policy(Some(&metadata))
+            .expect("execution policy");
+
+        assert_eq!(policy.affected_gaps.len(), 1);
+        assert_eq!(policy.affected_gaps[0].target_ref, "artifact:contract:b");
+        assert_eq!(
+            policy.affected_gaps[0].target_path.as_deref(),
+            Some("/tmp/b.md")
+        );
     }
 
     #[tokio::test]
