@@ -194,10 +194,12 @@ Rules:\n\
 - If `recent_evidence` contains `fact: execution_mode read_only_analysis`, prefer a single-turn `done`; do not use `continue` just to outline or narrate your plan\n\
 - If `required_output_schema` is `readonly_audit_4_paragraphs_v1`, return `decision=\"done\"` with exactly 4 `state_patch.accepted_summary_add` items, one each for `现状`、`主要风险`、`证据来源`、`下一步建议`\n\
 - Treat `recent_evidence` entries prefixed with `fact:` as the authoritative Fact Ledger for this turn\n\
+- Treat `budget.max_tool_calls=0` as unlimited tool calls, not as tool calls being disabled\n\
 - If a fact entry already says `none`, `none recorded`, `absent`, or equivalent, do NOT request that same context again\n\
 - Only use \"decision\": \"request_context\" when the missing fact is not already present in objective/open_items/blocked_items/accepted_summary/recent_evidence\n\
 - Use \"decision\": \"call_tool\" when you need a concrete runtime action before you can continue; always include `next_action.action_type` and structured `next_action.args`\n\
 - Only call tools listed in `allowed_tools`, and treat `allowed_actions` as the invokable runtime capability contract for this turn\n\
+- When `allowed_actions` is non-empty, do NOT request extra context like `fact:allow_worker_tool_calls`, `fact:increase_max_tool_calls`, or `fact:budget.max_tool_calls` to confirm permission; use the listed runtime actions directly\n\
 - In the current runtime, `call_tool` is expected to use real worker tools. Prefer narrow `Read` calls with exact `file_path`, use `Bash` only for concrete commands, and use `Edit` with exact `file_path` / `old_string` / `new_string`\n\
 - Never call `Edit` unless you already know the exact replacement span. If `old_string` is missing, empty, or uncertain, first `Read` the target file and then issue `Edit` with the exact `old_string`\n\
 - If a prior `call_tool` failed, read the `tool_feedback:` / `recent_output_ref:` lines in `recent_evidence`, diagnose the reason, and choose the next action accordingly\n\
@@ -214,6 +216,64 @@ Rules:\n\
 - Respond with JSON only, no prose or explanation\n\
 \n\
 StateFrame:";
+
+fn append_runtime_contract_facts(frame: &mut StateFrame) {
+    let max_tool_calls_value = if frame.budget.max_tool_calls == 0 {
+        "unlimited".to_string()
+    } else {
+        frame.budget.max_tool_calls.to_string()
+    };
+    push_unique(
+        &mut frame.recent_evidence,
+        format!(
+            "fact: budget.max_tool_calls value={} summary=max_tool_calls={} ({})",
+            max_tool_calls_value,
+            frame.budget.max_tool_calls,
+            if frame.budget.max_tool_calls == 0 {
+                "0 means unlimited"
+            } else {
+                "hard cap"
+            }
+        ),
+    );
+    push_unique(
+        &mut frame.recent_evidence,
+        format!(
+            "fact: allow_worker_tool_calls status={} allowed_actions={} allowed_tools={} summary=use allowed_actions as the runtime invocation contract",
+            if frame.allowed_actions.is_empty() {
+                "not_allowed"
+            } else {
+                "allowed"
+            },
+            if frame.allowed_actions.is_empty() {
+                "none".to_string()
+            } else {
+                frame.allowed_actions.join("|")
+            },
+            if frame.allowed_tools.is_empty() {
+                "none".to_string()
+            } else {
+                frame.allowed_tools.join("|")
+            }
+        ),
+    );
+    push_unique(
+        &mut frame.recent_evidence,
+        format!(
+            "fact: increase_max_tool_calls status={} summary={}",
+            if frame.budget.max_tool_calls == 0 {
+                "not_needed"
+            } else {
+                "available_if_cap_exhausted"
+            },
+            if frame.budget.max_tool_calls == 0 {
+                "max_tool_calls is already unlimited in this runtime"
+            } else {
+                "request only after consuming the current capped budget"
+            }
+        ),
+    );
+}
 
 fn push_unique(items: &mut Vec<String>, value: String) -> bool {
     if items.iter().any(|item| item == &value) {
@@ -1972,6 +2032,7 @@ pub async fn run_decision_loop_with_tools(
     let mut total_usage = LoopUsage::default();
     let mut fallback_ladder = FallbackLadderState::default();
     let mut tool_dispatch_seq = 0usize;
+    append_runtime_contract_facts(&mut frame);
     let initial_requests = initial_target_hydration_requests(&frame);
     let initial_hydration = hydrate_needed_context(&mut frame, &initial_requests);
     total_usage.hydration_count += initial_hydration.hydrated.len();
@@ -1979,6 +2040,7 @@ pub async fn run_decision_loop_with_tools(
     total_usage.hydration_ref_missing += initial_hydration.unavailable.len();
 
     for _iter in 0..config.max_iterations {
+        append_runtime_contract_facts(&mut frame);
         let prompt = format!(
             "{}\n{}",
             STATE_DECISION_INSTRUCTION,
@@ -2325,10 +2387,11 @@ pub async fn run_decision_loop_with_tools(
 #[cfg(test)]
 mod tests {
     use super::{
-        DecisionLoopConfig, LoopOutcome, LoopUsage, StateFrameToolRuntime, classify_tool_outcome,
-        evaluate_completion_evidence, execute_call_tool, parse_and_validate_decision,
-        push_tool_failure_feedback, push_tool_outcome_evidence, run_decision_loop,
-        run_decision_loop_with_tools, tool_backed_hydration_path,
+        DecisionLoopConfig, LoopOutcome, LoopUsage, StateFrameToolRuntime,
+        append_runtime_contract_facts, classify_tool_outcome, evaluate_completion_evidence,
+        execute_call_tool, parse_and_validate_decision, push_tool_failure_feedback,
+        push_tool_outcome_evidence, run_decision_loop, run_decision_loop_with_tools,
+        tool_backed_hydration_path,
     };
     use crate::core::state_frame::validate_state_decision;
     use crate::core::state_frame::{
@@ -2367,6 +2430,31 @@ mod tests {
             required_output_schema: Some("state_decision_v1".into()),
             budget: StateBudget::default(),
         }
+    }
+
+    #[test]
+    fn runtime_contract_facts_explain_unlimited_tool_budget() {
+        let mut frame = make_frame();
+        frame.allowed_actions = vec!["read_file".into(), "edit_file".into()];
+        frame.allowed_tools = vec!["Read".into(), "Edit".into()];
+        frame.budget.max_tool_calls = 0;
+
+        append_runtime_contract_facts(&mut frame);
+
+        assert!(frame.recent_evidence.iter().any(|item| {
+            item.contains("fact: budget.max_tool_calls")
+                && item.contains("value=unlimited")
+                && item.contains("0 means unlimited")
+        }));
+        assert!(frame.recent_evidence.iter().any(|item| {
+            item.contains("fact: allow_worker_tool_calls")
+                && item.contains("status=allowed")
+                && item.contains("allowed_actions=read_file|edit_file")
+        }));
+        assert!(frame.recent_evidence.iter().any(|item| {
+            item.contains("fact: increase_max_tool_calls")
+                && item.contains("status=not_needed")
+        }));
     }
 
     fn unique_temp_path(label: &str) -> std::path::PathBuf {

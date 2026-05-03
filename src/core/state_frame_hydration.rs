@@ -442,6 +442,61 @@ fn format_unavailable_line(selector: &NeededContextSelector, reason: &str, sourc
     )
 }
 
+fn runtime_budget_fact_line(frame: &StateFrame) -> String {
+    let value = if frame.budget.max_tool_calls == 0 {
+        "unlimited".to_string()
+    } else {
+        frame.budget.max_tool_calls.to_string()
+    };
+    format!(
+        "hydrated_context: fact:budget.max_tool_calls source=state_frame_budget match_reason=runtime_budget excerpt=max_tool_calls={} effective_value={} semantics={}",
+        frame.budget.max_tool_calls,
+        value,
+        if frame.budget.max_tool_calls == 0 {
+            "0_means_unlimited"
+        } else {
+            "hard_cap"
+        }
+    )
+}
+
+fn runtime_allow_worker_tool_calls_line(frame: &StateFrame) -> String {
+    format!(
+        "hydrated_context: fact:allow_worker_tool_calls source=state_frame_contract match_reason=allowed_actions excerpt=status={} allowed_actions={} allowed_tools={}",
+        if frame.allowed_actions.is_empty() {
+            "not_allowed"
+        } else {
+            "allowed"
+        },
+        if frame.allowed_actions.is_empty() {
+            "none".to_string()
+        } else {
+            frame.allowed_actions.join("|")
+        },
+        if frame.allowed_tools.is_empty() {
+            "none".to_string()
+        } else {
+            frame.allowed_tools.join("|")
+        }
+    )
+}
+
+fn runtime_increase_max_tool_calls_line(frame: &StateFrame) -> String {
+    format!(
+        "hydrated_context: fact:increase_max_tool_calls source=state_frame_budget match_reason=runtime_budget excerpt=status={} reason={}",
+        if frame.budget.max_tool_calls == 0 {
+            "not_needed"
+        } else {
+            "available_if_cap_exhausted"
+        },
+        if frame.budget.max_tool_calls == 0 {
+            "max_tool_calls_already_unlimited"
+        } else {
+            "current_budget_is_capped"
+        }
+    )
+}
+
 enum SelectorResolution {
     Hydrated(String),
     Stale(String),
@@ -794,15 +849,26 @@ fn hydrate_selector(
                 resolved => resolved,
             }
         }
-        NeededContextSelector::Fact { name } => resolve_fact_match(
-            index,
-            name,
-            selector,
-            excerpt_chars,
-            "fact_ledger",
-            "fact_name",
-            |_| true,
-        ),
+        NeededContextSelector::Fact { name } => match name.as_str() {
+            "budget.max_tool_calls" => {
+                SelectorResolution::Hydrated(runtime_budget_fact_line(frame))
+            }
+            "allow_worker_tool_calls" => {
+                SelectorResolution::Hydrated(runtime_allow_worker_tool_calls_line(frame))
+            }
+            "increase_max_tool_calls" => {
+                SelectorResolution::Hydrated(runtime_increase_max_tool_calls_line(frame))
+            }
+            _ => resolve_fact_match(
+                index,
+                name,
+                selector,
+                excerpt_chars,
+                "fact_ledger",
+                "fact_name",
+                |_| true,
+            ),
+        },
         NeededContextSelector::Symbol { name } => {
             let symbol_resolution = resolve_fact_match(
                 index,
@@ -1107,6 +1173,42 @@ mod tests {
         );
         assert!(frame.recent_evidence.iter().any(|item| {
             item.contains("hydrated_context: fact:permission_to_create_and_write:/tmp/report.md")
+        }));
+    }
+
+    #[test]
+    fn hydrate_needed_context_resolves_runtime_tool_budget_meta_facts() {
+        let mut frame = make_frame();
+        frame.allowed_actions = vec!["read_file".into(), "edit_file".into(), "run_test".into()];
+        frame.allowed_tools = vec!["Read".into(), "Edit".into(), "Bash".into()];
+        frame.budget.max_tool_calls = 0;
+
+        let summary = hydrate_needed_context(
+            &mut frame,
+            &[
+                "fact:budget.max_tool_calls".into(),
+                "fact:allow_worker_tool_calls".into(),
+                "fact:increase_max_tool_calls".into(),
+            ],
+        );
+
+        assert!(summary.changed);
+        assert_eq!(summary.unavailable.len(), 0);
+        assert_eq!(summary.hydrated.len(), 3);
+        assert!(frame.recent_evidence.iter().any(|item| {
+            item.contains("hydrated_context: fact:budget.max_tool_calls")
+                && item.contains("effective_value=unlimited")
+                && item.contains("semantics=0_means_unlimited")
+        }));
+        assert!(frame.recent_evidence.iter().any(|item| {
+            item.contains("hydrated_context: fact:allow_worker_tool_calls")
+                && item.contains("status=allowed")
+                && item.contains("allowed_actions=read_file|edit_file|run_test")
+        }));
+        assert!(frame.recent_evidence.iter().any(|item| {
+            item.contains("hydrated_context: fact:increase_max_tool_calls")
+                && item.contains("status=not_needed")
+                && item.contains("max_tool_calls_already_unlimited")
         }));
     }
 
