@@ -17,6 +17,7 @@ use crate::tool::orchestrator::build_execution_record;
 use crate::tool::registry::ToolRegistry;
 use crate::tool::result::ToolExecutionRecord;
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 #[derive(Debug, Clone)]
 pub struct DecisionLoopConfig {
@@ -67,6 +68,8 @@ pub struct LoopUsage {
 pub struct StateFrameToolRuntime {
     pub registry: ToolRegistry,
     pub permissions: ToolPermissionContext,
+    pub cwd: PathBuf,
+    pub config_root: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -1389,6 +1392,12 @@ mod tests {
         ))
     }
 
+    fn test_runtime_paths() -> (std::path::PathBuf, Option<std::path::PathBuf>) {
+        let cwd = std::env::temp_dir().join("state_frame_loop_tests");
+        let config_root = Some(cwd.join(".morgo"));
+        (cwd, config_root)
+    }
+
     #[test]
     fn request_context_unresolved_activates_recent_local_history_fallback() {
         let rt = tokio::runtime::Runtime::new().unwrap();
@@ -1498,6 +1507,8 @@ mod tests {
         let tool_runtime = StateFrameToolRuntime {
             registry: ToolRegistry::new().register(Arc::new(FileReadTool)),
             permissions: ToolPermissionContext::new(PermissionMode::Default),
+            cwd: test_runtime_paths().0,
+            config_root: test_runtime_paths().1,
         };
         let outcome = rt
             .block_on(run_decision_loop_with_tools(
@@ -1543,6 +1554,8 @@ mod tests {
         let tool_runtime = StateFrameToolRuntime {
             registry: ToolRegistry::new().register(Arc::new(FileReadTool)),
             permissions: ToolPermissionContext::new(PermissionMode::Default),
+            cwd: test_runtime_paths().0,
+            config_root: test_runtime_paths().1,
         };
 
         let outcome = rt
@@ -1592,6 +1605,8 @@ mod tests {
         let tool_runtime = StateFrameToolRuntime {
             registry,
             permissions: ToolPermissionContext::new(PermissionMode::Default),
+            cwd: test_runtime_paths().0,
+            config_root: test_runtime_paths().1,
         };
         let outcome = rt
             .block_on(run_decision_loop_with_tools(
@@ -1637,6 +1652,8 @@ mod tests {
         let tool_runtime = StateFrameToolRuntime {
             registry,
             permissions,
+            cwd: test_runtime_paths().0,
+            config_root: test_runtime_paths().1,
         };
         let outcome = rt
             .block_on(run_decision_loop_with_tools(
@@ -1702,6 +1719,8 @@ mod tests {
         let tool_runtime = StateFrameToolRuntime {
             registry,
             permissions,
+            cwd: test_runtime_paths().0,
+            config_root: test_runtime_paths().1,
         };
 
         let outcome = rt
@@ -1754,6 +1773,8 @@ mod tests {
         let tool_runtime = StateFrameToolRuntime {
             registry,
             permissions,
+            cwd: test_runtime_paths().0,
+            config_root: test_runtime_paths().1,
         };
         let mut frame = make_frame();
         let (changed, record, ref_write_count) = rt
@@ -1820,6 +1841,8 @@ mod tests {
         let tool_runtime = StateFrameToolRuntime {
             registry: ToolRegistry::new().register(Arc::new(FileReadTool)),
             permissions: ToolPermissionContext::new(PermissionMode::Default),
+            cwd: test_runtime_paths().0,
+            config_root: test_runtime_paths().1,
         };
         let outcome = rt
             .block_on(run_decision_loop_with_tools(
@@ -1861,6 +1884,8 @@ mod tests {
         let tool_runtime = StateFrameToolRuntime {
             registry: ToolRegistry::new().register(Arc::new(FileReadTool)),
             permissions: ToolPermissionContext::new(PermissionMode::Default),
+            cwd: test_runtime_paths().0,
+            config_root: test_runtime_paths().1,
         };
         let outcome = rt
             .block_on(run_decision_loop_with_tools(
@@ -1948,6 +1973,8 @@ mod tests {
         let tool_runtime = StateFrameToolRuntime {
             registry,
             permissions,
+            cwd: test_runtime_paths().0,
+            config_root: test_runtime_paths().1,
         };
         let outcome = rt
             .block_on(run_decision_loop_with_tools(
@@ -1992,6 +2019,8 @@ mod tests {
         let tool_runtime = StateFrameToolRuntime {
             registry,
             permissions,
+            cwd: test_runtime_paths().0,
+            config_root: test_runtime_paths().1,
         };
         let outcome = rt
             .block_on(run_decision_loop_with_tools(

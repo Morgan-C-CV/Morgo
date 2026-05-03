@@ -15,10 +15,7 @@ use crate::state::active_model_runtime::ActiveModelRuntimeSnapshot;
 use crate::tool::registry::{
     ToolAssemblyContext, ToolContractMismatch, ToolContractPreflightSpec, ToolRegistrySnapshot,
 };
-use crate::{
-    bootstrap::InteractionSurface, bootstrap::SessionMode,
-    bootstrap::config_root::resolve_config_root,
-};
+use crate::{bootstrap::InteractionSurface, bootstrap::SessionMode};
 
 /// Outcome of a single step execution via the StateFrame orchestrator seam.
 #[derive(Debug, Clone)]
@@ -56,7 +53,14 @@ fn tool_assembly_context_for_role(role: ActorRole) -> ToolAssemblyContext {
     }
 }
 
-fn direct_worker_preflight_spec(frame: &StateFrame) -> ToolContractPreflightSpec {
+fn has_any_marker(items: &[String], markers: &[&str]) -> bool {
+    items.iter().any(|item| {
+        let lowered = item.to_ascii_lowercase();
+        markers.iter().any(|marker| lowered.contains(marker))
+    })
+}
+
+fn infer_preflight_requirements_from_state_frame(frame: &StateFrame) -> ToolContractPreflightSpec {
     let mut spec = ToolContractPreflightSpec {
         required_visible_tools: Vec::new(),
         required_allowed_actions: Vec::new(),
@@ -76,23 +80,81 @@ fn direct_worker_preflight_spec(frame: &StateFrame) -> ToolContractPreflightSpec
         spec.required_allowed_actions.push("spawn_agent".into());
         spec.permission_probe_tools.push("Agent".into());
     }
-    if contains_external_effect_marker(&frame.objective)
-        && !matches!(
-            frame.required_output_schema.as_deref(),
-            Some("readonly_audit_4_paragraphs_v1")
-        )
-    {
+
+    let readonly_contract = matches!(
+        frame.required_output_schema.as_deref(),
+        Some("readonly_audit_4_paragraphs_v1")
+    );
+    let has_declared_writable_artifact = frame.recent_evidence.iter().any(|line| {
+        line.starts_with("fact: permission_to_create_and_write:")
+            || line.contains("permission_to_create_and_write:")
+            || line.contains("required_action=create_file")
+            || line.contains("required_action=create_directory")
+            || line.contains("write_strategy=")
+            || line.contains("target_artifact")
+            || line.contains("artifact_status")
+            || line.contains("artifact_ref:")
+    }) || has_any_marker(
+        &frame.open_items,
+        &[
+            "target file",
+            "target directory",
+            "目标文件",
+            "目标目录",
+            "artifact",
+            "输出文件",
+        ],
+    ) || has_any_marker(
+        &frame.accepted_summary,
+        &["artifact", "target file", "目标文件", "输出文件"],
+    );
+
+    let requires_command_execution = frame.recent_evidence.iter().any(|line| {
+        line.contains("fact: test_")
+            || line.contains("worker_reported_tests")
+            || line.contains("verification")
+            || line.contains("deployment_mode")
+    }) || has_any_marker(
+        &frame.open_items,
+        &[
+            "run ",
+            "test",
+            "verify",
+            "运行",
+            "测试",
+            "验证",
+            "cargo test",
+        ],
+    ) || has_any_marker(
+        &frame.accepted_summary,
+        &[
+            "run ",
+            "test",
+            "verify",
+            "运行",
+            "测试",
+            "验证",
+            "cargo test",
+        ],
+    );
+
+    let fallback_text_requires_write =
+        contains_external_effect_marker(&frame.objective) && !readonly_contract;
+    let fallback_text_requires_command = frame.objective.contains("运行命令")
+        || frame.objective.to_ascii_lowercase().contains("run ")
+        || frame.objective.to_ascii_lowercase().contains("test")
+        || frame.objective.to_ascii_lowercase().contains("verify");
+
+    if !readonly_contract && (has_declared_writable_artifact || fallback_text_requires_write) {
         spec.required_allowed_actions.push("write_file".into());
         spec.permission_probe_tools.push("Edit".into());
         spec.permission_probe_tools.push("Bash".into());
         spec.required_visible_tools.push("Bash".into());
-        if frame.objective.contains("运行命令")
-            || frame.objective.to_ascii_lowercase().contains("run ")
-            || frame.objective.to_ascii_lowercase().contains("test")
-        {
-            spec.required_allowed_actions.push("run_command".into());
-            spec.permission_probe_tools.push("Bash".into());
-        }
+    }
+    if !readonly_contract && (requires_command_execution || fallback_text_requires_command) {
+        spec.required_allowed_actions.push("run_command".into());
+        spec.permission_probe_tools.push("Bash".into());
+        spec.required_visible_tools.push("Bash".into());
     }
     spec.required_visible_tools.sort();
     spec.required_visible_tools.dedup();
@@ -103,12 +165,14 @@ fn direct_worker_preflight_spec(frame: &StateFrame) -> ToolContractPreflightSpec
     spec
 }
 
+fn direct_worker_preflight_spec(frame: &StateFrame) -> ToolContractPreflightSpec {
+    infer_preflight_requirements_from_state_frame(frame)
+}
+
 async fn apply_tool_registry_contract(
     frame: &mut StateFrame,
     runtime: &StateFrameToolRuntime,
 ) -> anyhow::Result<ToolRegistrySnapshot> {
-    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let config_root = resolve_config_root(&cwd).ok();
     let mut assembly_context = tool_assembly_context_for_role(frame.role);
     assembly_context.include_deferred_tools = runtime.permissions.include_deferred_tools;
     assembly_context.include_interactive_tools = runtime.permissions.include_interactive_tools;
@@ -122,8 +186,8 @@ async fn apply_tool_registry_contract(
                 .clone()
                 .unwrap_or_else(|| "unrouted".into()),
             format!("{:?}", frame.role).to_ascii_lowercase(),
-            cwd,
-            config_root,
+            runtime.cwd.clone(),
+            runtime.config_root.clone(),
         )
         .await;
     frame.allowed_tools = snapshot.visible_tools.clone();
@@ -473,8 +537,9 @@ fn estimate_loop_usage_cost_micros(usage: &LoopUsage, pricing: &ModelPricing) ->
 mod tests {
     use super::{
         DecisionLoopConfig, RoutedStateFrame, StepOutcome, StepRuntimeResolutionContext,
-        apply_tool_registry_contract, requires_external_tool_execution,
-        run_routed_step_with_runtime, tool_assembly_context_for_role,
+        apply_tool_registry_contract, infer_preflight_requirements_from_state_frame,
+        requires_external_tool_execution, run_routed_step_with_runtime,
+        tool_assembly_context_for_role,
     };
     use crate::core::boss_state::{BossActorRole, BossStage};
     use crate::core::state_frame::{ActorRole, AgentState, EffortLevel, StateBudget, StateFrame};
@@ -528,6 +593,12 @@ mod tests {
         }
     }
 
+    fn test_runtime_paths() -> (std::path::PathBuf, Option<std::path::PathBuf>) {
+        let cwd = std::env::temp_dir().join("state_frame_orchestrator_tests");
+        let config_root = Some(cwd.join(".morgo"));
+        (cwd, config_root)
+    }
+
     #[test]
     fn external_tool_gate_blocks_worker_only_without_runtime() {
         let frame = worker_frame("修改文件 src/core/boss.rs 并运行命令 cargo test");
@@ -554,6 +625,8 @@ mod tests {
         let runtime = crate::core::state_frame_loop::StateFrameToolRuntime {
             registry: registry.clone(),
             permissions: permissions.clone(),
+            cwd: test_runtime_paths().0,
+            config_root: test_runtime_paths().1,
         };
         let mut frame = worker_frame("修改文件 src/lib.rs 并运行命令 cargo test");
         let snapshot = apply_tool_registry_contract(&mut frame, &runtime)
@@ -583,6 +656,8 @@ mod tests {
         let runtime = crate::core::state_frame_loop::StateFrameToolRuntime {
             registry,
             permissions,
+            cwd: test_runtime_paths().0,
+            config_root: test_runtime_paths().1,
         };
         let mut frame = worker_frame("修改文件 src/lib.rs 并写入目标文件 /tmp/out.txt");
         frame.budget.effort = EffortLevel::L;
@@ -634,6 +709,8 @@ mod tests {
         let runtime = crate::core::state_frame_loop::StateFrameToolRuntime {
             registry,
             permissions,
+            cwd: test_runtime_paths().0,
+            config_root: test_runtime_paths().1,
         };
         let mut frame = worker_frame("修改文件 src/lib.rs");
         let snapshot = apply_tool_registry_contract(&mut frame, &runtime)
@@ -644,6 +721,63 @@ mod tests {
         assert!(!prompt_json.contains("write_file"));
         assert!(!prompt_json.contains("run_command"));
         assert!(!frame.allowed_tools.iter().any(|tool| tool == "Edit"));
+    }
+
+    #[tokio::test]
+    async fn direct_worker_preflight_requires_write_from_artifact_fact_even_without_keyword_marker()
+    {
+        let registry = ToolRegistry::new().register(Arc::new(FileReadTool));
+        let permissions = ToolPermissionContext::new(PermissionMode::Default);
+        let runtime = crate::core::state_frame_loop::StateFrameToolRuntime {
+            registry,
+            permissions,
+            cwd: test_runtime_paths().0,
+            config_root: test_runtime_paths().1,
+        };
+        let mut frame = worker_frame("finish the assigned artifact");
+        frame.recent_evidence.push(
+            "fact: permission_to_create_and_write:/tmp/p0-artifact/report.md ref=permission:step0:0 source=permission_scope source_event_id=permission-scope:0:0 freshness=current confidence=1.00 status=active invalidated_by=none supersedes=none conflicts_with=none summary=worker may create and write the declared target artifact path /tmp/p0-artifact/report.md".into(),
+        );
+        let snapshot = apply_tool_registry_contract(&mut frame, &runtime)
+            .await
+            .expect("snapshot");
+        let assembled = runtime
+            .registry
+            .assemble(tool_assembly_context_for_role(frame.role));
+        let mismatch = assembled
+            .preflight_contract(
+                &runtime.permissions,
+                &snapshot,
+                &infer_preflight_requirements_from_state_frame(&frame),
+            )
+            .await
+            .expect_err("artifact fact should force write requirement");
+        assert!(
+            mismatch
+                .missing_allowed_actions
+                .iter()
+                .any(|action| action == "write_file")
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_registry_snapshot_uses_runtime_cwd_and_config_root() {
+        let registry = ToolRegistry::new().register(Arc::new(FileReadTool));
+        let permissions = ToolPermissionContext::new(PermissionMode::Default);
+        let runtime_cwd = std::env::temp_dir().join("snapshot_runtime_cwd");
+        let runtime_config_root = runtime_cwd.join(".claude");
+        let runtime = crate::core::state_frame_loop::StateFrameToolRuntime {
+            registry,
+            permissions,
+            cwd: runtime_cwd.clone(),
+            config_root: Some(runtime_config_root.clone()),
+        };
+        let mut frame = worker_frame("read one file");
+        let snapshot = apply_tool_registry_contract(&mut frame, &runtime)
+            .await
+            .expect("snapshot");
+        assert_eq!(snapshot.cwd, runtime_cwd);
+        assert_eq!(snapshot.config_root, Some(runtime_config_root));
     }
 
     #[tokio::test]
@@ -659,6 +793,8 @@ mod tests {
         let exec_runtime = crate::core::state_frame_loop::StateFrameToolRuntime {
             registry: registry.clone(),
             permissions: exec_permissions,
+            cwd: test_runtime_paths().0,
+            config_root: test_runtime_paths().1,
         };
         let mut exec_frame = worker_frame("spawn implement worker");
         exec_frame.role = ActorRole::ExecutorB;
@@ -688,6 +824,8 @@ mod tests {
         let child_runtime = crate::core::state_frame_loop::StateFrameToolRuntime {
             registry,
             permissions: child_permissions,
+            cwd: test_runtime_paths().0,
+            config_root: test_runtime_paths().1,
         };
         let mut child_frame = worker_frame("implement task");
         let child_snapshot = apply_tool_registry_contract(&mut child_frame, &child_runtime)

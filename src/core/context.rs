@@ -1,3 +1,4 @@
+use crate::bootstrap::config_root::resolve_config_root;
 use crate::core::message::{Message, Role};
 use crate::hook::registry::HookRegistry;
 use crate::prompt::{
@@ -81,6 +82,12 @@ impl QueryContext {
 
     pub fn current_context_prompt(&self) -> String {
         build_context_prompt(&self.app_state)
+    }
+
+    pub fn runtime_paths(&self) -> (std::path::PathBuf, Option<std::path::PathBuf>) {
+        let cwd = self.app_state.current_working_directory();
+        let config_root = resolve_config_root(&cwd).ok();
+        (cwd, config_root)
     }
 
     pub fn compose_turn_prompt(&self, user_input: &str) -> String {

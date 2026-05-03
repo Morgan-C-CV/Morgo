@@ -3007,6 +3007,8 @@ impl BossCoordinator {
                                     Some(StateFrameToolRuntime {
                                         registry: registry.read().await.clone(),
                                         permissions,
+                                        cwd: cwd.clone(),
+                                        config_root: resolve_config_root(&cwd).ok(),
                                     })
                                 }
                                 None => None,
