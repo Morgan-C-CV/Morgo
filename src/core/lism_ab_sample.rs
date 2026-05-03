@@ -113,6 +113,8 @@ pub struct LisMAbSampleRecord {
     pub rollout_denylist_targets: Vec<String>,
     #[serde(default)]
     pub automatic_fallback_targets: Vec<String>,
+    #[serde(default)]
+    pub success_classification: Option<String>,
     pub pending_approval_count: usize,
     pub outcome: BossTestRunOutcome,
 }
@@ -203,6 +205,10 @@ pub struct LisMAbSummary {
     pub on_model_tier_counts: BTreeMap<String, usize>,
     #[serde(default)]
     pub off_model_tier_counts: BTreeMap<String, usize>,
+    #[serde(default)]
+    pub on_success_classification_counts: BTreeMap<String, usize>,
+    #[serde(default)]
+    pub off_success_classification_counts: BTreeMap<String, usize>,
     /// Fraction of on-runs that completed (vs aborted/rolled-back).
     pub on_completion_rate: Option<f64>,
     /// Fraction of off-runs that completed.
@@ -753,6 +759,7 @@ fn build_ab_record(
     let mut missing_verification_evidence_targets = BTreeMap::new();
     let mut rollout_denylist_targets = BTreeMap::new();
     let mut automatic_fallback_targets = BTreeMap::new();
+    let mut success_classification = None;
     for step in &report.steps {
         let Some(meta) = step.routed_metadata.as_ref() else {
             continue;
@@ -809,6 +816,10 @@ fn build_ab_record(
             if gap.missing_verification_evidence {
                 missing_verification_evidence_targets.insert(target, ());
             }
+        }
+        if let Some(classification) = meta.success_classification.as_ref() {
+            let classification = classification.as_str().to_string();
+            success_classification = Some(classification.clone());
         }
     }
     if let Some(policy) = report.rollout_policy_decision.as_ref() {
@@ -896,6 +907,7 @@ fn build_ab_record(
             .collect(),
         rollout_denylist_targets: rollout_denylist_targets.into_keys().collect(),
         automatic_fallback_targets: automatic_fallback_targets.into_keys().collect(),
+        success_classification,
         pending_approval_count,
         outcome,
     }
@@ -952,6 +964,8 @@ fn summarize_records(records: &[LisMAbSampleRecord]) -> LisMAbSummary {
         off_context_tier_counts: context_tier_counts(&off),
         on_model_tier_counts: aggregate_model_tier_counts(&on),
         off_model_tier_counts: aggregate_model_tier_counts(&off),
+        on_success_classification_counts: aggregate_success_classification_counts(&on),
+        off_success_classification_counts: aggregate_success_classification_counts(&off),
         on_completion_rate: completion_rate(&on),
         off_completion_rate: completion_rate(&off),
     }
@@ -963,7 +977,7 @@ mod tests {
     use crate::core::boss_state::{
         BossActorHandle, BossActorRole, BossPlanStepStatus, BossReportPayload,
         BossRolloutPolicyDecision, BossRolloutTargetDecision, BossStage, BossStepReport,
-        BossStepRoutedMetadata,
+        BossStepRoutedMetadata, BossSuccessClassification,
     };
     use crate::core::boss_test_readiness::BossTestRunOutcome;
     use crate::core::state_frame::CompletionEvidenceGap;
@@ -1020,6 +1034,7 @@ mod tests {
                 }],
                 summary: "verification gap".into(),
             }),
+            success_classification: Some(BossSuccessClassification::RecoveredSuccess),
             lism_policy: Default::default(),
         };
 
@@ -1068,6 +1083,7 @@ mod tests {
             history_summary: Vec::new(),
             observability_summary: None,
             rollout_policy_decision: None,
+            success_classification: None,
             lism_policy: Default::default(),
         };
 
@@ -1081,6 +1097,58 @@ mod tests {
 
         assert!(record.rollout_denylist_targets.is_empty());
         assert!(record.automatic_fallback_targets.is_empty());
+    }
+
+    #[test]
+    fn ab_sample_records_success_classification_and_aggregates_it() {
+        let report = BossReportPayload {
+            stage: BossStage::Execution,
+            current_step: Some(1),
+            total_steps: Some(1),
+            designer_a: empty_actor(),
+            executor_b: empty_actor(),
+            active_children: Vec::new(),
+            steps: vec![BossStepReport {
+                id: 1,
+                status: BossPlanStepStatus::Completed,
+                worker_task_id: None,
+                attempt_count: 1,
+                last_review_summary: None,
+                action_required: None,
+                blocker_reason: None,
+                routed_metadata: Some(BossStepRoutedMetadata {
+                    success_classification: Some(BossSuccessClassification::FallbackSuccess),
+                    ..BossStepRoutedMetadata::default()
+                }),
+            }],
+            history_summary: Vec::new(),
+            observability_summary: None,
+            rollout_policy_decision: None,
+            success_classification: Some(BossSuccessClassification::FallbackSuccess),
+            lism_policy: Default::default(),
+        };
+
+        let record = build_ab_record(
+            "run-3".into(),
+            true,
+            &report,
+            BossTestRunOutcome::Completed,
+            0,
+        );
+
+        assert_eq!(
+            record.success_classification.as_deref(),
+            Some("fallback_success")
+        );
+
+        let summary = summarize_records(&[record.clone()]);
+        assert_eq!(
+            summary
+                .on_success_classification_counts
+                .get("fallback_success")
+                .copied(),
+            Some(1)
+        );
     }
 }
 
@@ -1248,6 +1316,18 @@ fn aggregate_model_tier_counts(records: &[&LisMAbSampleRecord]) -> BTreeMap<Stri
     for record in records {
         for (tier, count) in &record.model_tier_counts {
             *counts.entry(tier.clone()).or_insert(0) += *count;
+        }
+    }
+    counts
+}
+
+fn aggregate_success_classification_counts(
+    records: &[&LisMAbSampleRecord],
+) -> BTreeMap<String, usize> {
+    let mut counts = BTreeMap::new();
+    for record in records {
+        if let Some(classification) = record.success_classification.as_ref() {
+            *counts.entry(classification.clone()).or_insert(0) += 1;
         }
     }
     counts

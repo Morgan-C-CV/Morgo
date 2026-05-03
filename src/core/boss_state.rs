@@ -277,6 +277,30 @@ pub struct BossStepRoutedMetadata {
     pub completion_evidence_gaps: Vec<CompletionEvidenceGap>,
     #[serde(default)]
     pub worker_report: Option<WorkerStructuredReport>,
+    #[serde(default)]
+    pub success_classification: Option<BossSuccessClassification>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BossSuccessClassification {
+    DirectSuccess,
+    RecoveredSuccess,
+    FallbackSuccess,
+    FullWorkerDispatchSuccess,
+    TrueExternalBlocker,
+}
+
+impl BossSuccessClassification {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::DirectSuccess => "direct_success",
+            Self::RecoveredSuccess => "recovered_success",
+            Self::FallbackSuccess => "fallback_success",
+            Self::FullWorkerDispatchSuccess => "full_worker_dispatch_success",
+            Self::TrueExternalBlocker => "true_external_blocker",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -434,14 +458,26 @@ pub struct BossReportPayload {
     #[serde(default)]
     pub rollout_policy_decision: Option<BossRolloutPolicyDecision>,
     #[serde(default)]
+    pub success_classification: Option<BossSuccessClassification>,
+    #[serde(default)]
     pub lism_policy: BossLisMPolicy,
 }
 
 impl BossReportPayload {
+    pub fn derive_success_classification_from_steps(
+        steps: &[BossStepReport],
+    ) -> Option<BossSuccessClassification> {
+        let last_metadata = steps
+            .iter()
+            .rev()
+            .find_map(|step| step.routed_metadata.as_ref())?;
+        last_metadata.success_classification
+    }
+
     pub fn format_report(&self) -> String {
         let mut lines = Vec::new();
         lines.push(format!(
-            "stage={:?} step={}/{} ",
+            "stage={:?} step={}/{} success={} ",
             self.stage,
             self.current_step
                 .map(|n| n.to_string())
@@ -449,6 +485,10 @@ impl BossReportPayload {
             self.total_steps
                 .map(|n| n.to_string())
                 .unwrap_or_else(|| "-".into()),
+            self.success_classification
+                .as_ref()
+                .map(|classification| classification.as_str())
+                .unwrap_or("-"),
         ));
         for step in &self.steps {
             let m = step.routed_metadata.as_ref();

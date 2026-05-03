@@ -143,6 +143,71 @@ fn build_file_handle_relevance(kind: &str, line: &str, path: &str) -> String {
     }
 }
 
+fn classify_step_success(metadata: Option<&BossStepRoutedMetadata>) -> Option<crate::core::boss_state::BossSuccessClassification> {
+    let metadata = metadata?;
+    let worker_report = metadata.worker_report.as_ref();
+    let completion = metadata.completion_evidence_status.as_deref();
+    let has_artifact_evidence = metadata
+        .completion_evidence_gaps
+        .iter()
+        .any(|gap| gap.missing_artifact_evidence);
+    let has_verification_gap = metadata
+        .completion_evidence_gaps
+        .iter()
+        .any(|gap| gap.missing_verification_evidence);
+    let has_test_gap = metadata
+        .completion_evidence_gaps
+        .iter()
+        .any(|gap| gap.missing_test_evidence);
+    let via_full_worker_dispatch = matches!(
+        metadata.recovery_tier.as_deref(),
+        Some("full_worker_dispatch")
+    ) || matches!(
+        metadata.fallback_tier.as_deref(),
+        Some("full_worker_dispatch")
+    );
+    let via_verification_first = matches!(
+        metadata.recovery_tier.as_deref(),
+        Some("verification_first")
+    ) || matches!(
+        metadata.fallback_tier.as_deref(),
+        Some("verification_first")
+    );
+    let via_recovery = metadata.recovery_attempted.unwrap_or(false)
+        || metadata.recovery_outcome.is_some()
+        || metadata.terminal_blocker_kind.is_some();
+    let achieved_artifact = worker_report
+        .map(|report| report.artifact_status.as_str() == "verified")
+        .unwrap_or(false)
+        || !has_artifact_evidence;
+    let passed_verification = worker_report
+        .map(|report| report.verification_status.as_str() == "verified")
+        .unwrap_or(false)
+        || completion == Some("sufficient");
+
+    if metadata.terminal_blocker_kind.as_deref() == Some("true_external_blocker") {
+        return Some(crate::core::boss_state::BossSuccessClassification::TrueExternalBlocker);
+    }
+    if via_full_worker_dispatch && achieved_artifact && passed_verification {
+        return Some(
+            crate::core::boss_state::BossSuccessClassification::FullWorkerDispatchSuccess,
+        );
+    }
+    if via_verification_first && achieved_artifact && passed_verification {
+        return Some(crate::core::boss_state::BossSuccessClassification::RecoveredSuccess);
+    }
+    if via_recovery && achieved_artifact && passed_verification {
+        return Some(crate::core::boss_state::BossSuccessClassification::RecoveredSuccess);
+    }
+    if achieved_artifact && passed_verification && (has_verification_gap || has_test_gap) {
+        return Some(crate::core::boss_state::BossSuccessClassification::FallbackSuccess);
+    }
+    if achieved_artifact && passed_verification {
+        return Some(crate::core::boss_state::BossSuccessClassification::DirectSuccess);
+    }
+    None
+}
+
 #[derive(Debug, Clone)]
 struct ExecutorBAssignmentContract {
     brief: BossContextBrief,
@@ -1893,6 +1958,7 @@ impl BossCoordinator {
             .as_ref()
             .map(|report| report.completion_evidence_gaps.clone())
             .unwrap_or_default();
+        routed_metadata.success_classification = classify_step_success(Some(routed_metadata));
     }
 
     async fn mark_routed_metadata_artifact_recovery(
@@ -2182,6 +2248,8 @@ impl BossCoordinator {
         let observability_summary =
             Self::build_observability_summary(&steps, tasks, step_metrics.as_ref());
         let rollout_policy_decision = Self::derive_rollout_policy_decision(&steps);
+        let success_classification =
+            BossReportPayload::derive_success_classification_from_steps(&steps);
 
         BossReportPayload {
             stage: status.stage,
@@ -2194,6 +2262,7 @@ impl BossCoordinator {
             history_summary: vec![],
             observability_summary,
             rollout_policy_decision,
+            success_classification,
             lism_policy: self.lism_policy().await,
         }
     }
@@ -2282,6 +2351,8 @@ impl BossCoordinator {
         let observability_summary =
             Self::build_observability_summary(&steps, Some(tasks), step_metrics.as_ref());
         let rollout_policy_decision = Self::derive_rollout_policy_decision(&steps);
+        let success_classification =
+            BossReportPayload::derive_success_classification_from_steps(&steps);
 
         Ok(BossReportPayload {
             stage: status.stage,
@@ -2294,6 +2365,7 @@ impl BossCoordinator {
             history_summary,
             observability_summary,
             rollout_policy_decision,
+            success_classification,
             lism_policy: self.lism_policy().await,
         })
     }
@@ -3242,6 +3314,7 @@ impl BossCoordinator {
                             completion_evidence_status: None,
                             completion_evidence_gaps: Vec::new(),
                             worker_report: None,
+                            success_classification: None,
                         };
                         let mut routed_step_metadata = self.routed_step_metadata.write().await;
                         routed_step_metadata.insert(step_id, routed_metadata);
@@ -3307,6 +3380,7 @@ impl BossCoordinator {
                             completion_evidence_status: None,
                             completion_evidence_gaps: Vec::new(),
                             worker_report: None,
+                            success_classification: None,
                         };
                         let mut routed_step_metadata = self.routed_step_metadata.write().await;
                         routed_step_metadata.insert(step_id, routed_metadata);
@@ -3385,6 +3459,7 @@ impl BossCoordinator {
                                 completion_evidence_status: None,
                                 completion_evidence_gaps: Vec::new(),
                                 worker_report: None,
+                                success_classification: None,
                             };
                             let cwd = app_state
                                 .session
@@ -4831,6 +4906,7 @@ mod tests {
     use crate::core::state_frame::{
         AgentState, CompletionEvidenceGap, CompletionEvidenceStatus, WorkerStructuredReport,
     };
+    use crate::core::boss_state::BossActorRole;
     use crate::core::state_frame_loop::LoopUsage;
     use crate::tool::result::{ToolOutcome, ToolOutcomeKind};
 
@@ -4997,6 +5073,39 @@ mod tests {
     }
 
     #[test]
+    fn boss_metadata_records_success_classification() {
+        let mut routed_metadata = BossStepRoutedMetadata {
+            completion_evidence_status: Some("sufficient".into()),
+            worker_report: Some(WorkerStructuredReport {
+                worker_state: AgentState::Done,
+                last_tool_action: Some("Write".into()),
+                files_changed: vec!["/tmp/report.md".into()],
+                tests_run: vec!["cargo test".into()],
+                artifact_status: "verified".into(),
+                test_status: "passed".into(),
+                verification_status: "verified".into(),
+                evidence_refs: vec!["artifact:1".into()],
+                completion_evidence_gaps: Vec::new(),
+                remaining_risks: Vec::new(),
+                completion_evidence_status: CompletionEvidenceStatus::Sufficient,
+            }),
+            ..BossStepRoutedMetadata::default()
+        };
+        let usage = LoopUsage {
+            worker_report: routed_metadata.worker_report.clone(),
+            completion_evidence_status: Some(CompletionEvidenceStatus::Sufficient),
+            ..LoopUsage::default()
+        };
+
+        BossCoordinator::apply_loop_usage_to_routed_metadata(&mut routed_metadata, &usage);
+
+        assert_eq!(
+            routed_metadata.success_classification.as_ref().map(|c| c.as_str()),
+            Some("direct_success")
+        );
+    }
+
+    #[test]
     fn boss_report_surfaces_worker_structured_report() {
         let mut routed_metadata = BossStepRoutedMetadata::default();
         let usage = LoopUsage {
@@ -5032,6 +5141,46 @@ mod tests {
                 .iter()
                 .any(|reference| reference == "tool_output:1")
         );
+    }
+
+    #[test]
+    fn boss_report_carries_success_classification() {
+        let report = BossReportPayload {
+            stage: BossStage::Execution,
+            current_step: Some(1),
+            total_steps: Some(1),
+            designer_a: BossActorHandle::new("a", "s", BossActorRole::DesignerA),
+            executor_b: BossActorHandle::new("b", "s", BossActorRole::ExecutorB),
+            active_children: Vec::new(),
+            steps: vec![BossStepReport {
+                id: 1,
+                status: BossPlanStepStatus::Completed,
+                worker_task_id: None,
+                attempt_count: 1,
+                last_review_summary: None,
+                action_required: None,
+                blocker_reason: None,
+                routed_metadata: Some(BossStepRoutedMetadata {
+                    success_classification: Some(
+                        crate::core::boss_state::BossSuccessClassification::RecoveredSuccess,
+                    ),
+                    ..BossStepRoutedMetadata::default()
+                }),
+            }],
+            history_summary: Vec::new(),
+            observability_summary: None,
+            rollout_policy_decision: None,
+            success_classification: Some(
+                crate::core::boss_state::BossSuccessClassification::RecoveredSuccess,
+            ),
+            lism_policy: Default::default(),
+        };
+
+        assert_eq!(
+            report.success_classification.as_ref().map(|c| c.as_str()),
+            Some("recovered_success")
+        );
+        assert!(report.format_report().contains("success=recovered_success"));
     }
 
     #[test]
