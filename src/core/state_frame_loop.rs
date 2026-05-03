@@ -811,6 +811,7 @@ fn clear_recovery_after_success(usage: &mut LoopUsage) {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FallbackTier {
+    TargetedEvidence,
     RecentLocalHistory,
     FullContext,
 }
@@ -818,6 +819,7 @@ enum FallbackTier {
 impl FallbackTier {
     fn as_str(self) -> &'static str {
         match self {
+            Self::TargetedEvidence => "targeted_evidence",
             Self::RecentLocalHistory => "recent_local_history",
             Self::FullContext => "full_context",
         }
@@ -826,6 +828,7 @@ impl FallbackTier {
 
 #[derive(Debug, Default)]
 struct FallbackLadderState {
+    targeted_evidence_activated: bool,
     recent_local_history_activated: bool,
     full_context_activated: bool,
 }
@@ -862,6 +865,40 @@ fn local_history_candidates(frame: &StateFrame, limit: usize) -> Vec<String> {
     }
     items.reverse();
     items
+}
+
+fn targeted_evidence_candidates(requested: &[String]) -> Vec<String> {
+    let mut items = Vec::new();
+    for request in requested {
+        let candidate = request.trim();
+        if candidate.is_empty() {
+            continue;
+        }
+        let normalized = format!("targeted_evidence: selector={candidate}");
+        if !items.iter().any(|existing| existing == &normalized) {
+            items.push(normalized);
+        }
+    }
+    items
+}
+
+fn activate_targeted_evidence_fallback(frame: &mut StateFrame, requested: &[String]) -> bool {
+    let requested_summary = fallback_requested_summary(requested);
+    let mut changed = push_unique(
+        &mut frame.recent_evidence,
+        format!(
+            "fallback_context: tier=targeted_evidence reason=request_context_unresolved requested={requested_summary}"
+        ),
+    );
+    for item in targeted_evidence_candidates(requested) {
+        changed |= push_unique(
+            &mut frame.recent_evidence,
+            format!(
+                "fallback_context_item: tier=targeted_evidence source=requested_context excerpt={item}"
+            ),
+        );
+    }
+    changed
 }
 
 fn activate_recent_local_history_fallback(frame: &mut StateFrame, requested: &[String]) -> bool {
@@ -941,6 +978,13 @@ fn activate_fallback_tier(
         }
         ladder.full_context_activated = true;
     }
+    if !ladder.targeted_evidence_activated {
+        if activate_targeted_evidence_fallback(frame, requested) {
+            ladder.targeted_evidence_activated = true;
+            return Some(FallbackTier::TargetedEvidence);
+        }
+        ladder.targeted_evidence_activated = true;
+    }
     if !ladder.recent_local_history_activated {
         if activate_recent_local_history_fallback(frame, requested) {
             ladder.recent_local_history_activated = true;
@@ -968,6 +1012,7 @@ fn fallback_requested_summary(requested: &[String]) -> String {
 
 fn fallback_reason_label(tier: FallbackTier, requested: &[String], escalate: bool) -> String {
     let base = match tier {
+        FallbackTier::TargetedEvidence => "request_context_targeted_evidence",
         FallbackTier::RecentLocalHistory => "request_context_unresolved",
         FallbackTier::FullContext if escalate => "request_context_escalated",
         FallbackTier::FullContext => "request_context_exhausted",
@@ -2151,12 +2196,13 @@ pub async fn run_decision_loop_with_tools(
                         }
                     }
                     if summary.hydrated.is_empty() {
-                        if let Some(fallback_tier) = activate_fallback_tier(
+                        let fallback_tier = activate_fallback_tier(
                             &mut frame,
                             &decision.needed_context,
                             &mut fallback_ladder,
                             decision.escalate,
-                        ) {
+                        );
+                        if let Some(fallback_tier) = fallback_tier {
                             total_usage.fallback_count += 1;
                             total_usage.fallback_tier = Some(fallback_tier.as_str().to_string());
                             total_usage.fallback_reason = Some(fallback_reason_label(
@@ -2448,10 +2494,109 @@ mod tests {
             LoopOutcome::Done { usage, .. } => {
                 assert_eq!(usage.fallback_count, 1);
                 assert_eq!(usage.hydration_ref_missing, 1);
-                assert_eq!(usage.fallback_tier.as_deref(), Some("recent_local_history"));
+                assert_eq!(usage.fallback_tier.as_deref(), Some("targeted_evidence"));
                 assert_eq!(
                     usage.fallback_reason.as_deref(),
-                    Some("request_context_unresolved:symbol:MissingSymbol")
+                    Some("request_context_targeted_evidence:symbol:MissingSymbol")
+                );
+            }
+            other => panic!("expected Done, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn request_context_no_progress_first_enters_targeted_evidence() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let request_json = r#"{"state":"executing","decision":"request_context","needed_context":["artifact_ref:artifact:contract:0"]}"#;
+        let done_json = r#"{"state":"done","decision":"done"}"#;
+        let client = ModelProviderClient::with_scripted_turns(vec![
+            vec![StreamEvent::TextDelta(request_json.into())],
+            vec![StreamEvent::TextDelta(done_json.into())],
+        ]);
+        let outcome = rt
+            .block_on(run_decision_loop(
+                &client,
+                make_frame(),
+                DecisionLoopConfig::default(),
+            ))
+            .expect("loop should not error");
+        match outcome {
+            LoopOutcome::Done { usage, .. } => {
+                assert_eq!(usage.fallback_count, 1);
+                assert_eq!(usage.fallback_tier.as_deref(), Some("targeted_evidence"));
+                assert_eq!(
+                    usage.fallback_reason.as_deref(),
+                    Some("request_context_targeted_evidence:artifact_ref:artifact:contract:0")
+                );
+            }
+            other => panic!("expected Done, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn request_context_no_progress_then_recent_local_history_then_full_context() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let request_json = r#"{"state":"executing","decision":"request_context","needed_context":["symbol:MissingSymbol"]}"#;
+        let done_json = r#"{"state":"done","decision":"done"}"#;
+        let client = ModelProviderClient::with_scripted_turns(vec![
+            vec![StreamEvent::TextDelta(request_json.into())],
+            vec![StreamEvent::TextDelta(request_json.into())],
+            vec![StreamEvent::TextDelta(request_json.into())],
+            vec![StreamEvent::TextDelta(done_json.into())],
+        ]);
+        let outcome = rt
+            .block_on(run_decision_loop(
+                &client,
+                make_frame(),
+                DecisionLoopConfig::default(),
+            ))
+            .expect("loop should not error");
+        match outcome {
+            LoopOutcome::Done { usage, .. } => {
+                assert_eq!(usage.fallback_count, 3);
+                assert_eq!(usage.fallback_tier.as_deref(), Some("full_context"));
+                assert_eq!(
+                    usage.fallback_reason.as_deref(),
+                    Some("request_context_exhausted:symbol:MissingSymbol")
+                );
+            }
+            other => panic!("expected Done, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn request_context_no_progress_ladder_clears_after_success() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let request_json = r#"{"state":"executing","decision":"request_context","needed_context":["symbol:MissingSymbol"]}"#;
+        let done_json = r#"{"state":"done","decision":"done"}"#;
+        let client = ModelProviderClient::with_scripted_turns(vec![
+            vec![StreamEvent::TextDelta(request_json.into())],
+            vec![StreamEvent::TextDelta(done_json.into())],
+        ]);
+        let outcome = rt
+            .block_on(run_decision_loop(
+                &client,
+                make_frame(),
+                DecisionLoopConfig::default(),
+            ))
+            .expect("loop should not error");
+        match outcome {
+            LoopOutcome::Done { usage, .. } => {
+                assert_eq!(usage.fallback_tier.as_deref(), Some("targeted_evidence"));
+                assert!(
+                    usage
+                        .worker_report
+                        .as_ref()
+                        .expect("worker report")
+                        .completion_evidence_gaps
+                        .is_empty()
+                        || usage
+                            .worker_report
+                            .as_ref()
+                            .expect("worker report")
+                            .completion_evidence_gaps
+                            .iter()
+                            .all(|gap| gap.target_ref != "artifact:contract:0")
                 );
             }
             other => panic!("expected Done, got {other:?}"),
