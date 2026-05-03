@@ -1,4 +1,6 @@
-use crate::core::state_frame::{CompletionEvidenceGap, WorkerStructuredReport};
+use crate::core::state_frame::{
+    CompletionEvidenceGap, StageExecutionContract, WorkerStructuredReport,
+};
 use crate::tool::registry::ToolContractMismatch;
 use crate::tool::result::ToolExecutionRecord;
 use serde::{Deserialize, Serialize};
@@ -336,6 +338,8 @@ pub struct BossStepReport {
     pub blocker_reason: Option<String>,
     #[serde(default)]
     pub routed_metadata: Option<BossStepRoutedMetadata>,
+    #[serde(default)]
+    pub stage_execution_contract: StageExecutionContract,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -461,6 +465,8 @@ pub struct BossReportPayload {
     pub success_classification: Option<BossSuccessClassification>,
     #[serde(default)]
     pub lism_policy: BossLisMPolicy,
+    #[serde(default)]
+    pub stage_execution_contract: StageExecutionContract,
 }
 
 impl BossReportPayload {
@@ -529,6 +535,19 @@ impl BossReportPayload {
                 m.map(|meta| meta.completion_evidence_gaps.len().to_string())
                     .unwrap_or_else(|| "-".into()),
             ));
+            if !step.stage_execution_contract.declared_artifacts.is_empty()
+                || !step.stage_execution_contract.verifications.is_empty()
+                || !step.stage_execution_contract.tests.is_empty()
+            {
+                lines.push(format!(
+                    "    contract: declared_artifacts={} verifications={} tests={} required_actions={} required_evidence={}",
+                    step.stage_execution_contract.declared_artifacts.len(),
+                    step.stage_execution_contract.verifications.len(),
+                    step.stage_execution_contract.tests.len(),
+                    step.stage_execution_contract.required_actions.join("|"),
+                    step.stage_execution_contract.required_evidence.join("|"),
+                ));
+            }
         }
         if let Some(policy) = &self.rollout_policy_decision {
             lines.push(format!(
@@ -585,6 +604,19 @@ impl BossReportPayload {
                 s.total_hydration_ref_missing,
                 dominant_model_tier,
                 s.model_tier_counts,
+            ));
+        }
+        if !self.stage_execution_contract.declared_artifacts.is_empty()
+            || !self.stage_execution_contract.verifications.is_empty()
+            || !self.stage_execution_contract.tests.is_empty()
+        {
+            lines.push(format!(
+                "contract summary: declared_artifacts={} verifications={} tests={} required_actions={} required_evidence={}",
+                self.stage_execution_contract.declared_artifacts.len(),
+                self.stage_execution_contract.verifications.len(),
+                self.stage_execution_contract.tests.len(),
+                self.stage_execution_contract.required_actions.join("|"),
+                self.stage_execution_contract.required_evidence.join("|"),
             ));
         }
         lines.join("\n")

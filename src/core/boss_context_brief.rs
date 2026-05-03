@@ -1,4 +1,5 @@
 use crate::core::boss_state::BossPlanStepStatus;
+use crate::core::state_frame::StageExecutionContract;
 use crate::core::prompt_segment::{PromptAssembly, PromptSegment, PromptSegmentKind};
 use serde::{Deserialize, Serialize};
 
@@ -72,6 +73,7 @@ pub struct BossContextBrief {
 pub struct BossStateFrame {
     pub step_id: usize,
     pub status: BossPlanStepStatus,
+    pub stage_execution_contract: StageExecutionContract,
     pub open_items: Vec<String>,
     pub blocked_items: Vec<String>,
     pub recent_local_facts: Vec<String>,
@@ -160,6 +162,39 @@ impl BossStateFrame {
             format!("step_id: {}", self.step_id),
             format!("status: {:?}", self.status),
         ];
+        if !self.stage_execution_contract.declared_artifacts.is_empty()
+            || !self.stage_execution_contract.verifications.is_empty()
+            || !self.stage_execution_contract.tests.is_empty()
+        {
+            lines.push("stage_execution_contract:".into());
+            for artifact in &self.stage_execution_contract.declared_artifacts {
+                lines.push(format!(
+                    "  - declared_artifact ref={} path={} kind={} required_actions={} required_evidence={}",
+                    artifact.ref_id,
+                    artifact.path,
+                    artifact.kind,
+                    artifact.required_actions.join(", "),
+                    artifact.required_evidence.join(", ")
+                ));
+            }
+            for verification in &self.stage_execution_contract.verifications {
+                lines.push(format!(
+                    "  - verification target_ref={} target_path={} required_actions={} required_evidence={}",
+                    verification.target_ref,
+                    verification.target_path.as_deref().unwrap_or("none"),
+                    verification.required_actions.join(", "),
+                    verification.required_evidence.join(", ")
+                ));
+            }
+            for test in &self.stage_execution_contract.tests {
+                lines.push(format!(
+                    "  - test name={} required_actions={} required_evidence={}",
+                    test.name,
+                    test.required_actions.join(", "),
+                    test.required_evidence.join(", ")
+                ));
+            }
+        }
         if !self.open_items.is_empty() {
             lines.push("open_items:".into());
             for item in &self.open_items {

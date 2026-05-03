@@ -4,7 +4,8 @@ use crate::core::state_fact_ledger::{
 };
 use crate::core::state_frame::{
     AgentState, CompletionEvidenceGap, CompletionEvidenceStatus, CompletionGateBlock, DecisionKind,
-    RepairNeeded, StateFrame, StatePatch, WorkerStructuredReport, validate_state_decision,
+    RepairNeeded, StateFrame, StageExecutionContract, StatePatch, WorkerStructuredReport,
+    validate_state_decision,
 };
 use crate::core::state_frame_hydration::{
     HydrationSummary, NeededContextSelector, hydrate_needed_context, parse_needed_context_selector,
@@ -310,6 +311,12 @@ fn split_contract_refs(value: &str) -> Vec<String> {
 }
 
 fn completion_contract_requirement(frame: &StateFrame, field_name: &str) -> bool {
+    match field_name {
+        "artifact_evidence" => return !frame.stage_execution_contract.declared_artifacts.is_empty(),
+        "test_evidence" => return !frame.stage_execution_contract.tests.is_empty(),
+        "verification_evidence" => return !frame.stage_execution_contract.verifications.is_empty(),
+        _ => {}
+    }
     frame.recent_evidence.iter().any(|line| {
         line.starts_with("fact: completion_contract ")
             && evidence_field_value(line, field_name).as_deref() == Some("required")
@@ -317,6 +324,33 @@ fn completion_contract_requirement(frame: &StateFrame, field_name: &str) -> bool
 }
 
 fn completion_contract_refs(frame: &StateFrame, field_name: &str) -> Vec<String> {
+    match field_name {
+        "artifact_refs" => {
+            return frame
+                .stage_execution_contract
+                .declared_artifacts
+                .iter()
+                .map(|item| item.ref_id.clone())
+                .collect();
+        }
+        "test_refs" => {
+            return frame
+                .stage_execution_contract
+                .tests
+                .iter()
+                .map(|item| item.name.clone())
+                .collect();
+        }
+        "verification_refs" => {
+            return frame
+                .stage_execution_contract
+                .verifications
+                .iter()
+                .map(|item| item.target_ref.clone())
+                .collect();
+        }
+        _ => {}
+    }
     frame
         .recent_evidence
         .iter()
@@ -791,6 +825,7 @@ fn build_worker_structured_report(
         artifact_status: summarize_artifact_status(frame),
         test_status: summarize_test_status(frame),
         verification_status: summarize_verification_status(frame),
+        stage_execution_contract: frame.stage_execution_contract.clone(),
         evidence_refs: collect_evidence_refs(frame),
         completion_evidence_gaps,
         remaining_risks: collect_remaining_risks(frame, &completion),
@@ -2395,7 +2430,8 @@ mod tests {
     };
     use crate::core::state_frame::validate_state_decision;
     use crate::core::state_frame::{
-        ActorRole, AgentState, CompletionEvidenceStatus, StateBudget, StateFrame,
+        ActorRole, AgentState, CompletionEvidenceStatus, StageExecutionContract, StateBudget,
+        StateFrame,
     };
     use crate::core::state_frame_hydration::hydrate_needed_context;
     use crate::service::api::client::ModelProviderClient;
@@ -2416,6 +2452,7 @@ mod tests {
             role: ActorRole::Worker,
             state: AgentState::Executing,
             objective: "update src/core/state_frame_projection.rs and get tests passing".into(),
+            stage_execution_contract: StageExecutionContract::default(),
             open_items: vec!["tests pass".into()],
             blocked_items: Vec::new(),
             accepted_summary: vec!["worker must preserve prior review signal".into()],

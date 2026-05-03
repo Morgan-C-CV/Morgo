@@ -4,7 +4,10 @@ use crate::core::state_fact_ledger::{
     build_blocker_records, build_open_item_records, build_rejected_approach_records,
     build_step_fact_ledgers,
 };
-use crate::core::state_frame::{ActorRole, AgentState, StateBudget, StateFrame};
+use crate::core::state_frame::{
+    ActorRole, AgentState, DeclaredArtifactContract, StageExecutionContract, StateBudget,
+    StateFrame, TestContract, VerificationContract,
+};
 use crate::core::state_frame_archive::{
     archive_to_summary, build_accepted_archive, retain_blocked_items, retain_open_items,
 };
@@ -187,6 +190,138 @@ fn build_completion_contract_fact(
             join_contract_refs(&verification_refs)
         ),
     )
+}
+
+fn build_stage_execution_contract(
+    step: Option<&crate::core::boss_state::BossPlanStep>,
+    permission_facts: &[String],
+    artifact_ledgers: &[crate::core::state_fact_ledger::ArtifactRecord],
+    open_item_ledgers: &[crate::core::state_fact_ledger::OpenItemRecord],
+    readonly_analysis: bool,
+) -> StageExecutionContract {
+    let declared_artifacts = artifact_ledgers
+        .iter()
+        .map(|item| DeclaredArtifactContract {
+            ref_id: item.ref_id.clone(),
+            path: item.path.clone(),
+            kind: item.kind.clone(),
+            required_actions: if readonly_analysis {
+                Vec::new()
+            } else {
+                vec!["create".into(), "write".into()]
+            },
+            required_evidence: vec![item.ref_id.clone(), item.path.clone(), item.kind.clone()],
+        })
+        .collect::<Vec<_>>();
+    let verifications = artifact_ledgers
+        .iter()
+        .map(|item| VerificationContract {
+            target_ref: item.ref_id.clone(),
+            target_path: Some(item.path.clone()),
+            required_actions: if readonly_analysis {
+                Vec::new()
+            } else {
+                vec!["verify".into()]
+            },
+            required_evidence: vec![item.ref_id.clone(), item.path.clone()],
+        })
+        .collect::<Vec<_>>();
+    let tests = open_item_ledgers
+        .iter()
+        .filter(|item| open_item_requires_test(&item.summary))
+        .map(|item| TestContract {
+            name: item.summary.clone(),
+            required_actions: vec!["run_test".into()],
+            required_evidence: vec![item.ref_id.clone()],
+        })
+        .collect::<Vec<_>>();
+    let mut required_actions = Vec::new();
+    if step.is_some() && !declared_artifacts.is_empty() {
+        required_actions.extend(["create".into(), "write".into()]);
+    }
+    if !tests.is_empty() {
+        required_actions.push("run_test".into());
+    }
+    if !verifications.is_empty() {
+        required_actions.push("verify".into());
+    }
+    let mut required_evidence = Vec::new();
+    required_evidence.extend(permission_facts.iter().cloned());
+    required_evidence.extend(
+        declared_artifacts
+            .iter()
+            .flat_map(|item| item.required_evidence.iter().cloned()),
+    );
+    required_evidence.extend(
+        verifications
+            .iter()
+            .flat_map(|item| item.required_evidence.iter().cloned()),
+    );
+    required_evidence.extend(
+        tests
+            .iter()
+            .flat_map(|item| item.required_evidence.iter().cloned()),
+    );
+    StageExecutionContract {
+        declared_artifacts,
+        verifications,
+        tests,
+        required_actions,
+        required_evidence,
+    }
+}
+
+fn build_stage_contract_facts(contract: &StageExecutionContract) -> Vec<String> {
+    let mut facts = Vec::new();
+    for artifact in &contract.declared_artifacts {
+        facts.push(fact_line(
+            "declared_artifact_contract",
+            format!(
+                "ref={} path={} kind={} required_actions={} required_evidence={}",
+                artifact.ref_id,
+                artifact.path,
+                artifact.kind,
+                summarize_list(&artifact.required_actions),
+                summarize_list(&artifact.required_evidence)
+            ),
+        ));
+    }
+    for verification in &contract.verifications {
+        facts.push(fact_line(
+            "verification_contract",
+            format!(
+                "target_ref={} target_path={} required_actions={} required_evidence={}",
+                verification.target_ref,
+                verification.target_path.as_deref().unwrap_or("none"),
+                summarize_list(&verification.required_actions),
+                summarize_list(&verification.required_evidence)
+            ),
+        ));
+    }
+    for test in &contract.tests {
+        facts.push(fact_line(
+            "test_contract",
+            format!(
+                "name={} required_actions={} required_evidence={}",
+                test.name,
+                summarize_list(&test.required_actions),
+                summarize_list(&test.required_evidence)
+            ),
+        ));
+    }
+    if !contract.required_actions.is_empty() {
+        facts.push(fact_line(
+            "required_actions",
+            summarize_list(&contract.required_actions),
+        ));
+    }
+    if !contract.required_evidence.is_empty() {
+        facts.push(fact_line(
+            "required_evidence",
+            summarize_list(&contract.required_evidence),
+        ));
+    }
+    facts
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -576,6 +711,14 @@ fn build_fact_ledger(
             ));
         }
         push_none_recorded_unless_present(&mut facts, "rejected_approaches");
+        let stage_execution_contract = build_stage_execution_contract(
+            current_step,
+            &permission_facts,
+            &ledgers.artifact_refs,
+            &open_item_ledgers,
+            readonly_analysis,
+        );
+        facts.extend(build_stage_contract_facts(&stage_execution_contract));
         facts.push(build_completion_contract_fact(
             &permission_facts,
             &ledgers.artifact_refs,
@@ -677,16 +820,35 @@ pub fn project_state_frame(
 
     // accepted_summary: rendered from archive.
     let accepted_summary = archive_to_summary(&archive);
+    let current_step = step_id.and_then(|id| plan.steps.iter().find(|s| s.id == id));
+    let permission_facts = current_step
+        .map(|step| build_permission_facts(step.id, step.objective(), readonly_analysis))
+        .unwrap_or_default();
+    let ledgers = current_step.map(build_step_fact_ledgers);
+    let open_item_ledgers = current_step
+        .map(|step| build_open_item_records(step, &open_items))
+        .unwrap_or_default();
+    let stage_execution_contract = build_stage_execution_contract(
+        current_step,
+        &permission_facts,
+        ledgers
+            .as_ref()
+            .map(|value| value.artifact_refs.as_slice())
+            .unwrap_or(&[]),
+        &open_item_ledgers,
+        readonly_analysis,
+    );
 
     // recent_evidence doubles as a compact Fact Ledger v1.
-    let mut recent_evidence = build_fact_ledger(
+    let mut recent_evidence = build_stage_contract_facts(&stage_execution_contract);
+    recent_evidence.extend(build_fact_ledger(
         plan,
         stage,
         step_id,
         &open_items,
         &blocked_items,
         readonly_analysis,
-    );
+    ));
     if let Some(step) = step_id.and_then(|id| plan.steps.iter().find(|s| s.id == id)) {
         if let Some(r) = &step.last_review_summary {
             recent_evidence.push(format!("review: {r}"));
@@ -700,6 +862,7 @@ pub fn project_state_frame(
         role,
         state,
         objective,
+        stage_execution_contract,
         open_items,
         blocked_items,
         accepted_summary,
@@ -733,7 +896,9 @@ pub fn project_state_frame(
 mod tests {
     use super::{collect_projection_diagnostics, project_state_frame};
     use crate::core::boss_state::{BossPlan, BossPlanStep, BossPlanStepStatus, BossStage};
-    use crate::core::state_frame::{ActorRole, AgentState, StateBudget, StateFrame};
+    use crate::core::state_frame::{
+        ActorRole, AgentState, StageExecutionContract, StateBudget, StateFrame,
+    };
 
     #[test]
     fn projection_diagnostics_flags_open_items_without_refs_and_missing_review_source_ref() {
@@ -741,6 +906,7 @@ mod tests {
             role: ActorRole::Worker,
             state: AgentState::Executing,
             objective: "fix worker context".into(),
+            stage_execution_contract: StageExecutionContract::default(),
             open_items: vec!["tests pass".into()],
             blocked_items: Vec::new(),
             accepted_summary: Vec::new(),
@@ -779,6 +945,7 @@ mod tests {
             role: ActorRole::Worker,
             state: AgentState::Executing,
             objective: "check lineage".into(),
+            stage_execution_contract: StageExecutionContract::default(),
             open_items: Vec::new(),
             blocked_items: Vec::new(),
             accepted_summary: Vec::new(),
@@ -865,5 +1032,102 @@ mod tests {
                 && item.contains("artifact_refs=artifact:step0:0")
                 && item.contains("verification_refs=artifact:step0:0")
         }));
+        assert_eq!(frame.stage_execution_contract.declared_artifacts.len(), 1);
+        assert_eq!(frame.stage_execution_contract.verifications.len(), 1);
+        assert_eq!(frame.stage_execution_contract.required_actions, vec!["create", "write", "verify"]);
+    }
+
+    #[test]
+    fn project_state_frame_declared_artifact_does_not_depend_on_objective_keywords() {
+        let plan = BossPlan {
+            plan_id: "plan-2".into(),
+            task_description: "build report".into(),
+            document_spec: String::new(),
+            pseudo_code: String::new(),
+            draft_spec: None,
+            review_feedback: None,
+            revision_notes: None,
+            finalized: false,
+            documentation_feedback: Vec::new(),
+            steps: vec![BossPlanStep {
+                id: 0,
+                description: "report".into(),
+                objective: Some("create output in /tmp/custom-output.txt".into()),
+                acceptance: vec!["done".into()],
+                requires_approval: false,
+                status: BossPlanStepStatus::Running,
+                completed: false,
+                result_diff: None,
+                worker_task_id: None,
+                attempt_count: 0,
+                retry_budget: 3,
+                last_review_summary: None,
+                last_correction: None,
+                review_task_id: None,
+                tool_execution_records: Vec::new(),
+            }],
+            accepted_by_user: true,
+            auto_sequence: false,
+            session_snapshot: None,
+        };
+
+        let frame = project_state_frame(&plan, BossStage::Execution, Some(0), ActorRole::Worker);
+        assert!(
+            frame
+                .stage_execution_contract
+                .declared_artifacts
+                .iter()
+                .any(|artifact| artifact.path == "/tmp/custom-output.txt")
+        );
+    }
+
+    #[test]
+    fn project_state_frame_keeps_multi_artifact_contract_visible() {
+        let plan = BossPlan {
+            plan_id: "plan-3".into(),
+            task_description: "build two artifacts".into(),
+            document_spec: String::new(),
+            pseudo_code: String::new(),
+            draft_spec: None,
+            review_feedback: None,
+            revision_notes: None,
+            finalized: false,
+            documentation_feedback: Vec::new(),
+            steps: vec![BossPlanStep {
+                id: 0,
+                description: "report".into(),
+                objective: Some(
+                    "create /tmp/alpha.txt and also create /tmp/beta.txt".into(),
+                ),
+                acceptance: vec!["done".into()],
+                requires_approval: false,
+                status: BossPlanStepStatus::Running,
+                completed: false,
+                result_diff: None,
+                worker_task_id: None,
+                attempt_count: 0,
+                retry_budget: 3,
+                last_review_summary: None,
+                last_correction: None,
+                review_task_id: None,
+                tool_execution_records: Vec::new(),
+            }],
+            accepted_by_user: true,
+            auto_sequence: false,
+            session_snapshot: None,
+        };
+
+        let frame = project_state_frame(&plan, BossStage::Execution, Some(0), ActorRole::Worker);
+        assert_eq!(frame.stage_execution_contract.declared_artifacts.len(), 2);
+        assert!(frame
+            .stage_execution_contract
+            .declared_artifacts
+            .iter()
+            .any(|artifact| artifact.path == "/tmp/alpha.txt"));
+        assert!(frame
+            .stage_execution_contract
+            .declared_artifacts
+            .iter()
+            .any(|artifact| artifact.path == "/tmp/beta.txt"));
     }
 }

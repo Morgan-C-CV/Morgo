@@ -980,7 +980,7 @@ mod tests {
         BossStepRoutedMetadata, BossSuccessClassification,
     };
     use crate::core::boss_test_readiness::BossTestRunOutcome;
-    use crate::core::state_frame::CompletionEvidenceGap;
+    use crate::core::state_frame::{CompletionEvidenceGap, StageExecutionContract};
 
     fn empty_actor() -> BossActorHandle {
         BossActorHandle::new("actor", "session", BossActorRole::DesignerA)
@@ -1014,6 +1014,7 @@ mod tests {
                     }],
                     ..BossStepRoutedMetadata::default()
                 }),
+                stage_execution_contract: StageExecutionContract::default(),
             }],
             history_summary: Vec::new(),
             observability_summary: None,
@@ -1036,6 +1037,7 @@ mod tests {
             }),
             success_classification: Some(BossSuccessClassification::RecoveredSuccess),
             lism_policy: Default::default(),
+            stage_execution_contract: StageExecutionContract::default(),
         };
 
         let record = build_ab_record(
@@ -1079,12 +1081,14 @@ mod tests {
                 action_required: None,
                 blocker_reason: None,
                 routed_metadata: Some(BossStepRoutedMetadata::default()),
+                stage_execution_contract: StageExecutionContract::default(),
             }],
             history_summary: Vec::new(),
             observability_summary: None,
             rollout_policy_decision: None,
             success_classification: None,
             lism_policy: Default::default(),
+            stage_execution_contract: StageExecutionContract::default(),
         };
 
         let record = build_ab_record(
@@ -1120,12 +1124,14 @@ mod tests {
                     success_classification: Some(BossSuccessClassification::FallbackSuccess),
                     ..BossStepRoutedMetadata::default()
                 }),
+                stage_execution_contract: StageExecutionContract::default(),
             }],
             history_summary: Vec::new(),
             observability_summary: None,
             rollout_policy_decision: None,
             success_classification: Some(BossSuccessClassification::FallbackSuccess),
             lism_policy: Default::default(),
+            stage_execution_contract: StageExecutionContract::default(),
         };
 
         let record = build_ab_record(
@@ -1173,12 +1179,14 @@ mod tests {
                     success_classification: Some(BossSuccessClassification::TrueExternalBlocker),
                     ..BossStepRoutedMetadata::default()
                 }),
+                stage_execution_contract: StageExecutionContract::default(),
             }],
             history_summary: Vec::new(),
             observability_summary: None,
             rollout_policy_decision: None,
             success_classification: Some(BossSuccessClassification::TrueExternalBlocker),
             lism_policy: Default::default(),
+            stage_execution_contract: StageExecutionContract::default(),
         };
 
         let record = build_ab_record(

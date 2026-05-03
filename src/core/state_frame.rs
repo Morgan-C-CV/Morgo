@@ -63,6 +63,51 @@ pub struct CompletionEvidenceGap {
     pub recommended_action: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct DeclaredArtifactContract {
+    pub ref_id: String,
+    pub path: String,
+    pub kind: String,
+    #[serde(default)]
+    pub required_actions: Vec<String>,
+    #[serde(default)]
+    pub required_evidence: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct VerificationContract {
+    pub target_ref: String,
+    #[serde(default)]
+    pub target_path: Option<String>,
+    #[serde(default)]
+    pub required_actions: Vec<String>,
+    #[serde(default)]
+    pub required_evidence: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct TestContract {
+    pub name: String,
+    #[serde(default)]
+    pub required_actions: Vec<String>,
+    #[serde(default)]
+    pub required_evidence: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct StageExecutionContract {
+    #[serde(default)]
+    pub declared_artifacts: Vec<DeclaredArtifactContract>,
+    #[serde(default)]
+    pub verifications: Vec<VerificationContract>,
+    #[serde(default)]
+    pub tests: Vec<TestContract>,
+    #[serde(default)]
+    pub required_actions: Vec<String>,
+    #[serde(default)]
+    pub required_evidence: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkerStructuredReport {
     pub worker_state: AgentState,
@@ -75,6 +120,8 @@ pub struct WorkerStructuredReport {
     pub artifact_status: String,
     pub test_status: String,
     pub verification_status: String,
+    #[serde(default)]
+    pub stage_execution_contract: StageExecutionContract,
     #[serde(default)]
     pub evidence_refs: Vec<String>,
     #[serde(default)]
@@ -130,6 +177,8 @@ pub struct StateFrame {
     pub role: ActorRole,
     pub state: AgentState,
     pub objective: String,
+    #[serde(default)]
+    pub stage_execution_contract: StageExecutionContract,
     #[serde(default)]
     pub open_items: Vec<String>,
     #[serde(default)]

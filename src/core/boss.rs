@@ -20,7 +20,7 @@ use crate::core::boss_test_readiness::BossTestRunOutcome;
 use crate::core::context::WorkerLisMPolicy;
 use crate::core::lism_ab_sample::SharedLisMAbSampleSink;
 use crate::core::prompt_budget::{BudgetDecision, evaluate_message_budget};
-use crate::core::state_frame::ActorRole;
+use crate::core::state_frame::{ActorRole, DeclaredArtifactContract, StageExecutionContract, VerificationContract};
 use crate::core::state_frame_loop::{DecisionLoopConfig, StateFrameToolRuntime};
 use crate::core::state_frame_model_router::ModelTier;
 use crate::core::state_frame_orchestrator::{
@@ -91,6 +91,60 @@ fn build_artifact_repair_instruction(step: &BossPlanStep, missing_reason: &str) 
     Some(format!(
         "repair artifact evidence for target_path={target_path} parent_dir={parent_dir} missing_reason={missing_reason} recommended_write_strategy={recommended_write_strategy}"
     ))
+}
+
+fn build_stage_execution_contract(
+    step: &BossPlanStep,
+    target_artifacts: &[TargetArtifact],
+) -> StageExecutionContract {
+    let declared_artifacts = target_artifacts
+        .iter()
+        .map(|artifact| DeclaredArtifactContract {
+            ref_id: artifact.path.clone(),
+            path: artifact.path.clone(),
+            kind: artifact.kind.clone(),
+            required_actions: vec!["create".into(), "write".into()],
+            required_evidence: vec![artifact.path.clone()],
+        })
+        .collect::<Vec<_>>();
+    let verifications = target_artifacts
+        .iter()
+        .map(|artifact| VerificationContract {
+            target_ref: artifact.path.clone(),
+            target_path: Some(artifact.path.clone()),
+            required_actions: vec!["verify".into()],
+            required_evidence: vec![artifact.path.clone()],
+        })
+        .collect::<Vec<_>>();
+    let tests = step
+        .acceptance
+        .iter()
+        .filter(|item| {
+            let lowered = item.to_ascii_lowercase();
+            lowered.contains("test") || lowered.contains("verify")
+        })
+        .map(|item| crate::core::state_frame::TestContract {
+            name: item.clone(),
+            required_actions: vec!["run_test".into()],
+            required_evidence: vec![item.clone()],
+        })
+        .collect::<Vec<_>>();
+    let mut required_actions = vec!["create".into(), "write".into(), "verify".into()];
+    if !tests.is_empty() {
+        required_actions.push("run_test".into());
+    }
+    let mut required_evidence = target_artifacts
+        .iter()
+        .map(|artifact| artifact.path.clone())
+        .collect::<Vec<_>>();
+    required_evidence.extend(tests.iter().map(|item| item.name.clone()));
+    StageExecutionContract {
+        declared_artifacts,
+        verifications,
+        tests,
+        required_actions,
+        required_evidence,
+    }
 }
 
 fn seed_step_acceptance(task: &str) -> Vec<String> {
@@ -2237,6 +2291,7 @@ impl BossCoordinator {
                         action_required: None,
                         blocker_reason: None,
                         routed_metadata: routed_step_metadata.get(&step.id).cloned(),
+                        stage_execution_contract: StageExecutionContract::default(),
                     })
                     .collect::<Vec<_>>()
             })
@@ -2262,6 +2317,7 @@ impl BossCoordinator {
             rollout_policy_decision,
             success_classification,
             lism_policy: self.lism_policy().await,
+            stage_execution_contract: StageExecutionContract::default(),
         }
     }
 
@@ -2304,7 +2360,7 @@ impl BossCoordinator {
             .map(|plan| {
                 plan.steps
                     .iter()
-                    .map(|step| BossStepReport {
+                .map(|step| BossStepReport {
                         id: step.id,
                         status: step.status,
                         worker_task_id: step.worker_task_id.clone(),
@@ -2326,6 +2382,7 @@ impl BossCoordinator {
                             None
                         },
                         routed_metadata: routed_step_metadata.get(&step.id).cloned(),
+                        stage_execution_contract: StageExecutionContract::default(),
                     })
                     .collect::<Vec<_>>()
             })
@@ -2365,6 +2422,7 @@ impl BossCoordinator {
             rollout_policy_decision,
             success_classification,
             lism_policy: self.lism_policy().await,
+            stage_execution_contract: StageExecutionContract::default(),
         })
     }
 
@@ -3969,6 +4027,7 @@ impl BossCoordinator {
         let state_frame = BossStateFrame {
             step_id: step.id,
             status: step.status,
+            stage_execution_contract: build_stage_execution_contract(step, &target_artifacts),
             open_items,
             blocked_items,
             recent_local_facts,
@@ -5082,6 +5141,7 @@ mod tests {
                 artifact_status: "verified".into(),
                 test_status: "passed".into(),
                 verification_status: "verified".into(),
+                stage_execution_contract: StageExecutionContract::default(),
                 evidence_refs: vec!["artifact:1".into()],
                 completion_evidence_gaps: Vec::new(),
                 remaining_risks: Vec::new(),
@@ -5117,6 +5177,7 @@ mod tests {
                 artifact_status: "verified".into(),
                 test_status: "passed".into(),
                 verification_status: "verified".into(),
+                stage_execution_contract: StageExecutionContract::default(),
                 evidence_refs: vec!["artifact:1".into()],
                 completion_evidence_gaps: Vec::new(),
                 remaining_risks: Vec::new(),
@@ -5145,6 +5206,7 @@ mod tests {
                 artifact_status: "verified".into(),
                 test_status: "passed".into(),
                 verification_status: "verified".into(),
+                stage_execution_contract: StageExecutionContract::default(),
                 evidence_refs: vec!["artifact:1".into()],
                 completion_evidence_gaps: Vec::new(),
                 remaining_risks: Vec::new(),
@@ -5171,6 +5233,7 @@ mod tests {
                 artifact_status: "verified".into(),
                 test_status: "passed".into(),
                 verification_status: "verified".into(),
+                stage_execution_contract: StageExecutionContract::default(),
                 evidence_refs: vec!["artifact:1".into()],
                 completion_evidence_gaps: Vec::new(),
                 remaining_risks: Vec::new(),
@@ -5199,6 +5262,7 @@ mod tests {
                 artifact_status: "blocked".into(),
                 test_status: "blocked".into(),
                 verification_status: "blocked".into(),
+                stage_execution_contract: StageExecutionContract::default(),
                 evidence_refs: Vec::new(),
                 completion_evidence_gaps: Vec::new(),
                 remaining_risks: vec!["external blocker".into()],
@@ -5229,6 +5293,7 @@ mod tests {
                 artifact_status: "blocked".into(),
                 test_status: "blocked".into(),
                 verification_status: "blocked".into(),
+                stage_execution_contract: StageExecutionContract::default(),
                 evidence_refs: Vec::new(),
                 completion_evidence_gaps: Vec::new(),
                 remaining_risks: vec!["external blocker".into()],
@@ -5256,6 +5321,7 @@ mod tests {
                 artifact_status: "verified".into(),
                 test_status: "passed".into(),
                 verification_status: "verified".into(),
+                stage_execution_contract: StageExecutionContract::default(),
                 evidence_refs: vec!["tool_output:1".into(), "artifact:step1:runtime:0".into()],
                 completion_evidence_gaps: Vec::new(),
                 remaining_risks: Vec::new(),
@@ -5304,6 +5370,7 @@ mod tests {
                     ),
                     ..BossStepRoutedMetadata::default()
                 }),
+                stage_execution_contract: StageExecutionContract::default(),
             }],
             history_summary: Vec::new(),
             observability_summary: None,
@@ -5312,6 +5379,7 @@ mod tests {
                 crate::core::boss_state::BossSuccessClassification::RecoveredSuccess,
             ),
             lism_policy: Default::default(),
+            stage_execution_contract: StageExecutionContract::default(),
         };
 
         assert_eq!(
@@ -5334,6 +5402,7 @@ mod tests {
                 artifact_status: "touched".into(),
                 test_status: "not_run".into(),
                 verification_status: "unverified".into(),
+                stage_execution_contract: StageExecutionContract::default(),
                 evidence_refs: vec!["change:1".into()],
                 completion_evidence_gaps: vec![CompletionEvidenceGap {
                     target_ref: "artifact:contract:1".into(),
@@ -5384,6 +5453,7 @@ mod tests {
                 artifact_status: "verified".into(),
                 test_status: "not_required".into(),
                 verification_status: "verified".into(),
+                stage_execution_contract: StageExecutionContract::default(),
                 evidence_refs: vec!["artifact:verified".into()],
                 completion_evidence_gaps: Vec::new(),
                 remaining_risks: Vec::new(),
@@ -5427,6 +5497,7 @@ mod tests {
                 ],
                 ..BossStepRoutedMetadata::default()
             }),
+            stage_execution_contract: StageExecutionContract::default(),
         }];
 
         let decision =
@@ -5462,6 +5533,7 @@ mod tests {
                 completion_evidence_gaps: Vec::new(),
                 ..BossStepRoutedMetadata::default()
             }),
+            stage_execution_contract: StageExecutionContract::default(),
         }];
 
         assert!(BossCoordinator::derive_rollout_policy_decision(&steps).is_none());

@@ -542,7 +542,9 @@ mod tests {
         tool_assembly_context_for_role,
     };
     use crate::core::boss_state::{BossActorRole, BossStage};
-    use crate::core::state_frame::{ActorRole, AgentState, EffortLevel, StateBudget, StateFrame};
+    use crate::core::state_frame::{
+        ActorRole, AgentState, EffortLevel, StageExecutionContract, StateBudget, StateFrame,
+    };
     use crate::core::state_frame_model_router::{ModelRoute, ModelTier};
     use crate::service::api::client::{ModelProviderClient, ModelProviderConfig};
     use crate::service::observability::ServiceObservabilityTracker;
@@ -563,6 +565,7 @@ mod tests {
             role: ActorRole::Worker,
             state: AgentState::Executing,
             objective: objective.into(),
+            stage_execution_contract: StageExecutionContract::default(),
             open_items: Vec::new(),
             blocked_items: Vec::new(),
             accepted_summary: Vec::new(),

@@ -955,7 +955,9 @@ pub fn hydrate_needed_context(frame: &mut StateFrame, requested: &[String]) -> H
 #[cfg(test)]
 mod tests {
     use super::{NeededContextSelector, hydrate_needed_context, parse_needed_context_selector};
-    use crate::core::state_frame::{ActorRole, AgentState, StateBudget, StateFrame};
+    use crate::core::state_frame::{
+        ActorRole, AgentState, StageExecutionContract, StateBudget, StateFrame,
+    };
 
     fn make_frame() -> StateFrame {
         StateFrame {
@@ -964,6 +966,7 @@ mod tests {
             objective:
                 "update src/core/state_frame_projection.rs around BossCoordinator artifact output"
                     .into(),
+            stage_execution_contract: StageExecutionContract::default(),
             open_items: vec!["tests pass".into()],
             blocked_items: Vec::new(),
             accepted_summary: Vec::new(),
