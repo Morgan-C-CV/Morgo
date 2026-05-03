@@ -572,6 +572,14 @@ auth_strategy = "none"
     .unwrap();
 }
 
+fn unique_test_dir(label: &str) -> std::path::PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock should be after epoch")
+        .as_nanos();
+    std::env::temp_dir().join(format!("{label}-{nanos}-{}", std::process::id()))
+}
+
 fn boss_step(id: usize, description: &str) -> BossPlanStep {
     BossPlanStep {
         id,
@@ -9807,7 +9815,7 @@ async fn t27_r1_report_observability_summary_aggregates_routed_steps() {
     let addr = listener.local_addr().unwrap();
     let server = tokio::spawn(run_minimal_openai_mock_server_n(listener, 2));
 
-    let config_dir = std::env::temp_dir().join("t27_r1_obs_summary_test");
+    let config_dir = unique_test_dir("t27_r1_obs_summary_test");
     write_worker_override_models_toml(&config_dir, &format!("http://{addr}"));
 
     let mut app = (*app_state_with_tasks("t27-r1-obs-session", task_manager.clone())).clone();
@@ -9987,7 +9995,7 @@ async fn t27_r1_observability_summary_aggregates_token_fields() {
         run_minimal_openai_mock_server_n(listener, 2).await;
     });
 
-    let config_dir = std::env::temp_dir().join("t27_r1_token_agg_test");
+    let config_dir = unique_test_dir("t27_r1_token_agg_test");
     write_worker_override_models_toml(&config_dir, &format!("http://{addr}"));
 
     let mut app = (*app_state_with_tasks("t27-r1-token-agg", task_manager.clone())).clone();
@@ -10557,11 +10565,17 @@ async fn lism_enabled_boss_completed_step_auto_advances_to_next_step() {
     });
     let app_state = Arc::new(app);
 
-    let _ = coordinator.advance_plan(&app_state).await.unwrap();
+    let result = coordinator.advance_plan(&app_state).await.unwrap();
 
     let guard = coordinator.plan.read().await;
     let plan = guard.as_ref().unwrap();
-    assert_eq!(plan.steps[0].status, BossPlanStepStatus::Completed);
+    if plan.steps[0].status != BossPlanStepStatus::Completed {
+        panic!(
+            "unexpected step status: {:?}; advance_plan result={result:?}; review_summary={:?}",
+            plan.steps[0].status,
+            plan.steps[0].last_review_summary
+        );
+    }
     assert_eq!(plan.steps[1].status, BossPlanStepStatus::Completed);
     assert!(
         plan.steps[1].completed,
@@ -11989,7 +12003,7 @@ async fn t27_8_lism_boss_production_path_with_registry_on_disk_uses_worker_overr
     let addr = listener.local_addr().unwrap();
     let server = tokio::spawn(run_minimal_openai_mock_server(listener));
 
-    let config_dir = std::env::temp_dir().join("t278_registry_test");
+    let config_dir = unique_test_dir("t278_registry_test");
     write_worker_override_models_toml(&config_dir, &format!("http://{addr}"));
 
     let mut app =
@@ -12008,11 +12022,17 @@ async fn t27_8_lism_boss_production_path_with_registry_on_disk_uses_worker_overr
         Some(make_inherited_runtime_snapshot_with_scripted_turns(vec![]));
     let app_state = Arc::new(app);
 
-    let _ = coordinator.advance_plan(&app_state).await.unwrap();
+    let result = coordinator.advance_plan(&app_state).await.unwrap();
 
     let guard = coordinator.plan.read().await;
     let plan = guard.as_ref().unwrap();
-    assert_eq!(plan.steps[0].status, BossPlanStepStatus::Completed);
+    if plan.steps[0].status != BossPlanStepStatus::Completed {
+        panic!(
+            "unexpected step status: {:?}; advance_plan result={result:?}; review_summary={:?}",
+            plan.steps[0].status,
+            plan.steps[0].last_review_summary
+        );
+    }
 
     server.await.expect("mock provider server finished");
     let _ = std::fs::remove_file(plan_path);
@@ -12620,8 +12640,8 @@ async fn r2_1_33_real_boss_mode_missing_hydration_triggers_fallback_ladder_in_pr
         "fallback ladder should require three turns"
     );
     assert!(
-        bodies[1].contains("fallback_context: tier=recent_local_history"),
-        "second request must carry recent_local_history fallback, got: {}",
+        bodies[1].contains("fallback_context: tier=targeted_evidence"),
+        "second request must carry targeted_evidence fallback before escalation, got: {}",
         bodies[1]
     );
     assert!(

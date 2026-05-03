@@ -82,73 +82,40 @@ fn infer_preflight_requirements_from_state_frame(frame: &StateFrame) -> ToolCont
         frame.required_output_schema.as_deref(),
         Some("readonly_audit_4_paragraphs_v1")
     );
-    let has_declared_writable_artifact = frame.recent_evidence.iter().any(|line| {
-        line.starts_with("fact: permission_to_create_and_write:")
-            || line.contains("permission_to_create_and_write:")
-            || line.contains("required_action=create_file")
-            || line.contains("required_action=create_directory")
-            || line.contains("write_strategy=")
-            || line.contains("target_artifact")
-            || line.contains("artifact_status")
-            || line.contains("artifact_ref:")
-    }) || has_any_marker(
-        &frame.open_items,
-        &[
-            "target file",
-            "target directory",
-            "目标文件",
-            "目标目录",
-            "artifact",
-            "输出文件",
-        ],
-    ) || has_any_marker(
-        &frame.accepted_summary,
-        &["artifact", "target file", "目标文件", "输出文件"],
-    );
+    let requires_write = !readonly_contract
+        && frame
+            .stage_execution_contract
+            .declared_artifacts
+            .iter()
+            .any(|artifact| {
+                artifact.required_actions.iter().any(|action| {
+                    matches!(action.as_str(), "write_file" | "edit_file" | "create" | "write")
+                })
+            });
+    let requires_command_execution = !readonly_contract
+        && (frame
+            .stage_execution_contract
+            .tests
+            .iter()
+            .any(|test| test.required_actions.iter().any(|action| action == "run_command"))
+            || frame
+                .stage_execution_contract
+                .verifications
+                .iter()
+                .any(|verification| {
+                    verification
+                        .required_actions
+                        .iter()
+                        .any(|action| action == "run_command")
+                }));
 
-    let requires_command_execution = frame.recent_evidence.iter().any(|line| {
-        line.contains("fact: test_")
-            || line.contains("worker_reported_tests")
-            || line.contains("verification")
-            || line.contains("deployment_mode")
-    }) || has_any_marker(
-        &frame.open_items,
-        &[
-            "run ",
-            "test",
-            "verify",
-            "运行",
-            "测试",
-            "验证",
-            "cargo test",
-        ],
-    ) || has_any_marker(
-        &frame.accepted_summary,
-        &[
-            "run ",
-            "test",
-            "verify",
-            "运行",
-            "测试",
-            "验证",
-            "cargo test",
-        ],
-    );
-
-    let fallback_text_requires_write =
-        contains_external_effect_marker(&frame.objective) && !readonly_contract;
-    let fallback_text_requires_command = frame.objective.contains("运行命令")
-        || frame.objective.to_ascii_lowercase().contains("run ")
-        || frame.objective.to_ascii_lowercase().contains("test")
-        || frame.objective.to_ascii_lowercase().contains("verify");
-
-    if !readonly_contract && (has_declared_writable_artifact || fallback_text_requires_write) {
+    if requires_write {
         spec.required_allowed_actions.push("write_file".into());
         spec.permission_probe_tools.push("Edit".into());
         spec.permission_probe_tools.push("Bash".into());
         spec.required_visible_tools.push("Bash".into());
     }
-    if !readonly_contract && (requires_command_execution || fallback_text_requires_command) {
+    if requires_command_execution {
         spec.required_allowed_actions.push("run_command".into());
         spec.permission_probe_tools.push("Bash".into());
         spec.required_visible_tools.push("Bash".into());
@@ -660,7 +627,20 @@ mod tests {
             config_root: test_runtime_paths().1,
         };
         let mut frame = worker_frame("修改文件 src/lib.rs 并写入目标文件 /tmp/out.txt");
-        frame.budget.effort = EffortLevel::L;
+        frame.stage_execution_contract.declared_artifacts.push(
+            crate::core::state_frame::DeclaredArtifactContract {
+                ref_id: "artifact:step0:0".into(),
+                path: "/tmp/out.txt".into(),
+                kind: "file".into(),
+                required_actions: vec!["write_file".into()],
+                required_evidence: vec!["artifact:step0:0".into(), "/tmp/out.txt".into()],
+            },
+        );
+        frame.stage_execution_contract.required_actions = vec!["write_file".into()];
+        frame.stage_execution_contract.required_evidence = vec![
+            "artifact:step0:0".into(),
+            "/tmp/out.txt".into(),
+        ];
         let routed = RoutedStateFrame {
             frame,
             model_route: ModelRoute {
@@ -735,8 +715,14 @@ mod tests {
             config_root: test_runtime_paths().1,
         };
         let mut frame = worker_frame("finish the assigned artifact");
-        frame.recent_evidence.push(
-            "fact: permission_to_create_and_write:/tmp/p0-artifact/report.md ref=permission:step0:0 source=permission_scope source_event_id=permission-scope:0:0 freshness=current confidence=1.00 status=active invalidated_by=none supersedes=none conflicts_with=none summary=worker may create and write the declared target artifact path /tmp/p0-artifact/report.md".into(),
+        frame.stage_execution_contract.declared_artifacts.push(
+            crate::core::state_frame::DeclaredArtifactContract {
+                ref_id: "artifact:step0:0".into(),
+                path: "/tmp/p0-artifact/report.md".into(),
+                kind: "file".into(),
+                required_actions: vec!["write_file".into()],
+                required_evidence: vec!["artifact:step0:0".into(), "/tmp/p0-artifact/report.md".into()],
+            },
         );
         let snapshot = apply_tool_registry_contract(&mut frame, &runtime)
             .await
@@ -757,6 +743,38 @@ mod tests {
                 .missing_allowed_actions
                 .iter()
                 .any(|action| action == "write_file")
+        );
+    }
+
+    #[tokio::test]
+    async fn direct_worker_preflight_does_not_infer_bash_from_objective_keywords_without_contract()
+    {
+        let registry = ToolRegistry::new().register(Arc::new(FileReadTool));
+        let permissions = ToolPermissionContext::new(PermissionMode::Default);
+        let runtime = crate::core::state_frame_loop::StateFrameToolRuntime {
+            registry,
+            permissions,
+            cwd: test_runtime_paths().0,
+            config_root: test_runtime_paths().1,
+        };
+        let mut frame = worker_frame("修改文件 src/lib.rs 并运行命令 cargo test");
+        let snapshot = apply_tool_registry_contract(&mut frame, &runtime)
+            .await
+            .expect("snapshot");
+        let assembled = runtime
+            .registry
+            .assemble(tool_assembly_context_for_role(frame.role));
+        let spec = infer_preflight_requirements_from_state_frame(&frame);
+        assert!(
+            spec.required_allowed_actions.is_empty(),
+            "preflight must stay contract-first when no typed contract demands commands"
+        );
+        assert!(
+            assembled
+                .preflight_contract(&runtime.permissions, &snapshot, &spec)
+                .await
+                .is_ok(),
+            "objective keywords alone must not force a Bash contract mismatch"
         );
     }
 
