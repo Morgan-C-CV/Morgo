@@ -160,6 +160,19 @@ for case in selected:
 PY
 }
 
+read_lines_into_array() {
+  local __resultvar="$1"
+  local __input
+  __input="$(cat)"
+  eval "$__resultvar=()"
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    eval "$__resultvar+=(\"\$line\")"
+  done <<EOF
+$__input
+EOF
+}
+
 prepare_dirs() {
   local out_dir="$1"
   mkdir -p \
@@ -577,7 +590,9 @@ if [ "$prepare_only" = "true" ]; then
   exit 0
 fi
 
-mapfile -t selected_cases < <(expand_cases "$cases_spec")
+read_lines_into_array selected_cases <<EOF
+$(expand_cases "$cases_spec")
+EOF
 [ "${#selected_cases[@]}" -gt 0 ] || die "no cases selected"
 
 run_tag="$(basename "$out_dir")"
@@ -590,7 +605,9 @@ echo "Model: $model"
 echo "Timeout secs: $timeout_secs"
 echo
 
-mapfile -t mode_sequence < <(mode_sequence_for_plan "$plan" "$single_mode")
+read_lines_into_array mode_sequence <<EOF
+$(mode_sequence_for_plan "$plan" "$single_mode")
+EOF
 
 for usecase in "${selected_cases[@]}"; do
   for mode in "${mode_sequence[@]}"; do
