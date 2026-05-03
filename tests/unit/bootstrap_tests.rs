@@ -2056,7 +2056,13 @@ fn initialize_runtime_builds_consistent_runtime_bundle_shape() {
     assert!(!bundle.command_registry.names().is_empty());
     assert!(!bundle.coordinator_tools.all_metadata().is_empty());
     assert_eq!(bundle.api_client.provider_config(), bundle.provider_config);
-    assert!(!bundle.runtime_tool_registry.blocking_read().all_metadata().is_empty());
+    assert!(
+        !bundle
+            .runtime_tool_registry
+            .blocking_read()
+            .all_metadata()
+            .is_empty()
+    );
 }
 
 #[test]

@@ -1,18 +1,143 @@
 use std::sync::Arc;
+use std::{
+    collections::{BTreeSet, hash_map::DefaultHasher},
+    hash::{Hash, Hasher},
+    path::{Path, PathBuf},
+};
 
 use crate::bootstrap::{InteractionSurface, SessionMode};
 use crate::core::boss_state::BossStage;
 use crate::state::app_state::RuntimeRole;
 use crate::state::permission_context::{BossActorPolicy, ToolPermissionContext};
 use crate::tool::definition::{
-    InterruptBehavior, ModelToolDefinition, ObservableInput, Tool, ToolCall, ToolMetadata,
-    ToolResult,
+    InterruptBehavior, ModelToolDefinition, ObservableInput, PermissionDecision, Tool, ToolCall,
+    ToolMetadata, ToolResult,
 };
 use crate::tool::permission::{evaluate_tool_permission, is_tool_allowed};
+use serde::{Deserialize, Serialize};
+use serde_json::json;
 
 #[derive(Clone, Default)]
 pub struct ToolRegistry {
     tools: Vec<Arc<dyn Tool>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ToolRegistrySnapshot {
+    pub toolset_id: String,
+    #[serde(default)]
+    pub visible_tools: Vec<String>,
+    #[serde(default)]
+    pub allowed_actions: Vec<String>,
+    pub schema_hash: String,
+    pub permission_hash: String,
+    pub actor_role: String,
+    pub cwd: PathBuf,
+    #[serde(default)]
+    pub config_root: Option<PathBuf>,
+    #[serde(default)]
+    pub workspace_capabilities: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ToolContractMismatch {
+    #[serde(default)]
+    pub missing_visible_tools: Vec<String>,
+    #[serde(default)]
+    pub missing_allowed_actions: Vec<String>,
+    #[serde(default)]
+    pub permission_denied_tools: Vec<String>,
+    pub actor_role: String,
+    pub cwd: PathBuf,
+    #[serde(default)]
+    pub config_root: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolContractPreflightSpec {
+    pub required_visible_tools: Vec<String>,
+    pub required_allowed_actions: Vec<String>,
+    pub permission_probe_tools: Vec<String>,
+}
+
+fn stable_hash(value: &serde_json::Value) -> String {
+    let mut hasher = DefaultHasher::new();
+    value.to_string().hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+fn actions_for_tool(tool_name: &str) -> &'static [&'static str] {
+    match tool_name {
+        "Read" => &["read_file"],
+        "Edit" => &["edit_file", "write_file"],
+        "Write" => &["write_file"],
+        "Bash" => &["run_command", "write_file"],
+        "LS" | "Glob" => &["list_files"],
+        "Grep" => &["search_files"],
+        "Agent" => &["spawn_agent"],
+        _ => &[],
+    }
+}
+
+fn sample_call_for_permission_probe(tool_name: &str, cwd: &Path) -> ToolCall {
+    match tool_name {
+        "Read" => ToolCall::new(
+            "Read",
+            json!({ "file_path": cwd.display().to_string() }).to_string(),
+        ),
+        "Edit" => ToolCall::new(
+            "Edit",
+            json!({
+                "file_path": cwd.join("__tool_contract_probe__.txt").display().to_string(),
+                "old_string": "before",
+                "new_string": "after"
+            })
+            .to_string(),
+        ),
+        "Write" => ToolCall::new(
+            "Write",
+            json!({
+                "file_path": cwd.join("__tool_contract_probe__.txt").display().to_string(),
+                "content": "probe"
+            })
+            .to_string(),
+        ),
+        "Bash" => ToolCall::new("Bash", json!({ "command": "pwd" }).to_string()),
+        "Glob" => ToolCall::new("Glob", json!({ "pattern": "*" }).to_string()),
+        "Grep" => ToolCall::new(
+            "Grep",
+            json!({ "pattern": "mod", "path": cwd.display().to_string() }).to_string(),
+        ),
+        "LS" => ToolCall::new(
+            "LS",
+            json!({ "path": cwd.display().to_string() }).to_string(),
+        ),
+        "Agent" => ToolCall::new("Agent", json!({ "prompt": "permission probe" }).to_string()),
+        other => ToolCall::new(other, "{}"),
+    }
+}
+
+fn render_workspace_capabilities(permissions: &ToolPermissionContext, cwd: &Path) -> Vec<String> {
+    let mut capabilities = Vec::new();
+    if let Some(config) = permissions.workspace_capability() {
+        let effective_tier = config.effective_max_tier(cwd);
+        capabilities.push(format!(
+            "global_max_tier={}",
+            config.global_max_tier.as_str()
+        ));
+        capabilities.push(format!("effective_max_tier={}", effective_tier.as_str()));
+        capabilities.push(format!(
+            "escalate_to_pending_approval={}",
+            config.escalate_to_pending_approval
+        ));
+        capabilities.push(format!(
+            "audit_capability_decisions={}",
+            config.audit_capability_decisions
+        ));
+    } else {
+        capabilities.push("workspace_capability=unset".into());
+    }
+    capabilities
 }
 
 impl std::fmt::Debug for ToolRegistry {
@@ -180,6 +305,149 @@ impl ToolRegistry {
             .collect()
     }
 
+    pub async fn derive_allowed_actions(
+        &self,
+        permissions: &ToolPermissionContext,
+        cwd: &Path,
+    ) -> Vec<String> {
+        let mut actions = BTreeSet::new();
+        for tool_name in self.visible_tool_names(permissions) {
+            if !self
+                .is_tool_invokable(tool_name.as_str(), permissions, cwd)
+                .await
+            {
+                continue;
+            }
+            for action in actions_for_tool(tool_name.as_str()) {
+                actions.insert(action.to_string());
+            }
+        }
+        actions.into_iter().collect()
+    }
+
+    pub fn visible_tool_names(&self, permissions: &ToolPermissionContext) -> Vec<String> {
+        self.visible_tools(permissions)
+            .into_iter()
+            .map(|metadata| metadata.name.to_string())
+            .collect()
+    }
+
+    pub async fn snapshot(
+        &self,
+        permissions: &ToolPermissionContext,
+        toolset_id: impl Into<String>,
+        actor_role: impl Into<String>,
+        cwd: PathBuf,
+        config_root: Option<PathBuf>,
+    ) -> ToolRegistrySnapshot {
+        let visible_tool_metadata = self.visible_tools(permissions);
+        let visible_model_tools = self.visible_model_tools(permissions);
+        let visible_tools = visible_tool_metadata
+            .iter()
+            .map(|tool| tool.name.to_string())
+            .collect::<Vec<_>>();
+        let allowed_actions = self.derive_allowed_actions(permissions, &cwd).await;
+        let schema_hash = stable_hash(&json!(
+            visible_tool_metadata
+                .iter()
+                .map(|tool| json!({
+                    "name": tool.name,
+                    "input_schema": visible_model_tools
+                        .iter()
+                        .find(|model_tool| model_tool.name == tool.name)
+                        .map(|model_tool| model_tool.input_schema.clone()),
+                }))
+                .collect::<Vec<_>>()
+        ));
+        let workspace_capabilities = render_workspace_capabilities(permissions, &cwd);
+        let permission_hash = stable_hash(&json!({
+            "mode": format!("{:?}", permissions.mode()),
+            "always_allow_rules": permissions.always_allow_rules(),
+            "always_ask_rules": permissions.always_ask_rules(),
+            "always_deny_rules": permissions.always_deny_rules(),
+            "include_deferred_tools": permissions.include_deferred_tools,
+            "include_interactive_tools": permissions.include_interactive_tools,
+            "active_surface": permissions.active_surface.map(|surface| format!("{surface:?}")),
+            "boss_actor_policy": permissions.boss_actor_policy.map(|policy| json!({
+                "actor_role": format!("{:?}", policy.actor_role),
+                "lineage_depth": policy.lineage_depth,
+                "phase": format!("{:?}", policy.phase),
+            })),
+            "workspace_capabilities": workspace_capabilities,
+        }));
+        ToolRegistrySnapshot {
+            toolset_id: toolset_id.into(),
+            visible_tools,
+            allowed_actions,
+            schema_hash,
+            permission_hash,
+            actor_role: actor_role.into(),
+            cwd,
+            config_root,
+            workspace_capabilities,
+        }
+    }
+
+    pub async fn preflight_contract(
+        &self,
+        permissions: &ToolPermissionContext,
+        snapshot: &ToolRegistrySnapshot,
+        spec: &ToolContractPreflightSpec,
+    ) -> Result<(), ToolContractMismatch> {
+        let missing_visible_tools = spec
+            .required_visible_tools
+            .iter()
+            .filter(|tool| {
+                !snapshot
+                    .visible_tools
+                    .iter()
+                    .any(|visible| visible == *tool)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let missing_allowed_actions = spec
+            .required_allowed_actions
+            .iter()
+            .filter(|action| {
+                !snapshot
+                    .allowed_actions
+                    .iter()
+                    .any(|allowed| allowed == *action)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut permission_denied_tools = Vec::new();
+        for tool_name in &spec.permission_probe_tools {
+            if !snapshot
+                .visible_tools
+                .iter()
+                .any(|visible| visible == tool_name)
+            {
+                continue;
+            }
+            if !self
+                .is_tool_invokable(tool_name.as_str(), permissions, &snapshot.cwd)
+                .await
+            {
+                permission_denied_tools.push(tool_name.clone());
+            }
+        }
+        if missing_visible_tools.is_empty()
+            && missing_allowed_actions.is_empty()
+            && permission_denied_tools.is_empty()
+        {
+            return Ok(());
+        }
+        Err(ToolContractMismatch {
+            missing_visible_tools,
+            missing_allowed_actions,
+            permission_denied_tools,
+            actor_role: snapshot.actor_role.clone(),
+            cwd: snapshot.cwd.clone(),
+            config_root: snapshot.config_root.clone(),
+        })
+    }
+
     pub fn all_metadata(&self) -> Vec<ToolMetadata> {
         self.tools.iter().map(|tool| tool.metadata()).collect()
     }
@@ -273,6 +541,31 @@ impl ToolRegistry {
             tool.backfill_observable_input(call)
                 .or_else(|| tool.observable_input(call))
         })
+    }
+
+    pub async fn permission_decision(
+        &self,
+        call: &ToolCall,
+        permissions: &ToolPermissionContext,
+    ) -> Option<PermissionDecision> {
+        let tool = self.find(call)?;
+        let metadata = tool.metadata();
+        let base_decision = evaluate_tool_permission(&metadata, call, permissions);
+        let tool_decision = tool.check_permissions(call, permissions).await;
+        Some(merge_permission_decisions(base_decision, tool_decision))
+    }
+
+    pub async fn is_tool_invokable(
+        &self,
+        tool_name: &str,
+        permissions: &ToolPermissionContext,
+        cwd: &Path,
+    ) -> bool {
+        let call = sample_call_for_permission_probe(tool_name, cwd);
+        matches!(
+            self.permission_decision(&call, permissions).await,
+            Some(PermissionDecision::Allow)
+        )
     }
 
     pub async fn invoke(

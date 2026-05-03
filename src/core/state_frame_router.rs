@@ -5,7 +5,6 @@ use crate::core::state_frame::{ActorRole, AgentState, StateFrame};
 pub struct ToolsetRoute {
     pub toolset_id: Option<String>,
     pub skillset_id: Option<String>,
-    pub allowed_actions: Vec<String>,
 }
 
 /// Route a StateFrame to its minimal toolset and skillset.
@@ -19,7 +18,6 @@ pub fn route_toolset(frame: &StateFrame) -> ToolsetRoute {
         return ToolsetRoute {
             toolset_id: None,
             skillset_id: None,
-            allowed_actions: vec![],
         };
     }
 
@@ -37,12 +35,10 @@ fn route_designer_a(state: AgentState) -> ToolsetRoute {
         AgentState::Planning => ToolsetRoute {
             toolset_id: Some("designer-planning".into()),
             skillset_id: Some("spec-writer".into()),
-            allowed_actions: vec!["read_file".into(), "write_spec".into(), "list_files".into()],
         },
         AgentState::Reviewing => ToolsetRoute {
             toolset_id: Some("designer-review".into()),
             skillset_id: Some("code-reviewer".into()),
-            allowed_actions: vec!["read_file".into(), "run_test".into()],
         },
         _ => conservative_fallback(),
     }
@@ -53,17 +49,10 @@ fn route_executor_b(state: AgentState) -> ToolsetRoute {
         AgentState::Executing => ToolsetRoute {
             toolset_id: Some("executor-edit".into()),
             skillset_id: Some("implementer".into()),
-            allowed_actions: vec![
-                "read_file".into(),
-                "edit_file".into(),
-                "run_test".into(),
-                "list_files".into(),
-            ],
         },
         AgentState::Correcting => ToolsetRoute {
             toolset_id: Some("executor-edit".into()),
             skillset_id: Some("implementer".into()),
-            allowed_actions: vec!["read_file".into(), "edit_file".into(), "run_test".into()],
         },
         _ => conservative_fallback(),
     }
@@ -74,12 +63,10 @@ fn route_worker(state: AgentState) -> ToolsetRoute {
         AgentState::Executing | AgentState::Correcting => ToolsetRoute {
             toolset_id: Some("worker-minimal".into()),
             skillset_id: None,
-            allowed_actions: vec!["read_file".into(), "edit_file".into(), "run_test".into()],
         },
         AgentState::Planning => ToolsetRoute {
             toolset_id: Some("worker-minimal".into()),
             skillset_id: None,
-            allowed_actions: vec!["read_file".into(), "list_files".into()],
         },
         _ => conservative_fallback(),
     }
@@ -90,7 +77,6 @@ fn route_verifier(state: AgentState) -> ToolsetRoute {
         AgentState::Verifying | AgentState::Reviewing => ToolsetRoute {
             toolset_id: Some("verifier-readonly".into()),
             skillset_id: Some("acceptance-checker".into()),
-            allowed_actions: vec!["read_file".into(), "run_test".into()],
         },
         _ => conservative_fallback(),
     }
@@ -102,7 +88,6 @@ fn route_summarizer(state: AgentState) -> ToolsetRoute {
         AgentState::Planning | AgentState::Executing | AgentState::Reviewing => ToolsetRoute {
             toolset_id: Some("summarizer-readonly".into()),
             skillset_id: Some("context-summarizer".into()),
-            allowed_actions: vec!["read_file".into()],
         },
         _ => conservative_fallback(),
     }
@@ -114,7 +99,6 @@ fn conservative_fallback() -> ToolsetRoute {
     ToolsetRoute {
         toolset_id: None,
         skillset_id: None,
-        allowed_actions: vec!["read_file".into()],
     }
 }
 
@@ -122,5 +106,4 @@ fn conservative_fallback() -> ToolsetRoute {
 pub fn apply_route(frame: &mut StateFrame, route: ToolsetRoute) {
     frame.toolset_id = route.toolset_id;
     frame.skillset_id = route.skillset_id;
-    frame.allowed_actions = route.allowed_actions;
 }

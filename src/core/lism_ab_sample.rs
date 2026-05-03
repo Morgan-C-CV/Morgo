@@ -75,6 +75,24 @@ pub struct LisMAbSampleRecord {
     pub tool_dispatch_ref_write_count: usize,
     #[serde(default)]
     pub tool_dispatch_failure_taxonomy: BTreeMap<String, usize>,
+    #[serde(default)]
+    pub toolset_ids: Vec<String>,
+    #[serde(default)]
+    pub visible_tools: Vec<String>,
+    #[serde(default)]
+    pub schema_hashes: Vec<String>,
+    #[serde(default)]
+    pub permission_hashes: Vec<String>,
+    #[serde(default)]
+    pub actor_roles: Vec<String>,
+    #[serde(default)]
+    pub cwd_values: Vec<String>,
+    #[serde(default)]
+    pub config_roots: Vec<String>,
+    #[serde(default)]
+    pub workspace_capabilities: Vec<String>,
+    #[serde(default)]
+    pub tool_contract_mismatch_count: usize,
     pub pending_approval_count: usize,
     pub outcome: BossTestRunOutcome,
 }
@@ -696,6 +714,45 @@ fn build_ab_record(
             }
         })
     });
+    let mut toolset_ids = BTreeMap::new();
+    let mut visible_tools = BTreeMap::new();
+    let mut schema_hashes = BTreeMap::new();
+    let mut permission_hashes = BTreeMap::new();
+    let mut actor_roles = BTreeMap::new();
+    let mut cwd_values = BTreeMap::new();
+    let mut config_roots = BTreeMap::new();
+    let mut workspace_capabilities = BTreeMap::new();
+    let mut tool_contract_mismatch_count = 0usize;
+    for step in &report.steps {
+        let Some(meta) = step.routed_metadata.as_ref() else {
+            continue;
+        };
+        if let Some(toolset_id) = meta.toolset_id.as_ref() {
+            toolset_ids.insert(toolset_id.clone(), ());
+        }
+        for tool in &meta.visible_tools {
+            visible_tools.insert(tool.clone(), ());
+        }
+        if let Some(schema_hash) = meta.schema_hash.as_ref() {
+            schema_hashes.insert(schema_hash.clone(), ());
+        }
+        if let Some(permission_hash) = meta.permission_hash.as_ref() {
+            permission_hashes.insert(permission_hash.clone(), ());
+        }
+        if let Some(actor_role) = meta.actor_role.as_ref() {
+            actor_roles.insert(actor_role.clone(), ());
+        }
+        if let Some(cwd) = meta.cwd.as_ref() {
+            cwd_values.insert(cwd.clone(), ());
+        }
+        if let Some(config_root) = meta.config_root.as_ref() {
+            config_roots.insert(config_root.clone(), ());
+        }
+        for capability in &meta.workspace_capabilities {
+            workspace_capabilities.insert(capability.clone(), ());
+        }
+        tool_contract_mismatch_count += meta.tool_contract_mismatch_count.unwrap_or(0);
+    }
 
     LisMAbSampleRecord {
         run_id,
@@ -744,6 +801,15 @@ fn build_ab_record(
         tool_dispatch_failure_taxonomy: obs
             .map(|o| o.tool_dispatch_failure_taxonomy.clone())
             .unwrap_or_default(),
+        toolset_ids: toolset_ids.into_keys().collect(),
+        visible_tools: visible_tools.into_keys().collect(),
+        schema_hashes: schema_hashes.into_keys().collect(),
+        permission_hashes: permission_hashes.into_keys().collect(),
+        actor_roles: actor_roles.into_keys().collect(),
+        cwd_values: cwd_values.into_keys().collect(),
+        config_roots: config_roots.into_keys().collect(),
+        workspace_capabilities: workspace_capabilities.into_keys().collect(),
+        tool_contract_mismatch_count,
         pending_approval_count,
         outcome,
     }

@@ -3,7 +3,7 @@ use std::fs;
 use std::hash::Hash;
 use std::path::{Path, PathBuf};
 
-use crate::bootstrap::config_root::{preferred_workspace_config_root, PRIMARY_CONFIG_DIR};
+use crate::bootstrap::config_root::{PRIMARY_CONFIG_DIR, preferred_workspace_config_root};
 use crate::skills::frontmatter::parse_frontmatter;
 use crate::skills::types::{SkillDefinition, SkillSource};
 

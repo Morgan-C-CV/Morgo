@@ -42,9 +42,10 @@ fn hook_loader_reads_external_rules_from_project_config() {
         .expect("config load result should be captured");
     assert_eq!(load_result.source, HookConfigSource::File);
     assert!(
-        load_result.diagnostics.iter().any(
-            |line| line.contains("Loaded 1 hook rule(s) from") && line.contains("hooks.json")
-        )
+        load_result
+            .diagnostics
+            .iter()
+            .any(|line| line.contains("Loaded 1 hook rule(s) from") && line.contains("hooks.json"))
     );
     assert_eq!(registry.rules().len(), 1);
     assert_eq!(registry.rules()[0].layer, HookRuleLayer::File);
@@ -146,9 +147,10 @@ fn hook_loader_ignores_unknown_events_and_keeps_valid_rules() {
             .any(|line| line.contains("Ignored hook rule with unknown event 'not_a_real_event'"))
     );
     assert!(
-        load_result.diagnostics.iter().any(
-            |line| line.contains("Loaded 1 hook rule(s) from") && line.contains("hooks.json")
-        )
+        load_result
+            .diagnostics
+            .iter()
+            .any(|line| line.contains("Loaded 1 hook rule(s) from") && line.contains("hooks.json"))
     );
 
     let registry = load_hook_registry(&root);

@@ -98,9 +98,7 @@ impl McpRuntime {
             client,
             config_load_result,
             McpGovernanceStateLoadResult {
-                path: std::path::PathBuf::from(format!(
-                    "{PRIMARY_CONFIG_DIR}/mcp-governance.json"
-                )),
+                path: std::path::PathBuf::from(format!("{PRIMARY_CONFIG_DIR}/mcp-governance.json")),
                 source: McpGovernanceStateSource::Defaults,
                 states: BTreeMap::new(),
                 diagnostics: Vec::new(),

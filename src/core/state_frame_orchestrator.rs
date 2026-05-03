@@ -12,16 +12,26 @@ use crate::core::state_frame_router::{apply_route, route_toolset};
 use crate::service::api::client::{ModelPricing, ModelProviderClient};
 use crate::service::observability::ServiceObservabilityTracker;
 use crate::state::active_model_runtime::ActiveModelRuntimeSnapshot;
+use crate::tool::registry::{
+    ToolAssemblyContext, ToolContractMismatch, ToolContractPreflightSpec, ToolRegistrySnapshot,
+};
+use crate::{
+    bootstrap::InteractionSurface, bootstrap::SessionMode,
+    bootstrap::config_root::resolve_config_root,
+};
 
 /// Outcome of a single step execution via the StateFrame orchestrator seam.
 #[derive(Debug, Clone)]
 pub enum StepOutcome {
     Completed {
         usage: LoopUsage,
+        tool_registry_snapshot: Option<ToolRegistrySnapshot>,
     },
     Failed {
         reason: String,
         usage: Option<LoopUsage>,
+        tool_registry_snapshot: Option<ToolRegistrySnapshot>,
+        tool_contract_mismatch: Option<ToolContractMismatch>,
     },
 }
 
@@ -30,6 +40,95 @@ pub struct RoutedStateFrame {
     pub frame: StateFrame,
     pub model_route: ModelRoute,
     pub projection_mismatch_count: usize,
+}
+
+fn tool_assembly_context_for_role(role: ActorRole) -> ToolAssemblyContext {
+    match role {
+        ActorRole::ExecutorB => {
+            ToolAssemblyContext::executor_b(InteractionSurface::Cli, SessionMode::Headless)
+        }
+        ActorRole::Worker | ActorRole::Verifier | ActorRole::Summarizer => {
+            ToolAssemblyContext::worker(InteractionSurface::Cli, SessionMode::Headless)
+        }
+        ActorRole::DesignerA => {
+            ToolAssemblyContext::coordinator(InteractionSurface::Cli, SessionMode::Headless)
+        }
+    }
+}
+
+fn direct_worker_preflight_spec(frame: &StateFrame) -> ToolContractPreflightSpec {
+    let mut spec = ToolContractPreflightSpec {
+        required_visible_tools: Vec::new(),
+        required_allowed_actions: Vec::new(),
+        permission_probe_tools: Vec::new(),
+    };
+    if matches!(
+        frame.state,
+        crate::core::state_frame::AgentState::Blocked | crate::core::state_frame::AgentState::Done
+    ) {
+        return spec;
+    }
+    spec.required_visible_tools.push("Read".into());
+    spec.required_allowed_actions.push("read_file".into());
+    spec.permission_probe_tools.push("Read".into());
+    if frame.role == ActorRole::ExecutorB {
+        spec.required_visible_tools.push("Agent".into());
+        spec.required_allowed_actions.push("spawn_agent".into());
+        spec.permission_probe_tools.push("Agent".into());
+    }
+    if contains_external_effect_marker(&frame.objective)
+        && !matches!(
+            frame.required_output_schema.as_deref(),
+            Some("readonly_audit_4_paragraphs_v1")
+        )
+    {
+        spec.required_allowed_actions.push("write_file".into());
+        spec.permission_probe_tools.push("Edit".into());
+        spec.permission_probe_tools.push("Bash".into());
+        spec.required_visible_tools.push("Bash".into());
+        if frame.objective.contains("运行命令")
+            || frame.objective.to_ascii_lowercase().contains("run ")
+            || frame.objective.to_ascii_lowercase().contains("test")
+        {
+            spec.required_allowed_actions.push("run_command".into());
+            spec.permission_probe_tools.push("Bash".into());
+        }
+    }
+    spec.required_visible_tools.sort();
+    spec.required_visible_tools.dedup();
+    spec.required_allowed_actions.sort();
+    spec.required_allowed_actions.dedup();
+    spec.permission_probe_tools.sort();
+    spec.permission_probe_tools.dedup();
+    spec
+}
+
+async fn apply_tool_registry_contract(
+    frame: &mut StateFrame,
+    runtime: &StateFrameToolRuntime,
+) -> anyhow::Result<ToolRegistrySnapshot> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let config_root = resolve_config_root(&cwd).ok();
+    let mut assembly_context = tool_assembly_context_for_role(frame.role);
+    assembly_context.include_deferred_tools = runtime.permissions.include_deferred_tools;
+    assembly_context.include_interactive_tools = runtime.permissions.include_interactive_tools;
+    assembly_context.boss_actor_policy = runtime.permissions.boss_actor_policy;
+    let actor_registry = runtime.registry.assemble(assembly_context);
+    let snapshot = actor_registry
+        .snapshot(
+            &runtime.permissions,
+            frame
+                .toolset_id
+                .clone()
+                .unwrap_or_else(|| "unrouted".into()),
+            format!("{:?}", frame.role).to_ascii_lowercase(),
+            cwd,
+            config_root,
+        )
+        .await;
+    frame.allowed_tools = snapshot.visible_tools.clone();
+    frame.allowed_actions = snapshot.allowed_actions.clone();
+    Ok(snapshot)
 }
 
 fn contains_external_effect_marker(text: &str) -> bool {
@@ -79,6 +178,8 @@ fn external_tool_execution_unsupported() -> StepOutcome {
     StepOutcome::Failed {
         reason: "StateFrame direct execution cannot yet perform required filesystem or command side effects; use full worker path or wire tool dispatch before enabling LisM for this step".into(),
         usage: None,
+        tool_registry_snapshot: None,
+        tool_contract_mismatch: None,
     }
 }
 
@@ -126,6 +227,7 @@ pub struct ResolvedRoutedStep {
     pub routed: RoutedStateFrame,
     pub resolved_snapshot: ActiveModelRuntimeSnapshot,
     pub tool_runtime: Option<StateFrameToolRuntime>,
+    pub tool_registry_snapshot: Option<ToolRegistrySnapshot>,
 }
 
 pub async fn run_step_with_state_frame(
@@ -141,7 +243,7 @@ pub async fn run_step_with_state_frame(
         return Ok(external_tool_execution_unsupported());
     }
     let outcome = run_decision_loop(client, routed.frame, config).await?;
-    Ok(map_loop_outcome(outcome))
+    Ok(map_loop_outcome(outcome, None))
 }
 
 pub async fn run_step_with_state_frame_and_runtime<'a>(
@@ -156,7 +258,33 @@ pub async fn run_step_with_state_frame_and_runtime<'a>(
     if requires_external_tool_execution(&routed.frame, runtime.tool_runtime.is_some()) {
         return Ok(external_tool_execution_unsupported());
     }
-    let resolved = resolve_routed_step_runtime(routed, runtime)?;
+    let resolved = resolve_routed_step_runtime(routed, runtime).await?;
+    if let (Some(tool_runtime), Some(snapshot)) = (
+        resolved.tool_runtime.as_ref(),
+        resolved.tool_registry_snapshot.as_ref(),
+    ) {
+        let actor_registry = tool_runtime
+            .registry
+            .assemble(tool_assembly_context_for_role(resolved.routed.frame.role));
+        if let Err(mismatch) = actor_registry
+            .preflight_contract(
+                &tool_runtime.permissions,
+                snapshot,
+                &direct_worker_preflight_spec(&resolved.routed.frame),
+            )
+            .await
+        {
+            return Ok(StepOutcome::Failed {
+                reason: format!(
+                    "ToolContractMismatch: {}",
+                    serde_json::to_string(&mismatch)?
+                ),
+                usage: None,
+                tool_registry_snapshot: Some(snapshot.clone()),
+                tool_contract_mismatch: Some(mismatch),
+            });
+        }
+    }
     let outcome = run_decision_loop_with_tools(
         &resolved.resolved_snapshot.client,
         resolved.routed.frame,
@@ -167,13 +295,20 @@ pub async fn run_step_with_state_frame_and_runtime<'a>(
     Ok(map_loop_outcome_with_pricing(
         outcome,
         &resolved.resolved_snapshot.config.pricing,
+        resolved.tool_registry_snapshot,
     ))
 }
 
-pub fn resolve_routed_step_runtime<'a>(
-    routed: RoutedStateFrame,
+pub async fn resolve_routed_step_runtime<'a>(
+    mut routed: RoutedStateFrame,
     runtime: StepRuntimeResolutionContext<'a>,
 ) -> anyhow::Result<ResolvedRoutedStep> {
+    let tool_registry_snapshot = match runtime.tool_runtime.as_ref() {
+        Some(tool_runtime) => {
+            Some(apply_tool_registry_contract(&mut routed.frame, tool_runtime).await?)
+        }
+        None => None,
+    };
     let resolved = resolve_step_model(
         &routed.model_route,
         runtime.inherited_snapshot,
@@ -184,6 +319,7 @@ pub fn resolve_routed_step_runtime<'a>(
         routed,
         resolved_snapshot: resolved.snapshot,
         tool_runtime: runtime.tool_runtime,
+        tool_registry_snapshot,
     })
 }
 
@@ -195,7 +331,33 @@ pub async fn run_routed_step_with_runtime<'a>(
     if requires_external_tool_execution(&routed.frame, runtime.tool_runtime.is_some()) {
         return Ok(external_tool_execution_unsupported());
     }
-    let resolved = resolve_routed_step_runtime(routed, runtime)?;
+    let resolved = resolve_routed_step_runtime(routed, runtime).await?;
+    if let (Some(tool_runtime), Some(snapshot)) = (
+        resolved.tool_runtime.as_ref(),
+        resolved.tool_registry_snapshot.as_ref(),
+    ) {
+        let actor_registry = tool_runtime
+            .registry
+            .assemble(tool_assembly_context_for_role(resolved.routed.frame.role));
+        if let Err(mismatch) = actor_registry
+            .preflight_contract(
+                &tool_runtime.permissions,
+                snapshot,
+                &direct_worker_preflight_spec(&resolved.routed.frame),
+            )
+            .await
+        {
+            return Ok(StepOutcome::Failed {
+                reason: format!(
+                    "ToolContractMismatch: {}",
+                    serde_json::to_string(&mismatch)?
+                ),
+                usage: None,
+                tool_registry_snapshot: Some(snapshot.clone()),
+                tool_contract_mismatch: Some(mismatch),
+            });
+        }
+    }
     let outcome = run_decision_loop_with_tools(
         &resolved.resolved_snapshot.client,
         resolved.routed.frame,
@@ -206,19 +368,30 @@ pub async fn run_routed_step_with_runtime<'a>(
     Ok(map_loop_outcome_with_pricing(
         outcome,
         &resolved.resolved_snapshot.config.pricing,
+        resolved.tool_registry_snapshot,
     ))
 }
 
-fn map_loop_outcome(outcome: LoopOutcome) -> StepOutcome {
+fn map_loop_outcome(
+    outcome: LoopOutcome,
+    tool_registry_snapshot: Option<ToolRegistrySnapshot>,
+) -> StepOutcome {
     match outcome {
-        LoopOutcome::Done { usage, .. } => StepOutcome::Completed { usage },
+        LoopOutcome::Done { usage, .. } => StepOutcome::Completed {
+            usage,
+            tool_registry_snapshot,
+        },
         LoopOutcome::Rejected { reason, usage } => StepOutcome::Failed {
             reason,
             usage: Some(usage),
+            tool_registry_snapshot,
+            tool_contract_mismatch: None,
         },
         LoopOutcome::MaxIterationsReached { last_state, usage } => StepOutcome::Failed {
             reason: format!("max iterations reached; last state: {last_state:?}"),
             usage: Some(usage),
+            tool_registry_snapshot,
+            tool_contract_mismatch: None,
         },
         LoopOutcome::NoProgress {
             last_state,
@@ -227,6 +400,8 @@ fn map_loop_outcome(outcome: LoopOutcome) -> StepOutcome {
         } => StepOutcome::Failed {
             reason: format!("{reason}; last state: {last_state:?}"),
             usage: Some(usage),
+            tool_registry_snapshot,
+            tool_contract_mismatch: None,
         },
         LoopOutcome::ToolDispatchFailed {
             last_state,
@@ -235,6 +410,8 @@ fn map_loop_outcome(outcome: LoopOutcome) -> StepOutcome {
         } => StepOutcome::Failed {
             reason: format!("tool dispatch failed: {reason}; last state: {last_state:?}"),
             usage: Some(usage),
+            tool_registry_snapshot,
+            tool_contract_mismatch: None,
         },
         LoopOutcome::RepairExhausted {
             reason,
@@ -243,24 +420,40 @@ fn map_loop_outcome(outcome: LoopOutcome) -> StepOutcome {
         } => StepOutcome::Failed {
             reason: format!("repair exhausted: {reason}; raw: {raw_json}"),
             usage: Some(usage),
+            tool_registry_snapshot,
+            tool_contract_mismatch: None,
         },
     }
 }
 
-fn map_loop_outcome_with_pricing(outcome: LoopOutcome, pricing: &ModelPricing) -> StepOutcome {
-    match map_loop_outcome(outcome) {
-        StepOutcome::Completed { mut usage } => {
+fn map_loop_outcome_with_pricing(
+    outcome: LoopOutcome,
+    pricing: &ModelPricing,
+    tool_registry_snapshot: Option<ToolRegistrySnapshot>,
+) -> StepOutcome {
+    match map_loop_outcome(outcome, tool_registry_snapshot) {
+        StepOutcome::Completed {
+            mut usage,
+            tool_registry_snapshot,
+        } => {
             usage.estimated_cost_micros_usd = estimate_loop_usage_cost_micros(&usage, pricing);
-            StepOutcome::Completed { usage }
+            StepOutcome::Completed {
+                usage,
+                tool_registry_snapshot,
+            }
         }
         StepOutcome::Failed {
             reason,
             usage: Some(mut usage),
+            tool_registry_snapshot,
+            tool_contract_mismatch,
         } => {
             usage.estimated_cost_micros_usd = estimate_loop_usage_cost_micros(&usage, pricing);
             StepOutcome::Failed {
                 reason,
                 usage: Some(usage),
+                tool_registry_snapshot,
+                tool_contract_mismatch,
             }
         }
         failed => failed,
@@ -278,8 +471,27 @@ fn estimate_loop_usage_cost_micros(usage: &LoopUsage, pricing: &ModelPricing) ->
 
 #[cfg(test)]
 mod tests {
-    use super::requires_external_tool_execution;
-    use crate::core::state_frame::{ActorRole, AgentState, StateBudget, StateFrame};
+    use super::{
+        DecisionLoopConfig, RoutedStateFrame, StepOutcome, StepRuntimeResolutionContext,
+        apply_tool_registry_contract, requires_external_tool_execution,
+        run_routed_step_with_runtime, tool_assembly_context_for_role,
+    };
+    use crate::core::boss_state::{BossActorRole, BossStage};
+    use crate::core::state_frame::{ActorRole, AgentState, EffortLevel, StateBudget, StateFrame};
+    use crate::core::state_frame_model_router::{ModelRoute, ModelTier};
+    use crate::service::api::client::{ModelProviderClient, ModelProviderConfig};
+    use crate::service::observability::ServiceObservabilityTracker;
+    use crate::state::active_model_runtime::ActiveModelRuntimeSnapshot;
+    use crate::state::app_state::{ActiveModelProfileSource, ActiveModelProviderSummary};
+    use crate::state::permission_context::{
+        BossActorPolicy, PermissionMode, ToolPermissionContext,
+    };
+    use crate::tool::builtin::agent::AgentTool;
+    use crate::tool::builtin::bash::BashTool;
+    use crate::tool::builtin::file_edit::FileEditTool;
+    use crate::tool::builtin::file_read::FileReadTool;
+    use crate::tool::registry::ToolRegistry;
+    use std::sync::Arc;
 
     fn worker_frame(objective: &str) -> StateFrame {
         StateFrame {
@@ -290,11 +502,29 @@ mod tests {
             blocked_items: Vec::new(),
             accepted_summary: Vec::new(),
             recent_evidence: Vec::new(),
-            allowed_actions: vec!["read_file".into(), "edit_file".into(), "run_test".into()],
+            allowed_actions: vec![],
+            allowed_tools: vec![],
             toolset_id: None,
             skillset_id: None,
             required_output_schema: Some("state_decision_v1".into()),
             budget: StateBudget::default(),
+        }
+    }
+
+    fn test_snapshot() -> ActiveModelRuntimeSnapshot {
+        ActiveModelRuntimeSnapshot {
+            config: ModelProviderConfig::default(),
+            client: ModelProviderClient::with_scripted_turns(Vec::new()),
+            active_profile_name: None,
+            source: ActiveModelProfileSource::BootstrapDefault,
+            summary: ActiveModelProviderSummary {
+                provider_id: "test".into(),
+                protocol: "messages_api".into(),
+                compatibility_profile: "messages_api".into(),
+                base_url_host: "localhost".into(),
+                model: "test-model".into(),
+                auth_status: "no_auth".into(),
+            },
         }
     }
 
@@ -310,5 +540,170 @@ mod tests {
         let mut frame = worker_frame("read-only review run");
         frame.required_output_schema = Some("readonly_audit_4_paragraphs_v1".into());
         assert!(!requires_external_tool_execution(&frame, false));
+    }
+
+    #[tokio::test]
+    async fn direct_worker_tool_snapshot_matches_registry() {
+        let registry = ToolRegistry::new()
+            .register(Arc::new(AgentTool))
+            .register(Arc::new(BashTool))
+            .register(Arc::new(FileEditTool))
+            .register(Arc::new(FileReadTool));
+        let permissions =
+            ToolPermissionContext::new(PermissionMode::Default).with_interactive_tools(true);
+        let runtime = crate::core::state_frame_loop::StateFrameToolRuntime {
+            registry: registry.clone(),
+            permissions: permissions.clone(),
+        };
+        let mut frame = worker_frame("修改文件 src/lib.rs 并运行命令 cargo test");
+        let snapshot = apply_tool_registry_contract(&mut frame, &runtime)
+            .await
+            .expect("snapshot");
+        let assembled = registry.assemble(tool_assembly_context_for_role(ActorRole::Worker));
+        let expected_visible = assembled
+            .visible_tools(&permissions)
+            .into_iter()
+            .map(|tool| tool.name.to_string())
+            .collect::<Vec<_>>();
+        let expected_actions = assembled
+            .derive_allowed_actions(&permissions, &snapshot.cwd)
+            .await;
+        assert_eq!(snapshot.visible_tools, expected_visible);
+        assert_eq!(snapshot.allowed_actions, expected_actions);
+        assert_eq!(frame.allowed_tools, snapshot.visible_tools);
+        assert_eq!(frame.allowed_actions, snapshot.allowed_actions);
+        assert!(!snapshot.visible_tools.iter().any(|tool| tool == "Agent"));
+    }
+
+    #[tokio::test]
+    async fn direct_worker_preflight_fails_on_missing_write_tool() {
+        let registry = ToolRegistry::new().register(Arc::new(FileReadTool));
+        let permissions =
+            ToolPermissionContext::new(PermissionMode::Default).with_interactive_tools(true);
+        let runtime = crate::core::state_frame_loop::StateFrameToolRuntime {
+            registry,
+            permissions,
+        };
+        let mut frame = worker_frame("修改文件 src/lib.rs 并写入目标文件 /tmp/out.txt");
+        frame.budget.effort = EffortLevel::L;
+        let routed = RoutedStateFrame {
+            frame,
+            model_route: ModelRoute {
+                tier: ModelTier::Low,
+                provider_profile_id: None,
+            },
+            projection_mismatch_count: 0,
+        };
+        let inherited_snapshot = test_snapshot();
+        let outcome = run_routed_step_with_runtime(
+            routed,
+            DecisionLoopConfig::default(),
+            StepRuntimeResolutionContext {
+                inherited_snapshot: &inherited_snapshot,
+                model_registry: None,
+                observability: ServiceObservabilityTracker::default(),
+                tool_runtime: Some(runtime),
+            },
+        )
+        .await
+        .expect("outcome");
+        match outcome {
+            StepOutcome::Failed {
+                usage,
+                tool_registry_snapshot: Some(snapshot),
+                tool_contract_mismatch: Some(mismatch),
+                ..
+            } => {
+                assert!(usage.is_none(), "preflight should fail before model loop");
+                assert!(snapshot.visible_tools.iter().any(|tool| tool == "Read"));
+                assert!(
+                    mismatch
+                        .missing_allowed_actions
+                        .iter()
+                        .any(|action| action == "write_file")
+                );
+            }
+            other => panic!("expected preflight mismatch, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn worker_prompt_does_not_advertise_unavailable_actions() {
+        let registry = ToolRegistry::new().register(Arc::new(FileReadTool));
+        let permissions = ToolPermissionContext::new(PermissionMode::Default);
+        let runtime = crate::core::state_frame_loop::StateFrameToolRuntime {
+            registry,
+            permissions,
+        };
+        let mut frame = worker_frame("修改文件 src/lib.rs");
+        let snapshot = apply_tool_registry_contract(&mut frame, &runtime)
+            .await
+            .expect("snapshot");
+        let prompt_json = serde_json::to_string(&frame).expect("state frame json");
+        assert_eq!(snapshot.visible_tools, vec!["Read".to_string()]);
+        assert!(!prompt_json.contains("write_file"));
+        assert!(!prompt_json.contains("run_command"));
+        assert!(!frame.allowed_tools.iter().any(|tool| tool == "Edit"));
+    }
+
+    #[tokio::test]
+    async fn agent_tool_visibility_remains_executor_b_only() {
+        let registry = ToolRegistry::new()
+            .register(Arc::new(AgentTool))
+            .register(Arc::new(FileReadTool));
+
+        let exec_permissions = ToolPermissionContext::new(PermissionMode::Default)
+            .with_interactive_tools(true)
+            .with_boss_actor_policy(BossActorPolicy::executor_b(BossStage::Execution));
+        exec_permissions.add_always_allow_rule("Agent");
+        let exec_runtime = crate::core::state_frame_loop::StateFrameToolRuntime {
+            registry: registry.clone(),
+            permissions: exec_permissions,
+        };
+        let mut exec_frame = worker_frame("spawn implement worker");
+        exec_frame.role = ActorRole::ExecutorB;
+        let exec_snapshot = apply_tool_registry_contract(&mut exec_frame, &exec_runtime)
+            .await
+            .expect("executor snapshot");
+        assert!(
+            exec_snapshot
+                .visible_tools
+                .iter()
+                .any(|tool| tool == "Agent")
+        );
+        assert!(
+            exec_snapshot
+                .allowed_actions
+                .iter()
+                .any(|action| action == "spawn_agent")
+        );
+
+        let child_permissions = ToolPermissionContext::new(PermissionMode::Default)
+            .with_interactive_tools(true)
+            .with_boss_actor_policy(BossActorPolicy::child(
+                BossActorRole::ImplementChild,
+                1,
+                BossStage::Execution,
+            ));
+        let child_runtime = crate::core::state_frame_loop::StateFrameToolRuntime {
+            registry,
+            permissions: child_permissions,
+        };
+        let mut child_frame = worker_frame("implement task");
+        let child_snapshot = apply_tool_registry_contract(&mut child_frame, &child_runtime)
+            .await
+            .expect("child snapshot");
+        assert!(
+            !child_snapshot
+                .visible_tools
+                .iter()
+                .any(|tool| tool == "Agent")
+        );
+        assert!(
+            !child_snapshot
+                .allowed_actions
+                .iter()
+                .any(|action| action == "spawn_agent")
+        );
     }
 }

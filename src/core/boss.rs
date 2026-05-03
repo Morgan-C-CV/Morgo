@@ -2866,6 +2866,16 @@ impl BossCoordinator {
                             original_prompt_chars: Some(0),
                             sent_prompt_chars: Some(0),
                             estimated_cost_micros_usd: Some(0),
+                            visible_tools: Vec::new(),
+                            allowed_actions: Vec::new(),
+                            schema_hash: None,
+                            permission_hash: None,
+                            actor_role: None,
+                            cwd: None,
+                            config_root: None,
+                            workspace_capabilities: Vec::new(),
+                            tool_contract_mismatch_count: Some(0),
+                            tool_contract_mismatch: None,
                         };
                         let mut routed_step_metadata = self.routed_step_metadata.write().await;
                         routed_step_metadata.insert(step_id, routed_metadata);
@@ -2907,6 +2917,16 @@ impl BossCoordinator {
                             original_prompt_chars: Some(0),
                             sent_prompt_chars: Some(0),
                             estimated_cost_micros_usd: Some(0),
+                            visible_tools: Vec::new(),
+                            allowed_actions: Vec::new(),
+                            schema_hash: None,
+                            permission_hash: None,
+                            actor_role: None,
+                            cwd: None,
+                            config_root: None,
+                            workspace_capabilities: Vec::new(),
+                            tool_contract_mismatch_count: Some(0),
+                            tool_contract_mismatch: None,
                         };
                         let mut routed_step_metadata = self.routed_step_metadata.write().await;
                         routed_step_metadata.insert(step_id, routed_metadata);
@@ -2961,6 +2981,16 @@ impl BossCoordinator {
                                 original_prompt_chars: Some(0),
                                 sent_prompt_chars: Some(0),
                                 estimated_cost_micros_usd: Some(0),
+                                visible_tools: Vec::new(),
+                                allowed_actions: Vec::new(),
+                                schema_hash: None,
+                                permission_hash: None,
+                                actor_role: None,
+                                cwd: None,
+                                config_root: None,
+                                workspace_capabilities: Vec::new(),
+                                tool_contract_mismatch_count: Some(0),
+                                tool_contract_mismatch: None,
                             };
                             let cwd = app_state
                                 .session
@@ -2994,7 +3024,7 @@ impl BossCoordinator {
                             )
                             .await?;
                             if let Some(usage) = match &outcome {
-                                StepOutcome::Completed { usage } => Some(usage),
+                                StepOutcome::Completed { usage, .. } => Some(usage),
                                 StepOutcome::Failed {
                                     usage: Some(usage), ..
                                 } => Some(usage),
@@ -3029,6 +3059,43 @@ impl BossCoordinator {
                                 routed_metadata.tool_dispatch_failure_taxonomy =
                                     usage.tool_dispatch_failure_taxonomy.clone();
                             }
+                            match &outcome {
+                                StepOutcome::Completed {
+                                    tool_registry_snapshot: Some(snapshot),
+                                    ..
+                                }
+                                | StepOutcome::Failed {
+                                    tool_registry_snapshot: Some(snapshot),
+                                    ..
+                                } => {
+                                    routed_metadata.visible_tools = snapshot.visible_tools.clone();
+                                    routed_metadata.allowed_actions =
+                                        snapshot.allowed_actions.clone();
+                                    routed_metadata.schema_hash =
+                                        Some(snapshot.schema_hash.clone());
+                                    routed_metadata.permission_hash =
+                                        Some(snapshot.permission_hash.clone());
+                                    routed_metadata.actor_role = Some(snapshot.actor_role.clone());
+                                    routed_metadata.cwd = Some(snapshot.cwd.display().to_string());
+                                    routed_metadata.config_root = snapshot
+                                        .config_root
+                                        .as_ref()
+                                        .map(|path| path.display().to_string());
+                                    routed_metadata.workspace_capabilities =
+                                        snapshot.workspace_capabilities.clone();
+                                }
+                                _ => {}
+                            }
+                            if let StepOutcome::Failed {
+                                tool_contract_mismatch,
+                                ..
+                            } = &outcome
+                            {
+                                routed_metadata.tool_contract_mismatch_count =
+                                    Some(tool_contract_mismatch.iter().count());
+                                routed_metadata.tool_contract_mismatch =
+                                    tool_contract_mismatch.clone();
+                            }
                             (outcome, routed_metadata)
                         };
                         {
@@ -3036,7 +3103,7 @@ impl BossCoordinator {
                             routed_step_metadata.insert(step_id, routed_metadata);
                         }
                         if let Some(usage) = match &outcome {
-                            StepOutcome::Completed { usage } => Some(usage),
+                            StepOutcome::Completed { usage, .. } => Some(usage),
                             StepOutcome::Failed {
                                 usage: Some(usage), ..
                             } => Some(usage),

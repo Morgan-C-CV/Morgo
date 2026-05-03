@@ -5,8 +5,7 @@ use crate::skills::types::{
 pub fn bundled_skills() -> Vec<SkillDefinition> {
     vec![SkillDefinition {
         name: "update-config".to_string(),
-        description: "Configure settings.json behavior for Morgo-style automation."
-            .to_string(),
+        description: "Configure settings.json behavior for Morgo-style automation.".to_string(),
         when_to_use: Some(
             "Use when the user asks to configure persistent automation or settings behavior."
                 .to_string(),

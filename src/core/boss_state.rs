@@ -1,3 +1,4 @@
+use crate::tool::registry::ToolContractMismatch;
 use crate::tool::result::ToolExecutionRecord;
 use serde::{Deserialize, Serialize};
 use std::time::SystemTime;
@@ -227,6 +228,26 @@ pub struct BossStepRoutedMetadata {
     /// Estimated cost in micros USD for this routed step.
     #[serde(default)]
     pub estimated_cost_micros_usd: Option<u64>,
+    #[serde(default)]
+    pub visible_tools: Vec<String>,
+    #[serde(default)]
+    pub allowed_actions: Vec<String>,
+    #[serde(default)]
+    pub schema_hash: Option<String>,
+    #[serde(default)]
+    pub permission_hash: Option<String>,
+    #[serde(default)]
+    pub actor_role: Option<String>,
+    #[serde(default)]
+    pub cwd: Option<String>,
+    #[serde(default)]
+    pub config_root: Option<String>,
+    #[serde(default)]
+    pub workspace_capabilities: Vec<String>,
+    #[serde(default)]
+    pub tool_contract_mismatch_count: Option<usize>,
+    #[serde(default)]
+    pub tool_contract_mismatch: Option<ToolContractMismatch>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

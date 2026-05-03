@@ -77,6 +77,8 @@ pub struct StateFrame {
     #[serde(default)]
     pub allowed_actions: Vec<String>,
     #[serde(default)]
+    pub allowed_tools: Vec<String>,
+    #[serde(default)]
     pub toolset_id: Option<String>,
     #[serde(default)]
     pub skillset_id: Option<String>,

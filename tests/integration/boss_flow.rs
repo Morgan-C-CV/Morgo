@@ -11967,7 +11967,10 @@ async fn t27_8_lism_boss_production_path_missing_inherited_snapshot_returns_erro
     let result = coordinator.advance_plan(&app_state).await;
     assert!(result.is_ok(), "fallback path should dispatch successfully");
     assert!(
-        result.unwrap().unwrap().contains("\"boss_actor_role\":\"executor_b\"")
+        result
+            .unwrap()
+            .unwrap()
+            .contains("\"boss_actor_role\":\"executor_b\"")
     );
 
     let _ = std::fs::remove_file(plan_path);

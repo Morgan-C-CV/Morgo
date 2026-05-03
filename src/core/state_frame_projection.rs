@@ -48,26 +48,6 @@ fn stage_to_agent_state(stage: BossStage) -> AgentState {
     }
 }
 
-/// Static allowed_actions per AgentState.
-/// Reviewing / Correcting / Verifying are not yet reachable from BossStage — omitted.
-fn allowed_actions_for_state(state: AgentState, readonly_analysis: bool) -> Vec<String> {
-    if readonly_analysis {
-        return match state {
-            AgentState::Planning | AgentState::Executing => {
-                vec!["read_file".into(), "summarize_findings".into()]
-            }
-            AgentState::Blocked | AgentState::Done => vec![],
-            _ => vec![],
-        };
-    }
-    match state {
-        AgentState::Planning => vec!["read_file".into(), "write_spec".into()],
-        AgentState::Executing => vec!["read_file".into(), "edit_file".into(), "run_test".into()],
-        AgentState::Blocked | AgentState::Done => vec![],
-        _ => vec![],
-    }
-}
-
 fn fact_line(name: &str, value: impl Into<String>) -> String {
     format!("fact: {name} {}", value.into())
 }
@@ -628,8 +608,6 @@ pub fn project_state_frame(
         }
     }
 
-    let allowed_actions = allowed_actions_for_state(state, readonly_analysis);
-
     let mut frame = StateFrame {
         role,
         state,
@@ -638,7 +616,8 @@ pub fn project_state_frame(
         blocked_items,
         accepted_summary,
         recent_evidence,
-        allowed_actions,
+        allowed_actions: Vec::new(),
+        allowed_tools: Vec::new(),
         toolset_id: None,
         skillset_id: None,
         required_output_schema: Some(if readonly_analysis {
@@ -683,6 +662,7 @@ mod tests {
                 "fact: rejected_approaches ref=rejected:step1:0 source=review_correction source_ref=review:step1:missing source_event_id=review-correction:1 freshness=after-review confidence=1.00 status=active invalidated_by=none supersedes=none conflicts_with=review:step1:missing summary=bad path".into(),
             ],
             allowed_actions: vec![],
+            allowed_tools: vec![],
             toolset_id: None,
             skillset_id: None,
             required_output_schema: Some("state_decision_v1".into()),
@@ -719,6 +699,7 @@ mod tests {
                 "fact: blocker_refs ref=blocker:1 kind=blocked_by_review source=step_runtime source_event_id=step-runtime:1 freshness=current confidence=1.00 status=active invalidated_by=none supersedes=none conflicts_with=artifact:missing summary=waiting".into(),
             ],
             allowed_actions: vec![],
+            allowed_tools: vec![],
             toolset_id: None,
             skillset_id: None,
             required_output_schema: Some("state_decision_v1".into()),

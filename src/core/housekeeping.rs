@@ -751,7 +751,10 @@ mod tests {
             active_model_provider_summary: ActiveModelProviderSummary {
                 provider_id: "default-provider".into(),
                 protocol: "MessagesApi".into(),
-                compatibility_profile: format!("{:?}", ProviderCompatibilityProfileKind::MessagesApi),
+                compatibility_profile: format!(
+                    "{:?}",
+                    ProviderCompatibilityProfileKind::MessagesApi
+                ),
                 base_url_host: "localhost".into(),
                 model: "default-model".into(),
                 auth_status: "none".into(),

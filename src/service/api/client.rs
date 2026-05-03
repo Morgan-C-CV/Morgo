@@ -2627,9 +2627,8 @@ mod tests {
 
     #[test]
     fn provider_compatibility_profiles_match_expected_capabilities() {
-        let morgo =
-            profile_for_provider(&ModelProviderConfig::from_legacy_provider_id("morgo"))
-                .expect("morgo profile");
+        let morgo = profile_for_provider(&ModelProviderConfig::from_legacy_provider_id("morgo"))
+            .expect("morgo profile");
         assert!(morgo.supports_tools);
         assert!(morgo.supports_streaming);
         assert!(morgo.supports_temperature);

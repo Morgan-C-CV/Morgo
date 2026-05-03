@@ -152,6 +152,7 @@ impl QueryContext {
                 // tools such as Bash, while execution is still governed by permission and
                 // workspace-capability checks at invocation time.
                 permission_context = permission_context.with_interactive_tools(true);
+                permission_context.add_always_allow_rule("Agent");
             }
         }
         let lineage = build_nested_memory_lineage(self, &child_agent_id, config.inherit_context);

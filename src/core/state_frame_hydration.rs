@@ -904,6 +904,7 @@ mod tests {
                 "fact: rejected_approaches ref=rejected:step1:0 source=review_correction source_ref=review:step1:runtime:1 source_event_id=review-correction:1 freshness=after-review confidence=1.00 status=active invalidated_by=none supersedes=none conflicts_with=review:step1:runtime:1 summary=previous patch ignored edge cases correction=preserve the auth guard branch".into(),
             ],
             allowed_actions: vec!["read_file".into()],
+            allowed_tools: vec!["Read".into()],
             toolset_id: None,
             skillset_id: None,
             required_output_schema: Some("state_decision_v1".into()),
