@@ -5214,6 +5214,36 @@ mod tests {
     }
 
     #[test]
+    fn verify_first_and_full_dispatch_do_not_override_external_blocker() {
+        let routed_metadata = BossStepRoutedMetadata {
+            terminal_blocker_kind: Some("true_external_blocker".into()),
+            fallback_tier: Some("full_worker_dispatch".into()),
+            recovery_tier: Some("verification_first".into()),
+            recovery_outcome: Some("full_worker_dispatch_success".into()),
+            completion_evidence_status: Some("sufficient".into()),
+            worker_report: Some(WorkerStructuredReport {
+                worker_state: AgentState::Blocked,
+                last_tool_action: Some("Verify".into()),
+                files_changed: Vec::new(),
+                tests_run: Vec::new(),
+                artifact_status: "blocked".into(),
+                test_status: "blocked".into(),
+                verification_status: "blocked".into(),
+                evidence_refs: Vec::new(),
+                completion_evidence_gaps: Vec::new(),
+                remaining_risks: vec!["external blocker".into()],
+                completion_evidence_status: CompletionEvidenceStatus::Sufficient,
+            }),
+            ..BossStepRoutedMetadata::default()
+        };
+
+        assert_eq!(
+            classify_step_success(Some(&routed_metadata)).map(|c| c.as_str()),
+            Some("true_external_blocker")
+        );
+    }
+
+    #[test]
     fn boss_report_surfaces_worker_structured_report() {
         let mut routed_metadata = BossStepRoutedMetadata::default();
         let usage = LoopUsage {

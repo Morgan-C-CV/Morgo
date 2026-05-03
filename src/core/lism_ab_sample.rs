@@ -1150,6 +1150,48 @@ mod tests {
             Some(1)
         );
     }
+
+    #[test]
+    fn ab_sample_does_not_count_external_blocker_as_success() {
+        let report = BossReportPayload {
+            stage: BossStage::Execution,
+            current_step: Some(1),
+            total_steps: Some(1),
+            designer_a: empty_actor(),
+            executor_b: empty_actor(),
+            active_children: Vec::new(),
+            steps: vec![BossStepReport {
+                id: 1,
+                status: BossPlanStepStatus::Rejected,
+                worker_task_id: None,
+                attempt_count: 1,
+                last_review_summary: None,
+                action_required: None,
+                blocker_reason: None,
+                routed_metadata: Some(BossStepRoutedMetadata {
+                    terminal_blocker_kind: Some("true_external_blocker".into()),
+                    success_classification: Some(BossSuccessClassification::TrueExternalBlocker),
+                    ..BossStepRoutedMetadata::default()
+                }),
+            }],
+            history_summary: Vec::new(),
+            observability_summary: None,
+            rollout_policy_decision: None,
+            success_classification: Some(BossSuccessClassification::TrueExternalBlocker),
+            lism_policy: Default::default(),
+        };
+
+        let record = build_ab_record(
+            "run-4".into(),
+            true,
+            &report,
+            BossTestRunOutcome::Aborted,
+            0,
+        );
+        let summary = summarize_records(&[record]);
+
+        assert!(summary.on_success_classification_counts.is_empty());
+    }
 }
 
 fn avg_cache_hit_ratio(records: &[&LisMAbSampleRecord]) -> Option<f64> {
@@ -1327,6 +1369,9 @@ fn aggregate_success_classification_counts(
     let mut counts = BTreeMap::new();
     for record in records {
         if let Some(classification) = record.success_classification.as_ref() {
+            if classification == "true_external_blocker" {
+                continue;
+            }
             *counts.entry(classification.clone()).or_insert(0) += 1;
         }
     }
