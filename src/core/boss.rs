@@ -147,24 +147,19 @@ fn classify_step_success(metadata: Option<&BossStepRoutedMetadata>) -> Option<cr
     let metadata = metadata?;
     let worker_report = metadata.worker_report.as_ref();
     let completion = metadata.completion_evidence_status.as_deref();
-    let has_artifact_evidence = metadata
+    let has_success_gaps = metadata
         .completion_evidence_gaps
         .iter()
-        .any(|gap| gap.missing_artifact_evidence);
-    let has_verification_gap = metadata
-        .completion_evidence_gaps
-        .iter()
-        .any(|gap| gap.missing_verification_evidence);
-    let has_test_gap = metadata
-        .completion_evidence_gaps
-        .iter()
-        .any(|gap| gap.missing_test_evidence);
+        .any(|gap| gap.missing_artifact_evidence || gap.missing_test_evidence || gap.missing_verification_evidence);
     let via_full_worker_dispatch = matches!(
         metadata.recovery_tier.as_deref(),
         Some("full_worker_dispatch")
     ) || matches!(
         metadata.fallback_tier.as_deref(),
         Some("full_worker_dispatch")
+    ) || matches!(
+        metadata.recovery_outcome.as_deref(),
+        Some("full_worker_dispatch_success")
     );
     let via_verification_first = matches!(
         metadata.recovery_tier.as_deref(),
@@ -172,6 +167,9 @@ fn classify_step_success(metadata: Option<&BossStepRoutedMetadata>) -> Option<cr
     ) || matches!(
         metadata.fallback_tier.as_deref(),
         Some("verification_first")
+    ) || matches!(
+        metadata.recovery_outcome.as_deref(),
+        Some("verification_first_success")
     );
     let via_recovery = metadata.recovery_attempted.unwrap_or(false)
         || metadata.recovery_outcome.is_some()
@@ -179,7 +177,7 @@ fn classify_step_success(metadata: Option<&BossStepRoutedMetadata>) -> Option<cr
     let achieved_artifact = worker_report
         .map(|report| report.artifact_status.as_str() == "verified")
         .unwrap_or(false)
-        || !has_artifact_evidence;
+        || completion == Some("sufficient");
     let passed_verification = worker_report
         .map(|report| report.verification_status.as_str() == "verified")
         .unwrap_or(false)
@@ -194,12 +192,12 @@ fn classify_step_success(metadata: Option<&BossStepRoutedMetadata>) -> Option<cr
         );
     }
     if via_verification_first && achieved_artifact && passed_verification {
-        return Some(crate::core::boss_state::BossSuccessClassification::RecoveredSuccess);
+        return Some(crate::core::boss_state::BossSuccessClassification::FallbackSuccess);
     }
     if via_recovery && achieved_artifact && passed_verification {
         return Some(crate::core::boss_state::BossSuccessClassification::RecoveredSuccess);
     }
-    if achieved_artifact && passed_verification && (has_verification_gap || has_test_gap) {
+    if has_success_gaps && achieved_artifact && passed_verification {
         return Some(crate::core::boss_state::BossSuccessClassification::FallbackSuccess);
     }
     if achieved_artifact && passed_verification {
@@ -5102,6 +5100,116 @@ mod tests {
         assert_eq!(
             routed_metadata.success_classification.as_ref().map(|c| c.as_str()),
             Some("direct_success")
+        );
+    }
+
+    #[test]
+    fn verify_first_success_is_classified_as_fallback_success() {
+        let routed_metadata = BossStepRoutedMetadata {
+            fallback_tier: Some("verification_first".into()),
+            recovery_outcome: Some("verification_first_success".into()),
+            completion_evidence_status: Some("sufficient".into()),
+            worker_report: Some(WorkerStructuredReport {
+                worker_state: AgentState::Done,
+                last_tool_action: Some("Verify".into()),
+                files_changed: vec!["/tmp/report.md".into()],
+                tests_run: vec!["cargo test".into()],
+                artifact_status: "verified".into(),
+                test_status: "passed".into(),
+                verification_status: "verified".into(),
+                evidence_refs: vec!["artifact:1".into()],
+                completion_evidence_gaps: Vec::new(),
+                remaining_risks: Vec::new(),
+                completion_evidence_status: CompletionEvidenceStatus::Sufficient,
+            }),
+            ..BossStepRoutedMetadata::default()
+        };
+
+        assert_eq!(
+            classify_step_success(Some(&routed_metadata)).map(|c| c.as_str()),
+            Some("fallback_success")
+        );
+    }
+
+    #[test]
+    fn full_dispatch_success_is_classified_separately() {
+        let routed_metadata = BossStepRoutedMetadata {
+            fallback_tier: Some("full_worker_dispatch".into()),
+            recovery_outcome: Some("full_worker_dispatch_success".into()),
+            completion_evidence_status: Some("sufficient".into()),
+            worker_report: Some(WorkerStructuredReport {
+                worker_state: AgentState::Done,
+                last_tool_action: Some("Bash".into()),
+                files_changed: vec!["/tmp/report.md".into()],
+                tests_run: vec!["cargo test".into()],
+                artifact_status: "verified".into(),
+                test_status: "passed".into(),
+                verification_status: "verified".into(),
+                evidence_refs: vec!["artifact:1".into()],
+                completion_evidence_gaps: Vec::new(),
+                remaining_risks: Vec::new(),
+                completion_evidence_status: CompletionEvidenceStatus::Sufficient,
+            }),
+            ..BossStepRoutedMetadata::default()
+        };
+
+        assert_eq!(
+            classify_step_success(Some(&routed_metadata)).map(|c| c.as_str()),
+            Some("full_worker_dispatch_success")
+        );
+    }
+
+    #[test]
+    fn direct_success_is_not_promoted_when_no_fallback_or_recovery_happened() {
+        let routed_metadata = BossStepRoutedMetadata {
+            completion_evidence_status: Some("sufficient".into()),
+            worker_report: Some(WorkerStructuredReport {
+                worker_state: AgentState::Done,
+                last_tool_action: Some("Read".into()),
+                files_changed: vec!["/tmp/report.md".into()],
+                tests_run: vec!["cargo test".into()],
+                artifact_status: "verified".into(),
+                test_status: "passed".into(),
+                verification_status: "verified".into(),
+                evidence_refs: vec!["artifact:1".into()],
+                completion_evidence_gaps: Vec::new(),
+                remaining_risks: Vec::new(),
+                completion_evidence_status: CompletionEvidenceStatus::Sufficient,
+            }),
+            ..BossStepRoutedMetadata::default()
+        };
+
+        assert_eq!(
+            classify_step_success(Some(&routed_metadata)).map(|c| c.as_str()),
+            Some("direct_success")
+        );
+    }
+
+    #[test]
+    fn true_external_blocker_is_not_mixed_with_recovery_success() {
+        let routed_metadata = BossStepRoutedMetadata {
+            terminal_blocker_kind: Some("true_external_blocker".into()),
+            recovery_outcome: Some("verification_first_success".into()),
+            completion_evidence_status: Some("sufficient".into()),
+            worker_report: Some(WorkerStructuredReport {
+                worker_state: AgentState::Blocked,
+                last_tool_action: Some("Verify".into()),
+                files_changed: Vec::new(),
+                tests_run: Vec::new(),
+                artifact_status: "blocked".into(),
+                test_status: "blocked".into(),
+                verification_status: "blocked".into(),
+                evidence_refs: Vec::new(),
+                completion_evidence_gaps: Vec::new(),
+                remaining_risks: vec!["external blocker".into()],
+                completion_evidence_status: CompletionEvidenceStatus::Sufficient,
+            }),
+            ..BossStepRoutedMetadata::default()
+        };
+
+        assert_eq!(
+            classify_step_success(Some(&routed_metadata)).map(|c| c.as_str()),
+            Some("true_external_blocker")
         );
     }
 
