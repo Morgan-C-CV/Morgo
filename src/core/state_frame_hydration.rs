@@ -194,8 +194,13 @@ pub fn parse_needed_context_selector(raw: &str) -> NeededContextSelector {
         return NeededContextSelector::Artifact { path: None };
     }
     if let Some(name) = trimmed.strip_prefix("fact:") {
+        let canonical = match name.trim() {
+            "allow_runtime_tool_calls" => "allow_worker_tool_calls",
+            "increase_tool_call_quota" => "increase_max_tool_calls",
+            other => other,
+        };
         return NeededContextSelector::Fact {
-            name: name.trim().to_string(),
+            name: canonical.to_string(),
         };
     }
     NeededContextSelector::Unknown {
@@ -1019,6 +1024,18 @@ mod tests {
             parse_needed_context_selector("rejected_approach"),
             NeededContextSelector::RejectedApproach { query: None }
         );
+        assert_eq!(
+            parse_needed_context_selector("fact:allow_runtime_tool_calls"),
+            NeededContextSelector::Fact {
+                name: "allow_worker_tool_calls".into()
+            }
+        );
+        assert_eq!(
+            parse_needed_context_selector("fact:increase_tool_call_quota"),
+            NeededContextSelector::Fact {
+                name: "increase_max_tool_calls".into()
+            }
+        );
     }
 
     #[test]
@@ -1210,6 +1227,34 @@ mod tests {
                 && item.contains("status=not_needed")
                 && item.contains("max_tool_calls_already_unlimited")
         }));
+    }
+
+    #[test]
+    fn hydrate_needed_context_canonicalizes_runtime_tool_permission_aliases() {
+        let mut frame = make_frame();
+        frame.allowed_actions = vec!["read_file".into(), "edit_file".into()];
+        frame.allowed_tools = vec!["Read".into(), "Edit".into()];
+        frame.budget.max_tool_calls = 0;
+
+        let summary = hydrate_needed_context(
+            &mut frame,
+            &[
+                "fact:allow_runtime_tool_calls".into(),
+                "fact:increase_tool_call_quota".into(),
+            ],
+        );
+
+        assert!(summary.changed);
+        assert_eq!(summary.unavailable.len(), 0);
+        assert_eq!(summary.hydrated.len(), 2);
+        assert!(summary
+            .hydrated
+            .iter()
+            .any(|item| item.contains("hydrated_context: fact:allow_worker_tool_calls")));
+        assert!(summary
+            .hydrated
+            .iter()
+            .any(|item| item.contains("hydrated_context: fact:increase_max_tool_calls")));
     }
 
     #[test]
