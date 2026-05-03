@@ -109,6 +109,10 @@ pub struct LisMAbSampleRecord {
     pub missing_artifact_evidence_targets: Vec<String>,
     #[serde(default)]
     pub missing_verification_evidence_targets: Vec<String>,
+    #[serde(default)]
+    pub rollout_denylist_targets: Vec<String>,
+    #[serde(default)]
+    pub automatic_fallback_targets: Vec<String>,
     pub pending_approval_count: usize,
     pub outcome: BossTestRunOutcome,
 }
@@ -747,6 +751,8 @@ fn build_ab_record(
     let mut terminal_blocker_kinds = BTreeMap::new();
     let mut missing_artifact_evidence_targets = BTreeMap::new();
     let mut missing_verification_evidence_targets = BTreeMap::new();
+    let mut rollout_denylist_targets = BTreeMap::new();
+    let mut automatic_fallback_targets = BTreeMap::new();
     for step in &report.steps {
         let Some(meta) = step.routed_metadata.as_ref() else {
             continue;
@@ -803,6 +809,22 @@ fn build_ab_record(
             if gap.missing_verification_evidence {
                 missing_verification_evidence_targets.insert(target, ());
             }
+        }
+    }
+    if let Some(policy) = report.rollout_policy_decision.as_ref() {
+        for target in &policy.denylist_targets {
+            let formatted = match target.target_path.as_deref() {
+                Some(path) => format!("{}:{path}", target.target_ref),
+                None => target.target_ref.clone(),
+            };
+            rollout_denylist_targets.insert(formatted, ());
+        }
+        for target in &policy.fallback_targets {
+            let formatted = match target.target_path.as_deref() {
+                Some(path) => format!("{}:{path}", target.target_ref),
+                None => target.target_ref.clone(),
+            };
+            automatic_fallback_targets.insert(formatted, ());
         }
     }
 
@@ -872,6 +894,8 @@ fn build_ab_record(
         missing_verification_evidence_targets: missing_verification_evidence_targets
             .into_keys()
             .collect(),
+        rollout_denylist_targets: rollout_denylist_targets.into_keys().collect(),
+        automatic_fallback_targets: automatic_fallback_targets.into_keys().collect(),
         pending_approval_count,
         outcome,
     }
@@ -937,8 +961,9 @@ fn summarize_records(records: &[LisMAbSampleRecord]) -> LisMAbSummary {
 mod tests {
     use super::*;
     use crate::core::boss_state::{
-        BossActorHandle, BossActorRole, BossPlanStepStatus, BossReportPayload, BossStage,
-        BossStepReport, BossStepRoutedMetadata,
+        BossActorHandle, BossActorRole, BossPlanStepStatus, BossReportPayload,
+        BossRolloutPolicyDecision, BossRolloutTargetDecision, BossStage, BossStepReport,
+        BossStepRoutedMetadata,
     };
     use crate::core::boss_test_readiness::BossTestRunOutcome;
     use crate::core::state_frame::CompletionEvidenceGap;
@@ -978,6 +1003,23 @@ mod tests {
             }],
             history_summary: Vec::new(),
             observability_summary: None,
+            rollout_policy_decision: Some(BossRolloutPolicyDecision {
+                denylist_targets: vec![BossRolloutTargetDecision {
+                    target_ref: "artifact:contract:1".into(),
+                    target_path: Some("/tmp/report.md".into()),
+                    missing_evidence_kinds: vec!["verification_evidence".into()],
+                    recommended_policy: "denylist_direct_worker_lism".into(),
+                    recommended_fallback: "full_worker_dispatch".into(),
+                }],
+                fallback_targets: vec![BossRolloutTargetDecision {
+                    target_ref: "artifact:contract:1".into(),
+                    target_path: Some("/tmp/report.md".into()),
+                    missing_evidence_kinds: vec!["verification_evidence".into()],
+                    recommended_policy: "denylist_direct_worker_lism".into(),
+                    recommended_fallback: "full_worker_dispatch".into(),
+                }],
+                summary: "verification gap".into(),
+            }),
             lism_policy: Default::default(),
         };
 
@@ -994,6 +1036,51 @@ mod tests {
             vec!["artifact:contract:1:/tmp/report.md".to_string()]
         );
         assert!(record.missing_artifact_evidence_targets.is_empty());
+        assert_eq!(
+            record.rollout_denylist_targets,
+            vec!["artifact:contract:1:/tmp/report.md".to_string()]
+        );
+        assert_eq!(
+            record.automatic_fallback_targets,
+            vec!["artifact:contract:1:/tmp/report.md".to_string()]
+        );
+    }
+
+    #[test]
+    fn ab_sample_clears_old_rollout_targets_after_gaps_are_resolved() {
+        let report = BossReportPayload {
+            stage: BossStage::Execution,
+            current_step: Some(1),
+            total_steps: Some(1),
+            designer_a: empty_actor(),
+            executor_b: empty_actor(),
+            active_children: Vec::new(),
+            steps: vec![BossStepReport {
+                id: 1,
+                status: BossPlanStepStatus::Completed,
+                worker_task_id: None,
+                attempt_count: 2,
+                last_review_summary: Some("verified".into()),
+                action_required: None,
+                blocker_reason: None,
+                routed_metadata: Some(BossStepRoutedMetadata::default()),
+            }],
+            history_summary: Vec::new(),
+            observability_summary: None,
+            rollout_policy_decision: None,
+            lism_policy: Default::default(),
+        };
+
+        let record = build_ab_record(
+            "run-2".into(),
+            true,
+            &report,
+            BossTestRunOutcome::Completed,
+            0,
+        );
+
+        assert!(record.rollout_denylist_targets.is_empty());
+        assert!(record.automatic_fallback_targets.is_empty());
     }
 }
 

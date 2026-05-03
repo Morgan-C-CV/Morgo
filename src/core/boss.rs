@@ -12,8 +12,9 @@ use crate::core::boss_runtime::{BossControlRuntime, BossRuntimeOwner};
 use crate::core::boss_state::{
     BossActorHandle, BossActorStatus, BossControlRequest, BossControlResponse, BossLisMPolicy,
     BossObservabilitySummary, BossPlan, BossPlanStep, BossPlanStepStatus, BossReportPayload,
-    BossSession, BossStage, BossStatus, BossStepMetrics, BossStepReport, BossStepRoutedMetadata,
-    BossStopOutcome, BossStopStage, CompressionStrategy, ContextMode,
+    BossRolloutPolicyDecision, BossRolloutTargetDecision, BossSession, BossStage, BossStatus,
+    BossStepMetrics, BossStepReport, BossStepRoutedMetadata, BossStopOutcome, BossStopStage,
+    CompressionStrategy, ContextMode,
 };
 use crate::core::boss_test_readiness::BossTestRunOutcome;
 use crate::core::context::WorkerLisMPolicy;
@@ -1897,6 +1898,109 @@ impl BossCoordinator {
         }
     }
 
+    fn derive_rollout_policy_decision(
+        steps: &[BossStepReport],
+    ) -> Option<BossRolloutPolicyDecision> {
+        use std::collections::{BTreeMap, BTreeSet};
+
+        #[derive(Default)]
+        struct AggregateGap {
+            target_ref: String,
+            target_path: Option<String>,
+            missing_evidence_kinds: BTreeSet<String>,
+        }
+
+        let mut aggregates: BTreeMap<(String, Option<String>), AggregateGap> = BTreeMap::new();
+        for step in steps {
+            let Some(metadata) = step.routed_metadata.as_ref() else {
+                continue;
+            };
+            for gap in &metadata.completion_evidence_gaps {
+                if !gap.missing_artifact_evidence
+                    && !gap.missing_test_evidence
+                    && !gap.missing_verification_evidence
+                {
+                    continue;
+                }
+                let key = (gap.target_ref.clone(), gap.target_path.clone());
+                let aggregate = aggregates.entry(key).or_insert_with(|| AggregateGap {
+                    target_ref: gap.target_ref.clone(),
+                    target_path: gap.target_path.clone(),
+                    missing_evidence_kinds: BTreeSet::new(),
+                });
+                if gap.missing_artifact_evidence {
+                    aggregate
+                        .missing_evidence_kinds
+                        .insert("artifact_evidence".into());
+                }
+                if gap.missing_test_evidence {
+                    aggregate
+                        .missing_evidence_kinds
+                        .insert("test_evidence".into());
+                }
+                if gap.missing_verification_evidence {
+                    aggregate
+                        .missing_evidence_kinds
+                        .insert("verification_evidence".into());
+                }
+            }
+        }
+
+        if aggregates.is_empty() {
+            return None;
+        }
+
+        let mut denylist_targets = Vec::new();
+        let mut fallback_targets = Vec::new();
+        for aggregate in aggregates.into_values() {
+            let missing_evidence_kinds: Vec<String> =
+                aggregate.missing_evidence_kinds.into_iter().collect();
+            let requires_denylist = missing_evidence_kinds
+                .iter()
+                .any(|kind| kind == "artifact_evidence" || kind == "verification_evidence");
+            let decision = if requires_denylist {
+                BossRolloutTargetDecision {
+                    target_ref: aggregate.target_ref,
+                    target_path: aggregate.target_path,
+                    missing_evidence_kinds,
+                    recommended_policy: "denylist_direct_worker_lism".into(),
+                    recommended_fallback: "full_worker_dispatch".into(),
+                }
+            } else {
+                BossRolloutTargetDecision {
+                    target_ref: aggregate.target_ref,
+                    target_path: aggregate.target_path,
+                    missing_evidence_kinds,
+                    recommended_policy: "fallback_before_force_on".into(),
+                    recommended_fallback: "run_verification_or_full_worker_dispatch".into(),
+                }
+            };
+            if requires_denylist {
+                denylist_targets.push(decision.clone());
+            }
+            fallback_targets.push(decision);
+        }
+
+        let summary = if !denylist_targets.is_empty() {
+            format!(
+                "artifact-scoped completion gaps detected; denylist direct worker LisM for {} target(s) and fallback {} target(s)",
+                denylist_targets.len(),
+                fallback_targets.len()
+            )
+        } else {
+            format!(
+                "artifact-scoped test gaps detected; require fallback/verification for {} target(s) before force-on rollout",
+                fallback_targets.len()
+            )
+        };
+
+        Some(BossRolloutPolicyDecision {
+            denylist_targets,
+            fallback_targets,
+            summary,
+        })
+    }
+
     fn build_observability_summary(
         steps: &[BossStepReport],
         tasks: Option<&TaskManager>,
@@ -2015,6 +2119,7 @@ impl BossCoordinator {
         let step_metrics = status.last_step_metrics.clone();
         let observability_summary =
             Self::build_observability_summary(&steps, tasks, step_metrics.as_ref());
+        let rollout_policy_decision = Self::derive_rollout_policy_decision(&steps);
 
         BossReportPayload {
             stage: status.stage,
@@ -2026,6 +2131,7 @@ impl BossCoordinator {
             steps,
             history_summary: vec![],
             observability_summary,
+            rollout_policy_decision,
             lism_policy: self.lism_policy().await,
         }
     }
@@ -2113,6 +2219,7 @@ impl BossCoordinator {
         let step_metrics = status.last_step_metrics.clone();
         let observability_summary =
             Self::build_observability_summary(&steps, Some(tasks), step_metrics.as_ref());
+        let rollout_policy_decision = Self::derive_rollout_policy_decision(&steps);
 
         Ok(BossReportPayload {
             stage: status.stage,
@@ -2124,6 +2231,7 @@ impl BossCoordinator {
             steps,
             history_summary,
             observability_summary,
+            rollout_policy_decision,
             lism_policy: self.lism_policy().await,
         })
     }
@@ -4876,6 +4984,77 @@ mod tests {
 
         BossCoordinator::apply_loop_usage_to_routed_metadata(&mut routed_metadata, &usage);
         assert!(routed_metadata.completion_evidence_gaps.is_empty());
+    }
+
+    #[test]
+    fn boss_report_rollout_policy_denylists_exact_artifact_gap_targets() {
+        let steps = vec![BossStepReport {
+            id: 1,
+            status: BossPlanStepStatus::Running,
+            worker_task_id: None,
+            attempt_count: 1,
+            last_review_summary: None,
+            action_required: None,
+            blocker_reason: None,
+            routed_metadata: Some(BossStepRoutedMetadata {
+                completion_evidence_gaps: vec![
+                    CompletionEvidenceGap {
+                        target_ref: "artifact:contract:1".into(),
+                        target_path: Some("/tmp/one.md".into()),
+                        missing_artifact_evidence: false,
+                        missing_test_evidence: false,
+                        missing_verification_evidence: false,
+                        recommended_action: "none".into(),
+                    },
+                    CompletionEvidenceGap {
+                        target_ref: "artifact:contract:2".into(),
+                        target_path: Some("/tmp/two.md".into()),
+                        missing_artifact_evidence: true,
+                        missing_test_evidence: false,
+                        missing_verification_evidence: true,
+                        recommended_action: "write_artifact".into(),
+                    },
+                ],
+                ..BossStepRoutedMetadata::default()
+            }),
+        }];
+
+        let decision =
+            BossCoordinator::derive_rollout_policy_decision(&steps).expect("policy decision");
+
+        assert_eq!(decision.denylist_targets.len(), 1);
+        assert_eq!(decision.fallback_targets.len(), 1);
+        let deny = &decision.denylist_targets[0];
+        assert_eq!(deny.target_ref, "artifact:contract:2");
+        assert_eq!(deny.target_path.as_deref(), Some("/tmp/two.md"));
+        assert_eq!(
+            deny.missing_evidence_kinds,
+            vec![
+                "artifact_evidence".to_string(),
+                "verification_evidence".to_string()
+            ]
+        );
+        assert_eq!(deny.recommended_policy, "denylist_direct_worker_lism");
+        assert_eq!(deny.recommended_fallback, "full_worker_dispatch");
+    }
+
+    #[test]
+    fn boss_report_rollout_policy_clears_after_gaps_are_resolved() {
+        let steps = vec![BossStepReport {
+            id: 1,
+            status: BossPlanStepStatus::Completed,
+            worker_task_id: None,
+            attempt_count: 2,
+            last_review_summary: Some("artifact verified".into()),
+            action_required: None,
+            blocker_reason: None,
+            routed_metadata: Some(BossStepRoutedMetadata {
+                completion_evidence_gaps: Vec::new(),
+                ..BossStepRoutedMetadata::default()
+            }),
+        }];
+
+        assert!(BossCoordinator::derive_rollout_policy_decision(&steps).is_none());
     }
 
     #[tokio::test]

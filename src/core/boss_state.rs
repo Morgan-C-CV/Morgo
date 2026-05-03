@@ -280,6 +280,26 @@ pub struct BossStepRoutedMetadata {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BossRolloutTargetDecision {
+    pub target_ref: String,
+    #[serde(default)]
+    pub target_path: Option<String>,
+    #[serde(default)]
+    pub missing_evidence_kinds: Vec<String>,
+    pub recommended_policy: String,
+    pub recommended_fallback: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct BossRolloutPolicyDecision {
+    #[serde(default)]
+    pub denylist_targets: Vec<BossRolloutTargetDecision>,
+    #[serde(default)]
+    pub fallback_targets: Vec<BossRolloutTargetDecision>,
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BossStepReport {
     pub id: usize,
     pub status: BossPlanStepStatus,
@@ -412,6 +432,8 @@ pub struct BossReportPayload {
     #[serde(default)]
     pub observability_summary: Option<BossObservabilitySummary>,
     #[serde(default)]
+    pub rollout_policy_decision: Option<BossRolloutPolicyDecision>,
+    #[serde(default)]
     pub lism_policy: BossLisMPolicy,
 }
 
@@ -466,6 +488,14 @@ impl BossReportPayload {
                     .unwrap_or_else(|| "-".into()),
                 m.map(|meta| meta.completion_evidence_gaps.len().to_string())
                     .unwrap_or_else(|| "-".into()),
+            ));
+        }
+        if let Some(policy) = &self.rollout_policy_decision {
+            lines.push(format!(
+                "rollout_policy denylist_targets={} fallback_targets={} summary={}",
+                policy.denylist_targets.len(),
+                policy.fallback_targets.len(),
+                policy.summary
             ));
         }
         if let Some(s) = &self.observability_summary {
