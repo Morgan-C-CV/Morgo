@@ -7,7 +7,7 @@ use crate::core::state_frame::{
     RepairNeeded, StateFrame, StatePatch, WorkerStructuredReport, validate_state_decision,
 };
 use crate::core::state_frame_hydration::{
-    NeededContextSelector, hydrate_needed_context, parse_needed_context_selector,
+    HydrationSummary, NeededContextSelector, hydrate_needed_context, parse_needed_context_selector,
 };
 use crate::service::api::client::ModelProviderClient;
 use crate::service::api::streaming::StreamEvent;
