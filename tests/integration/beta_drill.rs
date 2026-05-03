@@ -13,6 +13,7 @@ use rust_agent::core::boss_state::{
     BossActorHandle, BossActorRole, BossLisMPolicy, BossObservabilitySummary, BossPlanStepStatus,
     BossReportPayload, BossStage, BossStepReport,
 };
+use rust_agent::core::state_frame::StageExecutionContract;
 use rust_agent::core::boss_test_readiness::{BossRollbackPolicy, BossTestRunOutcome};
 use rust_agent::core::boss_test_sample_sink::BossTestSampleSink;
 use rust_agent::cost::tracker::CostTracker;
@@ -158,6 +159,7 @@ fn make_drill_report(completed: bool, cost_micros: u64) -> BossReportPayload {
                 Some("capability_escalation: admin_bash required".into())
             },
             routed_metadata: None,
+            stage_execution_contract: StageExecutionContract::default(),
         }],
         history_summary: vec![],
         observability_summary: Some(BossObservabilitySummary {
@@ -185,7 +187,10 @@ fn make_drill_report(completed: bool, cost_micros: u64) -> BossReportPayload {
             total_original_chars: 0,
             total_sent_chars: 0,
         }),
+        rollout_policy_decision: None,
+        success_classification: None,
         lism_policy: BossLisMPolicy::Inherit,
+        stage_execution_contract: StageExecutionContract::default(),
     }
 }
 

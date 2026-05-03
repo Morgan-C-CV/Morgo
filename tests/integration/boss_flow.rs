@@ -7010,6 +7010,7 @@ fn make_frame(step_id: usize) -> BossStateFrame {
     BossStateFrame {
         step_id,
         status: BossPlanStepStatus::Running,
+        stage_execution_contract: rust_agent::core::state_frame::StageExecutionContract::default(),
         open_items: vec!["write tests".into()],
         blocked_items: Vec::new(),
         recent_local_facts: Vec::new(),
@@ -7073,6 +7074,7 @@ fn t26_4_brief_fingerprint_stable_across_state_frame_changes() {
     let frame2 = BossStateFrame {
         step_id: 1,
         status: BossPlanStepStatus::Running,
+        stage_execution_contract: rust_agent::core::state_frame::StageExecutionContract::default(),
         open_items: vec!["DIFFERENT open item".into()],
         blocked_items: Vec::new(),
         recent_local_facts: Vec::new(),
@@ -8247,18 +8249,20 @@ async fn t26_9_instability_recorded_in_step_metrics() {
 #[test]
 fn t27_2_state_frame_serializes_and_deserializes() {
     use rust_agent::core::state_frame::{
-        ActorRole, AgentState, EffortLevel, StateBudget, StateFrame,
+        ActorRole, AgentState, EffortLevel, StageExecutionContract, StateBudget, StateFrame,
     };
 
     let frame = StateFrame {
         role: ActorRole::ExecutorB,
         state: AgentState::Executing,
         objective: "implement step 3".into(),
+        stage_execution_contract: StageExecutionContract::default(),
         open_items: vec!["write tests".into()],
         blocked_items: vec![],
         accepted_summary: vec!["step 1 done".into()],
         recent_evidence: vec!["diff: +10 lines".into()],
         allowed_actions: vec!["read_file".into(), "edit_file".into()],
+        allowed_tools: vec![],
         toolset_id: Some("minimal-edit".into()),
         skillset_id: None,
         required_output_schema: Some("state_decision_v1".into()),
@@ -8324,17 +8328,21 @@ fn t27_2_default_effort_is_m() {
 #[test]
 fn t27_2_state_frame_to_prompt_segment_is_non_cacheable() {
     use rust_agent::core::prompt_segment::PromptSegmentKind;
-    use rust_agent::core::state_frame::{ActorRole, AgentState, StateBudget, StateFrame};
+    use rust_agent::core::state_frame::{
+        ActorRole, AgentState, StageExecutionContract, StateBudget, StateFrame,
+    };
 
     let frame = StateFrame {
         role: ActorRole::Worker,
         state: AgentState::Planning,
         objective: "plan the task".into(),
+        stage_execution_contract: StageExecutionContract::default(),
         open_items: vec![],
         blocked_items: vec![],
         accepted_summary: vec![],
         recent_evidence: vec![],
         allowed_actions: vec![],
+        allowed_tools: vec![],
         toolset_id: None,
         skillset_id: None,
         required_output_schema: None,
@@ -9033,7 +9041,9 @@ fn t27_3_projected_frame_is_non_cacheable_segment() {
 
 #[test]
 fn t27_4_done_decision_terminates_loop() {
-    use rust_agent::core::state_frame::{ActorRole, AgentState, StateBudget, StateFrame};
+    use rust_agent::core::state_frame::{
+        ActorRole, AgentState, StageExecutionContract, StateBudget, StateFrame,
+    };
     use rust_agent::core::state_frame_loop::{DecisionLoopConfig, LoopOutcome, run_decision_loop};
     use rust_agent::service::api::client::ModelProviderClient;
     use rust_agent::service::api::streaming::StreamEvent;
@@ -9047,11 +9057,13 @@ fn t27_4_done_decision_terminates_loop() {
         role: ActorRole::Worker,
         state: AgentState::Executing,
         objective: "finish the task".into(),
+        stage_execution_contract: StageExecutionContract::default(),
         open_items: vec![],
         blocked_items: vec![],
         accepted_summary: vec![],
         recent_evidence: vec![],
         allowed_actions: vec![],
+        allowed_tools: vec![],
         toolset_id: None,
         skillset_id: None,
         required_output_schema: Some("state_decision_v1".into()),
@@ -9075,7 +9087,9 @@ fn t27_4_done_decision_terminates_loop() {
 
 #[test]
 fn t27_4_continue_decision_advances_state() {
-    use rust_agent::core::state_frame::{ActorRole, AgentState, StateBudget, StateFrame};
+    use rust_agent::core::state_frame::{
+        ActorRole, AgentState, StageExecutionContract, StateBudget, StateFrame,
+    };
     use rust_agent::core::state_frame_loop::{DecisionLoopConfig, LoopOutcome, run_decision_loop};
     use rust_agent::service::api::client::ModelProviderClient;
     use rust_agent::service::api::streaming::StreamEvent;
@@ -9092,11 +9106,13 @@ fn t27_4_continue_decision_advances_state() {
         role: ActorRole::ExecutorB,
         state: AgentState::Executing,
         objective: "run tests".into(),
+        stage_execution_contract: StageExecutionContract::default(),
         open_items: vec![],
         blocked_items: vec![],
         accepted_summary: vec![],
         recent_evidence: vec![],
         allowed_actions: vec![],
+        allowed_tools: vec![],
         toolset_id: None,
         skillset_id: None,
         required_output_schema: None,
@@ -9114,7 +9130,9 @@ fn t27_4_continue_decision_advances_state() {
 
 #[test]
 fn t27_4_reject_decision_returns_rejected_outcome() {
-    use rust_agent::core::state_frame::{ActorRole, AgentState, StateBudget, StateFrame};
+    use rust_agent::core::state_frame::{
+        ActorRole, AgentState, StageExecutionContract, StateBudget, StateFrame,
+    };
     use rust_agent::core::state_frame_loop::{DecisionLoopConfig, LoopOutcome, run_decision_loop};
     use rust_agent::service::api::client::ModelProviderClient;
     use rust_agent::service::api::streaming::StreamEvent;
@@ -9128,11 +9146,13 @@ fn t27_4_reject_decision_returns_rejected_outcome() {
         role: ActorRole::Verifier,
         state: AgentState::Verifying,
         objective: "verify step output".into(),
+        stage_execution_contract: StageExecutionContract::default(),
         open_items: vec![],
         blocked_items: vec![],
         accepted_summary: vec![],
         recent_evidence: vec![],
         allowed_actions: vec![],
+        allowed_tools: vec![],
         toolset_id: None,
         skillset_id: None,
         required_output_schema: None,
@@ -9155,7 +9175,9 @@ fn t27_4_reject_decision_returns_rejected_outcome() {
 
 #[test]
 fn t27_4_invalid_json_triggers_repair_then_done() {
-    use rust_agent::core::state_frame::{ActorRole, AgentState, StateBudget, StateFrame};
+    use rust_agent::core::state_frame::{
+        ActorRole, AgentState, StageExecutionContract, StateBudget, StateFrame,
+    };
     use rust_agent::core::state_frame_loop::{DecisionLoopConfig, LoopOutcome, run_decision_loop};
     use rust_agent::service::api::client::ModelProviderClient;
     use rust_agent::service::api::streaming::StreamEvent;
@@ -9172,11 +9194,13 @@ fn t27_4_invalid_json_triggers_repair_then_done() {
         role: ActorRole::Worker,
         state: AgentState::Executing,
         objective: "repair test".into(),
+        stage_execution_contract: StageExecutionContract::default(),
         open_items: vec![],
         blocked_items: vec![],
         accepted_summary: vec![],
         recent_evidence: vec![],
         allowed_actions: vec![],
+        allowed_tools: vec![],
         toolset_id: None,
         skillset_id: None,
         required_output_schema: None,
@@ -9197,7 +9221,9 @@ fn t27_4_invalid_json_triggers_repair_then_done() {
 
 #[test]
 fn t27_4_max_iterations_reached_when_always_continue() {
-    use rust_agent::core::state_frame::{ActorRole, AgentState, StateBudget, StateFrame};
+    use rust_agent::core::state_frame::{
+        ActorRole, AgentState, StageExecutionContract, StateBudget, StateFrame,
+    };
     use rust_agent::core::state_frame_loop::{DecisionLoopConfig, LoopOutcome, run_decision_loop};
     use rust_agent::service::api::client::ModelProviderClient;
     use rust_agent::service::api::streaming::StreamEvent;
@@ -9216,11 +9242,13 @@ fn t27_4_max_iterations_reached_when_always_continue() {
         role: ActorRole::Worker,
         state: AgentState::Executing,
         objective: "never finishes".into(),
+        stage_execution_contract: StageExecutionContract::default(),
         open_items: vec![],
         blocked_items: vec![],
         accepted_summary: vec![],
         recent_evidence: vec![],
         allowed_actions: vec![],
+        allowed_tools: vec![],
         toolset_id: None,
         skillset_id: None,
         required_output_schema: None,
@@ -9247,7 +9275,9 @@ fn t27_4_max_iterations_reached_when_always_continue() {
 
 #[test]
 fn t27_4_noop_continue_stops_without_repeating_prompt() {
-    use rust_agent::core::state_frame::{ActorRole, AgentState, StateBudget, StateFrame};
+    use rust_agent::core::state_frame::{
+        ActorRole, AgentState, StageExecutionContract, StateBudget, StateFrame,
+    };
     use rust_agent::core::state_frame_loop::{DecisionLoopConfig, LoopOutcome, run_decision_loop};
     use rust_agent::service::api::client::ModelProviderClient;
     use rust_agent::service::api::streaming::{StreamEvent, UsageEvent};
@@ -9273,11 +9303,13 @@ fn t27_4_noop_continue_stops_without_repeating_prompt() {
         role: ActorRole::Worker,
         state: AgentState::Executing,
         objective: "same prompt should not be resent".into(),
+        stage_execution_contract: StageExecutionContract::default(),
         open_items: vec![],
         blocked_items: vec![],
         accepted_summary: vec![],
         recent_evidence: vec![],
         allowed_actions: vec![],
+        allowed_tools: vec![],
         toolset_id: None,
         skillset_id: None,
         required_output_schema: None,
@@ -9310,7 +9342,9 @@ fn t27_4_noop_continue_stops_without_repeating_prompt() {
 
 #[test]
 fn t27_4_request_context_hydrates_typed_selector_before_done() {
-    use rust_agent::core::state_frame::{ActorRole, AgentState, StateBudget, StateFrame};
+    use rust_agent::core::state_frame::{
+        ActorRole, AgentState, StageExecutionContract, StateBudget, StateFrame,
+    };
     use rust_agent::core::state_frame_loop::{DecisionLoopConfig, LoopOutcome, run_decision_loop};
     use rust_agent::service::api::client::ModelProviderClient;
     use rust_agent::service::api::streaming::StreamEvent;
@@ -9326,6 +9360,7 @@ fn t27_4_request_context_hydrates_typed_selector_before_done() {
         role: ActorRole::Worker,
         state: AgentState::Executing,
         objective: "update src/core/state_frame_projection.rs".into(),
+        stage_execution_contract: StageExecutionContract::default(),
         open_items: vec!["tests pass".into()],
         blocked_items: vec![],
         accepted_summary: vec![],
@@ -9333,6 +9368,7 @@ fn t27_4_request_context_hydrates_typed_selector_before_done() {
             "fact: file_facts ref=filefact:1 path=src/core/state_frame_projection.rs kind=target_file source=step_objective freshness=current confidence=1.00 fact=target file".into(),
         ],
         allowed_actions: vec![],
+        allowed_tools: vec![],
         toolset_id: None,
         skillset_id: None,
         required_output_schema: None,
@@ -9350,7 +9386,9 @@ fn t27_4_request_context_hydrates_typed_selector_before_done() {
 
 #[test]
 fn t27_4_request_context_budget_deferred_still_counts_as_progress() {
-    use rust_agent::core::state_frame::{ActorRole, AgentState, StateBudget, StateFrame};
+    use rust_agent::core::state_frame::{
+        ActorRole, AgentState, StageExecutionContract, StateBudget, StateFrame,
+    };
     use rust_agent::core::state_frame_loop::{DecisionLoopConfig, LoopOutcome, run_decision_loop};
     use rust_agent::service::api::client::ModelProviderClient;
     use rust_agent::service::api::streaming::StreamEvent;
@@ -9366,6 +9404,7 @@ fn t27_4_request_context_budget_deferred_still_counts_as_progress() {
         role: ActorRole::Worker,
         state: AgentState::Executing,
         objective: "update src/core/state_frame_projection.rs around BossCoordinator".into(),
+        stage_execution_contract: StageExecutionContract::default(),
         open_items: vec!["tests pass".into()],
         blocked_items: vec![],
         accepted_summary: vec![],
@@ -9375,6 +9414,7 @@ fn t27_4_request_context_budget_deferred_still_counts_as_progress() {
             "fact: test_failures ref=test:1 name=worker_reported_tests status=failed source=worker_result freshness=after-worker-output confidence=0.85 summary=tests failed in boss_flow".into(),
         ],
         allowed_actions: vec![],
+        allowed_tools: vec![],
         toolset_id: None,
         skillset_id: None,
         required_output_schema: None,
@@ -9395,7 +9435,9 @@ fn t27_4_request_context_budget_deferred_still_counts_as_progress() {
 
 #[test]
 fn t27_4_continue_with_state_patch_is_progress() {
-    use rust_agent::core::state_frame::{ActorRole, AgentState, StateBudget, StateFrame};
+    use rust_agent::core::state_frame::{
+        ActorRole, AgentState, StageExecutionContract, StateBudget, StateFrame,
+    };
     use rust_agent::core::state_frame_loop::{DecisionLoopConfig, LoopOutcome, run_decision_loop};
     use rust_agent::service::api::client::ModelProviderClient;
     use rust_agent::service::api::streaming::StreamEvent;
@@ -9411,11 +9453,13 @@ fn t27_4_continue_with_state_patch_is_progress() {
         role: ActorRole::Worker,
         state: AgentState::Executing,
         objective: "allow patch-driven progress".into(),
+        stage_execution_contract: StageExecutionContract::default(),
         open_items: vec![],
         blocked_items: vec![],
         accepted_summary: vec![],
         recent_evidence: vec![],
         allowed_actions: vec![],
+        allowed_tools: vec![],
         toolset_id: None,
         skillset_id: None,
         required_output_schema: None,
@@ -9436,7 +9480,9 @@ fn t27_4_continue_with_state_patch_is_progress() {
 
 #[test]
 fn t27_4_continue_with_patch_alias_is_progress() {
-    use rust_agent::core::state_frame::{ActorRole, AgentState, StateBudget, StateFrame};
+    use rust_agent::core::state_frame::{
+        ActorRole, AgentState, StageExecutionContract, StateBudget, StateFrame,
+    };
     use rust_agent::core::state_frame_loop::{DecisionLoopConfig, LoopOutcome, run_decision_loop};
     use rust_agent::service::api::client::ModelProviderClient;
     use rust_agent::service::api::streaming::StreamEvent;
@@ -9452,11 +9498,13 @@ fn t27_4_continue_with_patch_alias_is_progress() {
         role: ActorRole::Worker,
         state: AgentState::Executing,
         objective: "allow alias-driven progress".into(),
+        stage_execution_contract: StageExecutionContract::default(),
         open_items: vec![],
         blocked_items: vec![],
         accepted_summary: vec![],
         recent_evidence: vec![],
         allowed_actions: vec![],
+        allowed_tools: vec![],
         toolset_id: None,
         skillset_id: None,
         required_output_schema: None,
@@ -9477,7 +9525,9 @@ fn t27_4_continue_with_patch_alias_is_progress() {
 
 #[test]
 fn t27_4_continue_clearing_open_items_auto_completes() {
-    use rust_agent::core::state_frame::{ActorRole, AgentState, StateBudget, StateFrame};
+    use rust_agent::core::state_frame::{
+        ActorRole, AgentState, StageExecutionContract, StateBudget, StateFrame,
+    };
     use rust_agent::core::state_frame_loop::{DecisionLoopConfig, LoopOutcome, run_decision_loop};
     use rust_agent::service::api::client::ModelProviderClient;
     use rust_agent::service::api::streaming::{StreamEvent, UsageEvent};
@@ -9502,6 +9552,7 @@ fn t27_4_continue_clearing_open_items_auto_completes() {
         role: ActorRole::Worker,
         state: AgentState::Executing,
         objective: "finish readonly report".into(),
+        stage_execution_contract: StageExecutionContract::default(),
         open_items: vec!["write final report".into()],
         blocked_items: vec![],
         accepted_summary: vec![],
@@ -9509,6 +9560,7 @@ fn t27_4_continue_clearing_open_items_auto_completes() {
             "fact: execution_mode read_only_analysis no_file_edits no_patch".into(),
         ],
         allowed_actions: vec!["read_file".into(), "summarize_findings".into()],
+        allowed_tools: vec![],
         toolset_id: None,
         skillset_id: None,
         required_output_schema: None,
@@ -9538,7 +9590,9 @@ fn t27_4_continue_clearing_open_items_auto_completes() {
 
 #[test]
 fn t27_4_readonly_audit_contract_repairs_short_summary() {
-    use rust_agent::core::state_frame::{ActorRole, AgentState, StateBudget, StateFrame};
+    use rust_agent::core::state_frame::{
+        ActorRole, AgentState, StageExecutionContract, StateBudget, StateFrame,
+    };
     use rust_agent::core::state_frame_loop::{DecisionLoopConfig, LoopOutcome, run_decision_loop};
     use rust_agent::service::api::client::ModelProviderClient;
     use rust_agent::service::api::streaming::StreamEvent;
@@ -9569,6 +9623,7 @@ fn t27_4_readonly_audit_contract_repairs_short_summary() {
         role: ActorRole::Worker,
         state: AgentState::Executing,
         objective: "write readonly audit".into(),
+        stage_execution_contract: StageExecutionContract::default(),
         open_items: vec!["Task completed successfully.".into()],
         blocked_items: vec![],
         accepted_summary: vec![],
@@ -9576,6 +9631,7 @@ fn t27_4_readonly_audit_contract_repairs_short_summary() {
             "fact: execution_mode read_only_analysis no_file_edits no_patch".into(),
         ],
         allowed_actions: vec!["read_file".into(), "summarize_findings".into()],
+        allowed_tools: vec![],
         toolset_id: None,
         skillset_id: None,
         required_output_schema: Some("readonly_audit_4_paragraphs_v1".into()),
@@ -10049,11 +10105,16 @@ async fn t27_r1_format_report_includes_hit_ratio_and_tokens_saved() {
                 original_prompt_chars: Some(0),
                 sent_prompt_chars: Some(0),
                 estimated_cost_micros_usd: Some(0),
+                ..Default::default()
             }),
+            stage_execution_contract: rust_agent::core::state_frame::StageExecutionContract::default(),
         }],
         history_summary: vec![],
         observability_summary: Some(summary),
+        rollout_policy_decision: None,
+        success_classification: None,
         lism_policy: rust_agent::core::boss_state::BossLisMPolicy::Inherit,
+        stage_execution_contract: rust_agent::core::state_frame::StageExecutionContract::default(),
     };
 
     let report = payload.format_report();
@@ -11070,7 +11131,7 @@ fn t27_5_external_effect_step_fails_without_stateframe_tool_dispatch() {
         ))
         .expect("should not error");
     match outcome {
-        StepOutcome::Failed { reason, usage } => {
+        StepOutcome::Failed { reason, usage, .. } => {
             assert!(reason.contains("cannot yet perform required filesystem"));
             assert!(usage.is_none());
         }
@@ -11189,6 +11250,7 @@ fn t27_5_no_progress_failure_preserves_usage() {
         StepOutcome::Failed {
             reason,
             usage: Some(usage),
+            ..
         } => {
             assert!(
                 reason.contains("no StateFrame progress"),
@@ -11248,16 +11310,18 @@ fn make_state_frame(
     role: rust_agent::core::state_frame::ActorRole,
     state: rust_agent::core::state_frame::AgentState,
 ) -> rust_agent::core::state_frame::StateFrame {
-    use rust_agent::core::state_frame::{StateBudget, StateFrame};
+    use rust_agent::core::state_frame::{StageExecutionContract, StateBudget, StateFrame};
     StateFrame {
         role,
         state,
         objective: "test".into(),
+        stage_execution_contract: StageExecutionContract::default(),
         open_items: vec![],
         blocked_items: vec![],
         accepted_summary: vec![],
         recent_evidence: vec![],
         allowed_actions: vec![],
+        allowed_tools: vec![],
         toolset_id: None,
         skillset_id: None,
         required_output_schema: None,
@@ -11268,43 +11332,46 @@ fn make_state_frame(
 #[test]
 fn t27_6_designer_a_planning_gets_spec_writer_toolset() {
     use rust_agent::core::state_frame::{ActorRole, AgentState};
-    use rust_agent::core::state_frame_router::route_toolset;
+    use rust_agent::core::state_frame_router::{apply_route, route_toolset};
 
-    let frame = make_state_frame(ActorRole::DesignerA, AgentState::Planning);
+    let mut frame = make_state_frame(ActorRole::DesignerA, AgentState::Planning);
     let route = route_toolset(&frame);
+    apply_route(&mut frame, route.clone());
     assert_eq!(route.toolset_id.as_deref(), Some("designer-planning"));
     assert_eq!(route.skillset_id.as_deref(), Some("spec-writer"));
-    assert!(route.allowed_actions.contains(&"write_spec".to_string()));
+    assert!(frame.allowed_actions.contains(&"write_spec".to_string()));
 }
 
 #[test]
 fn t27_6_executor_b_executing_gets_edit_toolset() {
     use rust_agent::core::state_frame::{ActorRole, AgentState};
-    use rust_agent::core::state_frame_router::route_toolset;
+    use rust_agent::core::state_frame_router::{apply_route, route_toolset};
 
-    let frame = make_state_frame(ActorRole::ExecutorB, AgentState::Executing);
+    let mut frame = make_state_frame(ActorRole::ExecutorB, AgentState::Executing);
     let route = route_toolset(&frame);
+    apply_route(&mut frame, route.clone());
     assert_eq!(route.toolset_id.as_deref(), Some("executor-edit"));
-    assert!(route.allowed_actions.contains(&"edit_file".to_string()));
-    assert!(route.allowed_actions.contains(&"run_test".to_string()));
+    assert!(frame.allowed_actions.contains(&"edit_file".to_string()));
+    assert!(frame.allowed_actions.contains(&"run_test".to_string()));
 }
 
 #[test]
 fn t27_6_verifier_gets_readonly_toolset() {
     use rust_agent::core::state_frame::{ActorRole, AgentState};
-    use rust_agent::core::state_frame_router::route_toolset;
+    use rust_agent::core::state_frame_router::{apply_route, route_toolset};
 
-    let frame = make_state_frame(ActorRole::Verifier, AgentState::Verifying);
+    let mut frame = make_state_frame(ActorRole::Verifier, AgentState::Verifying);
     let route = route_toolset(&frame);
+    apply_route(&mut frame, route.clone());
     assert_eq!(route.toolset_id.as_deref(), Some("verifier-readonly"));
     assert_eq!(route.skillset_id.as_deref(), Some("acceptance-checker"));
-    assert!(!route.allowed_actions.contains(&"edit_file".to_string()));
+    assert!(!frame.allowed_actions.contains(&"edit_file".to_string()));
 }
 
 #[test]
 fn t27_6_blocked_state_clears_all_actions_for_any_role() {
     use rust_agent::core::state_frame::{ActorRole, AgentState};
-    use rust_agent::core::state_frame_router::route_toolset;
+    use rust_agent::core::state_frame_router::{apply_route, route_toolset};
 
     for role in [
         ActorRole::DesignerA,
@@ -11313,14 +11380,15 @@ fn t27_6_blocked_state_clears_all_actions_for_any_role() {
         ActorRole::Verifier,
         ActorRole::Summarizer,
     ] {
-        let frame = make_state_frame(role, AgentState::Blocked);
+        let mut frame = make_state_frame(role, AgentState::Blocked);
         let route = route_toolset(&frame);
+        apply_route(&mut frame, route.clone());
         assert!(
             route.toolset_id.is_none(),
             "role {role:?} blocked should have no toolset"
         );
         assert!(
-            route.allowed_actions.is_empty(),
+            frame.allowed_actions.is_empty(),
             "role {role:?} blocked should have no actions"
         );
     }
@@ -11329,25 +11397,27 @@ fn t27_6_blocked_state_clears_all_actions_for_any_role() {
 #[test]
 fn t27_6_done_state_clears_all_actions() {
     use rust_agent::core::state_frame::{ActorRole, AgentState};
-    use rust_agent::core::state_frame_router::route_toolset;
+    use rust_agent::core::state_frame_router::{apply_route, route_toolset};
 
-    let frame = make_state_frame(ActorRole::Worker, AgentState::Done);
+    let mut frame = make_state_frame(ActorRole::Worker, AgentState::Done);
     let route = route_toolset(&frame);
+    apply_route(&mut frame, route.clone());
     assert!(route.toolset_id.is_none());
-    assert!(route.allowed_actions.is_empty());
+    assert!(frame.allowed_actions.is_empty());
 }
 
 #[test]
 fn t27_6_unknown_state_falls_back_to_readonly() {
     use rust_agent::core::state_frame::{ActorRole, AgentState};
-    use rust_agent::core::state_frame_router::route_toolset;
+    use rust_agent::core::state_frame_router::{apply_route, route_toolset};
 
     // Worker in Verifying state — not a natural combination, should get conservative fallback.
-    let frame = make_state_frame(ActorRole::Worker, AgentState::Verifying);
+    let mut frame = make_state_frame(ActorRole::Worker, AgentState::Verifying);
     let route = route_toolset(&frame);
+    apply_route(&mut frame, route.clone());
     assert!(route.toolset_id.is_none());
-    assert_eq!(route.allowed_actions, vec!["read_file"]);
-    assert!(!route.allowed_actions.contains(&"edit_file".to_string()));
+    assert_eq!(frame.allowed_actions, vec!["read_file"]);
+    assert!(!frame.allowed_actions.contains(&"edit_file".to_string()));
 }
 
 #[test]

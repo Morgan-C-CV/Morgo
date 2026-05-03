@@ -6,6 +6,7 @@ use rust_agent::core::boss_state::{
 };
 use rust_agent::core::boss_test_readiness::{BossRollbackPolicy, BossTestRunOutcome};
 use rust_agent::core::boss_test_sample_sink::{BossTestSampleSink, new_shared_sink};
+use rust_agent::core::state_frame::StageExecutionContract;
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -61,10 +62,36 @@ fn make_report(
                     original_prompt_chars: None,
                     sent_prompt_chars: None,
                     estimated_cost_micros_usd: None,
+                    visible_tools: Vec::new(),
+                    allowed_actions: Vec::new(),
+                    schema_hash: None,
+                    permission_hash: None,
+                    actor_role: None,
+                    cwd: None,
+                    config_root: None,
+                    workspace_capabilities: Vec::new(),
+                    tool_contract_mismatch_count: None,
+                    tool_contract_mismatch: None,
+                    last_effective_tool_action: None,
+                    last_failure_kind: None,
+                    last_failure_recoverable: None,
+                    last_recommended_repair: None,
+                    last_failure_evidence_ref: None,
+                    last_failure_bounded_excerpt: None,
+                    last_failure_truncated: None,
+                    recovery_attempted: None,
+                    recovery_tier: None,
+                    recovery_outcome: None,
+                    terminal_blocker_kind: None,
+                    completion_evidence_status: None,
+                    completion_evidence_gaps: Vec::new(),
+                    worker_report: None,
+                    success_classification: None,
                 })
             } else {
                 None
             },
+            stage_execution_contract: StageExecutionContract::default(),
         })
         .collect();
 
@@ -108,7 +135,10 @@ fn make_report(
         steps,
         history_summary: vec![],
         observability_summary,
+        rollout_policy_decision: None,
+        success_classification: None,
         lism_policy: BossLisMPolicy::Inherit,
+        stage_execution_contract: StageExecutionContract::default(),
     }
 }
 

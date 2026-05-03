@@ -9,6 +9,7 @@ use rust_agent::core::boss_test_readiness::BossTestRunOutcome;
 use rust_agent::core::lism_ab_sample::{
     LisMAbSampleSink, LisMPolicyRecommendation, LisMRolloutConclusion, new_shared_ab_sink,
 };
+use rust_agent::core::state_frame::StageExecutionContract;
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -41,6 +42,7 @@ fn make_report(
             action_required: None,
             blocker_reason: None,
             routed_metadata: None,
+            stage_execution_contract: StageExecutionContract::default(),
         })
         .collect();
 
@@ -84,7 +86,10 @@ fn make_report(
         steps,
         history_summary: vec![],
         observability_summary,
+        rollout_policy_decision: None,
+        success_classification: None,
         lism_policy: BossLisMPolicy::Inherit,
+        stage_execution_contract: StageExecutionContract::default(),
     }
 }
 
@@ -273,7 +278,9 @@ fn r1_1_record_carries_fallback_tier_and_reason() {
             original_prompt_chars: Some(0),
             sent_prompt_chars: Some(0),
             estimated_cost_micros_usd: Some(0),
+            ..Default::default()
         }),
+        stage_execution_contract: StageExecutionContract::default(),
     }];
     sink.record_run(
         "fallback-run",
@@ -597,6 +604,7 @@ fn r1_1_summarize_context_tier_and_hydration_metrics_per_arm() {
         original_prompt_chars: Some(0),
         sent_prompt_chars: Some(0),
         estimated_cost_micros_usd: Some(0),
+        ..Default::default()
     });
 
     let mut off_report = make_report(1, 1, 0, 0, 0);
@@ -652,6 +660,7 @@ fn r1_1_summarize_context_tier_and_hydration_metrics_per_arm() {
         original_prompt_chars: Some(0),
         sent_prompt_chars: Some(0),
         estimated_cost_micros_usd: Some(0),
+        ..Default::default()
     });
 
     sink.record_run("on-ctx", true, &on_report, BossTestRunOutcome::Completed, 0);
