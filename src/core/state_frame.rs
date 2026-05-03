@@ -50,6 +50,20 @@ impl CompletionEvidenceStatus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CompletionEvidenceGap {
+    pub target_ref: String,
+    #[serde(default)]
+    pub target_path: Option<String>,
+    #[serde(default)]
+    pub missing_artifact_evidence: bool,
+    #[serde(default)]
+    pub missing_test_evidence: bool,
+    #[serde(default)]
+    pub missing_verification_evidence: bool,
+    pub recommended_action: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkerStructuredReport {
     pub worker_state: AgentState,
     #[serde(default)]
@@ -63,6 +77,8 @@ pub struct WorkerStructuredReport {
     pub verification_status: String,
     #[serde(default)]
     pub evidence_refs: Vec<String>,
+    #[serde(default)]
+    pub completion_evidence_gaps: Vec<CompletionEvidenceGap>,
     #[serde(default)]
     pub remaining_risks: Vec<String>,
     pub completion_evidence_status: CompletionEvidenceStatus,

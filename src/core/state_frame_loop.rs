@@ -3,8 +3,8 @@ use crate::core::state_fact_ledger::{
     StepFactLedgers, append_runtime_tool_record, fact_lines_from_ledgers,
 };
 use crate::core::state_frame::{
-    AgentState, CompletionEvidenceStatus, CompletionGateBlock, DecisionKind, RepairNeeded,
-    StateFrame, StatePatch, WorkerStructuredReport, validate_state_decision,
+    AgentState, CompletionEvidenceGap, CompletionEvidenceStatus, CompletionGateBlock, DecisionKind,
+    RepairNeeded, StateFrame, StatePatch, WorkerStructuredReport, validate_state_decision,
 };
 use crate::core::state_frame_hydration::{
     NeededContextSelector, hydrate_needed_context, parse_needed_context_selector,
@@ -520,6 +520,63 @@ fn missing_verification_evidence_refs(frame: &StateFrame) -> Vec<String> {
         .collect()
 }
 
+fn recommended_action_for_gap(
+    missing_artifact_evidence: bool,
+    missing_test_evidence: bool,
+    missing_verification_evidence: bool,
+) -> String {
+    if missing_artifact_evidence {
+        "write_artifact".into()
+    } else if missing_verification_evidence {
+        "verify_artifact".into()
+    } else if missing_test_evidence {
+        "run_verification".into()
+    } else {
+        "none".into()
+    }
+}
+
+fn collect_completion_evidence_gaps(frame: &StateFrame) -> Vec<CompletionEvidenceGap> {
+    let missing_artifact_refs = missing_artifact_evidence_refs(frame);
+    let missing_test_refs = missing_test_evidence_refs(frame);
+    let missing_verification_refs = missing_verification_evidence_refs(frame);
+    let mut ordered_refs: Vec<String> = Vec::new();
+    for ref_id in missing_artifact_refs
+        .iter()
+        .chain(missing_test_refs.iter())
+        .chain(missing_verification_refs.iter())
+    {
+        if !ordered_refs.iter().any(|existing| existing == ref_id) {
+            ordered_refs.push(ref_id.clone());
+        }
+    }
+
+    ordered_refs
+        .into_iter()
+        .map(|target_ref| {
+            let target_path = artifact_contract_target(frame, &target_ref).map(|(path, _)| path);
+            let missing_artifact_evidence =
+                missing_artifact_refs.iter().any(|item| item == &target_ref);
+            let missing_test_evidence = missing_test_refs.iter().any(|item| item == &target_ref);
+            let missing_verification_evidence = missing_verification_refs
+                .iter()
+                .any(|item| item == &target_ref);
+            CompletionEvidenceGap {
+                target_ref,
+                target_path,
+                missing_artifact_evidence,
+                missing_test_evidence,
+                missing_verification_evidence,
+                recommended_action: recommended_action_for_gap(
+                    missing_artifact_evidence,
+                    missing_test_evidence,
+                    missing_verification_evidence,
+                ),
+            }
+        })
+        .collect()
+}
+
 fn evaluate_completion_evidence(
     frame: &StateFrame,
     _usage: &LoopUsage,
@@ -665,6 +722,7 @@ fn build_worker_structured_report(
     usage: &LoopUsage,
     completion: CompletionEvidenceStatus,
 ) -> WorkerStructuredReport {
+    let completion_evidence_gaps = collect_completion_evidence_gaps(frame);
     WorkerStructuredReport {
         worker_state: frame.state,
         last_tool_action: usage.last_effective_tool_action.clone(),
@@ -674,6 +732,7 @@ fn build_worker_structured_report(
         test_status: summarize_test_status(frame),
         verification_status: summarize_verification_status(frame),
         evidence_refs: collect_evidence_refs(frame),
+        completion_evidence_gaps,
         remaining_risks: collect_remaining_risks(frame, &completion),
         completion_evidence_status: completion,
     }
@@ -3363,6 +3422,12 @@ mod tests {
         assert_eq!(status, CompletionEvidenceStatus::MissingArtifactEvidence);
         let missing_refs = super::missing_artifact_evidence_refs(&frame);
         assert_eq!(missing_refs, vec!["artifact:contract:1".to_string()]);
+        let gaps = super::collect_completion_evidence_gaps(&frame);
+        assert_eq!(gaps.len(), 1);
+        assert_eq!(gaps[0].target_ref, "artifact:contract:1");
+        assert_eq!(gaps[0].target_path.as_deref(), Some("/tmp/two.md"));
+        assert!(gaps[0].missing_artifact_evidence);
+        assert_eq!(gaps[0].recommended_action, "write_artifact");
     }
 
     #[test]
@@ -3431,6 +3496,31 @@ mod tests {
             .expect("repair turn evidence");
         assert!(repair_line.contains("target_path=/tmp/second-output.md"));
         assert!(repair_line.contains("permission_ref=permission:second"));
+    }
+
+    #[test]
+    fn completion_evidence_gaps_clear_after_later_verification() {
+        let mut frame = make_frame();
+        frame.recent_evidence.clear();
+        push_completion_contract_with_refs(
+            &mut frame,
+            &["artifact:contract:0"],
+            &[],
+            &["artifact:contract:0"],
+        );
+        push_artifact_target_fact(&mut frame, "artifact:contract:0", "/tmp/report.md", "file");
+        frame.recent_evidence.push(
+            "fact: recent_changes_in_files ref=change:1 path=/tmp/report.md source=tool:Write source_event_id=tool-write:1 freshness=after-runtime confidence=1.00 status=active invalidated_by=none supersedes=none conflicts_with=none summary=updated /tmp/report.md".into(),
+        );
+        let initial_gaps = super::collect_completion_evidence_gaps(&frame);
+        assert_eq!(initial_gaps.len(), 1);
+        assert!(initial_gaps[0].missing_verification_evidence);
+
+        frame.recent_evidence.push(
+            "fact: artifact_status ref=artifact:verified path=/tmp/report.md kind=file status=verified source=tool:ArtifactVerify source_event_id=tool-artifact:1 freshness=after-runtime-artifact-verify confidence=1.00 lineage_status=active invalidated_by=none supersedes=none conflicts_with=none summary=artifact verification passed for /tmp/report.md".into(),
+        );
+        let cleared_gaps = super::collect_completion_evidence_gaps(&frame);
+        assert!(cleared_gaps.is_empty());
     }
 
     #[test]

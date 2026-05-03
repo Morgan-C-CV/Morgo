@@ -105,6 +105,10 @@ pub struct LisMAbSampleRecord {
     pub recovery_outcomes: Vec<String>,
     #[serde(default)]
     pub terminal_blocker_kinds: Vec<String>,
+    #[serde(default)]
+    pub missing_artifact_evidence_targets: Vec<String>,
+    #[serde(default)]
+    pub missing_verification_evidence_targets: Vec<String>,
     pub pending_approval_count: usize,
     pub outcome: BossTestRunOutcome,
 }
@@ -741,6 +745,8 @@ fn build_ab_record(
     let mut recovery_tiers = BTreeMap::new();
     let mut recovery_outcomes = BTreeMap::new();
     let mut terminal_blocker_kinds = BTreeMap::new();
+    let mut missing_artifact_evidence_targets = BTreeMap::new();
+    let mut missing_verification_evidence_targets = BTreeMap::new();
     for step in &report.steps {
         let Some(meta) = step.routed_metadata.as_ref() else {
             continue;
@@ -785,6 +791,18 @@ fn build_ab_record(
         }
         if let Some(kind) = meta.terminal_blocker_kind.as_ref() {
             terminal_blocker_kinds.insert(kind.clone(), ());
+        }
+        for gap in &meta.completion_evidence_gaps {
+            let target = match gap.target_path.as_deref() {
+                Some(path) => format!("{}:{path}", gap.target_ref),
+                None => gap.target_ref.clone(),
+            };
+            if gap.missing_artifact_evidence {
+                missing_artifact_evidence_targets.insert(target.clone(), ());
+            }
+            if gap.missing_verification_evidence {
+                missing_verification_evidence_targets.insert(target, ());
+            }
         }
     }
 
@@ -850,6 +868,10 @@ fn build_ab_record(
         recovery_tiers: recovery_tiers.into_keys().collect(),
         recovery_outcomes: recovery_outcomes.into_keys().collect(),
         terminal_blocker_kinds: terminal_blocker_kinds.into_keys().collect(),
+        missing_artifact_evidence_targets: missing_artifact_evidence_targets.into_keys().collect(),
+        missing_verification_evidence_targets: missing_verification_evidence_targets
+            .into_keys()
+            .collect(),
         pending_approval_count,
         outcome,
     }
@@ -908,6 +930,70 @@ fn summarize_records(records: &[LisMAbSampleRecord]) -> LisMAbSummary {
         off_model_tier_counts: aggregate_model_tier_counts(&off),
         on_completion_rate: completion_rate(&on),
         off_completion_rate: completion_rate(&off),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::boss_state::{
+        BossActorHandle, BossActorRole, BossPlanStepStatus, BossReportPayload, BossStage,
+        BossStepReport, BossStepRoutedMetadata,
+    };
+    use crate::core::boss_test_readiness::BossTestRunOutcome;
+    use crate::core::state_frame::CompletionEvidenceGap;
+
+    fn empty_actor() -> BossActorHandle {
+        BossActorHandle::new("actor", "session", BossActorRole::DesignerA)
+    }
+
+    #[test]
+    fn ab_sample_records_exact_verification_gap_target() {
+        let report = BossReportPayload {
+            stage: BossStage::Execution,
+            current_step: Some(1),
+            total_steps: Some(1),
+            designer_a: empty_actor(),
+            executor_b: empty_actor(),
+            active_children: Vec::new(),
+            steps: vec![BossStepReport {
+                id: 1,
+                status: BossPlanStepStatus::Rejected,
+                worker_task_id: None,
+                attempt_count: 1,
+                last_review_summary: None,
+                action_required: None,
+                blocker_reason: None,
+                routed_metadata: Some(BossStepRoutedMetadata {
+                    completion_evidence_gaps: vec![CompletionEvidenceGap {
+                        target_ref: "artifact:contract:1".into(),
+                        target_path: Some("/tmp/report.md".into()),
+                        missing_artifact_evidence: false,
+                        missing_test_evidence: false,
+                        missing_verification_evidence: true,
+                        recommended_action: "verify_artifact".into(),
+                    }],
+                    ..BossStepRoutedMetadata::default()
+                }),
+            }],
+            history_summary: Vec::new(),
+            observability_summary: None,
+            lism_policy: Default::default(),
+        };
+
+        let record = build_ab_record(
+            "run-1".into(),
+            true,
+            &report,
+            BossTestRunOutcome::Completed,
+            0,
+        );
+
+        assert_eq!(
+            record.missing_verification_evidence_targets,
+            vec!["artifact:contract:1:/tmp/report.md".to_string()]
+        );
+        assert!(record.missing_artifact_evidence_targets.is_empty());
     }
 }
 

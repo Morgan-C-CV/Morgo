@@ -1875,6 +1875,11 @@ impl BossCoordinator {
             .as_ref()
             .map(|status| status.as_str().to_string());
         routed_metadata.worker_report = usage.worker_report.clone();
+        routed_metadata.completion_evidence_gaps = usage
+            .worker_report
+            .as_ref()
+            .map(|report| report.completion_evidence_gaps.clone())
+            .unwrap_or_default();
     }
 
     async fn mark_routed_metadata_artifact_recovery(
@@ -3057,6 +3062,7 @@ impl BossCoordinator {
                             recovery_outcome: None,
                             terminal_blocker_kind: None,
                             completion_evidence_status: None,
+                            completion_evidence_gaps: Vec::new(),
                             worker_report: None,
                         };
                         let mut routed_step_metadata = self.routed_step_metadata.write().await;
@@ -3121,6 +3127,7 @@ impl BossCoordinator {
                             recovery_outcome: None,
                             terminal_blocker_kind: None,
                             completion_evidence_status: None,
+                            completion_evidence_gaps: Vec::new(),
                             worker_report: None,
                         };
                         let mut routed_step_metadata = self.routed_step_metadata.write().await;
@@ -3198,6 +3205,7 @@ impl BossCoordinator {
                                 recovery_outcome: None,
                                 terminal_blocker_kind: None,
                                 completion_evidence_status: None,
+                                completion_evidence_gaps: Vec::new(),
                                 worker_report: None,
                             };
                             let cwd = app_state
@@ -4589,7 +4597,9 @@ impl BossCoordinator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::state_frame::{AgentState, CompletionEvidenceStatus, WorkerStructuredReport};
+    use crate::core::state_frame::{
+        AgentState, CompletionEvidenceGap, CompletionEvidenceStatus, WorkerStructuredReport,
+    };
     use crate::core::state_frame_loop::LoopUsage;
     use crate::tool::result::{ToolOutcome, ToolOutcomeKind};
 
@@ -4769,6 +4779,7 @@ mod tests {
                 test_status: "passed".into(),
                 verification_status: "verified".into(),
                 evidence_refs: vec!["tool_output:1".into(), "artifact:step1:runtime:0".into()],
+                completion_evidence_gaps: Vec::new(),
                 remaining_risks: Vec::new(),
                 completion_evidence_status: CompletionEvidenceStatus::Sufficient,
             }),
@@ -4790,6 +4801,81 @@ mod tests {
                 .iter()
                 .any(|reference| reference == "tool_output:1")
         );
+    }
+
+    #[test]
+    fn boss_report_identifies_exact_missing_artifact_gap_for_second_target() {
+        let mut routed_metadata = BossStepRoutedMetadata::default();
+        let usage = LoopUsage {
+            completion_evidence_status: Some(CompletionEvidenceStatus::MissingArtifactEvidence),
+            worker_report: Some(WorkerStructuredReport {
+                worker_state: AgentState::Executing,
+                last_tool_action: Some("Write".into()),
+                files_changed: vec!["/tmp/one.md".into()],
+                tests_run: Vec::new(),
+                artifact_status: "touched".into(),
+                test_status: "not_run".into(),
+                verification_status: "unverified".into(),
+                evidence_refs: vec!["change:1".into()],
+                completion_evidence_gaps: vec![CompletionEvidenceGap {
+                    target_ref: "artifact:contract:1".into(),
+                    target_path: Some("/tmp/two.md".into()),
+                    missing_artifact_evidence: true,
+                    missing_test_evidence: false,
+                    missing_verification_evidence: false,
+                    recommended_action: "write_artifact".into(),
+                }],
+                remaining_risks: vec![
+                    "completion_evidence_status=missing_artifact_evidence".into(),
+                ],
+                completion_evidence_status: CompletionEvidenceStatus::MissingArtifactEvidence,
+            }),
+            ..LoopUsage::default()
+        };
+
+        BossCoordinator::apply_loop_usage_to_routed_metadata(&mut routed_metadata, &usage);
+
+        assert_eq!(routed_metadata.completion_evidence_gaps.len(), 1);
+        let gap = &routed_metadata.completion_evidence_gaps[0];
+        assert_eq!(gap.target_ref, "artifact:contract:1");
+        assert_eq!(gap.target_path.as_deref(), Some("/tmp/two.md"));
+        assert!(gap.missing_artifact_evidence);
+        assert_eq!(gap.recommended_action, "write_artifact");
+    }
+
+    #[test]
+    fn boss_metadata_clears_old_completion_gaps_after_later_success() {
+        let mut routed_metadata = BossStepRoutedMetadata {
+            completion_evidence_gaps: vec![CompletionEvidenceGap {
+                target_ref: "artifact:contract:1".into(),
+                target_path: Some("/tmp/two.md".into()),
+                missing_artifact_evidence: true,
+                missing_test_evidence: false,
+                missing_verification_evidence: false,
+                recommended_action: "write_artifact".into(),
+            }],
+            ..BossStepRoutedMetadata::default()
+        };
+        let usage = LoopUsage {
+            completion_evidence_status: Some(CompletionEvidenceStatus::Sufficient),
+            worker_report: Some(WorkerStructuredReport {
+                worker_state: AgentState::Done,
+                last_tool_action: Some("ArtifactVerify".into()),
+                files_changed: vec!["/tmp/one.md".into(), "/tmp/two.md".into()],
+                tests_run: Vec::new(),
+                artifact_status: "verified".into(),
+                test_status: "not_required".into(),
+                verification_status: "verified".into(),
+                evidence_refs: vec!["artifact:verified".into()],
+                completion_evidence_gaps: Vec::new(),
+                remaining_risks: Vec::new(),
+                completion_evidence_status: CompletionEvidenceStatus::Sufficient,
+            }),
+            ..LoopUsage::default()
+        };
+
+        BossCoordinator::apply_loop_usage_to_routed_metadata(&mut routed_metadata, &usage);
+        assert!(routed_metadata.completion_evidence_gaps.is_empty());
     }
 
     #[tokio::test]

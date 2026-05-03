@@ -1,4 +1,4 @@
-use crate::core::state_frame::WorkerStructuredReport;
+use crate::core::state_frame::{CompletionEvidenceGap, WorkerStructuredReport};
 use crate::tool::registry::ToolContractMismatch;
 use crate::tool::result::ToolExecutionRecord;
 use serde::{Deserialize, Serialize};
@@ -274,6 +274,8 @@ pub struct BossStepRoutedMetadata {
     #[serde(default)]
     pub completion_evidence_status: Option<String>,
     #[serde(default)]
+    pub completion_evidence_gaps: Vec<CompletionEvidenceGap>,
+    #[serde(default)]
     pub worker_report: Option<WorkerStructuredReport>,
 }
 
@@ -430,7 +432,7 @@ impl BossReportPayload {
             let m = step.routed_metadata.as_ref();
             let worker_report = m.and_then(|m| m.worker_report.as_ref());
             lines.push(format!(
-                "  step {:>3}: status={:?} tier={} profile={} frame={}B cache_r={} cache_w={} input={} uncached_input={} output={} sent_chars={} original_chars={} fb={} fb_tier={} fb_reason={} mm={} hydr={} stale={} miss={} worker_state={} artifact={} test={} verify={}",
+                "  step {:>3}: status={:?} tier={} profile={} frame={}B cache_r={} cache_w={} input={} uncached_input={} output={} sent_chars={} original_chars={} fb={} fb_tier={} fb_reason={} mm={} hydr={} stale={} miss={} worker_state={} artifact={} test={} verify={} gaps={}",
                 step.id,
                 step.status,
                 m.and_then(|m| m.model_tier.as_deref()).unwrap_or("-"),
@@ -461,6 +463,8 @@ impl BossReportPayload {
                     .unwrap_or_else(|| "-".into()),
                 worker_report
                     .map(|report| report.verification_status.clone())
+                    .unwrap_or_else(|| "-".into()),
+                m.map(|meta| meta.completion_evidence_gaps.len().to_string())
                     .unwrap_or_else(|| "-".into()),
             ));
         }
