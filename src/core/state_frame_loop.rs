@@ -65,6 +65,11 @@ pub struct LoopUsage {
     pub tool_execution_records: Vec<ToolExecutionRecord>,
     pub last_effective_tool_action: Option<String>,
     pub last_failure_outcome: Option<ToolOutcome>,
+    pub recovery_attempted: bool,
+    pub recovery_tier: Option<String>,
+    pub recovery_outcome: Option<String>,
+    pub terminal_blocker_kind: Option<String>,
+    pub last_recovery_attempt: Option<RecoveryAttempt>,
     pub worker_report: Option<WorkerStructuredReport>,
     pub completion_evidence_status: Option<CompletionEvidenceStatus>,
 }
@@ -113,6 +118,22 @@ struct CallToolDispatchError {
     reason: String,
     record: ToolExecutionRecord,
     outcome: ToolOutcome,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoveryAttempt {
+    pub failure_kind: String,
+    pub recommended_next_action: String,
+    pub target_path: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ArtifactRepairTurn {
+    target_path: String,
+    parent_dir: String,
+    permission_ref: String,
+    missing_reason: String,
+    recommended_write_strategy: String,
 }
 
 /// Collect text and token usage from a stream of events.
@@ -230,6 +251,16 @@ fn collect_completion_gate_refs(frame: &StateFrame, fact_name: &str) -> Vec<Stri
     collect_fact_field_values(frame, fact_name, "ref")
 }
 
+fn permission_target_path(line: &str) -> Option<String> {
+    let rest = line.strip_prefix("fact: permission_to_create_and_write:")?;
+    let path = rest
+        .split_once(' ')
+        .map(|(path, _)| path)
+        .unwrap_or(rest)
+        .trim();
+    (!path.is_empty()).then(|| path.to_string())
+}
+
 fn collect_evidence_refs(frame: &StateFrame) -> Vec<String> {
     let mut refs = Vec::new();
     for line in &frame.recent_evidence {
@@ -240,6 +271,58 @@ fn collect_evidence_refs(frame: &StateFrame) -> Vec<String> {
         }
     }
     refs
+}
+
+fn infer_artifact_repair_turn(
+    frame: &StateFrame,
+    missing_reason: &str,
+) -> Option<ArtifactRepairTurn> {
+    for line in &frame.recent_evidence {
+        if !line.starts_with("fact: permission_to_create_and_write:") {
+            continue;
+        }
+        let target_path = permission_target_path(line)?;
+        let permission_ref = evidence_field_value(line, "ref").unwrap_or_else(|| "none".into());
+        let parent_dir = std::path::Path::new(&target_path)
+            .parent()
+            .map(|path| path.display().to_string())
+            .filter(|path| !path.trim().is_empty())
+            .unwrap_or_else(|| ".".into());
+        let recommended_write_strategy = if std::path::Path::new(&target_path).extension().is_some()
+        {
+            "write_exact_target_file".to_string()
+        } else {
+            "create_directory_then_write_files".to_string()
+        };
+        return Some(ArtifactRepairTurn {
+            target_path,
+            parent_dir,
+            permission_ref,
+            missing_reason: missing_reason.to_string(),
+            recommended_write_strategy,
+        });
+    }
+
+    let target_path = collect_fact_field_values(frame, "artifact_status", "path")
+        .into_iter()
+        .find(|path| !path.trim().is_empty())?;
+    let parent_dir = std::path::Path::new(&target_path)
+        .parent()
+        .map(|path| path.display().to_string())
+        .filter(|path| !path.trim().is_empty())
+        .unwrap_or_else(|| ".".into());
+    let recommended_write_strategy = if std::path::Path::new(&target_path).extension().is_some() {
+        "write_exact_target_file".to_string()
+    } else {
+        "create_directory_then_write_files".to_string()
+    };
+    Some(ArtifactRepairTurn {
+        target_path,
+        parent_dir,
+        permission_ref: "none".into(),
+        missing_reason: missing_reason.to_string(),
+        recommended_write_strategy,
+    })
 }
 
 fn has_completion_verification_signal(frame: &StateFrame) -> bool {
@@ -385,11 +468,55 @@ fn inject_completion_gate_block(frame: &mut StateFrame, block: &CompletionGateBl
             missing_refs
         ),
     );
+    if block.required_action == "write_artifact" {
+        if let Some(repair_turn) = infer_artifact_repair_turn(frame, &block.reason) {
+            push_unique(
+                &mut frame.open_items,
+                format!(
+                    "repair_turn:artifact_missing target_path={} parent_dir={} permission_ref={} missing_reason={} recommended_write_strategy={}",
+                    repair_turn.target_path,
+                    repair_turn.parent_dir,
+                    repair_turn.permission_ref,
+                    repair_turn.missing_reason,
+                    repair_turn.recommended_write_strategy
+                ),
+            );
+            push_unique(
+                &mut frame.recent_evidence,
+                format!(
+                    "fact: repair_turn ref=repair:artifact_missing target_path={} parent_dir={} permission_ref={} missing_reason={} recommended_write_strategy={} summary=artifact repair required for {}",
+                    repair_turn.target_path,
+                    repair_turn.parent_dir,
+                    repair_turn.permission_ref,
+                    repair_turn.missing_reason,
+                    repair_turn.recommended_write_strategy,
+                    repair_turn.target_path
+                ),
+            );
+        }
+    }
     frame.state = match block.required_action.as_str() {
         "write_artifact" => AgentState::Executing,
         "run_verification" | "verify_artifact" => AgentState::Verifying,
         _ => AgentState::Correcting,
     };
+}
+
+fn record_completion_gate_recovery(
+    frame: &StateFrame,
+    usage: &mut LoopUsage,
+    block: &CompletionGateBlock,
+) {
+    usage.recovery_attempted = true;
+    usage.recovery_tier = Some("artifact_repair_turn".into());
+    usage.recovery_outcome = Some("repair_turn_injected".into());
+    usage.terminal_blocker_kind = None;
+    usage.last_recovery_attempt = Some(RecoveryAttempt {
+        failure_kind: block.status.as_str().to_string(),
+        recommended_next_action: block.required_action.clone(),
+        target_path: infer_artifact_repair_turn(frame, &block.reason)
+            .map(|repair_turn| repair_turn.target_path),
+    });
 }
 
 fn enforce_completion_gate(
@@ -464,6 +591,71 @@ fn finalize_worker_usage_report(frame: &StateFrame, usage: &mut LoopUsage) {
     let completion = evaluate_completion_evidence(frame, usage);
     usage.completion_evidence_status = Some(completion.clone());
     usage.worker_report = Some(build_worker_structured_report(frame, usage, completion));
+}
+
+fn current_action_target_path(
+    decision: &crate::core::state_frame::StateDecision,
+) -> Option<String> {
+    parse_read_path(decision).or_else(|| parse_edit_path(decision))
+}
+
+fn repeated_recovery_strategy_reason(
+    usage: &LoopUsage,
+    decision: &crate::core::state_frame::StateDecision,
+) -> Option<String> {
+    let next_action = decision.next_action.as_ref()?;
+    let attempt = usage.last_recovery_attempt.as_ref()?;
+    let target_path = current_action_target_path(decision);
+    if attempt.failure_kind == "user_error"
+        && attempt.recommended_next_action == "read_before_edit"
+        && next_action.action_type.eq_ignore_ascii_case("Edit")
+        && target_path == attempt.target_path
+    {
+        return Some(format!(
+            "repeated invalid edit on {} after read_before_edit recovery hint",
+            attempt.target_path.as_deref().unwrap_or("unknown_target")
+        ));
+    }
+    if attempt.failure_kind == "missing_path"
+        && next_action.action_type.eq_ignore_ascii_case("Read")
+        && target_path == attempt.target_path
+    {
+        return Some(format!(
+            "repeated missing-path read on {} without changing recovery strategy",
+            attempt.target_path.as_deref().unwrap_or("unknown_target")
+        ));
+    }
+    None
+}
+
+fn record_recoverable_tool_failure(
+    usage: &mut LoopUsage,
+    outcome: &ToolOutcome,
+    target_path: Option<String>,
+) {
+    if !outcome.recoverable {
+        usage.terminal_blocker_kind = Some(outcome.kind.as_str().to_string());
+        return;
+    }
+    usage.recovery_attempted = true;
+    usage.recovery_tier = Some("worker_self_repair".into());
+    usage.recovery_outcome = Some("pending_next_turn".into());
+    usage.last_recovery_attempt = Some(RecoveryAttempt {
+        failure_kind: outcome.kind.as_str().to_string(),
+        recommended_next_action: outcome
+            .recommended_next_action
+            .clone()
+            .unwrap_or_else(|| "none".into()),
+        target_path,
+    });
+}
+
+fn clear_recovery_after_success(usage: &mut LoopUsage) {
+    if usage.last_recovery_attempt.take().is_some() {
+        usage.recovery_attempted = true;
+        usage.recovery_outcome = Some("recovered".into());
+        usage.terminal_blocker_kind = None;
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1679,6 +1871,7 @@ pub async fn run_decision_loop_with_tools(
                 frame.state = decision.state;
                 if let Err(block) = enforce_completion_gate(&mut frame, &mut total_usage) {
                     inject_completion_gate_block(&mut frame, &block);
+                    record_completion_gate_recovery(&frame, &mut total_usage, &block);
                     continue;
                 }
                 finalize_worker_usage_report(&frame, &mut total_usage);
@@ -1713,6 +1906,7 @@ pub async fn run_decision_loop_with_tools(
                 {
                     if let Err(block) = enforce_completion_gate(&mut frame, &mut total_usage) {
                         inject_completion_gate_block(&mut frame, &block);
+                        record_completion_gate_recovery(&frame, &mut total_usage, &block);
                         continue;
                     }
                     finalize_worker_usage_report(&frame, &mut total_usage);
@@ -1756,6 +1950,7 @@ pub async fn run_decision_loop_with_tools(
                                 total_usage.last_effective_tool_action =
                                     Some(record.tool_name.clone());
                                 total_usage.last_failure_outcome = None;
+                                clear_recovery_after_success(&mut total_usage);
                                 total_usage.tool_execution_records.push(record);
                                 if changed {
                                     summary = hydrate_needed_context(
@@ -1786,6 +1981,11 @@ pub async fn run_decision_loop_with_tools(
                                 total_usage.last_effective_tool_action =
                                     Some(error.record.tool_name.clone());
                                 total_usage.last_failure_outcome = Some(error.outcome.clone());
+                                record_recoverable_tool_failure(
+                                    &mut total_usage,
+                                    &error.outcome,
+                                    current_action_target_path(&synthetic_read),
+                                );
                                 total_usage.tool_execution_records.push(error.record);
                                 if changed {
                                     summary = hydrate_needed_context(
@@ -1828,6 +2028,26 @@ pub async fn run_decision_loop_with_tools(
             }
             DecisionKind::CallTool => {
                 frame.state = decision.state;
+                if let Some(reason) = repeated_recovery_strategy_reason(&total_usage, &decision) {
+                    push_unique(
+                        &mut frame.recent_evidence,
+                        format!(
+                            "recovery_guard: reason={} target_path={} enforced_outcome=no_progress",
+                            reason,
+                            current_action_target_path(&decision).unwrap_or_else(|| "none".into())
+                        ),
+                    );
+                    total_usage.recovery_attempted = true;
+                    total_usage.recovery_tier = Some("strategy_dedupe".into());
+                    total_usage.recovery_outcome = Some("no_progress_escalation".into());
+                    total_usage.terminal_blocker_kind = Some("same_invalid_strategy".into());
+                    finalize_worker_usage_report(&frame, &mut total_usage);
+                    return Ok(LoopOutcome::NoProgress {
+                        last_state: frame.state,
+                        reason,
+                        usage: total_usage,
+                    });
+                }
                 total_usage.tool_dispatch_count += 1;
                 match execute_call_tool(
                     &mut frame,
@@ -1842,6 +2062,7 @@ pub async fn run_decision_loop_with_tools(
                         total_usage.tool_dispatch_ref_write_count += ref_write_count;
                         total_usage.last_effective_tool_action = Some(record.tool_name.clone());
                         total_usage.last_failure_outcome = None;
+                        clear_recovery_after_success(&mut total_usage);
                         total_usage.tool_execution_records.push(record);
                         if !changed {
                             finalize_worker_usage_report(&frame, &mut total_usage);
@@ -1871,6 +2092,11 @@ pub async fn run_decision_loop_with_tools(
                         total_usage.last_effective_tool_action =
                             Some(error.record.tool_name.clone());
                         total_usage.last_failure_outcome = Some(error.outcome.clone());
+                        record_recoverable_tool_failure(
+                            &mut total_usage,
+                            &error.outcome,
+                            current_action_target_path(&decision),
+                        );
                         total_usage.tool_execution_records.push(error.record);
                         if !changed {
                             finalize_worker_usage_report(&frame, &mut total_usage);
@@ -2935,6 +3161,38 @@ mod tests {
     }
 
     #[test]
+    fn artifact_gate_block_triggers_repair_turn_with_exact_target_path() {
+        let mut frame = make_frame();
+        frame.recent_evidence.clear();
+        push_completion_contract(&mut frame, true, false, false);
+        frame.recent_evidence.push(
+            "fact: artifact_status ref=artifact:missing path=/tmp/report.md kind=file status=missing_or_invalid source=artifact_expectation source_event_id=artifact-expectation:1 freshness=current confidence=1.00 lineage_status=active invalidated_by=none supersedes=none conflicts_with=none summary=target file missing".into(),
+        );
+        frame.recent_evidence.push(
+            "fact: permission_to_create_and_write:/tmp/report.md ref=permission:step1:0 source=permission_scope source_event_id=permission-scope:1 freshness=current confidence=1.00 status=active invalidated_by=none supersedes=none conflicts_with=none summary=worker may create and write /tmp/report.md".into(),
+        );
+        let mut usage = LoopUsage::default();
+        let block =
+            super::enforce_completion_gate(&mut frame, &mut usage).expect_err("gate should block");
+        super::inject_completion_gate_block(&mut frame, &block);
+        super::record_completion_gate_recovery(&frame, &mut usage, &block);
+        let repair_line = frame
+            .recent_evidence
+            .iter()
+            .find(|line| line.starts_with("fact: repair_turn "))
+            .expect("repair turn evidence");
+        assert!(repair_line.contains("target_path=/tmp/report.md"));
+        assert!(repair_line.contains("parent_dir=/tmp"));
+        assert!(repair_line.contains("permission_ref=permission:step1:0"));
+        assert!(repair_line.contains("recommended_write_strategy=write_exact_target_file"));
+        assert_eq!(usage.recovery_tier.as_deref(), Some("artifact_repair_turn"));
+        assert_eq!(
+            usage.recovery_outcome.as_deref(),
+            Some("repair_turn_injected")
+        );
+    }
+
+    #[test]
     fn done_passes_when_completion_evidence_is_sufficient() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let mut frame = make_frame();
@@ -2967,6 +3225,68 @@ mod tests {
                 );
             }
             other => panic!("expected Done, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn recovery_does_not_repeat_same_invalid_edit_strategy() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let target_path = unique_temp_path("repeat_invalid_edit");
+        std::fs::write(&target_path, "alpha\n").expect("seed file");
+        let edit_json = format!(
+            r#"{{"state":"executing","decision":"call_tool","next_action":{{"action_type":"Edit","args":{{"file_path":"{}","old_string":"missing-line","new_string":"beta"}}}}}}"#,
+            target_path.display()
+        );
+        let client = ModelProviderClient::with_scripted_turns(vec![
+            vec![StreamEvent::TextDelta(edit_json.clone())],
+            vec![StreamEvent::TextDelta(edit_json)],
+        ]);
+        let mut frame = make_frame();
+        frame.allowed_actions.push("edit_file".into());
+        frame.allowed_tools.push("Edit".into());
+        let registry = ToolRegistry::new().register(Arc::new(FileEditTool));
+        let permissions = ToolPermissionContext::new(PermissionMode::Default);
+        permissions.add_always_allow_rule("Edit");
+        let tool_runtime = StateFrameToolRuntime {
+            registry,
+            permissions,
+            cwd: test_runtime_paths().0,
+            config_root: test_runtime_paths().1,
+        };
+        let outcome = rt
+            .block_on(run_decision_loop_with_tools(
+                &client,
+                frame,
+                DecisionLoopConfig {
+                    max_iterations: 2,
+                    ..DecisionLoopConfig::default()
+                },
+                Some(tool_runtime),
+            ))
+            .expect("loop should not error");
+        let _ = std::fs::remove_file(&target_path);
+        match outcome {
+            LoopOutcome::NoProgress { reason, usage, .. } => {
+                assert!(reason.contains("read_before_edit"));
+                assert_eq!(usage.recovery_tier.as_deref(), Some("strategy_dedupe"));
+                assert_eq!(
+                    usage.recovery_outcome.as_deref(),
+                    Some("no_progress_escalation")
+                );
+                assert_eq!(
+                    usage.terminal_blocker_kind.as_deref(),
+                    Some("same_invalid_strategy")
+                );
+                assert!(
+                    usage
+                        .worker_report
+                        .expect("worker report")
+                        .evidence_refs
+                        .iter()
+                        .any(|reference| reference == "tool_feedback:1")
+                );
+            }
+            other => panic!("expected NoProgress, got {other:?}"),
         }
     }
 

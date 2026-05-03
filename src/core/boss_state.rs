@@ -264,6 +264,14 @@ pub struct BossStepRoutedMetadata {
     #[serde(default)]
     pub last_failure_truncated: Option<bool>,
     #[serde(default)]
+    pub recovery_attempted: Option<bool>,
+    #[serde(default)]
+    pub recovery_tier: Option<String>,
+    #[serde(default)]
+    pub recovery_outcome: Option<String>,
+    #[serde(default)]
+    pub terminal_blocker_kind: Option<String>,
+    #[serde(default)]
     pub completion_evidence_status: Option<String>,
     #[serde(default)]
     pub worker_report: Option<WorkerStructuredReport>,

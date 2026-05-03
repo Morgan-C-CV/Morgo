@@ -69,6 +69,28 @@ fn step_artifact_verification_error(step: &BossPlanStep) -> Option<String> {
         .map(|reason| format!("artifact verification failed: {reason}"))
 }
 
+fn build_artifact_repair_instruction(step: &BossPlanStep, missing_reason: &str) -> Option<String> {
+    let expectation = extract_artifact_expectations(step.objective())
+        .into_iter()
+        .next()?;
+    let target_path = expectation.path.display().to_string();
+    let parent_dir = expectation
+        .path
+        .parent()
+        .map(|path| path.display().to_string())
+        .filter(|path| !path.trim().is_empty())
+        .unwrap_or_else(|| ".".into());
+    let recommended_write_strategy = match expectation.kind {
+        crate::core::boss_acceptance::BossArtifactKind::File => "write_exact_target_file",
+        crate::core::boss_acceptance::BossArtifactKind::Directory => {
+            "create_directory_then_write_files"
+        }
+    };
+    Some(format!(
+        "repair artifact evidence for target_path={target_path} parent_dir={parent_dir} missing_reason={missing_reason} recommended_write_strategy={recommended_write_strategy}"
+    ))
+}
+
 fn seed_step_acceptance(task: &str) -> Vec<String> {
     let mut acceptance = vec!["Task completed successfully.".to_string()];
     for expectation in extract_artifact_expectations(task) {
@@ -1844,11 +1866,30 @@ impl BossCoordinator {
             routed_metadata.last_failure_bounded_excerpt = None;
             routed_metadata.last_failure_truncated = None;
         }
+        routed_metadata.recovery_attempted = Some(usage.recovery_attempted);
+        routed_metadata.recovery_tier = usage.recovery_tier.clone();
+        routed_metadata.recovery_outcome = usage.recovery_outcome.clone();
+        routed_metadata.terminal_blocker_kind = usage.terminal_blocker_kind.clone();
         routed_metadata.completion_evidence_status = usage
             .completion_evidence_status
             .as_ref()
             .map(|status| status.as_str().to_string());
         routed_metadata.worker_report = usage.worker_report.clone();
+    }
+
+    async fn mark_routed_metadata_artifact_recovery(
+        &self,
+        step_id: usize,
+        recovery_outcome: &str,
+        terminal_blocker_kind: Option<&str>,
+    ) {
+        let mut routed_step_metadata = self.routed_step_metadata.write().await;
+        if let Some(metadata) = routed_step_metadata.get_mut(&step_id) {
+            metadata.recovery_attempted = Some(true);
+            metadata.recovery_tier = Some("boss_artifact_repair".into());
+            metadata.recovery_outcome = Some(recovery_outcome.into());
+            metadata.terminal_blocker_kind = terminal_blocker_kind.map(str::to_string);
+        }
     }
 
     fn build_observability_summary(
@@ -2281,7 +2322,6 @@ impl BossCoordinator {
             TaskStatus::Completed => {
                 if let Some(reason) = step_artifact_verification_error(step) {
                     step.completed = false;
-                    step.status = BossPlanStepStatus::Failed;
                     step.worker_task_id = Some(event.task_id.clone());
                     step.last_review_summary = Some(reason.clone());
                     sync_step_tool_execution_records(step, tasks.as_deref(), &event.task_id);
@@ -2290,6 +2330,15 @@ impl BossCoordinator {
                         "missing_or_invalid",
                         &reason,
                     );
+                    step.attempt_count += 1;
+                    let repair_instruction = build_artifact_repair_instruction(step, &reason);
+                    if step.attempt_count >= step.retry_budget {
+                        step.status = BossPlanStepStatus::Failed;
+                        step.last_correction = repair_instruction;
+                    } else {
+                        step.status = BossPlanStepStatus::Rejected;
+                        step.last_correction = repair_instruction;
+                    }
                     tracing::warn!(
                         "BossPlan: Step {} failed artifact verification: {}",
                         step_id,
@@ -2354,6 +2403,19 @@ impl BossCoordinator {
             TaskStatus::Pending => None,
         };
 
+        let recovery_status =
+            plan.steps
+                .iter()
+                .find(|s| s.id == step_id)
+                .and_then(|step| match step.status {
+                    BossPlanStepStatus::Rejected => Some(("repair_dispatched", None)),
+                    BossPlanStepStatus::Failed if step.last_correction.is_some() => Some((
+                        "terminal_after_repair_exhausted",
+                        Some("artifact_verification_failed"),
+                    )),
+                    _ => None,
+                });
+
         if let Some(summary) = review_summary {
             drop(plan_guard);
             self.trigger_review_for_completed_step(step_id, summary)
@@ -2363,6 +2425,13 @@ impl BossCoordinator {
 
         let next_step = next_unfinished_step_id(plan);
         drop(plan_guard);
+        if let Some((outcome, blocker)) = recovery_status {
+            self.mark_routed_metadata_artifact_recovery(step_id, outcome, blocker)
+                .await;
+            if outcome == "repair_dispatched" {
+                self.maybe_auto_advance_after_completion().await?;
+            }
+        }
         self.update_current_step(next_step).await;
 
         Ok(())
@@ -2459,7 +2528,7 @@ impl BossCoordinator {
         step_id: usize,
         decision: &crate::core::boss_actor_runtime::ReviewDecision,
     ) -> anyhow::Result<()> {
-        let should_auto_advance = {
+        let (should_auto_advance, artifact_recovery_status) = {
             let mut plan_guard = self.plan.write().await;
             let Some(plan) = plan_guard.as_mut() else {
                 return Ok(());
@@ -2478,9 +2547,28 @@ impl BossCoordinator {
                         );
                         step.last_review_summary = Some(reason);
                         step.completed = false;
-                        step.status = BossPlanStepStatus::Failed;
-                        step.last_correction = None;
-                        false
+                        step.attempt_count += 1;
+                        let repair_instruction = build_artifact_repair_instruction(
+                            step,
+                            step.last_review_summary
+                                .as_deref()
+                                .unwrap_or("artifact verification failed"),
+                        );
+                        if step.attempt_count >= step.retry_budget {
+                            step.status = BossPlanStepStatus::Failed;
+                            step.last_correction = repair_instruction;
+                            (
+                                false,
+                                Some((
+                                    "terminal_after_repair_exhausted",
+                                    Some("artifact_verification_failed"),
+                                )),
+                            )
+                        } else {
+                            step.status = BossPlanStepStatus::Rejected;
+                            step.last_correction = repair_instruction;
+                            (false, Some(("repair_dispatched", None)))
+                        }
                     } else {
                         append_review_runtime_record(step, "accepted", summary, None);
                         append_artifact_verification_runtime_records(
@@ -2492,7 +2580,7 @@ impl BossCoordinator {
                         step.completed = true;
                         step.status = BossPlanStepStatus::Completed;
                         step.last_correction = None;
-                        true
+                        (true, None)
                     }
                 }
                 crate::core::boss_actor_runtime::ReviewDecision::Correct {
@@ -2508,7 +2596,7 @@ impl BossCoordinator {
                         step.status = BossPlanStepStatus::Rejected;
                         step.last_correction = correction.clone();
                     }
-                    false
+                    (false, None)
                 }
                 crate::core::boss_actor_runtime::ReviewDecision::ReplanStep { summary, reason } => {
                     append_review_runtime_record(
@@ -2520,11 +2608,15 @@ impl BossCoordinator {
                     step.last_review_summary = Some(summary.clone());
                     step.status = BossPlanStepStatus::ReplanRequired;
                     step.last_correction = Some(format!("replan required: {reason}"));
-                    false
+                    (false, None)
                 }
             }
         };
         self.persist_plan_if_configured().await?;
+        if let Some((outcome, blocker)) = artifact_recovery_status {
+            self.mark_routed_metadata_artifact_recovery(step_id, outcome, blocker)
+                .await;
+        }
         if should_auto_advance {
             let next_step = self
                 .plan
@@ -2533,6 +2625,8 @@ impl BossCoordinator {
                 .as_ref()
                 .and_then(|p| next_unfinished_step_id(p));
             self.update_current_step(next_step).await;
+            self.maybe_auto_advance_after_completion().await?;
+        } else if matches!(artifact_recovery_status, Some(("repair_dispatched", None))) {
             self.maybe_auto_advance_after_completion().await?;
         }
         Ok(())
@@ -2596,7 +2690,6 @@ impl BossCoordinator {
             status if status.eq_ignore_ascii_case("completed") => {
                 if let Some(reason) = step_artifact_verification_error(step) {
                     step.completed = false;
-                    step.status = BossPlanStepStatus::Failed;
                     step.worker_task_id = notification.task_id.clone();
                     step.last_review_summary = Some(reason.clone());
                     if let Some(task_id) = notification.task_id.as_deref() {
@@ -2607,6 +2700,15 @@ impl BossCoordinator {
                         "missing_or_invalid",
                         &reason,
                     );
+                    step.attempt_count += 1;
+                    let repair_instruction = build_artifact_repair_instruction(step, &reason);
+                    if step.attempt_count >= step.retry_budget {
+                        step.status = BossPlanStepStatus::Failed;
+                        step.last_correction = repair_instruction;
+                    } else {
+                        step.status = BossPlanStepStatus::Rejected;
+                        step.last_correction = repair_instruction;
+                    }
                     tracing::warn!(
                         "BossPlan: Step {} failed artifact verification via notification: {}",
                         step_id,
@@ -2715,6 +2817,19 @@ impl BossCoordinator {
             _ => None,
         };
 
+        let recovery_status =
+            plan.steps
+                .iter()
+                .find(|s| s.id == step_id)
+                .and_then(|step| match step.status {
+                    BossPlanStepStatus::Rejected => Some(("repair_dispatched", None)),
+                    BossPlanStepStatus::Failed if step.last_correction.is_some() => Some((
+                        "terminal_after_repair_exhausted",
+                        Some("artifact_verification_failed"),
+                    )),
+                    _ => None,
+                });
+
         if let Some(summary) = review_summary {
             drop(plan_guard);
             self.trigger_review_for_completed_step(step_id, summary)
@@ -2724,6 +2839,13 @@ impl BossCoordinator {
 
         let next_step = next_unfinished_step_id(plan);
         drop(plan_guard);
+        if let Some((outcome, blocker)) = recovery_status {
+            self.mark_routed_metadata_artifact_recovery(step_id, outcome, blocker)
+                .await;
+            if outcome == "repair_dispatched" {
+                self.maybe_auto_advance_after_completion().await?;
+            }
+        }
         self.update_current_step(next_step).await;
 
         Ok(())
@@ -2930,6 +3052,10 @@ impl BossCoordinator {
                             last_failure_evidence_ref: None,
                             last_failure_bounded_excerpt: None,
                             last_failure_truncated: None,
+                            recovery_attempted: None,
+                            recovery_tier: None,
+                            recovery_outcome: None,
+                            terminal_blocker_kind: None,
                             completion_evidence_status: None,
                             worker_report: None,
                         };
@@ -2990,6 +3116,10 @@ impl BossCoordinator {
                             last_failure_evidence_ref: None,
                             last_failure_bounded_excerpt: None,
                             last_failure_truncated: None,
+                            recovery_attempted: None,
+                            recovery_tier: None,
+                            recovery_outcome: None,
+                            terminal_blocker_kind: None,
                             completion_evidence_status: None,
                             worker_report: None,
                         };
@@ -3063,6 +3193,10 @@ impl BossCoordinator {
                                 last_failure_evidence_ref: None,
                                 last_failure_bounded_excerpt: None,
                                 last_failure_truncated: None,
+                                recovery_attempted: None,
+                                recovery_tier: None,
+                                recovery_outcome: None,
+                                terminal_blocker_kind: None,
                                 completion_evidence_status: None,
                                 worker_report: None,
                             };
@@ -4594,6 +4728,34 @@ mod tests {
     }
 
     #[test]
+    fn boss_metadata_records_recovery_tier_and_outcome() {
+        let mut routed_metadata = BossStepRoutedMetadata::default();
+        let usage = LoopUsage {
+            recovery_attempted: true,
+            recovery_tier: Some("artifact_repair_turn".into()),
+            recovery_outcome: Some("repair_turn_injected".into()),
+            terminal_blocker_kind: Some("same_invalid_strategy".into()),
+            ..LoopUsage::default()
+        };
+
+        BossCoordinator::apply_loop_usage_to_routed_metadata(&mut routed_metadata, &usage);
+
+        assert_eq!(routed_metadata.recovery_attempted, Some(true));
+        assert_eq!(
+            routed_metadata.recovery_tier.as_deref(),
+            Some("artifact_repair_turn")
+        );
+        assert_eq!(
+            routed_metadata.recovery_outcome.as_deref(),
+            Some("repair_turn_injected")
+        );
+        assert_eq!(
+            routed_metadata.terminal_blocker_kind.as_deref(),
+            Some("same_invalid_strategy")
+        );
+    }
+
+    #[test]
     fn boss_report_surfaces_worker_structured_report() {
         let mut routed_metadata = BossStepRoutedMetadata::default();
         let usage = LoopUsage {
@@ -4628,6 +4790,85 @@ mod tests {
                 .iter()
                 .any(|reference| reference == "tool_output:1")
         );
+    }
+
+    #[tokio::test]
+    async fn missing_artifact_after_done_escalates_to_repair_instead_of_terminal_success() {
+        let coordinator = BossCoordinator::new();
+        let target_path = std::env::temp_dir().join(format!(
+            "boss_missing_artifact_{}_{}.md",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let objective = format!(
+            "任务目标：\n- 目标文件：{}\n- 生成一份 markdown 报告",
+            target_path.display()
+        );
+        {
+            let mut plan = coordinator.plan.write().await;
+            *plan = Some(BossPlan {
+                steps: vec![BossPlanStep {
+                    id: 1,
+                    description: "write report".into(),
+                    objective: Some(objective),
+                    acceptance: vec!["target file exists and is non-empty".into()],
+                    requires_approval: false,
+                    status: BossPlanStepStatus::Reviewing,
+                    completed: false,
+                    result_diff: None,
+                    worker_task_id: None,
+                    attempt_count: 0,
+                    retry_budget: 3,
+                    last_review_summary: None,
+                    last_correction: None,
+                    review_task_id: None,
+                    tool_execution_records: Vec::new(),
+                }],
+                ..BossPlan::default()
+            });
+        }
+        {
+            let mut metadata = coordinator.routed_step_metadata.write().await;
+            metadata.insert(1, BossStepRoutedMetadata::default());
+        }
+
+        coordinator
+            .apply_review_verdict(
+                1,
+                &crate::core::boss_actor_runtime::ReviewDecision::Accept {
+                    summary: "worker says done".into(),
+                },
+            )
+            .await
+            .expect("apply review verdict");
+
+        let plan = coordinator.plan.read().await;
+        let step = plan
+            .as_ref()
+            .and_then(|plan| plan.steps.iter().find(|step| step.id == 1))
+            .expect("step");
+        assert_eq!(step.status, BossPlanStepStatus::Rejected);
+        assert!(!step.completed);
+        assert_eq!(step.attempt_count, 1);
+        let correction = step.last_correction.as_deref().expect("repair correction");
+        assert!(correction.contains(&format!("target_path={}", target_path.display())));
+        assert!(correction.contains("recommended_write_strategy=write_exact_target_file"));
+
+        let routed_metadata = coordinator.routed_step_metadata.read().await;
+        let metadata = routed_metadata.get(&1).expect("routed metadata");
+        assert_eq!(metadata.recovery_attempted, Some(true));
+        assert_eq!(
+            metadata.recovery_tier.as_deref(),
+            Some("boss_artifact_repair")
+        );
+        assert_eq!(
+            metadata.recovery_outcome.as_deref(),
+            Some("repair_dispatched")
+        );
+        assert_eq!(metadata.terminal_blocker_kind, None);
     }
 
     #[tokio::test]

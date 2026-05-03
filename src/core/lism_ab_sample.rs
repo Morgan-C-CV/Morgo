@@ -97,6 +97,14 @@ pub struct LisMAbSampleRecord {
     pub last_failure_kinds: Vec<String>,
     #[serde(default)]
     pub last_recommended_repairs: Vec<String>,
+    #[serde(default)]
+    pub recovery_attempted: bool,
+    #[serde(default)]
+    pub recovery_tiers: Vec<String>,
+    #[serde(default)]
+    pub recovery_outcomes: Vec<String>,
+    #[serde(default)]
+    pub terminal_blocker_kinds: Vec<String>,
     pub pending_approval_count: usize,
     pub outcome: BossTestRunOutcome,
 }
@@ -729,6 +737,10 @@ fn build_ab_record(
     let mut tool_contract_mismatch_count = 0usize;
     let mut last_failure_kinds = BTreeMap::new();
     let mut last_recommended_repairs = BTreeMap::new();
+    let mut recovery_attempted = false;
+    let mut recovery_tiers = BTreeMap::new();
+    let mut recovery_outcomes = BTreeMap::new();
+    let mut terminal_blocker_kinds = BTreeMap::new();
     for step in &report.steps {
         let Some(meta) = step.routed_metadata.as_ref() else {
             continue;
@@ -763,6 +775,16 @@ fn build_ab_record(
         }
         if let Some(repair) = meta.last_recommended_repair.as_ref() {
             last_recommended_repairs.insert(repair.clone(), ());
+        }
+        recovery_attempted |= meta.recovery_attempted.unwrap_or(false);
+        if let Some(tier) = meta.recovery_tier.as_ref() {
+            recovery_tiers.insert(tier.clone(), ());
+        }
+        if let Some(outcome) = meta.recovery_outcome.as_ref() {
+            recovery_outcomes.insert(outcome.clone(), ());
+        }
+        if let Some(kind) = meta.terminal_blocker_kind.as_ref() {
+            terminal_blocker_kinds.insert(kind.clone(), ());
         }
     }
 
@@ -824,6 +846,10 @@ fn build_ab_record(
         tool_contract_mismatch_count,
         last_failure_kinds: last_failure_kinds.into_keys().collect(),
         last_recommended_repairs: last_recommended_repairs.into_keys().collect(),
+        recovery_attempted,
+        recovery_tiers: recovery_tiers.into_keys().collect(),
+        recovery_outcomes: recovery_outcomes.into_keys().collect(),
+        terminal_blocker_kinds: terminal_blocker_kinds.into_keys().collect(),
         pending_approval_count,
         outcome,
     }
