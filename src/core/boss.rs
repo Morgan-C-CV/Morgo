@@ -5815,6 +5815,156 @@ mod tests {
     }
 
     #[test]
+    fn unsupported_selector_is_not_reported_as_generic_no_progress() {
+        let mut routed_metadata = BossStepRoutedMetadata::default();
+        let usage = LoopUsage {
+            terminal_blocker_kind: Some("unsupported_selector".into()),
+            recovery_outcome: Some("unsupported_selector".into()),
+            ..LoopUsage::default()
+        };
+
+        BossCoordinator::apply_loop_usage_to_routed_metadata(&mut routed_metadata, &usage);
+
+        assert_eq!(
+            routed_metadata
+                .step_failure_classification
+                .as_ref()
+                .map(|classification| classification.as_str()),
+            Some("unsupported_request")
+        );
+        assert!(!format!("{:?}", routed_metadata).contains("generic_failure"));
+    }
+
+    #[test]
+    fn writable_artifact_recovery_is_reported_as_repairable_recovery() {
+        let mut routed_metadata = BossStepRoutedMetadata::default();
+        let usage = LoopUsage {
+            recovery_attempted: true,
+            recovery_tier: Some("artifact_repair_turn".into()),
+            recovery_outcome: Some("repair_turn_injected".into()),
+            completion_evidence_status: Some(CompletionEvidenceStatus::MissingArtifactEvidence),
+            ..LoopUsage::default()
+        };
+
+        BossCoordinator::apply_loop_usage_to_routed_metadata(&mut routed_metadata, &usage);
+
+        assert_eq!(
+            routed_metadata
+                .step_failure_classification
+                .as_ref()
+                .map(|classification| classification.as_str()),
+            Some("repairable_recovery")
+        );
+    }
+
+    #[test]
+    fn verification_gap_repair_continuation_surfaces_in_step_state_and_report() {
+        let report = BossReportPayload {
+            stage: BossStage::Execution,
+            current_step: Some(1),
+            total_steps: Some(1),
+            designer_a: BossActorHandle::new("a", "s", BossActorRole::DesignerA),
+            executor_b: BossActorHandle::new("b", "s", BossActorRole::ExecutorB),
+            active_children: Vec::new(),
+            steps: vec![BossStepReport {
+                id: 1,
+                status: BossPlanStepStatus::Rejected,
+                worker_task_id: None,
+                attempt_count: 1,
+                last_review_summary: Some("verify again".into()),
+                action_required: None,
+                blocker_reason: None,
+                routed_metadata: Some(BossStepRoutedMetadata {
+                    step_failure_classification: Some(
+                        StepFailureClassification::VerificationRepairContinuation,
+                    ),
+                    recovery_outcome: Some("repair_turn_injected".into()),
+                    completion_evidence_status: Some("missing_verification_evidence".into()),
+                    ..BossStepRoutedMetadata::default()
+                }),
+                stage_execution_contract: StageExecutionContract::default(),
+                stage_continuation_context: Some(crate::core::state_frame::StageContinuationContext {
+                    repair_intent: Some(crate::core::state_frame::RepairIntent {
+                        failed_target: Some("/tmp/report.md".into()),
+                        verified_facts: vec!["fact: verified".into()],
+                        next_action: Some("run_verification".into()),
+                        continuity_mode: Some(crate::core::state_frame::ContinuityMode::Repair),
+                    }),
+                    failed_target: Some("/tmp/report.md".into()),
+                    verified_facts: vec!["fact: verified".into()],
+                    next_action: Some("run_verification".into()),
+                    continuity_mode: Some(crate::core::state_frame::ContinuityMode::Repair),
+                }),
+                executor_b_stage_memory: None,
+            }],
+            history_summary: Vec::new(),
+            observability_summary: None,
+            rollout_policy_decision: None,
+            success_classification: None,
+            lism_policy: BossLisMPolicy::Inherit,
+            stage_execution_contract: StageExecutionContract::default(),
+            stage_continuation_context: Some(crate::core::state_frame::StageContinuationContext {
+                repair_intent: Some(crate::core::state_frame::RepairIntent {
+                    failed_target: Some("/tmp/report.md".into()),
+                    verified_facts: vec!["fact: verified".into()],
+                    next_action: Some("run_verification".into()),
+                    continuity_mode: Some(crate::core::state_frame::ContinuityMode::Repair),
+                }),
+                failed_target: Some("/tmp/report.md".into()),
+                verified_facts: vec!["fact: verified".into()],
+                next_action: Some("run_verification".into()),
+                continuity_mode: Some(crate::core::state_frame::ContinuityMode::Repair),
+            }),
+            executor_b_stage_memory: None,
+        };
+
+        assert!(matches!(
+            report.steps[0]
+                .routed_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.step_failure_classification.as_ref()),
+            Some(StepFailureClassification::VerificationRepairContinuation)
+        ));
+        assert!(report
+            .format_report()
+            .contains("failure_class=verification_repair_continuation"));
+        assert_eq!(
+            report
+                .stage_continuation_context
+                .as_ref()
+                .and_then(|context| context.next_action.as_deref()),
+            Some("run_verification")
+        );
+    }
+
+    #[test]
+    fn true_external_blocker_does_not_enter_repairable_path() {
+        let mut routed_metadata = BossStepRoutedMetadata::default();
+        let usage = LoopUsage {
+            terminal_blocker_kind: Some("true_external_blocker".into()),
+            recovery_outcome: Some("external_blocker".into()),
+            ..LoopUsage::default()
+        };
+
+        BossCoordinator::apply_loop_usage_to_routed_metadata(&mut routed_metadata, &usage);
+
+        assert_eq!(
+            routed_metadata
+                .step_failure_classification
+                .as_ref()
+                .map(|classification| classification.as_str()),
+            Some("true_external_blocker")
+        );
+        assert_ne!(
+            routed_metadata
+                .step_failure_classification
+                .as_ref()
+                .map(|classification| classification.as_str()),
+            Some("repairable_recovery")
+        );
+    }
+
+    #[test]
     fn boss_metadata_records_success_classification() {
         let mut routed_metadata = BossStepRoutedMetadata {
             completion_evidence_status: Some("sufficient".into()),
@@ -6877,8 +7027,16 @@ mod tests {
             session_snapshot: None,
         };
 
-        let temp_dir = std::env::temp_dir();
-        let plan_path = temp_dir.join("boss_test_plan.json");
+        let temp_dir = std::env::temp_dir().join(format!(
+            "boss_test_plan_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let plan_path = temp_dir.join("planning.json");
 
         save_plan(&plan, &plan_path).await.unwrap();
         let loaded = load_plan(&plan_path).await.unwrap();
@@ -6887,7 +7045,8 @@ mod tests {
         assert_eq!(loaded.document_spec, "Spec v1");
         assert!(loaded.accepted_by_user);
 
-        std::fs::remove_file(plan_path).unwrap();
+        std::fs::remove_file(&plan_path).unwrap();
+        std::fs::remove_dir_all(temp_dir).unwrap();
     }
 
     #[test]
@@ -6902,8 +7061,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_restore_or_init_handles_state_properly() {
-        let temp_dir = std::env::temp_dir();
-        let plan_path = temp_dir.join("boss_test_restore_plan.json");
+        let temp_dir = std::env::temp_dir().join(format!(
+            "boss_test_restore_plan_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let plan_path = temp_dir.join("planning.json");
 
         // 1. Init without file
         let new_coordinator = BossCoordinator::restore_or_init(&plan_path).await.unwrap();
@@ -6957,7 +7124,8 @@ mod tests {
         assert_eq!(restored.get_stage().await, BossStage::Execution);
         assert_eq!(restored.status.read().await.current_step, Some(0));
 
-        std::fs::remove_file(plan_path).unwrap();
+        std::fs::remove_file(&plan_path).unwrap();
+        std::fs::remove_dir_all(temp_dir).unwrap();
     }
 
     #[tokio::test]
