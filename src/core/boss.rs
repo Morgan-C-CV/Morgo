@@ -3838,6 +3838,60 @@ impl BossCoordinator {
         Ok(())
     }
 
+    pub async fn sync_terminal_child_task_state(
+        &self,
+        tasks: &TaskManager,
+    ) -> anyhow::Result<bool> {
+        let terminal_step = {
+            let plan_guard = self.plan.read().await;
+            let Some(plan) = plan_guard.as_ref() else {
+                return Ok(false);
+            };
+            plan.steps.iter().find_map(|step| {
+                if step.status != BossPlanStepStatus::Running {
+                    return None;
+                }
+                let task_id = step.worker_task_id.as_ref()?;
+                let status = tasks.status(task_id)?;
+                if matches!(
+                    status,
+                    TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Killed
+                ) {
+                    Some((step.id, task_id.clone(), status))
+                } else {
+                    None
+                }
+            })
+        };
+
+        let Some((step_id, task_id, status)) = terminal_step else {
+            return Ok(false);
+        };
+
+        let record = tasks
+            .get(&task_id)
+            .ok_or_else(|| anyhow::anyhow!("unknown child task {task_id}"))?;
+        let event = TaskEvent {
+            owner: record.owner.clone(),
+            target_task_id: Some(task_id.clone()),
+            task_id: task_id.clone(),
+            task_type: record.task_type,
+            status,
+            summary: String::new(),
+            result: String::new(),
+            next_action: String::new(),
+            worker_role: record.worker_role,
+            orchestration_group_id: record.orchestration_group_id.clone(),
+            phase: record.phase,
+            validation_state: record.validation_state,
+            step_id: Some(step_id),
+            output_file: record.output_file,
+            usage: record.usage.clone(),
+        };
+        self.on_task_event(&event).await?;
+        Ok(true)
+    }
+
     async fn advance_once(
         &self,
         app_state: &Arc<crate::state::app_state::AppState>,
@@ -5742,21 +5796,307 @@ impl BossCoordinator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
+    use crate::cost::tracker::CostTracker;
     use crate::core::state_frame::{
         AgentState, CompletionEvidenceGap, CompletionEvidenceStatus, ContinuityMode,
         DeclaredArtifactContract, RepairIntent, WorkerStructuredReport,
     };
     use crate::core::boss_state::BossActorRole;
     use crate::core::state_frame_loop::LoopUsage;
+    use crate::interaction::dispatcher::NotificationDispatcher;
+    use crate::interaction::telegram::gateway::TelegramGateway;
+    use crate::service::observability::ServiceObservabilityTracker;
+    use crate::state::app_state::{
+        ActiveModelProfileSource, ActiveModelProviderSummary, AppState, RuntimeRole,
+    };
+    use crate::state::permission_context::{PermissionMode, ToolPermissionContext};
+    use crate::task::manager::TaskManager;
+    use crate::task::types::{TaskStatus, TaskType};
     use crate::tool::result::{
         ToolBatchContext, ToolExecutionOutcomeKind, ToolExecutionRecord, ToolOutcome,
         ToolOutcomeKind, ToolReportModifier,
     };
+    use std::sync::atomic::AtomicU64;
+    use std::sync::{Arc, Mutex};
+    use tokio_util::sync::CancellationToken;
+
+    fn test_app_state_with_tasks(
+        task_manager: Arc<TaskManager>,
+        boss: Arc<BossCoordinator>,
+    ) -> Arc<AppState> {
+        let dispatcher = NotificationDispatcher::new(TelegramGateway::default())
+            .with_boss_coordinator(boss.clone());
+        let permission_context = ToolPermissionContext::new(PermissionMode::Default)
+            .with_task_manager(task_manager)
+            .with_active_session_id("test-session")
+            .with_active_surface(InteractionSurface::Cli)
+            .with_notification_dispatcher(dispatcher.clone())
+            .with_boss_coordinator(boss);
+        Arc::new(AppState {
+            surface: InteractionSurface::Cli,
+            session_mode: SessionMode::Headless,
+            client_type: ClientType::Cli,
+            session_source: SessionSource::LocalCli,
+            runtime_role: RuntimeRole::Coordinator,
+            worker_role: None,
+            permission_context,
+            command_registry: None,
+            runtime_tool_registry: None,
+            skill_registry: None,
+            mcp_runtime: None,
+            plugin_load_result: None,
+            cost_tracker: CostTracker::default(),
+            service_observability_tracker: ServiceObservabilityTracker::default(),
+            notification_dispatcher: dispatcher,
+            audit_log: Arc::new(Mutex::new(crate::security::audit::AuditLog::default())),
+            startup_trace: Vec::new(),
+            active_model_runtime: None,
+            active_model_profile_name: None,
+            active_model_profile_source: ActiveModelProfileSource::BootstrapDefault,
+            active_model_provider_summary: ActiveModelProviderSummary {
+                provider_id: "test-provider".into(),
+                protocol: "MessagesApi".into(),
+                compatibility_profile: "MessagesApi".into(),
+                base_url_host: "localhost".into(),
+                model: "test-model".into(),
+                auth_status: "unset".into(),
+            },
+            active_session_id: "test-session".into(),
+            session_store: None,
+            session: None,
+            history: None,
+            restored_session: None,
+            last_activity_ts: Arc::new(AtomicU64::new(0)),
+            cancellation_token: CancellationToken::new(),
+            subagent_limiter: None,
+            boss_coordinator: None,
+            remote_actor_store: None,
+        })
+    }
 
     #[tokio::test]
     async fn test_boss_coordinator_initial_stage_is_documentation() {
         let coordinator = BossCoordinator::new();
         assert_eq!(coordinator.get_stage().await, BossStage::Documentation);
+    }
+
+    #[tokio::test]
+    async fn completed_child_task_advances_boss_state_immediately() {
+        let coordinator = Arc::new(BossCoordinator::new());
+        let tasks = Arc::new(TaskManager::new_with_output_root(std::env::temp_dir()));
+        let app_state = test_app_state_with_tasks(tasks.clone(), coordinator.clone());
+        coordinator
+            .attach_app_state_for_report_testing(app_state.clone())
+            .await;
+        {
+            let mut status = coordinator.status.write().await;
+            status.stage = BossStage::Execution;
+            status.current_step = Some(0);
+        }
+        {
+            let mut plan = coordinator.plan.write().await;
+            *plan = Some(BossPlan {
+                accepted_by_user: true,
+                auto_sequence: true,
+                steps: vec![BossPlanStep {
+                    id: 0,
+                    description: "run worker".into(),
+                    objective: Some("write artifact".into()),
+                    acceptance: Vec::new(),
+                    requires_approval: false,
+                    status: BossPlanStepStatus::Running,
+                    completed: false,
+                    result_diff: None,
+                    worker_task_id: Some("task-0".into()),
+                    attempt_count: 0,
+                    retry_budget: 3,
+                    last_review_summary: None,
+                    last_correction: None,
+                    stage_continuation_context: None,
+                    executor_b_stage_memory: None,
+                    review_task_id: None,
+                    tool_execution_records: Vec::new(),
+                }],
+                ..BossPlan::default()
+            });
+        }
+        let record = tasks.create_with_type(
+            "worker",
+            TaskType::LocalAgent,
+            "test-session",
+            InteractionSurface::Cli,
+        );
+        assert_eq!(record.id, "task-0");
+        tasks.start("task-0");
+        let dispatcher = NotificationDispatcher::new(TelegramGateway::default())
+            .with_boss_coordinator(coordinator.clone());
+        tasks.complete("task-0", &dispatcher);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        coordinator
+            .sync_terminal_child_task_state(tasks.as_ref())
+            .await
+            .expect("sync");
+        coordinator.advance_plan(&app_state).await.expect("advance");
+
+        let plan = coordinator.plan.read().await;
+        let step = &plan.as_ref().expect("plan").steps[0];
+        assert_eq!(step.status, BossPlanStepStatus::Completed);
+        assert!(step.completed);
+        assert_eq!(coordinator.get_stage().await, BossStage::Completed);
+    }
+
+    #[tokio::test]
+    async fn outer_coordinator_does_not_poll_completed_child_until_timeout() {
+        let coordinator = Arc::new(BossCoordinator::new());
+        let tasks = Arc::new(TaskManager::new_with_output_root(std::env::temp_dir()));
+        let app_state = test_app_state_with_tasks(tasks.clone(), coordinator.clone());
+        coordinator
+            .attach_app_state_for_report_testing(app_state.clone())
+            .await;
+        {
+            let mut status = coordinator.status.write().await;
+            status.stage = BossStage::Execution;
+            status.current_step = Some(0);
+        }
+        {
+            let mut plan = coordinator.plan.write().await;
+            *plan = Some(BossPlan {
+                accepted_by_user: true,
+                auto_sequence: true,
+                steps: vec![BossPlanStep {
+                    id: 0,
+                    description: "run worker".into(),
+                    objective: Some("write artifact".into()),
+                    acceptance: Vec::new(),
+                    requires_approval: false,
+                    status: BossPlanStepStatus::Running,
+                    completed: false,
+                    result_diff: None,
+                    worker_task_id: Some("task-0".into()),
+                    attempt_count: 0,
+                    retry_budget: 3,
+                    last_review_summary: None,
+                    last_correction: None,
+                    stage_continuation_context: None,
+                    executor_b_stage_memory: None,
+                    review_task_id: None,
+                    tool_execution_records: Vec::new(),
+                }],
+                ..BossPlan::default()
+            });
+        }
+        let record = tasks.create_with_type(
+            "worker",
+            TaskType::LocalAgent,
+            "test-session",
+            InteractionSurface::Cli,
+        );
+        assert_eq!(record.id, "task-0");
+        tasks.start("task-0");
+        let dispatcher = NotificationDispatcher::new(TelegramGateway::default())
+            .with_boss_coordinator(coordinator.clone());
+        tasks.complete("task-0", &dispatcher);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        coordinator
+            .sync_terminal_child_task_state(tasks.as_ref())
+            .await
+            .expect("sync");
+        let message = coordinator.advance_plan(&app_state).await.expect("advance");
+
+        assert!(
+            message
+                .as_deref()
+                .is_some_and(|value| value.contains("Boss plan complete"))
+        );
+        assert_ne!(coordinator.get_stage().await, BossStage::Execution);
+    }
+
+    #[tokio::test]
+    async fn terminal_child_status_syncs_boss_state_before_wait_loop() {
+        let coordinator = Arc::new(BossCoordinator::new());
+        let tasks = Arc::new(TaskManager::new_with_output_root(std::env::temp_dir()));
+        let app_state = test_app_state_with_tasks(tasks.clone(), coordinator.clone());
+        coordinator
+            .attach_app_state_for_report_testing(app_state.clone())
+            .await;
+        {
+            let mut status = coordinator.status.write().await;
+            status.stage = BossStage::Execution;
+            status.current_step = Some(0);
+        }
+        {
+            let mut plan = coordinator.plan.write().await;
+            *plan = Some(BossPlan {
+                accepted_by_user: true,
+                auto_sequence: true,
+                steps: vec![BossPlanStep {
+                    id: 0,
+                    description: "run worker".into(),
+                    objective: Some("write artifact".into()),
+                    acceptance: vec!["artifact verification passed".into()],
+                    requires_approval: false,
+                    status: BossPlanStepStatus::Running,
+                    completed: false,
+                    result_diff: None,
+                    worker_task_id: Some("task-0".into()),
+                    attempt_count: 0,
+                    retry_budget: 3,
+                    last_review_summary: None,
+                    last_correction: None,
+                    stage_continuation_context: None,
+                    executor_b_stage_memory: None,
+                    review_task_id: None,
+                    tool_execution_records: Vec::new(),
+                }],
+                ..BossPlan::default()
+            });
+        }
+        let record = tasks.create_with_type(
+            "worker",
+            TaskType::LocalAgent,
+            "test-session",
+            InteractionSurface::Cli,
+        );
+        assert_eq!(record.id, "task-0");
+        tasks.start("task-0");
+
+        {
+            let mut plan = coordinator.plan.write().await;
+            let step = &mut plan.as_mut().expect("plan").steps[0];
+            step.status = BossPlanStepStatus::Running;
+        }
+
+        let event = crate::task::types::TaskEvent {
+            owner: crate::task::types::TaskOwner {
+                session_id: "test-session".into(),
+                surface: InteractionSurface::Cli,
+            },
+            target_task_id: Some("task-0".into()),
+            task_id: "task-0".into(),
+            task_type: TaskType::LocalAgent,
+            status: TaskStatus::Completed,
+            summary: String::new(),
+            result: String::new(),
+            next_action: String::new(),
+            worker_role: None,
+            orchestration_group_id: None,
+            phase: None,
+            validation_state: None,
+            step_id: Some(0),
+            output_file: record.output_file,
+            usage: None,
+        };
+        coordinator.on_task_event(&event).await.expect("event");
+        coordinator.advance_plan(&app_state).await.expect("advance");
+
+        let plan = coordinator.plan.read().await;
+        let step = &plan.as_ref().expect("plan").steps[0];
+        assert_eq!(step.status, BossPlanStepStatus::Completed);
+        assert!(step.completed);
+        assert_eq!(coordinator.status.read().await.current_step, None);
     }
 
     #[tokio::test]

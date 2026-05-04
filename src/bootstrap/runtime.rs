@@ -715,6 +715,11 @@ impl RuntimeBootstrap {
                         println!(
                             "[boss-task] step task reached terminal status; syncing boss state"
                         );
+                        if let Some(task_manager) = app_arc.permission_context.task_manager.as_ref()
+                        {
+                            let synced = boss.sync_terminal_child_task_state(task_manager).await;
+                            println!("[boss-task] terminal child sync result: {:?}", synced);
+                        }
                         let terminal_msg = boss.advance_plan(&app_arc).await;
                         println!(
                             "[boss-task] terminal advance_plan result: {:?}",
