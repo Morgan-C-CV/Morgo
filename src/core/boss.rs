@@ -553,6 +553,18 @@ fn apply_step_failure_classification(
     }
 }
 
+fn should_emit_terminal_aborted_sample(repair_continuation_dispatched: bool) -> bool {
+    !repair_continuation_dispatched
+}
+
+fn should_continue_repairable_failure(
+    failure_classification: StepFailureClassification,
+    step_status: BossPlanStepStatus,
+) -> bool {
+    classify_repairable_failure(failure_classification)
+        && step_status == BossPlanStepStatus::Rejected
+}
+
 fn push_unique_memory_item(items: &mut Vec<String>, item: Option<String>, limit: usize) {
     let Some(item) = item.map(|value| value.trim().to_string()) else {
         return;
@@ -4383,7 +4395,8 @@ impl BossCoordinator {
                                 ..
                             } => {
                                 let reason_clone = reason.clone();
-                                {
+                                let repairable_continuation_dispatched = {
+                                    let mut dispatched = false;
                                     let mut plan_guard = self.plan.write().await;
                                     let plan = plan_guard
                                         .as_mut()
@@ -4400,28 +4413,46 @@ impl BossCoordinator {
                                         failure_classification,
                                         &reason_clone,
                                     );
-                                }
+                                    dispatched = should_continue_repairable_failure(
+                                        failure_classification,
+                                        step.status,
+                                    );
+                                    dispatched
+                                };
                                 self.update_current_step(Some(step_id)).await;
-                                if self.get_stage().await != BossStage::Documentation {
+                                if !repairable_continuation_dispatched
+                                    && self.get_stage().await != BossStage::Documentation
+                                {
                                     self.transition_to(BossStage::Documentation).await?;
                                 }
                                 if let Some(path) = self.status.read().await.planning_file.clone() {
                                     self.save_plan_with_session(std::path::Path::new(&path))
                                         .await?;
                                 }
-                                let run_id = self.current_run_id().await;
-                                let lism_enabled = effective_lism_enabled(
-                                    self.lism_policy().await,
-                                    app_state.permission_context.lism_enabled(),
-                                );
-                                self.emit_lism_sample(
-                                    &run_id,
-                                    lism_enabled,
-                                    BossTestRunOutcome::Aborted,
-                                    0,
-                                )
-                                .await;
-                                return Ok(Some(if classify_repairable_failure(failure_classification) {
+                                if repairable_continuation_dispatched {
+                                    self.mark_routed_metadata_artifact_recovery(
+                                        step_id,
+                                        "repair_dispatched",
+                                        None,
+                                    )
+                                    .await;
+                                } else if should_emit_terminal_aborted_sample(
+                                    repairable_continuation_dispatched,
+                                ) {
+                                    let run_id = self.current_run_id().await;
+                                    let lism_enabled = effective_lism_enabled(
+                                        self.lism_policy().await,
+                                        app_state.permission_context.lism_enabled(),
+                                    );
+                                    self.emit_lism_sample(
+                                        &run_id,
+                                        lism_enabled,
+                                        BossTestRunOutcome::Aborted,
+                                        0,
+                                    )
+                                    .await;
+                                }
+                                return Ok(Some(if repairable_continuation_dispatched {
                                     format!(
                                         "LisM routed boss step {} into repair continuation: {}",
                                         step_id, reason_clone
@@ -4586,7 +4617,11 @@ impl BossCoordinator {
                 let guard = self.plan.read().await;
                 guard.as_ref().is_some_and(|plan| {
                     plan.auto_sequence
-                        && plan.steps.iter().any(|step| step.completed)
+                        && (plan.steps.iter().any(|step| step.completed)
+                            || plan
+                                .steps
+                                .iter()
+                                .any(|step| step.status == BossPlanStepStatus::Rejected))
                         && !plan.steps.iter().all(|step| step.completed)
                         && !plan
                             .steps
@@ -6069,6 +6104,74 @@ mod tests {
 
         assert_eq!(step.status, BossPlanStepStatus::Failed);
         assert!(step.stage_continuation_context.is_none());
+    }
+
+    #[tokio::test]
+    async fn repairable_continuation_does_not_emit_terminal_aborted_sample_early() {
+        let sink = crate::core::lism_ab_sample::new_shared_ab_sink();
+        let coordinator = BossCoordinator::new().with_lism_ab_sink(sink.clone());
+        let target_path = std::env::temp_dir().join(format!(
+            "boss_repairable_continuation_{}_{}.md",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+
+        {
+            let mut plan = coordinator.plan.write().await;
+            *plan = Some(BossPlan {
+                accepted_by_user: true,
+                auto_sequence: true,
+                steps: vec![BossPlanStep {
+                    id: 0,
+                    description: "write artifact".into(),
+                    objective: Some(format!("任务目标：\n- 目标文件：{}\n- 生成报告", target_path.display())),
+                    acceptance: vec!["target file exists and is non-empty".into()],
+                    requires_approval: false,
+                    status: BossPlanStepStatus::Rejected,
+                    completed: false,
+                    result_diff: None,
+                    worker_task_id: Some("task-1".into()),
+                    attempt_count: 1,
+                    retry_budget: 3,
+                    last_review_summary: Some("artifact verification failed".into()),
+                    last_correction: Some("repair artifact".into()),
+                    stage_continuation_context: Some(crate::core::state_frame::StageContinuationContext {
+                        failed_target: Some(target_path.display().to_string()),
+                        verified_facts: vec!["fact: verified".into()],
+                        next_action: Some("repair artifact".into()),
+                        continuity_mode: Some(crate::core::state_frame::ContinuityMode::Repair),
+                        repair_intent: Some(crate::core::state_frame::RepairIntent {
+                            failed_target: Some(target_path.display().to_string()),
+                            verified_facts: vec!["fact: verified".into()],
+                            next_action: Some("repair artifact".into()),
+                            continuity_mode: Some(crate::core::state_frame::ContinuityMode::Repair),
+                        }),
+                    }),
+                    executor_b_stage_memory: None,
+                    review_task_id: None,
+                    tool_execution_records: Vec::new(),
+                }],
+                ..BossPlan::default()
+            });
+        }
+        {
+            let mut status = coordinator.status.write().await;
+            status.stage = BossStage::Execution;
+            status.current_step = Some(0);
+        }
+
+        let report = coordinator.build_lism_sample_report(None).await;
+        assert_eq!(
+            report.steps[0]
+                .stage_continuation_context
+                .as_ref()
+                .and_then(|context| context.next_action.as_deref()),
+            Some("repair artifact")
+        );
+        assert!(sink.records().is_empty());
     }
 
     #[test]
