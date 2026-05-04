@@ -97,9 +97,11 @@ fn build_command(plan: SandboxExecutionPlan, command: &str, cwd: &Path) -> Comma
     let mut process = match plan.runner {
         SandboxRunner::DirectShell => {
             let mut process = Command::new("/bin/sh");
+            process.kill_on_drop(true);
             process.arg("-lc").arg(command);
             process
         }
+
     };
 
     process

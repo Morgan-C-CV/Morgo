@@ -397,6 +397,7 @@ async fn run_background_process(
 ) -> anyhow::Result<ClampedProcessOutput> {
     let mut process = Command::new("/bin/sh");
     process
+        .kill_on_drop(true)
         .arg("-lc")
         .arg(command)
         .current_dir(cwd)
@@ -404,6 +405,7 @@ async fn run_background_process(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .env("RUST_AGENT_SANDBOX_POLICY", format!("{:?}", policy));
+
 
     let mut child = process
         .spawn()
