@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
+use crate::core::boss_acceptance::canonicalize_artifact_expectations;
 use crate::core::boss_state::BossReportPayload;
 use crate::core::boss_test_readiness::BossTestRunOutcome;
 // ── Record ────────────────────────────────────────────────────────────────────
@@ -850,6 +851,16 @@ fn build_ab_record(
             automatic_fallback_targets.insert(formatted, ());
         }
     }
+    let missing_artifact_evidence_targets = canonicalize_artifact_target_strings(
+        missing_artifact_evidence_targets.into_keys().collect(),
+    );
+    let missing_verification_evidence_targets = canonicalize_artifact_target_strings(
+        missing_verification_evidence_targets.into_keys().collect(),
+    );
+    let rollout_denylist_targets =
+        canonicalize_artifact_target_strings(rollout_denylist_targets.into_keys().collect());
+    let automatic_fallback_targets =
+        canonicalize_artifact_target_strings(automatic_fallback_targets.into_keys().collect());
 
     LisMAbSampleRecord {
         run_id,
@@ -916,16 +927,29 @@ fn build_ab_record(
         terminal_blocker_kinds: terminal_blocker_kinds.into_keys().collect(),
         step_failure_classifications: step_failure_classifications.into_keys().collect(),
         latest_step_failure_classification,
-        missing_artifact_evidence_targets: missing_artifact_evidence_targets.into_keys().collect(),
-        missing_verification_evidence_targets: missing_verification_evidence_targets
-            .into_keys()
-            .collect(),
-        rollout_denylist_targets: rollout_denylist_targets.into_keys().collect(),
-        automatic_fallback_targets: automatic_fallback_targets.into_keys().collect(),
+        missing_artifact_evidence_targets,
+        missing_verification_evidence_targets,
+        rollout_denylist_targets,
+        automatic_fallback_targets,
         success_classification,
         pending_approval_count,
         outcome,
     }
+}
+
+fn canonicalize_artifact_target_strings(targets: Vec<String>) -> Vec<String> {
+    canonicalize_artifact_expectations(
+        targets
+            .into_iter()
+            .map(|target| crate::core::boss_acceptance::BossArtifactExpectation {
+                path: std::path::PathBuf::from(target),
+                kind: crate::core::boss_acceptance::BossArtifactKind::File,
+            })
+            .collect(),
+    )
+    .into_iter()
+    .map(|expectation| expectation.path.to_string_lossy().to_string())
+    .collect()
 }
 
 fn summarize_records(records: &[LisMAbSampleRecord]) -> LisMAbSummary {
@@ -1125,6 +1149,95 @@ mod tests {
 
         assert!(record.rollout_denylist_targets.is_empty());
         assert!(record.automatic_fallback_targets.is_empty());
+    }
+
+    #[test]
+    fn ab_sample_drops_pseudo_targets_from_gap_aggregation() {
+        let report = BossReportPayload {
+            stage: BossStage::Execution,
+            current_step: Some(1),
+            total_steps: Some(1),
+            designer_a: empty_actor(),
+            executor_b: empty_actor(),
+            active_children: Vec::new(),
+            steps: vec![BossStepReport {
+                id: 1,
+                status: BossPlanStepStatus::Rejected,
+                worker_task_id: None,
+                attempt_count: 1,
+                last_review_summary: Some("repair".into()),
+                action_required: None,
+                blocker_reason: None,
+                routed_metadata: Some(BossStepRoutedMetadata {
+                    completion_evidence_gaps: vec![
+                        CompletionEvidenceGap {
+                            target_ref: "artifact:contract:1".into(),
+                            target_path: Some("/tmp/report.md".into()),
+                            missing_artifact_evidence: true,
+                            missing_test_evidence: false,
+                            missing_verification_evidence: false,
+                            recommended_action: "write_artifact".into(),
+                        },
+                        CompletionEvidenceGap {
+                            target_ref: "/boss".into(),
+                            target_path: Some("/".into()),
+                            missing_artifact_evidence: true,
+                            missing_test_evidence: false,
+                            missing_verification_evidence: false,
+                            recommended_action: "write_artifact".into(),
+                        },
+                    ],
+                    ..BossStepRoutedMetadata::default()
+                }),
+                stage_execution_contract: StageExecutionContract::default(),
+                stage_continuation_context: None,
+                        executor_b_stage_memory: None,
+            }],
+            history_summary: Vec::new(),
+            observability_summary: None,
+            rollout_policy_decision: Some(BossRolloutPolicyDecision {
+                denylist_targets: vec![
+                    BossRolloutTargetDecision {
+                        target_ref: "artifact:contract:1".into(),
+                        target_path: Some("/tmp/report.md".into()),
+                        missing_evidence_kinds: vec!["artifact_evidence".into()],
+                        recommended_policy: "denylist_direct_worker_lism".into(),
+                        recommended_fallback: "full_worker_dispatch".into(),
+                    },
+                    BossRolloutTargetDecision {
+                        target_ref: "/boss".into(),
+                        target_path: Some("/".into()),
+                        missing_evidence_kinds: vec!["artifact_evidence".into()],
+                        recommended_policy: "denylist_direct_worker_lism".into(),
+                        recommended_fallback: "full_worker_dispatch".into(),
+                    },
+                ],
+                fallback_targets: vec![],
+                summary: "mixed targets".into(),
+            }),
+            success_classification: None,
+            lism_policy: Default::default(),
+            stage_execution_contract: StageExecutionContract::default(),
+            stage_continuation_context: None,
+                        executor_b_stage_memory: None,
+        };
+
+        let record = build_ab_record(
+            "run-3".into(),
+            true,
+            &report,
+            BossTestRunOutcome::Aborted,
+            0,
+        );
+
+        assert_eq!(
+            record.missing_artifact_evidence_targets,
+            vec!["artifact:contract:1:/tmp/report.md".to_string()]
+        );
+        assert_eq!(
+            record.rollout_denylist_targets,
+            vec!["artifact:contract:1:/tmp/report.md".to_string()]
+        );
     }
 
     #[test]

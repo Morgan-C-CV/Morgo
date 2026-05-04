@@ -7491,6 +7491,23 @@ mod tests {
     }
 
     #[test]
+    fn artifact_expectations_drop_pseudo_targets_before_real_targets() {
+        let expectations = extract_artifact_expectations(
+            "任务目标：\n- /boss\n- /\n- 目标文件：/tmp/example/report.md\n- 目标目录：/tmp/example/output/",
+        );
+
+        assert_eq!(expectations.len(), 2);
+        assert!(expectations.iter().all(|item| item.path != PathBuf::from("/boss")));
+        assert!(expectations.iter().all(|item| item.path != PathBuf::from("/")));
+        assert!(expectations
+            .iter()
+            .any(|item| item.path == PathBuf::from("/tmp/example/report.md")));
+        assert!(expectations
+            .iter()
+            .any(|item| item.path == PathBuf::from("/tmp/example/output/")));
+    }
+
+    #[test]
     fn collect_recent_decisions_keeps_latest_review_summaries() {
         let mut steps = Vec::new();
         for id in 0..5 {

@@ -12,6 +12,27 @@ pub struct BossArtifactExpectation {
     pub kind: BossArtifactKind,
 }
 
+pub fn canonicalize_artifact_expectations(
+    expectations: Vec<BossArtifactExpectation>,
+) -> Vec<BossArtifactExpectation> {
+    expectations
+        .into_iter()
+        .filter(|expectation| {
+            let path = expectation.path.to_string_lossy();
+            let trimmed = path.trim();
+            !trimmed.is_empty()
+                && trimmed != "/"
+                && trimmed != "/boss"
+                && !trimmed.starts_with("/boss/")
+                && !trimmed.starts_with("/mcp")
+                && !trimmed.starts_with("/skills")
+                && !trimmed.starts_with("/lism")
+                && !trimmed.starts_with("/effort")
+                && !trimmed.starts_with("/status")
+        })
+        .collect()
+}
+
 fn target_file_marker(line: &str) -> Option<usize> {
     let lowered = line.to_lowercase();
     [
@@ -220,7 +241,7 @@ pub fn extract_artifact_expectations(text: &str) -> Vec<BossArtifactExpectation>
             }
         }
     }
-    expectations
+    canonicalize_artifact_expectations(expectations)
 }
 
 fn verify_file(path: &Path) -> Result<(), String> {
@@ -292,6 +313,27 @@ mod tests {
             item.kind == BossArtifactKind::File
                 && item.path == PathBuf::from("/tmp/example-report.md")
         }));
+    }
+
+    #[test]
+    fn canonicalization_drops_pseudo_artifacts() {
+        let expectations = canonicalize_artifact_expectations(vec![
+            BossArtifactExpectation {
+                path: PathBuf::from("/boss"),
+                kind: BossArtifactKind::File,
+            },
+            BossArtifactExpectation {
+                path: PathBuf::from("/"),
+                kind: BossArtifactKind::Directory,
+            },
+            BossArtifactExpectation {
+                path: PathBuf::from("/tmp/example-report.md"),
+                kind: BossArtifactKind::File,
+            },
+        ]);
+
+        assert_eq!(expectations.len(), 1);
+        assert_eq!(expectations[0].path, PathBuf::from("/tmp/example-report.md"));
     }
 
     #[test]
