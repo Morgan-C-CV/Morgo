@@ -83,6 +83,9 @@ pub struct BossStatus {
     /// Per-dispatch observability record — compression strategy + context mode + char counts.
     #[serde(default)]
     pub last_step_metrics: Option<BossStepMetrics>,
+    /// Ensures the LisM A/B sample is emitted at most once per boss run.
+    #[serde(default)]
+    pub lism_sample_emitted: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -766,6 +769,7 @@ impl Default for BossStatus {
             last_a_dispatch_message: None,
             last_b_ask_message: None,
             last_step_metrics: None,
+            lism_sample_emitted: false,
         }
     }
 }

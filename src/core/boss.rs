@@ -2287,7 +2287,7 @@ impl BossCoordinator {
     }
 
     /// Stable run identifier derived from plan_id, or a timestamp fallback.
-    async fn current_run_id(&self) -> String {
+    pub(crate) async fn current_run_id(&self) -> String {
         self.session
             .read()
             .await
@@ -2299,6 +2299,28 @@ impl BossCoordinator {
                     .map(|d| format!("boss-run-{}", d.as_millis()))
                     .unwrap_or_else(|_| "boss-run-unknown".to_string())
             })
+    }
+
+    pub(crate) async fn emit_lism_sample_once(
+        &self,
+        run_id: &str,
+        lism_enabled: bool,
+        outcome: BossTestRunOutcome,
+        pending_approval_count: usize,
+    ) {
+        let should_emit = {
+            let mut status = self.status.write().await;
+            if status.lism_sample_emitted {
+                false
+            } else {
+                status.lism_sample_emitted = true;
+                true
+            }
+        };
+        if should_emit {
+            self.emit_lism_sample(run_id, lism_enabled, outcome, pending_approval_count)
+                .await;
+        }
     }
 
     pub async fn has_terminal_failure(&self) -> bool {
@@ -3970,7 +3992,12 @@ impl BossCoordinator {
                     self.lism_policy().await,
                     app_state.permission_context.lism_enabled(),
                 );
-                self.emit_lism_sample(&run_id, lism_enabled, BossTestRunOutcome::Completed, 0)
+                self.emit_lism_sample_once(
+                    &run_id,
+                    lism_enabled,
+                    BossTestRunOutcome::Completed,
+                    0,
+                )
                     .await;
                 Ok(Some(
                     "Boss plan complete; no further steps to dispatch.".into(),
@@ -3986,7 +4013,12 @@ impl BossCoordinator {
                     self.lism_policy().await,
                     app_state.permission_context.lism_enabled(),
                 );
-                self.emit_lism_sample(&run_id, lism_enabled, BossTestRunOutcome::Aborted, 0)
+                self.emit_lism_sample_once(
+                    &run_id,
+                    lism_enabled,
+                    BossTestRunOutcome::Aborted,
+                    0,
+                )
                     .await;
                 Ok(Some(format!(
                     "Boss plan stopped after a terminal step failure; auto-advance halted. Reason: {}",
@@ -4409,7 +4441,7 @@ impl BossCoordinator {
                                             self.lism_policy().await,
                                             app_state.permission_context.lism_enabled(),
                                         );
-                                        self.emit_lism_sample(
+                                        self.emit_lism_sample_once(
                                             &run_id,
                                             lism_enabled,
                                             BossTestRunOutcome::Aborted,
@@ -4444,7 +4476,7 @@ impl BossCoordinator {
                                         self.lism_policy().await,
                                         app_state.permission_context.lism_enabled(),
                                     );
-                                    self.emit_lism_sample(
+                                    self.emit_lism_sample_once(
                                         &run_id,
                                         lism_enabled,
                                         BossTestRunOutcome::Completed,
@@ -4512,7 +4544,7 @@ impl BossCoordinator {
                                         self.lism_policy().await,
                                         app_state.permission_context.lism_enabled(),
                                     );
-                                    self.emit_lism_sample(
+                                    self.emit_lism_sample_once(
                                         &run_id,
                                         lism_enabled,
                                         BossTestRunOutcome::Aborted,
@@ -5558,7 +5590,7 @@ fn model_tier_label(tier: ModelTier) -> &'static str {
     }
 }
 
-fn effective_lism_enabled(policy: BossLisMPolicy, session_lism: bool) -> bool {
+pub(crate) fn effective_lism_enabled(policy: BossLisMPolicy, session_lism: bool) -> bool {
     match policy {
         BossLisMPolicy::Inherit => session_lism,
         BossLisMPolicy::ForceOn => true,

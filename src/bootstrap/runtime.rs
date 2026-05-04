@@ -737,6 +737,18 @@ impl RuntimeBootstrap {
                             "[boss-task] timed out after {} seconds",
                             self.cli.boss_task_timeout_secs
                         );
+                        let run_id = boss.current_run_id().await;
+                        let lism_enabled = crate::core::boss::effective_lism_enabled(
+                            boss.lism_policy().await,
+                            app_arc.permission_context.lism_enabled(),
+                        );
+                        boss.emit_lism_sample_once(
+                            &run_id,
+                            lism_enabled,
+                            crate::core::boss_test_readiness::BossTestRunOutcome::Aborted,
+                            0,
+                        )
+                        .await;
                         break;
                     }
                     tick += 1;
