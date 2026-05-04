@@ -1081,11 +1081,6 @@ mod tests {
                 item.contains("fact: permission_to_create_and_write:/tmp/demo-site")
             })
         );
-        assert!(frame.recent_evidence.iter().any(|item| {
-            item.contains("fact: completion_contract ")
-                && item.contains("artifact_refs=artifact:step0:0")
-                && item.contains("verification_refs=artifact:step0:0")
-        }));
         assert_eq!(frame.stage_execution_contract.declared_artifacts.len(), 1);
         assert_eq!(frame.stage_execution_contract.verifications.len(), 1);
         assert_eq!(frame.stage_execution_contract.required_actions, vec!["create", "write", "verify"]);
@@ -1135,6 +1130,58 @@ mod tests {
                 .iter()
                 .any(|artifact| artifact.path == "/tmp/custom-output.txt")
         );
+    }
+
+    #[test]
+    fn project_state_frame_emits_typed_contract_without_keyword_dependence() {
+        let plan = BossPlan {
+            plan_id: "plan-4".into(),
+            task_description: "build typed contract".into(),
+            document_spec: String::new(),
+            pseudo_code: String::new(),
+            draft_spec: None,
+            review_feedback: None,
+            revision_notes: None,
+            finalized: false,
+            documentation_feedback: Vec::new(),
+            steps: vec![BossPlanStep {
+                id: 0,
+                description: "report".into(),
+                objective: Some("write /tmp/typed-contract.txt".into()),
+                acceptance: vec!["done".into()],
+                requires_approval: false,
+                status: BossPlanStepStatus::Running,
+                completed: false,
+                result_diff: None,
+                worker_task_id: None,
+                attempt_count: 0,
+                retry_budget: 3,
+                last_review_summary: None,
+                last_correction: None,
+                stage_continuation_context: None,
+                executor_b_stage_memory: None,
+                review_task_id: None,
+                tool_execution_records: Vec::new(),
+            }],
+            accepted_by_user: true,
+            auto_sequence: false,
+            session_snapshot: None,
+        };
+
+        let frame = project_state_frame(&plan, BossStage::Execution, Some(0), ActorRole::Worker);
+        assert!(!frame.stage_execution_contract.declared_artifacts.is_empty());
+        assert!(frame
+            .stage_execution_contract
+            .declared_artifacts
+            .iter()
+            .all(|artifact| !artifact.path.trim().is_empty()));
+        assert!(frame
+            .recent_evidence
+            .iter()
+            .any(|item| item.starts_with("fact: declared_artifact_contract ")));
+        assert!(!frame.recent_evidence.iter().any(|item| {
+            item.contains("source=objective") && item.contains("fact: completion_contract ")
+        }));
     }
 
     #[test]

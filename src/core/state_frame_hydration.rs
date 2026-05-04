@@ -245,6 +245,65 @@ impl TypedEvidenceIndex {
     }
 }
 
+#[derive(Debug, Clone)]
+struct ContractArtifactEntry {
+    ref_id: String,
+    path: String,
+    kind: String,
+}
+
+#[derive(Debug, Clone)]
+struct ContractVerificationEntry {
+    target_ref: String,
+    target_path: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ContractTestEntry {
+    name: String,
+}
+
+#[derive(Debug, Clone, Default)]
+struct TypedContractIndex {
+    artifacts: Vec<ContractArtifactEntry>,
+    verifications: Vec<ContractVerificationEntry>,
+    tests: Vec<ContractTestEntry>,
+}
+
+impl TypedContractIndex {
+    fn from_frame(frame: &StateFrame) -> Self {
+        Self {
+            artifacts: frame
+                .stage_execution_contract
+                .declared_artifacts
+                .iter()
+                .map(|item| ContractArtifactEntry {
+                    ref_id: item.ref_id.clone(),
+                    path: item.path.clone(),
+                    kind: item.kind.clone(),
+                })
+                .collect(),
+            verifications: frame
+                .stage_execution_contract
+                .verifications
+                .iter()
+                .map(|item| ContractVerificationEntry {
+                    target_ref: item.target_ref.clone(),
+                    target_path: item.target_path.clone(),
+                })
+                .collect(),
+            tests: frame
+                .stage_execution_contract
+                .tests
+                .iter()
+                .map(|item| ContractTestEntry {
+                    name: item.name.clone(),
+                })
+                .collect(),
+        }
+    }
+}
+
 const FACT_FIELD_KEYS: &[&str] = &[
     "ref",
     "path",
@@ -447,6 +506,21 @@ fn format_unavailable_line(selector: &NeededContextSelector, reason: &str, sourc
     )
 }
 
+fn format_contract_line(
+    selector: &NeededContextSelector,
+    source: &str,
+    match_reason: &str,
+    excerpt: String,
+) -> String {
+    format!(
+        "hydrated_context: {} source={} match_reason={} excerpt={}",
+        selector_key(selector),
+        source,
+        match_reason,
+        excerpt
+    )
+}
+
 fn runtime_budget_fact_line(frame: &StateFrame) -> String {
     let value = if frame.budget.max_tool_calls == 0 {
         "unlimited".to_string()
@@ -592,6 +666,7 @@ fn select_context_requests(
 
 fn hydrate_selector(
     index: &TypedEvidenceIndex,
+    contract_index: &TypedContractIndex,
     frame: &StateFrame,
     selector: &NeededContextSelector,
     excerpt_chars: usize,
@@ -617,31 +692,63 @@ fn hydrate_selector(
             ),
             resolved => resolved,
         },
-        NeededContextSelector::TestFailure { query } => resolve_fact_match(
-            index,
-            "test_failures",
-            selector,
-            excerpt_chars,
-            "test_ledger",
-            if query.is_some() {
-                "query"
-            } else {
-                "latest_failed_test"
-            },
-            |item| {
-                field_eq(item, "status", "failed")
-                    && query
-                        .as_ref()
-                        .map(|q| {
-                            matches_any_query(
-                                item,
-                                q,
-                                &["ref", "name", "source_event_id", "summary"],
-                            )
-                        })
-                        .unwrap_or(true)
-            },
-        ),
+        NeededContextSelector::TestFailure { query } => {
+            let query = query.as_deref().map(str::trim);
+            if let Some(contract_test) = contract_index.tests.iter().find(|item| {
+                query
+                    .map(|q| item.name == q || item.name.contains(q))
+                    .unwrap_or(true)
+            }) {
+                let contract_match = resolve_fact_match(
+                    index,
+                    "test_failures",
+                    selector,
+                    excerpt_chars,
+                    "test_ledger",
+                    "declared_test_contract",
+                    |item| {
+                        field_eq(item, "status", "failed")
+                            && field_eq(item, "name", &contract_test.name)
+                    },
+                );
+                if !matches!(contract_match, SelectorResolution::Unavailable(_)) {
+                    return contract_match;
+                }
+                return SelectorResolution::Hydrated(format_contract_line(
+                    selector,
+                    "stage_execution_contract",
+                    "declared_test_contract",
+                    compact_excerpt(
+                        &format!("declared test contract name={}", contract_test.name),
+                        excerpt_chars,
+                    ),
+                ));
+            }
+            resolve_fact_match(
+                index,
+                "test_failures",
+                selector,
+                excerpt_chars,
+                "test_ledger",
+                if query.is_some() {
+                    "query"
+                } else {
+                    "latest_failed_test"
+                },
+                |item| {
+                    field_eq(item, "status", "failed")
+                        && query
+                            .map(|q| {
+                                matches_any_query(
+                                    item,
+                                    q,
+                                    &["ref", "name", "source_event_id", "summary"],
+                                )
+                            })
+                            .unwrap_or(true)
+                },
+            )
+        }
         NeededContextSelector::ChangeRef { path } => resolve_fact_match(
             index,
             "recent_changes_in_files",
@@ -685,24 +792,64 @@ fn hydrate_selector(
                     .unwrap_or(true)
             },
         ),
-        NeededContextSelector::ArtifactRef { query } => resolve_fact_match(
-            index,
-            "artifact_status",
-            selector,
-            excerpt_chars,
-            "artifact_ledger",
-            if query.is_some() {
-                "ref_path_or_source_event"
-            } else {
-                "latest_artifact"
-            },
-            |item| {
+        NeededContextSelector::ArtifactRef { query } => {
+            let query = query.as_deref().map(artifact_lookup_query);
+            if let Some(contract_artifact) = contract_index.artifacts.iter().find(|item| {
                 query
-                    .as_ref()
-                    .map(|q| matches_artifact_query(item, q))
+                    .map(|q| {
+                        item.ref_id == q
+                            || item.path == q
+                            || item.ref_id.contains(q)
+                            || item.path.contains(q)
+                    })
                     .unwrap_or(true)
-            },
-        ),
+            }) {
+                let contract_match = resolve_fact_match(
+                    index,
+                    "artifact_status",
+                    selector,
+                    excerpt_chars,
+                    "artifact_ledger",
+                    "declared_artifact_contract",
+                    |item| {
+                        field_eq(item, "ref", &contract_artifact.ref_id)
+                            || field_eq(item, "path", &contract_artifact.path)
+                    },
+                );
+                if !matches!(contract_match, SelectorResolution::Unavailable(_)) {
+                    return contract_match;
+                }
+                return SelectorResolution::Hydrated(format_contract_line(
+                    selector,
+                    "stage_execution_contract",
+                    "declared_artifact_contract",
+                    compact_excerpt(
+                        &format!(
+                            "declared artifact contract ref={} path={} kind={}",
+                            contract_artifact.ref_id, contract_artifact.path, contract_artifact.kind
+                        ),
+                        excerpt_chars,
+                    ),
+                ));
+            }
+            resolve_fact_match(
+                index,
+                "artifact_status",
+                selector,
+                excerpt_chars,
+                "artifact_ledger",
+                if query.is_some() {
+                    "ref_path_or_source_event"
+                } else {
+                    "latest_artifact"
+                },
+                |item| {
+                    query
+                        .map(|q| matches_artifact_query(item, q))
+                        .unwrap_or(true)
+                },
+            )
+        }
         NeededContextSelector::OpenItemRef { query } => resolve_fact_match(
             index,
             "open_item_refs",
@@ -770,6 +917,35 @@ fn hydrate_selector(
             },
         ),
         NeededContextSelector::Artifact { path } => {
+            let path = path.as_deref().map(artifact_lookup_query);
+            if let Some(contract_artifact) = contract_index.artifacts.iter().find(|item| {
+                path.map(|p| item.path == p).unwrap_or(true)
+            }) {
+                let contract_match = resolve_fact_match(
+                    index,
+                    "artifact_status",
+                    selector,
+                    excerpt_chars,
+                    "artifact_ledger",
+                    "declared_artifact_contract",
+                    |item| field_eq(item, "path", &contract_artifact.path),
+                );
+                if !matches!(contract_match, SelectorResolution::Unavailable(_)) {
+                    return contract_match;
+                }
+                return SelectorResolution::Hydrated(format_contract_line(
+                    selector,
+                    "stage_execution_contract",
+                    "declared_artifact_contract",
+                    compact_excerpt(
+                        &format!(
+                            "declared artifact contract ref={} path={} kind={}",
+                            contract_artifact.ref_id, contract_artifact.path, contract_artifact.kind
+                        ),
+                        excerpt_chars,
+                    ),
+                ));
+            }
             let artifact_resolution = resolve_fact_match(
                 index,
                 "artifact_status",
@@ -782,8 +958,8 @@ fn hydrate_selector(
                     "latest_artifact"
                 },
                 |item| {
-                    path.as_ref()
-                        .map(|p| field_eq(item, "path", artifact_lookup_query(p)))
+                    path
+                        .map(|p| field_eq(item, "path", p))
                         .unwrap_or(true)
                 },
             );
@@ -800,8 +976,8 @@ fn hydrate_selector(
                         "latest_change"
                     },
                     |item| {
-                        path.as_ref()
-                            .map(|p| field_eq(item, "path", artifact_lookup_query(p)))
+                        path
+                            .map(|p| field_eq(item, "path", p))
                             .unwrap_or(true)
                     },
                 ) {
@@ -817,36 +993,14 @@ fn hydrate_selector(
                             "latest_file_fact"
                         },
                         |item| {
-                            path.as_ref()
-                                .map(|p| field_eq(item, "path", artifact_lookup_query(p)))
+                            path
+                                .map(|p| field_eq(item, "path", p))
                                 .unwrap_or(true)
                         },
                     ) {
-                        SelectorResolution::Unavailable(_) => {
-                            if let Some(p) = path
-                                .as_ref()
-                                .map(|p| artifact_lookup_query(p.as_str()))
-                                .filter(|p| frame.objective.contains(*p))
-                            {
-                                SelectorResolution::Hydrated(format!(
-                                    "hydrated_context: {} source=objective match_reason=objective_path excerpt={}",
-                                    selector_key(selector),
-                                    compact_excerpt(
-                                        &format!(
-                                            "objective references artifact path {p}; objective={}",
-                                            frame.objective
-                                        ),
-                                        excerpt_chars
-                                    )
-                                ))
-                            } else {
-                                SelectorResolution::Unavailable(format_unavailable_line(
-                                    selector,
-                                    "no_match",
-                                    "typed_index",
-                                ))
-                            }
-                        }
+                        SelectorResolution::Unavailable(_) => SelectorResolution::Unavailable(
+                            format_unavailable_line(selector, "no_match", "typed_index"),
+                        ),
                         resolved => resolved,
                     },
                     resolved => resolved,
@@ -885,21 +1039,9 @@ fn hydrate_selector(
                 |item| field_eq(item, "symbol", name),
             );
             match symbol_resolution {
-                SelectorResolution::Unavailable(_) => {
-                    if frame.objective.contains(name) {
-                        SelectorResolution::Hydrated(format!(
-                            "hydrated_context: {} source=objective match_reason=objective_symbol excerpt={}",
-                            selector_key(selector),
-                            compact_excerpt(&frame.objective, excerpt_chars)
-                        ))
-                    } else {
-                        SelectorResolution::Unavailable(format_unavailable_line(
-                            selector,
-                            "no_symbol_match",
-                            "typed_index",
-                        ))
-                    }
-                }
+                SelectorResolution::Unavailable(_) => SelectorResolution::Unavailable(
+                    format_unavailable_line(selector, "no_symbol_match", "typed_index"),
+                ),
                 resolved => resolved,
             }
         }
@@ -914,6 +1056,7 @@ pub fn hydrate_needed_context(frame: &mut StateFrame, requested: &[String]) -> H
     let (selected, deferred) = select_context_requests(frame, requested);
     let excerpt_chars = estimate_excerpt_chars(frame, selected.len());
     let index = TypedEvidenceIndex::from_frame(frame);
+    let contract_index = TypedContractIndex::from_frame(frame);
 
     for selector in deferred {
         let deferred_line = format!(
@@ -927,7 +1070,7 @@ pub fn hydrate_needed_context(frame: &mut StateFrame, requested: &[String]) -> H
     }
 
     for selector in selected {
-        match hydrate_selector(&index, frame, &selector, excerpt_chars) {
+        match hydrate_selector(&index, &contract_index, frame, &selector, excerpt_chars) {
             SelectorResolution::Hydrated(hydrated) => {
                 if push_unique(&mut frame.recent_evidence, hydrated.clone()) {
                     summary.changed = true;
@@ -989,6 +1132,30 @@ mod tests {
             required_output_schema: Some("state_decision_v1".into()),
             budget: StateBudget::default(),
         }
+    }
+
+    fn make_contract_frame() -> StateFrame {
+        let mut frame = make_frame();
+        frame.objective = "generic objective".into();
+        frame.stage_execution_contract.declared_artifacts = vec![crate::core::state_frame::DeclaredArtifactContract {
+            ref_id: "artifact:declared:0".into(),
+            path: "/tmp/declared.txt".into(),
+            kind: "file".into(),
+            required_actions: vec!["create".into(), "write".into()],
+            required_evidence: vec!["artifact:declared:0".into(), "/tmp/declared.txt".into(), "file".into()],
+        }];
+        frame.stage_execution_contract.verifications = vec![crate::core::state_frame::VerificationContract {
+            target_ref: "artifact:declared:0".into(),
+            target_path: Some("/tmp/declared.txt".into()),
+            required_actions: vec!["verify".into()],
+            required_evidence: vec!["artifact:declared:0".into(), "/tmp/declared.txt".into()],
+        }];
+        frame.stage_execution_contract.tests = vec![crate::core::state_frame::TestContract {
+            name: "cargo test -p rust_agent".into(),
+            required_actions: vec!["run_test".into()],
+            required_evidence: vec!["test:declared:0".into()],
+        }];
+        frame
     }
 
     #[test]
@@ -1103,6 +1270,37 @@ mod tests {
         );
         assert!(frame.recent_evidence.iter().any(|item| {
             item.contains("hydrated_context: artifact:src/core/state_frame_projection.rs")
+        }));
+    }
+
+    #[test]
+    fn hydrate_needed_context_prefers_declared_artifact_contract() {
+        let mut frame = make_contract_frame();
+        let summary = hydrate_needed_context(
+            &mut frame,
+            &[
+                "artifact:/tmp/declared.txt".into(),
+                "artifact_ref:artifact:declared:0".into(),
+                "test_failure:cargo test -p rust_agent".into(),
+            ],
+        );
+
+        assert!(summary.changed);
+        assert!(summary.unavailable.is_empty());
+        assert!(frame.recent_evidence.iter().any(|item| {
+            item.contains("hydrated_context: artifact:/tmp/declared.txt")
+                && item.contains("source=stage_execution_contract")
+                && item.contains("declared_artifact_contract")
+        }));
+        assert!(frame.recent_evidence.iter().any(|item| {
+            item.contains("hydrated_context: artifact_ref:artifact:declared:0")
+                && item.contains("source=stage_execution_contract")
+                && item.contains("declared_artifact_contract")
+        }));
+        assert!(frame.recent_evidence.iter().any(|item| {
+            item.contains("hydrated_context: test_failure:cargo test -p rust_agent")
+                && item.contains("source=stage_execution_contract")
+                && item.contains("declared_test_contract")
         }));
     }
 
@@ -1308,6 +1506,33 @@ mod tests {
         assert!(summary.stale[0].contains("context_stale: review_ref:review:step1:stale"));
         assert!(summary.stale[0].contains("stale_reason=lineage_status=stale"));
         assert!(summary.stale[0].contains("source_event_id=tool-review:1:9"));
+    }
+
+    #[test]
+    fn hydrate_needed_context_distinguishes_unsupported_from_no_match_and_stale() {
+        let mut frame = make_contract_frame();
+        frame.recent_evidence.push(
+            "fact: artifact_status ref=artifact:declared:0 path=/tmp/declared.txt kind=file status=stale source=tool:ArtifactVerify source_event_id=artifact-verify:stale freshness=after-runtime-review confidence=1.00 lineage_status=stale invalidated_by=artifact:declared:0 supersedes=none conflicts_with=none summary=stale artifact".into(),
+        );
+        let summary = hydrate_needed_context(
+            &mut frame,
+            &[
+                "artifact_ref:artifact:declared:0".into(),
+                "symbol:MissingSymbol".into(),
+                "bogus_selector".into(),
+            ],
+        );
+
+        assert!(summary.stale.iter().any(|item| {
+            item.contains("context_stale: artifact_ref:artifact:declared:0")
+                && item.contains("stale_reason=lineage_status=stale")
+        }));
+        assert!(summary.unavailable.iter().any(|item| {
+            item == "context_unavailable: symbol:MissingSymbol reason=no_symbol_match resolver=typed_index"
+        }));
+        assert!(summary.unavailable.iter().any(|item| {
+            item == "context_unavailable: bogus_selector reason=unsupported_selector resolver=typed_index"
+        }));
     }
 
     #[test]

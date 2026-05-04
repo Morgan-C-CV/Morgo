@@ -312,15 +312,11 @@ fn split_contract_refs(value: &str) -> Vec<String> {
 
 fn completion_contract_requirement(frame: &StateFrame, field_name: &str) -> bool {
     match field_name {
-        "artifact_evidence" => return !frame.stage_execution_contract.declared_artifacts.is_empty(),
-        "test_evidence" => return !frame.stage_execution_contract.tests.is_empty(),
-        "verification_evidence" => return !frame.stage_execution_contract.verifications.is_empty(),
-        _ => {}
+        "artifact_evidence" => !frame.stage_execution_contract.declared_artifacts.is_empty(),
+        "test_evidence" => !frame.stage_execution_contract.tests.is_empty(),
+        "verification_evidence" => !frame.stage_execution_contract.verifications.is_empty(),
+        _ => false,
     }
-    frame.recent_evidence.iter().any(|line| {
-        line.starts_with("fact: completion_contract ")
-            && evidence_field_value(line, field_name).as_deref() == Some("required")
-    })
 }
 
 fn completion_contract_refs(frame: &StateFrame, field_name: &str) -> Vec<String> {
@@ -349,15 +345,8 @@ fn completion_contract_refs(frame: &StateFrame, field_name: &str) -> Vec<String>
                 .map(|item| item.target_ref.clone())
                 .collect();
         }
-        _ => {}
+        _ => Vec::new(),
     }
-    frame
-        .recent_evidence
-        .iter()
-        .filter(|line| line.starts_with("fact: completion_contract "))
-        .filter_map(|line| evidence_field_value(line, field_name))
-        .flat_map(|value| split_contract_refs(&value))
-        .collect()
 }
 
 fn fact_field_value_by_ref(

@@ -108,6 +108,34 @@ pub struct StageExecutionContract {
     pub required_evidence: Vec<String>,
 }
 
+impl StageExecutionContract {
+    pub fn declared_artifact_by_ref(&self, ref_id: &str) -> Option<&DeclaredArtifactContract> {
+        self.declared_artifacts.iter().find(|item| item.ref_id == ref_id)
+    }
+
+    pub fn declared_artifact_by_path(&self, path: &str) -> Option<&DeclaredArtifactContract> {
+        self.declared_artifacts.iter().find(|item| item.path == path)
+    }
+
+    pub fn verification_by_target_ref(&self, target_ref: &str) -> Option<&VerificationContract> {
+        self.verifications
+            .iter()
+            .find(|item| item.target_ref == target_ref)
+    }
+
+    pub fn verification_by_target_path(&self, target_path: &str) -> Option<&VerificationContract> {
+        self.verifications.iter().find(|item| {
+            item.target_path
+                .as_deref()
+                .is_some_and(|path| path == target_path)
+        })
+    }
+
+    pub fn test_by_name(&self, name: &str) -> Option<&TestContract> {
+        self.tests.iter().find(|item| item.name == name)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ContinuityMode {
