@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
 
+# This matrix must be run outside sandboxed execution environments.
+# The real Boss/LisM path depends on live provider DNS/network access, and
+# sandboxed runs can fail with transport-level DNS resolution errors that do
+# not reproduce in a normal shell.
+
 set -euo pipefail
 
 SCRIPT_DIR="$(
@@ -33,6 +38,11 @@ Usage:
 Required env bootstrap:
   source $ENV_LOADER $ENV_FILE
 
+Execution requirement:
+  run this script in a normal host shell, not inside a sandboxed executor
+  sandboxed runs can fail with provider DNS/transport errors before the
+  matrix reaches real tool dispatch
+
 Examples:
   bash RustAgent/Agent/tests/run_boss_lism_matrix.sh --cases u6-u9 --plan 3x3
   bash RustAgent/Agent/tests/run_boss_lism_matrix.sh --cases u8 --plan 3plus3
@@ -64,6 +74,7 @@ Plan semantics:
     one mode only, controlled by --mode
 
 Notes:
+  - Run this matrix outside sandboxed execution; provider DNS/network access must be real.
   - This script automatically generates isolated cache keys per output root + use case + mode.
   - For u6-u10 build tasks, it also rewrites target paths per mode/run to avoid artifact reuse.
   - Final summary deduplicates records by run_id because aborted samples may be appended twice.
