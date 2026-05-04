@@ -93,6 +93,16 @@ fn build_artifact_repair_instruction(step: &BossPlanStep, missing_reason: &str) 
     ))
 }
 
+fn build_verification_repair_instruction(step: &BossPlanStep) -> Option<String> {
+    let expectation = extract_artifact_expectations(step.objective())
+        .into_iter()
+        .next()?;
+    Some(format!(
+        "re-verify artifact evidence for target_path={}",
+        expectation.path.display()
+    ))
+}
+
 fn continuation_verified_facts(step: &BossPlanStep) -> Vec<String> {
     step.tool_execution_records
         .iter()
@@ -3442,12 +3452,15 @@ impl BossCoordinator {
                         step.last_review_summary = Some(reason);
                         step.completed = false;
                         step.attempt_count += 1;
-                        let repair_instruction = build_artifact_repair_instruction(
-                            step,
-                            step.last_review_summary
-                                .as_deref()
-                                .unwrap_or("artifact verification failed"),
-                        );
+                        let verification_instruction =
+                            build_verification_repair_instruction(step).or_else(|| {
+                                build_artifact_repair_instruction(
+                                    step,
+                                    step.last_review_summary
+                                        .as_deref()
+                                        .unwrap_or("artifact verification failed"),
+                                )
+                            });
                         if step.attempt_count >= step.retry_budget {
                             step.status = BossPlanStepStatus::Failed;
                             update_step_continuation_context(
@@ -3457,7 +3470,7 @@ impl BossCoordinator {
                                     .into_iter()
                                     .next()
                                     .map(|expectation| expectation.path.display().to_string()),
-                                repair_instruction,
+                                Some("verify_artifact".into()).or(verification_instruction),
                                 continuation_verified_facts(step),
                             );
                             (
@@ -3476,7 +3489,7 @@ impl BossCoordinator {
                                     .into_iter()
                                     .next()
                                     .map(|expectation| expectation.path.display().to_string()),
-                                repair_instruction,
+                                Some("verify_artifact".into()).or(verification_instruction),
                                 continuation_verified_facts(step),
                             );
                             (false, Some(("repair_dispatched", None)))
@@ -3625,7 +3638,8 @@ impl BossCoordinator {
                         &reason,
                     );
                     step.attempt_count += 1;
-                    let repair_instruction = build_artifact_repair_instruction(step, &reason);
+                    let verification_instruction = build_verification_repair_instruction(step)
+                        .or_else(|| build_artifact_repair_instruction(step, &reason));
                     if step.attempt_count >= step.retry_budget {
                         step.status = BossPlanStepStatus::Failed;
                         update_step_continuation_context(
@@ -3635,7 +3649,7 @@ impl BossCoordinator {
                                 .into_iter()
                                 .next()
                                 .map(|expectation| expectation.path.display().to_string()),
-                            repair_instruction,
+                            Some("verify_artifact".into()).or(verification_instruction),
                             continuation_verified_facts(step),
                         );
                     } else {
@@ -3647,7 +3661,7 @@ impl BossCoordinator {
                                 .into_iter()
                                 .next()
                                 .map(|expectation| expectation.path.display().to_string()),
-                            repair_instruction,
+                            Some("verify_artifact".into()).or(verification_instruction),
                             continuation_verified_facts(step),
                         );
                     }
@@ -5506,12 +5520,26 @@ fn next_unfinished_step_id(plan: &BossPlan) -> Option<usize> {
 }
 
 fn next_runnable_step(plan: &BossPlan) -> Option<&BossPlanStep> {
-    plan.steps.iter().find(|step| {
+    let verification_repair_continuation = plan.steps.iter().find(|step| {
         !step.completed
-            && matches!(
-                step.status,
-                BossPlanStepStatus::Pending | BossPlanStepStatus::Rejected
-            )
+            && step.status == BossPlanStepStatus::Rejected
+            && step
+                .stage_continuation_context
+                .as_ref()
+                .and_then(|context| context.next_action.as_deref())
+                .is_some_and(|action| {
+                    action.eq_ignore_ascii_case("verify_artifact")
+                        || action.eq_ignore_ascii_case("run_verification")
+                })
+    });
+    verification_repair_continuation.or_else(|| {
+        plan.steps.iter().find(|step| {
+            !step.completed
+                && matches!(
+                    step.status,
+                    BossPlanStepStatus::Pending | BossPlanStepStatus::Rejected
+                )
+        })
     })
 }
 
@@ -7198,8 +7226,7 @@ mod tests {
         assert!(!step.completed);
         assert_eq!(step.attempt_count, 1);
         let correction = step.last_correction.as_deref().expect("repair correction");
-        assert!(correction.contains(&format!("target_path={}", target_path.display())));
-        assert!(correction.contains("recommended_write_strategy=write_exact_target_file"));
+        assert_eq!(correction, "verify_artifact");
 
         let routed_metadata = coordinator.routed_step_metadata.read().await;
         let metadata = routed_metadata.get(&1).expect("routed metadata");

@@ -2435,6 +2435,20 @@ pub async fn run_decision_loop_with_tools(
                         usage: total_usage,
                     });
                 }
+                if matches!(
+                    evaluate_completion_evidence(&frame, &total_usage),
+                    CompletionEvidenceStatus::MissingVerificationEvidence
+                ) {
+                    let block = CompletionGateBlock {
+                        status: CompletionEvidenceStatus::MissingVerificationEvidence,
+                        required_action: "verify_artifact".into(),
+                        reason: "artifact verification failure requires repair continuation".into(),
+                        missing_evidence_refs: missing_verification_evidence_refs(&frame),
+                    };
+                    inject_completion_gate_block(&mut frame, &block);
+                    record_completion_gate_recovery(&frame, &mut total_usage, &block);
+                    continue;
+                }
                 let after = frame.to_prompt_segment().content;
                 if before == after {
                     finalize_worker_usage_report(&frame, &mut total_usage);
@@ -2710,12 +2724,45 @@ mod tests {
     use crate::tool::builtin::bash::BashTool;
     use crate::tool::builtin::file_edit::FileEditTool;
     use crate::tool::builtin::file_read::FileReadTool;
-    use crate::tool::definition::ToolResult;
+    use crate::tool::definition::{Tool, ToolCall, ToolMetadata, ToolResult};
     use crate::tool::orchestrator::build_execution_record;
     use crate::tool::registry::ToolRegistry;
     use crate::tool::result::{ToolOutcome, ToolOutcomeKind};
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    struct ArtifactVerifyMockTool;
+
+    #[async_trait::async_trait]
+    impl Tool for ArtifactVerifyMockTool {
+        fn metadata(&self) -> crate::tool::definition::ToolMetadata {
+            ToolMetadata {
+                name: "ArtifactVerify",
+                description: "mock artifact verification tool",
+                aliases: &[],
+                search_hint: None,
+                read_only: true,
+                destructive: false,
+                concurrency_safe: true,
+                always_load: true,
+                should_defer: false,
+                requires_auth: false,
+                requires_user_interaction: false,
+                is_open_world: false,
+                is_search_or_read_command: false,
+            }
+        }
+
+        async fn invoke(
+            &self,
+            _call: &ToolCall,
+            _permissions: &ToolPermissionContext,
+        ) -> anyhow::Result<ToolResult> {
+            Ok(ToolResult::Text(
+                "artifact verification passed for /tmp/report.md".into(),
+            ))
+        }
+    }
 
     fn make_frame() -> StateFrame {
         StateFrame {
@@ -2755,6 +2802,15 @@ mod tests {
             skillset_id: None,
             required_output_schema: Some("state_decision_v1".into()),
             budget: StateBudget::default(),
+        }
+    }
+
+    fn verification_repair_tool_runtime() -> StateFrameToolRuntime {
+        StateFrameToolRuntime {
+            registry: ToolRegistry::new().register(Arc::new(ArtifactVerifyMockTool)),
+            permissions: ToolPermissionContext::new(PermissionMode::Default),
+            cwd: test_runtime_paths().0,
+            config_root: test_runtime_paths().1,
         }
     }
 
@@ -4063,6 +4119,126 @@ mod tests {
                 );
             }
             other => panic!("expected MaxIterationsReached, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn verification_repair_continuation_reverifies_before_documentation_timeout() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut frame = make_frame();
+        push_completion_contract(&mut frame, true, false, true);
+        push_artifact_target_fact(&mut frame, "artifact:contract:0", "/tmp/report.md", "file");
+        frame.recent_evidence.push(
+            "fact: artifact_status ref=artifact:step1:runtime:0 path=/tmp/report.md kind=file status=created source=tool:Write source_event_id=tool-write:1 freshness=after-runtime confidence=1.00 status=active invalidated_by=none supersedes=none conflicts_with=none summary=artifact created".into(),
+        );
+        let continue_json = r#"{"state":"executing","decision":"continue","state_patch":{"open_items_remove":["tests pass"]}}"#;
+        let verify_json = r#"{"state":"executing","decision":"call_tool","next_action":{"action_type":"ArtifactVerify","args":{"path":"/tmp/report.md","kind":"file","status":"verified"}}}"#;
+        let done_json = r#"{"state":"done","decision":"done"}"#;
+        let client = ModelProviderClient::with_scripted_turns(vec![
+            vec![StreamEvent::TextDelta(continue_json.into())],
+            vec![StreamEvent::TextDelta(verify_json.into())],
+            vec![StreamEvent::TextDelta(done_json.into())],
+        ]);
+        let outcome = rt
+            .block_on(run_decision_loop_with_tools(
+                &client,
+                frame,
+                DecisionLoopConfig {
+                    max_iterations: 3,
+                    ..DecisionLoopConfig::default()
+                },
+                Some(verification_repair_tool_runtime()),
+            ))
+            .expect("loop should not error");
+        match outcome {
+            LoopOutcome::Done { usage, .. } => {
+                let report = usage.worker_report.expect("worker report");
+                assert_eq!(report.verification_status, "verified");
+                assert_eq!(report.completion_evidence_status.as_str(), "sufficient");
+                assert_eq!(report.artifact_status, "verified");
+            }
+            other => panic!("expected Done, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn repair_to_reverify_short_loop_completes_or_hard_fails() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut frame = make_frame();
+        push_completion_contract(&mut frame, true, false, true);
+        push_artifact_target_fact(&mut frame, "artifact:contract:0", "/tmp/report.md", "file");
+        frame.recent_evidence.push(
+            "fact: artifact_status ref=artifact:step1:runtime:0 path=/tmp/report.md kind=file status=created source=tool:Write source_event_id=tool-write:1 freshness=after-runtime confidence=1.00 status=active invalidated_by=none supersedes=none conflicts_with=none summary=artifact created".into(),
+        );
+        let continue_json = r#"{"state":"executing","decision":"continue","state_patch":{"open_items_remove":["tests pass"]}}"#;
+        let verify_json = r#"{"state":"executing","decision":"call_tool","next_action":{"action_type":"ArtifactVerify","args":{"path":"/tmp/report.md","kind":"file","status":"verified"}}}"#;
+        let done_json = r#"{"state":"done","decision":"done"}"#;
+        let client = ModelProviderClient::with_scripted_turns(vec![
+            vec![StreamEvent::TextDelta(continue_json.into())],
+            vec![StreamEvent::TextDelta(verify_json.into())],
+            vec![StreamEvent::TextDelta(done_json.into())],
+        ]);
+        let outcome = rt
+            .block_on(run_decision_loop_with_tools(
+                &client,
+                frame,
+                DecisionLoopConfig {
+                    max_iterations: 3,
+                    ..DecisionLoopConfig::default()
+                },
+                Some(verification_repair_tool_runtime()),
+            ))
+            .expect("loop should not error");
+        match outcome {
+            LoopOutcome::Done { usage, .. } => {
+                assert_eq!(
+                    usage.completion_evidence_status.as_ref().map(|s| s.as_str()),
+                    Some("sufficient")
+                );
+            }
+            other => panic!("expected Done, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn verification_only_gap_does_not_expand_into_long_documentation_tail() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut frame = make_frame();
+        push_completion_contract(&mut frame, true, false, true);
+        push_artifact_target_fact(&mut frame, "artifact:contract:0", "/tmp/report.md", "file");
+        frame.recent_evidence.push(
+            "fact: artifact_status ref=artifact:step1:runtime:0 path=/tmp/report.md kind=file status=created source=tool:Write source_event_id=tool-write:1 freshness=after-runtime confidence=1.00 status=active invalidated_by=none supersedes=none conflicts_with=none summary=artifact created".into(),
+        );
+        let continue_json = r#"{"state":"executing","decision":"continue","state_patch":{"open_items_remove":["tests pass"]}}"#;
+        let verify_json = r#"{"state":"executing","decision":"call_tool","next_action":{"action_type":"ArtifactVerify","args":{"path":"/tmp/report.md","kind":"file","status":"verified"}}}"#;
+        let done_json = r#"{"state":"done","decision":"done"}"#;
+        let client = ModelProviderClient::with_scripted_turns(vec![
+            vec![StreamEvent::TextDelta(continue_json.into())],
+            vec![StreamEvent::TextDelta(verify_json.into())],
+            vec![StreamEvent::TextDelta(done_json.into())],
+        ]);
+        let outcome = rt
+            .block_on(run_decision_loop_with_tools(
+                &client,
+                frame,
+                DecisionLoopConfig {
+                    max_iterations: 3,
+                    ..DecisionLoopConfig::default()
+                },
+                Some(verification_repair_tool_runtime()),
+            ))
+            .expect("loop should not error");
+        match outcome {
+            LoopOutcome::Done { usage, .. } => {
+                let report = usage.worker_report.expect("worker report");
+                assert!(
+                    !report
+                        .remaining_risks
+                        .iter()
+                        .any(|item| item.contains("documentation timeout"))
+                );
+            }
+            other => panic!("expected Done, got {other:?}"),
         }
     }
 

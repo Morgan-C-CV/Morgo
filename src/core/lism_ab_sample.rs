@@ -819,15 +819,13 @@ fn build_ab_record(
             latest_step_failure_classification = Some(classification);
         }
         for gap in &meta.completion_evidence_gaps {
-            let target = match gap.target_path.as_deref() {
-                Some(path) => format!("{}:{path}", gap.target_ref),
-                None => gap.target_ref.clone(),
-            };
             if gap.missing_artifact_evidence {
-                missing_artifact_evidence_targets.insert(target.clone(), ());
+                missing_artifact_evidence_targets
+                    .insert((gap.target_ref.clone(), gap.target_path.clone()), ());
             }
             if gap.missing_verification_evidence {
-                missing_verification_evidence_targets.insert(target, ());
+                missing_verification_evidence_targets
+                    .insert((gap.target_ref.clone(), gap.target_path.clone()), ());
             }
         }
         if let Some(classification) = meta.success_classification.as_ref() {
@@ -837,30 +835,24 @@ fn build_ab_record(
     }
     if let Some(policy) = report.rollout_policy_decision.as_ref() {
         for target in &policy.denylist_targets {
-            let formatted = match target.target_path.as_deref() {
-                Some(path) => format!("{}:{path}", target.target_ref),
-                None => target.target_ref.clone(),
-            };
-            rollout_denylist_targets.insert(formatted, ());
+            rollout_denylist_targets
+                .insert((target.target_ref.clone(), target.target_path.clone()), ());
         }
         for target in &policy.fallback_targets {
-            let formatted = match target.target_path.as_deref() {
-                Some(path) => format!("{}:{path}", target.target_ref),
-                None => target.target_ref.clone(),
-            };
-            automatic_fallback_targets.insert(formatted, ());
+            automatic_fallback_targets
+                .insert((target.target_ref.clone(), target.target_path.clone()), ());
         }
     }
-    let missing_artifact_evidence_targets = canonicalize_artifact_target_strings(
+    let missing_artifact_evidence_targets = canonicalize_artifact_target_pairs(
         missing_artifact_evidence_targets.into_keys().collect(),
     );
-    let missing_verification_evidence_targets = canonicalize_artifact_target_strings(
+    let missing_verification_evidence_targets = canonicalize_artifact_target_pairs(
         missing_verification_evidence_targets.into_keys().collect(),
     );
     let rollout_denylist_targets =
-        canonicalize_artifact_target_strings(rollout_denylist_targets.into_keys().collect());
+        canonicalize_artifact_target_pairs(rollout_denylist_targets.into_keys().collect());
     let automatic_fallback_targets =
-        canonicalize_artifact_target_strings(automatic_fallback_targets.into_keys().collect());
+        canonicalize_artifact_target_pairs(automatic_fallback_targets.into_keys().collect());
 
     LisMAbSampleRecord {
         run_id,
@@ -937,19 +929,31 @@ fn build_ab_record(
     }
 }
 
-fn canonicalize_artifact_target_strings(targets: Vec<String>) -> Vec<String> {
-    canonicalize_artifact_expectations(
+fn canonicalize_artifact_target_pairs(targets: Vec<(String, Option<String>)>) -> Vec<String> {
+    let canonical_paths = canonicalize_artifact_expectations(
         targets
-            .into_iter()
-            .map(|target| crate::core::boss_acceptance::BossArtifactExpectation {
-                path: std::path::PathBuf::from(target),
-                kind: crate::core::boss_acceptance::BossArtifactKind::File,
+            .iter()
+            .filter_map(|(_, target_path)| {
+                target_path.as_ref().map(|path| crate::core::boss_acceptance::BossArtifactExpectation {
+                    path: std::path::PathBuf::from(path),
+                    kind: crate::core::boss_acceptance::BossArtifactKind::File,
+                })
             })
             .collect(),
     )
     .into_iter()
     .map(|expectation| expectation.path.to_string_lossy().to_string())
-    .collect()
+    .collect::<std::collections::BTreeSet<_>>();
+
+    targets
+        .into_iter()
+        .filter_map(|(target_ref, target_path)| {
+            let path = target_path?;
+            canonical_paths
+                .contains(&path)
+                .then(|| format!("{target_ref}:{path}"))
+        })
+        .collect()
 }
 
 fn summarize_records(records: &[LisMAbSampleRecord]) -> LisMAbSummary {

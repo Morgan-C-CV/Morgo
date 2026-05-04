@@ -627,6 +627,32 @@ pub fn append_runtime_tool_record(
                 });
             }
         }
+        "ArtifactVerify" => {
+            if record.kind != ToolExecutionOutcomeKind::Success {
+                return;
+            }
+            let Some(path) = observable_path(record) else {
+                return;
+            };
+            let status =
+                observable_string_field(record, "status").unwrap_or_else(|| "verified".into());
+            let kind = observable_string_field(record, "kind").unwrap_or_else(|| "file".into());
+            push_artifact_record(
+                ledgers,
+                ArtifactRecord {
+                    ref_id: format!("artifact:{ref_namespace}:verify"),
+                    path,
+                    kind,
+                    status,
+                    summary: tool_record_summary(record),
+                    source: "tool:ArtifactVerify".into(),
+                    source_event_id: format!("tool-artifact:{ref_namespace}"),
+                    freshness: "after-runtime-artifact-verify".into(),
+                    confidence_milli: 1000,
+                    lineage: active_lineage(),
+                },
+            );
+        }
         _ => {}
     }
 }
