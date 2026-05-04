@@ -164,6 +164,9 @@ pub struct BossPlanStep {
     /// Typed continuation source for reject / repair / continue flows.
     #[serde(default)]
     pub stage_continuation_context: Option<StageContinuationContext>,
+    /// Typed step-local execution memory for the current ExecutorB stage.
+    #[serde(default)]
+    pub executor_b_stage_memory: Option<ExecutorBStageMemory>,
     /// Task id of the A review agent currently reviewing this step.
     #[serde(default)]
     pub review_task_id: Option<String>,
@@ -174,6 +177,36 @@ pub struct BossPlanStep {
 
 fn default_retry_budget() -> u32 {
     3
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutorBStageMemoryContinuity {
+    ReuseWithinStep,
+    FreshStep,
+    VerificationFirstIsolated,
+    FullWorkerDispatchReuse,
+    FullWorkerDispatchFresh,
+    FullContextReuse,
+    FullContextFresh,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct ExecutorBStageMemory {
+    #[serde(default)]
+    pub recent_reads: Vec<String>,
+    #[serde(default)]
+    pub recent_edits: Vec<String>,
+    #[serde(default)]
+    pub recent_test_refs: Vec<String>,
+    #[serde(default)]
+    pub recent_verification_refs: Vec<String>,
+    #[serde(default)]
+    pub failed_targets: Vec<String>,
+    #[serde(default)]
+    pub verified_targets: Vec<String>,
+    #[serde(default)]
+    pub continuity: Option<ExecutorBStageMemoryContinuity>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -345,6 +378,8 @@ pub struct BossStepReport {
     pub stage_execution_contract: StageExecutionContract,
     #[serde(default)]
     pub stage_continuation_context: Option<StageContinuationContext>,
+    #[serde(default)]
+    pub executor_b_stage_memory: Option<ExecutorBStageMemory>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -474,6 +509,8 @@ pub struct BossReportPayload {
     pub stage_execution_contract: StageExecutionContract,
     #[serde(default)]
     pub stage_continuation_context: Option<StageContinuationContext>,
+    #[serde(default)]
+    pub executor_b_stage_memory: Option<ExecutorBStageMemory>,
 }
 
 impl BossReportPayload {

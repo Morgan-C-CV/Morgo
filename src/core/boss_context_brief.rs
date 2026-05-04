@@ -1,4 +1,4 @@
-use crate::core::boss_state::BossPlanStepStatus;
+use crate::core::boss_state::{BossPlanStepStatus, ExecutorBStageMemory};
 use crate::core::state_frame::{StageContinuationContext, StageExecutionContract};
 use crate::core::prompt_segment::{PromptAssembly, PromptSegment, PromptSegmentKind};
 use serde::{Deserialize, Serialize};
@@ -76,6 +76,8 @@ pub struct BossStateFrame {
     pub stage_execution_contract: StageExecutionContract,
     #[serde(default)]
     pub stage_continuation_context: Option<StageContinuationContext>,
+    #[serde(default)]
+    pub executor_b_stage_memory: Option<ExecutorBStageMemory>,
     pub open_items: Vec<String>,
     pub blocked_items: Vec<String>,
     pub recent_local_facts: Vec<String>,
@@ -213,6 +215,53 @@ impl BossStateFrame {
                 ));
             } else {
                 lines.push("  - repair_intent=none".into());
+            }
+        }
+        if let Some(memory) = &self.executor_b_stage_memory {
+            lines.push("executor_b_stage_memory:".into());
+            lines.push(format!(
+                "  - continuity={}",
+                memory
+                    .continuity
+                    .as_ref()
+                    .map(|value| format!("{value:?}").to_ascii_lowercase())
+                    .unwrap_or_else(|| "none".into())
+            ));
+            if !memory.recent_reads.is_empty() {
+                lines.push("  - recent_reads:".into());
+                for item in &memory.recent_reads {
+                    lines.push(format!("    - {item}"));
+                }
+            }
+            if !memory.recent_edits.is_empty() {
+                lines.push("  - recent_edits:".into());
+                for item in &memory.recent_edits {
+                    lines.push(format!("    - {item}"));
+                }
+            }
+            if !memory.recent_test_refs.is_empty() {
+                lines.push("  - recent_test_refs:".into());
+                for item in &memory.recent_test_refs {
+                    lines.push(format!("    - {item}"));
+                }
+            }
+            if !memory.recent_verification_refs.is_empty() {
+                lines.push("  - recent_verification_refs:".into());
+                for item in &memory.recent_verification_refs {
+                    lines.push(format!("    - {item}"));
+                }
+            }
+            if !memory.failed_targets.is_empty() {
+                lines.push("  - failed_targets:".into());
+                for item in &memory.failed_targets {
+                    lines.push(format!("    - {item}"));
+                }
+            }
+            if !memory.verified_targets.is_empty() {
+                lines.push("  - verified_targets:".into());
+                for item in &memory.verified_targets {
+                    lines.push(format!("    - {item}"));
+                }
             }
         }
         if !self.open_items.is_empty() {

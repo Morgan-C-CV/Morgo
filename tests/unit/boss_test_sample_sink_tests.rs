@@ -93,6 +93,7 @@ fn make_report(
             },
             stage_execution_contract: StageExecutionContract::default(),
             stage_continuation_context: None,
+            executor_b_stage_memory: None,
         })
         .collect();
 
@@ -141,6 +142,7 @@ fn make_report(
         lism_policy: BossLisMPolicy::Inherit,
         stage_execution_contract: StageExecutionContract::default(),
         stage_continuation_context: None,
+        executor_b_stage_memory: None,
     }
 }
 

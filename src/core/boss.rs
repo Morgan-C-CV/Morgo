@@ -14,7 +14,7 @@ use crate::core::boss_state::{
     BossObservabilitySummary, BossPlan, BossPlanStep, BossPlanStepStatus, BossReportPayload,
     BossRolloutPolicyDecision, BossRolloutTargetDecision, BossSession, BossStage, BossStatus,
     BossStepMetrics, BossStepReport, BossStepRoutedMetadata, BossStopOutcome, BossStopStage,
-    CompressionStrategy, ContextMode,
+    CompressionStrategy, ContextMode, ExecutorBStageMemory, ExecutorBStageMemoryContinuity,
 };
 use crate::core::boss_test_readiness::BossTestRunOutcome;
 use crate::core::context::WorkerLisMPolicy;
@@ -160,6 +160,7 @@ fn update_step_continuation_context(
 fn clear_step_continuation_context(step: &mut BossPlanStep) {
     step.stage_continuation_context = None;
     step.last_correction = None;
+    step.executor_b_stage_memory = None;
 }
 
 fn build_stage_execution_contract(
@@ -367,6 +368,24 @@ struct ContinuationPayload {
     continuity_mode: Option<String>,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq, Default)]
+struct StageMemoryPayload {
+    #[serde(default)]
+    recent_reads: Vec<String>,
+    #[serde(default)]
+    recent_edits: Vec<String>,
+    #[serde(default)]
+    recent_test_refs: Vec<String>,
+    #[serde(default)]
+    recent_verification_refs: Vec<String>,
+    #[serde(default)]
+    failed_targets: Vec<String>,
+    #[serde(default)]
+    verified_targets: Vec<String>,
+    #[serde(default)]
+    continuity: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct StepRolloutExecutionPolicy {
     forced_worker_lism_policy: WorkerLisMPolicy,
@@ -443,6 +462,22 @@ fn build_continuation_payload(contract: &ExecutorBAssignmentContract) -> Continu
     }
 }
 
+fn build_stage_memory_payload(contract: &ExecutorBAssignmentContract) -> Option<StageMemoryPayload> {
+    let memory = contract.state_frame.executor_b_stage_memory.as_ref()?;
+    Some(StageMemoryPayload {
+        recent_reads: memory.recent_reads.clone(),
+        recent_edits: memory.recent_edits.clone(),
+        recent_test_refs: memory.recent_test_refs.clone(),
+        recent_verification_refs: memory.recent_verification_refs.clone(),
+        failed_targets: memory.failed_targets.clone(),
+        verified_targets: memory.verified_targets.clone(),
+        continuity: memory
+            .continuity
+            .as_ref()
+            .map(|value| format!("{value:?}").to_ascii_lowercase()),
+    })
+}
+
 fn build_stage_continuation_context(
     step: &BossPlanStep,
 ) -> Option<crate::core::state_frame::StageContinuationContext> {
@@ -464,6 +499,109 @@ fn build_stage_continuation_context(
             continuity_mode: Some(crate::core::state_frame::ContinuityMode::Repair),
         })
     })
+}
+
+fn push_unique_memory_item(items: &mut Vec<String>, item: Option<String>, limit: usize) {
+    let Some(item) = item.map(|value| value.trim().to_string()) else {
+        return;
+    };
+    if item.is_empty() || items.iter().any(|existing| existing == &item) {
+        return;
+    }
+    items.push(item);
+    if items.len() > limit {
+        let drop_count = items.len() - limit;
+        items.drain(0..drop_count);
+    }
+}
+
+fn continuity_for_step_memory(
+    step: &BossPlanStep,
+    metadata: Option<&BossStepRoutedMetadata>,
+) -> ExecutorBStageMemoryContinuity {
+    match metadata.and_then(|meta| meta.fallback_tier.as_deref()) {
+        Some("verification_first") => ExecutorBStageMemoryContinuity::VerificationFirstIsolated,
+        Some("full_context") => {
+            if matches!(step.status, BossPlanStepStatus::Running | BossPlanStepStatus::Rejected) {
+                ExecutorBStageMemoryContinuity::FullContextReuse
+            } else {
+                ExecutorBStageMemoryContinuity::FullContextFresh
+            }
+        }
+        Some("full_worker_dispatch") => {
+            if matches!(step.status, BossPlanStepStatus::Running | BossPlanStepStatus::Rejected) {
+                ExecutorBStageMemoryContinuity::FullWorkerDispatchReuse
+            } else {
+                ExecutorBStageMemoryContinuity::FullWorkerDispatchFresh
+            }
+        }
+        _ => {
+            if matches!(step.status, BossPlanStepStatus::Running | BossPlanStepStatus::Rejected) {
+                ExecutorBStageMemoryContinuity::ReuseWithinStep
+            } else {
+                ExecutorBStageMemoryContinuity::FreshStep
+            }
+        }
+    }
+}
+
+fn project_executor_b_stage_memory(
+    step: &BossPlanStep,
+    metadata: Option<&BossStepRoutedMetadata>,
+) -> Option<ExecutorBStageMemory> {
+    let mut memory = step.executor_b_stage_memory.clone().unwrap_or_default();
+    memory.continuity = Some(continuity_for_step_memory(step, metadata));
+
+    for record in &step.tool_execution_records {
+        match record.tool_name.as_str() {
+            "Read" => {
+                push_unique_memory_item(&mut memory.recent_reads, observable_path_local(record), 5);
+            }
+            "Edit" | "Write" => {
+                push_unique_memory_item(&mut memory.recent_edits, observable_path_local(record), 5);
+            }
+            "Bash" => {
+                push_unique_memory_item(
+                    &mut memory.recent_test_refs,
+                    observable_bash_command_local(record),
+                    5,
+                );
+            }
+            "ArtifactVerify" => {
+                let path = observable_path_local(record)
+                    .or_else(|| record.summary.split(':').next_back().map(str::trim).map(str::to_string));
+                push_unique_memory_item(
+                    &mut memory.recent_verification_refs,
+                    Some(record.summary.clone()),
+                    5,
+                );
+                if record.summary.contains("missing_or_invalid")
+                    || record.summary.contains("target file missing")
+                    || record.summary.contains("artifact verification failed")
+                {
+                    push_unique_memory_item(&mut memory.failed_targets, path, 5);
+                } else {
+                    push_unique_memory_item(&mut memory.verified_targets, path, 5);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if let Some(context) = step.stage_continuation_context.as_ref() {
+        push_unique_memory_item(&mut memory.failed_targets, context.failed_target.clone(), 5);
+        for fact in &context.verified_facts {
+            push_unique_memory_item(&mut memory.recent_verification_refs, Some(fact.clone()), 5);
+        }
+    }
+
+    let has_memory = !memory.recent_reads.is_empty()
+        || !memory.recent_edits.is_empty()
+        || !memory.recent_test_refs.is_empty()
+        || !memory.recent_verification_refs.is_empty()
+        || !memory.failed_targets.is_empty()
+        || !memory.verified_targets.is_empty();
+    has_memory.then_some(memory)
 }
 
 fn strip_to_path_start(candidate: &str) -> &str {
@@ -2050,6 +2188,7 @@ impl BossCoordinator {
                 last_review_summary: None,
                 last_correction: None,
                 stage_continuation_context: None,
+                executor_b_stage_memory: None,
                 review_task_id: None,
                 tool_execution_records: Vec::new(),
             }],
@@ -2519,8 +2658,15 @@ impl BossCoordinator {
                 plan.steps
                     .iter()
                     .rev()
-                .find_map(build_stage_continuation_context)
+                    .find_map(build_stage_continuation_context)
             });
+        let executor_b_stage_memory = plan.as_ref().and_then(|plan| {
+            let routed_step_metadata = routed_step_metadata.clone();
+            plan.steps
+                .iter()
+                .rev()
+                .find_map(|step| project_executor_b_stage_memory(step, routed_step_metadata.get(&step.id)))
+        });
         let steps = plan
             .as_ref()
             .map(|plan| {
@@ -2550,6 +2696,10 @@ impl BossCoordinator {
                             ),
                         ),
                         stage_continuation_context: build_stage_continuation_context(step),
+                        executor_b_stage_memory: project_executor_b_stage_memory(
+                            step,
+                            routed_step_metadata.get(&step.id),
+                        ),
                     })
                     .collect::<Vec<_>>()
             })
@@ -2577,6 +2727,7 @@ impl BossCoordinator {
             lism_policy: self.lism_policy().await,
             stage_execution_contract: StageExecutionContract::default(),
             stage_continuation_context: step_continuation_context,
+            executor_b_stage_memory,
         }
     }
 
@@ -2622,6 +2773,13 @@ impl BossCoordinator {
                     .rev()
                     .find_map(build_stage_continuation_context)
             });
+        let executor_b_stage_memory = plan.as_ref().and_then(|plan| {
+            let routed_step_metadata = routed_step_metadata.clone();
+            plan.steps
+                .iter()
+                .rev()
+                .find_map(|step| project_executor_b_stage_memory(step, routed_step_metadata.get(&step.id)))
+        });
         let steps = plan
             .as_ref()
             .map(|plan| {
@@ -2664,6 +2822,10 @@ impl BossCoordinator {
                             ),
                         ),
                         stage_continuation_context: build_stage_continuation_context(step),
+                        executor_b_stage_memory: project_executor_b_stage_memory(
+                            step,
+                            routed_step_metadata.get(&step.id),
+                        ),
                     })
                     .collect::<Vec<_>>()
             })
@@ -2705,6 +2867,7 @@ impl BossCoordinator {
             lism_policy: self.lism_policy().await,
             stage_execution_contract: StageExecutionContract::default(),
             stage_continuation_context: step_continuation_context,
+            executor_b_stage_memory,
         })
     }
 
@@ -4352,6 +4515,10 @@ impl BossCoordinator {
                 .get(&step_id)
                 .and_then(|metadata| Self::resolve_step_rollout_execution_policy(Some(metadata)))
         };
+        let projected_stage_memory = {
+            let routed_step_metadata = self.routed_step_metadata.read().await;
+            project_executor_b_stage_memory(step, routed_step_metadata.get(&step_id))
+        };
         let plan_version = format!("{}:steps={}", plan.plan_id, plan.steps.len());
         let step_revision = format!("step-{}-attempt-{}", step.id, step.attempt_count);
         let relevant_file_handles = extract_relevant_file_handles(step.objective(), &step_revision);
@@ -4415,6 +4582,31 @@ impl BossCoordinator {
             status: step.status,
             stage_execution_contract: build_stage_execution_contract(step, &target_artifacts),
             stage_continuation_context: build_stage_continuation_context(step),
+            executor_b_stage_memory: if include_local_continuity {
+                projected_stage_memory.clone()
+            } else {
+                projected_stage_memory.as_ref().map(|memory| ExecutorBStageMemory {
+                    continuity: Some(
+                        memory
+                            .continuity
+                            .as_ref()
+                            .map(|value| match value {
+                                ExecutorBStageMemoryContinuity::ReuseWithinStep => {
+                                    ExecutorBStageMemoryContinuity::FreshStep
+                                }
+                                ExecutorBStageMemoryContinuity::FullWorkerDispatchReuse => {
+                                    ExecutorBStageMemoryContinuity::FullWorkerDispatchFresh
+                                }
+                                ExecutorBStageMemoryContinuity::FullContextReuse => {
+                                    ExecutorBStageMemoryContinuity::FullContextFresh
+                                }
+                                other => *other,
+                            })
+                            .unwrap_or(ExecutorBStageMemoryContinuity::FreshStep),
+                    ),
+                    ..ExecutorBStageMemory::default()
+                })
+            },
             open_items,
             blocked_items,
             recent_local_facts,
@@ -4541,6 +4733,7 @@ refresh_reason: {}\n\n{}",
         let step_revision = contract.brief.step_revision.clone();
         let assignment_fingerprint = contract.assignment_fingerprint.clone();
         let continuation_payload = build_continuation_payload(&contract);
+        let executor_b_stage_memory = build_stage_memory_payload(&contract);
         let payload = json!({
             "task_id": b_task_id,
             "message": message,
@@ -4560,6 +4753,7 @@ refresh_reason: {}\n\n{}",
                 None
             },
             "continuation_payload": continuation_payload,
+            "executor_b_stage_memory": executor_b_stage_memory,
             "recent_local_facts": contract.state_frame.recent_local_facts,
             "allowed_tools": contract.allowed_tools,
             "lism_policy": contract.lism_policy,
@@ -4604,6 +4798,7 @@ refresh_reason: {}\n\n{}",
         let step_revision = contract.brief.step_revision.clone();
         let assignment_fingerprint = contract.assignment_fingerprint.clone();
         let continuation_payload = build_continuation_payload(&contract);
+        let executor_b_stage_memory = build_stage_memory_payload(&contract);
         let payload = json!({
             "task": assemble_brief_prompt(
                 &contract.brief,
@@ -4633,6 +4828,7 @@ refresh_reason: {}\n\n{}",
             "step_revision": step_revision,
             "assignment_fingerprint": assignment_fingerprint,
             "continuation_payload": continuation_payload,
+            "executor_b_stage_memory": executor_b_stage_memory,
         })
         .to_string();
 
@@ -5785,6 +5981,7 @@ mod tests {
                     next_action: Some("write_artifact".into()),
                     continuity_mode: Some(crate::core::state_frame::ContinuityMode::Repair),
                 }),
+                executor_b_stage_memory: None,
             }],
             history_summary: Vec::new(),
             observability_summary: None,
@@ -5806,6 +6003,7 @@ mod tests {
                 next_action: Some("write_artifact".into()),
                 continuity_mode: Some(crate::core::state_frame::ContinuityMode::Repair),
             }),
+            executor_b_stage_memory: None,
         };
 
         assert_eq!(
@@ -5927,6 +6125,7 @@ mod tests {
             }),
             stage_execution_contract: StageExecutionContract::default(),
             stage_continuation_context: None,
+            executor_b_stage_memory: None,
         }];
 
         let decision =
@@ -5964,6 +6163,7 @@ mod tests {
             }),
             stage_execution_contract: StageExecutionContract::default(),
             stage_continuation_context: None,
+            executor_b_stage_memory: None,
         }];
 
         assert!(BossCoordinator::derive_rollout_policy_decision(&steps).is_none());
@@ -6009,6 +6209,7 @@ mod tests {
                     ..StageExecutionContract::default()
                 },
                 stage_continuation_context: None,
+                executor_b_stage_memory: None,
                 open_items: vec!["write artifact".into()],
                 blocked_items: Vec::new(),
                 recent_local_facts: vec!["fact: file missing".into()],
@@ -6030,6 +6231,131 @@ mod tests {
         assert_eq!(payload.next_action.as_deref(), Some("write_artifact"));
         assert_eq!(payload.verified_facts, vec!["fact: file missing"]);
         assert_eq!(payload.continuity_mode.as_deref(), Some("continue"));
+    }
+
+    #[test]
+    fn executor_b_stage_memory_reuses_recent_read_edit_test_and_verification_facts() {
+        let step = BossPlanStep {
+            id: 0,
+            description: "step".into(),
+            objective: Some("创建目标文件：/tmp/report.md".into()),
+            acceptance: vec!["artifact file exists and is non-empty".into()],
+            requires_approval: false,
+            status: BossPlanStepStatus::Rejected,
+            completed: false,
+            result_diff: None,
+            worker_task_id: None,
+            attempt_count: 1,
+            retry_budget: 3,
+            last_review_summary: Some("repair".into()),
+            last_correction: Some("repair artifact".into()),
+            stage_continuation_context: Some(crate::core::state_frame::StageContinuationContext {
+                failed_target: Some("/tmp/report.md".into()),
+                verified_facts: vec!["artifact verification failed".into()],
+                next_action: Some("repair artifact".into()),
+                continuity_mode: Some(crate::core::state_frame::ContinuityMode::Repair),
+                repair_intent: None,
+            }),
+            executor_b_stage_memory: None,
+            review_task_id: None,
+            tool_execution_records: vec![
+                ToolExecutionRecord {
+                    tool_name: "Read".into(),
+                    outcome: "success".into(),
+                    kind: ToolExecutionOutcomeKind::Success,
+                    summary: "read src/lib.rs".into(),
+                    detail: None,
+                    pending_approval: None,
+                    report_modifier: ToolReportModifier::None,
+                    observable_input: Some(observable_input_json(json!({"path":"src/lib.rs"}))),
+                    batch_context: ToolBatchContext { batch_index: 0, batch_size: 1, executed_in_batch: false },
+                },
+                ToolExecutionRecord {
+                    tool_name: "Edit".into(),
+                    outcome: "success".into(),
+                    kind: ToolExecutionOutcomeKind::Success,
+                    summary: "updated src/lib.rs".into(),
+                    detail: None,
+                    pending_approval: None,
+                    report_modifier: ToolReportModifier::None,
+                    observable_input: Some(observable_input_json(json!({"path":"src/lib.rs"}))),
+                    batch_context: ToolBatchContext { batch_index: 0, batch_size: 1, executed_in_batch: false },
+                },
+                ToolExecutionRecord {
+                    tool_name: "Bash".into(),
+                    outcome: "success".into(),
+                    kind: ToolExecutionOutcomeKind::Success,
+                    summary: "cargo test passed".into(),
+                    detail: None,
+                    pending_approval: None,
+                    report_modifier: ToolReportModifier::None,
+                    observable_input: Some(observable_input_json(json!({"command":"cargo test -p rust_agent"}))),
+                    batch_context: ToolBatchContext { batch_index: 0, batch_size: 1, executed_in_batch: false },
+                },
+                ToolExecutionRecord {
+                    tool_name: "ArtifactVerify".into(),
+                    outcome: "failed".into(),
+                    kind: ToolExecutionOutcomeKind::Denied,
+                    summary: "artifact verification failed: target file missing".into(),
+                    detail: None,
+                    pending_approval: None,
+                    report_modifier: ToolReportModifier::None,
+                    observable_input: Some(observable_input_json(json!({"path":"/tmp/report.md","status":"missing_or_invalid"}))),
+                    batch_context: ToolBatchContext { batch_index: 0, batch_size: 1, executed_in_batch: false },
+                },
+            ],
+        };
+
+        let memory = project_executor_b_stage_memory(&step, None).expect("memory projected");
+        assert_eq!(memory.continuity, Some(ExecutorBStageMemoryContinuity::ReuseWithinStep));
+        assert_eq!(memory.recent_reads, vec!["src/lib.rs"]);
+        assert_eq!(memory.recent_edits, vec!["src/lib.rs"]);
+        assert_eq!(memory.recent_test_refs, vec!["cargo test -p rust_agent"]);
+        assert!(
+            memory
+                .recent_verification_refs
+                .iter()
+                .any(|item| item.contains("artifact verification failed"))
+        );
+        assert!(memory.failed_targets.iter().any(|item| item.contains("/tmp/report.md")));
+    }
+
+    #[test]
+    fn executor_b_stage_memory_marks_verification_first_as_isolated() {
+        let step = BossPlanStep {
+            id: 0,
+            description: "step".into(),
+            objective: Some("verify artifact".into()),
+            acceptance: vec![],
+            requires_approval: false,
+            status: BossPlanStepStatus::Running,
+            completed: false,
+            result_diff: None,
+            worker_task_id: None,
+            attempt_count: 0,
+            retry_budget: 3,
+            last_review_summary: None,
+            last_correction: None,
+            stage_continuation_context: None,
+            executor_b_stage_memory: Some(ExecutorBStageMemory {
+                recent_reads: vec!["src/lib.rs".into()],
+                ..ExecutorBStageMemory::default()
+            }),
+            review_task_id: None,
+            tool_execution_records: Vec::new(),
+        };
+        let metadata = BossStepRoutedMetadata {
+            fallback_tier: Some("verification_first".into()),
+            ..BossStepRoutedMetadata::default()
+        };
+
+        let memory =
+            project_executor_b_stage_memory(&step, Some(&metadata)).expect("memory projected");
+        assert_eq!(
+            memory.continuity,
+            Some(ExecutorBStageMemoryContinuity::VerificationFirstIsolated)
+        );
+        assert_eq!(memory.recent_reads, vec!["src/lib.rs"]);
     }
 
     #[tokio::test]
@@ -6069,6 +6395,7 @@ mod tests {
                         last_review_summary: Some("done".into()),
                         last_correction: None,
                         stage_continuation_context: None,
+                        executor_b_stage_memory: None,
                         review_task_id: None,
                         tool_execution_records: Vec::new(),
                     },
@@ -6087,6 +6414,7 @@ mod tests {
                         last_review_summary: Some("repair needed".into()),
                         last_correction: Some("/tmp/failed-report.md".into()),
                         stage_continuation_context: None,
+                        executor_b_stage_memory: None,
                         review_task_id: None,
                         tool_execution_records: vec![ToolExecutionRecord {
                             tool_name: "ArtifactVerify".into(),
@@ -6251,6 +6579,7 @@ mod tests {
                     last_review_summary: None,
                     last_correction: None,
                     stage_continuation_context: None,
+                    executor_b_stage_memory: None,
                     review_task_id: None,
                     tool_execution_records: Vec::new(),
                 }],
@@ -6352,6 +6681,7 @@ mod tests {
                     last_review_summary: None,
                     last_correction: None,
                     stage_continuation_context: None,
+                    executor_b_stage_memory: None,
                     review_task_id: None,
                     tool_execution_records: Vec::new(),
                 }],
@@ -6520,6 +6850,7 @@ mod tests {
                 last_review_summary: None,
                 last_correction: None,
                 stage_continuation_context: None,
+                executor_b_stage_memory: None,
                 review_task_id: None,
                 tool_execution_records: Vec::new(),
             }],
@@ -6558,6 +6889,7 @@ mod tests {
                     last_review_summary: None,
                     last_correction: None,
                     stage_continuation_context: None,
+                    executor_b_stage_memory: None,
                     review_task_id: None,
                     tool_execution_records: Vec::new(),
                 }],
@@ -6673,6 +7005,7 @@ mod tests {
                 last_review_summary: Some(format!("summary {id}")),
                 last_correction: None,
                 stage_continuation_context: None,
+                executor_b_stage_memory: None,
                 review_task_id: None,
                 tool_execution_records: Vec::new(),
             };
@@ -6724,6 +7057,7 @@ mod tests {
                     last_review_summary: None,
                     last_correction: None,
                     stage_continuation_context: None,
+                    executor_b_stage_memory: None,
                     review_task_id: None,
                     tool_execution_records: Vec::new(),
         };
@@ -6758,6 +7092,7 @@ mod tests {
             last_review_summary: Some("tests are still failing".into()),
             last_correction: None,
             stage_continuation_context: None,
+            executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
         };
@@ -6784,6 +7119,7 @@ mod tests {
             last_review_summary: None,
             last_correction: None,
             stage_continuation_context: None,
+            executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
         };

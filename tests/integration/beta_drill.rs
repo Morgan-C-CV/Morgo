@@ -161,6 +161,7 @@ fn make_drill_report(completed: bool, cost_micros: u64) -> BossReportPayload {
             routed_metadata: None,
             stage_execution_contract: StageExecutionContract::default(),
             stage_continuation_context: None,
+            executor_b_stage_memory: None,
         }],
         history_summary: vec![],
         observability_summary: Some(BossObservabilitySummary {
@@ -193,6 +194,7 @@ fn make_drill_report(completed: bool, cost_micros: u64) -> BossReportPayload {
         lism_policy: BossLisMPolicy::Inherit,
         stage_execution_contract: StageExecutionContract::default(),
         stage_continuation_context: None,
+        executor_b_stage_memory: None,
     }
 }
 

@@ -1,6 +1,7 @@
 use crate::core::concurrency::{
     BossBudgetDecision, current_memory_pressure_level, evaluate_boss_budget,
 };
+use crate::core::boss_state::ExecutorBStageMemory;
 use async_trait::async_trait;
 use serde::Deserialize;
 
@@ -65,6 +66,7 @@ struct ContinueBossStepContext {
     step_acceptance: Vec<String>,
     parent_session_id: Option<String>,
     continuation_context: Option<StageContinuationContext>,
+    executor_b_stage_memory: Option<ExecutorBStageMemory>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,6 +97,7 @@ struct AgentJsonRequest {
     task_id: Option<String>,
     message: Option<String>,
     continuation_payload: Option<StageContinuationContext>,
+    executor_b_stage_memory: Option<ExecutorBStageMemory>,
     boss_actor_role: Option<String>,
     boss_lineage_depth: Option<u32>,
 }
@@ -404,6 +407,7 @@ fn parse_agent_request(input: &str) -> anyhow::Result<AgentRequest> {
                 || request.step_acceptance.as_ref().is_some_and(|items| !items.is_empty())
                 || request.parent_session_id.is_some()
                 || request.continuation_payload.is_some()
+                || request.executor_b_stage_memory.is_some()
             {
                 Some(ContinueBossStepContext {
                     step_id: request.step_id,
@@ -412,6 +416,7 @@ fn parse_agent_request(input: &str) -> anyhow::Result<AgentRequest> {
                     step_acceptance: request.step_acceptance.unwrap_or_default(),
                     parent_session_id: request.parent_session_id,
                     continuation_context: request.continuation_payload,
+                    executor_b_stage_memory: request.executor_b_stage_memory,
                 })
             } else {
                 None
@@ -540,6 +545,7 @@ fn build_continue_task_input(
         || !context.step_acceptance.is_empty()
         || context.parent_session_id.is_some()
         || context.continuation_context.is_some()
+        || context.executor_b_stage_memory.is_some()
     {
         sections.push("<boss-step-context>".into());
         if let Some(plan_id) = context.boss_plan_id.as_deref() {
@@ -583,6 +589,61 @@ fn build_continue_task_input(
                         .verified_facts
                         .iter()
                         .map(|fact| format!("- {fact}")),
+                );
+            }
+        }
+        if let Some(memory) = context.executor_b_stage_memory.as_ref() {
+            sections.push("executor_b_stage_memory:".into());
+            sections.push(format!(
+                "continuity: {}",
+                memory
+                    .continuity
+                    .as_ref()
+                    .map(|value| format!("{value:?}").to_ascii_lowercase())
+                    .unwrap_or_else(|| "none".into())
+            ));
+            if !memory.recent_reads.is_empty() {
+                sections.push("recent_reads:".into());
+                sections.extend(memory.recent_reads.iter().map(|item| format!("- {item}")));
+            }
+            if !memory.recent_edits.is_empty() {
+                sections.push("recent_edits:".into());
+                sections.extend(memory.recent_edits.iter().map(|item| format!("- {item}")));
+            }
+            if !memory.recent_test_refs.is_empty() {
+                sections.push("recent_test_refs:".into());
+                sections.extend(
+                    memory
+                        .recent_test_refs
+                        .iter()
+                        .map(|item| format!("- {item}")),
+                );
+            }
+            if !memory.recent_verification_refs.is_empty() {
+                sections.push("recent_verification_refs:".into());
+                sections.extend(
+                    memory
+                        .recent_verification_refs
+                        .iter()
+                        .map(|item| format!("- {item}")),
+                );
+            }
+            if !memory.failed_targets.is_empty() {
+                sections.push("failed_targets:".into());
+                sections.extend(
+                    memory
+                        .failed_targets
+                        .iter()
+                        .map(|item| format!("- {item}")),
+                );
+            }
+            if !memory.verified_targets.is_empty() {
+                sections.push("verified_targets:".into());
+                sections.extend(
+                    memory
+                        .verified_targets
+                        .iter()
+                        .map(|item| format!("- {item}")),
                 );
             }
         }

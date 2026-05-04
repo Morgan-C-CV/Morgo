@@ -44,6 +44,7 @@ fn make_report(
             routed_metadata: None,
             stage_execution_contract: StageExecutionContract::default(),
             stage_continuation_context: None,
+            executor_b_stage_memory: None,
         })
         .collect();
 
@@ -92,6 +93,7 @@ fn make_report(
         lism_policy: BossLisMPolicy::Inherit,
         stage_execution_contract: StageExecutionContract::default(),
         stage_continuation_context: None,
+        executor_b_stage_memory: None,
     }
 }
 
@@ -284,6 +286,7 @@ fn r1_1_record_carries_fallback_tier_and_reason() {
         }),
         stage_execution_contract: StageExecutionContract::default(),
         stage_continuation_context: None,
+        executor_b_stage_memory: None,
     }];
     sink.record_run(
         "fallback-run",

@@ -1016,6 +1016,7 @@ mod tests {
                 }),
                 stage_execution_contract: StageExecutionContract::default(),
                 stage_continuation_context: None,
+                        executor_b_stage_memory: None,
             }],
             history_summary: Vec::new(),
             observability_summary: None,
@@ -1040,6 +1041,7 @@ mod tests {
             lism_policy: Default::default(),
             stage_execution_contract: StageExecutionContract::default(),
             stage_continuation_context: None,
+                        executor_b_stage_memory: None,
         };
 
         let record = build_ab_record(
@@ -1085,6 +1087,7 @@ mod tests {
                 routed_metadata: Some(BossStepRoutedMetadata::default()),
                 stage_execution_contract: StageExecutionContract::default(),
                 stage_continuation_context: None,
+                        executor_b_stage_memory: None,
             }],
             history_summary: Vec::new(),
             observability_summary: None,
@@ -1093,6 +1096,7 @@ mod tests {
             lism_policy: Default::default(),
             stage_execution_contract: StageExecutionContract::default(),
             stage_continuation_context: None,
+                        executor_b_stage_memory: None,
         };
 
         let record = build_ab_record(
@@ -1130,6 +1134,7 @@ mod tests {
                 }),
                 stage_execution_contract: StageExecutionContract::default(),
                 stage_continuation_context: None,
+                        executor_b_stage_memory: None,
             }],
             history_summary: Vec::new(),
             observability_summary: None,
@@ -1138,6 +1143,7 @@ mod tests {
             lism_policy: Default::default(),
             stage_execution_contract: StageExecutionContract::default(),
             stage_continuation_context: None,
+                        executor_b_stage_memory: None,
         };
 
         let record = build_ab_record(
@@ -1187,6 +1193,7 @@ mod tests {
                 }),
                 stage_execution_contract: StageExecutionContract::default(),
                 stage_continuation_context: None,
+                        executor_b_stage_memory: None,
             }],
             history_summary: Vec::new(),
             observability_summary: None,
@@ -1195,6 +1202,7 @@ mod tests {
             lism_policy: Default::default(),
             stage_execution_contract: StageExecutionContract::default(),
             stage_continuation_context: None,
+                        executor_b_stage_memory: None,
         };
 
         let record = build_ab_record(

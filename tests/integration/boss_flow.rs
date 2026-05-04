@@ -502,6 +502,7 @@ fn make_orchestrator_route_override_plan(step_id: usize) -> BossPlan {
             last_review_summary: None,
             last_correction: None,
             stage_continuation_context: None,
+            executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
         }],
@@ -597,6 +598,7 @@ fn boss_step(id: usize, description: &str) -> BossPlanStep {
         last_review_summary: None,
         last_correction: None,
         stage_continuation_context: None,
+        executor_b_stage_memory: None,
         review_task_id: None,
         tool_execution_records: Vec::new(),
     }
@@ -3390,6 +3392,7 @@ async fn successful_review_clears_stale_continuation_before_next_step() {
         let guard = coordinator.plan.read().await;
         let step0 = &guard.as_ref().unwrap().steps[0];
         assert!(step0.stage_continuation_context.is_none());
+        assert!(step0.executor_b_stage_memory.is_none());
     }
 
     let continue_payload = coordinator
@@ -3403,6 +3406,138 @@ async fn successful_review_clears_stale_continuation_before_next_step() {
     assert!(
         !failed_target.contains("stale-target"),
         "next step continuation must not inherit stale failed target"
+    );
+    assert!(
+        continue_json["executor_b_stage_memory"].is_null(),
+        "next step should not inherit stale local execution memory"
+    );
+
+    let _ = std::fs::remove_file(plan_path);
+}
+
+#[tokio::test]
+async fn continue_payload_reuses_executor_b_local_stage_memory() {
+    let (coordinator, plan_path) = coordinator_with_plan(
+        boss_plan(vec![boss_step(0, "Step with reusable local memory")]),
+        "test_boss_continue_payload_reuses_local_stage_memory.json",
+    )
+    .await;
+
+    {
+        let mut guard = coordinator.plan.write().await;
+        let plan = guard.as_mut().unwrap();
+        plan.steps[0].status = BossPlanStepStatus::Rejected;
+        plan.steps[0].tool_execution_records = vec![
+            rust_agent::tool::result::ToolExecutionRecord {
+                tool_name: "Read".into(),
+                outcome: "success".into(),
+                kind: rust_agent::tool::result::ToolExecutionOutcomeKind::Success,
+                summary: "read src/core/boss.rs".into(),
+                detail: None,
+                pending_approval: None,
+                report_modifier: rust_agent::tool::result::ToolReportModifier::None,
+                observable_input: Some(rust_agent::tool::definition::ObservableInput {
+                    source: rust_agent::tool::definition::ObservableInputSource::Raw,
+                    value: serde_json::json!({"path":"src/core/boss.rs"}).to_string(),
+                }),
+                batch_context: rust_agent::tool::result::ToolBatchContext {
+                    batch_index: 0,
+                    batch_size: 1,
+                    executed_in_batch: false,
+                },
+            },
+            rust_agent::tool::result::ToolExecutionRecord {
+                tool_name: "Edit".into(),
+                outcome: "success".into(),
+                kind: rust_agent::tool::result::ToolExecutionOutcomeKind::Success,
+                summary: "updated src/core/boss.rs".into(),
+                detail: None,
+                pending_approval: None,
+                report_modifier: rust_agent::tool::result::ToolReportModifier::None,
+                observable_input: Some(rust_agent::tool::definition::ObservableInput {
+                    source: rust_agent::tool::definition::ObservableInputSource::Raw,
+                    value: serde_json::json!({"path":"src/core/boss.rs"}).to_string(),
+                }),
+                batch_context: rust_agent::tool::result::ToolBatchContext {
+                    batch_index: 0,
+                    batch_size: 1,
+                    executed_in_batch: false,
+                },
+            },
+            rust_agent::tool::result::ToolExecutionRecord {
+                tool_name: "Bash".into(),
+                outcome: "success".into(),
+                kind: rust_agent::tool::result::ToolExecutionOutcomeKind::Success,
+                summary: "cargo test passed".into(),
+                detail: None,
+                pending_approval: None,
+                report_modifier: rust_agent::tool::result::ToolReportModifier::None,
+                observable_input: Some(rust_agent::tool::definition::ObservableInput {
+                    source: rust_agent::tool::definition::ObservableInputSource::Raw,
+                    value: serde_json::json!({"command":"cargo test -p rust_agent"}).to_string(),
+                }),
+                batch_context: rust_agent::tool::result::ToolBatchContext {
+                    batch_index: 0,
+                    batch_size: 1,
+                    executed_in_batch: false,
+                },
+            },
+            rust_agent::tool::result::ToolExecutionRecord {
+                tool_name: "ArtifactVerify".into(),
+                outcome: "success".into(),
+                kind: rust_agent::tool::result::ToolExecutionOutcomeKind::Success,
+                summary: "artifact verification passed for /tmp/report.md".into(),
+                detail: None,
+                pending_approval: None,
+                report_modifier: rust_agent::tool::result::ToolReportModifier::None,
+                observable_input: Some(rust_agent::tool::definition::ObservableInput {
+                    source: rust_agent::tool::definition::ObservableInputSource::Raw,
+                    value: serde_json::json!({"path":"/tmp/report.md","status":"verified"}).to_string(),
+                }),
+                batch_context: rust_agent::tool::result::ToolBatchContext {
+                    batch_index: 0,
+                    batch_size: 1,
+                    executed_in_batch: false,
+                },
+            },
+        ];
+        plan.steps[0].stage_continuation_context = Some(
+            rust_agent::core::state_frame::StageContinuationContext {
+                repair_intent: None,
+                failed_target: Some("/tmp/report.md".into()),
+                verified_facts: vec!["artifact verification passed for /tmp/report.md".into()],
+                next_action: Some("refine artifact".into()),
+                continuity_mode: Some(rust_agent::core::state_frame::ContinuityMode::Repair),
+            },
+        );
+    }
+
+    let continue_payload = coordinator
+        .build_step_continue_payload(0, "b-task-memory", "parent-session-memory")
+        .await
+        .unwrap();
+    let continue_json: serde_json::Value = serde_json::from_str(&continue_payload).unwrap();
+
+    assert_eq!(
+        continue_json["executor_b_stage_memory"]["recent_reads"][0],
+        "src/core/boss.rs"
+    );
+    assert_eq!(
+        continue_json["executor_b_stage_memory"]["recent_edits"][0],
+        "src/core/boss.rs"
+    );
+    assert_eq!(
+        continue_json["executor_b_stage_memory"]["recent_test_refs"][0],
+        "cargo test -p rust_agent"
+    );
+    assert!(
+        continue_json["executor_b_stage_memory"]["recent_verification_refs"][0]
+            .as_str()
+            .is_some_and(|value| value.contains("artifact verification passed"))
+    );
+    assert_eq!(
+        continue_json["executor_b_stage_memory"]["continuity"],
+        "reusewithinstep"
     );
 
     let _ = std::fs::remove_file(plan_path);
@@ -7178,6 +7313,7 @@ fn make_frame(step_id: usize) -> BossStateFrame {
         open_items: vec!["write tests".into()],
         blocked_items: Vec::new(),
         recent_local_facts: Vec::new(),
+        executor_b_stage_memory: None,
         allowed_actions: vec!["implement".into()],
         required_output_hint: Some("return a unified diff".into()),
     }
@@ -7243,6 +7379,7 @@ fn t26_4_brief_fingerprint_stable_across_state_frame_changes() {
         open_items: vec!["DIFFERENT open item".into()],
         blocked_items: Vec::new(),
         recent_local_facts: Vec::new(),
+        executor_b_stage_memory: None,
         allowed_actions: vec!["implement".into()],
         required_output_hint: None,
     };
@@ -8618,6 +8755,7 @@ fn t27_3_execution_stage_with_step_maps_objective_and_open_items() {
         last_review_summary: None,
         last_correction: None,
         stage_continuation_context: None,
+        executor_b_stage_memory: None,
         review_task_id: None,
         tool_execution_records: Vec::new(),
     };
@@ -8675,6 +8813,7 @@ fn t27_3_completed_steps_go_into_accepted_summary() {
         last_review_summary: None,
         last_correction: None,
         stage_continuation_context: None,
+        executor_b_stage_memory: None,
         review_task_id: None,
         tool_execution_records: Vec::new(),
     };
@@ -8693,6 +8832,7 @@ fn t27_3_completed_steps_go_into_accepted_summary() {
         last_review_summary: None,
         last_correction: None,
         stage_continuation_context: None,
+        executor_b_stage_memory: None,
         review_task_id: None,
         tool_execution_records: Vec::new(),
     };
@@ -8774,6 +8914,7 @@ fn t27_3_projection_emits_rejected_approach_fact_from_review_correction() {
         last_review_summary: Some("previous patch ignored edge cases".into()),
         last_correction: Some("preserve the auth guard branch".into()),
         stage_continuation_context: None,
+        executor_b_stage_memory: None,
         review_task_id: None,
         tool_execution_records: Vec::new(),
     };
@@ -8820,6 +8961,7 @@ fn t27_3_readonly_audit_projection_emits_fact_ledger_and_readonly_actions() {
         last_review_summary: None,
         last_correction: None,
         stage_continuation_context: None,
+        executor_b_stage_memory: None,
         review_task_id: None,
         tool_execution_records: Vec::new(),
     };
@@ -8887,6 +9029,7 @@ fn t27_3_projection_emits_file_change_and_test_ledgers() {
         last_review_summary: Some("tests failed because file_facts still said none recorded".into()),
         last_correction: None,
         stage_continuation_context: None,
+        executor_b_stage_memory: None,
         review_task_id: None,
         tool_execution_records: Vec::new(),
     };
@@ -8948,6 +9091,7 @@ fn t27_3_projection_emits_file_fact_when_worker_reports_reading_a_file() {
         last_review_summary: None,
         last_correction: None,
         stage_continuation_context: None,
+        executor_b_stage_memory: None,
         review_task_id: None,
         tool_execution_records: Vec::new(),
     };
@@ -9013,6 +9157,7 @@ fn t27_3_projection_suppresses_none_recorded_when_matching_ledgers_exist() {
         last_review_summary: Some("ACCEPT: artifact verified and tests passed".into()),
         last_correction: None,
         stage_continuation_context: None,
+        executor_b_stage_memory: None,
         review_task_id: None,
         tool_execution_records: Vec::new(),
     };
@@ -10282,6 +10427,7 @@ async fn t27_r1_format_report_includes_hit_ratio_and_tokens_saved() {
             }),
             stage_execution_contract: rust_agent::core::state_frame::StageExecutionContract::default(),
             stage_continuation_context: None,
+            executor_b_stage_memory: None,
         }],
         history_summary: vec![],
         observability_summary: Some(summary),
@@ -10290,6 +10436,7 @@ async fn t27_r1_format_report_includes_hit_ratio_and_tokens_saved() {
         lism_policy: rust_agent::core::boss_state::BossLisMPolicy::Inherit,
         stage_execution_contract: rust_agent::core::state_frame::StageExecutionContract::default(),
         stage_continuation_context: None,
+        executor_b_stage_memory: None,
     };
 
     let report = payload.format_report();
@@ -11079,6 +11226,7 @@ fn make_plan_with_step(
             last_review_summary: None,
             last_correction: None,
             stage_continuation_context: None,
+            executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
         }],
@@ -11636,6 +11784,7 @@ fn t27_7_build_accepted_archive_excludes_current_step() {
         last_review_summary: None,
         last_correction: None,
         stage_continuation_context: None,
+        executor_b_stage_memory: None,
         review_task_id: None,
         tool_execution_records: Vec::new(),
     };
@@ -11710,6 +11859,7 @@ fn t27_7_projection_uses_archive_for_accepted_summary() {
         last_review_summary: None,
         last_correction: None,
         stage_continuation_context: None,
+        executor_b_stage_memory: None,
         review_task_id: None,
         tool_execution_records: Vec::new(),
     };
@@ -11767,6 +11917,7 @@ fn t27_7_open_items_excludes_criteria_already_in_archive() {
         last_review_summary: None,
         last_correction: None,
         stage_continuation_context: None,
+        executor_b_stage_memory: None,
         review_task_id: None,
         tool_execution_records: Vec::new(),
     };
@@ -11786,6 +11937,7 @@ fn t27_7_open_items_excludes_criteria_already_in_archive() {
         last_review_summary: None,
         last_correction: None,
         stage_continuation_context: None,
+        executor_b_stage_memory: None,
         review_task_id: None,
         tool_execution_records: Vec::new(),
     };
@@ -11843,6 +11995,7 @@ fn make_t278_step(
         last_review_summary: None,
         last_correction: None,
         stage_continuation_context: None,
+        executor_b_stage_memory: None,
         review_task_id: None,
         tool_execution_records: Vec::new(),
     }
