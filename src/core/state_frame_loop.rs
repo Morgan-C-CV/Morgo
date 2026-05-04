@@ -56,8 +56,13 @@ pub struct LoopUsage {
     pub fallback_tier: Option<String>,
     pub fallback_reason: Option<String>,
     pub hydration_count: usize,
+    pub hydration_from_contract_count: usize,
+    pub hydration_from_ledger_count: usize,
     pub stale_ref_count: usize,
     pub hydration_ref_missing: usize,
+    pub hydration_miss_unsupported_count: usize,
+    pub hydration_miss_stale_count: usize,
+    pub hydration_miss_no_match_count: usize,
     pub tool_dispatch_count: usize,
     pub tool_dispatch_success_count: usize,
     pub tool_dispatch_failure_count: usize,
@@ -1020,6 +1025,40 @@ fn activate_recent_local_history_fallback(frame: &mut StateFrame, requested: &[S
     changed
 }
 
+fn requested_selector_has_contract_gap(frame: &StateFrame, requested: &[String]) -> bool {
+    requested.iter().any(|raw| match parse_needed_context_selector(raw) {
+        NeededContextSelector::ArtifactRef { query } => query
+            .as_deref()
+            .map(|q| {
+                frame.stage_execution_contract.declared_artifact_by_ref(q).is_some()
+                    || frame.stage_execution_contract.declared_artifact_by_path(q).is_some()
+                    || frame.stage_execution_contract.verification_by_target_ref(q).is_some()
+                    || frame.stage_execution_contract.verification_by_target_path(q).is_some()
+            })
+            .unwrap_or(!frame.stage_execution_contract.declared_artifacts.is_empty()),
+        NeededContextSelector::Artifact { path } => path
+            .as_deref()
+            .map(|p| {
+                frame.stage_execution_contract.declared_artifact_by_path(
+                    p.trim().trim_end_matches(":exists_confirmation"),
+                )
+                .is_some()
+                    || frame
+                        .stage_execution_contract
+                        .verification_by_target_path(
+                            p.trim().trim_end_matches(":exists_confirmation"),
+                        )
+                        .is_some()
+            })
+            .unwrap_or(!frame.stage_execution_contract.declared_artifacts.is_empty()),
+        NeededContextSelector::TestFailure { query } => query
+            .as_deref()
+            .map(|q| frame.stage_execution_contract.test_by_name(q).is_some())
+            .unwrap_or(!frame.stage_execution_contract.tests.is_empty()),
+        _ => false,
+    })
+}
+
 fn activate_full_context_fallback(frame: &mut StateFrame, requested: &[String]) -> bool {
     let requested_summary = fallback_requested_summary(requested);
     let mut changed = push_unique(
@@ -1070,7 +1109,12 @@ fn activate_fallback_tier(
     requested: &[String],
     ladder: &mut FallbackLadderState,
     escalate: bool,
+    contract_gap_present: bool,
+    local_memory_hit: bool,
 ) -> Option<FallbackTier> {
+    if local_memory_hit {
+        return None;
+    }
     if escalate && !ladder.full_context_activated {
         if activate_full_context_fallback(frame, requested) {
             ladder.full_context_activated = true;
@@ -1078,7 +1122,7 @@ fn activate_fallback_tier(
         }
         ladder.full_context_activated = true;
     }
-    if !ladder.targeted_evidence_activated {
+    if contract_gap_present && !ladder.targeted_evidence_activated {
         if activate_targeted_evidence_fallback(frame, requested) {
             ladder.targeted_evidence_activated = true;
             return Some(FallbackTier::TargetedEvidence);
@@ -2076,8 +2120,14 @@ pub async fn run_decision_loop_with_tools(
     let initial_requests = initial_target_hydration_requests(&frame);
     let initial_hydration = hydrate_needed_context(&mut frame, &initial_requests);
     total_usage.hydration_count += initial_hydration.hydrated.len();
+    total_usage.hydration_from_contract_count += initial_hydration.hydration_from_contract_count;
+    total_usage.hydration_from_ledger_count += initial_hydration.hydration_from_ledger_count;
     total_usage.stale_ref_count += initial_hydration.stale.len();
     total_usage.hydration_ref_missing += initial_hydration.unavailable.len();
+    total_usage.hydration_miss_unsupported_count +=
+        initial_hydration.hydration_miss_unsupported_count;
+    total_usage.hydration_miss_stale_count += initial_hydration.hydration_miss_stale_count;
+    total_usage.hydration_miss_no_match_count += initial_hydration.hydration_miss_no_match_count;
 
     for _iter in 0..config.max_iterations {
         append_runtime_contract_facts(&mut frame);
@@ -2226,8 +2276,17 @@ pub async fn run_decision_loop_with_tools(
             DecisionKind::RequestContext => {
                 let mut summary = hydrate_needed_context(&mut frame, &decision.needed_context);
                 total_usage.hydration_count += summary.hydrated.len();
+                total_usage.hydration_from_contract_count +=
+                    summary.hydration_from_contract_count;
+                total_usage.hydration_from_ledger_count += summary.hydration_from_ledger_count;
                 total_usage.stale_ref_count += summary.stale.len();
                 total_usage.hydration_ref_missing += summary.unavailable.len();
+                total_usage.hydration_miss_unsupported_count +=
+                    summary.hydration_miss_unsupported_count;
+                total_usage.hydration_miss_stale_count +=
+                    summary.hydration_miss_stale_count;
+                total_usage.hydration_miss_no_match_count +=
+                    summary.hydration_miss_no_match_count;
                 frame.state = decision.state;
                 if summary.hydrated.is_empty() {
                     if let Some(file_path) = tool_backed_hydration_path(&decision.needed_context) {
@@ -2256,8 +2315,18 @@ pub async fn run_decision_loop_with_tools(
                                         &decision.needed_context,
                                     );
                                     total_usage.hydration_count += summary.hydrated.len();
+                                    total_usage.hydration_from_contract_count +=
+                                        summary.hydration_from_contract_count;
+                                    total_usage.hydration_from_ledger_count +=
+                                        summary.hydration_from_ledger_count;
                                     total_usage.stale_ref_count += summary.stale.len();
                                     total_usage.hydration_ref_missing += summary.unavailable.len();
+                                    total_usage.hydration_miss_unsupported_count +=
+                                        summary.hydration_miss_unsupported_count;
+                                    total_usage.hydration_miss_stale_count +=
+                                        summary.hydration_miss_stale_count;
+                                    total_usage.hydration_miss_no_match_count +=
+                                        summary.hydration_miss_no_match_count;
                                 }
                             }
                             Err(error) => {
@@ -2291,19 +2360,40 @@ pub async fn run_decision_loop_with_tools(
                                         &decision.needed_context,
                                     );
                                     total_usage.hydration_count += summary.hydrated.len();
+                                    total_usage.hydration_from_contract_count +=
+                                        summary.hydration_from_contract_count;
+                                    total_usage.hydration_from_ledger_count +=
+                                        summary.hydration_from_ledger_count;
                                     total_usage.stale_ref_count += summary.stale.len();
                                     total_usage.hydration_ref_missing += summary.unavailable.len();
+                                    total_usage.hydration_miss_unsupported_count +=
+                                        summary.hydration_miss_unsupported_count;
+                                    total_usage.hydration_miss_stale_count +=
+                                        summary.hydration_miss_stale_count;
+                                    total_usage.hydration_miss_no_match_count +=
+                                        summary.hydration_miss_no_match_count;
                                 }
                             }
                         }
                     }
                     if summary.hydrated.is_empty() {
-                        let fallback_tier = activate_fallback_tier(
-                            &mut frame,
-                            &decision.needed_context,
-                            &mut fallback_ladder,
-                            decision.escalate,
-                        );
+                        let contract_gap_present =
+                            requested_selector_has_contract_gap(&frame, &decision.needed_context);
+                        let local_memory_hit = frame.recent_evidence.iter().any(|line| {
+                            line.starts_with("fallback_context_item: tier=recent_local_history")
+                        }) && summary.hydration_from_ledger_count > 0;
+                        let fallback_tier = if contract_gap_present || decision.escalate {
+                            activate_fallback_tier(
+                                &mut frame,
+                                &decision.needed_context,
+                                &mut fallback_ladder,
+                                decision.escalate,
+                                contract_gap_present,
+                                local_memory_hit,
+                            )
+                        } else {
+                            None
+                        };
                         if let Some(fallback_tier) = fallback_tier {
                             total_usage.fallback_count += 1;
                             total_usage.fallback_tier = Some(fallback_tier.as_str().to_string());
@@ -2465,6 +2555,25 @@ mod tests {
                 "fact: recent_changes_in_files ref=change:1 path=src/core/state_frame_projection.rs source=worker_result source_event_id=worker-result:1 freshness=after-worker-output confidence=0.90 status=active invalidated_by=none supersedes=none conflicts_with=none summary=updated src/core/state_frame_projection.rs".into(),
                 "fact: test_failures ref=test:1 name=worker_reported_tests status=failed source=worker_result source_event_id=worker-result:2 freshness=after-worker-output confidence=0.85 status=active invalidated_by=none supersedes=none conflicts_with=none summary=tests failed in boss_flow".into(),
             ],
+            allowed_actions: vec!["read_file".into()],
+            allowed_tools: vec!["Read".into()],
+            toolset_id: None,
+            skillset_id: None,
+            required_output_schema: Some("state_decision_v1".into()),
+            budget: StateBudget::default(),
+        }
+    }
+
+    fn make_clean_frame() -> StateFrame {
+        StateFrame {
+            role: ActorRole::Worker,
+            state: AgentState::Executing,
+            objective: "typed contract hydration test".into(),
+            stage_execution_contract: StageExecutionContract::default(),
+            open_items: vec!["tests pass".into()],
+            blocked_items: Vec::new(),
+            accepted_summary: Vec::new(),
+            recent_evidence: Vec::new(),
             allowed_actions: vec!["read_file".into()],
             allowed_tools: vec!["Read".into()],
             toolset_id: None,
@@ -2712,14 +2821,12 @@ mod tests {
     }
 
     #[test]
-    fn request_context_unresolved_activates_recent_local_history_fallback() {
+    fn request_context_no_match_without_contract_gap_stops_without_widening() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let request_json = r#"{"state":"executing","decision":"request_context","needed_context":["symbol:MissingSymbol"]}"#;
-        let done_json = r#"{"state":"done","decision":"done"}"#;
-        let client = ModelProviderClient::with_scripted_turns(vec![
-            vec![StreamEvent::TextDelta(request_json.into())],
-            vec![StreamEvent::TextDelta(done_json.into())],
-        ]);
+        let client = ModelProviderClient::with_scripted_turns(vec![vec![StreamEvent::TextDelta(
+            request_json.into(),
+        )]]);
         let outcome = rt
             .block_on(run_decision_loop(
                 &client,
@@ -2728,28 +2835,54 @@ mod tests {
             ))
             .expect("loop should not error");
         match outcome {
-            LoopOutcome::Done { usage, .. } => {
-                assert_eq!(usage.fallback_count, 1);
+            LoopOutcome::RepairExhausted { usage, .. } => {
+                assert_eq!(usage.fallback_count, 0);
                 assert_eq!(usage.hydration_ref_missing, 1);
-                assert_eq!(usage.fallback_tier.as_deref(), Some("targeted_evidence"));
-                assert_eq!(
-                    usage.fallback_reason.as_deref(),
-                    Some("request_context_targeted_evidence:symbol:MissingSymbol")
-                );
+                assert_eq!(usage.fallback_tier, None);
             }
-            other => panic!("expected Done, got {other:?}"),
+            other => panic!("expected RepairExhausted, got {other:?}"),
         }
     }
 
     #[test]
-    fn request_context_no_progress_first_enters_targeted_evidence() {
+    fn contract_hit_does_not_upgrade_widening() {
+        let mut frame = make_clean_frame();
+        push_completion_contract(&mut frame, true, false, true);
+        if let Some(artifact) = frame
+            .stage_execution_contract
+            .declared_artifacts
+            .iter_mut()
+            .find(|artifact| artifact.ref_id == "artifact:contract:0")
+        {
+            artifact.path = "/tmp/contract-hit.txt".into();
+            artifact.kind = "file".into();
+        }
+        if let Some(verification) = frame
+            .stage_execution_contract
+            .verifications
+            .iter_mut()
+            .find(|verification| verification.target_ref == "artifact:contract:0")
+        {
+            verification.target_path = Some("/tmp/contract-hit.txt".into());
+        }
+        let summary =
+            hydrate_needed_context(&mut frame, &["artifact_ref:artifact:contract:0".into()]);
+        assert_eq!(summary.hydration_from_contract_count, 1);
+        assert_eq!(summary.hydration_from_ledger_count, 0);
+        assert!(summary.unavailable.is_empty());
+    }
+
+    #[test]
+    fn ledger_fallback_only_happens_after_contract_miss() {
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let request_json = r#"{"state":"executing","decision":"request_context","needed_context":["artifact_ref:artifact:contract:0"]}"#;
+        let request_json =
+            r#"{"state":"executing","decision":"request_context","needed_context":["review_ref:review:step1:runtime:0"]}"#;
         let done_json = r#"{"state":"done","decision":"done"}"#;
         let client = ModelProviderClient::with_scripted_turns(vec![
             vec![StreamEvent::TextDelta(request_json.into())],
             vec![StreamEvent::TextDelta(done_json.into())],
         ]);
+
         let outcome = rt
             .block_on(run_decision_loop(
                 &client,
@@ -2759,120 +2892,30 @@ mod tests {
             .expect("loop should not error");
         match outcome {
             LoopOutcome::Done { usage, .. } => {
-                assert_eq!(usage.fallback_count, 1);
-                assert_eq!(usage.fallback_tier.as_deref(), Some("targeted_evidence"));
-                assert_eq!(
-                    usage.fallback_reason.as_deref(),
-                    Some("request_context_targeted_evidence:artifact_ref:artifact:contract:0")
-                );
+                assert_eq!(usage.fallback_count, 0);
+                assert_eq!(usage.hydration_from_contract_count, 0);
             }
             other => panic!("expected Done, got {other:?}"),
         }
     }
 
     #[test]
-    fn request_context_no_progress_then_recent_local_history_then_full_context() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let request_json = r#"{"state":"executing","decision":"request_context","needed_context":["symbol:MissingSymbol"]}"#;
-        let done_json = r#"{"state":"done","decision":"done"}"#;
-        let client = ModelProviderClient::with_scripted_turns(vec![
-            vec![StreamEvent::TextDelta(request_json.into())],
-            vec![StreamEvent::TextDelta(request_json.into())],
-            vec![StreamEvent::TextDelta(request_json.into())],
-            vec![StreamEvent::TextDelta(done_json.into())],
-        ]);
-        let outcome = rt
-            .block_on(run_decision_loop(
-                &client,
-                make_frame(),
-                DecisionLoopConfig::default(),
-            ))
-            .expect("loop should not error");
-        match outcome {
-            LoopOutcome::Done { usage, .. } => {
-                assert_eq!(usage.fallback_count, 3);
-                assert_eq!(usage.fallback_tier.as_deref(), Some("full_context"));
-                assert_eq!(
-                    usage.fallback_reason.as_deref(),
-                    Some("request_context_exhausted:symbol:MissingSymbol")
-                );
-            }
-            other => panic!("expected Done, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn request_context_no_progress_ladder_clears_after_success() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let request_json = r#"{"state":"executing","decision":"request_context","needed_context":["symbol:MissingSymbol"]}"#;
-        let done_json = r#"{"state":"done","decision":"done"}"#;
-        let client = ModelProviderClient::with_scripted_turns(vec![
-            vec![StreamEvent::TextDelta(request_json.into())],
-            vec![StreamEvent::TextDelta(done_json.into())],
-        ]);
-        let outcome = rt
-            .block_on(run_decision_loop(
-                &client,
-                make_frame(),
-                DecisionLoopConfig::default(),
-            ))
-            .expect("loop should not error");
-        match outcome {
-            LoopOutcome::Done { usage, .. } => {
-                assert_eq!(usage.fallback_tier.as_deref(), Some("targeted_evidence"));
-                assert!(
-                    usage
-                        .worker_report
-                        .as_ref()
-                        .expect("worker report")
-                        .completion_evidence_gaps
-                        .is_empty()
-                        || usage
-                            .worker_report
-                            .as_ref()
-                            .expect("worker report")
-                            .completion_evidence_gaps
-                            .iter()
-                            .all(|gap| gap.target_ref != "artifact:contract:0")
-                );
-            }
-            other => panic!("expected Done, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn repeated_request_context_or_escalate_reaches_full_context_fallback() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let request_json = r#"{"state":"executing","decision":"request_context","needed_context":["symbol:MissingSymbol"]}"#;
-        let escalate_json = r#"{"state":"executing","decision":"request_context","needed_context":["symbol:MissingSymbol"],"escalate":true}"#;
-        let done_json = r#"{"state":"done","decision":"done"}"#;
-        let client = ModelProviderClient::with_scripted_turns(vec![
-            vec![StreamEvent::TextDelta(request_json.into())],
-            vec![StreamEvent::TextDelta(escalate_json.into())],
-            vec![StreamEvent::TextDelta(done_json.into())],
-        ]);
-        let outcome = rt
-            .block_on(run_decision_loop(
-                &client,
-                make_frame(),
-                DecisionLoopConfig {
-                    max_iterations: 6,
-                    ..DecisionLoopConfig::default()
-                },
-            ))
-            .expect("loop should not error");
-        match outcome {
-            LoopOutcome::Done { usage, .. } => {
-                assert_eq!(usage.fallback_count, 2);
-                assert_eq!(usage.hydration_ref_missing, 2);
-                assert_eq!(usage.fallback_tier.as_deref(), Some("full_context"));
-                assert_eq!(
-                    usage.fallback_reason.as_deref(),
-                    Some("request_context_escalated:symbol:MissingSymbol")
-                );
-            }
-            other => panic!("expected Done, got {other:?}"),
-        }
+    fn hydration_miss_telemetry_separates_unsupported_stale_and_no_match() {
+        let mut frame = make_clean_frame();
+        frame.recent_evidence.push(
+            "fact: review_verdicts ref=review:step1:stale verdict=rejected source=tool:BossReview source_event_id=tool-review:1:9 freshness=after-runtime-review confidence=1.00 status=stale invalidated_by=review:step1:runtime:0 supersedes=none conflicts_with=none summary=obsolete review verdict".into(),
+        );
+        let hydration = hydrate_needed_context(
+            &mut frame,
+            &[
+                "review_ref:review:step1:stale".into(),
+                "symbol:MissingSymbol".into(),
+                "bogus_selector".into(),
+            ],
+        );
+        assert_eq!(hydration.hydration_miss_stale_count, 1);
+        assert_eq!(hydration.hydration_miss_no_match_count, 1);
+        assert_eq!(hydration.hydration_miss_unsupported_count, 1);
     }
 
     #[test]

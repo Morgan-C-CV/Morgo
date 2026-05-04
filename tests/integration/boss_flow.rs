@@ -12960,7 +12960,7 @@ async fn r2_1_33_real_boss_mode_missing_hydration_triggers_fallback_ladder_in_pr
         .routed_metadata
         .as_ref()
         .expect("routed metadata should exist");
-    assert_eq!(meta.fallback_count, Some(2));
+    assert_eq!(meta.fallback_count, Some(1));
     assert_eq!(meta.fallback_tier.as_deref(), Some("full_context"));
     assert_eq!(
         meta.fallback_reason.as_deref(),
@@ -12972,7 +12972,7 @@ async fn r2_1_33_real_boss_mode_missing_hydration_triggers_fallback_ladder_in_pr
         .observability_summary
         .as_ref()
         .expect("lism path should produce observability");
-    assert_eq!(summary.total_fallback_count, 2);
+    assert_eq!(summary.total_fallback_count, 1);
     assert_eq!(summary.total_hydration_ref_missing, 2);
     assert_eq!(
         summary.fallback_tier_counts.get("full_context").copied(),
@@ -12986,8 +12986,8 @@ async fn r2_1_33_real_boss_mode_missing_hydration_triggers_fallback_ladder_in_pr
         "fallback ladder should require three turns"
     );
     assert!(
-        bodies[1].contains("fallback_context: tier=targeted_evidence"),
-        "second request must carry targeted_evidence fallback before escalation, got: {}",
+        !bodies[1].contains("fallback_context: tier=targeted_evidence"),
+        "second request should not carry targeted_evidence without a typed contract gap, got: {}",
         bodies[1]
     );
     assert!(

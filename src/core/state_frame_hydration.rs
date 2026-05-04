@@ -24,6 +24,11 @@ pub struct HydrationSummary {
     pub unavailable: Vec<String>,
     pub deferred: Vec<String>,
     pub stale: Vec<String>,
+    pub hydration_from_contract_count: usize,
+    pub hydration_from_ledger_count: usize,
+    pub hydration_miss_unsupported_count: usize,
+    pub hydration_miss_stale_count: usize,
+    pub hydration_miss_no_match_count: usize,
 }
 
 fn push_unique(items: &mut Vec<String>, value: String) -> bool {
@@ -577,9 +582,27 @@ fn runtime_increase_max_tool_calls_line(frame: &StateFrame) -> String {
 }
 
 enum SelectorResolution {
-    Hydrated(String),
+    Hydrated {
+        line: String,
+        source_kind: HydrationSourceKind,
+    },
     Stale(String),
-    Unavailable(String),
+    Unavailable {
+        line: String,
+        miss_kind: HydrationMissKind,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HydrationSourceKind {
+    Contract,
+    Ledger,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HydrationMissKind {
+    Unsupported,
+    NoMatch,
 }
 
 fn resolve_fact_match<F>(
@@ -603,13 +626,10 @@ where
         .copied()
         .find(|item| stale_reason(item).is_none())
     {
-        return SelectorResolution::Hydrated(format_hydrated_line(
-            selector,
-            source,
-            match_reason,
-            item,
-            excerpt_chars,
-        ));
+        return SelectorResolution::Hydrated {
+            line: format_hydrated_line(selector, source, match_reason, item, excerpt_chars),
+            source_kind: HydrationSourceKind::Ledger,
+        };
     }
     if let Some(item) = matches.first().copied() {
         return SelectorResolution::Stale(format_stale_line(
@@ -619,7 +639,10 @@ where
             &stale_reason(item).unwrap_or_else(|| "stale_match".into()),
         ));
     }
-    SelectorResolution::Unavailable(format_unavailable_line(selector, "no_match", "typed_index"))
+    SelectorResolution::Unavailable {
+        line: format_unavailable_line(selector, "no_match", "typed_index"),
+        miss_kind: HydrationMissKind::NoMatch,
+    }
 }
 
 fn estimate_excerpt_chars(frame: &StateFrame, selected_count: usize) -> usize {
@@ -681,7 +704,7 @@ fn hydrate_selector(
             "path",
             |item| field_eq(item, "path", path),
         ) {
-            SelectorResolution::Unavailable(_) => resolve_fact_match(
+            SelectorResolution::Unavailable { .. } => resolve_fact_match(
                 index,
                 "recent_changes_in_files",
                 selector,
@@ -711,18 +734,21 @@ fn hydrate_selector(
                             && field_eq(item, "name", &contract_test.name)
                     },
                 );
-                if !matches!(contract_match, SelectorResolution::Unavailable(_)) {
+                if !matches!(contract_match, SelectorResolution::Unavailable { .. }) {
                     return contract_match;
                 }
-                return SelectorResolution::Hydrated(format_contract_line(
-                    selector,
-                    "stage_execution_contract",
-                    "declared_test_contract",
-                    compact_excerpt(
-                        &format!("declared test contract name={}", contract_test.name),
-                        excerpt_chars,
+                return SelectorResolution::Hydrated {
+                    line: format_contract_line(
+                        selector,
+                        "stage_execution_contract",
+                        "declared_test_contract",
+                        compact_excerpt(
+                            &format!("declared test contract name={}", contract_test.name),
+                            excerpt_chars,
+                        ),
                     ),
-                ));
+                    source_kind: HydrationSourceKind::Contract,
+                };
             }
             resolve_fact_match(
                 index,
@@ -816,21 +842,26 @@ fn hydrate_selector(
                             || field_eq(item, "path", &contract_artifact.path)
                     },
                 );
-                if !matches!(contract_match, SelectorResolution::Unavailable(_)) {
+                if !matches!(contract_match, SelectorResolution::Unavailable { .. }) {
                     return contract_match;
                 }
-                return SelectorResolution::Hydrated(format_contract_line(
-                    selector,
-                    "stage_execution_contract",
-                    "declared_artifact_contract",
-                    compact_excerpt(
-                        &format!(
-                            "declared artifact contract ref={} path={} kind={}",
-                            contract_artifact.ref_id, contract_artifact.path, contract_artifact.kind
+                return SelectorResolution::Hydrated {
+                    line: format_contract_line(
+                        selector,
+                        "stage_execution_contract",
+                        "declared_artifact_contract",
+                        compact_excerpt(
+                            &format!(
+                                "declared artifact contract ref={} path={} kind={}",
+                                contract_artifact.ref_id,
+                                contract_artifact.path,
+                                contract_artifact.kind
+                            ),
+                            excerpt_chars,
                         ),
-                        excerpt_chars,
                     ),
-                ));
+                    source_kind: HydrationSourceKind::Contract,
+                };
             }
             resolve_fact_match(
                 index,
@@ -930,21 +961,26 @@ fn hydrate_selector(
                     "declared_artifact_contract",
                     |item| field_eq(item, "path", &contract_artifact.path),
                 );
-                if !matches!(contract_match, SelectorResolution::Unavailable(_)) {
+                if !matches!(contract_match, SelectorResolution::Unavailable { .. }) {
                     return contract_match;
                 }
-                return SelectorResolution::Hydrated(format_contract_line(
-                    selector,
-                    "stage_execution_contract",
-                    "declared_artifact_contract",
-                    compact_excerpt(
-                        &format!(
-                            "declared artifact contract ref={} path={} kind={}",
-                            contract_artifact.ref_id, contract_artifact.path, contract_artifact.kind
+                return SelectorResolution::Hydrated {
+                    line: format_contract_line(
+                        selector,
+                        "stage_execution_contract",
+                        "declared_artifact_contract",
+                        compact_excerpt(
+                            &format!(
+                                "declared artifact contract ref={} path={} kind={}",
+                                contract_artifact.ref_id,
+                                contract_artifact.path,
+                                contract_artifact.kind
+                            ),
+                            excerpt_chars,
                         ),
-                        excerpt_chars,
                     ),
-                ));
+                    source_kind: HydrationSourceKind::Contract,
+                };
             }
             let artifact_resolution = resolve_fact_match(
                 index,
@@ -964,7 +1000,7 @@ fn hydrate_selector(
                 },
             );
             match artifact_resolution {
-                SelectorResolution::Unavailable(_) => match resolve_fact_match(
+                SelectorResolution::Unavailable { .. } => match resolve_fact_match(
                     index,
                     "recent_changes_in_files",
                     selector,
@@ -981,7 +1017,7 @@ fn hydrate_selector(
                             .unwrap_or(true)
                     },
                 ) {
-                    SelectorResolution::Unavailable(_) => match resolve_fact_match(
+                    SelectorResolution::Unavailable { .. } => match resolve_fact_match(
                         index,
                         "file_facts",
                         selector,
@@ -998,9 +1034,10 @@ fn hydrate_selector(
                                 .unwrap_or(true)
                         },
                     ) {
-                        SelectorResolution::Unavailable(_) => SelectorResolution::Unavailable(
-                            format_unavailable_line(selector, "no_match", "typed_index"),
-                        ),
+                        SelectorResolution::Unavailable { .. } => SelectorResolution::Unavailable {
+                            line: format_unavailable_line(selector, "no_match", "typed_index"),
+                            miss_kind: HydrationMissKind::NoMatch,
+                        },
                         resolved => resolved,
                     },
                     resolved => resolved,
@@ -1009,15 +1046,18 @@ fn hydrate_selector(
             }
         }
         NeededContextSelector::Fact { name } => match name.as_str() {
-            "budget.max_tool_calls" => {
-                SelectorResolution::Hydrated(runtime_budget_fact_line(frame))
-            }
-            "allow_worker_tool_calls" => {
-                SelectorResolution::Hydrated(runtime_allow_worker_tool_calls_line(frame))
-            }
-            "increase_max_tool_calls" => {
-                SelectorResolution::Hydrated(runtime_increase_max_tool_calls_line(frame))
-            }
+            "budget.max_tool_calls" => SelectorResolution::Hydrated {
+                line: runtime_budget_fact_line(frame),
+                source_kind: HydrationSourceKind::Contract,
+            },
+            "allow_worker_tool_calls" => SelectorResolution::Hydrated {
+                line: runtime_allow_worker_tool_calls_line(frame),
+                source_kind: HydrationSourceKind::Contract,
+            },
+            "increase_max_tool_calls" => SelectorResolution::Hydrated {
+                line: runtime_increase_max_tool_calls_line(frame),
+                source_kind: HydrationSourceKind::Contract,
+            },
             _ => resolve_fact_match(
                 index,
                 name,
@@ -1039,15 +1079,17 @@ fn hydrate_selector(
                 |item| field_eq(item, "symbol", name),
             );
             match symbol_resolution {
-                SelectorResolution::Unavailable(_) => SelectorResolution::Unavailable(
-                    format_unavailable_line(selector, "no_symbol_match", "typed_index"),
-                ),
+                SelectorResolution::Unavailable { .. } => SelectorResolution::Unavailable {
+                    line: format_unavailable_line(selector, "no_symbol_match", "typed_index"),
+                    miss_kind: HydrationMissKind::NoMatch,
+                },
                 resolved => resolved,
             }
         }
-        NeededContextSelector::Unknown { .. } => SelectorResolution::Unavailable(
-            format_unavailable_line(selector, "unsupported_selector", "typed_index"),
-        ),
+        NeededContextSelector::Unknown { .. } => SelectorResolution::Unavailable {
+            line: format_unavailable_line(selector, "unsupported_selector", "typed_index"),
+            miss_kind: HydrationMissKind::Unsupported,
+        },
     }
 }
 
@@ -1071,9 +1113,14 @@ pub fn hydrate_needed_context(frame: &mut StateFrame, requested: &[String]) -> H
 
     for selector in selected {
         match hydrate_selector(&index, &contract_index, frame, &selector, excerpt_chars) {
-            SelectorResolution::Hydrated(hydrated) => {
+            SelectorResolution::Hydrated { line, source_kind } => {
+                let hydrated = line;
                 if push_unique(&mut frame.recent_evidence, hydrated.clone()) {
                     summary.changed = true;
+                }
+                match source_kind {
+                    HydrationSourceKind::Contract => summary.hydration_from_contract_count += 1,
+                    HydrationSourceKind::Ledger => summary.hydration_from_ledger_count += 1,
                 }
                 push_unique(&mut summary.hydrated, hydrated);
             }
@@ -1081,11 +1128,23 @@ pub fn hydrate_needed_context(frame: &mut StateFrame, requested: &[String]) -> H
                 if push_unique(&mut frame.recent_evidence, stale.clone()) {
                     summary.changed = true;
                 }
+                summary.hydration_miss_stale_count += 1;
                 push_unique(&mut summary.stale, stale);
             }
-            SelectorResolution::Unavailable(unavailable) => {
+            SelectorResolution::Unavailable {
+                line: unavailable,
+                miss_kind,
+            } => {
                 if push_unique(&mut frame.recent_evidence, unavailable.clone()) {
                     summary.changed = true;
+                }
+                match miss_kind {
+                    HydrationMissKind::Unsupported => {
+                        summary.hydration_miss_unsupported_count += 1;
+                    }
+                    HydrationMissKind::NoMatch => {
+                        summary.hydration_miss_no_match_count += 1;
+                    }
                 }
                 push_unique(&mut summary.unavailable, unavailable);
             }

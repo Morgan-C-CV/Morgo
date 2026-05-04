@@ -188,6 +188,7 @@ fn make_drill_report(completed: bool, cost_micros: u64) -> BossReportPayload {
             estimated_cost_micros_usd: cost_micros,
             total_original_chars: 0,
             total_sent_chars: 0,
+            ..Default::default()
         }),
         rollout_policy_decision: None,
         success_classification: None,

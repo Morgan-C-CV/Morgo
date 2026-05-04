@@ -2276,8 +2276,14 @@ impl BossCoordinator {
         routed_metadata.fallback_tier = usage.fallback_tier.clone();
         routed_metadata.fallback_reason = usage.fallback_reason.clone();
         routed_metadata.hydration_count = Some(usage.hydration_count);
+        routed_metadata.hydration_from_contract_count = Some(usage.hydration_from_contract_count);
+        routed_metadata.hydration_from_ledger_count = Some(usage.hydration_from_ledger_count);
         routed_metadata.stale_ref_count = Some(usage.stale_ref_count);
         routed_metadata.hydration_ref_missing = Some(usage.hydration_ref_missing);
+        routed_metadata.hydration_miss_unsupported_count =
+            Some(usage.hydration_miss_unsupported_count);
+        routed_metadata.hydration_miss_stale_count = Some(usage.hydration_miss_stale_count);
+        routed_metadata.hydration_miss_no_match_count = Some(usage.hydration_miss_no_match_count);
         routed_metadata.tool_dispatch_count = Some(usage.tool_dispatch_count);
         routed_metadata.tool_dispatch_success_count = Some(usage.tool_dispatch_success_count);
         routed_metadata.tool_dispatch_failure_count = Some(usage.tool_dispatch_failure_count);
@@ -2514,8 +2520,18 @@ impl BossCoordinator {
                 }
                 summary.total_projection_mismatch_count += m.projection_mismatch_count.unwrap_or(0);
                 summary.total_hydration_count += m.hydration_count.unwrap_or(0);
+                summary.total_hydration_from_contract_count +=
+                    m.hydration_from_contract_count.unwrap_or(0);
+                summary.total_hydration_from_ledger_count +=
+                    m.hydration_from_ledger_count.unwrap_or(0);
                 summary.total_stale_ref_count += m.stale_ref_count.unwrap_or(0);
                 summary.total_hydration_ref_missing += m.hydration_ref_missing.unwrap_or(0);
+                summary.total_hydration_miss_unsupported_count +=
+                    m.hydration_miss_unsupported_count.unwrap_or(0);
+                summary.total_hydration_miss_stale_count +=
+                    m.hydration_miss_stale_count.unwrap_or(0);
+                summary.total_hydration_miss_no_match_count +=
+                    m.hydration_miss_no_match_count.unwrap_or(0);
                 summary.total_tool_dispatch_count += m.tool_dispatch_count.unwrap_or(0);
                 summary.total_tool_dispatch_success_count +=
                     m.tool_dispatch_success_count.unwrap_or(0);
@@ -2600,8 +2616,13 @@ impl BossCoordinator {
                 fallback_reason: None,
                 projection_mismatch_count: Some(routed.projection_mismatch_count),
                 hydration_count: Some(0),
+                hydration_from_contract_count: Some(0),
+                hydration_from_ledger_count: Some(0),
                 stale_ref_count: Some(0),
                 hydration_ref_missing: Some(0),
+                hydration_miss_unsupported_count: Some(0),
+                hydration_miss_stale_count: Some(0),
+                hydration_miss_no_match_count: Some(0),
                 tool_dispatch_count: Some(0),
                 tool_dispatch_success_count: Some(0),
                 tool_dispatch_failure_count: Some(0),
@@ -3882,8 +3903,13 @@ impl BossCoordinator {
                                 routed_preview.projection_mismatch_count,
                             ),
                             hydration_count: Some(0),
+                            hydration_from_contract_count: Some(0),
+                            hydration_from_ledger_count: Some(0),
                             stale_ref_count: Some(0),
                             hydration_ref_missing: Some(0),
+                            hydration_miss_unsupported_count: Some(0),
+                            hydration_miss_stale_count: Some(0),
+                            hydration_miss_no_match_count: Some(0),
                             tool_dispatch_count: Some(0),
                             tool_dispatch_success_count: Some(0),
                             tool_dispatch_failure_count: Some(0),
@@ -3948,8 +3974,13 @@ impl BossCoordinator {
                                 routed_preview.projection_mismatch_count,
                             ),
                             hydration_count: Some(0),
+                            hydration_from_contract_count: Some(0),
+                            hydration_from_ledger_count: Some(0),
                             stale_ref_count: Some(0),
                             hydration_ref_missing: Some(0),
+                            hydration_miss_unsupported_count: Some(0),
+                            hydration_miss_stale_count: Some(0),
+                            hydration_miss_no_match_count: Some(0),
                             tool_dispatch_count: Some(0),
                             tool_dispatch_success_count: Some(0),
                             tool_dispatch_failure_count: Some(0),
@@ -4027,8 +4058,13 @@ impl BossCoordinator {
                                 fallback_reason: None,
                                 projection_mismatch_count: Some(routed.projection_mismatch_count),
                                 hydration_count: Some(0),
+                                hydration_from_contract_count: Some(0),
+                                hydration_from_ledger_count: Some(0),
                                 stale_ref_count: Some(0),
                                 hydration_ref_missing: Some(0),
+                                hydration_miss_unsupported_count: Some(0),
+                                hydration_miss_stale_count: Some(0),
+                                hydration_miss_no_match_count: Some(0),
                                 tool_dispatch_count: Some(0),
                                 tool_dispatch_success_count: Some(0),
                                 tool_dispatch_failure_count: Some(0),

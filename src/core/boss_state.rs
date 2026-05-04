@@ -236,9 +236,19 @@ pub struct BossStepRoutedMetadata {
     #[serde(default)]
     pub hydration_count: Option<usize>,
     #[serde(default)]
+    pub hydration_from_contract_count: Option<usize>,
+    #[serde(default)]
+    pub hydration_from_ledger_count: Option<usize>,
+    #[serde(default)]
     pub stale_ref_count: Option<usize>,
     #[serde(default)]
     pub hydration_ref_missing: Option<usize>,
+    #[serde(default)]
+    pub hydration_miss_unsupported_count: Option<usize>,
+    #[serde(default)]
+    pub hydration_miss_stale_count: Option<usize>,
+    #[serde(default)]
+    pub hydration_miss_no_match_count: Option<usize>,
     #[serde(default)]
     pub tool_dispatch_count: Option<usize>,
     #[serde(default)]
@@ -396,9 +406,19 @@ pub struct BossObservabilitySummary {
     #[serde(default)]
     pub total_hydration_count: usize,
     #[serde(default)]
+    pub total_hydration_from_contract_count: usize,
+    #[serde(default)]
+    pub total_hydration_from_ledger_count: usize,
+    #[serde(default)]
     pub total_stale_ref_count: usize,
     #[serde(default)]
     pub total_hydration_ref_missing: usize,
+    #[serde(default)]
+    pub total_hydration_miss_unsupported_count: usize,
+    #[serde(default)]
+    pub total_hydration_miss_stale_count: usize,
+    #[serde(default)]
+    pub total_hydration_miss_no_match_count: usize,
     #[serde(default)]
     pub total_tool_dispatch_count: usize,
     #[serde(default)]

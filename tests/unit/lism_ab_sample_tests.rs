@@ -73,6 +73,7 @@ fn make_report(
             estimated_cost_micros_usd: cost_micros,
             total_original_chars: 0,
             total_sent_chars: 0,
+            ..Default::default()
         })
     } else {
         None
@@ -129,6 +130,7 @@ fn make_report_with_usage(
         estimated_cost_micros_usd: 0,
         total_original_chars: sent_chars,
         total_sent_chars: sent_chars,
+        ..Default::default()
     });
     report
 }
@@ -247,6 +249,7 @@ fn r1_1_record_carries_fallback_tier_and_reason() {
         estimated_cost_micros_usd: 0,
         total_original_chars: 0,
         total_sent_chars: 0,
+        ..Default::default()
     });
     report.steps = vec![BossStepReport {
         id: 0,
@@ -582,6 +585,7 @@ fn r1_1_summarize_context_tier_and_hydration_metrics_per_arm() {
         estimated_cost_micros_usd: 0,
         total_original_chars: 0,
         total_sent_chars: 0,
+        ..Default::default()
     });
     on_report.steps[0].status = BossPlanStepStatus::Completed;
     on_report.steps[0].routed_metadata = Some(BossStepRoutedMetadata {
@@ -638,6 +642,7 @@ fn r1_1_summarize_context_tier_and_hydration_metrics_per_arm() {
         estimated_cost_micros_usd: 0,
         total_original_chars: 0,
         total_sent_chars: 0,
+        ..Default::default()
     });
     off_report.steps[0].status = BossPlanStepStatus::Completed;
     off_report.steps[0].routed_metadata = Some(BossStepRoutedMetadata {
