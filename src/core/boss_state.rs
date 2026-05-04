@@ -1,6 +1,7 @@
 use crate::core::state_frame::{
     CompletionEvidenceGap, StageContinuationContext, StageExecutionContract, WorkerStructuredReport,
 };
+use crate::core::state_frame_orchestrator::StepFailureClassification;
 use crate::tool::registry::ToolContractMismatch;
 use crate::tool::result::ToolExecutionRecord;
 use serde::{Deserialize, Serialize};
@@ -320,6 +321,8 @@ pub struct BossStepRoutedMetadata {
     #[serde(default)]
     pub terminal_blocker_kind: Option<String>,
     #[serde(default)]
+    pub step_failure_classification: Option<StepFailureClassification>,
+    #[serde(default)]
     pub completion_evidence_status: Option<String>,
     #[serde(default)]
     pub completion_evidence_gaps: Vec<CompletionEvidenceGap>,
@@ -564,9 +567,12 @@ impl BossReportPayload {
             let m = step.routed_metadata.as_ref();
             let worker_report = m.and_then(|m| m.worker_report.as_ref());
             lines.push(format!(
-                "  step {:>3}: status={:?} tier={} profile={} frame={}B cache_r={} cache_w={} input={} uncached_input={} output={} sent_chars={} original_chars={} fb={} fb_tier={} fb_reason={} mm={} hydr={} stale={} miss={} worker_state={} artifact={} test={} verify={} gaps={}",
+                "  step {:>3}: status={:?} failure_class={} tier={} profile={} frame={}B cache_r={} cache_w={} input={} uncached_input={} output={} sent_chars={} original_chars={} fb={} fb_tier={} fb_reason={} mm={} hydr={} stale={} miss={} worker_state={} artifact={} test={} verify={} gaps={}",
                 step.id,
                 step.status,
+                m.and_then(|m| m.step_failure_classification.as_ref())
+                    .map(|classification| classification.as_str())
+                    .unwrap_or("-"),
                 m.and_then(|m| m.model_tier.as_deref()).unwrap_or("-"),
                 m.and_then(|m| m.provider_profile_id.as_deref()).unwrap_or("-"),
                 m.and_then(|m| m.state_frame_size).map(|n| n.to_string()).unwrap_or_else(|| "-".into()),

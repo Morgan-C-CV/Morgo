@@ -16,8 +16,31 @@ use crate::tool::registry::{
     ToolAssemblyContext, ToolContractMismatch, ToolContractPreflightSpec, ToolRegistrySnapshot,
 };
 use crate::{bootstrap::InteractionSurface, bootstrap::SessionMode};
+use serde::{Deserialize, Serialize};
 
 /// Outcome of a single step execution via the StateFrame orchestrator seam.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StepFailureClassification {
+    GenericFailure,
+    UnsupportedRequest,
+    RepairableRecovery,
+    VerificationRepairContinuation,
+    TrueExternalBlocker,
+}
+
+impl StepFailureClassification {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::GenericFailure => "generic_failure",
+            Self::UnsupportedRequest => "unsupported_request",
+            Self::RepairableRecovery => "repairable_recovery",
+            Self::VerificationRepairContinuation => "verification_repair_continuation",
+            Self::TrueExternalBlocker => "true_external_blocker",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum StepOutcome {
     Completed {
@@ -26,6 +49,7 @@ pub enum StepOutcome {
     },
     Failed {
         reason: String,
+        failure_classification: StepFailureClassification,
         usage: Option<LoopUsage>,
         tool_registry_snapshot: Option<ToolRegistrySnapshot>,
         tool_contract_mismatch: Option<ToolContractMismatch>,
@@ -205,10 +229,35 @@ pub fn requires_external_tool_execution(
 fn external_tool_execution_unsupported() -> StepOutcome {
     StepOutcome::Failed {
         reason: "StateFrame direct execution cannot yet perform required filesystem or command side effects; use full worker path or wire tool dispatch before enabling LisM for this step".into(),
+        failure_classification: StepFailureClassification::UnsupportedRequest,
         usage: None,
         tool_registry_snapshot: None,
         tool_contract_mismatch: None,
     }
+}
+
+fn classify_usage_failure(usage: Option<&LoopUsage>) -> StepFailureClassification {
+    let Some(usage) = usage else {
+        return StepFailureClassification::GenericFailure;
+    };
+    if usage.terminal_blocker_kind.as_deref() == Some("true_external_blocker") {
+        return StepFailureClassification::TrueExternalBlocker;
+    }
+    if usage.terminal_blocker_kind.as_deref() == Some("unsupported_selector")
+        || usage.recovery_outcome.as_deref() == Some("unsupported_selector")
+    {
+        return StepFailureClassification::UnsupportedRequest;
+    }
+    if usage.recovery_outcome.as_deref() == Some("repair_turn_injected") {
+        if matches!(
+            usage.completion_evidence_status,
+            Some(crate::core::state_frame::CompletionEvidenceStatus::MissingVerificationEvidence)
+        ) {
+            return StepFailureClassification::VerificationRepairContinuation;
+        }
+        return StepFailureClassification::RepairableRecovery;
+    }
+    StepFailureClassification::GenericFailure
 }
 
 pub fn build_routed_state_frame(
@@ -307,6 +356,7 @@ pub async fn run_step_with_state_frame_and_runtime<'a>(
                     "ToolContractMismatch: {}",
                     serde_json::to_string(&mismatch)?
                 ),
+                failure_classification: StepFailureClassification::UnsupportedRequest,
                 usage: None,
                 tool_registry_snapshot: Some(snapshot.clone()),
                 tool_contract_mismatch: Some(mismatch),
@@ -380,6 +430,7 @@ pub async fn run_routed_step_with_runtime<'a>(
                     "ToolContractMismatch: {}",
                     serde_json::to_string(&mismatch)?
                 ),
+                failure_classification: StepFailureClassification::UnsupportedRequest,
                 usage: None,
                 tool_registry_snapshot: Some(snapshot.clone()),
                 tool_contract_mismatch: Some(mismatch),
@@ -411,12 +462,14 @@ fn map_loop_outcome(
         },
         LoopOutcome::Rejected { reason, usage } => StepOutcome::Failed {
             reason,
+            failure_classification: classify_usage_failure(Some(&usage)),
             usage: Some(usage),
             tool_registry_snapshot,
             tool_contract_mismatch: None,
         },
         LoopOutcome::MaxIterationsReached { last_state, usage } => StepOutcome::Failed {
             reason: format!("max iterations reached; last state: {last_state:?}"),
+            failure_classification: classify_usage_failure(Some(&usage)),
             usage: Some(usage),
             tool_registry_snapshot,
             tool_contract_mismatch: None,
@@ -427,6 +480,7 @@ fn map_loop_outcome(
             usage,
         } => StepOutcome::Failed {
             reason: format!("{reason}; last state: {last_state:?}"),
+            failure_classification: classify_usage_failure(Some(&usage)),
             usage: Some(usage),
             tool_registry_snapshot,
             tool_contract_mismatch: None,
@@ -437,6 +491,7 @@ fn map_loop_outcome(
             usage,
         } => StepOutcome::Failed {
             reason: format!("tool dispatch failed: {reason}; last state: {last_state:?}"),
+            failure_classification: classify_usage_failure(Some(&usage)),
             usage: Some(usage),
             tool_registry_snapshot,
             tool_contract_mismatch: None,
@@ -447,6 +502,7 @@ fn map_loop_outcome(
             usage,
         } => StepOutcome::Failed {
             reason: format!("repair exhausted: {reason}; raw: {raw_json}"),
+            failure_classification: classify_usage_failure(Some(&usage)),
             usage: Some(usage),
             tool_registry_snapshot,
             tool_contract_mismatch: None,
@@ -472,6 +528,7 @@ fn map_loop_outcome_with_pricing(
         }
         StepOutcome::Failed {
             reason,
+            failure_classification,
             usage: Some(mut usage),
             tool_registry_snapshot,
             tool_contract_mismatch,
@@ -479,6 +536,7 @@ fn map_loop_outcome_with_pricing(
             usage.estimated_cost_micros_usd = estimate_loop_usage_cost_micros(&usage, pricing);
             StepOutcome::Failed {
                 reason,
+                failure_classification,
                 usage: Some(usage),
                 tool_registry_snapshot,
                 tool_contract_mismatch,

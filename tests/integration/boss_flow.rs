@@ -10423,6 +10423,7 @@ async fn t27_r1_format_report_includes_hit_ratio_and_tokens_saved() {
                 original_prompt_chars: Some(0),
                 sent_prompt_chars: Some(0),
                 estimated_cost_micros_usd: Some(0),
+                step_failure_classification: None,
                 ..Default::default()
             }),
             stage_execution_contract: rust_agent::core::state_frame::StageExecutionContract::default(),

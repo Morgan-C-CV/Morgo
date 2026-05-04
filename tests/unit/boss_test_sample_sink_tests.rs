@@ -88,6 +88,7 @@ fn make_report(
                     recovery_tier: None,
                     recovery_outcome: None,
                     terminal_blocker_kind: None,
+                    step_failure_classification: None,
                     completion_evidence_status: None,
                     completion_evidence_gaps: Vec::new(),
                     worker_report: None,

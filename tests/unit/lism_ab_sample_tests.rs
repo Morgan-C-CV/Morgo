@@ -285,6 +285,7 @@ fn r1_1_record_carries_fallback_tier_and_reason() {
             original_prompt_chars: Some(0),
             sent_prompt_chars: Some(0),
             estimated_cost_micros_usd: Some(0),
+            step_failure_classification: None,
             ..Default::default()
         }),
         stage_execution_contract: StageExecutionContract::default(),
@@ -614,6 +615,7 @@ fn r1_1_summarize_context_tier_and_hydration_metrics_per_arm() {
         original_prompt_chars: Some(0),
         sent_prompt_chars: Some(0),
         estimated_cost_micros_usd: Some(0),
+        step_failure_classification: None,
         ..Default::default()
     });
 
@@ -671,6 +673,7 @@ fn r1_1_summarize_context_tier_and_hydration_metrics_per_arm() {
         original_prompt_chars: Some(0),
         sent_prompt_chars: Some(0),
         estimated_cost_micros_usd: Some(0),
+        step_failure_classification: None,
         ..Default::default()
     });
 

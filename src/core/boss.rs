@@ -24,7 +24,7 @@ use crate::core::state_frame::{ActorRole, DeclaredArtifactContract, StageExecuti
 use crate::core::state_frame_loop::{DecisionLoopConfig, StateFrameToolRuntime};
 use crate::core::state_frame_model_router::ModelTier;
 use crate::core::state_frame_orchestrator::{
-    StepOutcome, StepRuntimeResolutionContext, build_routed_state_frame_with_model_route,
+    StepFailureClassification, StepOutcome, StepRuntimeResolutionContext, build_routed_state_frame_with_model_route,
     requires_external_tool_execution, run_routed_step_with_runtime,
 };
 use crate::history::session::SessionHistory;
@@ -499,6 +499,14 @@ fn build_stage_continuation_context(
             continuity_mode: Some(crate::core::state_frame::ContinuityMode::Repair),
         })
     })
+}
+
+fn classify_repairable_failure(failure_classification: StepFailureClassification) -> bool {
+    matches!(
+        failure_classification,
+        StepFailureClassification::RepairableRecovery
+            | StepFailureClassification::VerificationRepairContinuation
+    )
 }
 
 fn push_unique_memory_item(items: &mut Vec<String>, item: Option<String>, limit: usize) {
@@ -2310,6 +2318,29 @@ impl BossCoordinator {
         routed_metadata.recovery_tier = usage.recovery_tier.clone();
         routed_metadata.recovery_outcome = usage.recovery_outcome.clone();
         routed_metadata.terminal_blocker_kind = usage.terminal_blocker_kind.clone();
+        routed_metadata.step_failure_classification = match usage.terminal_blocker_kind.as_deref()
+        {
+            Some("true_external_blocker") => Some(StepFailureClassification::TrueExternalBlocker),
+            Some("unsupported_selector") => Some(StepFailureClassification::UnsupportedRequest),
+            _ if usage.recovery_outcome.as_deref() == Some("repair_turn_injected")
+                && matches!(
+                    usage.completion_evidence_status,
+                    Some(crate::core::state_frame::CompletionEvidenceStatus::MissingVerificationEvidence)
+                ) =>
+            {
+                Some(StepFailureClassification::VerificationRepairContinuation)
+            }
+            _ if usage.recovery_outcome.as_deref() == Some("repair_turn_injected") => {
+                Some(StepFailureClassification::RepairableRecovery)
+            }
+            _ if usage.recovery_outcome.as_deref() == Some("unsupported_selector") => {
+                Some(StepFailureClassification::UnsupportedRequest)
+            }
+            _ if usage.terminal_blocker_kind.is_some() || usage.recovery_outcome.is_some() => {
+                Some(StepFailureClassification::GenericFailure)
+            }
+            _ => None,
+        };
         routed_metadata.completion_evidence_status = usage
             .completion_evidence_status
             .as_ref()
@@ -2655,6 +2686,7 @@ impl BossCoordinator {
                 recovery_tier: None,
                 recovery_outcome: None,
                 terminal_blocker_kind: None,
+                step_failure_classification: None,
                 completion_evidence_status: None,
                 completion_evidence_gaps: Vec::new(),
                 worker_report: None,
@@ -3942,6 +3974,7 @@ impl BossCoordinator {
                             recovery_tier: None,
                             recovery_outcome: None,
                             terminal_blocker_kind: None,
+                            step_failure_classification: None,
                             completion_evidence_status: None,
                             completion_evidence_gaps: Vec::new(),
                             worker_report: None,
@@ -4013,6 +4046,7 @@ impl BossCoordinator {
                             recovery_tier: None,
                             recovery_outcome: None,
                             terminal_blocker_kind: None,
+                            step_failure_classification: None,
                             completion_evidence_status: None,
                             completion_evidence_gaps: Vec::new(),
                             worker_report: None,
@@ -4097,6 +4131,7 @@ impl BossCoordinator {
                                 recovery_tier: None,
                                 recovery_outcome: None,
                                 terminal_blocker_kind: None,
+                                step_failure_classification: None,
                                 completion_evidence_status: None,
                                 completion_evidence_gaps: Vec::new(),
                                 worker_report: None,
@@ -4291,8 +4326,13 @@ impl BossCoordinator {
                                     step_id
                                 )));
                             }
-                            StepOutcome::Failed { reason, .. } => {
+                            StepOutcome::Failed {
+                                reason,
+                                failure_classification,
+                                ..
+                            } => {
                                 let reason_clone = reason.clone();
+                                let is_repairable = classify_repairable_failure(failure_classification);
                                 {
                                     let mut plan_guard = self.plan.write().await;
                                     let plan = plan_guard
@@ -4306,8 +4346,22 @@ impl BossCoordinator {
                                             anyhow::anyhow!("Unknown boss step {step_id}")
                                         })?;
                                     step.completed = false;
-                                    step.status = BossPlanStepStatus::Failed;
                                     step.last_review_summary = Some(reason_clone.clone());
+                                    if is_repairable {
+                                        step.status = BossPlanStepStatus::Rejected;
+                                        update_step_continuation_context(
+                                            step,
+                                            crate::core::state_frame::ContinuityMode::Repair,
+                                            extract_artifact_expectations(step.objective())
+                                                .into_iter()
+                                                .next()
+                                                .map(|expectation| expectation.path.display().to_string()),
+                                            Some(reason_clone.clone()),
+                                            continuation_verified_facts(step),
+                                        );
+                                    } else {
+                                        step.status = BossPlanStepStatus::Failed;
+                                    }
                                 }
                                 self.update_current_step(Some(step_id)).await;
                                 if self.get_stage().await != BossStage::Documentation {
@@ -4329,10 +4383,14 @@ impl BossCoordinator {
                                     0,
                                 )
                                 .await;
-                                return Ok(Some(format!(
-                                    "LisM failed boss step {}: {}",
-                                    step_id, reason
-                                )));
+                                return Ok(Some(if is_repairable {
+                                    format!(
+                                        "LisM routed boss step {} into repair continuation: {}",
+                                        step_id, reason_clone
+                                    )
+                                } else {
+                                    format!("LisM failed boss step {}: {}", step_id, reason_clone)
+                                }));
                             }
                         }
                     }
