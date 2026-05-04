@@ -217,6 +217,26 @@ fn build_stage_execution_contract(
     }
 }
 
+fn inject_declared_writable_artifact_paths(
+    permissions: &crate::state::permission_context::ToolPermissionContext,
+    contract: &StageExecutionContract,
+) {
+    for artifact in &contract.declared_artifacts {
+        let path = artifact.path.trim();
+        if path.is_empty() {
+            continue;
+        }
+        if artifact.required_actions.iter().any(|action| {
+            matches!(
+                action.as_str(),
+                "write_file" | "edit_file" | "create" | "write"
+            )
+        }) {
+            permissions.add_delegated_write_path(path);
+        }
+    }
+}
+
 fn seed_step_acceptance(task: &str) -> Vec<String> {
     let mut acceptance = vec!["Task completed successfully.".to_string()];
     for expectation in extract_artifact_expectations(task) {
@@ -4173,6 +4193,10 @@ impl BossCoordinator {
                                 Some(registry) => {
                                     let mut permissions = app_state.permission_context.clone();
                                     permissions = permissions.with_interactive_tools(true);
+                                    inject_declared_writable_artifact_paths(
+                                        &permissions,
+                                        &routed.frame.stage_execution_contract,
+                                    );
                                     Some(StateFrameToolRuntime {
                                         registry: registry.read().await.clone(),
                                         permissions,
@@ -6558,6 +6582,38 @@ mod tests {
         assert_eq!(payload.next_action.as_deref(), Some("write_artifact"));
         assert_eq!(payload.verified_facts, vec!["fact: file missing"]);
         assert_eq!(payload.continuity_mode.as_deref(), Some("continue"));
+    }
+
+    #[test]
+    fn runtime_permissions_inherit_declared_writable_artifact_paths_for_lism_steps() {
+        let permissions =
+            crate::state::permission_context::ToolPermissionContext::new(
+                crate::state::permission_context::PermissionMode::Default,
+            );
+        let contract = StageExecutionContract {
+            declared_artifacts: vec![
+                DeclaredArtifactContract {
+                    ref_id: "artifact:readonly".into(),
+                    path: "/tmp/readonly-note.md".into(),
+                    kind: "file".into(),
+                    required_actions: vec!["verify".into()],
+                    required_evidence: vec![],
+                },
+                DeclaredArtifactContract {
+                    ref_id: "artifact:writable".into(),
+                    path: "/tmp/repair-target.md".into(),
+                    kind: "file".into(),
+                    required_actions: vec!["write".into(), "verify".into()],
+                    required_evidence: vec![],
+                },
+            ],
+            ..StageExecutionContract::default()
+        };
+
+        inject_declared_writable_artifact_paths(&permissions, &contract);
+
+        assert!(!permissions.is_delegated_write_path("/tmp/readonly-note.md"));
+        assert!(permissions.is_delegated_write_path("/tmp/repair-target.md"));
     }
 
     #[test]
