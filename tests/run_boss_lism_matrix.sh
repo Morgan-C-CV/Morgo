@@ -4,6 +4,10 @@
 # The real Boss/LisM path depends on live provider DNS/network access, and
 # sandboxed runs can fail with transport-level DNS resolution errors that do
 # not reproduce in a normal shell.
+#
+# NOTE: This matrix execution can take tens of minutes or hours to complete.
+# It is recommended to use low-frequency polling to monitor progress.
+
 
 set -euo pipefail
 
