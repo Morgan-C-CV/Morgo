@@ -49,6 +49,7 @@ Execution requirement:
 
 Examples:
   bash RustAgent/Agent/tests/run_boss_lism_matrix.sh --cases u6-u9 --plan 3x3
+  bash RustAgent/Agent/tests/run_boss_lism_matrix.sh --cases u7-u9 --plan 2x2
   bash RustAgent/Agent/tests/run_boss_lism_matrix.sh --cases u8 --plan 3plus3
   bash RustAgent/Agent/tests/run_boss_lism_matrix.sh --cases u7,u9 --plan single --mode boss_on_only
   bash RustAgent/Agent/tests/run_boss_lism_matrix.sh --cases all --plan 3x3 --out /tmp/rustagent-full
@@ -56,7 +57,7 @@ Examples:
 
 Options:
   --cases VALUE         all | u6 | u6,u7,u9 | u6-u9. Default: all
-  --plan VALUE          3x3 | 3plus3 | single. Default: $DEFAULT_PLAN
+  --plan VALUE          3x3 | 3plus3 | 2x2 | 2plus2 | single. Default: $DEFAULT_PLAN
   --mode VALUE          all_off | boss_on_only | all_on. Only for --plan single.
   --runs N              Runs per mode. Default: 3. For single, default 1.
   --out DIR             Output root. Default: $DEFAULT_OUT_DIR
@@ -74,6 +75,10 @@ Plan semantics:
     all_on       = boss force-on   + worker force-on
   3plus3:
     all_off x 3 + all_on x 3
+  2x2:
+    boss_on_only x 2 + all_on x 2
+  2plus2:
+    all_off x 2 + all_on x 2
   single:
     one mode only, controlled by --mode
 
@@ -204,6 +209,12 @@ mode_sequence_for_plan() {
       printf '%s\n' all_off boss_on_only all_on
       ;;
     3plus3)
+      printf '%s\n' all_off all_on
+      ;;
+    2x2)
+      printf '%s\n' boss_on_only all_on
+      ;;
+    2plus2)
       printf '%s\n' all_off all_on
       ;;
     single)
@@ -582,7 +593,7 @@ source "$ENV_LOADER" "$ENV_FILE" >/dev/null
 [ -n "${OPENAI_API_KEY:-}" ] || die "OPENAI_API_KEY is not set after sourcing $ENV_LOADER $ENV_FILE"
 
 case "$plan" in
-  3x3|3plus3|single)
+  3x3|3plus3|2x2|2plus2|single)
     ;;
   *)
     die "unsupported --plan: $plan"
@@ -600,6 +611,8 @@ esac
 if [ -z "$runs" ]; then
   if [ "$plan" = "single" ]; then
     runs="1"
+  elif [ "$plan" = "2x2" ] || [ "$plan" = "2plus2" ]; then
+    runs="2"
   else
     runs="3"
   fi
