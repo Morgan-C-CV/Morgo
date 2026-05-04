@@ -841,6 +841,7 @@ fn build_worker_structured_report(
         test_status: summarize_test_status(frame),
         verification_status: summarize_verification_status(frame),
         stage_execution_contract: frame.stage_execution_contract.clone(),
+        stage_continuation_context: None,
         evidence_refs: collect_evidence_refs(frame),
         completion_evidence_gaps,
         remaining_risks: collect_remaining_risks(frame, &completion),

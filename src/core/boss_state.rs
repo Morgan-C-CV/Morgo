@@ -1,5 +1,5 @@
 use crate::core::state_frame::{
-    CompletionEvidenceGap, StageExecutionContract, WorkerStructuredReport,
+    CompletionEvidenceGap, StageContinuationContext, StageExecutionContract, WorkerStructuredReport,
 };
 use crate::tool::registry::ToolContractMismatch;
 use crate::tool::result::ToolExecutionRecord;
@@ -340,6 +340,8 @@ pub struct BossStepReport {
     pub routed_metadata: Option<BossStepRoutedMetadata>,
     #[serde(default)]
     pub stage_execution_contract: StageExecutionContract,
+    #[serde(default)]
+    pub stage_continuation_context: Option<StageContinuationContext>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -467,6 +469,8 @@ pub struct BossReportPayload {
     pub lism_policy: BossLisMPolicy,
     #[serde(default)]
     pub stage_execution_contract: StageExecutionContract,
+    #[serde(default)]
+    pub stage_continuation_context: Option<StageContinuationContext>,
 }
 
 impl BossReportPayload {

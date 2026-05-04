@@ -286,6 +286,18 @@ struct SpawnPayloadBuild {
     step_revision: String,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq, Default)]
+struct ContinuationPayload {
+    #[serde(default)]
+    failed_target: Option<String>,
+    #[serde(default)]
+    verified_facts: Vec<String>,
+    #[serde(default)]
+    next_action: Option<String>,
+    #[serde(default)]
+    continuity_mode: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct StepRolloutExecutionPolicy {
     forced_worker_lism_policy: WorkerLisMPolicy,
@@ -300,6 +312,58 @@ fn assignment_fingerprint(material: &serde_json::Value) -> String {
     let mut hasher = DefaultHasher::new();
     material.to_string().hash(&mut hasher);
     format!("{:016x}", hasher.finish())
+}
+
+fn build_continuation_payload(contract: &ExecutorBAssignmentContract) -> ContinuationPayload {
+    ContinuationPayload {
+        failed_target: contract
+            .state_frame
+            .stage_execution_contract
+            .declared_artifacts
+            .first()
+            .map(|artifact| artifact.path.clone())
+            .or_else(|| Some(contract.brief.objective.clone())),
+        verified_facts: contract
+            .state_frame
+            .recent_local_facts
+            .iter()
+            .take(5)
+            .cloned()
+            .collect(),
+        next_action: contract
+            .state_frame
+            .allowed_actions
+            .first()
+            .cloned()
+            .or_else(|| contract.allowed_tools.first().cloned()),
+        continuity_mode: Some("continue".into()),
+    }
+}
+
+fn build_stage_continuation_context(
+    step: &BossPlanStep,
+) -> Option<crate::core::state_frame::StageContinuationContext> {
+    let verified_facts = step
+        .tool_execution_records
+        .iter()
+        .map(|record| record.summary.clone())
+        .take(5)
+        .collect::<Vec<_>>();
+    if verified_facts.is_empty() && step.last_correction.is_none() {
+        return None;
+    }
+    Some(crate::core::state_frame::StageContinuationContext {
+        repair_intent: Some(crate::core::state_frame::RepairIntent {
+            failed_target: step.last_correction.clone(),
+            verified_facts: verified_facts.clone(),
+            next_action: step.last_correction.clone(),
+            continuity_mode: Some(crate::core::state_frame::ContinuityMode::Repair),
+        }),
+        failed_target: step.last_correction.clone(),
+        verified_facts,
+        next_action: step.last_correction.clone(),
+        continuity_mode: Some(crate::core::state_frame::ContinuityMode::Repair),
+    })
 }
 
 fn strip_to_path_start(candidate: &str) -> &str {
@@ -2348,6 +2412,14 @@ impl BossCoordinator {
         let routed_step_metadata = self.routed_step_metadata.read().await.clone();
         let empty_session = BossSession::from_plan_id("unknown", status.stage);
         let session = session.unwrap_or(empty_session);
+        let step_continuation_context = plan
+            .as_ref()
+            .and_then(|plan| {
+                plan.steps
+                    .iter()
+                    .rev()
+                .find_map(build_stage_continuation_context)
+            });
         let steps = plan
             .as_ref()
             .map(|plan| {
@@ -2366,7 +2438,17 @@ impl BossCoordinator {
                             step,
                             &routed_step_metadata,
                         ),
-                        stage_execution_contract: StageExecutionContract::default(),
+                        stage_execution_contract: build_stage_execution_contract(
+                            step,
+                            &collect_target_artifacts(
+                                step,
+                                &collect_target_files(&extract_relevant_file_handles(
+                                    step.objective(),
+                                    &format!("step-{}-attempt-{}", step.id, step.attempt_count),
+                                )),
+                            ),
+                        ),
+                        stage_continuation_context: build_stage_continuation_context(step),
                     })
                     .collect::<Vec<_>>()
             })
@@ -2393,6 +2475,7 @@ impl BossCoordinator {
             success_classification,
             lism_policy: self.lism_policy().await,
             stage_execution_contract: StageExecutionContract::default(),
+            stage_continuation_context: step_continuation_context,
         }
     }
 
@@ -2430,6 +2513,14 @@ impl BossCoordinator {
         let routed_step_metadata = self.routed_step_metadata.read().await.clone();
         let empty_session = BossSession::from_plan_id("unknown", status.stage);
         let session = session.unwrap_or(empty_session);
+        let step_continuation_context = plan
+            .as_ref()
+            .and_then(|plan| {
+                plan.steps
+                    .iter()
+                    .rev()
+                    .find_map(build_stage_continuation_context)
+            });
         let steps = plan
             .as_ref()
             .map(|plan| {
@@ -2461,7 +2552,17 @@ impl BossCoordinator {
                             step,
                             &routed_step_metadata,
                         ),
-                        stage_execution_contract: StageExecutionContract::default(),
+                        stage_execution_contract: build_stage_execution_contract(
+                            step,
+                            &collect_target_artifacts(
+                                step,
+                                &collect_target_files(&extract_relevant_file_handles(
+                                    step.objective(),
+                                    &format!("step-{}-attempt-{}", step.id, step.attempt_count),
+                                )),
+                            ),
+                        ),
+                        stage_continuation_context: build_stage_continuation_context(step),
                     })
                     .collect::<Vec<_>>()
             })
@@ -2502,6 +2603,7 @@ impl BossCoordinator {
             success_classification,
             lism_policy: self.lism_policy().await,
             stage_execution_contract: StageExecutionContract::default(),
+            stage_continuation_context: step_continuation_context,
         })
     }
 
@@ -4107,6 +4209,7 @@ impl BossCoordinator {
             step_id: step.id,
             status: step.status,
             stage_execution_contract: build_stage_execution_contract(step, &target_artifacts),
+            stage_continuation_context: build_stage_continuation_context(step),
             open_items,
             blocked_items,
             recent_local_facts,
@@ -4232,6 +4335,7 @@ refresh_reason: {}\n\n{}",
         let plan_version = contract.brief.plan_version.clone();
         let step_revision = contract.brief.step_revision.clone();
         let assignment_fingerprint = contract.assignment_fingerprint.clone();
+        let continuation_payload = build_continuation_payload(&contract);
         let payload = json!({
             "task_id": b_task_id,
             "message": message,
@@ -4250,6 +4354,7 @@ refresh_reason: {}\n\n{}",
             } else {
                 None
             },
+            "continuation_payload": continuation_payload,
             "recent_local_facts": contract.state_frame.recent_local_facts,
             "allowed_tools": contract.allowed_tools,
             "lism_policy": contract.lism_policy,
@@ -4293,6 +4398,7 @@ refresh_reason: {}\n\n{}",
         let plan_version = contract.brief.plan_version.clone();
         let step_revision = contract.brief.step_revision.clone();
         let assignment_fingerprint = contract.assignment_fingerprint.clone();
+        let continuation_payload = build_continuation_payload(&contract);
         let payload = json!({
             "task": assemble_brief_prompt(
                 &contract.brief,
@@ -4321,6 +4427,7 @@ refresh_reason: {}\n\n{}",
             "plan_version": plan_version,
             "step_revision": step_revision,
             "assignment_fingerprint": assignment_fingerprint,
+            "continuation_payload": continuation_payload,
         })
         .to_string();
 
@@ -5040,11 +5147,15 @@ impl BossCoordinator {
 mod tests {
     use super::*;
     use crate::core::state_frame::{
-        AgentState, CompletionEvidenceGap, CompletionEvidenceStatus, WorkerStructuredReport,
+        AgentState, CompletionEvidenceGap, CompletionEvidenceStatus, ContinuityMode,
+        DeclaredArtifactContract, RepairIntent, WorkerStructuredReport,
     };
     use crate::core::boss_state::BossActorRole;
     use crate::core::state_frame_loop::LoopUsage;
-    use crate::tool::result::{ToolOutcome, ToolOutcomeKind};
+    use crate::tool::result::{
+        ToolBatchContext, ToolExecutionOutcomeKind, ToolExecutionRecord, ToolOutcome,
+        ToolOutcomeKind, ToolReportModifier,
+    };
 
     #[tokio::test]
     async fn test_boss_coordinator_initial_stage_is_documentation() {
@@ -5221,6 +5332,7 @@ mod tests {
                 test_status: "passed".into(),
                 verification_status: "verified".into(),
                 stage_execution_contract: StageExecutionContract::default(),
+                stage_continuation_context: None,
                 evidence_refs: vec!["artifact:1".into()],
                 completion_evidence_gaps: Vec::new(),
                 remaining_risks: Vec::new(),
@@ -5257,6 +5369,7 @@ mod tests {
                 test_status: "passed".into(),
                 verification_status: "verified".into(),
                 stage_execution_contract: StageExecutionContract::default(),
+                stage_continuation_context: None,
                 evidence_refs: vec!["artifact:1".into()],
                 completion_evidence_gaps: Vec::new(),
                 remaining_risks: Vec::new(),
@@ -5286,6 +5399,7 @@ mod tests {
                 test_status: "passed".into(),
                 verification_status: "verified".into(),
                 stage_execution_contract: StageExecutionContract::default(),
+                stage_continuation_context: None,
                 evidence_refs: vec!["artifact:1".into()],
                 completion_evidence_gaps: Vec::new(),
                 remaining_risks: Vec::new(),
@@ -5313,6 +5427,7 @@ mod tests {
                 test_status: "passed".into(),
                 verification_status: "verified".into(),
                 stage_execution_contract: StageExecutionContract::default(),
+                stage_continuation_context: None,
                 evidence_refs: vec!["artifact:1".into()],
                 completion_evidence_gaps: Vec::new(),
                 remaining_risks: Vec::new(),
@@ -5342,6 +5457,7 @@ mod tests {
                 test_status: "blocked".into(),
                 verification_status: "blocked".into(),
                 stage_execution_contract: StageExecutionContract::default(),
+                stage_continuation_context: None,
                 evidence_refs: Vec::new(),
                 completion_evidence_gaps: Vec::new(),
                 remaining_risks: vec!["external blocker".into()],
@@ -5373,6 +5489,7 @@ mod tests {
                 test_status: "blocked".into(),
                 verification_status: "blocked".into(),
                 stage_execution_contract: StageExecutionContract::default(),
+                stage_continuation_context: None,
                 evidence_refs: Vec::new(),
                 completion_evidence_gaps: Vec::new(),
                 remaining_risks: vec!["external blocker".into()],
@@ -5401,6 +5518,7 @@ mod tests {
                 test_status: "passed".into(),
                 verification_status: "verified".into(),
                 stage_execution_contract: StageExecutionContract::default(),
+                stage_continuation_context: None,
                 evidence_refs: vec!["tool_output:1".into(), "artifact:step1:runtime:0".into()],
                 completion_evidence_gaps: Vec::new(),
                 remaining_risks: Vec::new(),
@@ -5450,6 +5568,18 @@ mod tests {
                     ..BossStepRoutedMetadata::default()
                 }),
                 stage_execution_contract: StageExecutionContract::default(),
+                stage_continuation_context: Some(crate::core::state_frame::StageContinuationContext {
+                    repair_intent: Some(crate::core::state_frame::RepairIntent {
+                        failed_target: Some("/tmp/report.md".into()),
+                        verified_facts: vec!["fact: verified".into()],
+                        next_action: Some("write_artifact".into()),
+                        continuity_mode: Some(crate::core::state_frame::ContinuityMode::Repair),
+                    }),
+                    failed_target: Some("/tmp/report.md".into()),
+                    verified_facts: vec!["fact: verified".into()],
+                    next_action: Some("write_artifact".into()),
+                    continuity_mode: Some(crate::core::state_frame::ContinuityMode::Repair),
+                }),
             }],
             history_summary: Vec::new(),
             observability_summary: None,
@@ -5459,6 +5589,18 @@ mod tests {
             ),
             lism_policy: Default::default(),
             stage_execution_contract: StageExecutionContract::default(),
+            stage_continuation_context: Some(crate::core::state_frame::StageContinuationContext {
+                repair_intent: Some(crate::core::state_frame::RepairIntent {
+                    failed_target: Some("/tmp/report.md".into()),
+                    verified_facts: vec!["fact: verified".into()],
+                    next_action: Some("write_artifact".into()),
+                    continuity_mode: Some(crate::core::state_frame::ContinuityMode::Repair),
+                }),
+                failed_target: Some("/tmp/report.md".into()),
+                verified_facts: vec!["fact: verified".into()],
+                next_action: Some("write_artifact".into()),
+                continuity_mode: Some(crate::core::state_frame::ContinuityMode::Repair),
+            }),
         };
 
         assert_eq!(
@@ -5482,6 +5624,7 @@ mod tests {
                 test_status: "not_run".into(),
                 verification_status: "unverified".into(),
                 stage_execution_contract: StageExecutionContract::default(),
+                stage_continuation_context: None,
                 evidence_refs: vec!["change:1".into()],
                 completion_evidence_gaps: vec![CompletionEvidenceGap {
                     target_ref: "artifact:contract:1".into(),
@@ -5533,6 +5676,7 @@ mod tests {
                 test_status: "not_required".into(),
                 verification_status: "verified".into(),
                 stage_execution_contract: StageExecutionContract::default(),
+                stage_continuation_context: None,
                 evidence_refs: vec!["artifact:verified".into()],
                 completion_evidence_gaps: Vec::new(),
                 remaining_risks: Vec::new(),
@@ -5577,6 +5721,7 @@ mod tests {
                 ..BossStepRoutedMetadata::default()
             }),
             stage_execution_contract: StageExecutionContract::default(),
+            stage_continuation_context: None,
         }];
 
         let decision =
@@ -5613,9 +5758,185 @@ mod tests {
                 ..BossStepRoutedMetadata::default()
             }),
             stage_execution_contract: StageExecutionContract::default(),
+            stage_continuation_context: None,
         }];
 
         assert!(BossCoordinator::derive_rollout_policy_decision(&steps).is_none());
+    }
+
+    #[test]
+    fn continuation_payload_prefers_declared_artifact_over_objective_text() {
+        let contract = ExecutorBAssignmentContract {
+            brief: BossContextBrief {
+                plan_id: "plan-alpha".into(),
+                step_id: 0,
+                plan_version: "plan-alpha:steps=1".into(),
+                step_revision: "step-0-attempt-0".into(),
+                generated_at: "2026-05-04T00:00:00Z".into(),
+                objective: "fix the failing continuation path".into(),
+                acceptance: vec!["artifact exists".into()],
+                last_correction: None,
+                recent_decisions: Vec::new(),
+                relevant_file_handles: Vec::new(),
+                target_files: vec!["/tmp/from-target-files.md".into()],
+                target_artifacts: Vec::new(),
+                allowed_tools: vec!["Write".into()],
+                permission_scope: PermissionScopeView {
+                    lism_policy: "force_on".into(),
+                    inherit_context: false,
+                    workspace_capability: "write".into(),
+                    boss_actor_role: "executor_b".into(),
+                },
+                parent_session_id: "session-alpha".into(),
+                context_strategy: BossContextStrategy::Brief,
+            },
+            state_frame: BossStateFrame {
+                step_id: 0,
+                status: BossPlanStepStatus::Running,
+                stage_execution_contract: StageExecutionContract {
+                    declared_artifacts: vec![DeclaredArtifactContract {
+                        ref_id: "artifact:contract:0".into(),
+                        path: "/tmp/contract-first.md".into(),
+                        kind: "file".into(),
+                        required_evidence: vec!["artifact_exists".into()],
+                        required_actions: vec!["write_artifact".into()],
+                    }],
+                    ..StageExecutionContract::default()
+                },
+                stage_continuation_context: None,
+                open_items: vec!["write artifact".into()],
+                blocked_items: Vec::new(),
+                recent_local_facts: vec!["fact: file missing".into()],
+                allowed_actions: vec!["write_artifact".into()],
+                required_output_hint: None,
+            },
+            allowed_tools: vec!["Write".into()],
+            lism_policy: "force_on".into(),
+            worker_role: WorkerRole::Implement,
+            assignment_fingerprint: "fingerprint".into(),
+        };
+
+        let payload = build_continuation_payload(&contract);
+
+        assert_eq!(
+            payload.failed_target.as_deref(),
+            Some("/tmp/contract-first.md")
+        );
+        assert_eq!(payload.next_action.as_deref(), Some("write_artifact"));
+        assert_eq!(payload.verified_facts, vec!["fact: file missing"]);
+        assert_eq!(payload.continuity_mode.as_deref(), Some("continue"));
+    }
+
+    #[tokio::test]
+    async fn lism_sample_report_surfaces_latest_stage_continuation_context() {
+        let coordinator = BossCoordinator::new();
+        {
+            let mut status = coordinator.status.write().await;
+            status.stage = BossStage::Execution;
+            status.current_step = Some(1);
+            status.total_steps = Some(2);
+        }
+        {
+            let mut plan = coordinator.plan.write().await;
+            *plan = Some(BossPlan {
+                plan_id: "plan-alpha".into(),
+                task_description: "task".into(),
+                document_spec: String::new(),
+                pseudo_code: String::new(),
+                draft_spec: None,
+                review_feedback: None,
+                revision_notes: None,
+                finalized: true,
+                documentation_feedback: Vec::new(),
+                steps: vec![
+                    BossPlanStep {
+                        id: 0,
+                        description: "step 0".into(),
+                        objective: Some("objective 0".into()),
+                        acceptance: vec!["acceptance 0".into()],
+                        requires_approval: false,
+                        status: BossPlanStepStatus::Completed,
+                        completed: true,
+                        result_diff: None,
+                        worker_task_id: None,
+                        attempt_count: 1,
+                        retry_budget: 3,
+                        last_review_summary: Some("done".into()),
+                        last_correction: None,
+                        review_task_id: None,
+                        tool_execution_records: Vec::new(),
+                    },
+                    BossPlanStep {
+                        id: 1,
+                        description: "step 1".into(),
+                        objective: Some("objective 1".into()),
+                        acceptance: vec!["acceptance 1".into()],
+                        requires_approval: false,
+                        status: BossPlanStepStatus::ReplanRequired,
+                        completed: false,
+                        result_diff: None,
+                        worker_task_id: None,
+                        attempt_count: 2,
+                        retry_budget: 3,
+                        last_review_summary: Some("repair needed".into()),
+                        last_correction: Some("/tmp/failed-report.md".into()),
+                        review_task_id: None,
+                        tool_execution_records: vec![ToolExecutionRecord {
+                            tool_name: "ArtifactVerify".into(),
+                            outcome: "success".into(),
+                            kind: ToolExecutionOutcomeKind::Success,
+                            summary: "artifact exists: /tmp/partial-report.md".into(),
+                            detail: None,
+                            pending_approval: None,
+                            report_modifier: ToolReportModifier::None,
+                            observable_input: None,
+                            batch_context: ToolBatchContext {
+                                batch_index: 0,
+                                batch_size: 1,
+                                executed_in_batch: false,
+                            },
+                        }],
+                    },
+                ],
+                accepted_by_user: true,
+                auto_sequence: true,
+                session_snapshot: None,
+            });
+        }
+
+        let report = coordinator.build_lism_sample_report(None).await;
+        let step_context = report.steps[1]
+            .stage_continuation_context
+            .clone()
+            .expect("step continuation context");
+        let top_level = report
+            .stage_continuation_context
+            .clone()
+            .expect("top-level continuation context");
+
+        assert_eq!(
+            step_context.failed_target.as_deref(),
+            Some("/tmp/failed-report.md")
+        );
+        assert_eq!(
+            step_context.verified_facts,
+            vec!["artifact exists: /tmp/partial-report.md"]
+        );
+        assert_eq!(step_context.next_action.as_deref(), Some("/tmp/failed-report.md"));
+        assert_eq!(
+            step_context.continuity_mode,
+            Some(ContinuityMode::Repair)
+        );
+        assert_eq!(
+            step_context.repair_intent,
+            Some(RepairIntent {
+                failed_target: Some("/tmp/failed-report.md".into()),
+                verified_facts: vec!["artifact exists: /tmp/partial-report.md".into()],
+                next_action: Some("/tmp/failed-report.md".into()),
+                continuity_mode: Some(ContinuityMode::Repair),
+            })
+        );
+        assert_eq!(top_level, step_context);
     }
 
     #[test]

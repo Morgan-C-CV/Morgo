@@ -1,5 +1,5 @@
 use crate::core::boss_state::BossPlanStepStatus;
-use crate::core::state_frame::StageExecutionContract;
+use crate::core::state_frame::{StageContinuationContext, StageExecutionContract};
 use crate::core::prompt_segment::{PromptAssembly, PromptSegment, PromptSegmentKind};
 use serde::{Deserialize, Serialize};
 
@@ -69,11 +69,13 @@ pub struct BossContextBrief {
 
 /// Dynamic, non-cacheable state for the current turn.
 /// Maps to `PromptSegmentKind::StateFrame` (non-cacheable).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BossStateFrame {
     pub step_id: usize,
     pub status: BossPlanStepStatus,
     pub stage_execution_contract: StageExecutionContract,
+    #[serde(default)]
+    pub stage_continuation_context: Option<StageContinuationContext>,
     pub open_items: Vec<String>,
     pub blocked_items: Vec<String>,
     pub recent_local_facts: Vec<String>,
@@ -193,6 +195,24 @@ impl BossStateFrame {
                     test.required_actions.join(", "),
                     test.required_evidence.join(", ")
                 ));
+            }
+        }
+        if let Some(continuation) = &self.stage_continuation_context {
+            lines.push("stage_continuation_context:".into());
+            if let Some(intent) = &continuation.repair_intent {
+                lines.push(format!(
+                    "  - repair_intent failed_target={} next_action={} continuity_mode={} verified_facts={}",
+                    intent.failed_target.as_deref().unwrap_or("none"),
+                    intent.next_action.as_deref().unwrap_or("none"),
+                    intent
+                        .continuity_mode
+                        .as_ref()
+                        .map(|mode| format!("{:?}", mode).to_ascii_lowercase())
+                        .unwrap_or_else(|| "none".into()),
+                    intent.verified_facts.join(", ")
+                ));
+            } else {
+                lines.push("  - repair_intent=none".into());
             }
         }
         if !self.open_items.is_empty() {

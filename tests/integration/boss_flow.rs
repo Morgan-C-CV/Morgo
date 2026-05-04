@@ -2055,6 +2055,17 @@ async fn boss_b_receives_step_context_via_continue_or_mailbox() {
             .contains("permission_scope:"),
         "refresh continue payload must carry a replacement brief"
     );
+    assert!(
+        vc["continuation_payload"]["failed_target"]
+            .as_str()
+            .unwrap_or("")
+            .contains("objective 0")
+            || vc["continuation_payload"]["failed_target"]
+                .as_str()
+                .unwrap_or("")
+                .contains("artifact"),
+        "continue payload must carry typed failed_target"
+    );
 
     let _ = std::fs::remove_file(plan_path);
 }
@@ -7019,6 +7030,7 @@ fn make_frame(step_id: usize) -> BossStateFrame {
         step_id,
         status: BossPlanStepStatus::Running,
         stage_execution_contract: rust_agent::core::state_frame::StageExecutionContract::default(),
+        stage_continuation_context: None,
         open_items: vec!["write tests".into()],
         blocked_items: Vec::new(),
         recent_local_facts: Vec::new(),
@@ -7083,6 +7095,7 @@ fn t26_4_brief_fingerprint_stable_across_state_frame_changes() {
         step_id: 1,
         status: BossPlanStepStatus::Running,
         stage_execution_contract: rust_agent::core::state_frame::StageExecutionContract::default(),
+        stage_continuation_context: None,
         open_items: vec!["DIFFERENT open item".into()],
         blocked_items: Vec::new(),
         recent_local_facts: Vec::new(),
@@ -10116,6 +10129,7 @@ async fn t27_r1_format_report_includes_hit_ratio_and_tokens_saved() {
                 ..Default::default()
             }),
             stage_execution_contract: rust_agent::core::state_frame::StageExecutionContract::default(),
+            stage_continuation_context: None,
         }],
         history_summary: vec![],
         observability_summary: Some(summary),
@@ -10123,6 +10137,7 @@ async fn t27_r1_format_report_includes_hit_ratio_and_tokens_saved() {
         success_classification: None,
         lism_policy: rust_agent::core::boss_state::BossLisMPolicy::Inherit,
         stage_execution_contract: rust_agent::core::state_frame::StageExecutionContract::default(),
+        stage_continuation_context: None,
     };
 
     let report = payload.format_report();

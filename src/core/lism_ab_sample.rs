@@ -1015,6 +1015,7 @@ mod tests {
                     ..BossStepRoutedMetadata::default()
                 }),
                 stage_execution_contract: StageExecutionContract::default(),
+                stage_continuation_context: None,
             }],
             history_summary: Vec::new(),
             observability_summary: None,
@@ -1038,6 +1039,7 @@ mod tests {
             success_classification: Some(BossSuccessClassification::RecoveredSuccess),
             lism_policy: Default::default(),
             stage_execution_contract: StageExecutionContract::default(),
+            stage_continuation_context: None,
         };
 
         let record = build_ab_record(
@@ -1082,6 +1084,7 @@ mod tests {
                 blocker_reason: None,
                 routed_metadata: Some(BossStepRoutedMetadata::default()),
                 stage_execution_contract: StageExecutionContract::default(),
+                stage_continuation_context: None,
             }],
             history_summary: Vec::new(),
             observability_summary: None,
@@ -1089,6 +1092,7 @@ mod tests {
             success_classification: None,
             lism_policy: Default::default(),
             stage_execution_contract: StageExecutionContract::default(),
+            stage_continuation_context: None,
         };
 
         let record = build_ab_record(
@@ -1125,6 +1129,7 @@ mod tests {
                     ..BossStepRoutedMetadata::default()
                 }),
                 stage_execution_contract: StageExecutionContract::default(),
+                stage_continuation_context: None,
             }],
             history_summary: Vec::new(),
             observability_summary: None,
@@ -1132,6 +1137,7 @@ mod tests {
             success_classification: Some(BossSuccessClassification::FallbackSuccess),
             lism_policy: Default::default(),
             stage_execution_contract: StageExecutionContract::default(),
+            stage_continuation_context: None,
         };
 
         let record = build_ab_record(
@@ -1180,6 +1186,7 @@ mod tests {
                     ..BossStepRoutedMetadata::default()
                 }),
                 stage_execution_contract: StageExecutionContract::default(),
+                stage_continuation_context: None,
             }],
             history_summary: Vec::new(),
             observability_summary: None,
@@ -1187,6 +1194,7 @@ mod tests {
             success_classification: Some(BossSuccessClassification::TrueExternalBlocker),
             lism_policy: Default::default(),
             stage_execution_contract: StageExecutionContract::default(),
+            stage_continuation_context: None,
         };
 
         let record = build_ab_record(

@@ -43,6 +43,7 @@ fn make_report(
             blocker_reason: None,
             routed_metadata: None,
             stage_execution_contract: StageExecutionContract::default(),
+            stage_continuation_context: None,
         })
         .collect();
 
@@ -90,6 +91,7 @@ fn make_report(
         success_classification: None,
         lism_policy: BossLisMPolicy::Inherit,
         stage_execution_contract: StageExecutionContract::default(),
+        stage_continuation_context: None,
     }
 }
 
@@ -281,6 +283,7 @@ fn r1_1_record_carries_fallback_tier_and_reason() {
             ..Default::default()
         }),
         stage_execution_contract: StageExecutionContract::default(),
+        stage_continuation_context: None,
     }];
     sink.record_run(
         "fallback-run",

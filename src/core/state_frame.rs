@@ -109,6 +109,39 @@ pub struct StageExecutionContract {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ContinuityMode {
+    Continue,
+    Repair,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct RepairIntent {
+    #[serde(default)]
+    pub failed_target: Option<String>,
+    #[serde(default)]
+    pub verified_facts: Vec<String>,
+    #[serde(default)]
+    pub next_action: Option<String>,
+    #[serde(default)]
+    pub continuity_mode: Option<ContinuityMode>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct StageContinuationContext {
+    #[serde(default)]
+    pub repair_intent: Option<RepairIntent>,
+    #[serde(default)]
+    pub failed_target: Option<String>,
+    #[serde(default)]
+    pub verified_facts: Vec<String>,
+    #[serde(default)]
+    pub next_action: Option<String>,
+    #[serde(default)]
+    pub continuity_mode: Option<ContinuityMode>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkerStructuredReport {
     pub worker_state: AgentState,
     #[serde(default)]
@@ -122,6 +155,8 @@ pub struct WorkerStructuredReport {
     pub verification_status: String,
     #[serde(default)]
     pub stage_execution_contract: StageExecutionContract,
+    #[serde(default)]
+    pub stage_continuation_context: Option<StageContinuationContext>,
     #[serde(default)]
     pub evidence_refs: Vec<String>,
     #[serde(default)]
