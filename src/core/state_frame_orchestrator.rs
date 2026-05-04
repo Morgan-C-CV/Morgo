@@ -89,6 +89,7 @@ fn infer_preflight_requirements_from_state_frame(frame: &StateFrame) -> ToolCont
         required_visible_tools: Vec::new(),
         required_allowed_actions: Vec::new(),
         permission_probe_tools: Vec::new(),
+        permission_probe_paths: std::collections::BTreeMap::new(),
     };
     if matches!(
         frame.state,
@@ -132,12 +133,25 @@ fn infer_preflight_requirements_from_state_frame(frame: &StateFrame) -> ToolCont
                         .iter()
                         .any(|action| action == "run_command")
                 }));
+    let writable_probe_path = frame
+        .stage_execution_contract
+        .declared_artifacts
+        .iter()
+        .find(|artifact| {
+            artifact.required_actions.iter().any(|action| {
+                matches!(action.as_str(), "write_file" | "edit_file" | "create" | "write")
+            }) && std::path::Path::new(artifact.path.as_str()).extension().is_some()
+        })
+        .map(|artifact| artifact.path.clone());
 
     if requires_write {
         spec.required_allowed_actions.push("write_file".into());
         spec.permission_probe_tools.push("Edit".into());
         spec.permission_probe_tools.push("Bash".into());
         spec.required_visible_tools.push("Bash".into());
+        if let Some(path) = writable_probe_path {
+            spec.permission_probe_paths.insert("Edit".into(), path);
+        }
     }
     if requires_command_execution {
         spec.required_allowed_actions.push("run_command".into());
@@ -738,6 +752,56 @@ mod tests {
             }
             other => panic!("expected preflight mismatch, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn direct_worker_preflight_uses_declared_artifact_path_for_edit_probe() {
+        let registry = ToolRegistry::new()
+            .register(Arc::new(FileEditTool))
+            .register(Arc::new(FileReadTool));
+        let permissions = ToolPermissionContext::new(PermissionMode::Default);
+        let runtime = crate::core::state_frame_loop::StateFrameToolRuntime {
+            registry: registry.clone(),
+            permissions: permissions.clone(),
+            cwd: test_runtime_paths().0,
+            config_root: test_runtime_paths().1,
+        };
+        let temp_dir = std::env::temp_dir().join("state_frame_preflight_edit_probe");
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let artifact_path = temp_dir.join("README.md");
+        runtime
+            .permissions
+            .add_delegated_write_path(artifact_path.as_path());
+        let mut frame = worker_frame("finish the assigned artifact");
+        frame.stage_execution_contract.declared_artifacts.push(
+            crate::core::state_frame::DeclaredArtifactContract {
+                ref_id: "artifact:step0:0".into(),
+                path: artifact_path.display().to_string(),
+                kind: "file".into(),
+                required_actions: vec!["write_file".into()],
+                required_evidence: vec!["artifact:step0:0".into()],
+            },
+        );
+        let snapshot = apply_tool_registry_contract(&mut frame, &runtime)
+            .await
+            .expect("snapshot");
+        let assembled = registry.assemble(tool_assembly_context_for_role(frame.role));
+        let mismatch = assembled
+            .preflight_contract(
+                &runtime.permissions,
+                &snapshot,
+                &infer_preflight_requirements_from_state_frame(&frame),
+            )
+            .await
+            .expect_err("write path still lacks bash/write capability, but Edit should not be denied");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        assert!(
+            !mismatch
+                .permission_denied_tools
+                .iter()
+                .any(|tool| tool == "Edit"),
+            "declared artifact path should clear Edit permission probe: {mismatch:?}"
+        );
     }
 
     #[tokio::test]

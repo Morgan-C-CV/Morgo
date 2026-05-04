@@ -1,6 +1,6 @@
 use std::sync::Arc;
 use std::{
-    collections::{BTreeSet, hash_map::DefaultHasher},
+    collections::{BTreeMap, BTreeSet, hash_map::DefaultHasher},
     hash::{Hash, Hasher},
     path::{Path, PathBuf},
 };
@@ -58,6 +58,7 @@ pub struct ToolContractPreflightSpec {
     pub required_visible_tools: Vec<String>,
     pub required_allowed_actions: Vec<String>,
     pub permission_probe_tools: Vec<String>,
+    pub permission_probe_paths: BTreeMap<String, String>,
 }
 
 fn stable_hash(value: &serde_json::Value) -> String {
@@ -79,16 +80,26 @@ fn actions_for_tool(tool_name: &str) -> &'static [&'static str] {
     }
 }
 
-fn sample_call_for_permission_probe(tool_name: &str, cwd: &Path) -> ToolCall {
+fn sample_call_for_permission_probe(
+    tool_name: &str,
+    cwd: &Path,
+    probe_path: Option<&str>,
+) -> ToolCall {
+    let default_probe_path = cwd.join("__tool_contract_probe__.txt");
+    let file_probe_path = probe_path
+        .filter(|path| !path.trim().is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| default_probe_path.display().to_string());
+    let read_probe_path = probe_path
+        .filter(|path| !path.trim().is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| cwd.display().to_string());
     match tool_name {
-        "Read" => ToolCall::new(
-            "Read",
-            json!({ "file_path": cwd.display().to_string() }).to_string(),
-        ),
+        "Read" => ToolCall::new("Read", json!({ "file_path": read_probe_path }).to_string()),
         "Edit" => ToolCall::new(
             "Edit",
             json!({
-                "file_path": cwd.join("__tool_contract_probe__.txt").display().to_string(),
+                "file_path": file_probe_path,
                 "old_string": "before",
                 "new_string": "after"
             })
@@ -97,7 +108,7 @@ fn sample_call_for_permission_probe(tool_name: &str, cwd: &Path) -> ToolCall {
         "Write" => ToolCall::new(
             "Write",
             json!({
-                "file_path": cwd.join("__tool_contract_probe__.txt").display().to_string(),
+                "file_path": file_probe_path,
                 "content": "probe"
             })
             .to_string(),
@@ -313,7 +324,7 @@ impl ToolRegistry {
         let mut actions = BTreeSet::new();
         for tool_name in self.visible_tool_names(permissions) {
             if !self
-                .is_tool_invokable(tool_name.as_str(), permissions, cwd)
+                .is_tool_invokable(tool_name.as_str(), permissions, cwd, None)
                 .await
             {
                 continue;
@@ -425,8 +436,12 @@ impl ToolRegistry {
             {
                 continue;
             }
+            let probe_path = spec
+                .permission_probe_paths
+                .get(tool_name)
+                .map(|path| path.as_str());
             if !self
-                .is_tool_invokable(tool_name.as_str(), permissions, &snapshot.cwd)
+                .is_tool_invokable(tool_name.as_str(), permissions, &snapshot.cwd, probe_path)
                 .await
             {
                 permission_denied_tools.push(tool_name.clone());
@@ -560,8 +575,9 @@ impl ToolRegistry {
         tool_name: &str,
         permissions: &ToolPermissionContext,
         cwd: &Path,
+        probe_path: Option<&str>,
     ) -> bool {
-        let call = sample_call_for_permission_probe(tool_name, cwd);
+        let call = sample_call_for_permission_probe(tool_name, cwd, probe_path);
         matches!(
             self.permission_decision(&call, permissions).await,
             Some(PermissionDecision::Allow)
