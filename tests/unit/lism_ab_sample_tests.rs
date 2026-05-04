@@ -214,6 +214,47 @@ fn r1_1_record_extracts_usage_and_prompt_size_fields() {
 }
 
 #[test]
+fn r1_1_record_derives_typed_path_signal_from_hydration_and_tool_dispatch() {
+    let sink = LisMAbSampleSink::in_memory();
+    let mut report = make_report_with_usage(1, 1, 200, 30, 400);
+    report.observability_summary = Some(BossObservabilitySummary {
+        total_steps_routed: 1,
+        total_cache_read_tokens: 0,
+        total_cache_write_tokens: 0,
+        total_fallback_count: 0,
+        fallback_tier_counts: Default::default(),
+        fallback_reason_counts: Default::default(),
+        total_projection_mismatch_count: 0,
+        total_hydration_count: 2,
+        total_hydration_from_contract_count: 1,
+        total_hydration_from_ledger_count: 1,
+        total_stale_ref_count: 0,
+        total_hydration_ref_missing: 0,
+        total_hydration_miss_unsupported_count: 0,
+        total_hydration_miss_stale_count: 0,
+        total_hydration_miss_no_match_count: 0,
+        total_tool_dispatch_count: 3,
+        total_tool_dispatch_success_count: 2,
+        total_tool_dispatch_failure_count: 1,
+        total_tool_dispatch_ref_write_count: 2,
+        tool_dispatch_failure_taxonomy: Default::default(),
+        override_hit_count: 0,
+        model_tier_counts: Default::default(),
+        total_input_tokens: 200,
+        total_uncached_input_tokens: 200,
+        total_output_tokens: 30,
+        estimated_cost_micros_usd: 0,
+        total_original_chars: 400,
+        total_sent_chars: 400,
+    });
+
+    sink.record_run("typed-path-run", true, &report, BossTestRunOutcome::Completed, 0);
+
+    let record = &sink.records()[0];
+    assert_eq!(record.typed_path_signal, "hydration+tool_dispatch+ref_write");
+}
+
+#[test]
 fn r1_1_record_carries_fallback_tier_and_reason() {
     use rust_agent::core::boss_state::{
         BossPlanStepStatus, BossStepReport, BossStepRoutedMetadata,

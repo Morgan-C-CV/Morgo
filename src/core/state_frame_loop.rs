@@ -1317,6 +1317,23 @@ fn requires_readonly_audit_contract(frame: &StateFrame) -> bool {
     frame.required_output_schema.as_deref() == Some("readonly_audit_4_paragraphs_v1")
 }
 
+fn is_broad_discovery_tool(action_type: &str) -> bool {
+    matches!(action_type, "Glob" | "Grep" | "ToolSearch")
+}
+
+fn primary_declared_target_path(frame: &StateFrame) -> Option<&str> {
+    frame
+        .stage_execution_contract
+        .declared_artifacts
+        .iter()
+        .map(|artifact| artifact.path.trim())
+        .find(|path| !path.is_empty())
+}
+
+fn has_explicit_implementation_target(frame: &StateFrame) -> bool {
+    primary_declared_target_path(frame).is_some()
+}
+
 fn validate_decision_for_frame(
     frame: &StateFrame,
     decision: &crate::core::state_frame::StateDecision,
@@ -1332,6 +1349,27 @@ fn validate_decision_for_frame(
             if next_action.action_type.trim().is_empty() {
                 return Err(RepairNeeded {
                     reason: "call_tool requires non-empty next_action.action_type".into(),
+                    raw_json: String::new(),
+                });
+            }
+            if has_explicit_implementation_target(frame)
+                && is_broad_discovery_tool(next_action.action_type.trim())
+            {
+                let target_hint = primary_declared_target_path(frame)
+                    .map(|path| {
+                        format!(
+                            "target path `{path}` is already declared; use request_context:file_snippet:{path} or a narrow Read on that exact path instead of broad discovery"
+                        )
+                    })
+                    .unwrap_or_else(|| {
+                        "target path is already declared; use request_context:file_snippet:<target_path> or a narrow Read instead of broad discovery".into()
+                    });
+                return Err(RepairNeeded {
+                    reason: format!(
+                        "broad discovery tool {} is not allowed for this direct implement step: {}",
+                        next_action.action_type.trim(),
+                        target_hint
+                    ),
                     raw_json: String::new(),
                 });
             }
@@ -2206,6 +2244,7 @@ fn classify_dispatch_failure(reason: &str) -> String {
         || lowered.contains("serialize tool args")
         || lowered.contains("json-structured input")
         || lowered.contains("without next_action")
+        || lowered.contains("broad discovery tool")
     {
         "schema_invalid".into()
     } else if lowered.contains("sandbox")
@@ -3416,6 +3455,32 @@ mod tests {
         assert!(
             err.reason.contains("request Read first"),
             "expected read-first repair guidance, got {}",
+            err.reason
+        );
+    }
+
+    #[test]
+    fn broad_discovery_tool_is_rejected_when_declared_target_already_exists() {
+        let mut frame = make_frame();
+        frame.stage_execution_contract.declared_artifacts.push(DeclaredArtifactContract {
+            ref_id: "artifact:demo".into(),
+            path: "src/demo.rs".into(),
+            kind: "file".into(),
+            required_actions: vec!["write_artifact".into()],
+            required_evidence: vec!["artifact_evidence".into()],
+        });
+        let decision_json = r#"{"state":"executing","decision":"call_tool","next_action":{"action_type":"Glob","args":{"pattern":"src/**/*.rs"}}}"#;
+        let err = parse_and_validate_decision(&frame, decision_json)
+            .expect_err("broad discovery should be rejected when target path is already declared");
+        assert!(
+            err.reason.contains("broad discovery tool Glob is not allowed"),
+            "expected broad discovery guard, got {}",
+            err.reason
+        );
+        assert!(
+            err.reason.contains("request_context:file_snippet:src/demo.rs")
+                || err.reason.contains("narrow Read on that exact path"),
+            "expected direct-path repair hint, got {}",
             err.reason
         );
     }

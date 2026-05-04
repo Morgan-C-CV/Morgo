@@ -8,8 +8,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::boss_state::BossReportPayload;
 use crate::core::boss_test_readiness::BossTestRunOutcome;
-use crate::core::state_frame_orchestrator::StepFailureClassification;
-
 // ── Record ────────────────────────────────────────────────────────────────────
 
 /// One boss run's contribution to the LisM A/B comparison.
@@ -74,6 +72,8 @@ pub struct LisMAbSampleRecord {
     pub tool_dispatch_failure_count: usize,
     #[serde(default)]
     pub tool_dispatch_ref_write_count: usize,
+    #[serde(default)]
+    pub typed_path_signal: String,
     #[serde(default)]
     pub tool_dispatch_failure_taxonomy: BTreeMap<String, usize>,
     #[serde(default)]
@@ -895,6 +895,7 @@ fn build_ab_record(
         tool_dispatch_ref_write_count: obs
             .map(|o| o.total_tool_dispatch_ref_write_count)
             .unwrap_or(0),
+        typed_path_signal: derive_typed_path_signal(obs),
         tool_dispatch_failure_taxonomy: obs
             .map(|o| o.tool_dispatch_failure_taxonomy.clone())
             .unwrap_or_default(),
@@ -995,6 +996,7 @@ mod tests {
     };
     use crate::core::boss_test_readiness::BossTestRunOutcome;
     use crate::core::state_frame::{CompletionEvidenceGap, StageExecutionContract};
+    use crate::core::state_frame_orchestrator::StepFailureClassification;
 
     fn empty_actor() -> BossActorHandle {
         BossActorHandle::new("actor", "session", BossActorRole::DesignerA)
@@ -1551,6 +1553,26 @@ fn derive_context_tier(
         Some(summary) if summary.total_hydration_count > 0 => "typed_hydration".into(),
         Some(_) => "state_frame_only".into(),
         None => "no_observability".into(),
+    }
+}
+
+fn derive_typed_path_signal(
+    obs: Option<&crate::core::boss_state::BossObservabilitySummary>,
+) -> String {
+    let Some(summary) = obs else {
+        return "no_observability".into();
+    };
+    match (
+        summary.total_hydration_count > 0,
+        summary.total_tool_dispatch_count > 0,
+        summary.total_tool_dispatch_ref_write_count > 0,
+    ) {
+        (true, true, true) => "hydration+tool_dispatch+ref_write".into(),
+        (true, true, false) => "hydration+tool_dispatch".into(),
+        (false, true, true) => "tool_dispatch+ref_write".into(),
+        (false, true, false) => "tool_dispatch_only".into(),
+        (true, false, false) => "hydration_only".into(),
+        _ => "state_frame_only".into(),
     }
 }
 

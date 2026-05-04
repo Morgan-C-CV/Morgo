@@ -405,8 +405,8 @@ lines.append("# Boss LisM Matrix Summary")
 lines.append("")
 lines.append(f"output_dir: `{out_dir}`")
 lines.append("")
-lines.append("| use case | mode | unique runs | completed | completion | avg cost | avg input | avg uncached input | avg output | avg hydration | avg missing refs | dominant context tier |")
-lines.append("|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|")
+lines.append("| use case | mode | unique runs | completed | completion | avg cost | avg input | avg uncached input | avg output | avg hydration | avg tool dispatch | avg ref writes | avg missing refs | dominant context tier | dominant typed path signal |")
+lines.append("|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|")
 
 for usecase in sorted(grouped):
     for mode in ("all_off", "boss_on_only", "all_on"):
@@ -416,8 +416,10 @@ for usecase in sorted(grouped):
         completed = sum(1 for record in records if record.get("outcome") == "completed")
         ctx = Counter(record.get("context_tier", "n/a") for record in records)
         dominant_ctx = ctx.most_common(1)[0][0] if ctx else "n/a"
+        typed = Counter(record.get("typed_path_signal", "n/a") for record in records)
+        dominant_typed = typed.most_common(1)[0][0] if typed else "n/a"
         lines.append(
-            "| `{}` | `{}` | {} | {} | {:.2f} | {} | {} | {} | {} | {:.2f} | {:.2f} | `{}` |".format(
+            "| `{}` | `{}` | {} | {} | {:.2f} | {} | {} | {} | {} | {:.2f} | {:.2f} | {:.2f} | {:.2f} | `{}` | `{}` |".format(
                 usecase,
                 mode,
                 len(records),
@@ -428,8 +430,11 @@ for usecase in sorted(grouped):
                 int(round(avg(records, "total_uncached_input_tokens"))),
                 int(round(avg(records, "total_output_tokens"))),
                 avg(records, "hydration_count"),
+                avg(records, "tool_dispatch_count"),
+                avg(records, "tool_dispatch_ref_write_count"),
                 avg(records, "hydration_ref_missing"),
                 dominant_ctx,
+                dominant_typed,
             )
         )
 
@@ -447,7 +452,7 @@ for usecase in sorted(grouped):
         lines.append(f"- `{mode}`")
         for record in records:
             lines.append(
-                "  - run_id=`{}` outcome=`{}` cost={} input={} uncached={} output={} hydration={} missing_refs={} context_tier=`{}` fallback_tier=`{}`".format(
+                "  - run_id=`{}` outcome=`{}` cost={} input={} uncached={} output={} hydration={} tool_dispatch={} ref_writes={} missing_refs={} context_tier=`{}` typed_path_signal=`{}` fallback_tier=`{}`".format(
                     record.get("run_id"),
                     record.get("outcome"),
                     record.get("cost_micros_usd", 0),
@@ -455,8 +460,11 @@ for usecase in sorted(grouped):
                     record.get("total_uncached_input_tokens", 0),
                     record.get("total_output_tokens", 0),
                     record.get("hydration_count", 0),
+                    record.get("tool_dispatch_count", 0),
+                    record.get("tool_dispatch_ref_write_count", 0),
                     record.get("hydration_ref_missing", 0),
                     record.get("context_tier"),
+                    record.get("typed_path_signal"),
                     record.get("fallback_tier"),
                 )
             )
