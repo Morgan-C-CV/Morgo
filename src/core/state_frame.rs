@@ -338,8 +338,11 @@ fn normalized_agent_state(raw: &str) -> Option<&'static str> {
         "planning" | "plan" => Some("planning"),
         "executing" | "execute" | "execution" | "running" | "in_progress" => Some("executing"),
         "reviewing" | "review" => Some("reviewing"),
-        "correcting" | "correct" => Some("correcting"),
-        "verifying" | "verify" => Some("verifying"),
+        "correcting" | "correct" | "repairing" | "repair" => Some("correcting"),
+        "verifying" | "verify" | "re_verify" | "reverify" => Some("verifying"),
+        "awaiting_user_input" | "awaiting_input" | "needs_user_input" | "user_input" => {
+            Some("correcting")
+        }
         "blocked" => Some("blocked"),
         "done" | "completed" | "complete" | "success" | "succeeded" | "idle" => Some("done"),
         _ => None,
@@ -364,6 +367,7 @@ fn infer_decision_kind(
     state: Option<&str>,
     needed_context: Option<&Vec<Value>>,
     actions: Option<&Vec<Value>>,
+    next_action_present: bool,
 ) -> &'static str {
     if let Some(kind) = explicit.and_then(normalized_decision_kind) {
         return kind;
@@ -375,6 +379,9 @@ fn infer_decision_kind(
         return "request_context";
     }
     if actions.map(|items| !items.is_empty()).unwrap_or(false) {
+        return "call_tool";
+    }
+    if next_action_present {
         return "call_tool";
     }
     if matches!(state.and_then(normalized_agent_state), Some("done")) {
@@ -449,7 +456,15 @@ fn normalize_state_decision_value(value: Value) -> Result<Value, String> {
         .get("decision")
         .and_then(Value::as_str)
         .or_else(|| nested.and_then(|m| m.get("decision").and_then(Value::as_str)));
-    let decision = infer_decision_kind(decision_raw, Some(state), needed_context, actions);
+    let next_action_present = root.get("next_action").is_some()
+        || nested.and_then(|m| m.get("next_action")).is_some();
+    let decision = infer_decision_kind(
+        decision_raw,
+        Some(state),
+        needed_context,
+        actions,
+        next_action_present,
+    );
 
     let mut normalized = Map::new();
     normalized.insert("state".into(), Value::String(state.to_string()));
@@ -486,6 +501,31 @@ fn normalize_state_decision_value(value: Value) -> Result<Value, String> {
     }
 
     Ok(Value::Object(normalized))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DecisionKind, AgentState, validate_state_decision};
+
+    #[test]
+    fn invalid_repair_json_is_normalized_into_headless_safe_continuation() {
+        let decision = validate_state_decision(
+            r#"{
+                "type":"repair_response",
+                "decision":{
+                    "next_state":"awaiting_user_input",
+                    "actions":[{"action_type":"Write","args":{"file_path":"/tmp/report.md","content":"done"}}],
+                    "next_action":{"action_type":"Write","args":{"file_path":"/tmp/report.md","content":"done"}}
+                }
+            }"#,
+        )
+        .expect("repair wrapper should normalize");
+
+        assert_eq!(decision.state, AgentState::Correcting);
+        assert_eq!(decision.decision, DecisionKind::CallTool);
+        let next_action = decision.next_action.expect("next action");
+        assert_eq!(next_action.action_type, "Write");
+    }
 }
 
 /// Parse and validate a JSON string as a `StateDecision`.

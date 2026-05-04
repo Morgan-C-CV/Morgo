@@ -140,6 +140,8 @@ struct ArtifactRepairTurn {
     permission_ref: String,
     missing_reason: String,
     recommended_write_strategy: String,
+    create_parent_directory: bool,
+    write_target_file: bool,
 }
 
 /// Collect text and token usage from a stream of events.
@@ -430,19 +432,50 @@ fn infer_artifact_repair_turn(
         .map(|path| path.display().to_string())
         .filter(|path| !path.trim().is_empty())
         .unwrap_or_else(|| ".".into());
-    let recommended_write_strategy =
-        if kind == "directory" || std::path::Path::new(&target_path).extension().is_none() {
-            "create_directory_then_write_files".to_string()
-        } else {
-            "write_exact_target_file".to_string()
-        };
+    let is_directory = kind == "directory";
+    let is_file_target = !is_directory && std::path::Path::new(&target_path).extension().is_some();
+    let recommended_write_strategy = if is_file_target {
+        "create_parent_directory_and_write_target_file".to_string()
+    } else {
+        "create_directory_then_write_files".to_string()
+    };
     Some(ArtifactRepairTurn {
         target_path,
         parent_dir,
         permission_ref,
         missing_reason: missing_reason.to_string(),
         recommended_write_strategy,
+        create_parent_directory: true,
+        write_target_file: is_file_target,
     })
+}
+
+fn repair_turn_open_item(repair_turn: &ArtifactRepairTurn) -> String {
+    format!(
+        "repair_turn:artifact_missing target_path={} parent_dir={} permission_ref={} missing_reason={} recommended_write_strategy={} create_parent_directory={} write_target_file={}",
+        repair_turn.target_path,
+        repair_turn.parent_dir,
+        repair_turn.permission_ref,
+        repair_turn.missing_reason,
+        repair_turn.recommended_write_strategy,
+        repair_turn.create_parent_directory,
+        repair_turn.write_target_file
+    )
+}
+
+fn repair_turn_fact_line(repair_turn: &ArtifactRepairTurn, reference: &str, summary: String) -> String {
+    format!(
+        "fact: repair_turn ref={} target_path={} parent_dir={} permission_ref={} missing_reason={} recommended_write_strategy={} create_parent_directory={} write_target_file={} summary={}",
+        reference,
+        repair_turn.target_path,
+        repair_turn.parent_dir,
+        repair_turn.permission_ref,
+        repair_turn.missing_reason,
+        repair_turn.recommended_write_strategy,
+        repair_turn.create_parent_directory,
+        repair_turn.write_target_file,
+        summary
+    )
 }
 
 fn has_verified_artifact_for_path(frame: &StateFrame, path: &str) -> bool {
@@ -733,25 +766,14 @@ fn inject_completion_gate_block(frame: &mut StateFrame, block: &CompletionGateBl
         {
             push_unique(
                 &mut frame.open_items,
-                format!(
-                    "repair_turn:artifact_missing target_path={} parent_dir={} permission_ref={} missing_reason={} recommended_write_strategy={}",
-                    repair_turn.target_path,
-                    repair_turn.parent_dir,
-                    repair_turn.permission_ref,
-                    repair_turn.missing_reason,
-                    repair_turn.recommended_write_strategy
-                ),
+                repair_turn_open_item(&repair_turn),
             );
             push_unique(
                 &mut frame.recent_evidence,
-                format!(
-                    "fact: repair_turn ref=repair:artifact_missing target_path={} parent_dir={} permission_ref={} missing_reason={} recommended_write_strategy={} summary=artifact repair required for {}",
-                    repair_turn.target_path,
-                    repair_turn.parent_dir,
-                    repair_turn.permission_ref,
-                    repair_turn.missing_reason,
-                    repair_turn.recommended_write_strategy,
-                    repair_turn.target_path
+                repair_turn_fact_line(
+                    &repair_turn,
+                    "repair:artifact_missing",
+                    format!("artifact repair required for {}", repair_turn.target_path),
                 ),
             );
         }
@@ -881,6 +903,18 @@ fn repeated_recovery_strategy_reason(
             attempt.target_path.as_deref().unwrap_or("unknown_target")
         ));
     }
+    if attempt.failure_kind == "missing_path"
+        && attempt.recommended_next_action == "create_parent_directory_and_write_target_file"
+        && next_action.action_type.eq_ignore_ascii_case("Bash")
+        && parse_bash_command(decision)
+            .as_deref()
+            .is_some_and(|command| command.contains("mkdir") && !command.contains("write"))
+    {
+        return Some(format!(
+            "repeated create_directory without write on {} after headless repair hint",
+            attempt.target_path.as_deref().unwrap_or("unknown_target")
+        ));
+    }
     None
 }
 
@@ -950,10 +984,12 @@ fn inject_missing_path_recovery_gate(frame: &mut StateFrame, usage: &mut LoopUsa
                     .extension()
                     .is_some()
                 {
-                    "write_exact_target_file".into()
+                    "create_parent_directory_and_write_target_file".into()
                 } else {
                     "create_directory_then_write_files".into()
                 },
+                create_parent_directory: true,
+                write_target_file: std::path::Path::new(target_path).extension().is_some(),
             })
         });
     let Some(repair_turn) = repair_turn else {
@@ -962,25 +998,14 @@ fn inject_missing_path_recovery_gate(frame: &mut StateFrame, usage: &mut LoopUsa
     let mut changed = false;
     changed |= push_unique(
         &mut frame.open_items,
-        format!(
-            "repair_turn:artifact_missing target_path={} parent_dir={} permission_ref={} missing_reason={} recommended_write_strategy={}",
-            repair_turn.target_path,
-            repair_turn.parent_dir,
-            repair_turn.permission_ref,
-            repair_turn.missing_reason,
-            repair_turn.recommended_write_strategy
-        ),
+        repair_turn_open_item(&repair_turn),
     );
     changed |= push_unique(
         &mut frame.recent_evidence,
-        format!(
-            "fact: repair_turn ref=repair:missing_path target_path={} parent_dir={} permission_ref={} missing_reason={} recommended_write_strategy={} summary=missing path recovery required for {}",
-            repair_turn.target_path,
-            repair_turn.parent_dir,
-            repair_turn.permission_ref,
-            repair_turn.missing_reason,
-            repair_turn.recommended_write_strategy,
-            repair_turn.target_path
+        repair_turn_fact_line(
+            &repair_turn,
+            "repair:missing_path",
+            format!("missing path recovery required for {}", repair_turn.target_path),
         ),
     );
     if changed {
@@ -2038,7 +2063,7 @@ fn classify_tool_outcome(
             if has_create_permission_for_path(frame, path) {
                 outcome.recoverable = true;
                 let recommended = if std::path::Path::new(path).extension().is_some() {
-                    "create_file"
+                    "create_parent_directory_and_write_target_file"
                 } else {
                     "create_directory"
                 };
@@ -2178,7 +2203,13 @@ fn push_tool_failure_feedback(
                 }
             }
             if has_create_permission_for_path(frame, &path) {
-                feedback_tail.push_str(" recovery_hint=create_directory_then_write_files");
+                if std::path::Path::new(&path).extension().is_some() {
+                    feedback_tail.push_str(
+                        " recovery_hint=create_parent_directory_and_write_target_file",
+                    );
+                } else {
+                    feedback_tail.push_str(" recovery_hint=create_directory_then_write_files");
+                }
             }
         }
     }
@@ -2706,7 +2737,7 @@ pub async fn run_decision_loop_with_tools(
 #[cfg(test)]
 mod tests {
     use super::{
-        DecisionLoopConfig, LoopOutcome, LoopUsage, StateFrameToolRuntime,
+        DecisionLoopConfig, LoopOutcome, LoopUsage, RecoveryAttempt, StateFrameToolRuntime,
         append_runtime_contract_facts, classify_tool_outcome, evaluate_completion_evidence,
         execute_call_tool, parse_and_validate_decision, push_tool_failure_feedback,
         push_tool_outcome_evidence, run_decision_loop, run_decision_loop_with_tools,
@@ -3669,6 +3700,27 @@ mod tests {
     }
 
     #[test]
+    fn headless_repair_does_not_fall_into_awaiting_user_input() {
+        let decision = crate::core::state_frame::validate_state_decision(
+            r#"{
+                "decision": {
+                    "next_state": "awaiting_user_input",
+                    "next_action": {
+                        "action_type": "Write",
+                        "args": {
+                            "file_path": "/tmp/headless-safe-report.md",
+                            "content": "fixed"
+                        }
+                    }
+                }
+            }"#,
+        )
+        .expect("headless repair wrapper should normalize");
+        assert_eq!(decision.state, AgentState::Correcting);
+        assert_eq!(decision.decision, crate::core::state_frame::DecisionKind::CallTool);
+    }
+
+    #[test]
     fn tool_outcome_missing_path_on_writable_target_is_recoverable_create_hint() {
         let mut frame = make_frame();
         let path = std::env::temp_dir().join("p1_outcome_writable.md");
@@ -3698,8 +3750,53 @@ mod tests {
         assert!(outcome.recoverable);
         assert_eq!(
             outcome.recommended_next_action.as_deref(),
-            Some("create_file")
+            Some("create_parent_directory_and_write_target_file")
         );
+    }
+
+    #[test]
+    fn dir_plus_file_missing_path_repair_issues_create_and_write_once() {
+        let mut frame = make_frame();
+        frame.recent_evidence.clear();
+        let target_path = "/tmp/headless-repair/report.md";
+        frame.recent_evidence.push(format!(
+            "fact: permission_to_create_and_write:{target_path} ref=permission:file source=permission_scope source_event_id=permission:1 freshness=current confidence=1.00 status=active invalidated_by=none supersedes=none conflicts_with=none summary=write target"
+        ));
+        let mut usage = LoopUsage::default();
+        usage.last_recovery_attempt = Some(RecoveryAttempt {
+            failure_kind: "missing_path".into(),
+            recommended_next_action: "create_parent_directory_and_write_target_file".into(),
+            target_path: Some(target_path.into()),
+        });
+        assert!(super::inject_missing_path_recovery_gate(&mut frame, &mut usage));
+        let repair_line = frame
+            .recent_evidence
+            .iter()
+            .find(|line| line.starts_with("fact: repair_turn "))
+            .expect("repair turn");
+        assert!(repair_line.contains("target_path=/tmp/headless-repair/report.md"));
+        assert!(repair_line.contains("create_parent_directory=true"));
+        assert!(repair_line.contains("write_target_file=true"));
+        assert!(repair_line.contains(
+            "recommended_write_strategy=create_parent_directory_and_write_target_file"
+        ));
+    }
+
+    #[test]
+    fn repeated_create_directory_without_write_is_not_accepted() {
+        let decision = validate_state_decision(
+            r#"{"state":"executing","decision":"call_tool","next_action":{"action_type":"Bash","args":{"command":"mkdir -p /tmp/headless-repair"}}}"#,
+        )
+        .expect("decision");
+        let mut usage = LoopUsage::default();
+        usage.last_recovery_attempt = Some(RecoveryAttempt {
+            failure_kind: "missing_path".into(),
+            recommended_next_action: "create_parent_directory_and_write_target_file".into(),
+            target_path: Some("/tmp/headless-repair/report.md".into()),
+        });
+        let reason =
+            super::repeated_recovery_strategy_reason(&usage, &decision).expect("dedupe reason");
+        assert!(reason.contains("without write"));
     }
 
     #[test]
@@ -4295,7 +4392,11 @@ mod tests {
         assert!(repair_line.contains("target_path=/tmp/report.md"));
         assert!(repair_line.contains("parent_dir=/tmp"));
         assert!(repair_line.contains("permission_ref=permission:step1:0"));
-        assert!(repair_line.contains("recommended_write_strategy=write_exact_target_file"));
+        assert!(repair_line.contains(
+            "recommended_write_strategy=create_parent_directory_and_write_target_file"
+        ));
+        assert!(repair_line.contains("create_parent_directory=true"));
+        assert!(repair_line.contains("write_target_file=true"));
         assert_eq!(usage.recovery_tier.as_deref(), Some("artifact_repair_turn"));
         assert_eq!(
             usage.recovery_outcome.as_deref(),
