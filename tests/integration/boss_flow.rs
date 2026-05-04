@@ -12553,11 +12553,12 @@ async fn t27_8_terminal_failure_transitions_stage_to_documentation_and_surfaces_
 
 #[tokio::test]
 async fn r0_boss_full_worker_real_tool_call_creates_artifact_and_completes() {
-    let root = std::env::temp_dir().join("r0_boss_full_worker_real_tool_call");
+    let root = unique_test_dir("r0_boss_full_worker_real_tool_call");
     let output_root = root.join("task_output");
     let artifact_path = root.join("report.md");
     let artifact_content = "hello from the real write tool";
     let request_bodies = Arc::new(std::sync::Mutex::new(Vec::new()));
+    std::fs::create_dir_all(&output_root).expect("task output root should exist");
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -12646,7 +12647,7 @@ async fn r0_boss_full_worker_real_tool_call_creates_artifact_and_completes() {
 
 #[tokio::test]
 async fn r0_boss_full_worker_text_only_completion_fails_artifact_verification() {
-    let root = std::env::temp_dir().join("r0_boss_full_worker_text_only_failure");
+    let root = unique_test_dir("r0_boss_full_worker_text_only_failure");
     let output_root = root.join("task_output");
     let artifact_path = root.join("missing-report.md");
     let request_bodies = Arc::new(std::sync::Mutex::new(Vec::new()));
