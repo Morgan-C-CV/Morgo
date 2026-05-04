@@ -509,6 +509,30 @@ fn classify_repairable_failure(failure_classification: StepFailureClassification
     )
 }
 
+fn apply_step_failure_classification(
+    step: &mut BossPlanStep,
+    failure_classification: StepFailureClassification,
+    reason: &str,
+) {
+    step.completed = false;
+    step.last_review_summary = Some(reason.to_string());
+    if classify_repairable_failure(failure_classification) {
+        step.status = BossPlanStepStatus::Rejected;
+        update_step_continuation_context(
+            step,
+            crate::core::state_frame::ContinuityMode::Repair,
+            extract_artifact_expectations(step.objective())
+                .into_iter()
+                .next()
+                .map(|expectation| expectation.path.display().to_string()),
+            Some(reason.to_string()),
+            continuation_verified_facts(step),
+        );
+    } else {
+        step.status = BossPlanStepStatus::Failed;
+    }
+}
+
 fn push_unique_memory_item(items: &mut Vec<String>, item: Option<String>, limit: usize) {
     let Some(item) = item.map(|value| value.trim().to_string()) else {
         return;
@@ -4210,10 +4234,13 @@ impl BossCoordinator {
                                 _ => {}
                             }
                             if let StepOutcome::Failed {
+                                failure_classification,
                                 tool_contract_mismatch,
                                 ..
                             } = &outcome
                             {
+                                routed_metadata.step_failure_classification =
+                                    Some(*failure_classification);
                                 routed_metadata.tool_contract_mismatch_count =
                                     Some(tool_contract_mismatch.iter().count());
                                 routed_metadata.tool_contract_mismatch =
@@ -4332,7 +4359,6 @@ impl BossCoordinator {
                                 ..
                             } => {
                                 let reason_clone = reason.clone();
-                                let is_repairable = classify_repairable_failure(failure_classification);
                                 {
                                     let mut plan_guard = self.plan.write().await;
                                     let plan = plan_guard
@@ -4345,23 +4371,11 @@ impl BossCoordinator {
                                         .ok_or_else(|| {
                                             anyhow::anyhow!("Unknown boss step {step_id}")
                                         })?;
-                                    step.completed = false;
-                                    step.last_review_summary = Some(reason_clone.clone());
-                                    if is_repairable {
-                                        step.status = BossPlanStepStatus::Rejected;
-                                        update_step_continuation_context(
-                                            step,
-                                            crate::core::state_frame::ContinuityMode::Repair,
-                                            extract_artifact_expectations(step.objective())
-                                                .into_iter()
-                                                .next()
-                                                .map(|expectation| expectation.path.display().to_string()),
-                                            Some(reason_clone.clone()),
-                                            continuation_verified_facts(step),
-                                        );
-                                    } else {
-                                        step.status = BossPlanStepStatus::Failed;
-                                    }
+                                    apply_step_failure_classification(
+                                        step,
+                                        failure_classification,
+                                        &reason_clone,
+                                    );
                                 }
                                 self.update_current_step(Some(step_id)).await;
                                 if self.get_stage().await != BossStage::Documentation {
@@ -4383,7 +4397,7 @@ impl BossCoordinator {
                                     0,
                                 )
                                 .await;
-                                return Ok(Some(if is_repairable {
+                                return Ok(Some(if classify_repairable_failure(failure_classification) {
                                     format!(
                                         "LisM routed boss step {} into repair continuation: {}",
                                         step_id, reason_clone
@@ -5962,6 +5976,75 @@ mod tests {
                 .map(|classification| classification.as_str()),
             Some("repairable_recovery")
         );
+    }
+
+    #[test]
+    fn repairable_recovery_maps_to_rejected_and_preserves_continuation_context() {
+        let mut step = BossPlanStep {
+            id: 1,
+            description: "write artifact".into(),
+            objective: Some("目标文件：/tmp/report.md".into()),
+            acceptance: vec![],
+            requires_approval: false,
+            status: BossPlanStepStatus::Running,
+            completed: false,
+            result_diff: None,
+            worker_task_id: None,
+            attempt_count: 0,
+            retry_budget: 3,
+            last_review_summary: None,
+            last_correction: None,
+            stage_continuation_context: None,
+            executor_b_stage_memory: None,
+            review_task_id: None,
+            tool_execution_records: Vec::new(),
+        };
+
+        apply_step_failure_classification(
+            &mut step,
+            StepFailureClassification::RepairableRecovery,
+            "missing artifact evidence",
+        );
+
+        assert_eq!(step.status, BossPlanStepStatus::Rejected);
+        assert_eq!(
+            step.stage_continuation_context
+                .as_ref()
+                .and_then(|context| context.next_action.as_deref()),
+            Some("missing artifact evidence")
+        );
+    }
+
+    #[test]
+    fn unsupported_request_does_not_enter_rejected_repair_path() {
+        let mut step = BossPlanStep {
+            id: 1,
+            description: "request unsupported selector".into(),
+            objective: Some("operator_action:write_artifact".into()),
+            acceptance: vec![],
+            requires_approval: false,
+            status: BossPlanStepStatus::Running,
+            completed: false,
+            result_diff: None,
+            worker_task_id: None,
+            attempt_count: 0,
+            retry_budget: 3,
+            last_review_summary: None,
+            last_correction: None,
+            stage_continuation_context: None,
+            executor_b_stage_memory: None,
+            review_task_id: None,
+            tool_execution_records: Vec::new(),
+        };
+
+        apply_step_failure_classification(
+            &mut step,
+            StepFailureClassification::UnsupportedRequest,
+            "unsupported selector",
+        );
+
+        assert_eq!(step.status, BossPlanStepStatus::Failed);
+        assert!(step.stage_continuation_context.is_none());
     }
 
     #[test]

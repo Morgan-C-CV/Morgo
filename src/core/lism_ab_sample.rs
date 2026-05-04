@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::boss_state::BossReportPayload;
 use crate::core::boss_test_readiness::BossTestRunOutcome;
+use crate::core::state_frame_orchestrator::StepFailureClassification;
 
 // ── Record ────────────────────────────────────────────────────────────────────
 
@@ -105,6 +106,10 @@ pub struct LisMAbSampleRecord {
     pub recovery_outcomes: Vec<String>,
     #[serde(default)]
     pub terminal_blocker_kinds: Vec<String>,
+    #[serde(default)]
+    pub step_failure_classifications: Vec<String>,
+    #[serde(default)]
+    pub latest_step_failure_classification: Option<String>,
     #[serde(default)]
     pub missing_artifact_evidence_targets: Vec<String>,
     #[serde(default)]
@@ -755,6 +760,8 @@ fn build_ab_record(
     let mut recovery_tiers = BTreeMap::new();
     let mut recovery_outcomes = BTreeMap::new();
     let mut terminal_blocker_kinds = BTreeMap::new();
+    let mut step_failure_classifications = BTreeMap::new();
+    let mut latest_step_failure_classification = None;
     let mut missing_artifact_evidence_targets = BTreeMap::new();
     let mut missing_verification_evidence_targets = BTreeMap::new();
     let mut rollout_denylist_targets = BTreeMap::new();
@@ -804,6 +811,11 @@ fn build_ab_record(
         }
         if let Some(kind) = meta.terminal_blocker_kind.as_ref() {
             terminal_blocker_kinds.insert(kind.clone(), ());
+        }
+        if let Some(classification) = meta.step_failure_classification.as_ref() {
+            let classification = classification.as_str().to_string();
+            step_failure_classifications.insert(classification.clone(), ());
+            latest_step_failure_classification = Some(classification);
         }
         for gap in &meta.completion_evidence_gaps {
             let target = match gap.target_path.as_deref() {
@@ -901,6 +913,8 @@ fn build_ab_record(
         recovery_tiers: recovery_tiers.into_keys().collect(),
         recovery_outcomes: recovery_outcomes.into_keys().collect(),
         terminal_blocker_kinds: terminal_blocker_kinds.into_keys().collect(),
+        step_failure_classifications: step_failure_classifications.into_keys().collect(),
+        latest_step_failure_classification,
         missing_artifact_evidence_targets: missing_artifact_evidence_targets.into_keys().collect(),
         missing_verification_evidence_targets: missing_verification_evidence_targets
             .into_keys()
@@ -1215,6 +1229,130 @@ mod tests {
         let summary = summarize_records(&[record]);
 
         assert!(summary.on_success_classification_counts.is_empty());
+    }
+
+    #[test]
+    fn true_external_blocker_remains_terminal_in_report_and_sample() {
+        let report = BossReportPayload {
+            stage: BossStage::Execution,
+            current_step: Some(1),
+            total_steps: Some(1),
+            designer_a: empty_actor(),
+            executor_b: empty_actor(),
+            active_children: Vec::new(),
+            steps: vec![BossStepReport {
+                id: 1,
+                status: BossPlanStepStatus::Failed,
+                worker_task_id: None,
+                attempt_count: 1,
+                last_review_summary: Some("external blocker".into()),
+                action_required: None,
+                blocker_reason: None,
+                routed_metadata: Some(BossStepRoutedMetadata {
+                    step_failure_classification: Some(
+                        StepFailureClassification::TrueExternalBlocker,
+                    ),
+                    terminal_blocker_kind: Some("true_external_blocker".into()),
+                    ..BossStepRoutedMetadata::default()
+                }),
+                stage_execution_contract: StageExecutionContract::default(),
+                stage_continuation_context: None,
+                executor_b_stage_memory: None,
+            }],
+            history_summary: Vec::new(),
+            observability_summary: None,
+            rollout_policy_decision: None,
+            success_classification: None,
+            lism_policy: Default::default(),
+            stage_execution_contract: StageExecutionContract::default(),
+            stage_continuation_context: None,
+            executor_b_stage_memory: None,
+        };
+
+        let record = build_ab_record(
+            "run-terminal".into(),
+            true,
+            &report,
+            BossTestRunOutcome::Aborted,
+            0,
+        );
+
+        assert_eq!(
+            report.steps[0]
+                .routed_metadata
+                .as_ref()
+                .and_then(|meta| meta.step_failure_classification.as_ref())
+                .map(|classification| classification.as_str()),
+            Some("true_external_blocker")
+        );
+        assert_eq!(
+            record.latest_step_failure_classification.as_deref(),
+            Some("true_external_blocker")
+        );
+        assert_eq!(record.outcome, BossTestRunOutcome::Aborted);
+    }
+
+    #[test]
+    fn step_failure_classification_is_consistent_across_step_report_and_sample() {
+        let report = BossReportPayload {
+            stage: BossStage::Execution,
+            current_step: Some(1),
+            total_steps: Some(1),
+            designer_a: empty_actor(),
+            executor_b: empty_actor(),
+            active_children: Vec::new(),
+            steps: vec![BossStepReport {
+                id: 1,
+                status: BossPlanStepStatus::Rejected,
+                worker_task_id: None,
+                attempt_count: 1,
+                last_review_summary: Some("repair".into()),
+                action_required: None,
+                blocker_reason: None,
+                routed_metadata: Some(BossStepRoutedMetadata {
+                    step_failure_classification: Some(
+                        StepFailureClassification::VerificationRepairContinuation,
+                    ),
+                    ..BossStepRoutedMetadata::default()
+                }),
+                stage_execution_contract: StageExecutionContract::default(),
+                stage_continuation_context: None,
+                executor_b_stage_memory: None,
+            }],
+            history_summary: Vec::new(),
+            observability_summary: None,
+            rollout_policy_decision: None,
+            success_classification: None,
+            lism_policy: Default::default(),
+            stage_execution_contract: StageExecutionContract::default(),
+            stage_continuation_context: None,
+            executor_b_stage_memory: None,
+        };
+
+        let record = build_ab_record(
+            "run-consistent".into(),
+            true,
+            &report,
+            BossTestRunOutcome::Aborted,
+            0,
+        );
+
+        assert_eq!(
+            report.steps[0]
+                .routed_metadata
+                .as_ref()
+                .and_then(|meta| meta.step_failure_classification.as_ref())
+                .map(|classification| classification.as_str()),
+            Some("verification_repair_continuation")
+        );
+        assert_eq!(
+            record.latest_step_failure_classification.as_deref(),
+            Some("verification_repair_continuation")
+        );
+        assert_eq!(
+            record.step_failure_classifications,
+            vec!["verification_repair_continuation".to_string()]
+        );
     }
 }
 
