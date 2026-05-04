@@ -564,7 +564,7 @@ enum RetryDecision {
 }
 
 fn classify_request_transport_error(error: reqwest::Error) -> ApiError {
-    let message = format!("provider request failed: {error}");
+    let message = format!("provider request failed: {}", format_error_chain(&error));
     if error.is_timeout() {
         ApiError::timeout(message)
     } else if is_connection_reset_error(&error) {
@@ -575,7 +575,7 @@ fn classify_request_transport_error(error: reqwest::Error) -> ApiError {
 }
 
 fn classify_response_body_error(error: reqwest::Error) -> ApiError {
-    let message = format!("failed reading provider stream: {error}");
+    let message = format!("failed reading provider stream: {}", format_error_chain(&error));
     if error.is_timeout() {
         ApiError::timeout(message)
     } else if is_connection_reset_error(&error) {
@@ -585,6 +585,16 @@ fn classify_response_body_error(error: reqwest::Error) -> ApiError {
     } else {
         ApiError::transport(message)
     }
+}
+
+fn format_error_chain(error: &dyn std::error::Error) -> String {
+    let mut parts = vec![error.to_string()];
+    let mut source = error.source();
+    while let Some(error) = source {
+        parts.push(error.to_string());
+        source = error.source();
+    }
+    parts.join(": ")
 }
 
 fn classify_retry_policy(error: &ApiError) -> RetryDecision {
