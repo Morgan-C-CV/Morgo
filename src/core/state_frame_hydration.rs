@@ -119,6 +119,25 @@ fn selector_estimated_tokens(selector: &NeededContextSelector) -> u64 {
 
 pub fn parse_needed_context_selector(raw: &str) -> NeededContextSelector {
     let trimmed = raw.trim();
+    if let Some(path) = trimmed.strip_prefix("artifact_status:") {
+        let normalized = artifact_lookup_query(path);
+        if normalized.starts_with("artifact:") {
+            return NeededContextSelector::ArtifactRef {
+                query: Some(normalized.to_string()),
+            };
+        }
+        return NeededContextSelector::Artifact {
+            path: Some(normalized.to_string()),
+        };
+    }
+    if trimmed.starts_with("permission:")
+        || trimmed.starts_with("operator_action:")
+        || trimmed.starts_with("operator_action_hint:")
+    {
+        return NeededContextSelector::Unknown {
+            raw: trimmed.to_string(),
+        };
+    }
     if let Some(path) = trimmed.strip_prefix("file_snippet:") {
         return NeededContextSelector::FileSnippet {
             path: path.trim().to_string(),
@@ -1265,6 +1284,30 @@ mod tests {
                 name: "increase_max_tool_calls".into()
             }
         );
+        assert_eq!(
+            parse_needed_context_selector("artifact_status:/tmp/declared.txt"),
+            NeededContextSelector::Artifact {
+                path: Some("/tmp/declared.txt".into())
+            }
+        );
+        assert_eq!(
+            parse_needed_context_selector("artifact_status:artifact:declared:0"),
+            NeededContextSelector::ArtifactRef {
+                query: Some("artifact:declared:0".into())
+            }
+        );
+        assert_eq!(
+            parse_needed_context_selector("permission:create:/tmp/report.md"),
+            NeededContextSelector::Unknown {
+                raw: "permission:create:/tmp/report.md".into()
+            }
+        );
+        assert_eq!(
+            parse_needed_context_selector("operator_action:write_artifact"),
+            NeededContextSelector::Unknown {
+                raw: "operator_action:write_artifact".into()
+            }
+        );
     }
 
     #[test]
@@ -1592,6 +1635,41 @@ mod tests {
         assert!(summary.unavailable.iter().any(|item| {
             item == "context_unavailable: bogus_selector reason=unsupported_selector resolver=typed_index"
         }));
+    }
+
+    #[test]
+    fn legacy_artifact_status_selector_is_canonicalized_to_typed_artifact_selector() {
+        let mut frame = make_contract_frame();
+        let summary = hydrate_needed_context(
+            &mut frame,
+            &["artifact_status:/tmp/declared.txt".into()],
+        );
+
+        assert!(summary.changed);
+        assert!(summary.unavailable.is_empty());
+        assert_eq!(summary.hydration_from_contract_count, 1);
+        assert!(summary
+            .hydrated
+            .iter()
+            .any(|item| item.contains("hydrated_context: artifact:/tmp/declared.txt")));
+    }
+
+    #[test]
+    fn unsupported_legacy_selector_stays_explicitly_unsupported() {
+        let mut frame = make_contract_frame();
+        let summary = hydrate_needed_context(
+            &mut frame,
+            &["operator_action:write_artifact".into()],
+        );
+
+        assert!(summary.changed);
+        assert_eq!(summary.hydration_miss_unsupported_count, 1);
+        assert_eq!(
+            summary.unavailable,
+            vec![
+                "context_unavailable: operator_action:write_artifact reason=unsupported_selector resolver=typed_index"
+            ]
+        );
     }
 
     #[test]

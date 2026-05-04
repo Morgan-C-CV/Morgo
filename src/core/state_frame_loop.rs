@@ -914,6 +914,139 @@ fn clear_recovery_after_success(usage: &mut LoopUsage) {
     }
 }
 
+fn inject_missing_path_recovery_gate(frame: &mut StateFrame, usage: &mut LoopUsage) -> bool {
+    let Some(attempt) = usage.last_recovery_attempt.as_ref() else {
+        return false;
+    };
+    if attempt.failure_kind != "missing_path" {
+        return false;
+    }
+    let Some(target_path) = attempt.target_path.as_deref() else {
+        return false;
+    };
+    if !has_create_permission_for_path(frame, target_path) {
+        return false;
+    }
+    let repair_turn = infer_artifact_repair_turn(frame, target_path, "tool_missing_path_recovery")
+        .or_else(|| {
+            let parent_dir = std::path::Path::new(target_path)
+                .parent()
+                .map(|parent| parent.to_string_lossy().to_string())
+                .filter(|parent| !parent.trim().is_empty())
+                .unwrap_or_else(|| ".".into());
+            let permission_marker = format!("fact: permission_to_create_and_write:{target_path} ");
+            let permission_ref = frame
+                .recent_evidence
+                .iter()
+                .find(|line| line.starts_with(&permission_marker))
+                .and_then(|line| evidence_field_value(line, "ref"))
+                .unwrap_or_else(|| "none".into());
+            Some(ArtifactRepairTurn {
+                target_path: target_path.to_string(),
+                parent_dir,
+                permission_ref,
+                missing_reason: "tool_missing_path_recovery".into(),
+                recommended_write_strategy: if std::path::Path::new(target_path)
+                    .extension()
+                    .is_some()
+                {
+                    "write_exact_target_file".into()
+                } else {
+                    "create_directory_then_write_files".into()
+                },
+            })
+        });
+    let Some(repair_turn) = repair_turn else {
+        return false;
+    };
+    let mut changed = false;
+    changed |= push_unique(
+        &mut frame.open_items,
+        format!(
+            "repair_turn:artifact_missing target_path={} parent_dir={} permission_ref={} missing_reason={} recommended_write_strategy={}",
+            repair_turn.target_path,
+            repair_turn.parent_dir,
+            repair_turn.permission_ref,
+            repair_turn.missing_reason,
+            repair_turn.recommended_write_strategy
+        ),
+    );
+    changed |= push_unique(
+        &mut frame.recent_evidence,
+        format!(
+            "fact: repair_turn ref=repair:missing_path target_path={} parent_dir={} permission_ref={} missing_reason={} recommended_write_strategy={} summary=missing path recovery required for {}",
+            repair_turn.target_path,
+            repair_turn.parent_dir,
+            repair_turn.permission_ref,
+            repair_turn.missing_reason,
+            repair_turn.recommended_write_strategy,
+            repair_turn.target_path
+        ),
+    );
+    if changed {
+        frame.state = AgentState::Executing;
+        usage.recovery_attempted = true;
+        usage.recovery_tier = Some("missing_path_recovery_gate".into());
+        usage.recovery_outcome = Some("repair_turn_injected".into());
+        usage.terminal_blocker_kind = None;
+    }
+    changed
+}
+
+fn inject_request_context_recovery_gate(frame: &mut StateFrame, usage: &mut LoopUsage) -> bool {
+    let unsupported_only = !usage.hydration_miss_unsupported_count.eq(&0)
+        && usage.hydration_miss_no_match_count == 0
+        && usage.hydration_miss_stale_count == 0;
+    if unsupported_only {
+        usage.terminal_blocker_kind = Some("unsupported_selector".into());
+        usage.recovery_attempted = false;
+        usage.recovery_tier = None;
+        usage.recovery_outcome = Some("unsupported_selector".into());
+        return false;
+    }
+
+    let verification_gap = matches!(
+        usage.completion_evidence_status,
+        Some(CompletionEvidenceStatus::MissingVerificationEvidence)
+    );
+    if verification_gap {
+        let block = CompletionGateBlock {
+            status: CompletionEvidenceStatus::MissingVerificationEvidence,
+            required_action: "verify_artifact".into(),
+            reason: "artifact verification failure requires repair continuation".into(),
+            missing_evidence_refs: missing_verification_evidence_refs(frame),
+        };
+        inject_completion_gate_block(frame, &block);
+        record_completion_gate_recovery(frame, usage, &block);
+        return true;
+    }
+
+    if inject_missing_path_recovery_gate(frame, usage) {
+        return true;
+    }
+
+    if usage.terminal_blocker_kind.as_deref() == Some("external_blocker") {
+        usage.terminal_blocker_kind = Some("true_external_blocker".into());
+        usage.recovery_outcome = Some("external_blocker".into());
+        return false;
+    }
+
+    if usage.hydration_ref_missing > 0 || usage.hydration_miss_no_match_count > 0 {
+        let changed = push_unique(
+            &mut frame.recent_evidence,
+            "recovery_gate: source=request_context outcome=context_unavailable classified=no_match".into(),
+        );
+        if changed {
+            usage.recovery_attempted = true;
+            usage.recovery_tier = Some("request_context_recovery_gate".into());
+            usage.recovery_outcome = Some("context_unavailable".into());
+        }
+        return changed;
+    }
+
+    false
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FallbackTier {
     TargetedEvidence,
@@ -2407,6 +2540,9 @@ pub async fn run_decision_loop_with_tools(
                     }
                 }
                 if !summary.changed {
+                    if inject_request_context_recovery_gate(&mut frame, &mut total_usage) {
+                        continue;
+                    }
                     finalize_worker_usage_report(&frame, &mut total_usage);
                     return Ok(LoopOutcome::NoProgress {
                         last_state: frame.state,
@@ -3470,6 +3606,105 @@ mod tests {
             outcome.recommended_next_action.as_deref(),
             Some("context_unavailable")
         );
+    }
+
+    #[test]
+    fn request_context_unsupported_selector_does_not_trigger_fuzzy_widening() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let request_json = r#"{"state":"executing","decision":"request_context","needed_context":["operator_action:write_artifact"]}"#;
+        let client = ModelProviderClient::with_scripted_turns(vec![vec![StreamEvent::TextDelta(
+            request_json.into(),
+        )]]);
+        let outcome = rt
+            .block_on(run_decision_loop(
+                &client,
+                make_clean_frame(),
+                DecisionLoopConfig::default(),
+            ))
+            .expect("loop should not error");
+        match outcome {
+            LoopOutcome::RepairExhausted { usage, .. } => {
+                assert_eq!(usage.fallback_count, 0);
+                assert_eq!(usage.hydration_miss_unsupported_count, 1);
+            }
+            other => panic!("expected RepairExhausted, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn request_context_no_progress_can_inject_missing_path_recovery_gate() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let target = "/tmp/recovery-gate-report.md";
+        let request_json =
+            r#"{"state":"executing","decision":"request_context","needed_context":["symbol:MissingSymbol"]}"#;
+        let done_json = r#"{"state":"done","decision":"done"}"#;
+        let client = ModelProviderClient::with_scripted_turns(vec![
+            vec![StreamEvent::TextDelta(request_json.into())],
+            vec![StreamEvent::TextDelta(done_json.into())],
+        ]);
+        let mut frame = make_clean_frame();
+        push_completion_contract_with_refs(&mut frame, &["artifact:missing"], &[], &[]);
+        frame.recent_evidence.push(format!(
+            "fact: artifact_status ref=artifact:missing path={target} kind=file status=missing_or_invalid source=artifact_expectation source_event_id=artifact-expectation:1 freshness=current confidence=1.00 lineage_status=active invalidated_by=none supersedes=none conflicts_with=none summary=target file missing"
+        ));
+        frame.recent_evidence.push(format!(
+            "fact: permission_to_create_and_write:{target} ref=permission:recover source=permission_scope source_event_id=permission-scope:recover freshness=current confidence=1.00 status=active invalidated_by=none supersedes=none conflicts_with=none summary=write target"
+        ));
+        let outcome = rt
+            .block_on(run_decision_loop(
+                &client,
+                frame,
+                DecisionLoopConfig::default(),
+            ))
+            .expect("loop should not error");
+        match outcome {
+            LoopOutcome::RepairExhausted { usage, .. } => {
+                assert_eq!(usage.recovery_tier.as_deref(), Some("artifact_repair_turn"));
+                assert_eq!(usage.recovery_outcome.as_deref(), Some("repair_turn_injected"));
+                let report = usage.worker_report.expect("worker report");
+                assert!(report
+                    .remaining_risks
+                    .iter()
+                    .any(|item| item.contains("repair_turn:artifact_missing")));
+            }
+            other => panic!("expected RepairExhausted, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn verification_failure_enters_repair_instead_of_terminal_fail() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let request_json =
+            r#"{"state":"executing","decision":"request_context","needed_context":["symbol:MissingSymbol"]}"#;
+        let done_json = r#"{"state":"done","decision":"done"}"#;
+        let client = ModelProviderClient::with_scripted_turns(vec![
+            vec![StreamEvent::TextDelta(request_json.into())],
+            vec![StreamEvent::TextDelta(done_json.into())],
+        ]);
+        let mut frame = make_clean_frame();
+        push_completion_contract(&mut frame, true, false, true);
+        push_artifact_target_fact(&mut frame, "artifact:contract:0", "/tmp/report.md", "file");
+        frame.recent_evidence.push(
+            "fact: recent_changes_in_files ref=change:verify path=/tmp/report.md source=tool:Write source_event_id=tool-write:verify freshness=after-runtime confidence=1.00 status=active invalidated_by=none supersedes=none conflicts_with=none summary=updated /tmp/report.md".into(),
+        );
+        let outcome = rt
+            .block_on(run_decision_loop(
+                &client,
+                frame,
+                DecisionLoopConfig::default(),
+            ))
+            .expect("loop should not error");
+        match outcome {
+            LoopOutcome::RepairExhausted { usage, .. } => {
+                assert_eq!(
+                    usage.completion_evidence_status.as_ref().map(|s| s.as_str()),
+                    Some("missing_verification_evidence")
+                );
+                assert_eq!(usage.recovery_tier.as_deref(), Some("artifact_repair_turn"));
+                assert_eq!(usage.recovery_outcome.as_deref(), Some("repair_turn_injected"));
+            }
+            other => panic!("expected RepairExhausted, got {other:?}"),
+        }
     }
 
     #[test]
