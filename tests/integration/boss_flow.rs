@@ -501,6 +501,7 @@ fn make_orchestrator_route_override_plan(step_id: usize) -> BossPlan {
             retry_budget: 3,
             last_review_summary: None,
             last_correction: None,
+            stage_continuation_context: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
         }],
@@ -595,6 +596,7 @@ fn boss_step(id: usize, description: &str) -> BossPlanStep {
         retry_budget: 3,
         last_review_summary: None,
         last_correction: None,
+        stage_continuation_context: None,
         review_task_id: None,
         tool_execution_records: Vec::new(),
     }
@@ -3024,6 +3026,22 @@ async fn boss_a_review_rejects_and_sends_correction_to_b() {
         step.last_review_summary.as_deref(),
         Some("Missing error handling in step output")
     );
+    let continuation = step
+        .stage_continuation_context
+        .as_ref()
+        .expect("reject must seed continuation context");
+    assert_eq!(
+        continuation.failed_target.as_deref(),
+        Some("Add error handling for the edge case in section 3")
+    );
+    assert_eq!(
+        continuation.next_action.as_deref(),
+        Some("Add error handling for the edge case in section 3")
+    );
+    assert_eq!(
+        continuation.continuity_mode,
+        Some(rust_agent::core::state_frame::ContinuityMode::Repair)
+    );
 
     // Rejected step must be runnable — advance_plan should re-dispatch B.
     drop(guard);
@@ -3043,6 +3061,23 @@ async fn boss_a_review_rejects_and_sends_correction_to_b() {
     assert!(
         payload.contains("Add error handling for the edge case in section 3"),
         "retry payload must contain the correction text"
+    );
+    let continue_payload = coordinator
+        .build_step_continue_payload(0, "b-task-reject", "parent-session-reject")
+        .await
+        .unwrap();
+    let continue_json: serde_json::Value = serde_json::from_str(&continue_payload).unwrap();
+    assert_eq!(
+        continue_json["continuation_payload"]["failed_target"],
+        "Add error handling for the edge case in section 3"
+    );
+    assert_eq!(
+        continue_json["continuation_payload"]["next_action"],
+        "Add error handling for the edge case in section 3"
+    );
+    assert_eq!(
+        continue_json["continuation_payload"]["continuity_mode"],
+        "repair"
     );
 
     let _ = std::fs::remove_file(plan_path);
@@ -3259,6 +3294,115 @@ async fn repair_replan_step_restores_pending_and_requires_manual_advance() {
     assert!(
         payload.is_some(),
         "step should only resume after explicit advance_plan call"
+    );
+
+    let _ = std::fs::remove_file(plan_path);
+}
+
+#[tokio::test]
+async fn reject_updates_continuation_context_instead_of_preserving_old_failed_target() {
+    let (coordinator, plan_path) = coordinator_with_plan(
+        boss_plan(vec![boss_step(0, "Step to refresh continuation")]),
+        "test_boss_refresh_continuation_context.json",
+    )
+    .await;
+
+    {
+        let mut guard = coordinator.plan.write().await;
+        let plan = guard.as_mut().unwrap();
+        plan.steps[0].worker_task_id = Some("b-task-refresh".into());
+        plan.steps[0].status = BossPlanStepStatus::Reviewing;
+        plan.steps[0].stage_continuation_context = Some(
+            rust_agent::core::state_frame::StageContinuationContext {
+                repair_intent: Some(rust_agent::core::state_frame::RepairIntent {
+                    failed_target: Some("/tmp/old-target.md".into()),
+                    verified_facts: vec!["old fact".into()],
+                    next_action: Some("old action".into()),
+                    continuity_mode: Some(
+                        rust_agent::core::state_frame::ContinuityMode::Repair,
+                    ),
+                }),
+                failed_target: Some("/tmp/old-target.md".into()),
+                verified_facts: vec!["old fact".into()],
+                next_action: Some("old action".into()),
+                continuity_mode: Some(rust_agent::core::state_frame::ContinuityMode::Repair),
+            },
+        );
+    }
+
+    coordinator
+        .on_review_event(0, false, "new review summary", Some("/tmp/new-target.md"))
+        .await
+        .unwrap();
+
+    let guard = coordinator.plan.read().await;
+    let step = &guard.as_ref().unwrap().steps[0];
+    let continuation = step
+        .stage_continuation_context
+        .as_ref()
+        .expect("continuation should exist");
+    assert_eq!(continuation.failed_target.as_deref(), Some("/tmp/new-target.md"));
+    assert_eq!(continuation.next_action.as_deref(), Some("/tmp/new-target.md"));
+    assert_eq!(continuation.verified_facts, vec!["Boss review verdict: rejected"]);
+
+    let _ = std::fs::remove_file(plan_path);
+}
+
+#[tokio::test]
+async fn successful_review_clears_stale_continuation_before_next_step() {
+    let (coordinator, plan_path) = coordinator_with_plan(
+        boss_plan(vec![
+            boss_step(0, "Step 0"),
+            boss_step(1, "Step 1"),
+        ]),
+        "test_boss_clear_continuation_after_success.json",
+    )
+    .await;
+
+    {
+        let mut guard = coordinator.plan.write().await;
+        let plan = guard.as_mut().unwrap();
+        plan.steps[0].status = BossPlanStepStatus::Reviewing;
+        plan.steps[0].stage_continuation_context = Some(
+            rust_agent::core::state_frame::StageContinuationContext {
+                repair_intent: Some(rust_agent::core::state_frame::RepairIntent {
+                    failed_target: Some("/tmp/stale-target.md".into()),
+                    verified_facts: vec!["stale fact".into()],
+                    next_action: Some("stale action".into()),
+                    continuity_mode: Some(
+                        rust_agent::core::state_frame::ContinuityMode::Repair,
+                    ),
+                }),
+                failed_target: Some("/tmp/stale-target.md".into()),
+                verified_facts: vec!["stale fact".into()],
+                next_action: Some("stale action".into()),
+                continuity_mode: Some(rust_agent::core::state_frame::ContinuityMode::Repair),
+            },
+        );
+    }
+
+    coordinator
+        .on_review_event(0, true, "LGTM", None)
+        .await
+        .unwrap();
+
+    {
+        let guard = coordinator.plan.read().await;
+        let step0 = &guard.as_ref().unwrap().steps[0];
+        assert!(step0.stage_continuation_context.is_none());
+    }
+
+    let continue_payload = coordinator
+        .build_step_continue_payload(1, "b-task-next", "parent-session-next")
+        .await
+        .unwrap();
+    let continue_json: serde_json::Value = serde_json::from_str(&continue_payload).unwrap();
+    let failed_target = continue_json["continuation_payload"]["failed_target"]
+        .as_str()
+        .unwrap_or("");
+    assert!(
+        !failed_target.contains("stale-target"),
+        "next step continuation must not inherit stale failed target"
     );
 
     let _ = std::fs::remove_file(plan_path);
@@ -8473,6 +8617,7 @@ fn t27_3_execution_stage_with_step_maps_objective_and_open_items() {
         retry_budget: 3,
         last_review_summary: None,
         last_correction: None,
+        stage_continuation_context: None,
         review_task_id: None,
         tool_execution_records: Vec::new(),
     };
@@ -8529,6 +8674,7 @@ fn t27_3_completed_steps_go_into_accepted_summary() {
         retry_budget: 3,
         last_review_summary: None,
         last_correction: None,
+        stage_continuation_context: None,
         review_task_id: None,
         tool_execution_records: Vec::new(),
     };
@@ -8546,6 +8692,7 @@ fn t27_3_completed_steps_go_into_accepted_summary() {
         retry_budget: 3,
         last_review_summary: None,
         last_correction: None,
+        stage_continuation_context: None,
         review_task_id: None,
         tool_execution_records: Vec::new(),
     };
@@ -8626,6 +8773,7 @@ fn t27_3_projection_emits_rejected_approach_fact_from_review_correction() {
         retry_budget: 3,
         last_review_summary: Some("previous patch ignored edge cases".into()),
         last_correction: Some("preserve the auth guard branch".into()),
+        stage_continuation_context: None,
         review_task_id: None,
         tool_execution_records: Vec::new(),
     };
@@ -8671,6 +8819,7 @@ fn t27_3_readonly_audit_projection_emits_fact_ledger_and_readonly_actions() {
         retry_budget: 3,
         last_review_summary: None,
         last_correction: None,
+        stage_continuation_context: None,
         review_task_id: None,
         tool_execution_records: Vec::new(),
     };
@@ -8737,6 +8886,7 @@ fn t27_3_projection_emits_file_change_and_test_ledgers() {
         retry_budget: 3,
         last_review_summary: Some("tests failed because file_facts still said none recorded".into()),
         last_correction: None,
+        stage_continuation_context: None,
         review_task_id: None,
         tool_execution_records: Vec::new(),
     };
@@ -8797,6 +8947,7 @@ fn t27_3_projection_emits_file_fact_when_worker_reports_reading_a_file() {
         retry_budget: 3,
         last_review_summary: None,
         last_correction: None,
+        stage_continuation_context: None,
         review_task_id: None,
         tool_execution_records: Vec::new(),
     };
@@ -8861,6 +9012,7 @@ fn t27_3_projection_suppresses_none_recorded_when_matching_ledgers_exist() {
         retry_budget: 3,
         last_review_summary: Some("ACCEPT: artifact verified and tests passed".into()),
         last_correction: None,
+        stage_continuation_context: None,
         review_task_id: None,
         tool_execution_records: Vec::new(),
     };
@@ -10926,6 +11078,7 @@ fn make_plan_with_step(
             retry_budget: 3,
             last_review_summary: None,
             last_correction: None,
+            stage_continuation_context: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
         }],
@@ -11482,6 +11635,7 @@ fn t27_7_build_accepted_archive_excludes_current_step() {
         retry_budget: 3,
         last_review_summary: None,
         last_correction: None,
+        stage_continuation_context: None,
         review_task_id: None,
         tool_execution_records: Vec::new(),
     };
@@ -11555,6 +11709,7 @@ fn t27_7_projection_uses_archive_for_accepted_summary() {
         retry_budget: 3,
         last_review_summary: None,
         last_correction: None,
+        stage_continuation_context: None,
         review_task_id: None,
         tool_execution_records: Vec::new(),
     };
@@ -11611,6 +11766,7 @@ fn t27_7_open_items_excludes_criteria_already_in_archive() {
         retry_budget: 3,
         last_review_summary: None,
         last_correction: None,
+        stage_continuation_context: None,
         review_task_id: None,
         tool_execution_records: Vec::new(),
     };
@@ -11629,6 +11785,7 @@ fn t27_7_open_items_excludes_criteria_already_in_archive() {
         retry_budget: 3,
         last_review_summary: None,
         last_correction: None,
+        stage_continuation_context: None,
         review_task_id: None,
         tool_execution_records: Vec::new(),
     };
@@ -11685,6 +11842,7 @@ fn make_t278_step(
         retry_budget: 3,
         last_review_summary: None,
         last_correction: None,
+        stage_continuation_context: None,
         review_task_id: None,
         tool_execution_records: Vec::new(),
     }
@@ -12338,6 +12496,7 @@ async fn r0_boss_full_worker_text_only_completion_fails_artifact_verification() 
     let output_root = root.join("task_output");
     let artifact_path = root.join("missing-report.md");
     let request_bodies = Arc::new(std::sync::Mutex::new(Vec::new()));
+    std::fs::create_dir_all(&output_root).expect("task output root should exist");
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -12405,6 +12564,25 @@ async fn r0_boss_full_worker_text_only_completion_fails_artifact_verification() 
     assert!(
         !step.completed,
         "failed verification must not mark completed"
+    );
+    let continuation = step
+        .stage_continuation_context
+        .as_ref()
+        .expect("artifact verification failure must seed continuation context");
+    assert_eq!(
+        continuation.failed_target.as_deref(),
+        Some(artifact_path.to_string_lossy().as_ref())
+    );
+    assert_eq!(
+        continuation.continuity_mode,
+        Some(rust_agent::core::state_frame::ContinuityMode::Repair)
+    );
+    assert!(
+        continuation
+            .next_action
+            .as_deref()
+            .is_some_and(|action| action.contains("repair artifact evidence")),
+        "repair path should carry a concrete next_action"
     );
     drop(guard);
 

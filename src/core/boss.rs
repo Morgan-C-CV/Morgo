@@ -93,6 +93,75 @@ fn build_artifact_repair_instruction(step: &BossPlanStep, missing_reason: &str) 
     ))
 }
 
+fn continuation_verified_facts(step: &BossPlanStep) -> Vec<String> {
+    step.tool_execution_records
+        .iter()
+        .map(|record| record.summary.clone())
+        .take(5)
+        .collect()
+}
+
+fn sync_legacy_correction_from_continuation(step: &mut BossPlanStep) {
+    if let Some(context) = step.stage_continuation_context.as_ref() {
+        step.last_correction = context
+            .next_action
+            .clone()
+            .or_else(|| context.failed_target.clone())
+            .or_else(|| {
+                context
+                    .repair_intent
+                    .as_ref()
+                    .and_then(|intent| intent.next_action.clone().or(intent.failed_target.clone()))
+            });
+    }
+}
+
+fn update_step_continuation_context(
+    step: &mut BossPlanStep,
+    mode: crate::core::state_frame::ContinuityMode,
+    failed_target: Option<String>,
+    next_action: Option<String>,
+    verified_facts: Vec<String>,
+) {
+    let effective_failed_target = failed_target.or_else(|| {
+        step.stage_continuation_context
+            .as_ref()
+            .and_then(|context| context.failed_target.clone())
+    });
+    let effective_next_action = next_action.or_else(|| {
+        step.stage_continuation_context
+            .as_ref()
+            .and_then(|context| context.next_action.clone())
+    });
+    let effective_verified_facts = if verified_facts.is_empty() {
+        step.stage_continuation_context
+            .as_ref()
+            .map(|context| context.verified_facts.clone())
+            .unwrap_or_default()
+    } else {
+        verified_facts
+    };
+    let context = crate::core::state_frame::StageContinuationContext {
+        repair_intent: Some(crate::core::state_frame::RepairIntent {
+            failed_target: effective_failed_target.clone(),
+            verified_facts: effective_verified_facts.clone(),
+            next_action: effective_next_action.clone(),
+            continuity_mode: Some(mode.clone()),
+        }),
+        failed_target: effective_failed_target,
+        verified_facts: effective_verified_facts,
+        next_action: effective_next_action,
+        continuity_mode: Some(mode),
+    };
+    step.stage_continuation_context = Some(context);
+    sync_legacy_correction_from_continuation(step);
+}
+
+fn clear_step_continuation_context(step: &mut BossPlanStep) {
+    step.stage_continuation_context = None;
+    step.last_correction = None;
+}
+
 fn build_stage_execution_contract(
     step: &BossPlanStep,
     target_artifacts: &[TargetArtifact],
@@ -315,54 +384,85 @@ fn assignment_fingerprint(material: &serde_json::Value) -> String {
 }
 
 fn build_continuation_payload(contract: &ExecutorBAssignmentContract) -> ContinuationPayload {
+    let typed_context = contract.state_frame.stage_continuation_context.as_ref();
     ContinuationPayload {
-        failed_target: contract
-            .state_frame
-            .stage_execution_contract
-            .declared_artifacts
-            .first()
-            .map(|artifact| artifact.path.clone())
+        failed_target: typed_context
+            .and_then(|context| {
+                context
+                    .failed_target
+                    .clone()
+                    .or_else(|| {
+                        context
+                            .repair_intent
+                            .as_ref()
+                            .and_then(|intent| intent.failed_target.clone())
+                    })
+            })
+            .or_else(|| {
+                contract
+                    .state_frame
+                    .stage_execution_contract
+                    .declared_artifacts
+                    .first()
+                    .map(|artifact| artifact.path.clone())
+            })
             .or_else(|| Some(contract.brief.objective.clone())),
-        verified_facts: contract
-            .state_frame
-            .recent_local_facts
-            .iter()
-            .take(5)
-            .cloned()
-            .collect(),
-        next_action: contract
-            .state_frame
-            .allowed_actions
-            .first()
-            .cloned()
+        verified_facts: typed_context
+            .map(|context| context.verified_facts.clone())
+            .filter(|facts| !facts.is_empty())
+            .unwrap_or_else(|| {
+                contract
+                    .state_frame
+                    .recent_local_facts
+                    .iter()
+                    .take(5)
+                    .cloned()
+                    .collect()
+            }),
+        next_action: typed_context
+            .and_then(|context| {
+                context.next_action.clone().or_else(|| {
+                    context
+                        .repair_intent
+                        .as_ref()
+                        .and_then(|intent| intent.next_action.clone())
+                })
+            })
+            .or_else(|| contract.state_frame.allowed_actions.first().cloned())
             .or_else(|| contract.allowed_tools.first().cloned()),
-        continuity_mode: Some("continue".into()),
+        continuity_mode: Some(
+            typed_context
+                .and_then(|context| context.continuity_mode.as_ref())
+                .map(|mode| match mode {
+                    crate::core::state_frame::ContinuityMode::Continue => "continue",
+                    crate::core::state_frame::ContinuityMode::Repair => "repair",
+                })
+                .unwrap_or("continue")
+                .into(),
+        ),
     }
 }
 
 fn build_stage_continuation_context(
     step: &BossPlanStep,
 ) -> Option<crate::core::state_frame::StageContinuationContext> {
-    let verified_facts = step
-        .tool_execution_records
-        .iter()
-        .map(|record| record.summary.clone())
-        .take(5)
-        .collect::<Vec<_>>();
-    if verified_facts.is_empty() && step.last_correction.is_none() {
-        return None;
-    }
-    Some(crate::core::state_frame::StageContinuationContext {
-        repair_intent: Some(crate::core::state_frame::RepairIntent {
+    step.stage_continuation_context.clone().or_else(|| {
+        let verified_facts = continuation_verified_facts(step);
+        if verified_facts.is_empty() && step.last_correction.is_none() {
+            return None;
+        }
+        Some(crate::core::state_frame::StageContinuationContext {
+            repair_intent: Some(crate::core::state_frame::RepairIntent {
+                failed_target: step.last_correction.clone(),
+                verified_facts: verified_facts.clone(),
+                next_action: step.last_correction.clone(),
+                continuity_mode: Some(crate::core::state_frame::ContinuityMode::Repair),
+            }),
             failed_target: step.last_correction.clone(),
-            verified_facts: verified_facts.clone(),
+            verified_facts,
             next_action: step.last_correction.clone(),
             continuity_mode: Some(crate::core::state_frame::ContinuityMode::Repair),
-        }),
-        failed_target: step.last_correction.clone(),
-        verified_facts,
-        next_action: step.last_correction.clone(),
-        continuity_mode: Some(crate::core::state_frame::ContinuityMode::Repair),
+        })
     })
 }
 
@@ -1949,6 +2049,7 @@ impl BossCoordinator {
                 retry_budget: 3,
                 last_review_summary: None,
                 last_correction: None,
+                stage_continuation_context: None,
                 review_task_id: None,
                 tool_execution_records: Vec::new(),
             }],
@@ -2818,10 +2919,28 @@ impl BossCoordinator {
                     let repair_instruction = build_artifact_repair_instruction(step, &reason);
                     if step.attempt_count >= step.retry_budget {
                         step.status = BossPlanStepStatus::Failed;
-                        step.last_correction = repair_instruction;
+                        update_step_continuation_context(
+                            step,
+                            crate::core::state_frame::ContinuityMode::Repair,
+                            extract_artifact_expectations(step.objective())
+                                .into_iter()
+                                .next()
+                                .map(|expectation| expectation.path.display().to_string()),
+                            repair_instruction,
+                            continuation_verified_facts(step),
+                        );
                     } else {
                         step.status = BossPlanStepStatus::Rejected;
-                        step.last_correction = repair_instruction;
+                        update_step_continuation_context(
+                            step,
+                            crate::core::state_frame::ContinuityMode::Repair,
+                            extract_artifact_expectations(step.objective())
+                                .into_iter()
+                                .next()
+                                .map(|expectation| expectation.path.display().to_string()),
+                            repair_instruction,
+                            continuation_verified_facts(step),
+                        );
                     }
                     tracing::warn!(
                         "BossPlan: Step {} failed artifact verification: {}",
@@ -2841,6 +2960,7 @@ impl BossCoordinator {
                     } else {
                         step.completed = false;
                         step.status = BossPlanStepStatus::Reviewing;
+                        clear_step_continuation_context(step);
                         tracing::info!(
                             "BossPlan: Step {} completed by worker, entering Reviewing",
                             step_id
@@ -2864,7 +2984,9 @@ impl BossCoordinator {
                 step.worker_task_id = Some(event.task_id.clone());
                 sync_step_tool_execution_records(step, tasks.as_deref(), &event.task_id);
                 store_step_result_diff(step, &event.result, Some(&event.summary));
-                step.last_review_summary = step_artifact_verification_error(step)
+                let artifact_verification_reason = step_artifact_verification_error(step);
+                step.last_review_summary = artifact_verification_reason
+                    .clone()
                     .map(|reason| {
                         append_artifact_verification_runtime_records(
                             step,
@@ -2876,6 +2998,22 @@ impl BossCoordinator {
                     .or_else(|| Some(event.result.clone()).filter(|text| !text.trim().is_empty()))
                     .or_else(|| Some(event.summary.clone()).filter(|text| !text.trim().is_empty()));
                 tracing::warn!("BossPlan: Step {} marked as failed", step_id);
+                if step.last_review_summary.is_some() {
+                    let next_action = artifact_verification_reason
+                        .as_deref()
+                        .and_then(|reason| build_artifact_repair_instruction(step, reason))
+                        .or_else(|| step.last_review_summary.clone());
+                    update_step_continuation_context(
+                        step,
+                        crate::core::state_frame::ContinuityMode::Repair,
+                        extract_artifact_expectations(step.objective())
+                            .into_iter()
+                            .next()
+                            .map(|expectation| expectation.path.display().to_string()),
+                        next_action,
+                        continuation_verified_facts(step),
+                    );
+                }
                 None
             }
             TaskStatus::Running => {
@@ -3040,7 +3178,16 @@ impl BossCoordinator {
                         );
                         if step.attempt_count >= step.retry_budget {
                             step.status = BossPlanStepStatus::Failed;
-                            step.last_correction = repair_instruction;
+                            update_step_continuation_context(
+                                step,
+                                crate::core::state_frame::ContinuityMode::Repair,
+                                extract_artifact_expectations(step.objective())
+                                    .into_iter()
+                                    .next()
+                                    .map(|expectation| expectation.path.display().to_string()),
+                                repair_instruction,
+                                continuation_verified_facts(step),
+                            );
                             (
                                 false,
                                 Some((
@@ -3050,7 +3197,16 @@ impl BossCoordinator {
                             )
                         } else {
                             step.status = BossPlanStepStatus::Rejected;
-                            step.last_correction = repair_instruction;
+                            update_step_continuation_context(
+                                step,
+                                crate::core::state_frame::ContinuityMode::Repair,
+                                extract_artifact_expectations(step.objective())
+                                    .into_iter()
+                                    .next()
+                                    .map(|expectation| expectation.path.display().to_string()),
+                                repair_instruction,
+                                continuation_verified_facts(step),
+                            );
                             (false, Some(("repair_dispatched", None)))
                         }
                     } else {
@@ -3063,7 +3219,7 @@ impl BossCoordinator {
                         step.last_review_summary = Some(summary.clone());
                         step.completed = true;
                         step.status = BossPlanStepStatus::Completed;
-                        step.last_correction = None;
+                        clear_step_continuation_context(step);
                         (true, None)
                     }
                 }
@@ -3078,7 +3234,13 @@ impl BossCoordinator {
                         step.status = BossPlanStepStatus::Failed;
                     } else {
                         step.status = BossPlanStepStatus::Rejected;
-                        step.last_correction = correction.clone();
+                        update_step_continuation_context(
+                            step,
+                            crate::core::state_frame::ContinuityMode::Repair,
+                            correction.clone(),
+                            correction.clone(),
+                            continuation_verified_facts(step),
+                        );
                     }
                     (false, None)
                 }
@@ -3091,7 +3253,13 @@ impl BossCoordinator {
                     );
                     step.last_review_summary = Some(summary.clone());
                     step.status = BossPlanStepStatus::ReplanRequired;
-                    step.last_correction = Some(format!("replan required: {reason}"));
+                    update_step_continuation_context(
+                        step,
+                        crate::core::state_frame::ContinuityMode::Repair,
+                        None,
+                        Some(format!("replan required: {reason}")),
+                        continuation_verified_facts(step),
+                    );
                     (false, None)
                 }
             }
@@ -3188,10 +3356,28 @@ impl BossCoordinator {
                     let repair_instruction = build_artifact_repair_instruction(step, &reason);
                     if step.attempt_count >= step.retry_budget {
                         step.status = BossPlanStepStatus::Failed;
-                        step.last_correction = repair_instruction;
+                        update_step_continuation_context(
+                            step,
+                            crate::core::state_frame::ContinuityMode::Repair,
+                            extract_artifact_expectations(step.objective())
+                                .into_iter()
+                                .next()
+                                .map(|expectation| expectation.path.display().to_string()),
+                            repair_instruction,
+                            continuation_verified_facts(step),
+                        );
                     } else {
                         step.status = BossPlanStepStatus::Rejected;
-                        step.last_correction = repair_instruction;
+                        update_step_continuation_context(
+                            step,
+                            crate::core::state_frame::ContinuityMode::Repair,
+                            extract_artifact_expectations(step.objective())
+                                .into_iter()
+                                .next()
+                                .map(|expectation| expectation.path.display().to_string()),
+                            repair_instruction,
+                            continuation_verified_facts(step),
+                        );
                     }
                     tracing::warn!(
                         "BossPlan: Step {} failed artifact verification via notification: {}",
@@ -3217,6 +3403,7 @@ impl BossCoordinator {
                     } else {
                         step.completed = false;
                         step.status = BossPlanStepStatus::Reviewing;
+                        clear_step_continuation_context(step);
                         tracing::info!(
                             "BossPlan: Step {} completed via notification, entering Reviewing",
                             step_id
@@ -3260,7 +3447,9 @@ impl BossCoordinator {
                     notification.output_file.as_deref().unwrap_or_default(),
                     Some(notification.body.as_str()),
                 );
-                step.last_review_summary = step_artifact_verification_error(step)
+                let artifact_verification_reason = step_artifact_verification_error(step);
+                step.last_review_summary = artifact_verification_reason
+                    .clone()
                     .map(|reason| {
                         append_artifact_verification_runtime_records(
                             step,
@@ -3284,6 +3473,22 @@ impl BossCoordinator {
                             .clone()
                             .filter(|text| !text.trim().is_empty())
                     });
+                if step.last_review_summary.is_some() {
+                    let next_action = artifact_verification_reason
+                        .as_deref()
+                        .and_then(|reason| build_artifact_repair_instruction(step, reason))
+                        .or_else(|| step.last_review_summary.clone());
+                    update_step_continuation_context(
+                        step,
+                        crate::core::state_frame::ContinuityMode::Repair,
+                        extract_artifact_expectations(step.objective())
+                            .into_iter()
+                            .next()
+                            .map(|expectation| expectation.path.display().to_string()),
+                        next_action,
+                        continuation_verified_facts(step),
+                    );
+                }
                 tracing::warn!(
                     "BossPlan: Step {} marked as failed via notification",
                     step_id
@@ -5863,6 +6068,7 @@ mod tests {
                         retry_budget: 3,
                         last_review_summary: Some("done".into()),
                         last_correction: None,
+                        stage_continuation_context: None,
                         review_task_id: None,
                         tool_execution_records: Vec::new(),
                     },
@@ -5880,6 +6086,7 @@ mod tests {
                         retry_budget: 3,
                         last_review_summary: Some("repair needed".into()),
                         last_correction: Some("/tmp/failed-report.md".into()),
+                        stage_continuation_context: None,
                         review_task_id: None,
                         tool_execution_records: vec![ToolExecutionRecord {
                             tool_name: "ArtifactVerify".into(),
@@ -6043,6 +6250,7 @@ mod tests {
                     retry_budget: 3,
                     last_review_summary: None,
                     last_correction: None,
+                    stage_continuation_context: None,
                     review_task_id: None,
                     tool_execution_records: Vec::new(),
                 }],
@@ -6143,6 +6351,7 @@ mod tests {
                     retry_budget: 3,
                     last_review_summary: None,
                     last_correction: None,
+                    stage_continuation_context: None,
                     review_task_id: None,
                     tool_execution_records: Vec::new(),
                 }],
@@ -6310,6 +6519,7 @@ mod tests {
                 retry_budget: 3,
                 last_review_summary: None,
                 last_correction: None,
+                stage_continuation_context: None,
                 review_task_id: None,
                 tool_execution_records: Vec::new(),
             }],
@@ -6347,6 +6557,7 @@ mod tests {
                     retry_budget: 3,
                     last_review_summary: None,
                     last_correction: None,
+                    stage_continuation_context: None,
                     review_task_id: None,
                     tool_execution_records: Vec::new(),
                 }],
@@ -6461,6 +6672,7 @@ mod tests {
                 retry_budget: 3,
                 last_review_summary: Some(format!("summary {id}")),
                 last_correction: None,
+                stage_continuation_context: None,
                 review_task_id: None,
                 tool_execution_records: Vec::new(),
             };
@@ -6508,11 +6720,12 @@ mod tests {
             result_diff: None,
             worker_task_id: None,
             attempt_count: 0,
-            retry_budget: 3,
-            last_review_summary: None,
-            last_correction: None,
-            review_task_id: None,
-            tool_execution_records: Vec::new(),
+                    retry_budget: 3,
+                    last_review_summary: None,
+                    last_correction: None,
+                    stage_continuation_context: None,
+                    review_task_id: None,
+                    tool_execution_records: Vec::new(),
         };
         let artifacts =
             collect_target_artifacts(&step, &["/tmp/report.md".into(), "/tmp/results/".into()]);
@@ -6544,6 +6757,7 @@ mod tests {
             retry_budget: 3,
             last_review_summary: Some("tests are still failing".into()),
             last_correction: None,
+            stage_continuation_context: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
         };
@@ -6569,6 +6783,7 @@ mod tests {
             retry_budget: 3,
             last_review_summary: None,
             last_correction: None,
+            stage_continuation_context: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
         };

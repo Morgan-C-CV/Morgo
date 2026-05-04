@@ -161,6 +161,9 @@ pub struct BossPlanStep {
     /// Correction message from A sent back to B on rejection.
     #[serde(default)]
     pub last_correction: Option<String>,
+    /// Typed continuation source for reject / repair / continue flows.
+    #[serde(default)]
+    pub stage_continuation_context: Option<StageContinuationContext>,
     /// Task id of the A review agent currently reviewing this step.
     #[serde(default)]
     pub review_task_id: Option<String>,

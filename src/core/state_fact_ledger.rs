@@ -1187,6 +1187,7 @@ mod tests {
                 "tests failed because prompt did not include open items".into(),
             ),
             last_correction: None,
+            stage_continuation_context: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
         };
@@ -1232,6 +1233,7 @@ mod tests {
             retry_budget: 3,
             last_review_summary: None,
             last_correction: None,
+            stage_continuation_context: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
         };
@@ -1261,6 +1263,7 @@ mod tests {
             retry_budget: 3,
             last_review_summary: None,
             last_correction: None,
+            stage_continuation_context: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
         };
@@ -1289,6 +1292,7 @@ mod tests {
             retry_budget: 3,
             last_review_summary: None,
             last_correction: None,
+            stage_continuation_context: None,
             review_task_id: None,
             tool_execution_records: vec![
                 ToolExecutionRecord {
@@ -1390,6 +1394,7 @@ mod tests {
             retry_budget: 3,
             last_review_summary: Some("ACCEPT: artifact verified".into()),
             last_correction: None,
+            stage_continuation_context: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
         };
@@ -1424,6 +1429,7 @@ mod tests {
             retry_budget: 3,
             last_review_summary: Some("fallback review summary".into()),
             last_correction: None,
+            stage_continuation_context: None,
             review_task_id: None,
             tool_execution_records: vec![
                 ToolExecutionRecord {
@@ -1504,6 +1510,7 @@ mod tests {
             retry_budget: 3,
             last_review_summary: Some("previous patch ignored edge cases".into()),
             last_correction: Some("preserve the auth guard branch".into()),
+            stage_continuation_context: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
         };

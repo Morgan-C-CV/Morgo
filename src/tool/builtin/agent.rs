@@ -8,6 +8,7 @@ use crate::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSourc
 use crate::core::context::{QueryContext, SubagentConfig, WorkerLisMPolicy};
 use crate::core::message::Message;
 use crate::core::query_loop::{QueryParams, run_query_loop_with_params};
+use crate::core::state_frame::StageContinuationContext;
 use crate::cost::tracker::CostTracker;
 use crate::interaction::dispatcher::NotificationDispatcher;
 use crate::interaction::telegram::gateway::TelegramGateway;
@@ -26,7 +27,11 @@ use tracing::info;
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum AgentRequest {
     Spawn(SpawnAgentRequest),
-    Continue { task_id: String, message: String },
+    Continue {
+        task_id: String,
+        message: String,
+        boss_step_context: Option<ContinueBossStepContext>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,6 +55,16 @@ struct SpawnAgentRequest {
     lism_policy: WorkerLisMPolicy,
     /// When set, the spawned subagent runtime is assembled with this boss actor policy.
     boss_actor_policy: Option<crate::state::permission_context::BossActorPolicy>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ContinueBossStepContext {
+    step_id: Option<usize>,
+    boss_plan_id: Option<String>,
+    step_objective: Option<String>,
+    step_acceptance: Vec<String>,
+    parent_session_id: Option<String>,
+    continuation_context: Option<StageContinuationContext>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,6 +94,7 @@ struct AgentJsonRequest {
     lism_policy: Option<String>,
     task_id: Option<String>,
     message: Option<String>,
+    continuation_payload: Option<StageContinuationContext>,
     boss_actor_role: Option<String>,
     boss_lineage_depth: Option<u32>,
 }
@@ -255,7 +271,12 @@ impl Tool for AgentTool {
                     task.id, role_label, task_label
                 )))
             }
-            AgentRequest::Continue { task_id, message } => {
+            AgentRequest::Continue {
+                task_id,
+                message,
+                boss_step_context,
+            } => {
+                let message = build_continue_task_input(&message, boss_step_context.as_ref());
                 if !tasks.send_message(&task_id, &session_id, message.clone()) {
                     anyhow::bail!("task {task_id} is not running or not owned by this session");
                 }
@@ -377,7 +398,29 @@ fn effective_max_turns(request: &SpawnAgentRequest) -> Option<usize> {
 fn parse_agent_request(input: &str) -> anyhow::Result<AgentRequest> {
     if let Ok(request) = serde_json::from_str::<AgentJsonRequest>(input) {
         if let (Some(task_id), Some(message)) = (request.task_id, request.message) {
-            return Ok(AgentRequest::Continue { task_id, message });
+            let boss_step_context = if request.step_id.is_some()
+                || request.boss_plan_id.is_some()
+                || request.step_objective.is_some()
+                || request.step_acceptance.as_ref().is_some_and(|items| !items.is_empty())
+                || request.parent_session_id.is_some()
+                || request.continuation_payload.is_some()
+            {
+                Some(ContinueBossStepContext {
+                    step_id: request.step_id,
+                    boss_plan_id: request.boss_plan_id,
+                    step_objective: request.step_objective,
+                    step_acceptance: request.step_acceptance.unwrap_or_default(),
+                    parent_session_id: request.parent_session_id,
+                    continuation_context: request.continuation_payload,
+                })
+            } else {
+                None
+            };
+            return Ok(AgentRequest::Continue {
+                task_id,
+                message,
+                boss_step_context,
+            });
         }
         if let Some(task) = request.task {
             let role = parse_worker_role(request.role.as_deref())?;
@@ -413,7 +456,11 @@ fn parse_agent_request(input: &str) -> anyhow::Result<AgentRequest> {
         let mut parts = rest.splitn(2, ':');
         let task_id = parts.next().unwrap_or_default().trim().to_string();
         let message = parts.next().unwrap_or_default().trim().to_string();
-        return Ok(AgentRequest::Continue { task_id, message });
+        return Ok(AgentRequest::Continue {
+            task_id,
+            message,
+            boss_step_context: None,
+        });
     }
 
     Ok(AgentRequest::Spawn(SpawnAgentRequest {
@@ -476,6 +523,71 @@ fn build_worker_task_input(request: &SpawnAgentRequest) -> String {
         sections.push("</boss-step-context>".into());
     }
 
+    sections.join("\n")
+}
+
+fn build_continue_task_input(
+    message: &str,
+    boss_step_context: Option<&ContinueBossStepContext>,
+) -> String {
+    let Some(context) = boss_step_context else {
+        return message.to_string();
+    };
+    let mut sections = vec![message.to_string()];
+    if context.step_id.is_some()
+        || context.boss_plan_id.is_some()
+        || context.step_objective.is_some()
+        || !context.step_acceptance.is_empty()
+        || context.parent_session_id.is_some()
+        || context.continuation_context.is_some()
+    {
+        sections.push("<boss-step-context>".into());
+        if let Some(plan_id) = context.boss_plan_id.as_deref() {
+            sections.push(format!("plan_id: {plan_id}"));
+        }
+        if let Some(step_id) = context.step_id {
+            sections.push(format!("step_id: {step_id}"));
+        }
+        if let Some(objective) = context.step_objective.as_deref() {
+            sections.push(format!("objective: {objective}"));
+        }
+        if !context.step_acceptance.is_empty() {
+            sections.push("acceptance:".into());
+            sections.extend(context.step_acceptance.iter().map(|item| format!("- {item}")));
+        }
+        if let Some(parent_session_id) = context.parent_session_id.as_deref() {
+            sections.push(format!("parent_session_id: {parent_session_id}"));
+        }
+        if let Some(continuation) = context.continuation_context.as_ref() {
+            sections.push("stage_continuation_context:".into());
+            sections.push(format!(
+                "failed_target: {}",
+                continuation.failed_target.as_deref().unwrap_or("none")
+            ));
+            sections.push(format!(
+                "next_action: {}",
+                continuation.next_action.as_deref().unwrap_or("none")
+            ));
+            sections.push(format!(
+                "continuity_mode: {}",
+                continuation
+                    .continuity_mode
+                    .as_ref()
+                    .map(|mode| format!("{mode:?}").to_ascii_lowercase())
+                    .unwrap_or_else(|| "none".into())
+            ));
+            if !continuation.verified_facts.is_empty() {
+                sections.push("verified_facts:".into());
+                sections.extend(
+                    continuation
+                        .verified_facts
+                        .iter()
+                        .map(|fact| format!("- {fact}")),
+                );
+            }
+        }
+        sections.push("</boss-step-context>".into());
+    }
     sections.join("\n")
 }
 

@@ -47,6 +47,7 @@ fn boss_step(id: usize, desc: &str) -> BossPlanStep {
         retry_budget: 3,
         last_review_summary: None,
         last_correction: None,
+        stage_continuation_context: None,
         review_task_id: None,
         tool_execution_records: Vec::new(),
     }
