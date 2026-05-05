@@ -2478,8 +2478,8 @@ mod tests {
     #[test]
     fn extract_verified_target_from_messages_reads_short_form_contract_line() {
         let messages = vec![
-            Message::assistant("other".into()),
-            Message::user("verified_target: /tmp/one.md\nverification_result: verified".into()),
+            Message::assistant("other"),
+            Message::user("verified_target: /tmp/one.md\nverification_result: verified"),
         ];
 
         assert_eq!(
