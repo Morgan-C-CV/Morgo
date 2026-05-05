@@ -71,22 +71,49 @@ fn step_artifact_verification_error(step: &BossPlanStep) -> Option<String> {
         .map(|reason| format!("artifact verification failed: {reason}"))
 }
 
+fn primary_declared_artifact_path(step: &BossPlanStep) -> Option<String> {
+    step.stage_execution_contract
+        .declared_artifacts
+        .first()
+        .map(|artifact| artifact.path.clone())
+        .or_else(|| {
+            extract_artifact_expectations(step.objective())
+                .into_iter()
+                .next()
+                .map(|expectation| expectation.path.display().to_string())
+        })
+}
+
 fn build_artifact_repair_instruction(step: &BossPlanStep, missing_reason: &str) -> Option<String> {
-    let expectation = extract_artifact_expectations(step.objective())
-        .into_iter()
-        .next()?;
-    let target_path = expectation.path.display().to_string();
-    let parent_dir = expectation
-        .path
+    let expectation = step
+        .stage_execution_contract
+        .declared_artifacts
+        .first()
+        .map(|artifact| (artifact.path.clone(), artifact.kind.clone()))
+        .or_else(|| {
+            extract_artifact_expectations(step.objective())
+                .into_iter()
+                .next()
+                .map(|expectation| {
+                    let kind = match expectation.kind {
+                        crate::core::boss_acceptance::BossArtifactKind::File => "file".to_string(),
+                        crate::core::boss_acceptance::BossArtifactKind::Directory => {
+                            "directory".to_string()
+                        }
+                    };
+                    (expectation.path.display().to_string(), kind)
+                })
+        })?;
+    let target_path = expectation.0;
+    let parent_dir = std::path::Path::new(&target_path)
         .parent()
         .map(|path| path.display().to_string())
         .filter(|path| !path.trim().is_empty())
         .unwrap_or_else(|| ".".into());
-    let recommended_write_strategy = match expectation.kind {
-        crate::core::boss_acceptance::BossArtifactKind::File => "write_exact_target_file",
-        crate::core::boss_acceptance::BossArtifactKind::Directory => {
-            "create_directory_then_write_files"
-        }
+    let recommended_write_strategy = match expectation.1.as_str() {
+        "file" => "write_exact_target_file",
+        "directory" => "create_directory_then_write_files",
+        _ => "write_exact_target_file",
     };
     Some(format!(
         "repair artifact evidence for target_path={target_path} parent_dir={parent_dir} missing_reason={missing_reason} recommended_write_strategy={recommended_write_strategy}"
@@ -94,12 +121,10 @@ fn build_artifact_repair_instruction(step: &BossPlanStep, missing_reason: &str) 
 }
 
 fn build_verification_repair_instruction(step: &BossPlanStep) -> Option<String> {
-    let expectation = extract_artifact_expectations(step.objective())
-        .into_iter()
-        .next()?;
+    let target_path = primary_declared_artifact_path(step)?;
     Some(format!(
         "re-verify artifact evidence for target_path={}",
-        expectation.path.display()
+        target_path
     ))
 }
 
@@ -551,10 +576,7 @@ fn apply_step_failure_classification(
         update_step_continuation_context(
             step,
             crate::core::state_frame::ContinuityMode::Repair,
-            extract_artifact_expectations(step.objective())
-                .into_iter()
-                .next()
-                .map(|expectation| expectation.path.display().to_string()),
+            primary_declared_artifact_path(step),
             Some(reason.to_string()),
             continuation_verified_facts(step),
         );
