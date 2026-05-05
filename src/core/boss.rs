@@ -5632,7 +5632,10 @@ fn next_unfinished_step_id(plan: &BossPlan) -> Option<usize> {
 fn next_runnable_step(plan: &BossPlan) -> Option<&BossPlanStep> {
     let verification_repair_continuation = plan.steps.iter().find(|step| {
         !step.completed
-            && step.status == BossPlanStepStatus::Rejected
+            && matches!(
+                step.status,
+                BossPlanStepStatus::Rejected | BossPlanStepStatus::Reviewing
+            )
             && step
                 .stage_continuation_context
                 .as_ref()
@@ -6384,6 +6387,212 @@ mod tests {
             "completed child tail should not resolve to Ok(None)"
         );
         assert_eq!(coordinator.get_stage().await, BossStage::Completed);
+    }
+
+    #[test]
+    fn next_runnable_step_treats_verification_reviewing_step_as_runnable() {
+        let step = BossPlanStep {
+            id: 0,
+            description: "verify target".into(),
+            objective: Some("verify artifact".into()),
+            acceptance: vec!["artifact verification passed".into()],
+            requires_approval: false,
+            status: BossPlanStepStatus::Reviewing,
+            completed: false,
+            result_diff: None,
+            worker_task_id: Some("task-0".into()),
+            attempt_count: 0,
+            retry_budget: 3,
+            last_review_summary: None,
+            last_correction: Some("verify_artifact".into()),
+            stage_execution_contract: StageExecutionContract::default(),
+            stage_continuation_context: Some(crate::core::state_frame::StageContinuationContext {
+                repair_intent: Some(crate::core::state_frame::RepairIntent {
+                    failed_target: Some("/tmp/target".into()),
+                    verified_facts: vec!["verified".into()],
+                    next_action: Some("verify_artifact".into()),
+                    continuity_mode: Some(crate::core::state_frame::ContinuityMode::Repair),
+                }),
+                failed_target: Some("/tmp/target".into()),
+                verified_facts: vec!["verified".into()],
+                next_action: Some("verify_artifact".into()),
+                continuity_mode: Some(crate::core::state_frame::ContinuityMode::Repair),
+            }),
+            executor_b_stage_memory: None,
+            review_task_id: None,
+            tool_execution_records: Vec::new(),
+        };
+        let plan = BossPlan {
+            accepted_by_user: true,
+            auto_sequence: true,
+            steps: vec![step],
+            ..BossPlan::default()
+        };
+
+        let runnable = next_runnable_step(&plan).map(|step| step.id);
+        assert_eq!(runnable, Some(0));
+    }
+
+    #[tokio::test]
+    async fn verification_continuation_step_advances_after_completed_child_sync() {
+        let coordinator = Arc::new(BossCoordinator::new());
+        let tasks = Arc::new(TaskManager::new_with_output_root(std::env::temp_dir()));
+        let app_state = test_app_state_with_tasks(tasks.clone(), coordinator.clone());
+        coordinator
+            .attach_app_state_for_report_testing(app_state.clone())
+            .await;
+        let target_path = std::env::temp_dir().join(format!(
+            "boss_verification_advances_{}_{}.md",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::write(&target_path, "verified").expect("write target");
+        {
+            let mut status = coordinator.status.write().await;
+            status.stage = BossStage::Execution;
+            status.current_step = Some(0);
+        }
+        {
+            let mut plan = coordinator.plan.write().await;
+            *plan = Some(BossPlan {
+                accepted_by_user: true,
+                auto_sequence: true,
+                steps: vec![BossPlanStep {
+                    id: 0,
+                    description: "verify target".into(),
+                    objective: Some(format!(
+                        "任务目标：\n- 目标文件：{}\n- 验证文件存在且非空",
+                        target_path.display()
+                    )),
+                    acceptance: vec!["artifact verification passed".into()],
+                    requires_approval: false,
+                    status: BossPlanStepStatus::Reviewing,
+                    completed: false,
+                    result_diff: None,
+                    worker_task_id: Some("task-0".into()),
+                    attempt_count: 0,
+                    retry_budget: 3,
+                    last_review_summary: None,
+                    last_correction: Some("verify_artifact".into()),
+                    stage_execution_contract: StageExecutionContract::default(),
+                    stage_continuation_context: Some(crate::core::state_frame::StageContinuationContext {
+                        repair_intent: Some(crate::core::state_frame::RepairIntent {
+                            failed_target: Some(target_path.display().to_string()),
+                            verified_facts: vec!["verified".into()],
+                            next_action: Some("verify_artifact".into()),
+                            continuity_mode: Some(crate::core::state_frame::ContinuityMode::Repair),
+                        }),
+                        failed_target: Some(target_path.display().to_string()),
+                        verified_facts: vec!["verified".into()],
+                        next_action: Some("verify_artifact".into()),
+                        continuity_mode: Some(crate::core::state_frame::ContinuityMode::Repair),
+                    }),
+                    executor_b_stage_memory: None,
+                    review_task_id: None,
+                    tool_execution_records: Vec::new(),
+                }],
+                ..BossPlan::default()
+            });
+        }
+        let record = tasks.create_with_type(
+            "worker",
+            TaskType::LocalAgent,
+            "test-session",
+            InteractionSurface::Cli,
+        );
+        assert_eq!(record.id, "task-0");
+        tasks.start("task-0");
+        let dispatcher = NotificationDispatcher::new(TelegramGateway::default())
+            .with_boss_coordinator(coordinator.clone());
+        tasks.complete("task-0", &dispatcher);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        coordinator
+            .sync_terminal_child_task_state(tasks.as_ref())
+            .await
+            .expect("sync");
+        let message = coordinator.advance_plan(&app_state).await.expect("advance");
+
+        assert!(message.is_some());
+        assert_eq!(coordinator.get_stage().await, BossStage::Completed);
+    }
+
+    #[tokio::test]
+    async fn advance_plan_does_not_return_none_for_reviewing_verification_continuation() {
+        let coordinator = Arc::new(BossCoordinator::new());
+        let tasks = Arc::new(TaskManager::new_with_output_root(std::env::temp_dir()));
+        let app_state = test_app_state_with_tasks(tasks.clone(), coordinator.clone());
+        coordinator
+            .attach_app_state_for_report_testing(app_state.clone())
+            .await;
+        {
+            let mut status = coordinator.status.write().await;
+            status.stage = BossStage::Execution;
+            status.current_step = Some(0);
+        }
+        {
+            let mut plan = coordinator.plan.write().await;
+            *plan = Some(BossPlan {
+                accepted_by_user: true,
+                auto_sequence: true,
+                steps: vec![BossPlanStep {
+                    id: 0,
+                    description: "verify target".into(),
+                    objective: Some("verify artifact".into()),
+                    acceptance: vec!["artifact verification passed".into()],
+                    requires_approval: false,
+                    status: BossPlanStepStatus::Reviewing,
+                    completed: false,
+                    result_diff: None,
+                    worker_task_id: Some("task-0".into()),
+                    attempt_count: 0,
+                    retry_budget: 3,
+                    last_review_summary: None,
+                    last_correction: Some("verify_artifact".into()),
+                    stage_execution_contract: StageExecutionContract::default(),
+                    stage_continuation_context: Some(crate::core::state_frame::StageContinuationContext {
+                        repair_intent: Some(crate::core::state_frame::RepairIntent {
+                            failed_target: Some("/tmp/target".into()),
+                            verified_facts: vec!["verified".into()],
+                            next_action: Some("verify_artifact".into()),
+                            continuity_mode: Some(crate::core::state_frame::ContinuityMode::Repair),
+                        }),
+                        failed_target: Some("/tmp/target".into()),
+                        verified_facts: vec!["verified".into()],
+                        next_action: Some("verify_artifact".into()),
+                        continuity_mode: Some(crate::core::state_frame::ContinuityMode::Repair),
+                    }),
+                    executor_b_stage_memory: None,
+                    review_task_id: None,
+                    tool_execution_records: Vec::new(),
+                }],
+                ..BossPlan::default()
+            });
+        }
+        let record = tasks.create_with_type(
+            "worker",
+            TaskType::LocalAgent,
+            "test-session",
+            InteractionSurface::Cli,
+        );
+        assert_eq!(record.id, "task-0");
+        tasks.start("task-0");
+        let dispatcher = NotificationDispatcher::new(TelegramGateway::default())
+            .with_boss_coordinator(coordinator.clone());
+        tasks.complete("task-0", &dispatcher);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        coordinator
+            .sync_terminal_child_task_state(tasks.as_ref())
+            .await
+            .expect("sync");
+        let message = coordinator.advance_plan(&app_state).await.expect("advance");
+
+        assert!(message.is_some());
+        assert_ne!(coordinator.get_stage().await, BossStage::Execution);
     }
 
     #[tokio::test]
