@@ -354,13 +354,13 @@ fn launch_agent_task(
             estimated_cost_micros_usd: usage_delta.estimated_cost_micros_usd,
         });
 
-        if result.messages.is_empty() {
-            tasks_for_run.append_output(&launched_task_id, "subagent produced no output");
-        } else {
-            for message in &result.messages {
-                tasks_for_run.append_output(&launched_task_id, format!("{}\n", message.text()));
-            }
-        }
+        append_subagent_output(
+            &tasks_for_run,
+            &launched_task_id,
+            request.role,
+            &task_input,
+            &result.messages,
+        );
 
         let artifact_verification = if request.role == WorkerRole::Implement {
             crate::core::boss_acceptance::verify_artifact_expectations(&task_input)
@@ -652,6 +652,175 @@ fn build_continue_task_input(
     sections.join("\n")
 }
 
+fn append_subagent_output(
+    tasks: &std::sync::Arc<crate::task::manager::TaskManager>,
+    task_id: &str,
+    role: WorkerRole,
+    task_input: &str,
+    messages: &[Message],
+) {
+    if messages.is_empty() {
+        tasks.append_output(task_id, "subagent produced no output");
+        return;
+    }
+
+    if role == WorkerRole::Verify {
+        let raw_output = messages
+            .iter()
+            .map(|message| message.text().trim().to_string())
+            .filter(|text| !text.is_empty())
+            .collect::<Vec<String>>()
+            .join("\n");
+        tasks.append_output(
+            task_id,
+            format!("{}\n", normalize_verify_output(task_input, &raw_output)),
+        );
+        return;
+    }
+
+    for message in messages {
+        tasks.append_output(task_id, format!("{}\n", message.text()));
+    }
+}
+
+fn normalize_verify_output(task_input: &str, raw_output: &str) -> String {
+    let target = extract_verify_target(raw_output)
+        .or_else(|| extract_verify_target(task_input))
+        .unwrap_or_else(|| "unknown".into());
+    let verification_result =
+        extract_labeled_value(raw_output, &["verification_result", "verification result"])
+            .unwrap_or_else(|| infer_verification_result(raw_output));
+    let remaining_blocker =
+        extract_labeled_value(raw_output, &["remaining_blocker", "remaining blocker"])
+            .unwrap_or_else(|| infer_remaining_blocker(raw_output, &verification_result));
+    let minimal_evidence =
+        extract_labeled_value(raw_output, &["minimal_evidence", "minimal evidence"])
+            .or_else(|| infer_minimal_evidence(raw_output))
+            .unwrap_or_else(|| "none recorded".into());
+
+    format!(
+        "verified_target: {target}\nverification_result: {verification_result}\nminimal_evidence: {minimal_evidence}\nremaining_blocker: {remaining_blocker}"
+    )
+}
+
+fn extract_verify_target(text: &str) -> Option<String> {
+    extract_labeled_value(text, &["verified_target", "verified target"])
+        .or_else(|| extract_suffix_after(text, "Verify target artifact only:"))
+        .or_else(|| extract_suffix_after(text, "target file exists and is non-empty:"))
+        .or_else(|| extract_suffix_after(text, "failed_target:"))
+}
+
+fn extract_suffix_after(text: &str, prefix: &str) -> Option<String> {
+    text.lines()
+        .find_map(|line| line.trim().strip_prefix(prefix).map(str::trim))
+        .and_then(|value| {
+            let trimmed = value
+                .trim_end_matches('.')
+                .split_once(". Return")
+                .map(|(head, _)| head)
+                .unwrap_or(value)
+                .trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_string())
+        })
+}
+
+fn extract_labeled_value(text: &str, labels: &[&str]) -> Option<String> {
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let lower = trimmed.to_ascii_lowercase();
+        for label in labels {
+            if lower.starts_with(label) {
+                if let Some((_, value)) = trimmed.split_once(':') {
+                    let value = value.trim();
+                    if !value.is_empty() {
+                        return Some(value.to_string());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn infer_verification_result(raw_output: &str) -> String {
+    if raw_output
+        .lines()
+        .map(str::trim)
+        .any(|line| line.eq_ignore_ascii_case("blocked") || line.contains("blocked"))
+    {
+        "blocked".into()
+    } else {
+        "verified".into()
+    }
+}
+
+fn infer_remaining_blocker(raw_output: &str, verification_result: &str) -> String {
+    if verification_result.eq_ignore_ascii_case("blocked") {
+        first_nonempty_noncontract_line(raw_output).unwrap_or_else(|| "unspecified blocker".into())
+    } else {
+        "none".into()
+    }
+}
+
+fn infer_minimal_evidence(raw_output: &str) -> Option<String> {
+    let evidence_prefixes = [
+        "read succeeded",
+        "write succeeded",
+        "glob succeeded",
+        "artifactverify succeeded",
+        "bash succeeded",
+        "evidence:",
+        "verified:",
+    ];
+    for line in raw_output.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let lower = trimmed.to_ascii_lowercase();
+        if evidence_prefixes
+            .iter()
+            .any(|prefix| lower.starts_with(prefix))
+        {
+            return Some(trimmed.to_string());
+        }
+    }
+    first_nonempty_noncontract_line(raw_output)
+}
+
+fn first_nonempty_noncontract_line(text: &str) -> Option<String> {
+    text.lines()
+        .map(str::trim)
+        .find(|line| {
+            !line.is_empty()
+                && !line.eq_ignore_ascii_case("verified")
+                && !line.eq_ignore_ascii_case("blocked")
+                && !line.to_ascii_lowercase().starts_with("verified_target:")
+                && !line.to_ascii_lowercase().starts_with("verified target:")
+                && !line
+                    .to_ascii_lowercase()
+                    .starts_with("verification_result:")
+                && !line
+                    .to_ascii_lowercase()
+                    .starts_with("verification result:")
+                && !line.to_ascii_lowercase().starts_with("minimal_evidence:")
+                && !line.to_ascii_lowercase().starts_with("minimal evidence:")
+                && !line.to_ascii_lowercase().starts_with("remaining_blocker:")
+                && !line.to_ascii_lowercase().starts_with("remaining blocker:")
+                && !line
+                    .to_ascii_lowercase()
+                    .starts_with("next_action for coordinator:")
+                && !line
+                    .to_ascii_lowercase()
+                    .starts_with("minimal verification steps:")
+                && !line.to_ascii_lowercase().starts_with("files changed")
+        })
+        .map(ToString::to_string)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -733,6 +902,42 @@ mod tests {
             panic!("expected spawn request");
         };
         assert_eq!(spawn.lism_policy, WorkerLisMPolicy::Inherit);
+    }
+
+    #[test]
+    fn normalize_verify_output_hard_clamps_to_four_lines() {
+        let task_input = "Verify target artifact only: /tmp/verification-first.md. Return a short verification result only.\n<boss-step-context>\nacceptance:\n- verified_target: /tmp/verification-first.md\n</boss-step-context>";
+        let raw_output = "Files changed\nverification_result: blocked\nminimal_evidence: Read succeeded\nremaining_blocker: target missing verification\nMinimal verification steps: run stat\nnext_action for coordinator: keep reading docs";
+        let normalized = normalize_verify_output(task_input, raw_output);
+        let lines = normalized.lines().collect::<Vec<_>>();
+        assert_eq!(lines.len(), 4);
+        assert_eq!(lines[0], "verified_target: /tmp/verification-first.md");
+        assert_eq!(lines[1], "verification_result: blocked");
+        assert_eq!(lines[2], "minimal_evidence: Read succeeded");
+        assert_eq!(lines[3], "remaining_blocker: target missing verification");
+    }
+
+    #[test]
+    fn normalize_verify_output_falls_back_to_task_target_and_blocked_line() {
+        let task_input =
+            "target file exists and is non-empty: /tmp/report.md\nfailed_target: /tmp/report.md";
+        let raw_output = "blocked\nRead succeeded\nnext_action for coordinator: expand docs";
+        let normalized = normalize_verify_output(task_input, raw_output);
+        assert_eq!(
+            normalized,
+            "verified_target: /tmp/report.md\nverification_result: blocked\nminimal_evidence: Read succeeded\nremaining_blocker: Read succeeded"
+        );
+    }
+
+    #[test]
+    fn normalize_verify_output_defaults_verified_when_no_blocker_is_present() {
+        let task_input = "Verify target artifact only: /tmp/report.md. Return a short verification result only.";
+        let raw_output = "Read succeeded\nhow to validate: stat report";
+        let normalized = normalize_verify_output(task_input, raw_output);
+        assert_eq!(
+            normalized,
+            "verified_target: /tmp/report.md\nverification_result: verified\nminimal_evidence: Read succeeded\nremaining_blocker: none"
+        );
     }
 }
 

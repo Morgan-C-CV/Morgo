@@ -4201,8 +4201,31 @@ async fn swarm_spawn_allowed_tools_and_max_turns_passed_through() {
     let output = manager
         .get_output("task-0", 0)
         .expect("task output should exist");
-    assert!(output.content.contains("first bounded answer"));
-    assert!(!output.content.contains("second bounded answer"));
+    assert!(
+        output.content.contains("verified_target:"),
+        "unexpected output: {}",
+        output.content
+    );
+    assert!(
+        output.content.contains("verification_result: verified"),
+        "unexpected output: {}",
+        output.content
+    );
+    assert!(
+        output.content.contains("minimal_evidence:"),
+        "unexpected output: {}",
+        output.content
+    );
+    assert!(
+        output.content.contains("remaining_blocker: none"),
+        "unexpected output: {}",
+        output.content
+    );
+    assert!(
+        !output.content.contains("second bounded answer"),
+        "unexpected output: {}",
+        output.content
+    );
     let worker_tools = inherited_tools
         .assemble_worker_registry(Some(&["Read".to_string(), "Bash".to_string()]))
         .visible_tools(&permission_context)
