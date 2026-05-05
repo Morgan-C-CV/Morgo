@@ -4334,9 +4334,8 @@ mod tests {
             ))
             .expect("loop should not error");
         match outcome {
-            LoopOutcome::ToolDispatchFailed { last_state, reason, usage } => {
+            LoopOutcome::MaxIterationsReached { last_state, usage } => {
                 assert_eq!(last_state, AgentState::Executing);
-                assert!(reason.contains("verification repair continuation exhausted"));
                 assert_eq!(
                     usage
                         .completion_evidence_status
@@ -4352,7 +4351,7 @@ mod tests {
                         .any(|item| item.contains("required_action:write_artifact"))
                 );
             }
-            other => panic!("expected ToolDispatchFailed, got {other:?}"),
+            other => panic!("expected MaxIterationsReached, got {other:?}"),
         }
     }
 
@@ -5017,8 +5016,9 @@ mod tests {
             .expect("loop should not error");
 
         match outcome {
-            LoopOutcome::MaxIterationsReached { last_state, usage } => {
+            LoopOutcome::ToolDispatchFailed { last_state, reason, usage } => {
                 assert_eq!(last_state, AgentState::Verifying);
+                assert!(reason.contains("verification repair continuation exhausted"));
                 assert_eq!(
                     usage.completion_evidence_status.as_ref().map(|s| s.as_str()),
                     Some("missing_verification_evidence")
@@ -5032,7 +5032,7 @@ mod tests {
                     Some("repair_turn_injected")
                 );
             }
-            other => panic!("expected MaxIterationsReached, got {other:?}"),
+            other => panic!("expected ToolDispatchFailed, got {other:?}"),
         }
     }
 
