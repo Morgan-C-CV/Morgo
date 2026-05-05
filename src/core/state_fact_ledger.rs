@@ -72,6 +72,19 @@ pub struct ArtifactRecord {
     pub lineage: LedgerLineage,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerificationRecord {
+    pub ref_id: String,
+    pub path: String,
+    pub status: String,
+    pub source: String,
+    pub source_event_id: String,
+    pub freshness: String,
+    pub confidence_milli: u16,
+    pub lineage: LedgerLineage,
+    pub summary: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct LedgerLineage {
     pub status: String,
@@ -122,6 +135,7 @@ pub struct StepFactLedgers {
     pub test_refs: Vec<TestRecord>,
     pub review_refs: Vec<ReviewRecord>,
     pub artifact_refs: Vec<ArtifactRecord>,
+    pub verification_refs: Vec<VerificationRecord>,
     pub open_item_refs: Vec<OpenItemRecord>,
     pub blocker_refs: Vec<BlockerRecord>,
     pub rejected_approaches: Vec<RejectedApproachRecord>,
@@ -390,6 +404,18 @@ fn push_artifact_record(ledger: &mut StepFactLedgers, record: ArtifactRecord) {
     }
 }
 
+fn push_verification_record(ledger: &mut StepFactLedgers, record: VerificationRecord) {
+    let duplicate = ledger.verification_refs.iter().any(|existing| {
+        existing.path == record.path
+            && existing.status == record.status
+            && existing.source == record.source
+            && existing.summary == record.summary
+    });
+    if !duplicate {
+        ledger.verification_refs.push(record);
+    }
+}
+
 fn normalize_runtime_path(path: &str) -> String {
     normalize_candidate_path(path, std::env::current_dir().ok().as_deref())
         .unwrap_or_else(|| path.to_string())
@@ -490,26 +516,17 @@ pub fn format_artifact_fact_line(item: &ArtifactRecord) -> String {
     )
 }
 
-pub fn format_verification_fact_line(
-    ref_id: &str,
-    path: &str,
-    status: &str,
-    source: &str,
-    source_event_id: &str,
-    freshness: &str,
-    confidence_milli: u16,
-    summary: &str,
-) -> String {
+pub fn format_verification_fact_line(item: &VerificationRecord) -> String {
     format!(
         "fact: verification_status ref={} path={} status={} source={} source_event_id={} freshness={} confidence={} lineage_status=active invalidated_by=none supersedes=none conflicts_with=none summary={}",
-        ref_id,
-        path,
-        status,
-        source,
-        source_event_id,
-        freshness,
-        format_confidence(confidence_milli),
-        summary,
+        item.ref_id,
+        item.path,
+        item.status,
+        item.source,
+        item.source_event_id,
+        item.freshness,
+        format_confidence(item.confidence_milli),
+        item.summary,
     )
 }
 
@@ -526,18 +543,9 @@ pub fn fact_lines_from_ledgers(ledgers: &StepFactLedgers) -> Vec<String> {
     }
     for item in &ledgers.artifact_refs {
         facts.push(format_artifact_fact_line(item));
-        if item.status == "verified" {
-            facts.push(format_verification_fact_line(
-                &item.ref_id,
-                &item.path,
-                "verified",
-                &item.source,
-                &item.source_event_id,
-                &item.freshness,
-                item.confidence_milli,
-                &item.summary,
-            ));
-        }
+    }
+    for item in &ledgers.verification_refs {
+        facts.push(format_verification_fact_line(item));
     }
     facts
 }
@@ -563,6 +571,29 @@ fn bash_test_status(record: &ToolExecutionRecord) -> &'static str {
         ToolExecutionOutcomeKind::ResultTooLarge => "result_too_large",
         _ => "failed",
     }
+}
+
+fn is_target_scoped_readback(record: &ToolExecutionRecord) -> bool {
+    let detail = record.detail.as_deref().unwrap_or_default().to_ascii_lowercase();
+    let summary = record.summary.to_ascii_lowercase();
+    detail.contains("verified")
+        || detail.contains("read-back")
+        || detail.contains("read back")
+        || detail.contains("exists")
+        || summary.contains("verify")
+        || summary.contains("read-back")
+        || summary.contains("exists")
+}
+
+fn infer_bash_readback_path(command: &str) -> Option<String> {
+    let read_only_prefixes = ["cat ", "ls ", "stat ", "test -f ", "test -d "];
+    if !read_only_prefixes.iter().any(|prefix| command.contains(prefix)) {
+        return None;
+    }
+    extract_artifact_expectations(command)
+        .into_iter()
+        .next()
+        .map(|expectation| expectation.path.to_string_lossy().to_string())
 }
 
 pub fn append_runtime_tool_record(
@@ -597,18 +628,22 @@ pub fn append_runtime_tool_record(
                     lineage: active_lineage(),
                 },
             );
-            ledgers.artifact_refs.push(ArtifactRecord {
-                ref_id: format!("artifact:{ref_namespace}:readback"),
-                path: path.clone(),
-                kind: "file".into(),
-                status: "verified".into(),
-                summary: format!("runtime Read verified readable artifact at {path}"),
-                source: "tool:Read".into(),
-                source_event_id: format!("tool-read:{ref_namespace}"),
-                freshness: "after-runtime-read".into(),
-                confidence_milli: 900,
-                lineage: active_lineage(),
-            });
+            if is_target_scoped_readback(record) {
+                push_verification_record(
+                    ledgers,
+                    VerificationRecord {
+                        ref_id: format!("verification:{ref_namespace}:readback"),
+                        path: path.clone(),
+                        status: "verified".into(),
+                        source: "tool:Read".into(),
+                        source_event_id: format!("tool-read:{ref_namespace}"),
+                        freshness: "after-runtime-read".into(),
+                        confidence_milli: 900,
+                        lineage: active_lineage(),
+                        summary: format!("runtime Read verified readable artifact at {path}"),
+                    },
+                );
+            }
         }
         "Edit" | "Write" => {
             if record.kind != ToolExecutionOutcomeKind::Success {
@@ -674,40 +709,21 @@ pub fn append_runtime_tool_record(
                 });
             }
             if record.kind == ToolExecutionOutcomeKind::Success {
-                let detail = record.detail.as_deref().unwrap_or_default().to_ascii_lowercase();
-                let read_like = command.contains("cat ")
-                    || command.contains("ls ")
-                    || command.contains("find ")
-                    || command.contains("stat ")
-                    || command.contains("test -f ")
-                    || command.contains("test -d ")
-                    || command.contains("wc -c ")
-                    || command.contains("python3 ")
-                    || detail.contains("exists")
-                    || detail.contains("readme")
-                    || detail.contains("demo.py");
-                if read_like {
-                    if let Some(path) = extract_artifact_expectations(&command)
-                        .into_iter()
-                        .next()
-                        .map(|expectation| expectation.path.to_string_lossy().to_string())
-                    {
-                        push_artifact_record(
-                            ledgers,
-                            ArtifactRecord {
-                                ref_id: format!("artifact:{ref_namespace}:bash-readback"),
-                                path,
-                                kind: "path".into(),
-                                status: "verified".into(),
-                                summary: tool_record_summary(record),
-                                source: "tool:Bash".into(),
-                                source_event_id: format!("tool-bash:{ref_namespace}"),
-                                freshness: "after-runtime-bash".into(),
-                                confidence_milli: 850,
-                                lineage: active_lineage(),
-                            },
-                        );
-                    }
+                if let Some(path) = infer_bash_readback_path(&command) {
+                    push_verification_record(
+                        ledgers,
+                        VerificationRecord {
+                            ref_id: format!("verification:{ref_namespace}:bash-readback"),
+                            path,
+                            status: "verified".into(),
+                            source: "tool:Bash".into(),
+                            source_event_id: format!("tool-bash:{ref_namespace}"),
+                            freshness: "after-runtime-bash".into(),
+                            confidence_milli: 850,
+                            lineage: active_lineage(),
+                            summary: tool_record_summary(record),
+                        },
+                    );
                 }
             }
         }
@@ -1270,8 +1286,9 @@ pub fn build_step_fact_ledgers(step: &BossPlanStep) -> StepFactLedgers {
 #[cfg(test)]
 mod tests {
     use super::{
+        append_runtime_tool_record,
         LedgerLineage, ReviewRecord, build_blocker_records, build_open_item_records,
-        build_rejected_approach_records, build_step_fact_ledgers,
+        build_rejected_approach_records, build_step_fact_ledgers, StepFactLedgers,
     };
     use crate::core::boss_state::{BossPlanStep, BossPlanStepStatus, BossStage};
     use crate::tool::definition::{ObservableInput, ObservableInputSource};
@@ -1608,6 +1625,60 @@ mod tests {
                 .all(|item| item.source != "review_summary"),
             "runtime review records should suppress fallback inferred review entries"
         );
+    }
+
+    #[test]
+    fn successful_read_without_target_scoped_verify_intent_does_not_emit_verification_record() {
+        let mut ledgers = StepFactLedgers::default();
+        let record = ToolExecutionRecord {
+            tool_name: "Read".into(),
+            outcome: "Text".into(),
+            kind: ToolExecutionOutcomeKind::Success,
+            summary: "Read succeeded".into(),
+            detail: Some("plain file contents".into()),
+            pending_approval: None,
+            report_modifier: ToolReportModifier::None,
+            observable_input: Some(ObservableInput {
+                value: r#"{"path":"src/core/state_fact_ledger.rs"}"#.into(),
+                source: ObservableInputSource::Raw,
+            }),
+            batch_context: ToolBatchContext {
+                batch_index: 0,
+                batch_size: 1,
+                executed_in_batch: false,
+            },
+        };
+
+        append_runtime_tool_record(&mut ledgers, &record, "read-no-verify");
+
+        assert!(ledgers.verification_refs.is_empty());
+    }
+
+    #[test]
+    fn python_bash_success_does_not_emit_verification_record() {
+        let mut ledgers = StepFactLedgers::default();
+        let record = ToolExecutionRecord {
+            tool_name: "Bash".into(),
+            outcome: "Text".into(),
+            kind: ToolExecutionOutcomeKind::Success,
+            summary: "Bash succeeded".into(),
+            detail: Some("exit_code: 0\nprinted demo.py".into()),
+            pending_approval: None,
+            report_modifier: ToolReportModifier::None,
+            observable_input: Some(ObservableInput {
+                value: r#"{"command":"python3 scripts/check.py /tmp/demo.py"}"#.into(),
+                source: ObservableInputSource::Raw,
+            }),
+            batch_context: ToolBatchContext {
+                batch_index: 0,
+                batch_size: 1,
+                executed_in_batch: false,
+            },
+        };
+
+        append_runtime_tool_record(&mut ledgers, &record, "bash-python");
+
+        assert!(ledgers.verification_refs.is_empty());
     }
 
     #[test]

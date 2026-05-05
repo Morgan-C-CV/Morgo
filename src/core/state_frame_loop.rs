@@ -480,16 +480,14 @@ fn repair_turn_fact_line(repair_turn: &ArtifactRepairTurn, reference: &str, summ
 
 fn has_verified_artifact_for_path(frame: &StateFrame, path: &str) -> bool {
     frame.recent_evidence.iter().any(|line| {
-        ((line.starts_with("fact: artifact_status ")
+        (line.starts_with("fact: artifact_status ")
             && evidence_field_value(line, "path").as_deref() == Some(path)
             && evidence_field_value(line, "status").as_deref() == Some("verified")
             && (evidence_field_value(line, "source").as_deref() == Some("tool:ArtifactVerify")
-                || evidence_field_value(line, "source").as_deref() == Some("tool:Read")
-                || evidence_field_value(line, "source").as_deref() == Some("tool:Bash")
                 || line.contains("artifact verification passed")))
             || (line.starts_with("fact: verification_status ")
                 && evidence_field_value(line, "path").as_deref() == Some(path)
-                && evidence_field_value(line, "status").as_deref() == Some("verified")))
+                && evidence_field_value(line, "status").as_deref() == Some("verified"))
     })
 }
 
@@ -4591,7 +4589,7 @@ mod tests {
         );
         push_artifact_target_fact(&mut frame, "artifact:contract:0", "/tmp/report.md", "file");
         frame.recent_evidence.push(
-            "fact: artifact_status ref=artifact:contract:0 path=/tmp/report.md kind=file status=verified source=tool:Read source_event_id=tool-read:1 freshness=after-runtime-read confidence=0.90 lineage_status=active invalidated_by=none supersedes=none conflicts_with=none summary=read-back verified /tmp/report.md".into(),
+            "fact: artifact_status ref=artifact:created path=/tmp/report.md kind=file status=created source=tool:Write source_event_id=tool-write:1 freshness=after-runtime confidence=1.00 lineage_status=active invalidated_by=none supersedes=none conflicts_with=none summary=artifact created".into(),
         );
         frame.recent_evidence.push(
             "fact: verification_status ref=artifact:contract:0 path=/tmp/report.md status=verified source=tool:Read source_event_id=tool-read:1 freshness=after-runtime-read confidence=0.90 lineage_status=active invalidated_by=none supersedes=none conflicts_with=none summary=read-back verified /tmp/report.md".into(),
