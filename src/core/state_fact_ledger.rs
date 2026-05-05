@@ -2,6 +2,9 @@ use crate::core::boss_acceptance::{
     BossArtifactKind, extract_artifact_expectations, verify_artifact_expectations,
 };
 use crate::core::boss_state::{BossPlanStep, BossPlanStepStatus, BossStage};
+use crate::core::state_frame::{
+    DeclaredArtifactContract, StageExecutionContract, VerificationContract,
+};
 use crate::tool::result::{ToolExecutionOutcomeKind, ToolExecutionRecord};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -573,19 +576,48 @@ fn bash_test_status(record: &ToolExecutionRecord) -> &'static str {
     }
 }
 
-fn is_target_scoped_readback(record: &ToolExecutionRecord) -> bool {
+fn contract_mentions_path(contract: &StageExecutionContract, path: &str) -> bool {
+    contract
+        .declared_artifact_by_path(path)
+        .is_some()
+        || contract.verification_by_target_path(path).is_some()
+}
+
+fn contract_has_explicit_verify_intent(contract: &StageExecutionContract, path: &str) -> bool {
+    contract
+        .verification_by_target_path(path)
+        .map(|verification| {
+            verification
+                .required_actions
+                .iter()
+                .chain(verification.required_evidence.iter())
+                .any(|item| {
+                    let lowered = item.to_ascii_lowercase();
+                    lowered.contains("verify")
+                        || lowered.contains("read_back")
+                        || lowered.contains("read-back")
+                        || lowered.contains("exists")
+                })
+        })
+        .unwrap_or(false)
+}
+
+fn is_target_scoped_readback(
+    contract: &StageExecutionContract,
+    record: &ToolExecutionRecord,
+    path: &str,
+) -> bool {
+    if !contract_mentions_path(contract, path) || !contract_has_explicit_verify_intent(contract, path) {
+        return false;
+    }
     let detail = record.detail.as_deref().unwrap_or_default().to_ascii_lowercase();
-    let summary = record.summary.to_ascii_lowercase();
     detail.contains("verified")
         || detail.contains("read-back")
         || detail.contains("read back")
         || detail.contains("exists")
-        || summary.contains("verify")
-        || summary.contains("read-back")
-        || summary.contains("exists")
 }
 
-fn infer_bash_readback_path(command: &str) -> Option<String> {
+fn infer_bash_readback_path(contract: &StageExecutionContract, command: &str) -> Option<String> {
     let read_only_prefixes = ["cat ", "ls ", "stat ", "test -f ", "test -d "];
     if !read_only_prefixes.iter().any(|prefix| command.contains(prefix)) {
         return None;
@@ -594,9 +626,50 @@ fn infer_bash_readback_path(command: &str) -> Option<String> {
         .into_iter()
         .next()
         .map(|expectation| expectation.path.to_string_lossy().to_string())
+        .filter(|path| contract_mentions_path(contract, path))
+        .filter(|path| contract_has_explicit_verify_intent(contract, path))
+}
+
+fn contract_from_step_declared_context(step: &BossPlanStep) -> StageExecutionContract {
+    let declared_artifacts = extract_artifact_expectations(step.objective())
+        .into_iter()
+        .map(|expectation| DeclaredArtifactContract {
+            ref_id: expectation.path.to_string_lossy().to_string(),
+            path: expectation.path.to_string_lossy().to_string(),
+            kind: match expectation.kind {
+                BossArtifactKind::File => "file".into(),
+                BossArtifactKind::Directory => "directory".into(),
+            },
+            required_actions: Vec::new(),
+            required_evidence: vec!["artifact_evidence".into()],
+        })
+        .collect::<Vec<_>>();
+    let acceptance = step.acceptance.join(" ").to_ascii_lowercase();
+    let verifications = declared_artifacts
+        .iter()
+        .filter(|artifact| {
+            acceptance.contains("verify")
+                || acceptance.contains("read-back")
+                || acceptance.contains("read_back")
+                || acceptance.contains("exists")
+        })
+        .map(|artifact| VerificationContract {
+            target_ref: artifact.ref_id.clone(),
+            target_path: Some(artifact.path.clone()),
+            required_actions: vec!["read_back_verify".into()],
+            required_evidence: vec!["verification_evidence".into()],
+        })
+        .collect::<Vec<_>>();
+    StageExecutionContract {
+        declared_artifacts,
+        verifications,
+        required_evidence: vec!["artifact_evidence".into()],
+        ..StageExecutionContract::default()
+    }
 }
 
 pub fn append_runtime_tool_record(
+    contract: &StageExecutionContract,
     ledgers: &mut StepFactLedgers,
     record: &ToolExecutionRecord,
     ref_namespace: &str,
@@ -628,7 +701,7 @@ pub fn append_runtime_tool_record(
                     lineage: active_lineage(),
                 },
             );
-            if is_target_scoped_readback(record) {
+            if is_target_scoped_readback(contract, record, &path) {
                 push_verification_record(
                     ledgers,
                     VerificationRecord {
@@ -709,7 +782,7 @@ pub fn append_runtime_tool_record(
                 });
             }
             if record.kind == ToolExecutionOutcomeKind::Success {
-                if let Some(path) = infer_bash_readback_path(&command) {
+                if let Some(path) = infer_bash_readback_path(contract, &command) {
                     push_verification_record(
                         ledgers,
                         VerificationRecord {
@@ -772,10 +845,16 @@ fn is_test_command(command: &str) -> bool {
 }
 
 fn apply_runtime_tool_records(ledgers: &mut StepFactLedgers, step: &BossPlanStep) {
+    let contract = contract_from_step_declared_context(step);
     for (idx, record) in step.tool_execution_records.iter().enumerate() {
         match record.tool_name.as_str() {
             "Read" | "Edit" | "Write" | "Bash" => {
-                append_runtime_tool_record(ledgers, record, &format!("step{}:{idx}", step.id));
+                append_runtime_tool_record(
+                    &contract,
+                    ledgers,
+                    record,
+                    &format!("step{}:{idx}", step.id),
+                );
             }
             "BossReview" => {
                 let verdict =
@@ -1291,6 +1370,7 @@ mod tests {
         build_rejected_approach_records, build_step_fact_ledgers, StepFactLedgers,
     };
     use crate::core::boss_state::{BossPlanStep, BossPlanStepStatus, BossStage};
+    use crate::core::state_frame::{DeclaredArtifactContract, StageExecutionContract, VerificationContract};
     use crate::tool::definition::{ObservableInput, ObservableInputSource};
     use crate::tool::result::{
         ToolBatchContext, ToolExecutionOutcomeKind, ToolExecutionRecord, ToolReportModifier,
@@ -1630,6 +1710,7 @@ mod tests {
     #[test]
     fn successful_read_without_target_scoped_verify_intent_does_not_emit_verification_record() {
         let mut ledgers = StepFactLedgers::default();
+        let contract = StageExecutionContract::default();
         let record = ToolExecutionRecord {
             tool_name: "Read".into(),
             outcome: "Text".into(),
@@ -1649,7 +1730,7 @@ mod tests {
             },
         };
 
-        append_runtime_tool_record(&mut ledgers, &record, "read-no-verify");
+        append_runtime_tool_record(&contract, &mut ledgers, &record, "read-no-verify");
 
         assert!(ledgers.verification_refs.is_empty());
     }
@@ -1657,6 +1738,7 @@ mod tests {
     #[test]
     fn python_bash_success_does_not_emit_verification_record() {
         let mut ledgers = StepFactLedgers::default();
+        let contract = StageExecutionContract::default();
         let record = ToolExecutionRecord {
             tool_name: "Bash".into(),
             outcome: "Text".into(),
@@ -1676,9 +1758,54 @@ mod tests {
             },
         };
 
-        append_runtime_tool_record(&mut ledgers, &record, "bash-python");
+        append_runtime_tool_record(&contract, &mut ledgers, &record, "bash-python");
 
         assert!(ledgers.verification_refs.is_empty());
+    }
+
+    #[test]
+    fn target_scoped_read_with_verify_intent_emits_verification_record() {
+        let mut ledgers = StepFactLedgers::default();
+        let contract = StageExecutionContract {
+            declared_artifacts: vec![DeclaredArtifactContract {
+                ref_id: "artifact:report".into(),
+                path: "/tmp/report.md".into(),
+                kind: "file".into(),
+                required_actions: vec![],
+                required_evidence: vec!["artifact_evidence".into()],
+            }],
+            verifications: vec![VerificationContract {
+                target_ref: "artifact:report".into(),
+                target_path: Some("/tmp/report.md".into()),
+                required_actions: vec!["read_back_verify".into()],
+                required_evidence: vec!["verification_evidence".into()],
+            }],
+            ..StageExecutionContract::default()
+        };
+        let record = ToolExecutionRecord {
+            tool_name: "Read".into(),
+            outcome: "Text".into(),
+            kind: ToolExecutionOutcomeKind::Success,
+            summary: "Read verification".into(),
+            detail: Some("read-back verified /tmp/report.md".into()),
+            pending_approval: None,
+            report_modifier: ToolReportModifier::None,
+            observable_input: Some(ObservableInput {
+                value: r#"{"path":"/tmp/report.md"}"#.into(),
+                source: ObservableInputSource::Raw,
+            }),
+            batch_context: ToolBatchContext {
+                batch_index: 0,
+                batch_size: 1,
+                executed_in_batch: false,
+            },
+        };
+
+        append_runtime_tool_record(&contract, &mut ledgers, &record, "read-verify");
+
+        assert_eq!(ledgers.verification_refs.len(), 1);
+        assert_eq!(ledgers.verification_refs[0].path, "/tmp/report.md");
+        assert_eq!(ledgers.verification_refs[0].source, "tool:Read");
     }
 
     #[test]

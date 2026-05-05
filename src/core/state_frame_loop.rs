@@ -1874,7 +1874,12 @@ async fn execute_call_tool(
                 &source_event_id,
             );
             let mut ledgers = StepFactLedgers::default();
-            append_runtime_tool_record(&mut ledgers, &record, &format!("runtime:{}", dispatch_seq));
+            append_runtime_tool_record(
+                &frame.stage_execution_contract,
+                &mut ledgers,
+                &record,
+                &format!("runtime:{}", dispatch_seq),
+            );
             let fact_lines = fact_lines_from_ledgers(&ledgers);
             ref_write_count += fact_lines.len();
             for line in fact_lines {
@@ -2260,7 +2265,12 @@ fn push_tool_failure_feedback(
     );
 
     let mut ledgers = StepFactLedgers::default();
-    append_runtime_tool_record(&mut ledgers, record, &format!("runtime:{}", dispatch_seq));
+    append_runtime_tool_record(
+        &frame.stage_execution_contract,
+        &mut ledgers,
+        record,
+        &format!("runtime:{}", dispatch_seq),
+    );
     let fact_lines = fact_lines_from_ledgers(&ledgers);
     let ref_write_count = fact_lines.len();
     for line in fact_lines {
