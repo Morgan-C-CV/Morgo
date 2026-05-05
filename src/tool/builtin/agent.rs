@@ -528,6 +528,23 @@ fn build_worker_task_input(request: &SpawnAgentRequest) -> String {
         sections.push("</boss-step-context>".into());
     }
 
+    if request.role == WorkerRole::Verify {
+        sections.push("<verify-output-contract>".into());
+        sections.push(
+            "return only four short lines: verified_target, verification_result, minimal_evidence, remaining_blocker"
+                .into(),
+        );
+        sections.push(
+            "do not include analysis, summary prose, next_action, file lists, suggestions, or extra validation steps"
+                .into(),
+        );
+        sections.push(
+            "keep minimal_evidence to one short factual phrase and keep remaining_blocker short"
+                .into(),
+        );
+        sections.push("</verify-output-contract>".into());
+    }
+
     sections.join("\n")
 }
 
@@ -868,6 +885,17 @@ mod tests {
         assert!(input.contains("<boss-step-context>"));
         assert!(input.contains("objective: objective 1"));
         assert!(input.contains("plan_id: plan-1"));
+    }
+
+    #[test]
+    fn build_worker_task_input_adds_verify_output_contract_for_verify_role() {
+        let mut request = sample_spawn_request();
+        request.role = WorkerRole::Verify;
+        let input = build_worker_task_input(&request);
+        assert!(input.contains("<verify-output-contract>"));
+        assert!(input.contains("return only four short lines"));
+        assert!(input.contains("do not include analysis"));
+        assert!(input.contains("keep minimal_evidence to one short factual phrase"));
     }
 
     #[test]
