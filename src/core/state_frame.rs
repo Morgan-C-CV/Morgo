@@ -336,7 +336,9 @@ pub struct RepairNeeded {
 fn normalized_agent_state(raw: &str) -> Option<&'static str> {
     match raw.trim().to_ascii_lowercase().as_str() {
         "planning" | "plan" => Some("planning"),
-        "executing" | "execute" | "execution" | "running" | "in_progress" => Some("executing"),
+        "executing" | "execute" | "executed" | "execution" | "running" | "in_progress" => {
+            Some("executing")
+        }
         "reviewing" | "review" => Some("reviewing"),
         "correcting" | "correct" | "repairing" | "repair" => Some("correcting"),
         "verifying" | "verify" | "re_verify" | "reverify" => Some("verifying"),
@@ -357,7 +359,9 @@ fn normalized_decision_kind(raw: &str) -> Option<&'static str> {
         "handoff" => Some("handoff"),
         "accept" => Some("accept"),
         "reject" => Some("reject"),
-        "done" | "complete" | "completed" | "finish" | "finished" => Some("done"),
+        "done" | "complete" | "completed" | "finish" | "finished" | "success" | "succeeded" => {
+            Some("done")
+        }
         _ => None,
     }
 }
@@ -525,6 +529,33 @@ mod tests {
         assert_eq!(decision.decision, DecisionKind::CallTool);
         let next_action = decision.next_action.expect("next action");
         assert_eq!(next_action.action_type, "Write");
+    }
+
+    #[test]
+    fn executed_and_success_aliases_are_accepted_by_state_decision_validation() {
+        let decision = validate_state_decision(
+            r#"{
+                "state":"executed",
+                "decision":"success"
+            }"#,
+        )
+        .expect("executed/success aliases should normalize");
+
+        assert_eq!(decision.state, AgentState::Executing);
+    }
+
+    #[test]
+    fn executed_with_completed_next_state_is_accepted_by_state_decision_validation() {
+        let decision = validate_state_decision(
+            r#"{
+                "state":"executed",
+                "next_state":"completed",
+                "decision":"success"
+            }"#,
+        )
+        .expect("completed alias should normalize");
+
+        assert_eq!(decision.state, AgentState::Executing);
     }
 }
 

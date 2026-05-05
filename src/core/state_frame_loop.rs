@@ -225,6 +225,20 @@ Rules:\n\
 \n\
 StateFrame:";
 
+fn build_state_decision_repair_prompt(reason: &str, raw_json: &str) -> String {
+    format!(
+        "Your previous response could not be parsed as canonical StateDecision JSON.\n\
+         Error: {reason}\n\
+         Raw output: {raw_json}\n\
+         Return ONLY one JSON object matching the canonical schema.\n\
+         Canonical state values: planning, executing, reviewing, correcting, verifying, blocked, done.\n\
+         Canonical decision values: continue, request_context, call_tool, handoff, accept, reject, done.\n\
+         Alias mapping you must normalize before responding: executed -> executing, completed -> done, success -> done.\n\
+         Do not return explanations, wrappers, validation prose, or keys outside the canonical schema.\n\
+         Please respond with canonical StateDecision JSON only."
+    )
+}
+
 fn append_runtime_contract_facts(frame: &mut StateFrame) {
     let max_tool_calls_value = if frame.budget.max_tool_calls == 0 {
         "unlimited".to_string()
@@ -2525,13 +2539,8 @@ pub async fn run_decision_loop_with_tools(
                 let mut last_repair = first_repair;
                 let mut resolved = None;
                 for _attempt in 0..config.repair_budget {
-                    let repair_prompt = format!(
-                        "Your previous response could not be parsed as StateDecision JSON.\n\
-                         Error: {}\n\
-                         Raw output: {}\n\
-                         Please respond with valid StateDecision JSON only.",
-                        last_repair.reason, last_repair.raw_json
-                    );
+                    let repair_prompt =
+                        build_state_decision_repair_prompt(&last_repair.reason, &last_repair.raw_json);
                     let repair_prompt_chars = repair_prompt.chars().count();
                     total_usage.original_prompt_chars += repair_prompt_chars;
                     total_usage.sent_prompt_chars += repair_prompt_chars;
@@ -2917,10 +2926,10 @@ pub async fn run_decision_loop_with_tools(
 mod tests {
     use super::{
         DecisionLoopConfig, LoopOutcome, LoopUsage, RecoveryAttempt, StateFrameToolRuntime,
-        append_runtime_contract_facts, classify_tool_outcome, evaluate_completion_evidence,
-        execute_call_tool, parse_and_validate_decision, push_tool_failure_feedback,
-        push_tool_outcome_evidence, run_decision_loop, run_decision_loop_with_tools,
-        tool_backed_hydration_path,
+        append_runtime_contract_facts, build_state_decision_repair_prompt, classify_tool_outcome,
+        evaluate_completion_evidence, execute_call_tool, parse_and_validate_decision,
+        push_tool_failure_feedback, push_tool_outcome_evidence, run_decision_loop,
+        run_decision_loop_with_tools, tool_backed_hydration_path,
     };
     use crate::core::state_frame::validate_state_decision;
     use crate::core::state_frame::{
@@ -2942,6 +2951,19 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     struct ArtifactVerifyMockTool;
+
+    #[test]
+    fn repair_prompt_restates_canonical_enums_and_alias_mapping() {
+        let prompt = build_state_decision_repair_prompt(
+            "missing or unsupported state/next_state",
+            r#"{"state":"executed","decision":"success"}"#,
+        );
+
+        assert!(prompt.contains("Canonical state values: planning, executing, reviewing, correcting, verifying, blocked, done."));
+        assert!(prompt.contains("Canonical decision values: continue, request_context, call_tool, handoff, accept, reject, done."));
+        assert!(prompt.contains("executed -> executing, completed -> done, success -> done"));
+        assert!(prompt.contains("canonical StateDecision JSON only"));
+    }
 
     #[async_trait::async_trait]
     impl Tool for ArtifactVerifyMockTool {
