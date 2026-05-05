@@ -3875,28 +3875,38 @@ impl BossCoordinator {
             let Some(plan) = plan_guard.as_ref() else {
                 return Ok(false);
             };
-            let Some(current_step_id) = self.status.read().await.current_step else {
-                return Ok(false);
-            };
-            let Some(step) = plan.steps.iter().find(|step| step.id == current_step_id) else {
-                return Ok(false);
-            };
-            if step.completed || step.status.is_terminal_failure() {
-                return Ok(false);
-            }
-            let Some(task_id) = step.worker_task_id.as_ref() else {
-                return Ok(false);
-            };
-            let Some(status) = tasks.status(task_id) else {
-                return Ok(false);
-            };
-            if matches!(
-                status,
-                TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Killed
-            ) {
-                Some((step.id, task_id.clone(), status))
+            let current_step_id = self.status.read().await.current_step;
+            let current_step_terminal = current_step_id.and_then(|current_step_id| {
+                let step = plan.steps.iter().find(|step| step.id == current_step_id)?;
+                if step.completed || step.status.is_terminal_failure() {
+                    return None;
+                }
+                let task_id = step.worker_task_id.as_ref()?;
+                let status = tasks.status(task_id)?;
+                matches!(
+                    status,
+                    TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Killed
+                )
+                .then_some((step.id, task_id.clone(), status))
+            });
+            if current_step_terminal.is_some() {
+                current_step_terminal
             } else {
-                None
+                plan.steps.iter().find_map(|step| {
+                    if step.completed || step.status.is_terminal_failure() {
+                        return None;
+                    }
+                    let task_id = step.worker_task_id.as_ref()?;
+                    let status = tasks.status(task_id)?;
+                    if matches!(
+                        status,
+                        TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Killed
+                    ) {
+                        Some((step.id, task_id.clone(), status))
+                    } else {
+                        None
+                    }
+                })
             }
         };
 
