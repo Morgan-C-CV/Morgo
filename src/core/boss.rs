@@ -178,7 +178,13 @@ fn is_verification_first_continuation(step: &BossPlanStep) -> bool {
 }
 
 fn verification_first_output_contract() -> String {
-    "return only: verified target, verification result, minimal evidence, remaining blocker if any. Keep it brief and target-scoped. No roadmap, replan prose, further reading suggestions, or extended next steps.".into()
+    "Return exactly four labeled lines:
+verified_target: <exact target path>
+verification_result: <verified|blocked>
+minimal_evidence: <1-3 short facts>
+remaining_blocker: <none|short blocker>
+Forbidden: Files changed, Minimal verification steps, next_action for coordinator, further reading suggestions, file-reading plans, truncation notes, roadmap, replan prose, or extended next steps."
+        .into()
 }
 
 fn general_worker_output_contract() -> String {
@@ -217,6 +223,83 @@ fn build_brief_verification_review_summary(step: &BossPlanStep, source: &str) ->
     format!(
         "{source} reported boss step {} complete.\nVerified target: {}\nVerification result: target-scoped verification complete\nMinimal evidence: {}\nRemaining blocker: none",
         step.id, verified_target, evidence_line
+    )
+}
+
+fn build_verification_first_brief_objective(step: &BossPlanStep) -> String {
+    let target = primary_declared_artifact_path(step).unwrap_or_else(|| "unknown".into());
+    format!(
+        "Verify only the declared target artifact for this step: {target}. Return a target-scoped verification result only. Do not continue implementation, do not summarize extra files, and do not provide coordinator advice or next-step suggestions."
+    )
+}
+
+fn build_verification_first_acceptance(step: &BossPlanStep) -> Vec<String> {
+    let target = primary_declared_artifact_path(step).unwrap_or_else(|| "unknown".into());
+    vec![
+        format!("verified target: {target}"),
+        "verification result is reported in short form".into(),
+        "remaining blocker is stated only if verification is blocked".into(),
+    ]
+}
+
+fn shape_verification_first_result_text(step: &BossPlanStep, text: &str) -> String {
+    let target = primary_declared_artifact_path(step).unwrap_or_else(|| "unknown".into());
+    let mut verification_result = None;
+    let mut minimal_evidence = None;
+    let mut remaining_blocker = None;
+
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let lower = trimmed.to_ascii_lowercase();
+        if verification_result.is_none()
+            && (lower.starts_with("verification result:")
+                || lower.starts_with("verification_result:"))
+        {
+            verification_result = trimmed
+                .split_once(':')
+                .map(|(_, value)| value.trim().to_string())
+                .filter(|value| !value.is_empty());
+            continue;
+        }
+        if minimal_evidence.is_none()
+            && (lower.starts_with("minimal evidence:")
+                || lower.starts_with("minimal_evidence:"))
+        {
+            minimal_evidence = trimmed
+                .split_once(':')
+                .map(|(_, value)| value.trim().to_string())
+                .filter(|value| !value.is_empty());
+            continue;
+        }
+        if remaining_blocker.is_none()
+            && (lower.starts_with("remaining blocker:")
+                || lower.starts_with("remaining_blocker:")
+                || lower.starts_with("remaining blockers"))
+        {
+            remaining_blocker = trimmed
+                .split_once(':')
+                .map(|(_, value)| value.trim().to_string())
+                .filter(|value| !value.is_empty());
+            continue;
+        }
+    }
+
+    let evidence = minimal_evidence.unwrap_or_else(|| {
+        let facts = target_scoped_verification_evidence(step);
+        if facts.is_empty() {
+            "none recorded".into()
+        } else {
+            facts.join("; ")
+        }
+    });
+    let result = verification_result.unwrap_or_else(|| "verified".into());
+    let blocker = remaining_blocker.unwrap_or_else(|| "none".into());
+
+    format!(
+        "verified_target: {target}\nverification_result: {result}\nminimal_evidence: {evidence}\nremaining_blocker: {blocker}"
     )
 }
 
@@ -1170,7 +1253,12 @@ fn store_step_result_diff(step: &mut BossPlanStep, primary: &str, fallback: Opti
     if candidate.trim().is_empty() {
         return;
     }
-    step.result_diff = Some(candidate.trim().to_string());
+    let stored = if is_verification_first_continuation(step) {
+        shape_verification_first_result_text(step, candidate.trim())
+    } else {
+        candidate.trim().to_string()
+    };
+    step.result_diff = Some(stored);
 }
 
 fn sync_step_tool_execution_records(
@@ -4992,6 +5080,10 @@ impl BossCoordinator {
             .as_ref()
             .map(|policy| policy.worker_role)
             .unwrap_or(WorkerRole::Implement);
+        let verification_first_short_form = worker_role == WorkerRole::Verify
+            && rollout_execution_policy
+                .as_ref()
+                .is_some_and(|policy| policy.fallback_tier == "verification_first");
         let lism_policy = if let Some(policy) = rollout_execution_policy.as_ref() {
             policy.forced_worker_lism_policy.as_str().to_string()
         } else {
@@ -5010,29 +5102,58 @@ impl BossCoordinator {
             workspace_capability: render_workspace_capability_scope(),
             boss_actor_role: "executor_b".to_string(),
         };
+        let effective_objective = if verification_first_short_form {
+            build_verification_first_brief_objective(step)
+        } else {
+            step.objective().to_string()
+        };
+        let effective_acceptance = if verification_first_short_form {
+            build_verification_first_acceptance(step)
+        } else {
+            step.acceptance.clone()
+        };
+        let effective_relevant_file_handles = if verification_first_short_form {
+            relevant_file_handles
+                .iter()
+                .filter(|handle| handle.kind == "target_file" || handle.kind == "target_directory")
+                .cloned()
+                .collect::<Vec<_>>()
+        } else {
+            relevant_file_handles.clone()
+        };
+        let effective_target_files = if verification_first_short_form {
+            target_files.iter().take(1).cloned().collect::<Vec<_>>()
+        } else {
+            target_files.clone()
+        };
+        let effective_target_artifacts = if verification_first_short_form {
+            target_artifacts
+                .iter()
+                .take(1)
+                .cloned()
+                .collect::<Vec<_>>()
+        } else {
+            target_artifacts.clone()
+        };
         let brief = BossContextBrief {
             plan_id: plan.plan_id.clone(),
             step_id: step.id,
             plan_version: plan_version.clone(),
             step_revision: step_revision.clone(),
             generated_at,
-            objective: step.objective().to_string(),
-            acceptance: step.acceptance.clone(),
+            objective: effective_objective.clone(),
+            acceptance: effective_acceptance.clone(),
             last_correction: step.last_correction.clone(),
             recent_decisions: recent_decisions.clone(),
-            relevant_file_handles: relevant_file_handles.clone(),
-            target_files: target_files.clone(),
-            target_artifacts: target_artifacts.clone(),
+            relevant_file_handles: effective_relevant_file_handles.clone(),
+            target_files: effective_target_files.clone(),
+            target_artifacts: effective_target_artifacts.clone(),
             allowed_tools: allowed_tools.clone(),
             permission_scope: permission_scope.clone(),
             parent_session_id: parent_session_id.to_string(),
             context_strategy: BossContextStrategy::Brief,
         };
-        let required_output_hint = if worker_role == WorkerRole::Verify
-            && rollout_execution_policy
-                .as_ref()
-                .is_some_and(|policy| policy.fallback_tier == "verification_first")
-        {
+        let required_output_hint = if verification_first_short_form {
             Some(verification_first_output_contract())
         } else {
             Some(general_worker_output_contract())
@@ -5067,10 +5188,18 @@ impl BossCoordinator {
                     ..ExecutorBStageMemory::default()
                 })
             },
-            open_items,
+            open_items: if verification_first_short_form {
+                effective_acceptance.clone()
+            } else {
+                open_items
+            },
             blocked_items,
             recent_local_facts,
-            allowed_actions: vec!["implement".into()],
+            allowed_actions: if verification_first_short_form {
+                vec!["verify_artifact".into()]
+            } else {
+                vec!["implement".into()]
+            },
             required_output_hint,
         };
         let assignment_fingerprint = assignment_fingerprint(&json!({
@@ -5084,13 +5213,13 @@ impl BossCoordinator {
             })).collect::<Vec<_>>(),
             "step_id": step.id,
             "step_revision": step_revision,
-            "objective": step.objective(),
-            "acceptance": step.acceptance,
+            "objective": effective_objective,
+            "acceptance": effective_acceptance,
             "last_correction": step.last_correction,
             "recent_decisions": recent_decisions,
-            "relevant_file_handles": relevant_file_handles,
-            "target_files": target_files,
-            "target_artifacts": target_artifacts,
+            "relevant_file_handles": effective_relevant_file_handles,
+            "target_files": effective_target_files,
+            "target_artifacts": effective_target_artifacts,
             "allowed_tools": allowed_tools,
             "permission_scope": {
                 "lism_policy": permission_scope.lism_policy,
@@ -8436,11 +8565,88 @@ mod tests {
             .required_output_hint
             .as_deref()
             .expect("required output hint");
-        assert!(hint.contains("verified target"));
-        assert!(hint.contains("minimal evidence"));
+        assert!(hint.contains("verified_target"));
+        assert!(hint.contains("minimal_evidence"));
         assert!(!hint.contains("unified diff"));
-        assert!(hint.contains("No roadmap"));
-        assert!(hint.contains("No roadmap, replan prose, further reading suggestions"));
+        assert!(hint.contains("Forbidden: Files changed"));
+        assert!(hint.contains("further reading suggestions"));
+    }
+
+    #[tokio::test]
+    async fn verification_first_verify_role_payload_forbids_coordinator_advice_prose() {
+        let coordinator = BossCoordinator::new();
+        {
+            let mut plan = coordinator.plan.write().await;
+            *plan = Some(BossPlan {
+                plan_id: "plan-verify".into(),
+                accepted_by_user: true,
+                steps: vec![BossPlanStep {
+                    id: 0,
+                    description: "verify target".into(),
+                    objective: Some("write report to /tmp/verification-first.md".into()),
+                    acceptance: vec!["target file exists and is non-empty: /tmp/verification-first.md".into()],
+                    requires_approval: false,
+                    status: BossPlanStepStatus::Rejected,
+                    completed: false,
+                    result_diff: None,
+                    worker_task_id: None,
+                    attempt_count: 1,
+                    retry_budget: 3,
+                    last_review_summary: Some("verification missing".into()),
+                    last_correction: Some("verify_artifact".into()),
+                    stage_execution_contract: StageExecutionContract::default(),
+                    stage_continuation_context: Some(crate::core::state_frame::StageContinuationContext {
+                        repair_intent: Some(crate::core::state_frame::RepairIntent {
+                            failed_target: Some("/tmp/verification-first.md".into()),
+                            verified_facts: vec!["Write succeeded".into()],
+                            next_action: Some("verify_artifact".into()),
+                            continuity_mode: Some(crate::core::state_frame::ContinuityMode::Repair),
+                        }),
+                        failed_target: Some("/tmp/verification-first.md".into()),
+                        verified_facts: vec!["Write succeeded".into()],
+                        next_action: Some("verify_artifact".into()),
+                        continuity_mode: Some(crate::core::state_frame::ContinuityMode::Repair),
+                    }),
+                    executor_b_stage_memory: Some(ExecutorBStageMemory {
+                        continuity: Some(ExecutorBStageMemoryContinuity::VerificationFirstIsolated),
+                        ..ExecutorBStageMemory::default()
+                    }),
+                    review_task_id: None,
+                    tool_execution_records: Vec::new(),
+                }],
+                ..BossPlan::default()
+            });
+        }
+        {
+            let mut metadata = coordinator.routed_step_metadata.write().await;
+            metadata.insert(0, BossStepRoutedMetadata {
+                completion_evidence_gaps: vec![CompletionEvidenceGap {
+                    target_ref: "artifact:0".into(),
+                    target_path: Some("/tmp/verification-first.md".into()),
+                    missing_artifact_evidence: false,
+                    missing_test_evidence: false,
+                    missing_verification_evidence: true,
+                    recommended_action: "verify_artifact".into(),
+                }],
+                fallback_tier: Some("verification_first".into()),
+                fallback_reason: Some("rollout_policy_verification_gap".into()),
+                ..BossStepRoutedMetadata::default()
+            });
+        }
+
+        let payload = coordinator
+            .build_step_spawn_payload_internal(0, "session-alpha", "boss-actor-b")
+            .await
+            .expect("spawn payload")
+            .payload;
+
+        assert!(payload.contains("required_output: Return exactly four labeled lines:"));
+        assert!(payload.contains("verified_target: <exact target path>"));
+        assert!(payload.contains("Forbidden: Files changed"));
+        assert!(!payload.contains("return a unified diff or file edits"));
+        assert!(payload.contains("Do not continue implementation"));
+        assert!(payload.contains("do not provide coordinator advice or next-step suggestions"));
+        assert!(!payload.contains("任务必须按 4 个阶段推进"));
     }
 
     #[test]
@@ -8525,6 +8731,71 @@ mod tests {
         assert!(!summary.contains("If you approve"));
         assert!(!summary.contains("roadmap"));
         assert!(!summary.contains("Next action:"));
+    }
+
+    #[test]
+    fn verification_first_verify_role_result_is_post_shaped_to_short_form() {
+        let mut step = BossPlanStep {
+            id: 0,
+            description: "verify report".into(),
+            objective: Some("write report to /tmp/verification-first.md".into()),
+            acceptance: vec!["target file exists and is non-empty: /tmp/verification-first.md".into()],
+            requires_approval: false,
+            status: BossPlanStepStatus::Running,
+            completed: false,
+            result_diff: None,
+            worker_task_id: None,
+            attempt_count: 1,
+            retry_budget: 3,
+            last_review_summary: Some("verification missing".into()),
+            last_correction: Some("verify_artifact".into()),
+            stage_execution_contract: StageExecutionContract::default(),
+            stage_continuation_context: Some(crate::core::state_frame::StageContinuationContext {
+                repair_intent: Some(crate::core::state_frame::RepairIntent {
+                    failed_target: Some("/tmp/verification-first.md".into()),
+                    verified_facts: vec!["Write succeeded".into()],
+                    next_action: Some("verify_artifact".into()),
+                    continuity_mode: Some(crate::core::state_frame::ContinuityMode::Repair),
+                }),
+                failed_target: Some("/tmp/verification-first.md".into()),
+                verified_facts: vec!["Write succeeded".into()],
+                next_action: Some("verify_artifact".into()),
+                continuity_mode: Some(crate::core::state_frame::ContinuityMode::Repair),
+            }),
+            executor_b_stage_memory: Some(ExecutorBStageMemory {
+                continuity: Some(ExecutorBStageMemoryContinuity::VerificationFirstIsolated),
+                ..ExecutorBStageMemory::default()
+            }),
+            review_task_id: None,
+            tool_execution_records: vec![ToolExecutionRecord {
+                tool_name: "Read".into(),
+                outcome: "Text".into(),
+                kind: ToolExecutionOutcomeKind::Success,
+                summary: "Read succeeded".into(),
+                detail: None,
+                pending_approval: None,
+                report_modifier: ToolReportModifier::None,
+                observable_input: None,
+                batch_context: ToolBatchContext {
+                    batch_index: 0,
+                    batch_size: 1,
+                    executed_in_batch: false,
+                },
+            }],
+        };
+
+        store_step_result_diff(
+            &mut step,
+            "verification result: verified\nminimal evidence: Read succeeded\nremaining blockers / risk summary: none\nnext_action for coordinator: keep reading docs",
+            None,
+        );
+
+        let shaped = step.result_diff.as_deref().expect("result diff");
+        assert!(shaped.contains("verified_target: /tmp/verification-first.md"));
+        assert!(shaped.contains("verification_result: verified"));
+        assert!(shaped.contains("minimal_evidence: Read succeeded"));
+        assert!(shaped.contains("remaining_blocker: none"));
+        assert!(!shaped.contains("next_action for coordinator"));
     }
 
     #[test]
@@ -8626,6 +8897,91 @@ mod tests {
     }
 
     #[test]
+    fn u8_verify_role_long_output_is_compressed_before_boss_summary() {
+        let mut step = BossPlanStep {
+            id: 0,
+            description: "verify u8 report".into(),
+            objective: Some("write report to /tmp/multistage-tools-memory-token-report.md".into()),
+            acceptance: vec!["target file exists and is non-empty: /tmp/multistage-tools-memory-token-report.md".into()],
+            requires_approval: false,
+            status: BossPlanStepStatus::Running,
+            completed: false,
+            result_diff: None,
+            worker_task_id: None,
+            attempt_count: 1,
+            retry_budget: 3,
+            last_review_summary: Some("verification missing".into()),
+            last_correction: Some("verify_artifact".into()),
+            stage_execution_contract: StageExecutionContract::default(),
+            stage_continuation_context: Some(crate::core::state_frame::StageContinuationContext {
+                repair_intent: Some(crate::core::state_frame::RepairIntent {
+                    failed_target: Some("/tmp/multistage-tools-memory-token-report.md".into()),
+                    verified_facts: vec!["Write succeeded".into(), "Read succeeded".into()],
+                    next_action: Some("verify_artifact".into()),
+                    continuity_mode: Some(crate::core::state_frame::ContinuityMode::Repair),
+                }),
+                failed_target: Some("/tmp/multistage-tools-memory-token-report.md".into()),
+                verified_facts: vec!["Write succeeded".into(), "Read succeeded".into()],
+                next_action: Some("verify_artifact".into()),
+                continuity_mode: Some(crate::core::state_frame::ContinuityMode::Repair),
+            }),
+            executor_b_stage_memory: Some(ExecutorBStageMemory {
+                continuity: Some(ExecutorBStageMemoryContinuity::VerificationFirstIsolated),
+                ..ExecutorBStageMemory::default()
+            }),
+            review_task_id: None,
+            tool_execution_records: vec![
+                ToolExecutionRecord {
+                    tool_name: "Read".into(),
+                    outcome: "Text".into(),
+                    kind: ToolExecutionOutcomeKind::Success,
+                    summary: "Read succeeded".into(),
+                    detail: None,
+                    pending_approval: None,
+                    report_modifier: ToolReportModifier::None,
+                    observable_input: None,
+                    batch_context: ToolBatchContext {
+                        batch_index: 0,
+                        batch_size: 1,
+                        executed_in_batch: false,
+                    },
+                },
+                ToolExecutionRecord {
+                    tool_name: "Write".into(),
+                    outcome: "Text".into(),
+                    kind: ToolExecutionOutcomeKind::Success,
+                    summary: "Write succeeded".into(),
+                    detail: None,
+                    pending_approval: None,
+                    report_modifier: ToolReportModifier::None,
+                    observable_input: None,
+                    batch_context: ToolBatchContext {
+                        batch_index: 0,
+                        batch_size: 1,
+                        executed_in_batch: false,
+                    },
+                },
+            ],
+        };
+
+        store_step_result_diff(
+            &mut step,
+            "Files changed\nMinimal verification steps for coordinator\nnext_action for coordinator: read more docs\nremaining blockers / risk summary: doc truncation\nverification result: verified",
+            Some("fallback"),
+        );
+        let summary = build_step_review_summary(
+            &step,
+            "Worker task",
+            &[("Result", step.result_diff.as_deref().unwrap_or_default())],
+        );
+
+        assert!(!summary.contains("Files changed"));
+        assert!(!summary.contains("Minimal verification steps"));
+        assert!(!summary.contains("next_action for coordinator"));
+        assert!(summary.contains("Verified target: /tmp/multistage-tools-memory-token-report.md"));
+    }
+
+    #[test]
     fn verification_first_verify_role_output_is_shorter_than_general_replan_contract() {
         let mut verification_step = BossPlanStep {
             id: 0,
@@ -8702,6 +9058,71 @@ mod tests {
         assert!(brief_summary.len() < general_summary.len());
         assert!(!brief_summary.contains("If you approve"));
         assert!(general_summary.contains("If you approve"));
+    }
+
+    #[test]
+    fn verification_first_short_form_keeps_target_result_evidence_and_blocker_only() {
+        let mut step = BossPlanStep {
+            id: 0,
+            description: "verify target".into(),
+            objective: Some("write report to /tmp/verification-first.md".into()),
+            acceptance: vec!["target file exists and is non-empty: /tmp/verification-first.md".into()],
+            requires_approval: false,
+            status: BossPlanStepStatus::Running,
+            completed: false,
+            result_diff: None,
+            worker_task_id: None,
+            attempt_count: 1,
+            retry_budget: 3,
+            last_review_summary: Some("verification missing".into()),
+            last_correction: Some("verify_artifact".into()),
+            stage_execution_contract: StageExecutionContract::default(),
+            stage_continuation_context: Some(crate::core::state_frame::StageContinuationContext {
+                repair_intent: Some(crate::core::state_frame::RepairIntent {
+                    failed_target: Some("/tmp/verification-first.md".into()),
+                    verified_facts: vec!["Read succeeded".into()],
+                    next_action: Some("verify_artifact".into()),
+                    continuity_mode: Some(crate::core::state_frame::ContinuityMode::Repair),
+                }),
+                failed_target: Some("/tmp/verification-first.md".into()),
+                verified_facts: vec!["Read succeeded".into()],
+                next_action: Some("verify_artifact".into()),
+                continuity_mode: Some(crate::core::state_frame::ContinuityMode::Repair),
+            }),
+            executor_b_stage_memory: Some(ExecutorBStageMemory {
+                continuity: Some(ExecutorBStageMemoryContinuity::VerificationFirstIsolated),
+                ..ExecutorBStageMemory::default()
+            }),
+            review_task_id: None,
+            tool_execution_records: vec![ToolExecutionRecord {
+                tool_name: "Read".into(),
+                outcome: "Text".into(),
+                kind: ToolExecutionOutcomeKind::Success,
+                summary: "Read succeeded".into(),
+                detail: None,
+                pending_approval: None,
+                report_modifier: ToolReportModifier::None,
+                observable_input: None,
+                batch_context: ToolBatchContext {
+                    batch_index: 0,
+                    batch_size: 1,
+                    executed_in_batch: false,
+                },
+            }],
+        };
+
+        store_step_result_diff(
+            &mut step,
+            "verification result: blocked\nminimal evidence: Read succeeded\nremaining blocker: target file still missing verification evidence\nFiles changed: none",
+            None,
+        );
+
+        assert_eq!(
+            step.result_diff.as_deref(),
+            Some(
+                "verified_target: /tmp/verification-first.md\nverification_result: blocked\nminimal_evidence: Read succeeded\nremaining_blocker: target file still missing verification evidence"
+            )
+        );
     }
 
     #[test]
