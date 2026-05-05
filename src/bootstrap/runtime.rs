@@ -256,6 +256,14 @@ fn diagnostic_preview(value: &str, max_chars: usize) -> String {
 const DEFAULT_RUNTIME_SHUTDOWN_TIMEOUT_MS: u64 = 1_500;
 const DEFAULT_BOSS_TASK_TIMEOUT_SECS: u64 = 900;
 
+fn terminal_tail_stalled(
+    sync_result: &anyhow::Result<bool>,
+    terminal_result: &anyhow::Result<Option<String>>,
+) -> bool {
+    sync_result.as_ref().map(|value| !*value).unwrap_or(true)
+        || terminal_result.as_ref().map(|value| value.is_none()).unwrap_or(true)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ShutdownFailure {
     ForceDrainTimedOut,
@@ -715,11 +723,15 @@ impl RuntimeBootstrap {
                         println!(
                             "[boss-task] step task reached terminal status; syncing boss state"
                         );
-                        if let Some(task_manager) = app_arc.permission_context.task_manager.as_ref()
+                        let synced = if let Some(task_manager) =
+                            app_arc.permission_context.task_manager.as_ref()
                         {
                             let synced = boss.sync_terminal_child_task_state(task_manager).await;
                             println!("[boss-task] terminal child sync result: {:?}", synced);
-                        }
+                            synced
+                        } else {
+                            Ok(false)
+                        };
                         let terminal_msg = boss.advance_plan(&app_arc).await;
                         println!(
                             "[boss-task] terminal advance_plan result: {:?}",
@@ -729,6 +741,24 @@ impl RuntimeBootstrap {
                             boss.get_stage().await,
                             crate::core::boss_state::BossStage::Completed
                         ) {
+                            break;
+                        }
+                        if terminal_tail_stalled(&synced, &terminal_msg) {
+                            let run_id = boss.current_run_id().await;
+                            let lism_enabled = crate::core::boss::effective_lism_enabled(
+                                boss.lism_policy().await,
+                                app_arc.permission_context.lism_enabled(),
+                            );
+                            boss.emit_lism_sample_once(
+                                &run_id,
+                                lism_enabled,
+                                crate::core::boss_test_readiness::BossTestRunOutcome::Aborted,
+                                0,
+                            )
+                            .await;
+                            println!(
+                                "[boss-task] terminal tail stalled after child completion; emitted terminal sample"
+                            );
                             break;
                         }
                     }
@@ -2099,8 +2129,10 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        BootstrapCli, DEFAULT_BOSS_TASK_TIMEOUT_SECS, preview_chars, resolve_skill_project_root,
+        terminal_tail_stalled, BootstrapCli, DEFAULT_BOSS_TASK_TIMEOUT_SECS, preview_chars,
+        resolve_skill_project_root,
     };
+    use anyhow::anyhow;
 
     #[test]
     fn preview_chars_respects_utf8_boundaries() {
@@ -2138,5 +2170,20 @@ mod tests {
     fn bootstrap_cli_default_full_worker_dispatch_fallback_remains_enabled() {
         let cli = BootstrapCli::default();
         assert!(!cli.disable_full_worker_dispatch_fallback);
+    }
+
+    #[test]
+    fn terminal_sample_is_emitted_when_completed_child_tail_cannot_advance() {
+        let sync_result: anyhow::Result<bool> = Ok(false);
+        let terminal_result: anyhow::Result<Option<String>> = Ok(None);
+        assert!(terminal_tail_stalled(&sync_result, &terminal_result));
+
+        let sync_result: anyhow::Result<bool> = Ok(true);
+        let terminal_result: anyhow::Result<Option<String>> = Ok(Some("advance".into()));
+        assert!(!terminal_tail_stalled(&sync_result, &terminal_result));
+
+        let sync_result: anyhow::Result<bool> = Err(anyhow!("sync failed"));
+        let terminal_result: anyhow::Result<Option<String>> = Ok(None);
+        assert!(terminal_tail_stalled(&sync_result, &terminal_result));
     }
 }
