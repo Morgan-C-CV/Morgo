@@ -128,6 +128,28 @@ fn build_verification_repair_instruction(step: &BossPlanStep) -> Option<String> 
     ))
 }
 
+fn has_only_verification_evidence_gap(step: &BossPlanStep) -> bool {
+    step.tool_execution_records
+        .iter()
+        .filter(|record| record.tool_name == "ArtifactVerify")
+        .any(|record| {
+            record.kind == ToolExecutionOutcomeKind::Interrupted
+                && record
+                    .detail
+                    .as_deref()
+                    .is_some_and(|detail| detail.contains("artifact verification status=missing_or_invalid"))
+        })
+        && step.stage_continuation_context.as_ref().is_some_and(|context| {
+            context
+                .next_action
+                .as_deref()
+                .is_some_and(|action| {
+                    action.eq_ignore_ascii_case("verify_artifact")
+                        || action.eq_ignore_ascii_case("run_verification")
+                })
+        })
+}
+
 fn continuation_verified_facts(step: &BossPlanStep) -> Vec<String> {
     step.tool_execution_records
         .iter()
@@ -3405,18 +3427,21 @@ impl BossCoordinator {
             TaskStatus::Pending => None,
         };
 
-        let recovery_status =
-            plan.steps
-                .iter()
-                .find(|s| s.id == step_id)
-                .and_then(|step| match step.status {
-                    BossPlanStepStatus::Rejected => Some(("repair_dispatched", None)),
-                    BossPlanStepStatus::Failed if step.last_correction.is_some() => Some((
-                        "terminal_after_repair_exhausted",
-                        Some("artifact_verification_failed"),
-                    )),
-                    _ => None,
-                });
+        let recovery_status = plan.steps.iter().find(|s| s.id == step_id).and_then(|step| {
+            match step.status {
+                BossPlanStepStatus::Rejected => Some(("repair_dispatched", None)),
+                BossPlanStepStatus::Failed
+                    if step.last_correction.is_some() && has_only_verification_evidence_gap(step) =>
+                {
+                    Some(("repair_dispatched", None))
+                }
+                BossPlanStepStatus::Failed if step.last_correction.is_some() => Some((
+                    "terminal_after_repair_exhausted",
+                    Some("artifact_verification_failed"),
+                )),
+                _ => None,
+            }
+        });
 
         if let Some(summary) = review_summary {
             drop(plan_guard);
@@ -7095,6 +7120,145 @@ mod tests {
         assert!(
             message.is_some(),
             "verification continuation should not stall in execution"
+        );
+    }
+
+    #[test]
+    fn verification_only_terminalization_does_not_abort_while_repair_dispatch_is_still_possible() {
+        let mut step = BossPlanStep {
+            id: 0,
+            description: "verify target".into(),
+            objective: Some("verify artifact".into()),
+            acceptance: vec!["artifact verification passed".into()],
+            requires_approval: false,
+            status: BossPlanStepStatus::Failed,
+            completed: false,
+            result_diff: None,
+            worker_task_id: Some("task-0".into()),
+            attempt_count: 3,
+            retry_budget: 3,
+            last_review_summary: Some("artifact verification failed".into()),
+            last_correction: Some("verify_artifact".into()),
+            stage_execution_contract: StageExecutionContract::default(),
+            stage_continuation_context: Some(crate::core::state_frame::StageContinuationContext {
+                repair_intent: Some(crate::core::state_frame::RepairIntent {
+                    failed_target: Some("/tmp/example-site".into()),
+                    verified_facts: vec!["README created".into()],
+                    next_action: Some("verify_artifact".into()),
+                    continuity_mode: Some(crate::core::state_frame::ContinuityMode::Repair),
+                }),
+                failed_target: Some("/tmp/example-site".into()),
+                verified_facts: vec!["README created".into()],
+                next_action: Some("verify_artifact".into()),
+                continuity_mode: Some(crate::core::state_frame::ContinuityMode::Repair),
+            }),
+            executor_b_stage_memory: None,
+            review_task_id: None,
+            tool_execution_records: vec![ToolExecutionRecord {
+                tool_name: "ArtifactVerify".into(),
+                outcome: "Text".into(),
+                kind: ToolExecutionOutcomeKind::Interrupted,
+                summary: "artifact verification failed: /tmp/example-site".into(),
+                detail: Some(
+                    "artifact verification status=missing_or_invalid path=/tmp/example-site"
+                        .into(),
+                ),
+                pending_approval: None,
+                report_modifier: ToolReportModifier::None,
+                observable_input: None,
+                batch_context: ToolBatchContext {
+                    batch_index: 0,
+                    batch_size: 1,
+                    executed_in_batch: false,
+                },
+            }],
+        };
+
+        assert!(super::has_only_verification_evidence_gap(&step));
+        step.status = BossPlanStepStatus::Failed;
+        assert_eq!(step.status, BossPlanStepStatus::Failed);
+    }
+
+    #[tokio::test]
+    async fn u7_boss_on_only_verification_first_matches_all_on_terminalization_path() {
+        let coordinator = Arc::new(BossCoordinator::new());
+        let tasks = Arc::new(TaskManager::new_with_output_root(std::env::temp_dir()));
+        let app_state = test_app_state_with_tasks(tasks.clone(), coordinator.clone());
+        coordinator
+            .attach_app_state_for_report_testing(app_state.clone())
+            .await;
+        {
+            let mut status = coordinator.status.write().await;
+            status.stage = BossStage::Execution;
+            status.current_step = Some(0);
+        }
+        {
+            let mut plan = coordinator.plan.write().await;
+            *plan = Some(BossPlan {
+                accepted_by_user: true,
+                auto_sequence: true,
+                steps: vec![BossPlanStep {
+                    id: 0,
+                    description: "verify target".into(),
+                    objective: Some("verify artifact".into()),
+                    acceptance: vec!["artifact verification passed".into()],
+                    requires_approval: false,
+                    status: BossPlanStepStatus::Failed,
+                    completed: false,
+                    result_diff: None,
+                    worker_task_id: Some("task-0".into()),
+                    attempt_count: 3,
+                    retry_budget: 3,
+                    last_review_summary: Some("artifact verification failed".into()),
+                    last_correction: Some("verify_artifact".into()),
+                    stage_execution_contract: StageExecutionContract::default(),
+                    stage_continuation_context: Some(crate::core::state_frame::StageContinuationContext {
+                        repair_intent: Some(crate::core::state_frame::RepairIntent {
+                            failed_target: Some("/tmp/example-site".into()),
+                            verified_facts: vec!["README created".into()],
+                            next_action: Some("verify_artifact".into()),
+                            continuity_mode: Some(crate::core::state_frame::ContinuityMode::Repair),
+                        }),
+                        failed_target: Some("/tmp/example-site".into()),
+                        verified_facts: vec!["README created".into()],
+                        next_action: Some("verify_artifact".into()),
+                        continuity_mode: Some(crate::core::state_frame::ContinuityMode::Repair),
+                    }),
+                    executor_b_stage_memory: None,
+                    review_task_id: None,
+                    tool_execution_records: vec![ToolExecutionRecord {
+                        tool_name: "ArtifactVerify".into(),
+                        outcome: "Text".into(),
+                        kind: ToolExecutionOutcomeKind::Interrupted,
+                        summary: "artifact verification failed: /tmp/example-site".into(),
+                        detail: Some(
+                            "artifact verification status=missing_or_invalid path=/tmp/example-site"
+                                .into(),
+                        ),
+                        pending_approval: None,
+                        report_modifier: ToolReportModifier::None,
+                        observable_input: None,
+                        batch_context: ToolBatchContext {
+                            batch_index: 0,
+                            batch_size: 1,
+                            executed_in_batch: false,
+                        },
+                    }],
+                }],
+                ..BossPlan::default()
+            });
+        }
+
+        let message = coordinator.advance_plan(&app_state).await.expect("advance");
+        assert!(message.is_some());
+        let plan = coordinator.plan.read().await;
+        let step = &plan.as_ref().expect("plan").steps[0];
+        assert_eq!(step.status, BossPlanStepStatus::Failed);
+        assert_eq!(
+            step.stage_continuation_context
+                .as_ref()
+                .and_then(|context| context.next_action.as_deref()),
+            Some("verify_artifact")
         );
     }
 

@@ -918,6 +918,31 @@ fn terminalize_verification_only_gap(frame: &mut StateFrame, usage: &mut LoopUsa
     true
 }
 
+fn verification_gap_still_actionable(frame: &StateFrame, usage: &LoopUsage) -> bool {
+    if !matches!(
+        usage.completion_evidence_status,
+        Some(CompletionEvidenceStatus::MissingVerificationEvidence)
+    ) {
+        return false;
+    }
+    if usage.recovery_tier.as_deref() != Some("verification_repair_continuation")
+        && usage.recovery_outcome.as_deref() != Some("recovered")
+    {
+        return false;
+    }
+
+    let missing_refs = missing_verification_evidence_refs(frame);
+    if missing_refs.is_empty() {
+        return false;
+    }
+
+    missing_refs.iter().any(|verification_ref| {
+        artifact_contract_target(frame, verification_ref)
+            .map(|(_path, kind)| kind == "directory" || kind == "file")
+            .unwrap_or(false)
+    })
+}
+
 fn build_worker_structured_report(
     frame: &StateFrame,
     usage: &LoopUsage,
@@ -2868,6 +2893,10 @@ pub async fn run_decision_loop_with_tools(
     }
 
     terminalize_verification_only_gap(&mut frame, &mut total_usage);
+    if verification_gap_still_actionable(&frame, &total_usage) {
+        frame.state = AgentState::Verifying;
+        total_usage.recovery_outcome = Some("repair_dispatched".into());
+    }
     finalize_worker_usage_report(&frame, &mut total_usage);
     Ok(LoopOutcome::MaxIterationsReached {
         last_state: frame.state,
@@ -4987,7 +5016,7 @@ mod tests {
                 );
                 assert_eq!(
                     usage.recovery_outcome.as_deref(),
-                    Some("repair_turn_injected")
+                    Some("repair_dispatched")
                 );
             }
             other => panic!("expected MaxIterationsReached, got {other:?}"),
@@ -5021,6 +5050,49 @@ mod tests {
             gap.target_path.as_deref() == Some("/tmp/example-site/README.md")
                 && gap.recommended_action == "verify_artifact"
         }));
+    }
+
+    #[test]
+    fn verification_first_verifying_tail_does_not_end_as_terminal_after_repair_exhausted_when_reverify_is_still_actionable()
+     {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let frame = u7_recovered_artifact_frame_missing_verification();
+        let client = ModelProviderClient::with_scripted_turns(Vec::new());
+        let outcome = rt
+            .block_on(run_decision_loop(
+                &client,
+                frame,
+                DecisionLoopConfig {
+                    max_iterations: 0,
+                    ..DecisionLoopConfig::default()
+                },
+            ))
+            .expect("loop should not error");
+
+        match outcome {
+            LoopOutcome::MaxIterationsReached { last_state, usage } => {
+                assert_eq!(last_state, AgentState::Verifying);
+                assert_eq!(usage.recovery_tier.as_deref(), Some("verification_repair_continuation"));
+                assert_eq!(usage.recovery_outcome.as_deref(), Some("repair_dispatched"));
+            }
+            other => panic!("expected MaxIterationsReached, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn verification_first_directory_and_readme_gap_reuses_reverify_path_before_terminalizing() {
+        let mut frame = u7_recovered_artifact_frame_missing_verification();
+        let mut usage = LoopUsage {
+            recovery_attempted: true,
+            recovery_outcome: Some("recovered".into()),
+            ..LoopUsage::default()
+        };
+
+        assert!(super::promote_recovered_verification_gap(
+            &mut frame, &mut usage
+        ));
+        assert!(super::verification_gap_still_actionable(&frame, &usage));
+        assert_eq!(frame.state, AgentState::Verifying);
     }
 
     #[test]
