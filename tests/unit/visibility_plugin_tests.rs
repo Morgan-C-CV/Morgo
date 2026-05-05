@@ -44,6 +44,7 @@ use rust_agent::state::permission_context::{PermissionMode, ToolPermissionContex
 use rust_agent::task::manager::TaskManager;
 use rust_agent::tool::definition::{ToolCall, ToolResult};
 use rust_agent::tool::registry::ToolRegistry;
+use tokio::time::{Duration, timeout};
 use tokio::sync::RwLock;
 
 fn unique_temp_path(prefix: &str) -> PathBuf {
@@ -1609,63 +1610,67 @@ async fn wasm_runtime_tool_executes_happy_path() {
 
 #[tokio::test]
 async fn wasm_runtime_tool_timeout_maps_to_interrupted() {
-    let root = unique_temp_path("rust-agent-runtime-timeout");
-    let plugin_dir = root.join(".claude").join("plugins").join("demo");
-    let manifest_path = plugin_dir.join("plugin.json");
-    fs::create_dir_all(plugin_dir.join("dist")).expect("plugin dir should exist");
-    write_wasm_fixture(
-        &plugin_dir.join("dist").join("plugin.wasm"),
-        "plugin_runtime_loop.wat",
-    );
+    timeout(Duration::from_secs(60), async {
+        let root = unique_temp_path("rust-agent-runtime-timeout");
+        let plugin_dir = root.join(".claude").join("plugins").join("demo");
+        let manifest_path = plugin_dir.join("plugin.json");
+        fs::create_dir_all(plugin_dir.join("dist")).expect("plugin dir should exist");
+        write_wasm_fixture(
+            &plugin_dir.join("dist").join("plugin.wasm"),
+            "plugin_runtime_loop.wat",
+        );
 
-    let load_result = PluginLoadResult {
-        root: root.join(".claude").join("plugins"),
-        source: PluginConfigSource::Directory,
-        plugins: vec![PluginDefinition {
-            name: "demo-plugin".into(),
-            version: Some("0.1.0".into()),
-            description: "demo".into(),
-            manifest_path: manifest_path.clone(),
-            capabilities: vec![PluginCapability::Tools],
-            runtime: Some(sample_runtime_spec_with_limits(10, 65_536)),
-            diagnostics_metadata: None,
-            commands: vec![],
-            tools: vec![sample_runtime_tool("runtime-tool", manifest_path.clone())],
-            hooks: vec![],
-            governance: PluginGovernanceState::default(),
-            lifecycle_state: PluginLifecycleState::Enabled,
-            apply_status: PluginApplyStatus::Applied,
-            activation: PluginActivationSummary {
-                commands: 0,
-                tools: 1,
-                hooks: 0,
-            },
-        }],
-        diagnostics: vec![],
-        orphaned_governance_entries: vec![],
-    };
+        let load_result = PluginLoadResult {
+            root: root.join(".claude").join("plugins"),
+            source: PluginConfigSource::Directory,
+            plugins: vec![PluginDefinition {
+                name: "demo-plugin".into(),
+                version: Some("0.1.0".into()),
+                description: "demo".into(),
+                manifest_path: manifest_path.clone(),
+                capabilities: vec![PluginCapability::Tools],
+                runtime: Some(sample_runtime_spec_with_limits(100, 65_536)),
+                diagnostics_metadata: None,
+                commands: vec![],
+                tools: vec![sample_runtime_tool("runtime-tool", manifest_path.clone())],
+                hooks: vec![],
+                governance: PluginGovernanceState::default(),
+                lifecycle_state: PluginLifecycleState::Enabled,
+                apply_status: PluginApplyStatus::Applied,
+                activation: PluginActivationSummary {
+                    commands: 0,
+                    tools: 1,
+                    hooks: 0,
+                },
+            }],
+            diagnostics: vec![],
+            orphaned_governance_entries: vec![],
+        };
 
-    let (registry, diagnostics) =
-        augment_tool_registry_with_plugins(ToolRegistry::new(), &load_result);
-    assert!(diagnostics.is_empty());
+        let (registry, diagnostics) =
+            augment_tool_registry_with_plugins(ToolRegistry::new(), &load_result);
+        assert!(diagnostics.is_empty());
 
-    let result = registry
-        .invoke(
-            &ToolCall::new("plugin.demo-plugin.runtime-tool", "{\"input\":\"x\"}"),
-            &ToolPermissionContext::new(PermissionMode::Default),
-        )
-        .await
-        .expect("runtime invoke should map timeout");
-    let ToolResult::Interrupted(message) = result else {
-        panic!("expected interrupted result");
-    };
-    assert!(message.contains("plugin runtime execution interrupted"));
-    assert!(message.contains("Runtime: wasm"));
-    assert!(message.contains("Entry: run_tool"));
-    assert!(message.contains("Timeout hit: yes"));
-    assert!(message.contains("Result: interrupted"));
+        let result = registry
+            .invoke(
+                &ToolCall::new("plugin.demo-plugin.runtime-tool", "{\"input\":\"x\"}"),
+                &ToolPermissionContext::new(PermissionMode::Default),
+            )
+            .await
+            .expect("runtime invoke should map timeout");
+        let ToolResult::Interrupted(message) = result else {
+            panic!("expected interrupted result");
+        };
+        assert!(message.contains("plugin runtime execution interrupted"));
+        assert!(message.contains("Runtime: wasm"));
+        assert!(message.contains("Entry: run_tool"));
+        assert!(message.contains("Timeout hit: yes"));
+        assert!(message.contains("Result: interrupted"));
 
-    fs::remove_dir_all(root).expect("runtime timeout temp dir should be cleaned up");
+        fs::remove_dir_all(root).expect("runtime timeout temp dir should be cleaned up");
+    })
+    .await
+    .expect("wasm runtime timeout test should complete within 60 seconds");
 }
 
 #[tokio::test]
