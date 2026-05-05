@@ -28,6 +28,7 @@ use rust_agent::core::lism_ab_sample::new_shared_ab_sink;
 use rust_agent::core::prompt_budget::{
     BudgetDecision, PromptCacheCapability, ProviderProfile, evaluate_prompt_budget,
 };
+use rust_agent::core::state_frame::StageExecutionContract;
 use rust_agent::core::prompt_cache_adapter::apply_cache_control;
 use rust_agent::core::prompt_segment::{PromptAssembly, PromptSegment, PromptSegmentKind};
 use rust_agent::cost::tracker::CostTracker;
@@ -482,6 +483,7 @@ async fn run_minimal_openai_mock_server_n(listener: TcpListener, n: usize) {
 
 fn make_orchestrator_route_override_plan(step_id: usize) -> BossPlan {
     use rust_agent::core::boss_state::{BossPlan, BossPlanStep, BossPlanStepStatus};
+    use rust_agent::core::state_frame::StageExecutionContract;
     BossPlan {
         plan_id: format!("p-route-override-{step_id}"),
         task_description: "runtime resolution test".into(),
@@ -501,6 +503,7 @@ fn make_orchestrator_route_override_plan(step_id: usize) -> BossPlan {
             retry_budget: 3,
             last_review_summary: None,
             last_correction: None,
+            stage_execution_contract: StageExecutionContract::default(),
             stage_continuation_context: None,
             executor_b_stage_memory: None,
             review_task_id: None,
@@ -583,6 +586,7 @@ fn unique_test_dir(label: &str) -> std::path::PathBuf {
 }
 
 fn boss_step(id: usize, description: &str) -> BossPlanStep {
+    use rust_agent::core::state_frame::StageExecutionContract;
     BossPlanStep {
         id,
         description: description.into(),
@@ -597,6 +601,7 @@ fn boss_step(id: usize, description: &str) -> BossPlanStep {
         retry_budget: 3,
         last_review_summary: None,
         last_correction: None,
+        stage_execution_contract: StageExecutionContract::default(),
         stage_continuation_context: None,
         executor_b_stage_memory: None,
         review_task_id: None,
@@ -8754,6 +8759,7 @@ fn t27_3_execution_stage_with_step_maps_objective_and_open_items() {
         retry_budget: 3,
         last_review_summary: None,
         last_correction: None,
+        stage_execution_contract: StageExecutionContract::default(),
         stage_continuation_context: None,
         executor_b_stage_memory: None,
         review_task_id: None,
@@ -8812,6 +8818,7 @@ fn t27_3_completed_steps_go_into_accepted_summary() {
         retry_budget: 3,
         last_review_summary: None,
         last_correction: None,
+        stage_execution_contract: StageExecutionContract::default(),
         stage_continuation_context: None,
         executor_b_stage_memory: None,
         review_task_id: None,
@@ -8831,6 +8838,7 @@ fn t27_3_completed_steps_go_into_accepted_summary() {
         retry_budget: 3,
         last_review_summary: None,
         last_correction: None,
+        stage_execution_contract: StageExecutionContract::default(),
         stage_continuation_context: None,
         executor_b_stage_memory: None,
         review_task_id: None,
@@ -8913,6 +8921,7 @@ fn t27_3_projection_emits_rejected_approach_fact_from_review_correction() {
         retry_budget: 3,
         last_review_summary: Some("previous patch ignored edge cases".into()),
         last_correction: Some("preserve the auth guard branch".into()),
+        stage_execution_contract: StageExecutionContract::default(),
         stage_continuation_context: None,
         executor_b_stage_memory: None,
         review_task_id: None,
@@ -8960,6 +8969,7 @@ fn t27_3_readonly_audit_projection_emits_fact_ledger_and_readonly_actions() {
         retry_budget: 3,
         last_review_summary: None,
         last_correction: None,
+        stage_execution_contract: StageExecutionContract::default(),
         stage_continuation_context: None,
         executor_b_stage_memory: None,
         review_task_id: None,
@@ -9028,6 +9038,7 @@ fn t27_3_projection_emits_file_change_and_test_ledgers() {
         retry_budget: 3,
         last_review_summary: Some("tests failed because file_facts still said none recorded".into()),
         last_correction: None,
+        stage_execution_contract: StageExecutionContract::default(),
         stage_continuation_context: None,
         executor_b_stage_memory: None,
         review_task_id: None,
@@ -9090,6 +9101,7 @@ fn t27_3_projection_emits_file_fact_when_worker_reports_reading_a_file() {
         retry_budget: 3,
         last_review_summary: None,
         last_correction: None,
+        stage_execution_contract: StageExecutionContract::default(),
         stage_continuation_context: None,
         executor_b_stage_memory: None,
         review_task_id: None,
@@ -9156,6 +9168,7 @@ fn t27_3_projection_suppresses_none_recorded_when_matching_ledgers_exist() {
         retry_budget: 3,
         last_review_summary: Some("ACCEPT: artifact verified and tests passed".into()),
         last_correction: None,
+        stage_execution_contract: StageExecutionContract::default(),
         stage_continuation_context: None,
         executor_b_stage_memory: None,
         review_task_id: None,
@@ -11226,6 +11239,7 @@ fn make_plan_with_step(
             retry_budget: 3,
             last_review_summary: None,
             last_correction: None,
+            stage_execution_contract: StageExecutionContract::default(),
             stage_continuation_context: None,
             executor_b_stage_memory: None,
             review_task_id: None,
@@ -11784,6 +11798,7 @@ fn t27_7_build_accepted_archive_excludes_current_step() {
         retry_budget: 3,
         last_review_summary: None,
         last_correction: None,
+        stage_execution_contract: StageExecutionContract::default(),
         stage_continuation_context: None,
         executor_b_stage_memory: None,
         review_task_id: None,
@@ -11859,6 +11874,7 @@ fn t27_7_projection_uses_archive_for_accepted_summary() {
         retry_budget: 3,
         last_review_summary: None,
         last_correction: None,
+        stage_execution_contract: StageExecutionContract::default(),
         stage_continuation_context: None,
         executor_b_stage_memory: None,
         review_task_id: None,
@@ -11917,6 +11933,7 @@ fn t27_7_open_items_excludes_criteria_already_in_archive() {
         retry_budget: 3,
         last_review_summary: None,
         last_correction: None,
+        stage_execution_contract: StageExecutionContract::default(),
         stage_continuation_context: None,
         executor_b_stage_memory: None,
         review_task_id: None,
@@ -11937,6 +11954,7 @@ fn t27_7_open_items_excludes_criteria_already_in_archive() {
         retry_budget: 3,
         last_review_summary: None,
         last_correction: None,
+        stage_execution_contract: StageExecutionContract::default(),
         stage_continuation_context: None,
         executor_b_stage_memory: None,
         review_task_id: None,
@@ -11995,6 +12013,7 @@ fn make_t278_step(
         retry_budget: 3,
         last_review_summary: None,
         last_correction: None,
+        stage_execution_contract: StageExecutionContract::default(),
         stage_continuation_context: None,
         executor_b_stage_memory: None,
         review_task_id: None,

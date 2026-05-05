@@ -2261,6 +2261,7 @@ impl BossCoordinator {
                 retry_budget: 3,
                 last_review_summary: None,
                 last_correction: None,
+                stage_execution_contract: StageExecutionContract::default(),
                 stage_continuation_context: None,
                 executor_b_stage_memory: None,
                 review_task_id: None,
@@ -2826,16 +2827,7 @@ impl BossCoordinator {
                             step,
                             &routed_step_metadata,
                         ),
-                        stage_execution_contract: build_stage_execution_contract(
-                            step,
-                            &collect_target_artifacts(
-                                step,
-                                &collect_target_files(&extract_relevant_file_handles(
-                                    step.objective(),
-                                    &format!("step-{}-attempt-{}", step.id, step.attempt_count),
-                                )),
-                            ),
-                        ),
+                        stage_execution_contract: step.stage_execution_contract.clone(),
                         stage_continuation_context: build_stage_continuation_context(step),
                         executor_b_stage_memory: project_executor_b_stage_memory(
                             step,
@@ -2952,16 +2944,7 @@ impl BossCoordinator {
                             step,
                             &routed_step_metadata,
                         ),
-                        stage_execution_contract: build_stage_execution_contract(
-                            step,
-                            &collect_target_artifacts(
-                                step,
-                                &collect_target_files(&extract_relevant_file_handles(
-                                    step.objective(),
-                                    &format!("step-{}-attempt-{}", step.id, step.attempt_count),
-                                )),
-                            ),
-                        ),
+                        stage_execution_contract: step.stage_execution_contract.clone(),
                         stage_continuation_context: build_stage_continuation_context(step),
                         executor_b_stage_memory: project_executor_b_stage_memory(
                             step,
@@ -5945,6 +5928,7 @@ mod tests {
                     retry_budget: 3,
                     last_review_summary: None,
                     last_correction: None,
+                    stage_execution_contract: StageExecutionContract::default(),
                     stage_continuation_context: None,
                     executor_b_stage_memory: None,
                     review_task_id: None,
@@ -6011,6 +5995,7 @@ mod tests {
                     retry_budget: 3,
                     last_review_summary: None,
                     last_correction: None,
+                    stage_execution_contract: StageExecutionContract::default(),
                     stage_continuation_context: None,
                     executor_b_stage_memory: None,
                     review_task_id: None,
@@ -6078,6 +6063,7 @@ mod tests {
                     retry_budget: 3,
                     last_review_summary: None,
                     last_correction: None,
+                    stage_execution_contract: StageExecutionContract::default(),
                     stage_continuation_context: None,
                     executor_b_stage_memory: None,
                     review_task_id: None,
@@ -6453,6 +6439,16 @@ mod tests {
             retry_budget: 3,
             last_review_summary: None,
             last_correction: None,
+            stage_execution_contract: StageExecutionContract {
+                declared_artifacts: vec![DeclaredArtifactContract {
+                    ref_id: "artifact:report".into(),
+                    path: "/tmp/report.md".into(),
+                    kind: "file".into(),
+                    required_evidence: vec!["artifact_evidence".into()],
+                    required_actions: vec!["write_artifact".into()],
+                }],
+                ..StageExecutionContract::default()
+            },
             stage_continuation_context: None,
             executor_b_stage_memory: None,
             review_task_id: None,
@@ -6472,6 +6468,65 @@ mod tests {
                 .and_then(|context| context.next_action.as_deref()),
             Some("missing artifact evidence")
         );
+        assert_eq!(
+            step.stage_execution_contract.declared_artifacts[0].path,
+            "/tmp/report.md"
+        );
+    }
+
+    #[test]
+    fn typed_stage_contract_is_preserved_on_step_dispatch_and_repair() {
+        let contract = StageExecutionContract {
+            declared_artifacts: vec![DeclaredArtifactContract {
+                ref_id: "artifact:report".into(),
+                path: "/tmp/contract-report.md".into(),
+                kind: "file".into(),
+                required_evidence: vec!["artifact_evidence".into()],
+                required_actions: vec!["write_artifact".into()],
+            }],
+            verifications: vec![VerificationContract {
+                target_ref: "artifact:report".into(),
+                target_path: Some("/tmp/contract-report.md".into()),
+                required_actions: vec!["read_back_verify".into()],
+                required_evidence: vec!["verification_evidence".into()],
+            }],
+            ..StageExecutionContract::default()
+        };
+        let mut step = BossPlanStep {
+            id: 1,
+            description: "write artifact".into(),
+            objective: Some("noise objective /boss /".into()),
+            acceptance: vec![],
+            requires_approval: false,
+            status: BossPlanStepStatus::Running,
+            completed: false,
+            result_diff: None,
+            worker_task_id: None,
+            attempt_count: 0,
+            retry_budget: 3,
+            last_review_summary: None,
+            last_correction: None,
+            stage_execution_contract: contract.clone(),
+            stage_continuation_context: None,
+            executor_b_stage_memory: None,
+            review_task_id: None,
+            tool_execution_records: Vec::new(),
+        };
+
+        apply_step_failure_classification(
+            &mut step,
+            StepFailureClassification::RepairableRecovery,
+            "repair artifact",
+        );
+
+        assert_eq!(step.status, BossPlanStepStatus::Rejected);
+        assert_eq!(step.stage_execution_contract, contract);
+        assert_eq!(
+            step.stage_continuation_context
+                .as_ref()
+                .and_then(|context| context.failed_target.as_deref()),
+            Some("/tmp/contract-report.md")
+        );
     }
 
     #[test]
@@ -6490,6 +6545,7 @@ mod tests {
             retry_budget: 3,
             last_review_summary: None,
             last_correction: None,
+            stage_execution_contract: StageExecutionContract::default(),
             stage_continuation_context: None,
             executor_b_stage_memory: None,
             review_task_id: None,
@@ -6538,6 +6594,7 @@ mod tests {
                     retry_budget: 3,
                     last_review_summary: Some("artifact verification failed".into()),
                     last_correction: Some("repair artifact".into()),
+                    stage_execution_contract: StageExecutionContract::default(),
                     stage_continuation_context: Some(crate::core::state_frame::StageContinuationContext {
                         failed_target: Some(target_path.display().to_string()),
                         verified_facts: vec!["fact: verified".into()],
@@ -7135,6 +7192,7 @@ mod tests {
             retry_budget: 3,
             last_review_summary: Some("repair".into()),
             last_correction: Some("repair artifact".into()),
+            stage_execution_contract: StageExecutionContract::default(),
             stage_continuation_context: Some(crate::core::state_frame::StageContinuationContext {
                 failed_target: Some("/tmp/report.md".into()),
                 verified_facts: vec!["artifact verification failed".into()],
@@ -7222,6 +7280,7 @@ mod tests {
             retry_budget: 3,
             last_review_summary: None,
             last_correction: None,
+            stage_execution_contract: StageExecutionContract::default(),
             stage_continuation_context: None,
             executor_b_stage_memory: Some(ExecutorBStageMemory {
                 recent_reads: vec!["src/lib.rs".into()],
@@ -7280,6 +7339,7 @@ mod tests {
                         retry_budget: 3,
                         last_review_summary: Some("done".into()),
                         last_correction: None,
+                        stage_execution_contract: StageExecutionContract::default(),
                         stage_continuation_context: None,
                         executor_b_stage_memory: None,
                         review_task_id: None,
@@ -7299,6 +7359,7 @@ mod tests {
                         retry_budget: 3,
                         last_review_summary: Some("repair needed".into()),
                         last_correction: Some("/tmp/failed-report.md".into()),
+                        stage_execution_contract: StageExecutionContract::default(),
                         stage_continuation_context: None,
                         executor_b_stage_memory: None,
                         review_task_id: None,
@@ -7464,6 +7525,7 @@ mod tests {
                     retry_budget: 3,
                     last_review_summary: None,
                     last_correction: None,
+                    stage_execution_contract: StageExecutionContract::default(),
                     stage_continuation_context: None,
                     executor_b_stage_memory: None,
                     review_task_id: None,
@@ -7566,6 +7628,7 @@ mod tests {
                     retry_budget: 3,
                     last_review_summary: None,
                     last_correction: None,
+                    stage_execution_contract: StageExecutionContract::default(),
                     stage_continuation_context: None,
                     executor_b_stage_memory: None,
                     review_task_id: None,
@@ -7751,6 +7814,7 @@ mod tests {
                 retry_budget: 3,
                 last_review_summary: None,
                 last_correction: None,
+                stage_execution_contract: StageExecutionContract::default(),
                 stage_continuation_context: None,
                 executor_b_stage_memory: None,
                 review_task_id: None,
@@ -7791,6 +7855,7 @@ mod tests {
                     retry_budget: 3,
                     last_review_summary: None,
                     last_correction: None,
+                    stage_execution_contract: StageExecutionContract::default(),
                     stage_continuation_context: None,
                     executor_b_stage_memory: None,
                     review_task_id: None,
@@ -7924,6 +7989,7 @@ mod tests {
                 retry_budget: 3,
                 last_review_summary: Some(format!("summary {id}")),
                 last_correction: None,
+                stage_execution_contract: StageExecutionContract::default(),
                 stage_continuation_context: None,
                 executor_b_stage_memory: None,
                 review_task_id: None,
@@ -7973,13 +8039,14 @@ mod tests {
             result_diff: None,
             worker_task_id: None,
             attempt_count: 0,
-                    retry_budget: 3,
-                    last_review_summary: None,
-                    last_correction: None,
-                    stage_continuation_context: None,
-                    executor_b_stage_memory: None,
-                    review_task_id: None,
-                    tool_execution_records: Vec::new(),
+            retry_budget: 3,
+            last_review_summary: None,
+            last_correction: None,
+            stage_execution_contract: StageExecutionContract::default(),
+            stage_continuation_context: None,
+            executor_b_stage_memory: None,
+            review_task_id: None,
+            tool_execution_records: Vec::new(),
         };
         let artifacts =
             collect_target_artifacts(&step, &["/tmp/report.md".into(), "/tmp/results/".into()]);
@@ -8011,6 +8078,7 @@ mod tests {
             retry_budget: 3,
             last_review_summary: Some("tests are still failing".into()),
             last_correction: None,
+            stage_execution_contract: StageExecutionContract::default(),
             stage_continuation_context: None,
             executor_b_stage_memory: None,
             review_task_id: None,
@@ -8038,6 +8106,7 @@ mod tests {
             retry_budget: 3,
             last_review_summary: None,
             last_correction: None,
+            stage_execution_contract: StageExecutionContract::default(),
             stage_continuation_context: None,
             executor_b_stage_memory: None,
             review_task_id: None,

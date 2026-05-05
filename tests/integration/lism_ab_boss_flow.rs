@@ -9,6 +9,7 @@ use rust_agent::core::boss::{BossCoordinator, save_plan};
 use rust_agent::core::boss_state::{BossPlan, BossPlanStep, BossPlanStepStatus, BossStage};
 use rust_agent::core::boss_test_readiness::BossTestRunOutcome;
 use rust_agent::core::lism_ab_sample::{LisMAbSampleSink, new_shared_ab_sink};
+use rust_agent::core::state_frame::StageExecutionContract;
 use rust_agent::cost::tracker::CostTracker;
 use rust_agent::history::session::InMemorySessionStore;
 use rust_agent::interaction::dispatcher::NotificationDispatcher;
@@ -47,6 +48,7 @@ fn boss_step(id: usize, desc: &str) -> BossPlanStep {
         retry_budget: 3,
         last_review_summary: None,
         last_correction: None,
+        stage_execution_contract: StageExecutionContract::default(),
         stage_continuation_context: None,
         executor_b_stage_memory: None,
         review_task_id: None,

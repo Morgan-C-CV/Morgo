@@ -165,6 +165,9 @@ pub struct BossPlanStep {
     /// Correction message from A sent back to B on rejection.
     #[serde(default)]
     pub last_correction: Option<String>,
+    /// Typed stage execution contract carried on the step itself.
+    #[serde(default)]
+    pub stage_execution_contract: StageExecutionContract,
     /// Typed continuation source for reject / repair / continue flows.
     #[serde(default)]
     pub stage_continuation_context: Option<StageContinuationContext>,

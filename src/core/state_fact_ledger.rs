@@ -2,9 +2,7 @@ use crate::core::boss_acceptance::{
     BossArtifactKind, extract_artifact_expectations, verify_artifact_expectations,
 };
 use crate::core::boss_state::{BossPlanStep, BossPlanStepStatus, BossStage};
-use crate::core::state_frame::{
-    DeclaredArtifactContract, StageExecutionContract, VerificationContract,
-};
+use crate::core::state_frame::StageExecutionContract;
 use crate::tool::result::{ToolExecutionOutcomeKind, ToolExecutionRecord};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -630,44 +628,6 @@ fn infer_bash_readback_path(contract: &StageExecutionContract, command: &str) ->
         .filter(|path| contract_has_explicit_verify_intent(contract, path))
 }
 
-fn contract_from_step_declared_context(step: &BossPlanStep) -> StageExecutionContract {
-    let declared_artifacts = extract_artifact_expectations(step.objective())
-        .into_iter()
-        .map(|expectation| DeclaredArtifactContract {
-            ref_id: expectation.path.to_string_lossy().to_string(),
-            path: expectation.path.to_string_lossy().to_string(),
-            kind: match expectation.kind {
-                BossArtifactKind::File => "file".into(),
-                BossArtifactKind::Directory => "directory".into(),
-            },
-            required_actions: Vec::new(),
-            required_evidence: vec!["artifact_evidence".into()],
-        })
-        .collect::<Vec<_>>();
-    let acceptance = step.acceptance.join(" ").to_ascii_lowercase();
-    let verifications = declared_artifacts
-        .iter()
-        .filter(|artifact| {
-            acceptance.contains("verify")
-                || acceptance.contains("read-back")
-                || acceptance.contains("read_back")
-                || acceptance.contains("exists")
-        })
-        .map(|artifact| VerificationContract {
-            target_ref: artifact.ref_id.clone(),
-            target_path: Some(artifact.path.clone()),
-            required_actions: vec!["read_back_verify".into()],
-            required_evidence: vec!["verification_evidence".into()],
-        })
-        .collect::<Vec<_>>();
-    StageExecutionContract {
-        declared_artifacts,
-        verifications,
-        required_evidence: vec!["artifact_evidence".into()],
-        ..StageExecutionContract::default()
-    }
-}
-
 pub fn append_runtime_tool_record(
     contract: &StageExecutionContract,
     ledgers: &mut StepFactLedgers,
@@ -845,12 +805,11 @@ fn is_test_command(command: &str) -> bool {
 }
 
 fn apply_runtime_tool_records(ledgers: &mut StepFactLedgers, step: &BossPlanStep) {
-    let contract = contract_from_step_declared_context(step);
     for (idx, record) in step.tool_execution_records.iter().enumerate() {
         match record.tool_name.as_str() {
             "Read" | "Edit" | "Write" | "Bash" => {
                 append_runtime_tool_record(
-                    &contract,
+                    &step.stage_execution_contract,
                     ledgers,
                     record,
                     &format!("step{}:{idx}", step.id),
@@ -1394,8 +1353,9 @@ mod tests {
                 "tests failed because prompt did not include open items".into(),
             ),
             last_correction: None,
+            stage_execution_contract: StageExecutionContract::default(),
             stage_continuation_context: None,
-                        executor_b_stage_memory: None,
+            executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
         };
@@ -1441,6 +1401,7 @@ mod tests {
             retry_budget: 3,
             last_review_summary: None,
             last_correction: None,
+            stage_execution_contract: StageExecutionContract::default(),
             stage_continuation_context: None,
                         executor_b_stage_memory: None,
             review_task_id: None,
@@ -1472,6 +1433,7 @@ mod tests {
             retry_budget: 3,
             last_review_summary: None,
             last_correction: None,
+            stage_execution_contract: StageExecutionContract::default(),
             stage_continuation_context: None,
                         executor_b_stage_memory: None,
             review_task_id: None,
@@ -1502,6 +1464,7 @@ mod tests {
             retry_budget: 3,
             last_review_summary: None,
             last_correction: None,
+            stage_execution_contract: StageExecutionContract::default(),
             stage_continuation_context: None,
                         executor_b_stage_memory: None,
             review_task_id: None,
@@ -1605,6 +1568,7 @@ mod tests {
             retry_budget: 3,
             last_review_summary: Some("ACCEPT: artifact verified".into()),
             last_correction: None,
+            stage_execution_contract: StageExecutionContract::default(),
             stage_continuation_context: None,
                         executor_b_stage_memory: None,
             review_task_id: None,
@@ -1641,6 +1605,7 @@ mod tests {
             retry_budget: 3,
             last_review_summary: Some("fallback review summary".into()),
             last_correction: None,
+            stage_execution_contract: StageExecutionContract::default(),
             stage_continuation_context: None,
                         executor_b_stage_memory: None,
             review_task_id: None,
@@ -1809,6 +1774,74 @@ mod tests {
     }
 
     #[test]
+    fn state_fact_ledger_uses_frontdoor_stage_execution_contract_only() {
+        let step = BossPlanStep {
+            id: 13,
+            description: "frontdoor contract only".into(),
+            objective: Some(
+                "目标文件：/tmp/from-objective.md\n请读回验证 /tmp/from-objective.md".into(),
+            ),
+            acceptance: vec!["artifact verified".into()],
+            requires_approval: false,
+            status: BossPlanStepStatus::Running,
+            completed: false,
+            result_diff: None,
+            worker_task_id: None,
+            attempt_count: 0,
+            retry_budget: 3,
+            last_review_summary: None,
+            last_correction: None,
+            stage_execution_contract: StageExecutionContract {
+                declared_artifacts: vec![DeclaredArtifactContract {
+                    ref_id: "artifact:frontdoor".into(),
+                    path: "/tmp/from-contract.md".into(),
+                    kind: "file".into(),
+                    required_actions: vec!["write_artifact".into()],
+                    required_evidence: vec!["artifact_evidence".into()],
+                }],
+                verifications: vec![VerificationContract {
+                    target_ref: "artifact:frontdoor".into(),
+                    target_path: Some("/tmp/from-contract.md".into()),
+                    required_actions: vec!["read_back_verify".into()],
+                    required_evidence: vec!["verification_evidence".into()],
+                }],
+                ..StageExecutionContract::default()
+            },
+            stage_continuation_context: None,
+            executor_b_stage_memory: None,
+            review_task_id: None,
+            tool_execution_records: vec![ToolExecutionRecord {
+                tool_name: "Read".into(),
+                outcome: "Text".into(),
+                kind: ToolExecutionOutcomeKind::Success,
+                summary: "Read verification".into(),
+                detail: Some("read-back verified /tmp/from-contract.md".into()),
+                pending_approval: None,
+                report_modifier: ToolReportModifier::None,
+                observable_input: Some(ObservableInput {
+                    value: r#"{"path":"/tmp/from-contract.md"}"#.into(),
+                    source: ObservableInputSource::Raw,
+                }),
+                batch_context: ToolBatchContext {
+                    batch_index: 0,
+                    batch_size: 1,
+                    executed_in_batch: false,
+                },
+            }],
+        };
+
+        let ledgers = build_step_fact_ledgers(&step);
+        assert_eq!(ledgers.verification_refs.len(), 1);
+        assert_eq!(ledgers.verification_refs[0].path, "/tmp/from-contract.md");
+        assert!(
+            ledgers
+                .verification_refs
+                .iter()
+                .all(|item| item.path != "/tmp/from-objective.md")
+        );
+    }
+
+    #[test]
     fn helper_ledgers_build_open_blocker_and_rejected_records_with_lineage() {
         let step = BossPlanStep {
             id: 12,
@@ -1824,6 +1857,7 @@ mod tests {
             retry_budget: 3,
             last_review_summary: Some("previous patch ignored edge cases".into()),
             last_correction: Some("preserve the auth guard branch".into()),
+            stage_execution_contract: StageExecutionContract::default(),
             stage_continuation_context: None,
                         executor_b_stage_memory: None,
             review_task_id: None,
