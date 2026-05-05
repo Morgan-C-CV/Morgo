@@ -901,6 +901,53 @@ fn finalize_worker_usage_report(frame: &StateFrame, usage: &mut LoopUsage) {
     usage.worker_report = Some(build_worker_structured_report(frame, usage, completion));
 }
 
+fn verification_terminal_outcome(
+    frame: &StateFrame,
+    usage: &mut LoopUsage,
+) -> Option<LoopOutcome> {
+    if frame.state != AgentState::Verifying
+        || !completion_contract_requirement(frame, "verification_evidence")
+    {
+        return None;
+    }
+
+    let completion = evaluate_completion_evidence(frame, usage);
+    if matches!(completion, CompletionEvidenceStatus::Sufficient) {
+        finalize_worker_usage_report(frame, usage);
+        return Some(LoopOutcome::Done {
+            final_state: AgentState::Done,
+            usage: usage.clone(),
+        });
+    }
+
+    let attempted_target_scoped_verification =
+        matches!(usage.last_effective_tool_action.as_deref(), Some("ArtifactVerify"))
+            && usage.last_failure_outcome.is_none();
+    if attempted_target_scoped_verification
+        && matches!(
+            completion,
+            CompletionEvidenceStatus::MissingVerificationEvidence
+        )
+    {
+        let missing_refs = missing_verification_evidence_refs(frame);
+        finalize_worker_usage_report(frame, usage);
+        return Some(LoopOutcome::ToolDispatchFailed {
+            last_state: frame.state,
+            reason: format!(
+                "verification evidence still missing after target-scoped verification attempt: {}",
+                if missing_refs.is_empty() {
+                    "none".to_string()
+                } else {
+                    missing_refs.join("|")
+                }
+            ),
+            usage: usage.clone(),
+        });
+    }
+
+    None
+}
+
 fn current_action_target_path(
     decision: &crate::core::state_frame::StateDecision,
 ) -> Option<String> {
@@ -2765,6 +2812,10 @@ pub async fn run_decision_loop_with_tools(
                 frame.state = decision.state;
             }
         }
+
+        if let Some(outcome) = verification_terminal_outcome(&frame, &mut total_usage) {
+            return Ok(outcome);
+        }
     }
 
     finalize_worker_usage_report(&frame, &mut total_usage);
@@ -4376,6 +4427,77 @@ mod tests {
                 );
             }
             other => panic!("expected Done, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn verification_loop_exits_when_target_scoped_verification_evidence_is_sufficient() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut frame = make_frame();
+        push_completion_contract(&mut frame, true, false, true);
+        push_artifact_target_fact(&mut frame, "artifact:contract:0", "/tmp/report.md", "file");
+        frame.recent_evidence.push(
+            "fact: artifact_status ref=artifact:created path=/tmp/report.md kind=file status=created source=tool:Write source_event_id=tool-write:1 freshness=after-runtime confidence=1.00 lineage_status=active invalidated_by=none supersedes=none conflicts_with=none summary=artifact created".into(),
+        );
+        let verify_json = r#"{"state":"verifying","decision":"call_tool","next_action":{"action_type":"ArtifactVerify","args":{"path":"/tmp/report.md","kind":"file","status":"verified"}}}"#;
+        let client = ModelProviderClient::with_scripted_turns(vec![vec![StreamEvent::TextDelta(
+            verify_json.into(),
+        )]]);
+        let outcome = rt
+            .block_on(run_decision_loop_with_tools(
+                &client,
+                frame,
+                DecisionLoopConfig {
+                    max_iterations: 2,
+                    ..DecisionLoopConfig::default()
+                },
+                Some(verification_repair_tool_runtime()),
+            ))
+            .expect("loop should not error");
+        match outcome {
+            LoopOutcome::Done { usage, .. } => {
+                assert_eq!(
+                    usage.completion_evidence_status.as_ref().map(|s| s.as_str()),
+                    Some("sufficient")
+                );
+            }
+            other => panic!("expected Done, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn verification_loop_hard_fails_without_spinning_when_gap_is_not_repairable() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut frame = make_frame();
+        push_completion_contract(&mut frame, true, false, true);
+        push_artifact_target_fact(&mut frame, "artifact:contract:0", "/tmp/report.md", "file");
+        frame.recent_evidence.push(
+            "fact: artifact_status ref=artifact:created path=/tmp/report.md kind=file status=created source=tool:Write source_event_id=tool-write:1 freshness=after-runtime confidence=1.00 lineage_status=active invalidated_by=none supersedes=none conflicts_with=none summary=artifact created".into(),
+        );
+        let verify_json = r#"{"state":"verifying","decision":"call_tool","next_action":{"action_type":"ArtifactVerify","args":{"path":"/tmp/other.md","kind":"file","status":"verified"}}}"#;
+        let client = ModelProviderClient::with_scripted_turns(vec![vec![StreamEvent::TextDelta(
+            verify_json.into(),
+        )]]);
+        let outcome = rt
+            .block_on(run_decision_loop_with_tools(
+                &client,
+                frame,
+                DecisionLoopConfig {
+                    max_iterations: 3,
+                    ..DecisionLoopConfig::default()
+                },
+                Some(verification_repair_tool_runtime()),
+            ))
+            .expect("loop should not error");
+        match outcome {
+            LoopOutcome::ToolDispatchFailed { reason, usage, .. } => {
+                assert!(reason.contains("verification evidence still missing"));
+                assert_eq!(
+                    usage.completion_evidence_status.as_ref().map(|s| s.as_str()),
+                    Some("missing_verification_evidence")
+                );
+            }
+            other => panic!("expected ToolDispatchFailed, got {other:?}"),
         }
     }
 
