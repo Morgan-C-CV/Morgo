@@ -13,6 +13,7 @@ use crate::tool::orchestrator::{ToolExecutionOutcome, aggregate_execution_record
 use crate::tool::result::{
     ToolExecutionRecord, ToolExecutionReport, ToolReportContextModifier, ToolReportModifier,
 };
+use crate::state::app_state::WorkerRole;
 use tokio::time::{Duration, timeout};
 
 const WORKER_MAILBOX_IDLE_TIMEOUT_MS: u64 = 2_000;
@@ -1021,8 +1022,13 @@ async fn execute_tool_phase(
                                 };
                             }
                             apply_tool_report_context(state, &report);
-                            let follow_up =
-                                tool_follow_up_message(&tool_name, &effective_tool_input, &report);
+                            let follow_up = tool_follow_up_message(
+                                &tool_name,
+                                &effective_tool_input,
+                                &report,
+                                context.app_state.worker_role,
+                                &state.messages,
+                            );
                             TurnOutcome {
                                 state: state.clone(),
                                 events: engine_events,
@@ -1268,7 +1274,13 @@ fn tool_follow_up_message(
     tool_name: &str,
     tool_input: &str,
     report: &ToolExecutionReport,
+    worker_role: Option<WorkerRole>,
+    messages: &[Message],
 ) -> String {
+    if worker_role == Some(WorkerRole::Verify) && tool_name == "Read" {
+        return verify_read_follow_up_message(tool_input, report, messages);
+    }
+
     let detail = report_detail_or_summary(report);
     let mut message = format!("tool result for {tool_name}: {detail}");
     if tool_name == "Read"
@@ -1295,6 +1307,84 @@ fn tool_follow_up_message(
         );
     }
     message
+}
+
+fn verify_read_follow_up_message(
+    tool_input: &str,
+    report: &ToolExecutionReport,
+    messages: &[Message],
+) -> String {
+    let target = extract_read_target_path(tool_input)
+        .or_else(|| extract_verified_target_from_messages(messages))
+        .unwrap_or_else(|| "unknown".into());
+    let detail = report_detail_or_summary(report);
+    let summary = report.summary.trim();
+    let verification_result = infer_verify_read_result(summary, &detail);
+    let minimal_evidence = infer_verify_read_evidence(summary, &detail);
+    let remaining_blocker = infer_verify_read_blocker(&verification_result, &detail);
+    format!(
+        "tool result for Read:\nverified_target: {target}\nverification_result: {verification_result}\nminimal_evidence: {minimal_evidence}\nremaining_blocker: {remaining_blocker}"
+    )
+}
+
+fn extract_read_target_path(tool_input: &str) -> Option<String> {
+    let parsed = serde_json::from_str::<serde_json::Value>(tool_input).ok()?;
+    parsed
+        .get("file_path")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
+fn extract_verified_target_from_messages(messages: &[Message]) -> Option<String> {
+    messages.iter().find_map(|message| {
+        message.text().lines().find_map(|line| {
+            let trimmed = line.trim();
+            trimmed
+                .strip_prefix("verified_target:")
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string)
+        })
+    })
+}
+
+fn infer_verify_read_result(summary: &str, detail: &str) -> String {
+    let combined = format!(
+        "{}\n{}",
+        summary.to_ascii_lowercase(),
+        detail.to_ascii_lowercase()
+    );
+    if combined.contains("failed")
+        || combined.contains("denied")
+        || combined.contains("missing")
+        || combined.contains("not found")
+    {
+        "blocked".into()
+    } else {
+        "verified".into()
+    }
+}
+
+fn infer_verify_read_evidence(summary: &str, detail: &str) -> String {
+    if !summary.trim().is_empty() {
+        summary.trim().to_string()
+    } else if detail.contains("[Read truncated:") {
+        "Read succeeded".into()
+    } else {
+        "read completed".into()
+    }
+}
+
+fn infer_verify_read_blocker(verification_result: &str, detail: &str) -> String {
+    if verification_result.eq_ignore_ascii_case("verified") {
+        "none".into()
+    } else if detail.contains("[Read truncated:") {
+        "read output truncated".into()
+    } else {
+        "read verification failed".into()
+    }
 }
 
 fn batch_follow_up_message(state: &LoopState, report: &ToolExecutionReport) -> String {
@@ -2119,15 +2209,18 @@ impl QueryLoopStateExt for QueryLoopState {
 mod tests {
     use super::{
         LoopState, QueryParams, apply_tool_report_context, batch_follow_up_message,
-        classify_pre_stream_failure_code, classify_stream_failure_code, is_broad_discovery_tool,
+        classify_pre_stream_failure_code, classify_stream_failure_code,
+        extract_read_target_path, extract_verified_target_from_messages, is_broad_discovery_tool,
         is_prompt_only_discovery_gate_record, prompt_only_discovery_gate_outcome,
         prompt_only_output_contract_from_messages, report_detail_or_summary,
         should_discourage_repeated_discovery_search, should_gate_prompt_only_discovery,
         should_lock_prompt_only_discovery, should_return_terminal_after_recovery_exhausted,
+        tool_follow_up_message,
     };
     use crate::core::events::ServiceFailureCode;
     use crate::core::message::Message;
     use crate::service::api::streaming::ProviderFailureDisposition;
+    use crate::state::app_state::WorkerRole;
     use crate::tool::definition::{ObservableInput, ObservableInputSource};
     use crate::tool::result::{
         ToolBatchContext, ToolExecutionOutcomeKind, ToolExecutionRecord, ToolExecutionReport,
@@ -2318,6 +2411,81 @@ mod tests {
         };
 
         assert!(should_discourage_repeated_discovery_search(&report));
+    }
+
+    #[test]
+    fn verify_read_follow_up_is_reduced_to_four_line_short_form() {
+        let report = ToolExecutionReport {
+            records: Vec::new(),
+            summary: "Read succeeded".into(),
+            detail: Some(
+                "# report\n\nlong body that should not be copied back into the follow-up transcript"
+                    .into(),
+            ),
+            report_modifier: ToolReportModifier::None,
+            context_modifier: ToolReportContextModifier::None,
+        };
+
+        let follow_up = tool_follow_up_message(
+            "Read",
+            r#"{"file_path":"/tmp/report.md"}"#,
+            &report,
+            Some(WorkerRole::Verify),
+            &[],
+        );
+        let lines = follow_up.lines().collect::<Vec<_>>();
+
+        assert_eq!(lines[0], "tool result for Read:");
+        assert_eq!(lines[1], "verified_target: /tmp/report.md");
+        assert_eq!(lines[2], "verification_result: verified");
+        assert_eq!(lines[3], "minimal_evidence: Read succeeded");
+        assert_eq!(lines[4], "remaining_blocker: none");
+        assert_eq!(lines.len(), 5);
+        assert!(!follow_up.contains("long body that should not be copied back"));
+    }
+
+    #[test]
+    fn verify_read_follow_up_uses_verified_target_from_messages_when_input_missing_path() {
+        let report = ToolExecutionReport {
+            records: Vec::new(),
+            summary: "Read succeeded".into(),
+            detail: Some("[Read truncated: path=/tmp/report.md, offset=0, returned_chars=200, total_chars=4000.]".into()),
+            report_modifier: ToolReportModifier::None,
+            context_modifier: ToolReportContextModifier::None,
+        };
+        let messages = vec![Message::user(
+            "verified_target: /tmp/report.md\nverification_result: verified\nminimal_evidence: Read succeeded\nremaining_blocker: none",
+        )];
+
+        let follow_up =
+            tool_follow_up_message("Read", "{}", &report, Some(WorkerRole::Verify), &messages);
+
+        assert!(follow_up.contains("verified_target: /tmp/report.md"));
+        assert!(follow_up.contains("minimal_evidence: Read succeeded"));
+        assert!(follow_up.contains("remaining_blocker: none"));
+        assert!(!follow_up.contains("[Read truncated:"));
+    }
+
+    #[test]
+    fn extract_read_target_path_reads_file_path_from_tool_input_json() {
+        assert_eq!(
+            extract_read_target_path(r#"{"file_path":"src/lib.rs","offset":200}"#).as_deref(),
+            Some("src/lib.rs")
+        );
+        assert_eq!(extract_read_target_path("{}"), None);
+    }
+
+    #[test]
+    fn extract_verified_target_from_messages_reads_short_form_contract_line() {
+        let messages = vec![
+            Message::assistant("other".into()),
+            Message::user("verified_target: /tmp/one.md\nverification_result: verified".into()),
+        ];
+
+        assert_eq!(
+            extract_verified_target_from_messages(&messages).as_deref(),
+            Some("/tmp/one.md")
+        );
     }
 
     #[test]
