@@ -335,6 +335,7 @@ fn launch_agent_task(
 
         let mut params = QueryParams::default();
         params.max_turns = effective_max_turns;
+        params.initial_max_output_tokens = effective_max_output_tokens(&request);
         let usage_before = query_context.app_state.cost_tracker.snapshot();
         let result =
             run_query_loop_with_params(&query_context, Message::user(task_input.clone()), params)
@@ -396,6 +397,13 @@ fn effective_max_turns(request: &SpawnAgentRequest) -> Option<usize> {
         WorkerRole::Verify => request.step_id.map(|_| 6),
         WorkerRole::Implement => request.step_id.map(|_| 64),
     })
+}
+
+fn effective_max_output_tokens(request: &SpawnAgentRequest) -> Option<u64> {
+    match request.role {
+        WorkerRole::Verify => Some(1024),
+        WorkerRole::Research | WorkerRole::Implement => None,
+    }
 }
 
 fn parse_agent_request(input: &str) -> anyhow::Result<AgentRequest> {
@@ -492,7 +500,7 @@ fn parse_agent_request(input: &str) -> anyhow::Result<AgentRequest> {
 
 fn build_worker_task_input(request: &SpawnAgentRequest) -> String {
     if request.task_contains_boss_context {
-        return request.task.clone();
+        return with_verify_output_contract(request.role, request.task.clone());
     }
 
     let mut sections = vec![request.task.clone()];
@@ -545,7 +553,17 @@ fn build_worker_task_input(request: &SpawnAgentRequest) -> String {
         sections.push("</verify-output-contract>".into());
     }
 
-    sections.join("\n")
+    with_verify_output_contract(request.role, sections.join("\n"))
+}
+
+fn with_verify_output_contract(role: WorkerRole, task_input: String) -> String {
+    if role != WorkerRole::Verify || task_input.contains("<verify-output-contract>") {
+        return task_input;
+    }
+
+    format!(
+        "{task_input}\n<verify-output-contract>\nreturn only four short lines: verified_target, verification_result, minimal_evidence, remaining_blocker\ndo not include analysis, summary prose, next_action, file lists, suggestions, or extra validation steps\nkeep minimal_evidence to one short factual phrase and keep remaining_blocker short\n</verify-output-contract>"
+    )
 }
 
 fn build_continue_task_input(
@@ -688,9 +706,14 @@ fn append_subagent_output(
             .filter(|text| !text.is_empty())
             .collect::<Vec<String>>()
             .join("\n");
+        let normalized = if verify_output_matches_contract(&raw_output) {
+            raw_output
+        } else {
+            normalize_verify_output(task_input, &raw_output)
+        };
         tasks.append_output(
             task_id,
-            format!("{}\n", normalize_verify_output(task_input, &raw_output)),
+            format!("{normalized}\n"),
         );
         return;
     }
@@ -718,6 +741,18 @@ fn normalize_verify_output(task_input: &str, raw_output: &str) -> String {
     format!(
         "verified_target: {target}\nverification_result: {verification_result}\nminimal_evidence: {minimal_evidence}\nremaining_blocker: {remaining_blocker}"
     )
+}
+
+fn verify_output_matches_contract(raw_output: &str) -> bool {
+    let mut lines = raw_output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty());
+    matches!(lines.next(), Some(line) if line.to_ascii_lowercase().starts_with("verified_target:"))
+        && matches!(lines.next(), Some(line) if line.to_ascii_lowercase().starts_with("verification_result:"))
+        && matches!(lines.next(), Some(line) if line.to_ascii_lowercase().starts_with("minimal_evidence:"))
+        && matches!(lines.next(), Some(line) if line.to_ascii_lowercase().starts_with("remaining_blocker:"))
+        && lines.next().is_none()
 }
 
 fn extract_verify_target(text: &str) -> Option<String> {
@@ -879,6 +914,18 @@ mod tests {
     }
 
     #[test]
+    fn build_worker_task_input_injects_verify_contract_into_preassembled_boss_prompt() {
+        let mut request = sample_spawn_request();
+        request.role = WorkerRole::Verify;
+        request.task = "verified_target: /tmp/preassembled.md".into();
+        request.task_contains_boss_context = true;
+        let input = build_worker_task_input(&request);
+        assert!(input.starts_with("verified_target: /tmp/preassembled.md"));
+        assert!(input.contains("<verify-output-contract>"));
+        assert_eq!(input.matches("<verify-output-contract>").count(), 1);
+    }
+
+    #[test]
     fn build_worker_task_input_appends_boss_step_context_by_default() {
         let request = sample_spawn_request();
         let input = build_worker_task_input(&request);
@@ -909,6 +956,16 @@ mod tests {
         let mut request = sample_spawn_request();
         request.max_turns = Some(3);
         assert_eq!(effective_max_turns(&request), Some(3));
+    }
+
+    #[test]
+    fn effective_max_output_tokens_is_lower_for_verify_role() {
+        let mut request = sample_spawn_request();
+        request.role = WorkerRole::Verify;
+        assert_eq!(effective_max_output_tokens(&request), Some(1024));
+
+        request.role = WorkerRole::Implement;
+        assert_eq!(effective_max_output_tokens(&request), None);
     }
 
     #[test]
@@ -943,6 +1000,16 @@ mod tests {
         assert_eq!(lines[1], "verification_result: blocked");
         assert_eq!(lines[2], "minimal_evidence: Read succeeded");
         assert_eq!(lines[3], "remaining_blocker: target missing verification");
+    }
+
+    #[test]
+    fn verify_output_matches_contract_accepts_exact_four_line_output() {
+        assert!(verify_output_matches_contract(
+            "verified_target: /tmp/report.md\nverification_result: verified\nminimal_evidence: Read succeeded\nremaining_blocker: none"
+        ));
+        assert!(!verify_output_matches_contract(
+            "verified_target: /tmp/report.md\nverification_result: verified\nminimal_evidence: Read succeeded\nremaining_blocker: none\nnext_action: extra"
+        ));
     }
 
     #[test]

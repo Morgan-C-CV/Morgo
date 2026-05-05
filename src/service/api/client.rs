@@ -306,14 +306,31 @@ impl ModelProviderClient {
         input: &Message,
         tools: &[ModelToolDefinition],
     ) -> Vec<StreamEvent> {
+        self.stream_message_with_tools_and_max_tokens(input, tools, None)
+            .await
+    }
+
+    pub async fn stream_message_with_tools_and_max_tokens(
+        &self,
+        input: &Message,
+        tools: &[ModelToolDefinition],
+        max_tokens: Option<u64>,
+    ) -> Vec<StreamEvent> {
         if tools.is_empty() || !self.supports_tool_requests() {
             return self
-                .stream_message_with_options(input, RequestOptions::default())
+                .stream_message_with_options(
+                    input,
+                    RequestOptions {
+                        max_tokens,
+                        ..RequestOptions::default()
+                    },
+                )
                 .await;
         }
         self.stream_message_with_options(
             input,
             RequestOptions {
+                max_tokens,
                 require_tools: !tools.is_empty(),
                 tools: tools.to_vec(),
                 ..RequestOptions::default()

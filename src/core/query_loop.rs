@@ -30,6 +30,7 @@ pub struct QueryParams {
     pub max_turns: Option<usize>,
     pub max_output_tokens_recovery_limit: usize,
     pub max_budget_input_tokens: Option<usize>,
+    pub initial_max_output_tokens: Option<u64>,
 }
 
 impl Default for QueryParams {
@@ -39,6 +40,7 @@ impl Default for QueryParams {
             max_turns: Some(4),
             max_output_tokens_recovery_limit: 3,
             max_budget_input_tokens: None,
+            initial_max_output_tokens: None,
         }
     }
 }
@@ -65,7 +67,7 @@ impl LoopState {
             auto_compact_tracking: None,
             max_output_tokens_recovery_count: 0,
             has_attempted_reactive_compact: false,
-            max_output_tokens_override: None,
+            max_output_tokens_override: params.initial_max_output_tokens,
             pending_tool_use_summary: None,
             prompt_only_output_contract_active: false,
             prompt_only_discovery_locked: false,
@@ -204,7 +206,13 @@ pub async fn run_query_loop_with_params(
                 return result;
             }
         };
-        let streamed = stream_model_turn(context, &prepared, state.transition.as_ref()).await;
+        let streamed = stream_model_turn(
+            context,
+            &prepared,
+            state.max_output_tokens_override,
+            state.transition.as_ref(),
+        )
+        .await;
         if streamed.is_empty() {
             turn_token.cancel();
             let _ = hb_handle.await;
@@ -438,6 +446,7 @@ fn process_user_input(
 async fn stream_model_turn(
     context: &QueryContext,
     prepared: &PreparedTurn,
+    max_output_tokens_override: Option<u64>,
     transition: Option<&Continue>,
 ) -> Vec<StreamEvent> {
     let model_tools = context
@@ -445,7 +454,11 @@ async fn stream_model_turn(
         .visible_model_tools(&context.app_state.permission_context);
     let mut streamed = context
         .api_client
-        .stream_message_with_tools(&Message::user(prepared.prompt.clone()), &model_tools)
+        .stream_message_with_tools_and_max_tokens(
+            &Message::user(prepared.prompt.clone()),
+            &model_tools,
+            max_output_tokens_override,
+        )
         .await;
     if matches!(transition, Some(Continue::ModelFallbackRetry)) {
         if let Some(index) = streamed.iter().position(|event| {
