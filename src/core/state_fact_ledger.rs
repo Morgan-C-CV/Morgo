@@ -490,6 +490,29 @@ pub fn format_artifact_fact_line(item: &ArtifactRecord) -> String {
     )
 }
 
+pub fn format_verification_fact_line(
+    ref_id: &str,
+    path: &str,
+    status: &str,
+    source: &str,
+    source_event_id: &str,
+    freshness: &str,
+    confidence_milli: u16,
+    summary: &str,
+) -> String {
+    format!(
+        "fact: verification_status ref={} path={} status={} source={} source_event_id={} freshness={} confidence={} lineage_status=active invalidated_by=none supersedes=none conflicts_with=none summary={}",
+        ref_id,
+        path,
+        status,
+        source,
+        source_event_id,
+        freshness,
+        format_confidence(confidence_milli),
+        summary,
+    )
+}
+
 pub fn fact_lines_from_ledgers(ledgers: &StepFactLedgers) -> Vec<String> {
     let mut facts = Vec::new();
     for item in &ledgers.file_facts {
@@ -503,6 +526,18 @@ pub fn fact_lines_from_ledgers(ledgers: &StepFactLedgers) -> Vec<String> {
     }
     for item in &ledgers.artifact_refs {
         facts.push(format_artifact_fact_line(item));
+        if item.status == "verified" {
+            facts.push(format_verification_fact_line(
+                &item.ref_id,
+                &item.path,
+                "verified",
+                &item.source,
+                &item.source_event_id,
+                &item.freshness,
+                item.confidence_milli,
+                &item.summary,
+            ));
+        }
     }
     facts
 }
@@ -562,6 +597,18 @@ pub fn append_runtime_tool_record(
                     lineage: active_lineage(),
                 },
             );
+            ledgers.artifact_refs.push(ArtifactRecord {
+                ref_id: format!("artifact:{ref_namespace}:readback"),
+                path: path.clone(),
+                kind: "file".into(),
+                status: "verified".into(),
+                summary: format!("runtime Read verified readable artifact at {path}"),
+                source: "tool:Read".into(),
+                source_event_id: format!("tool-read:{ref_namespace}"),
+                freshness: "after-runtime-read".into(),
+                confidence_milli: 900,
+                lineage: active_lineage(),
+            });
         }
         "Edit" | "Write" => {
             if record.kind != ToolExecutionOutcomeKind::Success {
@@ -625,6 +672,43 @@ pub fn append_runtime_tool_record(
                     confidence_milli: 1000,
                     lineage: active_lineage(),
                 });
+            }
+            if record.kind == ToolExecutionOutcomeKind::Success {
+                let detail = record.detail.as_deref().unwrap_or_default().to_ascii_lowercase();
+                let read_like = command.contains("cat ")
+                    || command.contains("ls ")
+                    || command.contains("find ")
+                    || command.contains("stat ")
+                    || command.contains("test -f ")
+                    || command.contains("test -d ")
+                    || command.contains("wc -c ")
+                    || command.contains("python3 ")
+                    || detail.contains("exists")
+                    || detail.contains("readme")
+                    || detail.contains("demo.py");
+                if read_like {
+                    if let Some(path) = extract_artifact_expectations(&command)
+                        .into_iter()
+                        .next()
+                        .map(|expectation| expectation.path.to_string_lossy().to_string())
+                    {
+                        push_artifact_record(
+                            ledgers,
+                            ArtifactRecord {
+                                ref_id: format!("artifact:{ref_namespace}:bash-readback"),
+                                path,
+                                kind: "path".into(),
+                                status: "verified".into(),
+                                summary: tool_record_summary(record),
+                                source: "tool:Bash".into(),
+                                source_event_id: format!("tool-bash:{ref_namespace}"),
+                                freshness: "after-runtime-bash".into(),
+                                confidence_milli: 850,
+                                lineage: active_lineage(),
+                            },
+                        );
+                    }
+                }
             }
         }
         "ArtifactVerify" => {

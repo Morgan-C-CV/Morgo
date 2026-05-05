@@ -480,19 +480,27 @@ fn repair_turn_fact_line(repair_turn: &ArtifactRepairTurn, reference: &str, summ
 
 fn has_verified_artifact_for_path(frame: &StateFrame, path: &str) -> bool {
     frame.recent_evidence.iter().any(|line| {
-        line.starts_with("fact: artifact_status ")
+        ((line.starts_with("fact: artifact_status ")
             && evidence_field_value(line, "path").as_deref() == Some(path)
             && evidence_field_value(line, "status").as_deref() == Some("verified")
             && (evidence_field_value(line, "source").as_deref() == Some("tool:ArtifactVerify")
-                || line.contains("artifact verification passed"))
+                || evidence_field_value(line, "source").as_deref() == Some("tool:Read")
+                || evidence_field_value(line, "source").as_deref() == Some("tool:Bash")
+                || line.contains("artifact verification passed")))
+            || (line.starts_with("fact: verification_status ")
+                && evidence_field_value(line, "path").as_deref() == Some(path)
+                && evidence_field_value(line, "status").as_deref() == Some("verified")))
     })
 }
 
 fn has_explicit_verification_fact(frame: &StateFrame, target_ref: &str) -> bool {
     frame.recent_evidence.iter().any(|line| {
-        line.starts_with("fact: verification_status ")
+        (line.starts_with("fact: verification_status ")
             && evidence_field_value(line, "target_ref").as_deref() == Some(target_ref)
-            && evidence_field_value(line, "status").as_deref() == Some("verified")
+            && evidence_field_value(line, "status").as_deref() == Some("verified"))
+            || (line.starts_with("fact: verification_status ")
+                && evidence_field_value(line, "ref").as_deref() == Some(target_ref)
+                && evidence_field_value(line, "status").as_deref() == Some("verified"))
     })
 }
 
@@ -527,6 +535,11 @@ fn artifact_path_has_material_evidence(frame: &StateFrame, path: &str, kind: &st
                 && evidence_field_value(line, "status")
                     .as_deref()
                     .is_some_and(acceptable_status);
+        }
+        if line.starts_with("fact: file_facts ") {
+            return evidence_field_value(line, "path")
+                .as_deref()
+                .is_some_and(path_matches);
         }
         false
     })
@@ -4523,6 +4536,129 @@ mod tests {
         );
         let cleared_gaps = super::collect_completion_evidence_gaps(&frame);
         assert!(cleared_gaps.is_empty());
+    }
+
+    #[test]
+    fn u7_directory_and_readme_write_is_recognized_as_material_artifact_evidence() {
+        let mut frame = make_frame();
+        frame.recent_evidence.clear();
+        push_completion_contract_with_refs(
+            &mut frame,
+            &["artifact:contract:dir", "artifact:contract:file"],
+            &[],
+            &[],
+        );
+        push_artifact_target_fact(
+            &mut frame,
+            "artifact:contract:dir",
+            "/tmp/example-site",
+            "directory",
+        );
+        push_artifact_target_fact(
+            &mut frame,
+            "artifact:contract:file",
+            "/tmp/example-site/README.md",
+            "file",
+        );
+        frame.recent_evidence.push(
+            "fact: recent_changes_in_files ref=change:dir path=/tmp/example-site/README.md source=tool:Write source_event_id=tool-write:1 freshness=after-runtime confidence=1.00 status=active invalidated_by=none supersedes=none conflicts_with=none summary=updated README".into(),
+        );
+        assert!(super::artifact_path_has_material_evidence(
+            &frame,
+            "/tmp/example-site",
+            "directory"
+        ));
+        assert!(super::artifact_path_has_material_evidence(
+            &frame,
+            "/tmp/example-site/README.md",
+            "file"
+        ));
+        assert_eq!(
+            super::evaluate_completion_evidence(&frame, &LoopUsage::default()),
+            CompletionEvidenceStatus::Sufficient
+        );
+    }
+
+    #[test]
+    fn read_back_or_verify_success_counts_as_verification_evidence_for_target() {
+        let mut frame = make_frame();
+        frame.recent_evidence.clear();
+        push_completion_contract_with_refs(
+            &mut frame,
+            &["artifact:contract:0"],
+            &[],
+            &["artifact:contract:0"],
+        );
+        push_artifact_target_fact(&mut frame, "artifact:contract:0", "/tmp/report.md", "file");
+        frame.recent_evidence.push(
+            "fact: artifact_status ref=artifact:contract:0 path=/tmp/report.md kind=file status=verified source=tool:Read source_event_id=tool-read:1 freshness=after-runtime-read confidence=0.90 lineage_status=active invalidated_by=none supersedes=none conflicts_with=none summary=read-back verified /tmp/report.md".into(),
+        );
+        frame.recent_evidence.push(
+            "fact: verification_status ref=artifact:contract:0 path=/tmp/report.md status=verified source=tool:Read source_event_id=tool-read:1 freshness=after-runtime-read confidence=0.90 lineage_status=active invalidated_by=none supersedes=none conflicts_with=none summary=read-back verified /tmp/report.md".into(),
+        );
+        assert!(super::has_verified_artifact_for_path(&frame, "/tmp/report.md"));
+        assert!(super::has_explicit_verification_fact(
+            &frame,
+            "artifact:contract:0"
+        ));
+        assert_eq!(
+            super::evaluate_completion_evidence(&frame, &LoopUsage::default()),
+            CompletionEvidenceStatus::Sufficient
+        );
+    }
+
+    #[test]
+    fn repair_continuation_local_reverify_closes_gap_without_full_worker_dispatch() {
+        let mut frame = make_frame();
+        frame.recent_evidence.clear();
+        push_completion_contract_with_refs(
+            &mut frame,
+            &["artifact:contract:0"],
+            &[],
+            &["artifact:contract:0"],
+        );
+        push_artifact_target_fact(&mut frame, "artifact:contract:0", "/tmp/report.md", "file");
+        frame.recent_evidence.push(
+            "fact: artifact_status ref=artifact:created path=/tmp/report.md kind=file status=created source=tool:Write source_event_id=tool-write:1 freshness=after-runtime confidence=1.00 lineage_status=active invalidated_by=none supersedes=none conflicts_with=none summary=artifact created".into(),
+        );
+        assert_eq!(
+            super::evaluate_completion_evidence(&frame, &LoopUsage::default()),
+            CompletionEvidenceStatus::MissingVerificationEvidence
+        );
+        frame.recent_evidence.push(
+            "fact: verification_status ref=artifact:contract:0 path=/tmp/report.md status=verified source=tool:Read source_event_id=tool-read:2 freshness=after-runtime-read confidence=0.90 lineage_status=active invalidated_by=none supersedes=none conflicts_with=none summary=local re-verify succeeded".into(),
+        );
+        assert_eq!(
+            super::evaluate_completion_evidence(&frame, &LoopUsage::default()),
+            CompletionEvidenceStatus::Sufficient
+        );
+        assert!(super::collect_completion_evidence_gaps(&frame).is_empty());
+    }
+
+    #[test]
+    fn directory_target_evidence_is_not_evaluated_as_file_only_evidence() {
+        let mut frame = make_frame();
+        frame.recent_evidence.clear();
+        push_completion_contract_with_refs(
+            &mut frame,
+            &["artifact:contract:dir"],
+            &[],
+            &[],
+        );
+        push_artifact_target_fact(
+            &mut frame,
+            "artifact:contract:dir",
+            "/tmp/example-site",
+            "directory",
+        );
+        frame.recent_evidence.push(
+            "fact: file_facts ref=filefact:1 path=/tmp/example-site/README.md kind=read_observation source=tool:Read source_event_id=tool-read:1 freshness=after-runtime-read confidence=1.00 status=active invalidated_by=none supersedes=none conflicts_with=none fact=runtime Read succeeded for /tmp/example-site/README.md".into(),
+        );
+        assert!(super::artifact_path_has_material_evidence(
+            &frame,
+            "/tmp/example-site",
+            "directory"
+        ));
     }
 
     #[test]
