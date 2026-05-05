@@ -7,6 +7,16 @@
 #
 # NOTE: This matrix execution can take tens of minutes or hours to complete.
 # It is recommended to use low-frequency polling to monitor progress.
+#
+# Audit discipline:
+# - Do not wait for the full matrix to finish before inspecting results.
+# - As soon as one mode finishes its runs, immediately audit that mode's
+#   samples/logs/summary slice.
+# - If that mode already shows aborted/failed behavior or obviously unhealthy
+#   state transitions, stop treating the remaining matrix time as meaningful
+#   signal and investigate the failure path immediately.
+# - In other words: mode-level completion is an audit checkpoint; do not
+#   "quietly wait for the rest" when the finished mode is already broken.
 
 
 set -euo pipefail
@@ -87,6 +97,8 @@ Notes:
   - This script automatically generates isolated cache keys per output root + use case + mode.
   - For u6-u10 build tasks, it also rewrites target paths per mode/run to avoid artifact reuse.
   - Final summary deduplicates records by run_id because aborted samples may be appended twice.
+  - Operational rule: once any mode finishes, audit that mode immediately before
+    deciding whether waiting for the rest of the matrix is still worthwhile.
 EOF
 }
 
