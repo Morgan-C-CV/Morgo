@@ -1293,6 +1293,17 @@ impl BossCoordinator {
         guard.as_ref().and_then(|s| s.executor_b.task_id.clone())
     }
 
+    #[doc(hidden)]
+    pub async fn current_step_worker_task_id(&self) -> Option<String> {
+        let current_step = self.status.read().await.current_step?;
+        let plan = self.plan.read().await;
+        plan.as_ref()?
+            .steps
+            .iter()
+            .find(|step| step.id == current_step)
+            .and_then(|step| step.worker_task_id.clone())
+    }
+
     /// Full-mode constructor — wires A+B callbacks immediately.
     /// Prefer `BossRuntimeHost::build_coordinator` in production so the host's
     /// `BossRuntimeOwner` is used. This method is the building block used by the host.
@@ -1609,7 +1620,7 @@ impl BossCoordinator {
                 match c.invoke_agent_tool_with_task_id(&app, &payload).await {
                     Ok(task_id) => {
                         c.record_b_session_id(&task_id).await;
-                        Ok(payload)
+                        Ok(task_id)
                     }
                     Err(e) => Err(e),
                 }
@@ -1666,6 +1677,24 @@ impl BossCoordinator {
             session.executor_b.session_id = task_id.to_string();
             session.executor_b.task_id = Some(task_id.to_string());
             session.executor_b.status = crate::core::boss_state::BossActorStatus::Active;
+        }
+    }
+
+    async fn record_step_dispatch_task_id(&self, step_id: usize, task_id: &str) {
+        {
+            let mut guard = self.session.write().await;
+            if let Some(session) = guard.as_mut() {
+                session.executor_b.task_id = Some(task_id.to_string());
+                session.executor_b.status = BossActorStatus::Active;
+            }
+        }
+        {
+            let mut plan = self.plan.write().await;
+            if let Some(plan) = plan.as_mut() {
+                if let Some(step) = plan.steps.iter_mut().find(|step| step.id == step_id) {
+                    step.worker_task_id = Some(task_id.to_string());
+                }
+            }
         }
     }
 
@@ -4655,14 +4684,20 @@ impl BossCoordinator {
                     self.bootstrap_actor_registry_with_app_state(app_state)
                         .await;
                     if let Some(registry) = self.actor_registry.read().await.as_ref() {
-                        let _ = registry
+                        if let Ok(crate::core::boss_actor_runtime::BossActorEvent::StepDispatched {
+                            task_id,
+                            ..
+                        }) = registry
                             .b_mailbox()
                             .request(ExecutorBCommand::ContinueStep {
                                 step_id,
                                 task_id: b_task_id.clone(),
                                 payload: continue_payload.clone(),
                             })
-                            .await;
+                            .await
+                        {
+                            self.record_step_dispatch_task_id(step_id, &task_id).await;
+                        }
                     }
 
                     continue_payload
@@ -4688,21 +4723,18 @@ impl BossCoordinator {
                     self.bootstrap_actor_registry_with_app_state(app_state)
                         .await;
                     if let Some(registry) = self.actor_registry.read().await.as_ref() {
-                        let _ = registry
+                        if let Ok(crate::core::boss_actor_runtime::BossActorEvent::StepDispatched {
+                            task_id,
+                            ..
+                        }) = registry
                             .b_mailbox()
                             .request(ExecutorBCommand::DispatchStep {
                                 step_id,
                                 payload: spawn_payload.clone(),
                             })
-                            .await;
-                    }
-
-                    let records = tasks.list();
-                    if let Some(task) = records.last() {
-                        let mut guard = self.session.write().await;
-                        if let Some(session) = guard.as_mut() {
-                            session.executor_b.task_id = Some(task.id.clone());
-                            session.executor_b.status = BossActorStatus::Active;
+                            .await
+                        {
+                            self.record_step_dispatch_task_id(step_id, &task_id).await;
                         }
                     }
 
@@ -6320,6 +6352,144 @@ mod tests {
         assert_eq!(step0.status, BossPlanStepStatus::Running);
         assert_eq!(step1.status, BossPlanStepStatus::Completed);
         assert!(step1.completed);
+    }
+
+    #[tokio::test]
+    async fn full_dispatch_completed_child_syncs_even_if_session_task_id_drifted() {
+        let coordinator = Arc::new(BossCoordinator::new());
+        let tasks = Arc::new(TaskManager::new_with_output_root(std::env::temp_dir()));
+        let app_state = test_app_state_with_tasks(tasks.clone(), coordinator.clone());
+        coordinator
+            .attach_app_state_for_report_testing(app_state.clone())
+            .await;
+        {
+            let mut status = coordinator.status.write().await;
+            status.stage = BossStage::Execution;
+            status.current_step = Some(0);
+        }
+        {
+            let mut session = coordinator.session.write().await;
+            *session = Some(BossSession::from_plan_id("plan", BossStage::Execution));
+            if let Some(snapshot) = session.as_mut() {
+                snapshot.executor_b.task_id = Some("task-0".into());
+            }
+        }
+        {
+            let mut plan = coordinator.plan.write().await;
+            *plan = Some(BossPlan {
+                accepted_by_user: true,
+                auto_sequence: true,
+                steps: vec![BossPlanStep {
+                    id: 0,
+                    description: "run worker".into(),
+                    objective: Some("write artifact".into()),
+                    acceptance: Vec::new(),
+                    requires_approval: false,
+                    status: BossPlanStepStatus::Running,
+                    completed: false,
+                    result_diff: None,
+                    worker_task_id: Some("task-1".into()),
+                    attempt_count: 0,
+                    retry_budget: 3,
+                    last_review_summary: None,
+                    last_correction: None,
+                    stage_execution_contract: StageExecutionContract::default(),
+                    stage_continuation_context: None,
+                    executor_b_stage_memory: None,
+                    review_task_id: None,
+                    tool_execution_records: Vec::new(),
+                }],
+                ..BossPlan::default()
+            });
+        }
+        let stale = tasks.create_with_type(
+            "stale worker",
+            TaskType::LocalAgent,
+            "test-session",
+            InteractionSurface::Cli,
+        );
+        let current = tasks.create_with_type(
+            "current worker",
+            TaskType::LocalAgent,
+            "test-session",
+            InteractionSurface::Cli,
+        );
+        assert_eq!(stale.id, "task-0");
+        assert_eq!(current.id, "task-1");
+        tasks.start(&stale.id);
+        tasks.start(&current.id);
+        let dispatcher = NotificationDispatcher::new(TelegramGateway::default())
+            .with_boss_coordinator(coordinator.clone());
+        tasks.complete(&current.id, &dispatcher);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        assert!(
+            coordinator
+                .sync_terminal_child_task_state(tasks.as_ref())
+                .await
+                .expect("sync")
+        );
+        let plan = coordinator.plan.read().await;
+        let step = &plan.as_ref().expect("plan").steps[0];
+        assert_eq!(step.status, BossPlanStepStatus::Completed);
+        assert_eq!(step.worker_task_id.as_deref(), Some("task-1"));
+    }
+
+    #[tokio::test]
+    async fn recorded_dispatch_task_id_is_not_overwritten_by_unrelated_new_task() {
+        let coordinator = Arc::new(BossCoordinator::new());
+        {
+            let mut session = coordinator.session.write().await;
+            *session = Some(BossSession::from_plan_id("plan", BossStage::Execution));
+        }
+        {
+            let mut plan = coordinator.plan.write().await;
+            *plan = Some(BossPlan {
+                steps: vec![BossPlanStep {
+                    id: 0,
+                    description: "run worker".into(),
+                    objective: Some("write artifact".into()),
+                    acceptance: Vec::new(),
+                    requires_approval: false,
+                    status: BossPlanStepStatus::Running,
+                    completed: false,
+                    result_diff: None,
+                    worker_task_id: None,
+                    attempt_count: 0,
+                    retry_budget: 3,
+                    last_review_summary: None,
+                    last_correction: None,
+                    stage_execution_contract: StageExecutionContract::default(),
+                    stage_continuation_context: None,
+                    executor_b_stage_memory: None,
+                    review_task_id: None,
+                    tool_execution_records: Vec::new(),
+                }],
+                ..BossPlan::default()
+            });
+        }
+
+        coordinator.record_step_dispatch_task_id(0, "task-real").await;
+
+        let tasks = TaskManager::new_with_output_root(std::env::temp_dir());
+        let unrelated = tasks.create_with_type(
+            "unrelated",
+            TaskType::LocalAgent,
+            "test-session",
+            InteractionSurface::Cli,
+        );
+        assert_eq!(unrelated.id, "task-0");
+
+        assert_eq!(coordinator.b_task_id().await.as_deref(), Some("task-real"));
+        assert_eq!(
+            coordinator.current_step_worker_task_id().await.as_deref(),
+            None
+        );
+        let plan = coordinator.plan.read().await;
+        assert_eq!(
+            plan.as_ref().expect("plan").steps[0].worker_task_id.as_deref(),
+            Some("task-real")
+        );
     }
 
     #[tokio::test]

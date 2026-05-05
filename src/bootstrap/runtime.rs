@@ -264,6 +264,30 @@ fn terminal_tail_stalled(
         || terminal_result.as_ref().map(|value| value.is_none()).unwrap_or(true)
 }
 
+fn task_is_terminal(
+    task_manager: &crate::task::manager::TaskManager,
+    task_id: Option<&str>,
+) -> bool {
+    task_id.is_some_and(|tid| {
+        matches!(
+            task_manager.status(tid),
+            Some(
+                crate::task::types::TaskStatus::Completed
+                    | crate::task::types::TaskStatus::Failed
+                    | crate::task::types::TaskStatus::Killed
+            )
+        )
+    })
+}
+
+fn step_terminal_from_tracked_ids(
+    task_manager: &crate::task::manager::TaskManager,
+    b_task_id: Option<&str>,
+    current_step_task_id: Option<&str>,
+) -> bool {
+    task_is_terminal(task_manager, b_task_id) || task_is_terminal(task_manager, current_step_task_id)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ShutdownFailure {
     ForceDrainTimedOut,
@@ -704,18 +728,12 @@ impl RuntimeBootstrap {
                         app_arc.permission_context.task_manager.as_ref()
                     {
                         let b_task_id = boss.b_task_id().await;
-                        if let Some(tid) = b_task_id {
-                            matches!(
-                                task_manager.status(&tid),
-                                Some(
-                                    crate::task::types::TaskStatus::Completed
-                                        | crate::task::types::TaskStatus::Failed
-                                        | crate::task::types::TaskStatus::Killed
-                                )
-                            )
-                        } else {
-                            false
-                        }
+                        let current_step_task_id = boss.current_step_worker_task_id().await;
+                        step_terminal_from_tracked_ids(
+                            task_manager,
+                            b_task_id.as_deref(),
+                            current_step_task_id.as_deref(),
+                        )
                     } else {
                         false
                     };
@@ -2129,7 +2147,8 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        terminal_tail_stalled, BootstrapCli, DEFAULT_BOSS_TASK_TIMEOUT_SECS, preview_chars,
+        step_terminal_from_tracked_ids, terminal_tail_stalled, BootstrapCli,
+        DEFAULT_BOSS_TASK_TIMEOUT_SECS, preview_chars,
         resolve_skill_project_root,
     };
     use anyhow::anyhow;
@@ -2185,5 +2204,36 @@ mod tests {
         let sync_result: anyhow::Result<bool> = Err(anyhow!("sync failed"));
         let terminal_result: anyhow::Result<Option<String>> = Ok(None);
         assert!(terminal_tail_stalled(&sync_result, &terminal_result));
+    }
+
+    #[test]
+    fn runtime_terminal_poll_does_not_depend_on_single_b_task_id() {
+        let tasks = crate::task::manager::TaskManager::new_with_output_root(std::env::temp_dir());
+        let stale = tasks.create_with_type(
+            "stale",
+            crate::task::types::TaskType::LocalAgent,
+            "test-session",
+            crate::bootstrap::InteractionSurface::Cli,
+        );
+        let current = tasks.create_with_type(
+            "current",
+            crate::task::types::TaskType::LocalAgent,
+            "test-session",
+            crate::bootstrap::InteractionSurface::Cli,
+        );
+        tasks.start(&stale.id);
+        tasks.start(&current.id);
+        tasks.complete(
+            &current.id,
+            &crate::interaction::dispatcher::NotificationDispatcher::new(
+                crate::interaction::telegram::gateway::TelegramGateway::default(),
+            ),
+        );
+
+        assert!(step_terminal_from_tracked_ids(
+            &tasks,
+            Some(stale.id.as_str()),
+            Some(current.id.as_str())
+        ));
     }
 }

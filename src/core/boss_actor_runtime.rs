@@ -488,12 +488,16 @@ async fn handle_executor_b_command(
                 s.current_step = Some(step_id);
             }
             // Call the execution side effect if wired — B owns the tool invocation.
-            if let Some(f) = exec_fn {
-                let _ = f(payload).await;
-            }
+            let task_id = if let Some(f) = exec_fn {
+                f(payload)
+                    .await
+                    .unwrap_or_else(|_| format!("b-task-step-{step_id}"))
+            } else {
+                format!("b-task-step-{step_id}")
+            };
             BossActorEvent::StepDispatched {
                 step_id,
-                task_id: format!("b-task-step-{step_id}"),
+                task_id,
             }
         }
         ExecutorBCommand::ContinueStep {
