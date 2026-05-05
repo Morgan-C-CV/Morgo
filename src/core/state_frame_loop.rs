@@ -872,6 +872,52 @@ fn enforce_completion_gate(
     })
 }
 
+fn verification_only_completion_gate_block(frame: &StateFrame) -> Option<CompletionGateBlock> {
+    if !completion_contract_requirement(frame, "verification_evidence") {
+        return None;
+    }
+    if !missing_artifact_evidence_refs(frame).is_empty()
+        || !missing_test_evidence_refs(frame).is_empty()
+    {
+        return None;
+    }
+    let missing_evidence_refs = missing_verification_evidence_refs(frame);
+    if missing_evidence_refs.is_empty() {
+        return None;
+    }
+    Some(CompletionGateBlock {
+        status: CompletionEvidenceStatus::MissingVerificationEvidence,
+        required_action: "verify_artifact".into(),
+        reason: "artifact repair recovered; remaining verification evidence requires short re-verify".into(),
+        missing_evidence_refs,
+    })
+}
+
+fn promote_recovered_verification_gap(frame: &mut StateFrame, usage: &mut LoopUsage) -> bool {
+    if usage.recovery_outcome.as_deref() != Some("recovered") {
+        return false;
+    }
+    let Some(block) = verification_only_completion_gate_block(frame) else {
+        return false;
+    };
+    usage.completion_evidence_status = Some(block.status.clone());
+    inject_completion_gate_block(frame, &block);
+    record_completion_gate_recovery(frame, usage, &block);
+    usage.recovery_tier = Some("verification_repair_continuation".into());
+    true
+}
+
+fn terminalize_verification_only_gap(frame: &mut StateFrame, usage: &mut LoopUsage) -> bool {
+    let Some(block) = verification_only_completion_gate_block(frame) else {
+        return false;
+    };
+    usage.completion_evidence_status = Some(block.status.clone());
+    inject_completion_gate_block(frame, &block);
+    record_completion_gate_recovery(frame, usage, &block);
+    usage.recovery_tier = Some("verification_repair_continuation".into());
+    true
+}
+
 fn build_worker_structured_report(
     frame: &StateFrame,
     usage: &LoopUsage,
@@ -2816,8 +2862,12 @@ pub async fn run_decision_loop_with_tools(
         if let Some(outcome) = verification_terminal_outcome(&frame, &mut total_usage) {
             return Ok(outcome);
         }
+        if promote_recovered_verification_gap(&mut frame, &mut total_usage) {
+            continue;
+        }
     }
 
+    terminalize_verification_only_gap(&mut frame, &mut total_usage);
     finalize_worker_usage_report(&frame, &mut total_usage);
     Ok(LoopOutcome::MaxIterationsReached {
         last_state: frame.state,
@@ -4824,6 +4874,153 @@ mod tests {
             CompletionEvidenceStatus::Sufficient
         );
         assert!(super::collect_completion_evidence_gaps(&frame).is_empty());
+    }
+
+    fn u7_recovered_artifact_frame_missing_verification() -> StateFrame {
+        let mut frame = make_frame();
+        frame.recent_evidence.clear();
+        frame.state = AgentState::Executing;
+        push_completion_contract_with_refs(
+            &mut frame,
+            &["artifact:contract:dir", "artifact:contract:file"],
+            &[],
+            &["artifact:contract:dir", "artifact:contract:file"],
+        );
+        push_artifact_target_fact(
+            &mut frame,
+            "artifact:contract:dir",
+            "/tmp/example-site",
+            "directory",
+        );
+        push_artifact_target_fact(
+            &mut frame,
+            "artifact:contract:file",
+            "/tmp/example-site/README.md",
+            "file",
+        );
+        frame.recent_evidence.push(
+            "fact: recent_changes_in_files ref=change:readme path=/tmp/example-site/README.md source=tool:Write source_event_id=tool-write:1 freshness=after-runtime confidence=1.00 status=active invalidated_by=none supersedes=none conflicts_with=none summary=updated README".into(),
+        );
+        frame.recent_evidence.push(
+            "fact: artifact_status ref=artifact:readme-created path=/tmp/example-site/README.md kind=file status=created source=tool:Write source_event_id=tool-write:1 freshness=after-runtime confidence=1.00 lineage_status=active invalidated_by=none supersedes=none conflicts_with=none summary=README created".into(),
+        );
+        frame
+    }
+
+    #[test]
+    fn recovered_artifact_repair_with_remaining_verification_gap_enters_verify_artifact() {
+        let mut frame = u7_recovered_artifact_frame_missing_verification();
+        let mut usage = LoopUsage {
+            recovery_attempted: true,
+            recovery_tier: Some("missing_path_recovery_gate".into()),
+            recovery_outcome: Some("recovered".into()),
+            ..LoopUsage::default()
+        };
+
+        assert!(super::missing_artifact_evidence_refs(&frame).is_empty());
+        assert!(!super::missing_verification_evidence_refs(&frame).is_empty());
+        assert!(super::promote_recovered_verification_gap(
+            &mut frame, &mut usage
+        ));
+
+        assert_eq!(frame.state, AgentState::Verifying);
+        assert_eq!(
+            usage.completion_evidence_status.as_ref().map(|s| s.as_str()),
+            Some("missing_verification_evidence")
+        );
+        assert_eq!(
+            usage.recovery_tier.as_deref(),
+            Some("verification_repair_continuation")
+        );
+        assert_eq!(usage.recovery_outcome.as_deref(), Some("repair_turn_injected"));
+        assert!(
+            frame
+                .open_items
+                .iter()
+                .any(|item| item.contains("required_action:verify_artifact"))
+        );
+    }
+
+    #[test]
+    fn verification_only_gap_after_recovery_does_not_spin_in_executing_until_max_iterations() {
+        let mut frame = u7_recovered_artifact_frame_missing_verification();
+        let mut usage = LoopUsage {
+            recovery_attempted: true,
+            recovery_outcome: Some("recovered".into()),
+            ..LoopUsage::default()
+        };
+
+        assert!(super::promote_recovered_verification_gap(
+            &mut frame, &mut usage
+        ));
+
+        assert_ne!(frame.state, AgentState::Executing);
+        assert_eq!(frame.state, AgentState::Verifying);
+    }
+
+    #[test]
+    fn max_iterations_with_only_verification_gap_is_not_generic_failure() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let frame = u7_recovered_artifact_frame_missing_verification();
+        let client = ModelProviderClient::with_scripted_turns(Vec::new());
+        let outcome = rt
+            .block_on(run_decision_loop(
+                &client,
+                frame,
+                DecisionLoopConfig {
+                    max_iterations: 0,
+                    ..DecisionLoopConfig::default()
+                },
+            ))
+            .expect("loop should not error");
+
+        match outcome {
+            LoopOutcome::MaxIterationsReached { last_state, usage } => {
+                assert_eq!(last_state, AgentState::Verifying);
+                assert_eq!(
+                    usage.completion_evidence_status.as_ref().map(|s| s.as_str()),
+                    Some("missing_verification_evidence")
+                );
+                assert_eq!(
+                    usage.recovery_tier.as_deref(),
+                    Some("verification_repair_continuation")
+                );
+                assert_eq!(
+                    usage.recovery_outcome.as_deref(),
+                    Some("repair_turn_injected")
+                );
+            }
+            other => panic!("expected MaxIterationsReached, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn u7_recovered_artifact_repair_missing_readme_verification_classifies_verification_continuation()
+     {
+        let mut frame = u7_recovered_artifact_frame_missing_verification();
+        let mut usage = LoopUsage {
+            recovery_attempted: true,
+            recovery_outcome: Some("recovered".into()),
+            ..LoopUsage::default()
+        };
+
+        assert!(super::promote_recovered_verification_gap(
+            &mut frame, &mut usage
+        ));
+        super::finalize_worker_usage_report(&frame, &mut usage);
+        let report = usage.worker_report.expect("worker report");
+
+        assert_eq!(
+            report.completion_evidence_status.as_str(),
+            "missing_verification_evidence"
+        );
+        assert!(report.completion_evidence_gaps.iter().all(|gap| {
+            !gap.missing_artifact_evidence && gap.missing_verification_evidence
+        }));
+        assert!(report.completion_evidence_gaps.iter().any(|gap| {
+            gap.target_path.as_deref() == Some("/tmp/example-site/README.md")
+                && gap.recommended_action == "verify_artifact"
+        }));
     }
 
     #[test]
