@@ -240,20 +240,44 @@ pub fn requires_external_tool_execution(
         && contains_external_effect_marker(&frame.objective)
 }
 
-fn external_tool_execution_unsupported() -> StepOutcome {
-    StepOutcome::Failed {
-        reason: "StateFrame direct execution cannot yet perform required filesystem or command side effects; use full worker path or wire tool dispatch before enabling LisM for this step".into(),
-        failure_classification: StepFailureClassification::UnsupportedRequest,
-        usage: None,
-        tool_registry_snapshot: None,
-        tool_contract_mismatch: None,
+    fn external_tool_execution_unsupported() -> StepOutcome {
+        StepOutcome::Failed {
+            reason: "StateFrame direct execution cannot yet perform required filesystem or command side effects; use full worker path or wire tool dispatch before enabling LisM for this step".into(),
+            failure_classification: StepFailureClassification::UnsupportedRequest,
+            usage: None,
+            tool_registry_snapshot: None,
+            tool_contract_mismatch: None,
+        }
     }
-}
 
-fn classify_usage_failure(usage: Option<&LoopUsage>) -> StepFailureClassification {
+    #[test]
+    fn verification_repair_continuation_with_missing_evidence_is_not_generic_failure() {
+        let usage = LoopUsage {
+            recovery_tier: Some("verification_repair_continuation".into()),
+            completion_evidence_status: Some(
+                crate::core::state_frame::CompletionEvidenceStatus::MissingVerificationEvidence,
+            ),
+            ..LoopUsage::default()
+        };
+
+        assert_eq!(
+            classify_usage_failure(Some(&usage)),
+            StepFailureClassification::VerificationRepairContinuation
+        );
+    }
+
+    fn classify_usage_failure(usage: Option<&LoopUsage>) -> StepFailureClassification {
     let Some(usage) = usage else {
         return StepFailureClassification::GenericFailure;
     };
+    if usage.recovery_tier.as_deref() == Some("verification_repair_continuation")
+        && matches!(
+            usage.completion_evidence_status,
+            Some(crate::core::state_frame::CompletionEvidenceStatus::MissingVerificationEvidence)
+        )
+    {
+        return StepFailureClassification::VerificationRepairContinuation;
+    }
     if usage.terminal_blocker_kind.as_deref() == Some("true_external_blocker") {
         return StepFailureClassification::TrueExternalBlocker;
     }
