@@ -2566,9 +2566,14 @@ impl BossCoordinator {
         for aggregate in aggregates.into_values() {
             let missing_evidence_kinds: Vec<String> =
                 aggregate.missing_evidence_kinds.into_iter().collect();
+            let verification_only_gap = missing_evidence_kinds.len() == 1
+                && missing_evidence_kinds
+                    .iter()
+                    .any(|kind| kind == "verification_evidence");
             let requires_denylist = missing_evidence_kinds
                 .iter()
-                .any(|kind| kind == "artifact_evidence" || kind == "verification_evidence");
+                .any(|kind| kind == "artifact_evidence")
+                && !verification_only_gap;
             let decision = if requires_denylist {
                 BossRolloutTargetDecision {
                     target_ref: aggregate.target_ref,
@@ -2576,6 +2581,14 @@ impl BossCoordinator {
                     missing_evidence_kinds,
                     recommended_policy: "denylist_direct_worker_lism".into(),
                     recommended_fallback: "full_worker_dispatch".into(),
+                }
+            } else if verification_only_gap {
+                BossRolloutTargetDecision {
+                    target_ref: aggregate.target_ref,
+                    target_path: aggregate.target_path,
+                    missing_evidence_kinds,
+                    recommended_policy: "prefer_local_reverify".into(),
+                    recommended_fallback: "verification_first".into(),
                 }
             } else {
                 BossRolloutTargetDecision {
@@ -2596,6 +2609,17 @@ impl BossCoordinator {
             format!(
                 "artifact-scoped completion gaps detected; denylist direct worker LisM for {} target(s) and fallback {} target(s)",
                 denylist_targets.len(),
+                fallback_targets.len()
+            )
+        } else if fallback_targets.iter().any(|target| {
+            target.recommended_fallback == "verification_first"
+                && target
+                    .missing_evidence_kinds
+                    .iter()
+                    .all(|kind| kind == "verification_evidence")
+        }) {
+            format!(
+                "verification-only completion gaps detected; prefer local re-verify for {} target(s)",
                 fallback_targets.len()
             )
         } else {
@@ -2635,19 +2659,33 @@ impl BossCoordinator {
         let has_verification_gap = affected_gaps
             .iter()
             .any(|gap| gap.missing_verification_evidence);
+        let has_test_gap = affected_gaps.iter().any(|gap| gap.missing_test_evidence);
+        let verification_only_gap =
+            has_verification_gap && !has_artifact_gap && !has_test_gap;
         if has_artifact_gap || has_verification_gap {
-            Some(StepRolloutExecutionPolicy {
-                forced_worker_lism_policy: WorkerLisMPolicy::ForceOff,
-                fallback_tier: "full_worker_dispatch",
-                fallback_reason: if has_artifact_gap {
-                    "rollout_policy_exact_artifact_gap"
-                } else {
-                    "rollout_policy_verification_gap"
-                },
-                worker_role: WorkerRole::Implement,
-                force_fresh_spawn: false,
-                affected_gaps,
-            })
+            if verification_only_gap {
+                Some(StepRolloutExecutionPolicy {
+                    forced_worker_lism_policy: WorkerLisMPolicy::ForceOff,
+                    fallback_tier: "verification_first",
+                    fallback_reason: "rollout_policy_verification_gap",
+                    worker_role: WorkerRole::Verify,
+                    force_fresh_spawn: true,
+                    affected_gaps,
+                })
+            } else {
+                Some(StepRolloutExecutionPolicy {
+                    forced_worker_lism_policy: WorkerLisMPolicy::ForceOff,
+                    fallback_tier: "full_worker_dispatch",
+                    fallback_reason: if has_artifact_gap {
+                        "rollout_policy_exact_artifact_gap"
+                    } else {
+                        "rollout_policy_verification_gap"
+                    },
+                    worker_role: WorkerRole::Implement,
+                    force_fresh_spawn: false,
+                    affected_gaps,
+                })
+            }
         } else if metadata.fallback_tier.as_deref() == Some("verification_first") {
             Some(StepRolloutExecutionPolicy {
                 forced_worker_lism_policy: WorkerLisMPolicy::ForceOff,
@@ -8405,8 +8443,10 @@ mod tests {
         let policy = BossCoordinator::resolve_step_rollout_execution_policy(Some(&metadata))
             .expect("execution policy");
 
-        assert_eq!(policy.fallback_tier, "full_worker_dispatch");
+        assert_eq!(policy.fallback_tier, "verification_first");
         assert_eq!(policy.fallback_reason, "rollout_policy_verification_gap");
+        assert_eq!(policy.worker_role, WorkerRole::Verify);
+        assert!(policy.force_fresh_spawn);
     }
 
     #[test]
@@ -8558,6 +8598,127 @@ mod tests {
         );
         assert_eq!(policy.worker_role, WorkerRole::Implement);
         assert!(!policy.force_fresh_spawn);
+    }
+
+    #[test]
+    fn verification_only_gap_does_not_recommend_full_worker_dispatch() {
+        let steps = vec![BossStepReport {
+            id: 1,
+            status: BossPlanStepStatus::Rejected,
+            worker_task_id: Some("task-0".into()),
+            attempt_count: 1,
+            last_review_summary: Some("verify again".into()),
+            action_required: None,
+            blocker_reason: None,
+            routed_metadata: Some(BossStepRoutedMetadata {
+                step_failure_classification: Some(
+                    StepFailureClassification::VerificationRepairContinuation,
+                ),
+                completion_evidence_gaps: vec![CompletionEvidenceGap {
+                    target_ref: "artifact:contract:verify".into(),
+                    target_path: Some("/tmp/report.md".into()),
+                    missing_artifact_evidence: false,
+                    missing_test_evidence: false,
+                    missing_verification_evidence: true,
+                    recommended_action: "verify_artifact".into(),
+                }],
+                ..BossStepRoutedMetadata::default()
+            }),
+            stage_execution_contract: StageExecutionContract::default(),
+            stage_continuation_context: None,
+            executor_b_stage_memory: None,
+        }];
+
+        let decision =
+            BossCoordinator::derive_rollout_policy_decision(&steps).expect("policy decision");
+        assert_eq!(decision.fallback_targets.len(), 1);
+        assert_eq!(
+            decision.fallback_targets[0].recommended_fallback,
+            "verification_first"
+        );
+        assert!(decision.denylist_targets.is_empty());
+    }
+
+    #[test]
+    fn verification_repair_continuation_prefers_local_reverify_over_full_dispatch() {
+        let metadata = BossStepRoutedMetadata {
+            step_failure_classification: Some(
+                StepFailureClassification::VerificationRepairContinuation,
+            ),
+            completion_evidence_gaps: vec![CompletionEvidenceGap {
+                target_ref: "artifact:contract:verify".into(),
+                target_path: Some("/tmp/report.md".into()),
+                missing_artifact_evidence: false,
+                missing_test_evidence: false,
+                missing_verification_evidence: true,
+                recommended_action: "verify_artifact".into(),
+            }],
+            ..BossStepRoutedMetadata::default()
+        };
+
+        let policy = BossCoordinator::resolve_step_rollout_execution_policy(Some(&metadata))
+            .expect("execution policy");
+        assert_eq!(policy.fallback_tier, "verification_first");
+        assert_eq!(policy.fallback_reason, "rollout_policy_verification_gap");
+        assert_eq!(policy.worker_role, WorkerRole::Verify);
+        assert!(policy.force_fresh_spawn);
+    }
+
+    #[test]
+    fn artifact_plus_verification_gap_still_allows_full_dispatch() {
+        let metadata = BossStepRoutedMetadata {
+            step_failure_classification: Some(
+                StepFailureClassification::VerificationRepairContinuation,
+            ),
+            completion_evidence_gaps: vec![CompletionEvidenceGap {
+                target_ref: "artifact:contract:combo".into(),
+                target_path: Some("/tmp/report.md".into()),
+                missing_artifact_evidence: true,
+                missing_test_evidence: false,
+                missing_verification_evidence: true,
+                recommended_action: "write_artifact".into(),
+            }],
+            ..BossStepRoutedMetadata::default()
+        };
+
+        let policy = BossCoordinator::resolve_step_rollout_execution_policy(Some(&metadata))
+            .expect("execution policy");
+        assert_eq!(policy.fallback_tier, "full_worker_dispatch");
+        assert_eq!(policy.fallback_reason, "rollout_policy_exact_artifact_gap");
+        assert_eq!(policy.worker_role, WorkerRole::Implement);
+    }
+
+    #[test]
+    fn u7_verification_only_gap_keeps_fallback_tier_off_full_worker_dispatch() {
+        let metadata = BossStepRoutedMetadata {
+            step_failure_classification: Some(
+                StepFailureClassification::VerificationRepairContinuation,
+            ),
+            completion_evidence_gaps: vec![
+                CompletionEvidenceGap {
+                    target_ref: "artifact:step0:0:/tmp/site".into(),
+                    target_path: Some("/tmp/site".into()),
+                    missing_artifact_evidence: false,
+                    missing_test_evidence: false,
+                    missing_verification_evidence: true,
+                    recommended_action: "verify_artifact".into(),
+                },
+                CompletionEvidenceGap {
+                    target_ref: "artifact:step0:1:/tmp/site/README.md".into(),
+                    target_path: Some("/tmp/site/README.md".into()),
+                    missing_artifact_evidence: false,
+                    missing_test_evidence: false,
+                    missing_verification_evidence: true,
+                    recommended_action: "verify_artifact".into(),
+                },
+            ],
+            ..BossStepRoutedMetadata::default()
+        };
+
+        let policy = BossCoordinator::resolve_step_rollout_execution_policy(Some(&metadata))
+            .expect("execution policy");
+        assert_eq!(policy.fallback_tier, "verification_first");
+        assert_ne!(policy.fallback_tier, "full_worker_dispatch");
     }
 
     #[tokio::test]
