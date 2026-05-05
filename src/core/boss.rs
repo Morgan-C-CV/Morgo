@@ -2600,14 +2600,21 @@ impl BossCoordinator {
         if affected_gaps.is_empty() {
             return None;
         }
-        let has_artifact_or_verification_gap = affected_gaps
+        let has_artifact_gap = affected_gaps
             .iter()
-            .any(|gap| gap.missing_artifact_evidence || gap.missing_verification_evidence);
-        if has_artifact_or_verification_gap {
+            .any(|gap| gap.missing_artifact_evidence);
+        let has_verification_gap = affected_gaps
+            .iter()
+            .any(|gap| gap.missing_verification_evidence);
+        if has_artifact_gap || has_verification_gap {
             Some(StepRolloutExecutionPolicy {
                 forced_worker_lism_policy: WorkerLisMPolicy::ForceOff,
                 fallback_tier: "full_worker_dispatch",
-                fallback_reason: "rollout_policy_exact_artifact_gap",
+                fallback_reason: if has_artifact_gap {
+                    "rollout_policy_exact_artifact_gap"
+                } else {
+                    "rollout_policy_verification_gap"
+                },
                 worker_role: WorkerRole::Implement,
                 force_fresh_spawn: false,
                 affected_gaps,
@@ -3875,7 +3882,7 @@ impl BossCoordinator {
                 return Ok(false);
             };
             plan.steps.iter().find_map(|step| {
-                if step.status != BossPlanStepStatus::Running {
+                if step.completed || step.status.is_terminal_failure() {
                     return None;
                 }
                 let task_id = step.worker_task_id.as_ref()?;
@@ -6140,6 +6147,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn full_worker_dispatch_completed_child_syncs_without_timeout_tail() {
+        let coordinator = Arc::new(BossCoordinator::new());
+        let tasks = Arc::new(TaskManager::new_with_output_root(std::env::temp_dir()));
+        let app_state = test_app_state_with_tasks(tasks.clone(), coordinator.clone());
+        coordinator
+            .attach_app_state_for_report_testing(app_state.clone())
+            .await;
+        {
+            let mut status = coordinator.status.write().await;
+            status.stage = BossStage::Execution;
+            status.current_step = Some(0);
+        }
+        {
+            let mut plan = coordinator.plan.write().await;
+            *plan = Some(BossPlan {
+                accepted_by_user: true,
+                auto_sequence: true,
+                steps: vec![BossPlanStep {
+                    id: 0,
+                    description: "run worker".into(),
+                    objective: Some("write artifact".into()),
+                    acceptance: Vec::new(),
+                    requires_approval: false,
+                    status: BossPlanStepStatus::Reviewing,
+                    completed: false,
+                    result_diff: None,
+                    worker_task_id: Some("task-0".into()),
+                    attempt_count: 0,
+                    retry_budget: 3,
+                    last_review_summary: None,
+                    last_correction: None,
+                    stage_execution_contract: StageExecutionContract::default(),
+                    stage_continuation_context: None,
+                    executor_b_stage_memory: None,
+                    review_task_id: None,
+                    tool_execution_records: Vec::new(),
+                }],
+                ..BossPlan::default()
+            });
+        }
+        let record = tasks.create_with_type(
+            "worker",
+            TaskType::LocalAgent,
+            "test-session",
+            InteractionSurface::Cli,
+        );
+        assert_eq!(record.id, "task-0");
+        tasks.start("task-0");
+        let dispatcher = NotificationDispatcher::new(TelegramGateway::default())
+            .with_boss_coordinator(coordinator.clone());
+        tasks.complete("task-0", &dispatcher);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        assert!(
+            coordinator
+                .sync_terminal_child_task_state(tasks.as_ref())
+                .await
+                .expect("sync")
+        );
+    }
+
+    #[tokio::test]
     async fn test_state_transition_to_waiting_for_approval() {
         let coordinator = BossCoordinator::new();
         coordinator
@@ -7465,6 +7534,27 @@ mod tests {
         assert_eq!(policy.fallback_reason, "rollout_policy_exact_artifact_gap");
         assert_eq!(policy.affected_gaps.len(), 1);
         assert_eq!(policy.affected_gaps[0].target_ref, "artifact:contract:2");
+    }
+
+    #[test]
+    fn verification_only_gap_is_not_labeled_exact_artifact_gap() {
+        let metadata = BossStepRoutedMetadata {
+            completion_evidence_gaps: vec![CompletionEvidenceGap {
+                target_ref: "artifact:contract:b".into(),
+                target_path: Some("/tmp/b.md".into()),
+                missing_artifact_evidence: false,
+                missing_test_evidence: false,
+                missing_verification_evidence: true,
+                recommended_action: "verify_artifact".into(),
+            }],
+            ..BossStepRoutedMetadata::default()
+        };
+
+        let policy = BossCoordinator::resolve_step_rollout_execution_policy(Some(&metadata))
+            .expect("execution policy");
+
+        assert_eq!(policy.fallback_tier, "full_worker_dispatch");
+        assert_eq!(policy.fallback_reason, "rollout_policy_verification_gap");
     }
 
     #[test]

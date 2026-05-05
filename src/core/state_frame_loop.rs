@@ -479,14 +479,33 @@ fn repair_turn_fact_line(repair_turn: &ArtifactRepairTurn, reference: &str, summ
 }
 
 fn has_verified_artifact_for_path(frame: &StateFrame, path: &str) -> bool {
+    let path_matches = |candidate: &str| {
+        if candidate == path {
+            return true;
+        }
+        frame.stage_execution_contract
+            .verification_by_target_path(path)
+            .and_then(|verification| {
+                frame
+                    .stage_execution_contract
+                    .declared_artifact_by_ref(&verification.target_ref)
+            })
+            .is_some_and(|artifact| {
+                artifact.kind == "directory" && candidate.starts_with(&format!("{path}/"))
+            })
+    };
     frame.recent_evidence.iter().any(|line| {
         (line.starts_with("fact: artifact_status ")
-            && evidence_field_value(line, "path").as_deref() == Some(path)
+            && evidence_field_value(line, "path")
+                .as_deref()
+                .is_some_and(path_matches)
             && evidence_field_value(line, "status").as_deref() == Some("verified")
             && (evidence_field_value(line, "source").as_deref() == Some("tool:ArtifactVerify")
                 || line.contains("artifact verification passed")))
             || (line.starts_with("fact: verification_status ")
-                && evidence_field_value(line, "path").as_deref() == Some(path)
+                && evidence_field_value(line, "path")
+                    .as_deref()
+                    .is_some_and(path_matches)
                 && evidence_field_value(line, "status").as_deref() == Some("verified"))
     })
 }
@@ -4635,6 +4654,48 @@ mod tests {
         );
         frame.recent_evidence.push(
             "fact: verification_status ref=artifact:contract:0 path=/tmp/report.md status=verified source=tool:Read source_event_id=tool-read:2 freshness=after-runtime-read confidence=0.90 lineage_status=active invalidated_by=none supersedes=none conflicts_with=none summary=local re-verify succeeded".into(),
+        );
+        assert_eq!(
+            super::evaluate_completion_evidence(&frame, &LoopUsage::default()),
+            CompletionEvidenceStatus::Sufficient
+        );
+        assert!(super::collect_completion_evidence_gaps(&frame).is_empty());
+    }
+
+    #[test]
+    fn u7_directory_and_readme_verification_gap_closes_after_reverify() {
+        let mut frame = make_frame();
+        frame.recent_evidence.clear();
+        push_completion_contract_with_refs(
+            &mut frame,
+            &["artifact:contract:dir", "artifact:contract:file"],
+            &[],
+            &["artifact:contract:dir", "artifact:contract:file"],
+        );
+        push_artifact_target_fact(
+            &mut frame,
+            "artifact:contract:dir",
+            "/tmp/example-site",
+            "directory",
+        );
+        push_artifact_target_fact(
+            &mut frame,
+            "artifact:contract:file",
+            "/tmp/example-site/README.md",
+            "file",
+        );
+        frame.recent_evidence.push(
+            "fact: recent_changes_in_files ref=change:dir path=/tmp/example-site/README.md source=tool:Write source_event_id=tool-write:1 freshness=after-runtime confidence=1.00 status=active invalidated_by=none supersedes=none conflicts_with=none summary=updated README".into(),
+        );
+        assert_eq!(
+            super::evaluate_completion_evidence(&frame, &LoopUsage::default()),
+            CompletionEvidenceStatus::MissingVerificationEvidence
+        );
+        frame.recent_evidence.push(
+            "fact: verification_status ref=artifact:contract:file target_ref=artifact:contract:file path=/tmp/example-site/README.md status=verified source=tool:Read source_event_id=tool-read:1 freshness=after-runtime-read confidence=0.90 lineage_status=active invalidated_by=none supersedes=none conflicts_with=none summary=read-back verified README".into(),
+        );
+        frame.recent_evidence.push(
+            "fact: verification_status ref=artifact:contract:dir target_ref=artifact:contract:dir path=/tmp/example-site/README.md status=verified source=tool:Read source_event_id=tool-read:2 freshness=after-runtime-read confidence=0.90 lineage_status=active invalidated_by=none supersedes=none conflicts_with=none summary=directory target verified via README".into(),
         );
         assert_eq!(
             super::evaluate_completion_evidence(&frame, &LoopUsage::default()),
