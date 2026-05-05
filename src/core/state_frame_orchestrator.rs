@@ -1,6 +1,8 @@
 use crate::bootstrap::model_profiles::ModelProfileRegistry;
 use crate::core::boss_state::{BossPlan, BossStage};
-use crate::core::state_frame::{ActorRole, StateFrame};
+use crate::core::state_frame::{
+    ActorRole, CompletionEvidenceStatus, StageExecutionContract, StateFrame,
+};
 use crate::core::state_frame_loop::{
     DecisionLoopConfig, LoopOutcome, LoopUsage, StateFrameToolRuntime, run_decision_loop,
     run_decision_loop_with_tools,
@@ -357,8 +359,9 @@ pub async fn run_step_with_state_frame(
     if requires_external_tool_execution(&routed.frame, false) {
         return Ok(external_tool_execution_unsupported());
     }
+    let stage_execution_contract = routed.frame.stage_execution_contract.clone();
     let outcome = run_decision_loop(client, routed.frame, config).await?;
-    Ok(map_loop_outcome(outcome, None))
+    Ok(map_loop_outcome(outcome, &stage_execution_contract, None))
 }
 
 pub async fn run_step_with_state_frame_and_runtime<'a>(
@@ -401,6 +404,7 @@ pub async fn run_step_with_state_frame_and_runtime<'a>(
             });
         }
     }
+    let stage_execution_contract = resolved.routed.frame.stage_execution_contract.clone();
     let outcome = run_decision_loop_with_tools(
         &resolved.resolved_snapshot.client,
         resolved.routed.frame,
@@ -410,6 +414,7 @@ pub async fn run_step_with_state_frame_and_runtime<'a>(
     .await?;
     Ok(map_loop_outcome_with_pricing(
         outcome,
+        &stage_execution_contract,
         &resolved.resolved_snapshot.config.pricing,
         resolved.tool_registry_snapshot,
     ))
@@ -475,6 +480,7 @@ pub async fn run_routed_step_with_runtime<'a>(
             });
         }
     }
+    let stage_execution_contract = resolved.routed.frame.stage_execution_contract.clone();
     let outcome = run_decision_loop_with_tools(
         &resolved.resolved_snapshot.client,
         resolved.routed.frame,
@@ -484,6 +490,7 @@ pub async fn run_routed_step_with_runtime<'a>(
     .await?;
     Ok(map_loop_outcome_with_pricing(
         outcome,
+        &stage_execution_contract,
         &resolved.resolved_snapshot.config.pricing,
         resolved.tool_registry_snapshot,
     ))
@@ -491,13 +498,28 @@ pub async fn run_routed_step_with_runtime<'a>(
 
 fn map_loop_outcome(
     outcome: LoopOutcome,
+    stage_execution_contract: &StageExecutionContract,
     tool_registry_snapshot: Option<ToolRegistrySnapshot>,
 ) -> StepOutcome {
     match outcome {
-        LoopOutcome::Done { usage, .. } => StepOutcome::Completed {
-            usage,
-            tool_registry_snapshot,
-        },
+        LoopOutcome::Done { usage, .. } => {
+            if let Some((reason, failure_classification)) =
+                completion_gate_failure(stage_execution_contract, &usage)
+            {
+                StepOutcome::Failed {
+                    reason,
+                    failure_classification,
+                    usage: Some(usage),
+                    tool_registry_snapshot,
+                    tool_contract_mismatch: None,
+                }
+            } else {
+                StepOutcome::Completed {
+                    usage,
+                    tool_registry_snapshot,
+                }
+            }
+        }
         LoopOutcome::Rejected { reason, usage } => StepOutcome::Failed {
             reason,
             failure_classification: classify_usage_failure(Some(&usage)),
@@ -550,10 +572,11 @@ fn map_loop_outcome(
 
 fn map_loop_outcome_with_pricing(
     outcome: LoopOutcome,
+    stage_execution_contract: &StageExecutionContract,
     pricing: &ModelPricing,
     tool_registry_snapshot: Option<ToolRegistrySnapshot>,
 ) -> StepOutcome {
-    match map_loop_outcome(outcome, tool_registry_snapshot) {
+    match map_loop_outcome(outcome, stage_execution_contract, tool_registry_snapshot) {
         StepOutcome::Completed {
             mut usage,
             tool_registry_snapshot,
@@ -593,17 +616,70 @@ fn estimate_loop_usage_cost_micros(usage: &LoopUsage, pricing: &ModelPricing) ->
     (estimated_cost_usd * 1_000_000.0).round() as u64
 }
 
+fn stage_execution_contract_requires_verification(
+    stage_execution_contract: &StageExecutionContract,
+) -> bool {
+    !stage_execution_contract.verifications.is_empty()
+        || stage_execution_contract.required_actions.iter().any(|action| {
+            matches!(
+                action.as_str(),
+                "verify" | "verify_artifact" | "run_verification"
+            )
+        })
+}
+
+fn completion_gate_failure(
+    stage_execution_contract: &StageExecutionContract,
+    usage: &LoopUsage,
+) -> Option<(String, StepFailureClassification)> {
+    if !stage_execution_contract_requires_verification(stage_execution_contract) {
+        return None;
+    }
+    let completion_status = usage.completion_evidence_status.as_ref();
+    let report = usage.worker_report.as_ref();
+    let gaps = report
+        .map(|report| report.completion_evidence_gaps.as_slice())
+        .unwrap_or(&[]);
+    let has_gaps = !gaps.is_empty();
+    let missing_verification_gap = gaps.iter().any(|gap| gap.missing_verification_evidence);
+    let completion_sufficient = matches!(
+        completion_status,
+        Some(CompletionEvidenceStatus::Sufficient)
+    ) && report
+        .is_some_and(|report| report.completion_evidence_status == CompletionEvidenceStatus::Sufficient);
+
+    if completion_sufficient && !has_gaps {
+        return None;
+    }
+
+    let failure_classification = if missing_verification_gap
+        || matches!(
+            completion_status,
+            Some(CompletionEvidenceStatus::MissingVerificationEvidence)
+        ) {
+        StepFailureClassification::VerificationRepairContinuation
+    } else {
+        StepFailureClassification::RepairableRecovery
+    };
+    Some((
+        "completion gate rejected direct completion: verification contract remains unsatisfied"
+            .into(),
+        failure_classification,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        DecisionLoopConfig, RoutedStateFrame, StepOutcome, StepRuntimeResolutionContext,
+        DecisionLoopConfig, LoopOutcome, LoopUsage, RoutedStateFrame, StepFailureClassification,
+        StepOutcome, StepRuntimeResolutionContext,
         apply_tool_registry_contract, infer_preflight_requirements_from_state_frame,
-        requires_external_tool_execution, run_routed_step_with_runtime,
+        map_loop_outcome, requires_external_tool_execution, run_routed_step_with_runtime,
         tool_assembly_context_for_role,
     };
     use crate::core::boss_state::{BossActorRole, BossStage};
     use crate::core::state_frame::{
-        ActorRole, AgentState, EffortLevel, StageExecutionContract, StateBudget, StateFrame,
+        ActorRole, AgentState, StageExecutionContract, StateBudget, StateFrame,
     };
     use crate::core::state_frame_model_router::{ModelRoute, ModelTier};
     use crate::service::api::client::{ModelProviderClient, ModelProviderConfig};
@@ -636,6 +712,20 @@ mod tests {
             skillset_id: None,
             required_output_schema: Some("state_decision_v1".into()),
             budget: StateBudget::default(),
+        }
+    }
+
+    fn verification_contract() -> StageExecutionContract {
+        StageExecutionContract {
+            verifications: vec![crate::core::state_frame::VerificationContract {
+                target_ref: "artifact:step0:0".into(),
+                target_path: Some("/tmp/report.md".into()),
+                required_actions: vec!["verify_artifact".into()],
+                required_evidence: vec!["/tmp/report.md".into()],
+            }],
+            required_actions: vec!["verify_artifact".into()],
+            required_evidence: vec!["/tmp/report.md".into()],
+            ..StageExecutionContract::default()
         }
     }
 
@@ -1007,5 +1097,86 @@ mod tests {
                 .iter()
                 .any(|action| action == "spawn_agent")
         );
+    }
+
+    #[test]
+    fn step_outcome_completed_is_rejected_when_worker_report_still_has_verification_gap() {
+        let outcome = LoopOutcome::Done {
+            final_state: AgentState::Done,
+            usage: LoopUsage {
+                completion_evidence_status: Some(
+                    crate::core::state_frame::CompletionEvidenceStatus::MissingVerificationEvidence,
+                ),
+                worker_report: Some(crate::core::state_frame::WorkerStructuredReport {
+                    worker_state: AgentState::Done,
+                    last_tool_action: Some("Read".into()),
+                    files_changed: vec!["/tmp/report.md".into()],
+                    tests_run: Vec::new(),
+                    artifact_status: "verified".into(),
+                    test_status: "not_required".into(),
+                    verification_status: "unverified".into(),
+                    stage_execution_contract: verification_contract(),
+                    stage_continuation_context: None,
+                    evidence_refs: vec!["read:/tmp/report.md".into()],
+                    completion_evidence_gaps: vec![crate::core::state_frame::CompletionEvidenceGap {
+                        target_ref: "artifact:step0:0".into(),
+                        target_path: Some("/tmp/report.md".into()),
+                        missing_artifact_evidence: false,
+                        missing_test_evidence: false,
+                        missing_verification_evidence: true,
+                        recommended_action: "verify_artifact".into(),
+                    }],
+                    remaining_risks: Vec::new(),
+                    completion_evidence_status:
+                        crate::core::state_frame::CompletionEvidenceStatus::MissingVerificationEvidence,
+                }),
+                ..LoopUsage::default()
+            },
+        };
+
+        match map_loop_outcome(outcome, &verification_contract(), None) {
+            StepOutcome::Failed {
+                failure_classification,
+                ..
+            } => {
+                assert_eq!(
+                    failure_classification,
+                    StepFailureClassification::VerificationRepairContinuation
+                );
+            }
+            other => panic!("expected failed outcome, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn verification_required_contract_cannot_finish_with_empty_missing_targets_only_by_done_state() {
+        let outcome = LoopOutcome::Done {
+            final_state: AgentState::Done,
+            usage: LoopUsage {
+                completion_evidence_status: None,
+                worker_report: Some(crate::core::state_frame::WorkerStructuredReport {
+                    worker_state: AgentState::Done,
+                    last_tool_action: Some("Write".into()),
+                    files_changed: vec!["/tmp/report.md".into()],
+                    tests_run: Vec::new(),
+                    artifact_status: "verified".into(),
+                    test_status: "not_required".into(),
+                    verification_status: "unverified".into(),
+                    stage_execution_contract: verification_contract(),
+                    stage_continuation_context: None,
+                    evidence_refs: vec!["write:/tmp/report.md".into()],
+                    completion_evidence_gaps: Vec::new(),
+                    remaining_risks: Vec::new(),
+                    completion_evidence_status:
+                        crate::core::state_frame::CompletionEvidenceStatus::MissingVerificationEvidence,
+                }),
+                ..LoopUsage::default()
+            },
+        };
+
+        match map_loop_outcome(outcome, &verification_contract(), None) {
+            StepOutcome::Failed { .. } => {}
+            other => panic!("expected failed outcome, got {other:?}"),
+        }
     }
 }

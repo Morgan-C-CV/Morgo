@@ -20,7 +20,10 @@ use crate::core::boss_test_readiness::BossTestRunOutcome;
 use crate::core::context::WorkerLisMPolicy;
 use crate::core::lism_ab_sample::SharedLisMAbSampleSink;
 use crate::core::prompt_budget::{BudgetDecision, evaluate_message_budget};
-use crate::core::state_frame::{ActorRole, DeclaredArtifactContract, StageExecutionContract, VerificationContract};
+use crate::core::state_frame::{
+    ActorRole, CompletionEvidenceStatus, DeclaredArtifactContract, StageExecutionContract,
+    VerificationContract,
+};
 use crate::core::state_frame_loop::{DecisionLoopConfig, StateFrameToolRuntime};
 use crate::core::state_frame_model_router::ModelTier;
 use crate::core::state_frame_orchestrator::{
@@ -69,6 +72,54 @@ fn step_artifact_verification_error(step: &BossPlanStep) -> Option<String> {
     verify_artifact_expectations(step.objective())
         .err()
         .map(|reason| format!("artifact verification failed: {reason}"))
+}
+
+fn step_requires_verification_evidence(step: &BossPlanStep) -> bool {
+    !step.stage_execution_contract.verifications.is_empty()
+        || step
+            .stage_execution_contract
+            .required_actions
+            .iter()
+            .any(|action| matches!(action.as_str(), "verify" | "verify_artifact" | "run_verification"))
+}
+
+fn step_completion_gate_error(
+    step: &BossPlanStep,
+    metadata: Option<&BossStepRoutedMetadata>,
+) -> Option<(String, StepFailureClassification)> {
+    if let Some(reason) = step_artifact_verification_error(step) {
+        return Some((reason, StepFailureClassification::RepairableRecovery));
+    }
+    if !step_requires_verification_evidence(step) {
+        return None;
+    }
+    let metadata = metadata?;
+    let completion_sufficient = matches!(
+        metadata.completion_evidence_status.as_deref(),
+        Some("sufficient")
+    ) && metadata
+        .worker_report
+        .as_ref()
+        .is_some_and(|report| report.completion_evidence_status == CompletionEvidenceStatus::Sufficient);
+    if completion_sufficient && metadata.completion_evidence_gaps.is_empty() {
+        return None;
+    }
+    let classification = if metadata
+        .completion_evidence_gaps
+        .iter()
+        .any(|gap| gap.missing_verification_evidence)
+        || matches!(
+            metadata.completion_evidence_status.as_deref(),
+            Some("missing_verification_evidence")
+        ) {
+        StepFailureClassification::VerificationRepairContinuation
+    } else {
+        StepFailureClassification::RepairableRecovery
+    };
+    Some((
+        "completion gate rejected direct completion: verification evidence still missing".into(),
+        classification,
+    ))
 }
 
 fn primary_declared_artifact_path(step: &BossPlanStep) -> Option<String> {
@@ -4684,6 +4735,22 @@ impl BossCoordinator {
 
                         match outcome {
                             StepOutcome::Completed { .. } => {
+                                let completion_gate_failure = {
+                                    let routed_metadata = self.routed_step_metadata.read().await;
+                                    let metadata = routed_metadata.get(&step_id);
+                                    let plan_guard = self.plan.read().await;
+                                    let plan = plan_guard
+                                        .as_ref()
+                                        .ok_or_else(|| anyhow::anyhow!("No plan loaded"))?;
+                                    let step = plan
+                                        .steps
+                                        .iter()
+                                        .find(|step| step.id == step_id)
+                                        .ok_or_else(|| {
+                                            anyhow::anyhow!("Unknown boss step {step_id}")
+                                        })?;
+                                    step_completion_gate_error(step, metadata)
+                                };
                                 {
                                     let mut plan_guard = self.plan.write().await;
                                     let plan = plan_guard
@@ -4696,29 +4763,45 @@ impl BossCoordinator {
                                         .ok_or_else(|| {
                                             anyhow::anyhow!("Unknown boss step {step_id}")
                                         })?;
-                                    if let Some(reason) = step_artifact_verification_error(step) {
+                                    if let Some((reason, failure_classification)) =
+                                        completion_gate_failure
+                                    {
                                         step.completed = false;
-                                        step.status = BossPlanStepStatus::Failed;
-                                        step.last_review_summary = Some(reason.clone());
+                                        apply_step_failure_classification(
+                                            step,
+                                            failure_classification,
+                                            &reason,
+                                        );
+                                        let repairable_continuation_dispatched =
+                                            should_continue_repairable_failure(
+                                                failure_classification,
+                                                step.status,
+                                            );
                                         drop(plan_guard);
                                         self.update_current_step(Some(step_id)).await;
-                                        if self.get_stage().await != BossStage::Documentation {
+                                        if !repairable_continuation_dispatched
+                                            && self.get_stage().await != BossStage::Documentation
+                                        {
                                             self.transition_to(BossStage::Documentation).await?;
                                         }
-                                        let run_id = self.current_run_id().await;
-                                        let lism_enabled = effective_lism_enabled(
-                                            self.lism_policy().await,
-                                            app_state.permission_context.lism_enabled(),
-                                        );
-                                        self.emit_lism_sample_once(
-                                            &run_id,
-                                            lism_enabled,
-                                            BossTestRunOutcome::Aborted,
-                                            0,
-                                        )
-                                        .await;
+                                        if let Some(path) =
+                                            self.status.read().await.planning_file.clone()
+                                        {
+                                            self.save_plan_with_session(
+                                                std::path::Path::new(&path),
+                                            )
+                                            .await?;
+                                        }
+                                        if repairable_continuation_dispatched {
+                                            self.mark_routed_metadata_artifact_recovery(
+                                                step_id,
+                                                "repair_dispatched",
+                                                None,
+                                            )
+                                            .await;
+                                        }
                                         return Ok(Some(format!(
-                                            "LisM failed boss step {}: {}",
+                                            "LisM routed boss step {} into repair continuation: {}",
                                             step_id, reason
                                         )));
                                     }
@@ -8012,6 +8095,143 @@ mod tests {
             routed_metadata.success_classification.as_ref().map(|c| c.as_str()),
             Some("direct_success")
         );
+    }
+
+    #[test]
+    fn boss_does_not_accept_typed_hydration_completion_without_verification_evidence() {
+        let step = BossPlanStep {
+            id: 0,
+            description: "write report".into(),
+            objective: None,
+            acceptance: vec!["verification evidence required".into()],
+            requires_approval: false,
+            status: BossPlanStepStatus::Running,
+            completed: false,
+            result_diff: None,
+            worker_task_id: None,
+            attempt_count: 0,
+            retry_budget: 3,
+            last_review_summary: None,
+            last_correction: None,
+            stage_execution_contract: StageExecutionContract {
+                declared_artifacts: vec![DeclaredArtifactContract {
+                    ref_id: "artifact:step0:0".into(),
+                    path: "/tmp/report.md".into(),
+                    kind: "file".into(),
+                    required_actions: vec!["write".into()],
+                    required_evidence: vec!["/tmp/report.md".into()],
+                }],
+                verifications: vec![VerificationContract {
+                    target_ref: "artifact:step0:0".into(),
+                    target_path: Some("/tmp/report.md".into()),
+                    required_actions: vec!["verify_artifact".into()],
+                    required_evidence: vec!["/tmp/report.md".into()],
+                }],
+                required_actions: vec!["write".into(), "verify_artifact".into()],
+                required_evidence: vec!["/tmp/report.md".into()],
+                ..StageExecutionContract::default()
+            },
+            stage_continuation_context: None,
+            executor_b_stage_memory: None,
+            review_task_id: None,
+            tool_execution_records: Vec::new(),
+        };
+        let metadata = BossStepRoutedMetadata {
+            completion_evidence_status: Some("missing_verification_evidence".into()),
+            worker_report: Some(WorkerStructuredReport {
+                worker_state: AgentState::Done,
+                last_tool_action: Some("Write".into()),
+                files_changed: vec!["/tmp/report.md".into()],
+                tests_run: Vec::new(),
+                artifact_status: "verified".into(),
+                test_status: "not_required".into(),
+                verification_status: "unverified".into(),
+                stage_execution_contract: step.stage_execution_contract.clone(),
+                stage_continuation_context: None,
+                evidence_refs: vec!["write:/tmp/report.md".into()],
+                completion_evidence_gaps: vec![CompletionEvidenceGap {
+                    target_ref: "artifact:step0:0".into(),
+                    target_path: Some("/tmp/report.md".into()),
+                    missing_artifact_evidence: false,
+                    missing_test_evidence: false,
+                    missing_verification_evidence: true,
+                    recommended_action: "verify_artifact".into(),
+                }],
+                remaining_risks: vec!["verification missing".into()],
+                completion_evidence_status: CompletionEvidenceStatus::MissingVerificationEvidence,
+            }),
+            completion_evidence_gaps: vec![CompletionEvidenceGap {
+                target_ref: "artifact:step0:0".into(),
+                target_path: Some("/tmp/report.md".into()),
+                missing_artifact_evidence: false,
+                missing_test_evidence: false,
+                missing_verification_evidence: true,
+                recommended_action: "verify_artifact".into(),
+            }],
+            ..BossStepRoutedMetadata::default()
+        };
+
+        let failure = step_completion_gate_error(&step, Some(&metadata))
+            .expect("verification gate should reject direct completion");
+        assert_eq!(failure.1, StepFailureClassification::VerificationRepairContinuation);
+    }
+
+    #[test]
+    fn u8_placeholder_report_does_not_bypass_verification_gate() {
+        let step = BossPlanStep {
+            id: 0,
+            description: "write report".into(),
+            objective: None,
+            acceptance: vec!["verification evidence required".into()],
+            requires_approval: false,
+            status: BossPlanStepStatus::Running,
+            completed: false,
+            result_diff: None,
+            worker_task_id: None,
+            attempt_count: 0,
+            retry_budget: 3,
+            last_review_summary: None,
+            last_correction: None,
+            stage_execution_contract: StageExecutionContract {
+                verifications: vec![VerificationContract {
+                    target_ref: "artifact:step0:0".into(),
+                    target_path: Some("/tmp/report.md".into()),
+                    required_actions: vec!["verify_artifact".into()],
+                    required_evidence: vec!["/tmp/report.md".into()],
+                }],
+                required_actions: vec!["verify_artifact".into()],
+                required_evidence: vec!["/tmp/report.md".into()],
+                ..StageExecutionContract::default()
+            },
+            stage_continuation_context: None,
+            executor_b_stage_memory: None,
+            review_task_id: None,
+            tool_execution_records: Vec::new(),
+        };
+        let metadata = BossStepRoutedMetadata {
+            completion_evidence_status: Some("sufficient".into()),
+            worker_report: Some(WorkerStructuredReport {
+                worker_state: AgentState::Done,
+                last_tool_action: Some("Write".into()),
+                files_changed: vec!["/tmp/report.md".into()],
+                tests_run: Vec::new(),
+                artifact_status: "verified".into(),
+                test_status: "not_required".into(),
+                verification_status: "unverified".into(),
+                stage_execution_contract: step.stage_execution_contract.clone(),
+                stage_continuation_context: None,
+                evidence_refs: vec!["write:/tmp/report.md".into()],
+                completion_evidence_gaps: Vec::new(),
+                remaining_risks: Vec::new(),
+                completion_evidence_status: CompletionEvidenceStatus::MissingVerificationEvidence,
+            }),
+            completion_evidence_gaps: Vec::new(),
+            ..BossStepRoutedMetadata::default()
+        };
+
+        let failure = step_completion_gate_error(&step, Some(&metadata))
+            .expect("placeholder completion should not bypass verification gate");
+        assert_eq!(failure.1, StepFailureClassification::RepairableRecovery);
     }
 
     #[test]
