@@ -76,6 +76,7 @@ Options:
   --prepare-only        Only generate usecases/configs, do not run.
   --summary-only DIR    Skip execution, summarize an existing output directory.
   --list-cases          Print supported use cases and exit.
+  --check-semantics     Verify mode mapping semantics and exit.
   --help                Show this help.
 
 Plan semantics:
@@ -242,7 +243,8 @@ source_mode_for_label() {
   local mode="$1"
   case "$mode" in
     all_off)
-      printf 'off\n'
+      # all_off is the production baseline; only the LisM policies change.
+      printf 'on\n'
       ;;
     boss_on_only|all_on)
       printf 'on\n'
@@ -251,6 +253,15 @@ source_mode_for_label() {
       die "unsupported mode label: $mode"
       ;;
   esac
+}
+
+check_mode_semantics() {
+  [ "$(source_mode_for_label all_off)" = "on" ] || die "all_off must use the production-like config family"
+  [ "$(boss_policy_for_label all_off)" = "force-off" ] || die "all_off must force boss LisM off"
+  [ "$(worker_policy_for_label all_off)" = "force-off" ] || die "all_off must force worker LisM off"
+  [ "$(source_mode_for_label boss_on_only)" = "on" ] || die "boss_on_only must use the production-like config family"
+  [ "$(source_mode_for_label all_on)" = "on" ] || die "all_on must use the production-like config family"
+  echo "mode semantics check passed"
 }
 
 boss_policy_for_label() {
@@ -572,6 +583,10 @@ while [ $# -gt 0 ]; do
     --list-cases)
       list_cases="true"
       shift
+      ;;
+    --check-semantics)
+      check_mode_semantics
+      exit 0
       ;;
     --help|-h)
       usage

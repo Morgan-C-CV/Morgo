@@ -14,6 +14,14 @@ EXPECTED_BEST_MODE = {
 }
 
 MODE_LABELS = ["all_off", "boss_on_only", "all_on"]
+MODE_SEMANTICS = {
+    "all_off": "production baseline: real boss/worker production chain with boss LisM OFF and worker LisM OFF",
+    "boss_on_only": "production comparison arm: real boss/worker production chain with boss LisM ON and worker LisM OFF",
+    "all_on": "production comparison arm: real boss/worker production chain with boss LisM ON and worker LisM ON",
+}
+TYPED_PATH_SIGNAL_SEMANTICS = {
+    "state_frame_only": "typed-path signal only; internal diagnostic signal, not mode semantics",
+}
 METRIC_FIELDS = [
     "fallback_count",
     "hydration_count",
@@ -28,13 +36,49 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Summarize boss-mode u6-u9 worker LisM rollout metrics."
     )
-    parser.add_argument("samples_dir", help="Directory containing per-mode JSONL sample files")
+    parser.add_argument(
+        "--check-semantics",
+        action="store_true",
+        help="Verify report wording keeps all_off as production baseline and state_frame_only as a signal.",
+    )
+    parser.add_argument(
+        "samples_dir",
+        nargs="?",
+        help="Directory containing per-mode JSONL sample files",
+    )
     parser.add_argument(
         "--output",
-        required=True,
         help="Markdown output path",
     )
     return parser.parse_args()
+
+
+def render_semantic_alignment():
+    lines = []
+    lines.append("## 0. Benchmark 语义约束")
+    lines.append("")
+    for mode in MODE_LABELS:
+        lines.append(f"- `{mode}`: {MODE_SEMANTICS[mode]}")
+    lines.append(
+        "- `state_frame_only`: "
+        + TYPED_PATH_SIGNAL_SEMANTICS["state_frame_only"]
+    )
+    lines.append(
+        "- 报告里的 `typed_path_signal` 只用于解释样本信号，不用于重定义 `all_off / boss_on_only / all_on` 的 mode 语义。"
+    )
+    lines.append("")
+    return lines
+
+
+def check_semantics():
+    assert MODE_SEMANTICS["all_off"].startswith("production baseline")
+    assert "boss LisM OFF" in MODE_SEMANTICS["all_off"]
+    assert "worker LisM OFF" in MODE_SEMANTICS["all_off"]
+    assert "not mode semantics" in TYPED_PATH_SIGNAL_SEMANTICS["state_frame_only"]
+    alignment = "\n".join(render_semantic_alignment())
+    assert "production baseline" in alignment
+    assert "typed-path signal only" in alignment
+    print("semantic checks passed")
 
 
 def load_records(path: Path):
@@ -158,6 +202,7 @@ def render_report(grouped):
     lines.append("")
     lines.append("日期：`2026-05-02`")
     lines.append("")
+    lines.extend(render_semantic_alignment())
     lines.append("## 1. 目标")
     lines.append("")
     lines.append(
@@ -237,7 +282,7 @@ def render_report(grouped):
                 continue
             telemetry_missing = telemetry_missing and not stats["telemetry_available"]
             lines.append(
-                f"- `{mode}`: completion={format_float(stats['completion_rate'], 2)}, "
+                f"- `{mode}` ({MODE_SEMANTICS[mode]}): completion={format_float(stats['completion_rate'], 2)}, "
                 f"avg_cost_micros={format_intish(stats['avg_cost'])}, "
                 f"avg_input={format_intish(stats['avg_input'])}, "
                 f"avg_uncached_input={format_intish(stats['avg_uncached_input'])}, "
@@ -336,6 +381,13 @@ def render_report(grouped):
 
 def main():
     args = parse_args()
+    if args.check_semantics:
+        check_semantics()
+        return
+    if not args.samples_dir:
+        raise SystemExit("samples_dir is required")
+    if not args.output:
+        raise SystemExit("--output is required")
     samples_dir = Path(args.samples_dir)
     output = Path(args.output)
     grouped = summarize(samples_dir)
