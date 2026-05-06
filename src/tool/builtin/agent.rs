@@ -1,7 +1,7 @@
 use crate::core::concurrency::{
     BossBudgetDecision, current_memory_pressure_level, evaluate_boss_budget,
 };
-use crate::core::boss_state::ExecutorBStageMemory;
+use crate::core::boss_state::{ExecutorBStageMemory, SharedStepMemory};
 use async_trait::async_trait;
 use serde::Deserialize;
 
@@ -54,6 +54,7 @@ struct SpawnAgentRequest {
     parent_session_id: Option<String>,
     requires_verification: bool,
     lism_policy: WorkerLisMPolicy,
+    shared_step_memory: Option<SharedStepMemory>,
     /// When set, the spawned subagent runtime is assembled with this boss actor policy.
     boss_actor_policy: Option<crate::state::permission_context::BossActorPolicy>,
 }
@@ -67,6 +68,7 @@ struct ContinueBossStepContext {
     parent_session_id: Option<String>,
     continuation_context: Option<StageContinuationContext>,
     executor_b_stage_memory: Option<ExecutorBStageMemory>,
+    shared_step_memory: Option<SharedStepMemory>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,6 +100,7 @@ struct AgentJsonRequest {
     message: Option<String>,
     continuation_payload: Option<StageContinuationContext>,
     executor_b_stage_memory: Option<ExecutorBStageMemory>,
+    shared_step_memory: Option<SharedStepMemory>,
     boss_actor_role: Option<String>,
     boss_lineage_depth: Option<u32>,
 }
@@ -416,6 +419,7 @@ fn parse_agent_request(input: &str) -> anyhow::Result<AgentRequest> {
                 || request.parent_session_id.is_some()
                 || request.continuation_payload.is_some()
                 || request.executor_b_stage_memory.is_some()
+                || request.shared_step_memory.is_some()
             {
                 Some(ContinueBossStepContext {
                     step_id: request.step_id,
@@ -425,6 +429,7 @@ fn parse_agent_request(input: &str) -> anyhow::Result<AgentRequest> {
                     parent_session_id: request.parent_session_id,
                     continuation_context: request.continuation_payload,
                     executor_b_stage_memory: request.executor_b_stage_memory,
+                    shared_step_memory: request.shared_step_memory,
                 })
             } else {
                 None
@@ -459,6 +464,7 @@ fn parse_agent_request(input: &str) -> anyhow::Result<AgentRequest> {
                 parent_session_id: request.parent_session_id,
                 requires_verification: request.requires_verification.unwrap_or(false),
                 lism_policy: parse_worker_lism_policy(request.lism_policy.as_deref(), role)?,
+                shared_step_memory: request.shared_step_memory,
                 boss_actor_policy,
             }));
         }
@@ -494,6 +500,7 @@ fn parse_agent_request(input: &str) -> anyhow::Result<AgentRequest> {
         parent_session_id: None,
         requires_verification: false,
         lism_policy: WorkerLisMPolicy::default_for_role(WorkerRole::Research),
+        shared_step_memory: None,
         boss_actor_policy: None,
     }))
 }
@@ -510,6 +517,7 @@ fn build_worker_task_input(request: &SpawnAgentRequest) -> String {
         || request.step_objective.is_some()
         || !request.step_acceptance.is_empty()
         || request.parent_session_id.is_some()
+        || request.shared_step_memory.is_some()
     {
         sections.push("<boss-step-context>".into());
         if let Some(plan_id) = request.boss_plan_id.as_deref() {
@@ -533,6 +541,9 @@ fn build_worker_task_input(request: &SpawnAgentRequest) -> String {
         if let Some(parent_session_id) = request.parent_session_id.as_deref() {
             sections.push(format!("parent_session_id: {parent_session_id}"));
         }
+        if let Some(memory) = request.shared_step_memory.as_ref() {
+            sections.extend(render_shared_step_memory_section(memory));
+        }
         sections.push("</boss-step-context>".into());
     }
 
@@ -554,6 +565,40 @@ fn build_worker_task_input(request: &SpawnAgentRequest) -> String {
     }
 
     with_verify_output_contract(request.role, sections.join("\n"))
+}
+
+fn render_shared_step_memory_section(memory: &SharedStepMemory) -> Vec<String> {
+    let mut sections = vec!["shared_step_memory:".into()];
+    if let Some(step_id) = memory.step_id {
+        sections.push(format!("step_id: {step_id}"));
+    }
+    if let Some(role) = memory.worker_role.as_deref() {
+        sections.push(format!("worker_role: {role}"));
+    }
+    if let Some(target) = memory.target.as_deref() {
+        sections.push(format!("target: {target}"));
+    }
+    if let Some(required_action) = memory.required_action.as_deref() {
+        sections.push(format!("required_action: {required_action}"));
+    }
+    if !memory.acceptance_contract.is_empty() {
+        sections.push("acceptance_contract:".into());
+        sections.extend(
+            memory
+                .acceptance_contract
+                .iter()
+                .map(|item| format!("- {item}")),
+        );
+    }
+    if !memory.verified_facts.is_empty() {
+        sections.push("verified_facts:".into());
+        sections.extend(memory.verified_facts.iter().map(|item| format!("- {item}")));
+    }
+    if !memory.evidence_refs.is_empty() {
+        sections.push("evidence_refs:".into());
+        sections.extend(memory.evidence_refs.iter().map(|item| format!("- {item}")));
+    }
+    sections
 }
 
 fn with_verify_output_contract(role: WorkerRole, task_input: String) -> String {
@@ -580,6 +625,7 @@ fn build_continue_task_input(
         || !context.step_acceptance.is_empty()
         || context.parent_session_id.is_some()
         || context.continuation_context.is_some()
+        || context.shared_step_memory.is_some()
         || context.executor_b_stage_memory.is_some()
     {
         sections.push("<boss-step-context>".into());
@@ -626,6 +672,9 @@ fn build_continue_task_input(
                         .map(|fact| format!("- {fact}")),
                 );
             }
+        }
+        if let Some(memory) = context.shared_step_memory.as_ref() {
+            sections.extend(render_shared_step_memory_section(memory));
         }
         if let Some(memory) = context.executor_b_stage_memory.as_ref() {
             sections.push("executor_b_stage_memory:".into());
@@ -896,6 +945,7 @@ mod tests {
             parent_session_id: Some("parent-session".into()),
             requires_verification: false,
             lism_policy: WorkerLisMPolicy::default_for_role(WorkerRole::Implement),
+            shared_step_memory: None,
             boss_actor_policy: None,
         }
     }

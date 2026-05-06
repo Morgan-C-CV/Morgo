@@ -216,6 +216,25 @@ pub struct ExecutorBStageMemory {
     pub continuity: Option<ExecutorBStageMemoryContinuity>,
 }
 
+/// Minimal shared step ledger for verification-first flows.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct SharedStepMemory {
+    #[serde(default)]
+    pub step_id: Option<usize>,
+    #[serde(default)]
+    pub worker_role: Option<String>,
+    #[serde(default)]
+    pub target: Option<String>,
+    #[serde(default)]
+    pub required_action: Option<String>,
+    #[serde(default)]
+    pub acceptance_contract: Vec<String>,
+    #[serde(default)]
+    pub verified_facts: Vec<String>,
+    #[serde(default)]
+    pub evidence_refs: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct BossStepRoutedMetadata {
     #[serde(default)]
