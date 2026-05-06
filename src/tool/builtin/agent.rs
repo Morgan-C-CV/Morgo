@@ -760,6 +760,7 @@ fn append_subagent_output(
 }
 
 fn normalize_verify_output(task_input: &str, raw_output: &str) -> String {
+    let scrub_templates = contains_multistage_report_template(raw_output);
     let target = extract_verify_target(raw_output)
         .or_else(|| extract_verify_target(task_input))
         .unwrap_or_else(|| "unknown".into());
@@ -768,16 +769,19 @@ fn normalize_verify_output(task_input: &str, raw_output: &str) -> String {
             .unwrap_or_else(|| infer_verification_result(raw_output));
     let remaining_blocker =
         extract_labeled_value(raw_output, &["remaining_blocker", "remaining blocker"])
-            .unwrap_or_else(|| infer_remaining_blocker(raw_output, &verification_result));
+            .or_else(|| infer_remaining_blocker(raw_output, &verification_result, scrub_templates));
     let minimal_evidence =
         extract_labeled_value(raw_output, &["minimal_evidence", "minimal evidence"])
-            .or_else(|| infer_minimal_evidence(raw_output))
+            .or_else(|| infer_minimal_evidence(raw_output, scrub_templates))
             .unwrap_or_else(|| "none recorded".into());
 
     format!(
         "verified_target: {target}\nverification_result: {verification_result}\nminimal_evidence: {}\nremaining_blocker: {}",
         compact_verify_value(&minimal_evidence),
-        compact_verify_value(&remaining_blocker)
+        remaining_blocker
+            .as_deref()
+            .map(compact_verify_value)
+            .unwrap_or_else(|| "none".into())
     )
 }
 
@@ -868,17 +872,25 @@ fn infer_verification_result(raw_output: &str) -> String {
     }
 }
 
-fn infer_remaining_blocker(raw_output: &str, verification_result: &str) -> String {
+fn infer_remaining_blocker(
+    raw_output: &str,
+    verification_result: &str,
+    scrub_templates: bool,
+) -> Option<String> {
     if verification_result.eq_ignore_ascii_case("blocked") {
-        shortest_noncontract_line(raw_output)
-            .map(|value| compact_verify_value(&value))
-            .unwrap_or_else(|| "unspecified blocker".into())
+        if scrub_templates {
+            extract_labeled_value(raw_output, &["remaining_blocker", "remaining blocker"])
+                .map(|value| compact_verify_value(&value))
+                .or_else(|| Some("none".into()))
+        } else {
+            shortest_noncontract_line(raw_output).map(|value| compact_verify_value(&value))
+        }
     } else {
-        "none".into()
+        Some("none".into())
     }
 }
 
-fn infer_minimal_evidence(raw_output: &str) -> Option<String> {
+fn infer_minimal_evidence(raw_output: &str, scrub_templates: bool) -> Option<String> {
     let evidence_prefixes = [
         "read succeeded",
         "write succeeded",
@@ -888,16 +900,18 @@ fn infer_minimal_evidence(raw_output: &str) -> Option<String> {
         "evidence:",
         "verified:",
     ];
-    shortest_noncontract_line(raw_output)
-        .filter(|line| {
-            let lower = line.to_ascii_lowercase();
-            evidence_prefixes
-                .iter()
-                .any(|prefix| lower.starts_with(prefix))
-        })
-        .or_else(|| {
-            shortest_noncontract_line(raw_output).map(|line| compact_verify_value(&line))
-        })
+    let explicit_evidence = shortest_noncontract_line(raw_output).filter(|line| {
+        let lower = line.to_ascii_lowercase();
+        evidence_prefixes
+            .iter()
+            .any(|prefix| lower.starts_with(prefix))
+    });
+    if explicit_evidence.is_some() || scrub_templates {
+        return explicit_evidence;
+    }
+    explicit_evidence.or_else(|| {
+        shortest_noncontract_line(raw_output).map(|line| compact_verify_value(&line))
+    })
 }
 
 fn shortest_noncontract_line(text: &str) -> Option<String> {
@@ -927,6 +941,40 @@ fn is_verify_contract_line(line: &str) -> bool {
         || lower.starts_with("next_action for coordinator:")
         || lower.starts_with("minimal verification steps:")
         || lower.starts_with("files changed")
+        || lower.starts_with("阶段 1")
+        || lower.starts_with("阶段 2")
+        || lower.starts_with("阶段 3")
+        || lower.starts_with("阶段 4")
+        || lower.starts_with("证据来源")
+        || lower.starts_with("如何运行")
+        || lower.starts_with("验证与运行")
+        || lower.starts_with("剩余风险")
+        || lower.starts_with("后续工作")
+        || lower.starts_with("recommendations:")
+        || lower.starts_with("recommendation:")
+        || lower.starts_with("risk notes:")
+        || lower.starts_with("validation steps:")
+        || lower.starts_with("next_action:")
+}
+
+fn contains_multistage_report_template(raw_output: &str) -> bool {
+    raw_output.lines().map(str::trim).any(|line| {
+        let lower = line.to_ascii_lowercase();
+        lower.starts_with("阶段 1")
+            || lower.starts_with("阶段 2")
+            || lower.starts_with("阶段 3")
+            || lower.starts_with("阶段 4")
+            || lower.starts_with("证据来源")
+            || lower.starts_with("如何运行")
+            || lower.starts_with("验证与运行")
+            || lower.starts_with("剩余风险")
+            || lower.starts_with("后续工作")
+            || lower.starts_with("recommendations:")
+            || lower.starts_with("recommendation:")
+            || lower.starts_with("risk notes:")
+            || lower.starts_with("validation steps:")
+            || lower.starts_with("next_action:")
+    })
 }
 
 fn compact_verify_value(value: &str) -> String {
@@ -1170,7 +1218,7 @@ mod tests {
     #[test]
     fn normalize_verify_output_hard_clamps_to_four_lines() {
         let task_input = "Verify target artifact only: /tmp/verification-first.md. Return a short verification result only.\n<boss-step-context>\nacceptance:\n- verified_target: /tmp/verification-first.md\n</boss-step-context>";
-        let raw_output = "Files changed\nverification_result: blocked\nminimal_evidence: Read succeeded\nremaining_blocker: target missing verification\nMinimal verification steps: run stat\nnext_action for coordinator: keep reading docs";
+        let raw_output = "阶段 1：scan\n阶段 2：read\n阶段 3：report\n阶段 4：close\n证据来源\n- read succeeded\n如何运行与验证\n- run stat\nverification_result: blocked\nminimal_evidence: Read succeeded and the file is present\nremaining_blocker: target missing verification\nnext_action: keep reading docs";
         let normalized = normalize_verify_output(task_input, raw_output);
         let lines = normalized.lines().collect::<Vec<_>>();
         assert_eq!(lines.len(), 4);
@@ -1178,6 +1226,32 @@ mod tests {
         assert_eq!(lines[1], "verification_result: blocked");
         assert_eq!(lines[2], "minimal_evidence: Read succeeded");
         assert_eq!(lines[3], "remaining_blocker: target missing verification");
+    }
+
+    #[test]
+    fn verify_output_normalization_rewrites_multistage_report_template_to_four_line_short_form() {
+        let task_input = "Verify target artifact only: /tmp/report.md. Return a short verification result only.";
+        let raw_output = "阶段 1：overview\n阶段 2：evidence\n阶段 3：analysis\n阶段 4：wrap\n证据来源\n- README\n- docs\n我做了什么 / 变更说明\n- wrote report\n如何运行与验证\n- cat report\n剩余风险与后续工作\n- rerun later\nverification_result: verified\nminimal_evidence: Read succeeded and the file is present.\nremaining_blocker: none\nnext_action: continue";
+        let normalized = normalize_verify_output(task_input, raw_output);
+        assert_eq!(
+            normalized,
+            "verified_target: /tmp/report.md\nverification_result: verified\nminimal_evidence: Read succeeded\nremaining_blocker: none"
+        );
+        assert_eq!(normalized.lines().count(), 4);
+    }
+
+    #[test]
+    fn verify_output_normalization_discards_evidence_sources_and_run_instructions() {
+        let task_input = "Verify target artifact only: /tmp/report.md. Return a short verification result only.";
+        let raw_output = "证据来源\n- RustAgent/docs/29-memory-backpressure-and-resource-limits.md\n- RustAgent/docs/31-token-efficiency-cost-performance.md\n如何运行与验证\n- cargo test --quiet\n- bash RustAgent/Agent/tests/run_boss_lism_matrix.sh\nverification_result: blocked\nminimal_evidence: Read succeeded and the file is present.\nremaining_blocker: target missing verification\nnext_action: rerun with stat";
+        let normalized = normalize_verify_output(task_input, raw_output);
+        assert!(!normalized.contains("证据来源"));
+        assert!(!normalized.contains("如何运行与验证"));
+        assert!(!normalized.contains("run_boss_lism_matrix"));
+        assert_eq!(
+            normalized,
+            "verified_target: /tmp/report.md\nverification_result: blocked\nminimal_evidence: Read succeeded\nremaining_blocker: target missing verification"
+        );
     }
 
     #[test]

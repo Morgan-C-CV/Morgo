@@ -1076,20 +1076,62 @@ fn verification_first_shared_memory_compact_facts(shared: &SharedStepMemory) -> 
             .then(|| compact_verification_first_fact(fact))
     }) {
         facts.push(evidence);
-    } else if let Some(evidence) = shared.verified_facts.iter().find(|fact| {
+    } else if let Some(evidence) = shared.verified_facts.iter().find_map(|fact| {
         let lower = fact.to_ascii_lowercase();
-        !lower.starts_with("verified_target:")
-            && !lower.starts_with("verified target:")
-            && !lower.starts_with("verification_result:")
-            && !lower.starts_with("verification result:")
-            && !lower.starts_with("remaining_blocker:")
-            && !lower.starts_with("remaining blocker:")
+        (lower.starts_with("evidence:")
+            || lower.starts_with("read succeeded")
+            || lower.starts_with("write succeeded")
+            || lower.starts_with("glob succeeded")
+            || lower.starts_with("bash succeeded")
+            || lower.starts_with("artifactverify succeeded"))
+        .then(|| compact_verification_first_fact(fact))
     }) {
-        facts.push((*evidence).clone());
+        facts.push(evidence);
     }
 
     facts.truncate(2);
     facts
+}
+
+fn normalize_verification_first_blocker_code(reason: Option<&str>) -> &'static str {
+    let Some(reason) = reason else {
+        return "none";
+    };
+    let reason = reason.trim().to_ascii_lowercase();
+    if reason.is_empty() || reason == "none" {
+        return "none";
+    }
+    if reason == "verify_artifact" || reason.contains("verify_artifact") {
+        return "verification_evidence_missing";
+    }
+    if reason == "repair_artifact" || reason.contains("repair_artifact") {
+        return "repair_exhausted";
+    }
+    if reason.contains("remaining verification evidence missing") {
+        return "repair_exhausted";
+    }
+    if reason.contains("verification") || reason.contains("evidence") || reason.contains("verify") {
+        return "verification_evidence_missing";
+    }
+    if reason.contains("artifact") || reason.contains("target missing") || reason.contains("missing artifact")
+    {
+        return "artifact_missing";
+    }
+    if reason.contains("exhausted") {
+        return "repair_exhausted";
+    }
+    "none"
+}
+
+fn normalize_verification_first_next_action_from_blocker_code(
+    blocker_code: &str,
+) -> Option<String> {
+    match blocker_code {
+        "verification_evidence_missing" => Some("verify_artifact".into()),
+        "artifact_missing" | "repair_exhausted" => Some("repair_artifact".into()),
+        "none" => Some("none".into()),
+        _ => Some("none".into()),
+    }
 }
 
 fn compact_verify_value(value: &str) -> String {
@@ -1164,22 +1206,22 @@ fn compact_verification_first_fact(fact: &str) -> String {
 fn verification_first_contract_blocker(contract: &ExecutorBAssignmentContract) -> String {
     if let Some(shared) = contract.shared_step_memory.as_ref() {
         if let Some(blocker) = verification_first_shared_memory_blocker(shared) {
-            return blocker;
+            return normalize_verification_first_blocker_code(Some(&blocker)).into();
         }
     }
-    contract
-        .state_frame
-        .stage_continuation_context
-        .as_ref()
-        .and_then(|context| {
-            context.next_action.clone().or_else(|| {
-                context
-                    .repair_intent
-                    .as_ref()
-                    .and_then(|intent| intent.next_action.clone())
-            })
-        })
-        .unwrap_or_else(|| "none".into())
+    if let Some(context) = contract.state_frame.stage_continuation_context.as_ref() {
+        let code = normalize_verification_first_blocker_code(context.next_action.as_deref());
+        if code != "none" {
+            return code.into();
+        }
+        if let Some(intent) = context.repair_intent.as_ref() {
+            let code = normalize_verification_first_blocker_code(intent.next_action.as_deref());
+            if code != "none" {
+                return code.into();
+            }
+        }
+    }
+    "none".into()
 }
 
 fn build_verification_first_task_message(contract: &ExecutorBAssignmentContract) -> String {
@@ -1203,6 +1245,18 @@ fn build_continuation_payload(contract: &ExecutorBAssignmentContract) -> Continu
         let shared_memory = contract.shared_step_memory.as_ref();
         let use_shared_projection = shared_memory.is_some();
         let shared_required_action = shared_memory.and_then(verification_first_shared_memory_required_action);
+        let blocker_code = normalize_verification_first_blocker_code(
+            shared_required_action.as_deref().or_else(|| {
+                typed_context.and_then(|context| {
+                    context.next_action.as_deref().or_else(|| {
+                        context
+                            .repair_intent
+                            .as_ref()
+                            .and_then(|intent| intent.next_action.as_deref())
+                    })
+                })
+            }),
+        );
         return ContinuationPayload {
             failed_target: contract
                 .shared_step_memory
@@ -1248,32 +1302,8 @@ fn build_continuation_payload(contract: &ExecutorBAssignmentContract) -> Continu
                     })
                     .unwrap_or_default()
             },
-            next_action: if use_shared_projection {
-                normalize_verification_first_next_action(shared_required_action.or_else(|| {
-                    typed_context.and_then(|context| {
-                        context.next_action.clone().or_else(|| {
-                            context
-                                .repair_intent
-                                .as_ref()
-                                .and_then(|intent| intent.next_action.clone())
-                        })
-                    })
-                }))
-                .or_else(|| Some("verify_artifact".into()))
-            } else {
-                shared_required_action
-                    .or_else(|| {
-                        typed_context.and_then(|context| {
-                            context.next_action.clone().or_else(|| {
-                                context
-                                    .repair_intent
-                                    .as_ref()
-                                    .and_then(|intent| intent.next_action.clone())
-                            })
-                        })
-                    })
-                    .or_else(|| Some("verify_artifact".into()))
-            },
+            next_action: normalize_verification_first_next_action_from_blocker_code(blocker_code)
+                .or_else(|| Some("none".into())),
             continuity_mode: Some(
                 typed_context
                     .and_then(|context| context.continuity_mode.as_ref())
@@ -10073,7 +10103,7 @@ mod tests {
         assert!(!payload.contains("acceptance:"));
         assert!(payload.contains("verification_result: verified|blocked"));
         assert!(payload.contains("minimal_evidence: Write succeeded"));
-        assert!(payload.contains("remaining_blocker: verify_artifact"));
+        assert!(payload.contains("remaining_blocker: verification_evidence_missing"));
         assert!(!payload.contains("return a unified diff or file edits"));
         assert!(!payload.contains("任务必须按 4 个阶段推进"));
         assert!(!payload.contains("recent_decisions:"));
@@ -11206,10 +11236,7 @@ mod tests {
             .expect("build assignment");
         let mut assignment = assignment;
         if let Some(shared) = assignment.shared_step_memory.as_mut() {
-            shared.required_action = Some(
-                "tool dispatch failed: repair continuation exhausted / remaining evidence missing; last state: waiting"
-                    .into(),
-            );
+            shared.required_action = Some("repair_artifact".into());
             shared.verified_facts = vec![
                 "verified_target: /tmp/verification-first.md".into(),
                 "verification_result: blocked".into(),
@@ -11220,6 +11247,69 @@ mod tests {
 
         let payload = build_continuation_payload(&assignment);
         assert_eq!(payload.next_action.as_deref(), Some("repair_artifact"));
+    }
+
+    #[tokio::test]
+    async fn verification_first_continuation_payload_maps_long_repair_reason_to_short_blocker_code() {
+        let (coordinator, _) =
+            verification_first_projection_coordinator(WorkerLisMPolicy::ForceOn).await;
+
+        let assignment = coordinator
+            .build_executor_b_assignment_contract(0, "session-alpha", true)
+            .await
+            .expect("build assignment");
+        let mut assignment = assignment;
+        if let Some(shared) = assignment.shared_step_memory.as_mut() {
+            shared.remaining_blocker = Some(
+                "tool dispatch failed: verification repair continuation exhausted / remaining verification evidence missing; last state: Verifying"
+                    .into(),
+            );
+            shared.required_action = Some(
+                "tool dispatch failed: verification repair continuation exhausted / remaining verification evidence missing; last state: Verifying"
+                    .into(),
+            );
+        }
+
+        let payload = build_continuation_payload(&assignment);
+        assert_eq!(payload.next_action.as_deref(), Some("repair_artifact"));
+        assert!(payload
+            .verified_facts
+            .iter()
+            .all(|fact| !fact.contains("tool dispatch failed")));
+
+        let message = build_verification_first_task_message(&assignment);
+        assert!(message.contains("remaining_blocker: repair_exhausted"));
+        assert!(!message.contains("tool dispatch failed"));
+    }
+
+    #[tokio::test]
+    async fn verification_first_continuation_payload_does_not_carry_long_repair_sentence_into_next_action_or_facts()
+     {
+        let (coordinator, _) =
+            verification_first_projection_coordinator(WorkerLisMPolicy::ForceOn).await;
+
+        let assignment = coordinator
+            .build_executor_b_assignment_contract(0, "session-alpha", true)
+            .await
+            .expect("build assignment");
+        let mut assignment = assignment;
+        if let Some(shared) = assignment.shared_step_memory.as_mut() {
+            shared.required_action = Some(
+                "tool dispatch failed: verification repair continuation exhausted / remaining verification evidence missing; last state: Verifying"
+                    .into(),
+            );
+        }
+
+        let payload = build_continuation_payload(&assignment);
+        assert_eq!(payload.next_action.as_deref(), Some("repair_artifact"));
+        assert!(payload
+            .verified_facts
+            .iter()
+            .all(|fact| !fact.contains("tool dispatch failed")));
+        assert!(payload
+            .verified_facts
+            .iter()
+            .all(|fact| !fact.contains("remaining verification evidence missing")));
     }
 
     #[tokio::test]
