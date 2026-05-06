@@ -550,15 +550,15 @@ fn build_worker_task_input(request: &SpawnAgentRequest) -> String {
     if request.role == WorkerRole::Verify {
         sections.push("<verify-output-contract>".into());
         sections.push(
-            "return only four short lines: verified_target, verification_result, minimal_evidence, remaining_blocker"
+            "return exactly four short lines only: verified_target, verification_result, minimal_evidence, remaining_blocker"
                 .into(),
         );
         sections.push(
-            "do not include analysis, summary prose, next_action, file lists, suggestions, or extra validation steps"
+            "do not include analysis, summary prose, recommendations, next_action, file lists, validation steps, risk notes, or multi-section report formatting"
                 .into(),
         );
         sections.push(
-            "keep minimal_evidence to one short factual phrase and keep remaining_blocker short"
+            "keep minimal_evidence to one short factual phrase and keep remaining_blocker to a single short blocker or none"
                 .into(),
         );
         sections.push("</verify-output-contract>".into());
@@ -646,7 +646,7 @@ fn with_verify_output_contract(role: WorkerRole, task_input: String) -> String {
     }
 
     format!(
-        "{task_input}\n<verify-output-contract>\nreturn only four short lines: verified_target, verification_result, minimal_evidence, remaining_blocker\ndo not include analysis, summary prose, next_action, file lists, suggestions, or extra validation steps\nkeep minimal_evidence to one short factual phrase and keep remaining_blocker short\n</verify-output-contract>"
+        "{task_input}\n<verify-output-contract>\nreturn exactly four short lines only: verified_target, verification_result, minimal_evidence, remaining_blocker\ndo not include analysis, summary prose, recommendations, next_action, file lists, validation steps, risk notes, or multi-section report formatting\nkeep minimal_evidence to one short factual phrase and keep remaining_blocker to a single short blocker or none\n</verify-output-contract>"
     )
 }
 
@@ -775,20 +775,43 @@ fn normalize_verify_output(task_input: &str, raw_output: &str) -> String {
             .unwrap_or_else(|| "none recorded".into());
 
     format!(
-        "verified_target: {target}\nverification_result: {verification_result}\nminimal_evidence: {minimal_evidence}\nremaining_blocker: {remaining_blocker}"
+        "verified_target: {target}\nverification_result: {verification_result}\nminimal_evidence: {}\nremaining_blocker: {}",
+        compact_verify_value(&minimal_evidence),
+        compact_verify_value(&remaining_blocker)
     )
 }
 
 fn verify_output_matches_contract(raw_output: &str) -> bool {
-    let mut lines = raw_output
+    let lines = raw_output
         .lines()
         .map(str::trim)
-        .filter(|line| !line.is_empty());
-    matches!(lines.next(), Some(line) if line.to_ascii_lowercase().starts_with("verified_target:"))
-        && matches!(lines.next(), Some(line) if line.to_ascii_lowercase().starts_with("verification_result:"))
-        && matches!(lines.next(), Some(line) if line.to_ascii_lowercase().starts_with("minimal_evidence:"))
-        && matches!(lines.next(), Some(line) if line.to_ascii_lowercase().starts_with("remaining_blocker:"))
-        && lines.next().is_none()
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    if lines.len() != 4 {
+        return false;
+    }
+
+    let Some((_, verified_target)) = lines[0].split_once(':') else {
+        return false;
+    };
+    let Some((_, verification_result)) = lines[1].split_once(':') else {
+        return false;
+    };
+    let Some((_, minimal_evidence)) = lines[2].split_once(':') else {
+        return false;
+    };
+    let Some((_, remaining_blocker)) = lines[3].split_once(':') else {
+        return false;
+    };
+
+    lines[0].to_ascii_lowercase().starts_with("verified_target:")
+        && lines[1].to_ascii_lowercase().starts_with("verification_result:")
+        && lines[2].to_ascii_lowercase().starts_with("minimal_evidence:")
+        && lines[3].to_ascii_lowercase().starts_with("remaining_blocker:")
+        && is_valid_verification_result(verification_result.trim())
+        && is_concise_target_value(verified_target.trim())
+        && is_concise_verify_value(minimal_evidence.trim())
+        && is_concise_verify_value(remaining_blocker.trim())
 }
 
 fn extract_verify_target(text: &str) -> Option<String> {
@@ -847,7 +870,9 @@ fn infer_verification_result(raw_output: &str) -> String {
 
 fn infer_remaining_blocker(raw_output: &str, verification_result: &str) -> String {
     if verification_result.eq_ignore_ascii_case("blocked") {
-        first_nonempty_noncontract_line(raw_output).unwrap_or_else(|| "unspecified blocker".into())
+        shortest_noncontract_line(raw_output)
+            .map(|value| compact_verify_value(&value))
+            .unwrap_or_else(|| "unspecified blocker".into())
     } else {
         "none".into()
     }
@@ -863,50 +888,116 @@ fn infer_minimal_evidence(raw_output: &str) -> Option<String> {
         "evidence:",
         "verified:",
     ];
-    for line in raw_output.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let lower = trimmed.to_ascii_lowercase();
-        if evidence_prefixes
-            .iter()
-            .any(|prefix| lower.starts_with(prefix))
-        {
-            return Some(trimmed.to_string());
-        }
-    }
-    first_nonempty_noncontract_line(raw_output)
+    shortest_noncontract_line(raw_output)
+        .filter(|line| {
+            let lower = line.to_ascii_lowercase();
+            evidence_prefixes
+                .iter()
+                .any(|prefix| lower.starts_with(prefix))
+        })
+        .or_else(|| {
+            shortest_noncontract_line(raw_output).map(|line| compact_verify_value(&line))
+        })
 }
 
-fn first_nonempty_noncontract_line(text: &str) -> Option<String> {
+fn shortest_noncontract_line(text: &str) -> Option<String> {
     text.lines()
         .map(str::trim)
-        .find(|line| {
+        .filter(|line| {
             !line.is_empty()
                 && !line.eq_ignore_ascii_case("verified")
                 && !line.eq_ignore_ascii_case("blocked")
-                && !line.to_ascii_lowercase().starts_with("verified_target:")
-                && !line.to_ascii_lowercase().starts_with("verified target:")
-                && !line
-                    .to_ascii_lowercase()
-                    .starts_with("verification_result:")
-                && !line
-                    .to_ascii_lowercase()
-                    .starts_with("verification result:")
-                && !line.to_ascii_lowercase().starts_with("minimal_evidence:")
-                && !line.to_ascii_lowercase().starts_with("minimal evidence:")
-                && !line.to_ascii_lowercase().starts_with("remaining_blocker:")
-                && !line.to_ascii_lowercase().starts_with("remaining blocker:")
-                && !line
-                    .to_ascii_lowercase()
-                    .starts_with("next_action for coordinator:")
-                && !line
-                    .to_ascii_lowercase()
-                    .starts_with("minimal verification steps:")
-                && !line.to_ascii_lowercase().starts_with("files changed")
+                && !is_verify_contract_line(line)
         })
-        .map(ToString::to_string)
+        .map(|line| compact_verify_value(line))
+        .filter(|line| !line.is_empty())
+        .min_by_key(|line| line.len())
+}
+
+fn is_verify_contract_line(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    lower.starts_with("verified_target:")
+        || lower.starts_with("verified target:")
+        || lower.starts_with("verification_result:")
+        || lower.starts_with("verification result:")
+        || lower.starts_with("minimal_evidence:")
+        || lower.starts_with("minimal evidence:")
+        || lower.starts_with("remaining_blocker:")
+        || lower.starts_with("remaining blocker:")
+        || lower.starts_with("next_action for coordinator:")
+        || lower.starts_with("minimal verification steps:")
+        || lower.starts_with("files changed")
+}
+
+fn compact_verify_value(value: &str) -> String {
+    let mut compacted = value
+        .split_whitespace()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    compacted = compacted
+        .trim()
+        .trim_matches(|ch: char| matches!(ch, '"' | '\'' | '`' | ',' | ';'))
+        .to_string();
+    let compacted = compacted
+        .split(|ch| matches!(ch, '.' | '!' | '?' | ';'))
+        .next()
+        .unwrap_or_else(|| compacted.as_str())
+        .trim();
+    let compacted = compacted
+        .split(" and ")
+        .next()
+        .unwrap_or(compacted)
+        .trim();
+    let compacted = compacted
+        .split(" but ")
+        .next()
+        .unwrap_or(compacted)
+        .trim();
+    let compacted = compacted
+        .split(" because ")
+        .next()
+        .unwrap_or(compacted)
+        .trim();
+    let compacted = compacted
+        .split(" so ")
+        .next()
+        .unwrap_or(compacted)
+        .trim();
+    if compacted.len() <= 96 {
+        return compacted.to_string();
+    }
+    let mut truncated = compacted.chars().take(96).collect::<String>();
+    if let Some(idx) = truncated.rfind(' ') {
+        truncated.truncate(idx);
+    }
+    truncated.trim().to_string()
+}
+
+fn is_valid_verification_result(value: &str) -> bool {
+    matches!(value.trim().to_ascii_lowercase().as_str(), "verified" | "blocked")
+}
+
+fn is_concise_verify_value(value: &str) -> bool {
+    let value = value.trim();
+    if value.is_empty() {
+        return false;
+    }
+    if value.len() > 96 {
+        return false;
+    }
+    if value.contains('\n') || value.contains('\r') {
+        return false;
+    }
+    if value.contains('.') || value.contains('!') || value.contains('?') {
+        return false;
+    }
+    value.split_whitespace().count() <= 8
+}
+
+fn is_concise_target_value(value: &str) -> bool {
+    let value = value.trim();
+    !value.is_empty() && value.len() <= 200 && !value.contains('\n') && !value.contains('\r')
 }
 
 #[cfg(test)]
@@ -977,7 +1068,7 @@ mod tests {
         request.role = WorkerRole::Verify;
         let input = build_worker_task_input(&request);
         assert!(input.contains("<verify-output-contract>"));
-        assert!(input.contains("return only four short lines"));
+        assert!(input.contains("return exactly four short lines only"));
         assert!(input.contains("do not include analysis"));
         assert!(input.contains("keep minimal_evidence to one short factual phrase"));
     }
@@ -1092,13 +1183,50 @@ mod tests {
     }
 
     #[test]
-    fn verify_output_matches_contract_accepts_exact_four_line_output() {
+    fn verify_output_contract_requires_exact_four_prefixed_lines() {
         assert!(verify_output_matches_contract(
             "verified_target: /tmp/report.md\nverification_result: verified\nminimal_evidence: Read succeeded\nremaining_blocker: none"
         ));
         assert!(!verify_output_matches_contract(
             "verified_target: /tmp/report.md\nverification_result: verified\nminimal_evidence: Read succeeded\nremaining_blocker: none\nnext_action: extra"
         ));
+        assert!(!verify_output_matches_contract(
+            "verified_target: /tmp/report.md\nverification_result: verified\nminimal_evidence: Read succeeded"
+        ));
+    }
+
+    #[test]
+    fn verify_output_contract_rejects_multi_section_report_prose() {
+        assert!(!verify_output_matches_contract(
+            "verified_target: /tmp/report.md\nverification_result: verified\nminimal_evidence: Read succeeded and the file looks good. No further action needed.\nremaining_blocker: none"
+        ));
+        assert!(!verify_output_matches_contract(
+            "verified_target: /tmp/report.md\nverification_result: blocked\nminimal_evidence: Read succeeded\nremaining_blocker: target missing verification. please inspect the report and rerun validation."
+        ));
+    }
+
+    #[test]
+    fn verify_completion_is_rewritten_to_short_form_before_append_output() {
+        let task_input =
+            "Verify target artifact only: /tmp/report.md. Return a short verification result only.";
+        let raw_output = "## verification report\nverified_target: /tmp/report.md\nverification_result: verified\nminimal_evidence: Read succeeded and the file is present.\nremaining_blocker: none\n\nrecommendations:\n- keep reading docs\n- add more checks";
+        let normalized = normalize_verify_output(task_input, raw_output);
+        assert_eq!(normalized.lines().count(), 4);
+        assert_eq!(
+            normalized,
+            "verified_target: /tmp/report.md\nverification_result: verified\nminimal_evidence: Read succeeded\nremaining_blocker: none"
+        );
+    }
+
+    #[test]
+    fn verify_completion_short_form_drops_recommendations_and_risk_notes() {
+        let task_input = "Verify target artifact only: /tmp/report.md. Return a short verification result only.";
+        let raw_output = "risk notes: the workspace may drift\nverified_target: /tmp/report.md\nverification_result: blocked\nminimal_evidence: Read succeeded\nremaining_blocker: target missing verification\nnext_action: rerun with stat\nvalidation steps: read docs";
+        let normalized = normalize_verify_output(task_input, raw_output);
+        assert_eq!(
+            normalized,
+            "verified_target: /tmp/report.md\nverification_result: blocked\nminimal_evidence: Read succeeded\nremaining_blocker: target missing verification"
+        );
     }
 
     #[test]
