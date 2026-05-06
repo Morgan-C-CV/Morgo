@@ -17,6 +17,7 @@ pub mod skills;
 pub mod status;
 pub mod swarm;
 pub mod tasks;
+pub mod um;
 
 use crate::command::registry::CommandRegistry;
 use std::sync::Arc;
@@ -38,6 +39,7 @@ use resume::ResumeCommand;
 use session::SessionCommand;
 use skills::SkillsCommand;
 use status::StatusCommand;
+use self::um::UMCommand;
 use swarm::SwarmCommand;
 use tasks::TasksCommand;
 
@@ -45,6 +47,7 @@ pub fn register_builtin_commands(registry: CommandRegistry) -> CommandRegistry {
     registry
         .register(Arc::new(HelpCommand))
         .register(Arc::new(LisMCommand))
+        .register(Arc::new(UMCommand))
         .register(Arc::new(CostCommand))
         .register(Arc::new(CompactCommand))
         .register(Arc::new(ClearCommand))
@@ -65,4 +68,16 @@ pub fn register_builtin_commands(registry: CommandRegistry) -> CommandRegistry {
 
 pub fn register_mcp_commands(registry: CommandRegistry) -> CommandRegistry {
     registry.register(Arc::new(McpCommand))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn builtin_registry_includes_um_command() {
+        let registry = register_builtin_commands(CommandRegistry::new());
+        assert!(registry.get("UM").is_some());
+        assert!(registry.get("um").is_some());
+    }
 }
