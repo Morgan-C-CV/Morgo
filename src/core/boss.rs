@@ -11207,7 +11207,7 @@ mod tests {
         let mut assignment = assignment;
         if let Some(shared) = assignment.shared_step_memory.as_mut() {
             shared.required_action = Some(
-                "tool dispatch failed: verification repair continuation exhausted / remaining verification evidence missing; last state: Verifying"
+                "tool dispatch failed: repair continuation exhausted / remaining evidence missing; last state: waiting"
                     .into(),
             );
             shared.verified_facts = vec![
