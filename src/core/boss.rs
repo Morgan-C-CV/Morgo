@@ -584,21 +584,78 @@ fn build_verification_first_shared_step_memory(
 }
 
 fn render_shared_step_memory_summary(shared: &SharedStepMemory) -> String {
-    let target = shared
-        .target
-        .clone()
-        .unwrap_or_else(|| "unknown".into());
-    let facts = if shared.verified_facts.is_empty() {
-        vec![
-            format!("verified_target: {target}"),
-            "verification_result: verified|blocked".into(),
-            "minimal_evidence: none recorded".into(),
-            "remaining_blocker: none".into(),
-        ]
-    } else {
-        shared.verified_facts.clone()
-    };
-    facts.join("\n")
+    let target = shared.target.as_deref().unwrap_or("unknown");
+    let mut verification_result = None;
+    let mut minimal_evidence = None;
+    let mut remaining_blocker = None;
+
+    for fact in &shared.verified_facts {
+        let trimmed = fact.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let lower = trimmed.to_ascii_lowercase();
+        if verification_result.is_none()
+            && (lower.starts_with("verification_result:")
+                || lower.starts_with("verification result:"))
+        {
+            verification_result = trimmed
+                .split_once(':')
+                .map(|(_, value)| value.trim().to_string())
+                .filter(|value| !value.is_empty());
+            continue;
+        }
+        if minimal_evidence.is_none()
+            && (lower.starts_with("minimal_evidence:")
+                || lower.starts_with("minimal evidence:"))
+        {
+            minimal_evidence = trimmed
+                .split_once(':')
+                .map(|(_, value)| value.trim().to_string())
+                .filter(|value| !value.is_empty());
+            continue;
+        }
+        if remaining_blocker.is_none()
+            && (lower.starts_with("remaining_blocker:")
+                || lower.starts_with("remaining blocker:"))
+        {
+            remaining_blocker = trimmed
+                .split_once(':')
+                .map(|(_, value)| value.trim().to_string())
+                .filter(|value| !value.is_empty());
+            continue;
+        }
+        if lower.starts_with("verified_target:") || lower.starts_with("verified target:") {
+            continue;
+        }
+        if minimal_evidence.is_none() {
+            minimal_evidence = Some(trimmed.to_string());
+        }
+    }
+
+    format!(
+        "verified_target: {target}\nverification_result: {}\nminimal_evidence: {}\nremaining_blocker: {}",
+        verification_result.unwrap_or_else(|| "verified".into()),
+        minimal_evidence.unwrap_or_else(|| "none recorded".into()),
+        remaining_blocker.unwrap_or_else(|| "none".into())
+    )
+}
+
+fn is_verification_first_short_summary(summary: &str) -> bool {
+    let mut lines = summary.lines().map(str::trim);
+    matches!(
+        lines.next(),
+        Some(line) if line.starts_with("verified_target:")
+    ) && matches!(
+        lines.next(),
+        Some(line) if line.starts_with("verification_result:")
+    ) && matches!(
+        lines.next(),
+        Some(line) if line.starts_with("minimal_evidence:")
+    ) && matches!(
+        lines.next(),
+        Some(line) if line.starts_with("remaining_blocker:")
+    ) && lines.next().is_none()
 }
 
 fn update_verification_first_review_summary(step: &mut BossPlanStep) {
@@ -1868,6 +1925,13 @@ fn build_step_review_summary(
     details: &[(&str, &str)],
 ) -> String {
     if is_verification_first_continuation(step) {
+        if step
+            .last_review_summary
+            .as_deref()
+            .is_some_and(is_verification_first_short_summary)
+        {
+            return step.last_review_summary.clone().unwrap_or_default();
+        }
         return build_brief_verification_review_summary(step, source);
     }
     let mut sections = vec![
@@ -2937,6 +3001,11 @@ impl BossCoordinator {
 
     pub async fn shared_memory_enabled(&self) -> bool {
         *self.shared_memory_enabled.read().await
+    }
+
+    async fn verification_first_shared_memory_projection_enabled(&self) -> bool {
+        self.shared_memory_enabled().await
+            && self.worker_lism_policy().await == WorkerLisMPolicy::ForceOn
     }
 
     async fn shared_step_memory_for_step(&self, step_id: usize) -> Option<SharedStepMemory> {
@@ -4088,10 +4157,17 @@ impl BossCoordinator {
                             step.result_diff.as_deref().unwrap_or(&event.result),
                         )
                         .await;
-                    if let Some(shared_step_memory) = shared_step_memory.as_ref() {
-                        step.last_review_summary = Some(render_shared_step_memory_summary(
-                            shared_step_memory,
-                        ));
+                    if self
+                        .verification_first_shared_memory_projection_enabled()
+                        .await
+                    {
+                        if let Some(shared_step_memory) = shared_step_memory.as_ref() {
+                            step.last_review_summary = Some(render_shared_step_memory_summary(
+                                shared_step_memory,
+                            ));
+                        } else {
+                            update_verification_first_review_summary(step);
+                        }
                     } else {
                         update_verification_first_review_summary(step);
                     }
@@ -4168,11 +4244,20 @@ impl BossCoordinator {
                             Some(event.summary.clone()).filter(|text| !text.trim().is_empty())
                         }
                     });
-                if let Some(shared_step_memory) = shared_step_memory.as_ref() {
-                    if artifact_verification_reason.is_none() {
-                        step.last_review_summary = Some(render_shared_step_memory_summary(
-                            shared_step_memory,
-                        ));
+                if artifact_verification_reason.is_none() {
+                    if self
+                        .verification_first_shared_memory_projection_enabled()
+                        .await
+                    {
+                        if let Some(shared_step_memory) = shared_step_memory.as_ref() {
+                            step.last_review_summary = Some(render_shared_step_memory_summary(
+                                shared_step_memory,
+                            ));
+                        } else {
+                            update_verification_first_review_summary(step);
+                        }
+                    } else {
+                        update_verification_first_review_summary(step);
                     }
                 } else {
                     update_verification_first_review_summary(step);
@@ -4610,10 +4695,17 @@ impl BossCoordinator {
                                 .unwrap_or(notification.body.as_str()),
                         )
                         .await;
-                    if let Some(shared_step_memory) = shared_step_memory.as_ref() {
-                        step.last_review_summary = Some(render_shared_step_memory_summary(
-                            shared_step_memory,
-                        ));
+                    if self
+                        .verification_first_shared_memory_projection_enabled()
+                        .await
+                    {
+                        if let Some(shared_step_memory) = shared_step_memory.as_ref() {
+                            step.last_review_summary = Some(render_shared_step_memory_summary(
+                                shared_step_memory,
+                            ));
+                        } else {
+                            update_verification_first_review_summary(step);
+                        }
                     } else {
                         update_verification_first_review_summary(step);
                     }
@@ -4721,11 +4813,20 @@ impl BossCoordinator {
                                 .filter(|text| !text.trim().is_empty())
                         }
                     });
-                if let Some(shared_step_memory) = shared_step_memory.as_ref() {
-                    if artifact_verification_reason.is_none() {
-                        step.last_review_summary = Some(render_shared_step_memory_summary(
-                            shared_step_memory,
-                        ));
+                if artifact_verification_reason.is_none() {
+                    if self
+                        .verification_first_shared_memory_projection_enabled()
+                        .await
+                    {
+                        if let Some(shared_step_memory) = shared_step_memory.as_ref() {
+                            step.last_review_summary = Some(render_shared_step_memory_summary(
+                                shared_step_memory,
+                            ));
+                        } else {
+                            update_verification_first_review_summary(step);
+                        }
+                    } else {
+                        update_verification_first_review_summary(step);
                     }
                 } else {
                     update_verification_first_review_summary(step);
@@ -5966,7 +6067,8 @@ impl BossCoordinator {
             },
             required_output_hint,
         };
-        let shared_step_memory = if verification_first_short_form && self.shared_memory_enabled().await
+        let shared_step_memory = if verification_first_short_form
+            && self.verification_first_shared_memory_projection_enabled().await
         {
             let target = verification_first_target
                 .clone()
@@ -6977,6 +7079,7 @@ mod tests {
     use super::*;
     use crate::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
     use crate::core::boss_state::BossActorRole;
+    use crate::core::context::WorkerLisMPolicy;
     use crate::core::state_frame::{
         AgentState, CompletionEvidenceGap, CompletionEvidenceStatus, ContinuityMode,
         DeclaredArtifactContract, RepairIntent, WorkerStructuredReport,
@@ -10504,6 +10607,446 @@ mod tests {
         assert_eq!(facts.len(), 4);
         assert!(facts.iter().all(|fact| !fact.contains("review prose")));
         assert!(facts.iter().all(|fact| !fact.contains("replan required")));
+    }
+
+    fn verification_first_review_step(
+        target: &str,
+        last_review_summary: Option<String>,
+        tool_execution_records: Vec<ToolExecutionRecord>,
+    ) -> BossPlanStep {
+        BossPlanStep {
+            id: 0,
+            description: "verify target".into(),
+            objective: Some(format!("write report to {target}")),
+            acceptance: vec![format!(
+                "target file exists and is non-empty: {target}"
+            )],
+            requires_approval: false,
+            status: BossPlanStepStatus::Running,
+            completed: false,
+            result_diff: None,
+            worker_task_id: None,
+            attempt_count: 1,
+            retry_budget: 3,
+            last_review_summary,
+            last_correction: Some("verify_artifact".into()),
+            stage_execution_contract: StageExecutionContract::default(),
+            stage_continuation_context: Some(crate::core::state_frame::StageContinuationContext {
+                repair_intent: Some(crate::core::state_frame::RepairIntent {
+                    failed_target: Some(target.into()),
+                    verified_facts: vec!["Read succeeded".into()],
+                    next_action: Some("verify_artifact".into()),
+                    continuity_mode: Some(crate::core::state_frame::ContinuityMode::Repair),
+                }),
+                failed_target: Some(target.into()),
+                verified_facts: vec!["Read succeeded".into()],
+                next_action: Some("verify_artifact".into()),
+                continuity_mode: Some(crate::core::state_frame::ContinuityMode::Repair),
+            }),
+            executor_b_stage_memory: Some(ExecutorBStageMemory {
+                continuity: Some(ExecutorBStageMemoryContinuity::VerificationFirstIsolated),
+                ..ExecutorBStageMemory::default()
+            }),
+            review_task_id: None,
+            tool_execution_records,
+        }
+    }
+
+    async fn verification_first_projection_coordinator(
+        worker_policy: WorkerLisMPolicy,
+    ) -> (Arc<BossCoordinator>, BossPlanStep) {
+        let coordinator = Arc::new(BossCoordinator::new());
+        coordinator.set_shared_memory_enabled(true).await;
+        coordinator.set_lism_policy(BossLisMPolicy::ForceOn).await;
+        coordinator.set_worker_lism_policy(worker_policy).await;
+
+        let step = verification_first_review_step(
+            "/tmp/verification-first.md",
+            Some("verification missing".into()),
+            Vec::new(),
+        );
+
+        {
+            let mut plan = coordinator.plan.write().await;
+            *plan = Some(BossPlan {
+                plan_id: "plan-verification-first".into(),
+                accepted_by_user: true,
+                steps: vec![step.clone()],
+                ..BossPlan::default()
+            });
+        }
+        {
+            let mut metadata = coordinator.routed_step_metadata.write().await;
+            metadata.insert(
+                0,
+                BossStepRoutedMetadata {
+                    completion_evidence_gaps: vec![CompletionEvidenceGap {
+                        target_ref: "artifact:0".into(),
+                        target_path: Some("/tmp/verification-first.md".into()),
+                        missing_artifact_evidence: false,
+                        missing_test_evidence: false,
+                        missing_verification_evidence: true,
+                        recommended_action: "verify_artifact".into(),
+                    }],
+                    fallback_tier: Some("verification_first".into()),
+                    fallback_reason: Some("rollout_policy_verification_gap".into()),
+                    ..BossStepRoutedMetadata::default()
+                },
+            );
+        }
+
+        (coordinator, step)
+    }
+
+    #[test]
+    fn shared_step_memory_summary_is_hard_clamped_to_four_line_short_form() {
+        let target = "/tmp/verification-first.md";
+        let mut memory = build_verification_first_shared_step_memory(
+            9,
+            WorkerRole::Verify,
+            target,
+            vec![
+                "acceptance contract detail that must not leak".into(),
+                "another acceptance contract detail".into(),
+                "yet another acceptance contract detail".into(),
+            ],
+            "verify_artifact",
+        );
+        memory.verified_facts = vec![
+            format!("verified_target: {target}"),
+            "verification_result: blocked".into(),
+            "minimal_evidence: Read succeeded".into(),
+            "remaining_blocker: source file missing".into(),
+            "extra prose that must not leak".into(),
+            "replan required: later".into(),
+        ];
+
+        let summary = render_shared_step_memory_summary(&memory);
+        let lines = summary.lines().collect::<Vec<_>>();
+
+        assert_eq!(lines.len(), 4);
+        assert_eq!(lines[0], format!("verified_target: {target}"));
+        assert_eq!(lines[1], "verification_result: blocked");
+        assert_eq!(lines[2], "minimal_evidence: Read succeeded");
+        assert_eq!(lines[3], "remaining_blocker: source file missing");
+        assert!(!summary.contains("acceptance contract detail"));
+        assert!(!summary.contains("extra prose"));
+        assert!(!summary.contains("replan required"));
+    }
+
+    #[test]
+    fn shared_memory_projection_keeps_target_result_evidence_and_blocker_only() {
+        let target = "/tmp/shared-first.md";
+        let memory = {
+            let mut memory = build_verification_first_shared_step_memory(
+                7,
+                WorkerRole::Verify,
+                target,
+                vec!["contract prose that should stay hidden".into()],
+                "verify_artifact",
+            );
+            memory.verified_facts = vec![
+                format!("verified_target: {target}"),
+                "verification_result: verified".into(),
+                "minimal_evidence: Read succeeded".into(),
+                "remaining_blocker: none".into(),
+                "more prose that should not surface".into(),
+            ];
+            memory
+        };
+        let short_form = render_shared_step_memory_summary(&memory);
+        let step = verification_first_review_step(
+            target,
+            Some(short_form.clone()),
+            vec![ToolExecutionRecord {
+                tool_name: "Read".into(),
+                outcome: "Text".into(),
+                kind: ToolExecutionOutcomeKind::Success,
+                summary: "Read succeeded".into(),
+                detail: None,
+                pending_approval: None,
+                report_modifier: ToolReportModifier::None,
+                observable_input: None,
+                batch_context: ToolBatchContext {
+                    batch_index: 0,
+                    batch_size: 1,
+                    executed_in_batch: false,
+                },
+            }],
+        );
+
+        let projected = build_step_review_summary(
+            &step,
+            "Worker task",
+            &[(
+                "Summary",
+                "Long prose should not survive the short projection contract.",
+            )],
+        );
+
+        assert_eq!(projected, short_form);
+        assert_eq!(projected.lines().count(), 4);
+        assert!(projected.contains("verified_target: /tmp/shared-first.md"));
+        assert!(projected.contains("verification_result: verified"));
+        assert!(projected.contains("minimal_evidence: Read succeeded"));
+        assert!(projected.contains("remaining_blocker: none"));
+    }
+
+    #[test]
+    fn boss_on_only_verification_first_shared_memory_does_not_expand_review_summary() {
+        let target = "/tmp/boss-only.md";
+        let mut memory = build_verification_first_shared_step_memory(
+            11,
+            WorkerRole::Verify,
+            target,
+            vec!["hidden acceptance contract".into(), "more hidden contract".into()],
+            "verify_artifact",
+        );
+        memory.verified_facts = vec![
+            format!("verified_target: {target}"),
+            "verification_result: verified".into(),
+            "minimal_evidence: Read succeeded".into(),
+            "remaining_blocker: none".into(),
+            "extra prose that should not expand the review summary".into(),
+        ];
+        let short_form = render_shared_step_memory_summary(&memory);
+        let step = verification_first_review_step(
+            target,
+            Some(short_form.clone()),
+            vec![ToolExecutionRecord {
+                tool_name: "Read".into(),
+                outcome: "Text".into(),
+                kind: ToolExecutionOutcomeKind::Success,
+                summary: "Read succeeded".into(),
+                detail: None,
+                pending_approval: None,
+                report_modifier: ToolReportModifier::None,
+                observable_input: None,
+                batch_context: ToolBatchContext {
+                    batch_index: 0,
+                    batch_size: 1,
+                    executed_in_batch: false,
+                },
+            }],
+        );
+
+        let projected = build_step_review_summary(
+            &step,
+            "Worker task",
+            &[(
+                "Next action",
+                "If you approve, I can keep expanding the prose and add more roadmap notes.",
+            )],
+        );
+
+        assert_eq!(projected, short_form);
+        assert_eq!(projected.lines().count(), 4);
+        assert!(!projected.contains("roadmap"));
+        assert!(!projected.contains("expand the prose"));
+    }
+
+    #[tokio::test]
+    async fn boss_on_only_shared_memory_is_write_only_for_verification_first() {
+        let (coordinator, step) =
+            verification_first_projection_coordinator(WorkerLisMPolicy::ForceOff).await;
+
+        let written = coordinator
+            .sync_verification_first_shared_step_memory_from_result(
+                &step,
+                "verified_target: /tmp/verification-first.md\nverification_result: verified\nminimal_evidence: Read succeeded\nremaining_blocker: none",
+            )
+            .await
+            .expect("shared memory write");
+        assert_eq!(written.verified_facts.len(), 4);
+        assert!(coordinator.shared_step_memory_for_step(step.id).await.is_some());
+
+        let assignment = coordinator
+            .build_executor_b_assignment_contract(0, "session-alpha", true)
+            .await
+            .expect("build assignment");
+
+        assert_eq!(assignment.worker_role, WorkerRole::Verify);
+        assert!(assignment.shared_step_memory.is_none());
+    }
+
+    #[tokio::test]
+    async fn all_on_verification_first_still_projects_from_shared_memory() {
+        let (coordinator, step) =
+            verification_first_projection_coordinator(WorkerLisMPolicy::ForceOn).await;
+
+        let written = coordinator
+            .sync_verification_first_shared_step_memory_from_result(
+                &step,
+                "verified_target: /tmp/verification-first.md\nverification_result: verified\nminimal_evidence: Read succeeded\nremaining_blocker: none",
+            )
+            .await
+            .expect("shared memory write");
+        assert_eq!(written.verified_facts.len(), 4);
+
+        let assignment = coordinator
+            .build_executor_b_assignment_contract(0, "session-alpha", true)
+            .await
+            .expect("build assignment");
+
+        let shared = assignment
+            .shared_step_memory
+            .as_ref()
+            .expect("shared memory projection");
+        assert_eq!(shared.verified_facts.len(), 4);
+        assert_eq!(
+            render_shared_step_memory_summary(shared),
+            "verified_target: /tmp/verification-first.md\nverification_result: verified\nminimal_evidence: Read succeeded\nremaining_blocker: none"
+        );
+
+        let payload = build_continuation_payload(&assignment);
+        assert_eq!(
+            payload.verified_facts,
+            vec![
+                "verified_target: /tmp/verification-first.md".to_string(),
+                "verification_result: verified".to_string(),
+                "minimal_evidence: Read succeeded".to_string(),
+                "remaining_blocker: none".to_string(),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn boss_on_only_review_summary_falls_back_to_non_shared_projection() {
+        let (coordinator, step) =
+            verification_first_projection_coordinator(WorkerLisMPolicy::ForceOff).await;
+
+        let assignment = coordinator
+            .build_executor_b_assignment_contract(0, "session-alpha", true)
+            .await
+            .expect("build assignment");
+
+        assert!(assignment.shared_step_memory.is_none());
+        let payload = build_continuation_payload(&assignment);
+
+        assert_eq!(payload.failed_target.as_deref(), Some("/tmp/verification-first.md"));
+        assert_eq!(payload.verified_facts, vec!["Read succeeded".to_string()]);
+        assert_eq!(payload.next_action.as_deref(), Some("verify_artifact"));
+        assert_eq!(payload.continuity_mode.as_deref(), Some("repair"));
+
+        let summary = build_step_review_summary(&step, "Worker task", &[("Result", "Read succeeded")]);
+        assert!(summary.contains("verified_target: /tmp/verification-first.md"));
+        assert!(summary.contains("verification_result: verified"));
+        assert!(summary.contains("minimal_evidence: none"));
+        assert!(!summary.contains("Read succeeded"));
+    }
+
+    #[tokio::test]
+    async fn shared_memory_ledger_write_survives_when_boss_on_only_projection_is_disabled() {
+        let (coordinator, step) =
+            verification_first_projection_coordinator(WorkerLisMPolicy::ForceOff).await;
+
+        let written = coordinator
+            .sync_verification_first_shared_step_memory_from_result(
+                &step,
+                "verified_target: /tmp/verification-first.md\nverification_result: blocked\nminimal_evidence: Read succeeded\nremaining_blocker: source file missing",
+            )
+            .await
+            .expect("shared memory write");
+
+        assert_eq!(written.verified_facts.len(), 4);
+        assert_eq!(
+            written.verified_facts,
+            vec![
+                "verified_target: /tmp/verification-first.md".to_string(),
+                "verification_result: blocked".to_string(),
+                "minimal_evidence: Read succeeded".to_string(),
+                "remaining_blocker: source file missing".to_string(),
+            ]
+        );
+        assert!(coordinator.shared_step_memory_for_step(step.id).await.is_some());
+    }
+
+    #[test]
+    fn all_on_and_boss_on_only_share_same_short_projection_contract() {
+        let target = "/tmp/shared-contract.md";
+        let mut memory = build_verification_first_shared_step_memory(
+            13,
+            WorkerRole::Verify,
+            target,
+            vec!["contract that should stay bounded".into()],
+            "verify_artifact",
+        );
+        memory.verified_facts = vec![
+            format!("verified_target: {target}"),
+            "verification_result: blocked".into(),
+            "minimal_evidence: Write succeeded; Read succeeded".into(),
+            "remaining_blocker: source file missing".into(),
+        ];
+        let short_form = render_shared_step_memory_summary(&memory);
+
+        let shared_memory_step = verification_first_review_step(
+            target,
+            Some(short_form.clone()),
+            vec![ToolExecutionRecord {
+                tool_name: "Read".into(),
+                outcome: "Text".into(),
+                kind: ToolExecutionOutcomeKind::Success,
+                summary: "Read succeeded".into(),
+                detail: None,
+                pending_approval: None,
+                report_modifier: ToolReportModifier::None,
+                observable_input: None,
+                batch_context: ToolBatchContext {
+                    batch_index: 0,
+                    batch_size: 1,
+                    executed_in_batch: false,
+                },
+            }],
+        );
+
+        let raw_projection_step = verification_first_review_step(
+            target,
+            Some(normalize_verification_first_short_form(
+                &verification_first_review_step(
+                    target,
+                    None,
+                    vec![ToolExecutionRecord {
+                        tool_name: "Read".into(),
+                        outcome: "Text".into(),
+                        kind: ToolExecutionOutcomeKind::Success,
+                        summary: "Read succeeded".into(),
+                        detail: None,
+                        pending_approval: None,
+                        report_modifier: ToolReportModifier::None,
+                        observable_input: None,
+                        batch_context: ToolBatchContext {
+                            batch_index: 0,
+                            batch_size: 1,
+                            executed_in_batch: false,
+                        },
+                    }],
+                ),
+                "verified_target: /tmp/shared-contract.md\nverification_result: blocked\nminimal_evidence: Write succeeded; Read succeeded\nremaining_blocker: source file missing\nroadmap: expand later",
+                None,
+            )),
+            vec![ToolExecutionRecord {
+                tool_name: "Read".into(),
+                outcome: "Text".into(),
+                kind: ToolExecutionOutcomeKind::Success,
+                summary: "Read succeeded".into(),
+                detail: None,
+                pending_approval: None,
+                report_modifier: ToolReportModifier::None,
+                observable_input: None,
+                batch_context: ToolBatchContext {
+                    batch_index: 0,
+                    batch_size: 1,
+                    executed_in_batch: false,
+                },
+            }],
+        );
+
+        let shared_projection = build_step_review_summary(&shared_memory_step, "Worker task", &[]);
+        let raw_projection = build_step_review_summary(&raw_projection_step, "Worker task", &[]);
+
+        assert_eq!(shared_projection, raw_projection);
+        assert_eq!(shared_projection, short_form);
+        assert_eq!(shared_projection.lines().count(), 4);
     }
 
     #[test]
