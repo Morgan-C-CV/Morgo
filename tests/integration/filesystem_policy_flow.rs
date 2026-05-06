@@ -126,6 +126,7 @@ async fn bootstrap_env_policy_is_attached_and_enforced_by_file_tools() {
         disable_full_worker_dispatch_fallback: false,
         boss_task: None,
         boss_task_timeout_secs: 900,
+        shared_memory_enabled: false,
     })
     .with_provider_config(test_model_provider_config());
     let state = BootstrapState::new(InteractionSurface::Cli, SessionMode::Headless, false);

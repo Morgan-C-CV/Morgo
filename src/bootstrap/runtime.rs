@@ -347,6 +347,9 @@ pub struct BootstrapCli {
     /// One of: inherit, force-on, force-off.
     #[arg(long, value_name = "POLICY")]
     pub worker_lism_policy: Option<String>,
+    /// Enable shared step memory for verification-first boss flows.
+    #[arg(long, default_value_t = false)]
+    pub shared_memory_enabled: bool,
     /// Experimental: disable the Boss LisM escape hatch that falls back to full worker dispatch
     /// when a step appears to require filesystem or shell side effects.
     #[arg(long, default_value_t = false)]
@@ -378,6 +381,7 @@ impl Default for BootstrapCli {
             lism_ab_conclude: None,
             lism_policy: None,
             worker_lism_policy: None,
+            shared_memory_enabled: false,
             disable_full_worker_dispatch_fallback: false,
             boss_task: None,
             boss_task_timeout_secs: DEFAULT_BOSS_TASK_TIMEOUT_SECS,
@@ -1101,6 +1105,10 @@ impl RuntimeBootstrap {
         // Apply boss-spawned worker LisM policy override if requested via CLI.
         if let Some(policy_str) = &self.cli.worker_lism_policy {
             boss_coordinator.init_worker_lism_policy(parse_worker_lism_policy(policy_str));
+        }
+
+        if self.cli.shared_memory_enabled {
+            boss_coordinator.init_shared_memory_enabled(true);
         }
 
         if self.cli.disable_full_worker_dispatch_fallback {
@@ -2144,6 +2152,7 @@ fn print_lism_ab_summary(
 
 #[cfg(test)]
 mod tests {
+    use clap::Parser;
     use std::path::Path;
 
     use super::{
@@ -2189,6 +2198,12 @@ mod tests {
     fn bootstrap_cli_default_full_worker_dispatch_fallback_remains_enabled() {
         let cli = BootstrapCli::default();
         assert!(!cli.disable_full_worker_dispatch_fallback);
+    }
+
+    #[test]
+    fn bootstrap_cli_parses_shared_memory_enabled_flag() {
+        let cli = BootstrapCli::parse_from(["rust-agent", "--shared-memory-enabled"]);
+        assert!(cli.shared_memory_enabled);
     }
 
     #[test]

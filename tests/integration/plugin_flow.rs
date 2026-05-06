@@ -147,6 +147,7 @@ async fn plugin_runtime_exposes_command_hook_tool_and_diagnostics() {
         disable_full_worker_dispatch_fallback: false,
         boss_task: None,
         boss_task_timeout_secs: 900,
+        shared_memory_enabled: false,
     })
     .with_session_store(session_store)
     .with_provider_config(test_model_provider_config());

@@ -69,6 +69,8 @@ Options:
   --cases VALUE         all | u6 | u6,u7,u9 | u6-u9. Default: all
   --plan VALUE          3x3 | 3plus3 | 2x2 | 2plus2 | single. Default: $DEFAULT_PLAN
   --mode VALUE          all_off | boss_on_only | all_on. Only for --plan single.
+  --shared-memory-enabled
+                        Enable shared step memory in the launched runtime.
   --runs N              Runs per mode. Default: 3. For single, default 1.
   --out DIR             Output root. Default: $DEFAULT_OUT_DIR
   --model MODEL         Override model written into generated config.
@@ -380,6 +382,7 @@ run_one() {
   local sample_file
   local log_file
   local api_log_file
+  local shared_memory_flag=()
 
   src_mode="$(source_mode_for_label "$mode")"
   boss_policy="$(boss_policy_for_label "$mode")"
@@ -392,6 +395,9 @@ run_one() {
   sample_file="$out_dir/samples/${usecase}-${mode}.jsonl"
   log_file="$out_dir/logs/${usecase}-${mode}-run${run_id}.log"
   api_log_file="$out_dir/api_logs/${usecase}-${mode}-run${run_id}.jsonl"
+  if [ "$shared_memory_enabled" = "true" ]; then
+    shared_memory_flag=(--shared-memory-enabled)
+  fi
 
   echo "=== START $usecase $mode run$run_id $(date '+%F %T') ==="
   (
@@ -400,6 +406,7 @@ run_one() {
     "$BIN_PATH" \
       --lism-policy "$boss_policy" \
       --worker-lism-policy "$worker_policy" \
+      "${shared_memory_flag[@]}" \
       --lism-ab-sample "$sample_file" \
       --boss-task "$(cat "$task_file")" \
       --boss-task-timeout-secs "$timeout_secs"
@@ -538,6 +545,7 @@ runs=""
 out_dir="$DEFAULT_OUT_DIR"
 model="$DEFAULT_MODEL"
 timeout_secs="$DEFAULT_TIMEOUT_SECS"
+shared_memory_enabled="false"
 prepare_only="false"
 summary_only=""
 list_cases="false"
@@ -555,6 +563,10 @@ while [ $# -gt 0 ]; do
     --mode)
       single_mode="${2:-}"
       shift 2
+      ;;
+    --shared-memory-enabled)
+      shared_memory_enabled="true"
+      shift
       ;;
     --runs)
       runs="${2:-}"
