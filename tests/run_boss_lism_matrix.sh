@@ -382,7 +382,6 @@ run_one() {
   local sample_file
   local log_file
   local api_log_file
-  local shared_memory_flag=()
 
   src_mode="$(source_mode_for_label "$mode")"
   boss_policy="$(boss_policy_for_label "$mode")"
@@ -395,21 +394,27 @@ run_one() {
   sample_file="$out_dir/samples/${usecase}-${mode}.jsonl"
   log_file="$out_dir/logs/${usecase}-${mode}-run${run_id}.log"
   api_log_file="$out_dir/api_logs/${usecase}-${mode}-run${run_id}.jsonl"
-  if [ "$shared_memory_enabled" = "true" ]; then
-    shared_memory_flag=(--shared-memory-enabled)
-  fi
 
   echo "=== START $usecase $mode run$run_id $(date '+%F %T') ==="
   (
     export RUST_AGENT_CONFIG_ROOT="$config_root"
     export RUST_AGENT_API_CALL_LOG="$api_log_file"
-    "$BIN_PATH" \
-      --lism-policy "$boss_policy" \
-      --worker-lism-policy "$worker_policy" \
-      "${shared_memory_flag[@]}" \
-      --lism-ab-sample "$sample_file" \
-      --boss-task "$(cat "$task_file")" \
-      --boss-task-timeout-secs "$timeout_secs"
+    if [ "$shared_memory_enabled" = "true" ]; then
+      "$BIN_PATH" \
+        --lism-policy "$boss_policy" \
+        --worker-lism-policy "$worker_policy" \
+        --shared-memory-enabled \
+        --lism-ab-sample "$sample_file" \
+        --boss-task "$(cat "$task_file")" \
+        --boss-task-timeout-secs "$timeout_secs"
+    else
+      "$BIN_PATH" \
+        --lism-policy "$boss_policy" \
+        --worker-lism-policy "$worker_policy" \
+        --lism-ab-sample "$sample_file" \
+        --boss-task "$(cat "$task_file")" \
+        --boss-task-timeout-secs "$timeout_secs"
+    fi
   ) >"$log_file" 2>&1
   echo "=== END $usecase $mode run$run_id $(date '+%F %T') ==="
 }
