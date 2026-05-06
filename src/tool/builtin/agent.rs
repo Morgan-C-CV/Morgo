@@ -581,22 +581,61 @@ fn render_shared_step_memory_section(memory: &SharedStepMemory) -> Vec<String> {
     if let Some(required_action) = memory.required_action.as_deref() {
         sections.push(format!("required_action: {required_action}"));
     }
-    if !memory.acceptance_contract.is_empty() {
-        sections.push("acceptance_contract:".into());
-        sections.extend(
-            memory
-                .acceptance_contract
-                .iter()
-                .map(|item| format!("- {item}")),
-        );
-    }
     if !memory.verified_facts.is_empty() {
         sections.push("verified_facts:".into());
         sections.extend(memory.verified_facts.iter().map(|item| format!("- {item}")));
     }
+    if let Some(remaining_blocker) = memory.remaining_blocker.as_deref() {
+        sections.push(format!("remaining_blocker: {remaining_blocker}"));
+    }
     if !memory.evidence_refs.is_empty() {
         sections.push("evidence_refs:".into());
         sections.extend(memory.evidence_refs.iter().map(|item| format!("- {item}")));
+    }
+    sections
+}
+
+fn render_worker_local_memory_section(memory: &ExecutorBStageMemory) -> Vec<String> {
+    let mut sections = vec!["worker_local_memory:".into()];
+    if let Some(continuity) = memory.continuity.as_ref() {
+        sections.push(format!(
+            "continuity: {}",
+            format!("{continuity:?}").to_ascii_lowercase()
+        ));
+    }
+    if !memory.recent_reads.is_empty() {
+        sections.push("recent_reads:".into());
+        sections.extend(memory.recent_reads.iter().map(|item| format!("- {item}")));
+    }
+    if !memory.recent_edits.is_empty() {
+        sections.push("recent_edits:".into());
+        sections.extend(memory.recent_edits.iter().map(|item| format!("- {item}")));
+    }
+    if !memory.recent_test_refs.is_empty() {
+        sections.push("recent_test_refs:".into());
+        sections.extend(
+            memory
+                .recent_test_refs
+                .iter()
+                .map(|item| format!("- {item}")),
+        );
+    }
+    if !memory.recent_verification_refs.is_empty() {
+        sections.push("recent_verification_refs:".into());
+        sections.extend(
+            memory
+                .recent_verification_refs
+                .iter()
+                .map(|item| format!("- {item}")),
+        );
+    }
+    if !memory.failed_targets.is_empty() {
+        sections.push("failed_targets:".into());
+        sections.extend(memory.failed_targets.iter().map(|item| format!("- {item}")));
+    }
+    if !memory.verified_targets.is_empty() {
+        sections.push("verified_targets:".into());
+        sections.extend(memory.verified_targets.iter().map(|item| format!("- {item}")));
     }
     sections
 }
@@ -677,59 +716,7 @@ fn build_continue_task_input(
             sections.extend(render_shared_step_memory_section(memory));
         }
         if let Some(memory) = context.executor_b_stage_memory.as_ref() {
-            sections.push("executor_b_stage_memory:".into());
-            sections.push(format!(
-                "continuity: {}",
-                memory
-                    .continuity
-                    .as_ref()
-                    .map(|value| format!("{value:?}").to_ascii_lowercase())
-                    .unwrap_or_else(|| "none".into())
-            ));
-            if !memory.recent_reads.is_empty() {
-                sections.push("recent_reads:".into());
-                sections.extend(memory.recent_reads.iter().map(|item| format!("- {item}")));
-            }
-            if !memory.recent_edits.is_empty() {
-                sections.push("recent_edits:".into());
-                sections.extend(memory.recent_edits.iter().map(|item| format!("- {item}")));
-            }
-            if !memory.recent_test_refs.is_empty() {
-                sections.push("recent_test_refs:".into());
-                sections.extend(
-                    memory
-                        .recent_test_refs
-                        .iter()
-                        .map(|item| format!("- {item}")),
-                );
-            }
-            if !memory.recent_verification_refs.is_empty() {
-                sections.push("recent_verification_refs:".into());
-                sections.extend(
-                    memory
-                        .recent_verification_refs
-                        .iter()
-                        .map(|item| format!("- {item}")),
-                );
-            }
-            if !memory.failed_targets.is_empty() {
-                sections.push("failed_targets:".into());
-                sections.extend(
-                    memory
-                        .failed_targets
-                        .iter()
-                        .map(|item| format!("- {item}")),
-                );
-            }
-            if !memory.verified_targets.is_empty() {
-                sections.push("verified_targets:".into());
-                sections.extend(
-                    memory
-                        .verified_targets
-                        .iter()
-                        .map(|item| format!("- {item}")),
-                );
-            }
+            sections.extend(render_worker_local_memory_section(memory));
         }
         sections.push("</boss-step-context>".into());
     }
@@ -993,6 +980,58 @@ mod tests {
         assert!(input.contains("return only four short lines"));
         assert!(input.contains("do not include analysis"));
         assert!(input.contains("keep minimal_evidence to one short factual phrase"));
+    }
+
+    #[test]
+    fn continue_task_input_renders_shared_and_local_memory_as_separate_sections() {
+        let shared_step_memory = SharedStepMemory {
+            step_id: Some(7),
+            worker_role: Some("verify".into()),
+            target: Some("/tmp/shared.md".into()),
+            required_action: Some("verify_artifact".into()),
+            artifact_status: Some("present".into()),
+            verification_status: Some("verified".into()),
+            completion_evidence_status: Some("present".into()),
+            verified_facts: vec![
+                "verified_target: /tmp/shared.md".into(),
+                "verification_result: verified".into(),
+                "minimal_evidence: Read succeeded".into(),
+                "remaining_blocker: none".into(),
+            ],
+            remaining_blocker: Some("none".into()),
+            evidence_refs: vec!["artifact:shared".into()],
+        };
+        let local_memory = ExecutorBStageMemory {
+            recent_reads: vec!["src/lib.rs".into()],
+            recent_edits: vec!["src/lib.rs".into()],
+            recent_test_refs: vec!["cargo test".into()],
+            recent_verification_refs: vec!["verify ref".into()],
+            failed_targets: vec!["/tmp/local.md".into()],
+            verified_targets: vec!["/tmp/local.md".into()],
+            continuity: Some(crate::core::boss_state::ExecutorBStageMemoryContinuity::ReuseWithinStep),
+        };
+        let context = ContinueBossStepContext {
+            step_id: Some(7),
+            boss_plan_id: Some("plan-7".into()),
+            step_objective: Some("verify shared artifact".into()),
+            step_acceptance: vec!["target file exists".into()],
+            parent_session_id: Some("session-7".into()),
+            continuation_context: None,
+            executor_b_stage_memory: Some(local_memory),
+            shared_step_memory: Some(shared_step_memory),
+        };
+
+        let rendered = build_continue_task_input("please continue", Some(&context));
+        assert!(rendered.contains("shared_step_memory:"));
+        assert!(rendered.contains("worker_local_memory:"));
+        assert!(rendered.contains("verified_target: /tmp/shared.md"));
+        assert!(rendered.contains("recent_reads:"));
+        assert!(rendered.contains("src/lib.rs"));
+        assert!(!rendered.contains("acceptance_contract:"));
+        assert!(!rendered.contains("executor_b_stage_memory:"));
+        let shared_index = rendered.find("shared_step_memory:").expect("shared section");
+        let local_index = rendered.find("worker_local_memory:").expect("local section");
+        assert!(shared_index < local_index);
     }
 
     #[test]

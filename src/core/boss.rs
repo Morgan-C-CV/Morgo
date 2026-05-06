@@ -475,6 +475,12 @@ fn verification_first_shared_memory_facts(shared: &SharedStepMemory) -> Vec<Stri
 }
 
 fn verification_first_shared_memory_blocker(shared: &SharedStepMemory) -> Option<String> {
+    if let Some(blocker) = shared.remaining_blocker.as_ref() {
+        let trimmed = blocker.trim();
+        if !trimmed.is_empty() && trimmed != "none" {
+            return Some(trimmed.to_string());
+        }
+    }
     shared.verified_facts.iter().find_map(|fact| {
         fact.trim()
             .strip_prefix("remaining_blocker:")
@@ -510,34 +516,31 @@ fn verification_first_shared_memory_lines_from_text(
                 .filter(|value| !value.is_empty());
             continue;
         }
-        if verification_result.is_none()
-            && (lower.starts_with("verification_result:")
-                || lower.starts_with("verification result:"))
-        {
-            verification_result = trimmed
-                .split_once(':')
-                .map(|(_, value)| value.trim().to_string())
-                .filter(|value| !value.is_empty());
+        if lower.starts_with("verification_result:") || lower.starts_with("verification result:") {
+            if verification_result.is_none() {
+                verification_result = trimmed
+                    .split_once(':')
+                    .map(|(_, value)| value.trim().to_string())
+                    .filter(|value| !value.is_empty());
+            }
             continue;
         }
-        if minimal_evidence.is_none()
-            && (lower.starts_with("minimal_evidence:")
-                || lower.starts_with("minimal evidence:"))
-        {
-            minimal_evidence = trimmed
-                .split_once(':')
-                .map(|(_, value)| value.trim().to_string())
-                .filter(|value| !value.is_empty());
+        if lower.starts_with("minimal_evidence:") || lower.starts_with("minimal evidence:") {
+            if minimal_evidence.is_none() {
+                minimal_evidence = trimmed
+                    .split_once(':')
+                    .map(|(_, value)| value.trim().to_string())
+                    .filter(|value| !value.is_empty());
+            }
             continue;
         }
-        if remaining_blocker.is_none()
-            && (lower.starts_with("remaining_blocker:")
-                || lower.starts_with("remaining blocker:"))
-        {
-            remaining_blocker = trimmed
-                .split_once(':')
-                .map(|(_, value)| value.trim().to_string())
-                .filter(|value| !value.is_empty());
+        if lower.starts_with("remaining_blocker:") || lower.starts_with("remaining blocker:") {
+            if remaining_blocker.is_none() {
+                remaining_blocker = trimmed
+                    .split_once(':')
+                    .map(|(_, value)| value.trim().to_string())
+                    .filter(|value| !value.is_empty());
+            }
             continue;
         }
     }
@@ -566,7 +569,7 @@ fn build_verification_first_shared_step_memory(
     step_id: usize,
     worker_role: WorkerRole,
     target: &str,
-    acceptance_contract: Vec<String>,
+    _acceptance_contract: Vec<String>,
     required_action: &str,
 ) -> SharedStepMemory {
     SharedStepMemory {
@@ -574,20 +577,30 @@ fn build_verification_first_shared_step_memory(
         worker_role: Some(worker_role.as_str().to_string()),
         target: Some(target.to_string()),
         required_action: Some(required_action.to_string()),
-        acceptance_contract,
+        artifact_status: Some("present".into()),
+        verification_status: Some("pending".into()),
+        completion_evidence_status: Some("pending".into()),
         verified_facts: vec![
             format!("verified_target: {target}"),
             "verification_result: verified|blocked".into(),
         ],
+        remaining_blocker: None,
         evidence_refs: Vec::new(),
     }
 }
 
 fn render_shared_step_memory_summary(shared: &SharedStepMemory) -> String {
     let target = shared.target.as_deref().unwrap_or("unknown");
-    let mut verification_result = None;
+    let mut verification_result = shared.verification_status.as_ref().and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.eq_ignore_ascii_case("pending") || trimmed.eq_ignore_ascii_case("unknown") {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    });
     let mut minimal_evidence = None;
-    let mut remaining_blocker = None;
+    let mut remaining_blocker = shared.remaining_blocker.clone();
 
     for fact in &shared.verified_facts {
         let trimmed = fact.trim();
@@ -595,34 +608,31 @@ fn render_shared_step_memory_summary(shared: &SharedStepMemory) -> String {
             continue;
         }
         let lower = trimmed.to_ascii_lowercase();
-        if verification_result.is_none()
-            && (lower.starts_with("verification_result:")
-                || lower.starts_with("verification result:"))
-        {
-            verification_result = trimmed
-                .split_once(':')
-                .map(|(_, value)| value.trim().to_string())
-                .filter(|value| !value.is_empty());
+        if lower.starts_with("verification_result:") || lower.starts_with("verification result:") {
+            if verification_result.is_none() {
+                verification_result = trimmed
+                    .split_once(':')
+                    .map(|(_, value)| value.trim().to_string())
+                    .filter(|value| !value.is_empty());
+            }
             continue;
         }
-        if minimal_evidence.is_none()
-            && (lower.starts_with("minimal_evidence:")
-                || lower.starts_with("minimal evidence:"))
-        {
-            minimal_evidence = trimmed
-                .split_once(':')
-                .map(|(_, value)| value.trim().to_string())
-                .filter(|value| !value.is_empty());
+        if lower.starts_with("minimal_evidence:") || lower.starts_with("minimal evidence:") {
+            if minimal_evidence.is_none() {
+                minimal_evidence = trimmed
+                    .split_once(':')
+                    .map(|(_, value)| value.trim().to_string())
+                    .filter(|value| !value.is_empty());
+            }
             continue;
         }
-        if remaining_blocker.is_none()
-            && (lower.starts_with("remaining_blocker:")
-                || lower.starts_with("remaining blocker:"))
-        {
-            remaining_blocker = trimmed
-                .split_once(':')
-                .map(|(_, value)| value.trim().to_string())
-                .filter(|value| !value.is_empty());
+        if lower.starts_with("remaining_blocker:") || lower.starts_with("remaining blocker:") {
+            if remaining_blocker.is_none() {
+                remaining_blocker = trimmed
+                    .split_once(':')
+                    .map(|(_, value)| value.trim().to_string())
+                    .filter(|value| !value.is_empty());
+            }
             continue;
         }
         if lower.starts_with("verified_target:") || lower.starts_with("verified target:") {
@@ -1071,12 +1081,6 @@ fn verification_first_contract_blocker(contract: &ExecutorBAssignmentContract) -
 
 fn build_verification_first_task_message(contract: &ExecutorBAssignmentContract) -> String {
     let target = verification_first_contract_target(contract);
-    let acceptance = contract
-        .brief
-        .acceptance
-        .first()
-        .cloned()
-        .unwrap_or_else(|| "target-scoped verification".into());
     let facts = verification_first_contract_facts(contract);
     let evidence = if facts.is_empty() {
         "none".into()
@@ -1085,7 +1089,7 @@ fn build_verification_first_task_message(contract: &ExecutorBAssignmentContract)
     };
     let blocker = verification_first_contract_blocker(contract);
     format!(
-        "verified_target: {target}\nacceptance: {acceptance}\nminimal_evidence: {evidence}\nremaining_blocker: {blocker}"
+        "verified_target: {target}\nverification_result: verified|blocked\nminimal_evidence: {evidence}\nremaining_blocker: {blocker}"
     )
 }
 
@@ -3049,10 +3053,29 @@ impl BossCoordinator {
         memory.worker_role = Some(WorkerRole::Verify.as_str().to_string());
         memory.target = Some(target.clone());
         memory.required_action = Some("verify_artifact".into());
-        if memory.acceptance_contract.is_empty() {
-            memory.acceptance_contract = build_verification_first_acceptance(step);
-        }
         memory.verified_facts = verification_first_shared_memory_lines_from_text(&target, result_text);
+        memory.artifact_status = Some("present".into());
+        memory.verification_status = memory
+            .verified_facts
+            .iter()
+            .find_map(|fact| fact.trim().strip_prefix("verification_result:").map(str::trim))
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .or_else(|| Some("unknown".into()));
+        memory.completion_evidence_status = memory
+            .verified_facts
+            .iter()
+            .find_map(|fact| fact.trim().strip_prefix("minimal_evidence:").map(str::trim))
+            .filter(|value| !value.is_empty())
+            .map(|value| {
+                if value == "none recorded" {
+                    "missing".into()
+                } else {
+                    "present".into()
+                }
+            })
+            .or_else(|| Some("unknown".into()));
+        memory.remaining_blocker = verification_first_shared_memory_blocker(&memory);
         self.shared_step_memory
             .write()
             .await
@@ -6090,7 +6113,6 @@ impl BossCoordinator {
             shared.worker_role = Some(worker_role.as_str().to_string());
             shared.target = Some(target.clone());
             shared.required_action = Some("verify_artifact".into());
-            shared.acceptance_contract = effective_acceptance.clone();
             if shared.verified_facts.is_empty() {
                 shared.verified_facts = vec![
                     format!("verified_target: {target}"),
@@ -9919,7 +9941,8 @@ mod tests {
             .payload;
 
         assert!(payload.contains("verified_target: /tmp/verification-first.md"));
-        assert!(payload.contains("acceptance:"));
+        assert!(!payload.contains("acceptance:"));
+        assert!(payload.contains("verification_result: verified|blocked"));
         assert!(payload.contains("minimal_evidence: Write succeeded"));
         assert!(payload.contains("remaining_blocker: verify_artifact"));
         assert!(!payload.contains("return a unified diff or file edits"));
@@ -10438,7 +10461,7 @@ mod tests {
     }
 
     #[test]
-    fn verification_first_shared_step_memory_is_initialized_with_target_scoped_contract() {
+    fn shared_step_memory_contains_only_canonical_shared_facts() {
         let memory = build_verification_first_shared_step_memory(
             3,
             WorkerRole::Verify,
@@ -10454,13 +10477,9 @@ mod tests {
         assert_eq!(memory.worker_role.as_deref(), Some("verify"));
         assert_eq!(memory.target.as_deref(), Some("/tmp/verification-first.md"));
         assert_eq!(memory.required_action.as_deref(), Some("verify_artifact"));
-        assert_eq!(
-            memory.acceptance_contract,
-            vec![
-                "verified_target: /tmp/verification-first.md".to_string(),
-                "verification_result: verified|blocked".to_string(),
-            ]
-        );
+        assert_eq!(memory.artifact_status.as_deref(), Some("present"));
+        assert_eq!(memory.verification_status.as_deref(), Some("pending"));
+        assert_eq!(memory.completion_evidence_status.as_deref(), Some("pending"));
         assert_eq!(
             memory.verified_facts,
             vec![
@@ -10468,6 +10487,8 @@ mod tests {
                 "verification_result: verified|blocked".to_string(),
             ]
         );
+        assert_eq!(memory.remaining_blocker, None);
+        assert!(memory.evidence_refs.is_empty());
     }
 
     #[test]
@@ -10598,7 +10619,7 @@ mod tests {
     }
 
     #[test]
-    fn shared_step_memory_does_not_store_review_or_replan_prose() {
+    fn verification_first_shared_memory_lines_strip_acceptance_and_replan_prose() {
         let facts = verification_first_shared_memory_lines_from_text(
             "/tmp/verification-first.md",
             "review prose\nverified_target: /tmp/verification-first.md\nverification_result: blocked\nminimal_evidence: Read succeeded\nremaining_blocker: none\nreplan required: later\nmore review prose",
@@ -10606,7 +10627,107 @@ mod tests {
 
         assert_eq!(facts.len(), 4);
         assert!(facts.iter().all(|fact| !fact.contains("review prose")));
+        assert!(facts.iter().all(|fact| !fact.contains("acceptance")));
         assert!(facts.iter().all(|fact| !fact.contains("replan required")));
+    }
+
+    #[test]
+    fn executor_b_stage_memory_remains_worker_local_and_excludes_shared_contract_fields() {
+        let step = BossPlanStep {
+            id: 5,
+            description: "worker-local step".into(),
+            objective: Some("keep worker traces local".into()),
+            acceptance: vec!["local-only acceptance".into()],
+            requires_approval: false,
+            status: BossPlanStepStatus::Running,
+            completed: false,
+            result_diff: None,
+            worker_task_id: None,
+            attempt_count: 0,
+            retry_budget: 3,
+            last_review_summary: None,
+            last_correction: None,
+            stage_execution_contract: StageExecutionContract::default(),
+            stage_continuation_context: Some(crate::core::state_frame::StageContinuationContext {
+                repair_intent: Some(crate::core::state_frame::RepairIntent {
+                    failed_target: Some("/tmp/local-only.md".into()),
+                    verified_facts: vec!["verified_target: /tmp/local-only.md".into()],
+                    next_action: Some("repair later".into()),
+                    continuity_mode: Some(crate::core::state_frame::ContinuityMode::Repair),
+                }),
+                failed_target: Some("/tmp/local-only.md".into()),
+                verified_facts: vec!["verified_target: /tmp/local-only.md".into()],
+                next_action: Some("repair later".into()),
+                continuity_mode: Some(crate::core::state_frame::ContinuityMode::Repair),
+            }),
+            executor_b_stage_memory: Some(ExecutorBStageMemory {
+                recent_reads: vec!["src/lib.rs".into()],
+                recent_edits: vec!["src/lib.rs".into()],
+                recent_test_refs: vec!["cargo test".into()],
+                recent_verification_refs: vec!["verify ref".into()],
+                failed_targets: vec!["/tmp/local-only.md".into()],
+                verified_targets: vec!["/tmp/local-only.md".into()],
+                continuity: Some(ExecutorBStageMemoryContinuity::ReuseWithinStep),
+            }),
+            review_task_id: None,
+            tool_execution_records: Vec::new(),
+        };
+
+        let memory = project_executor_b_stage_memory(&step, None).expect("memory projected");
+        assert!(memory.recent_reads.iter().any(|item| item.contains("src/lib.rs")));
+        assert!(memory.recent_edits.iter().any(|item| item.contains("src/lib.rs")));
+        assert!(memory.recent_test_refs.iter().any(|item| item.contains("cargo test")));
+        assert!(memory
+            .recent_verification_refs
+            .iter()
+            .any(|item| item.contains("verify ref")));
+        assert!(memory
+            .failed_targets
+            .iter()
+            .any(|item| item.contains("/tmp/local-only.md")));
+        assert!(memory
+            .verified_targets
+            .iter()
+            .any(|item| item.contains("/tmp/local-only.md")));
+        assert!(!format!("{memory:?}").contains("verified_facts"));
+        assert!(!format!("{memory:?}").contains("remaining_blocker"));
+        assert!(!format!("{memory:?}").contains("acceptance"));
+    }
+
+    #[tokio::test]
+    async fn verification_first_shared_memory_write_path_does_not_store_acceptance_or_replan_prose()
+    {
+        let (coordinator, step) =
+            verification_first_projection_coordinator(WorkerLisMPolicy::ForceOn).await;
+
+        let written = coordinator
+            .sync_verification_first_shared_step_memory_from_result(
+                &step,
+                "review prose\nverified_target: /tmp/verification-first.md\nverification_result: blocked\nminimal_evidence: Read succeeded\nremaining_blocker: source file missing\nreplan required: later\nmore prose",
+            )
+            .await
+            .expect("shared memory write");
+
+        assert!(written
+            .verified_facts
+            .iter()
+            .all(|fact| !fact.contains("acceptance")));
+        assert!(written
+            .verified_facts
+            .iter()
+            .all(|fact| !fact.contains("replan required")));
+        assert_eq!(
+            written.verified_facts,
+            vec![
+                "verified_target: /tmp/verification-first.md".to_string(),
+                "verification_result: blocked".to_string(),
+                "minimal_evidence: Read succeeded".to_string(),
+                "remaining_blocker: source file missing".to_string(),
+            ]
+        );
+        assert_eq!(written.remaining_blocker.as_deref(), Some("source file missing"));
+        assert_eq!(written.verification_status.as_deref(), Some("blocked"));
+        assert_eq!(written.completion_evidence_status.as_deref(), Some("present"));
     }
 
     fn verification_first_review_step(

@@ -198,6 +198,7 @@ pub enum ExecutorBStageMemoryContinuity {
     FullContextFresh,
 }
 
+/// Worker-local memory carried inside Executor B stage execution.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct ExecutorBStageMemory {
     #[serde(default)]
@@ -216,6 +217,9 @@ pub struct ExecutorBStageMemory {
     pub continuity: Option<ExecutorBStageMemoryContinuity>,
 }
 
+/// Worker-local memory alias retained for the staged split from shared facts.
+pub type WorkerLocalMemory = ExecutorBStageMemory;
+
 /// Minimal shared step ledger for verification-first flows.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct SharedStepMemory {
@@ -228,9 +232,15 @@ pub struct SharedStepMemory {
     #[serde(default)]
     pub required_action: Option<String>,
     #[serde(default)]
-    pub acceptance_contract: Vec<String>,
+    pub artifact_status: Option<String>,
+    #[serde(default)]
+    pub verification_status: Option<String>,
+    #[serde(default)]
+    pub completion_evidence_status: Option<String>,
     #[serde(default)]
     pub verified_facts: Vec<String>,
+    #[serde(default)]
+    pub remaining_blocker: Option<String>,
     #[serde(default)]
     pub evidence_refs: Vec<String>,
 }
