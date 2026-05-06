@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
+use crate::core::boss::PERSISTED_WORKER_TASK_USAGE_SIGNAL;
 use crate::core::boss_acceptance::canonicalize_artifact_expectations;
 use crate::core::boss_state::BossReportPayload;
 use crate::core::boss_test_readiness::BossTestRunOutcome;
@@ -768,6 +769,11 @@ fn build_ab_record(
     let mut rollout_denylist_targets = BTreeMap::new();
     let mut automatic_fallback_targets = BTreeMap::new();
     let mut success_classification = None;
+    let has_full_context_worker_path = obs.is_some_and(has_persisted_worker_task_usage_signal)
+        && report
+            .steps
+            .iter()
+            .any(|step| step.worker_task_id.is_some());
     for step in &report.steps {
         let Some(meta) = step.routed_metadata.as_ref() else {
             continue;
@@ -843,9 +849,8 @@ fn build_ab_record(
                 .insert((target.target_ref.clone(), target.target_path.clone()), ());
         }
     }
-    let missing_artifact_evidence_targets = canonicalize_artifact_target_pairs(
-        missing_artifact_evidence_targets.into_keys().collect(),
-    );
+    let missing_artifact_evidence_targets =
+        canonicalize_artifact_target_pairs(missing_artifact_evidence_targets.into_keys().collect());
     let missing_verification_evidence_targets = canonicalize_artifact_target_pairs(
         missing_verification_evidence_targets.into_keys().collect(),
     );
@@ -879,6 +884,7 @@ fn build_ab_record(
         context_tier: derive_context_tier(
             obs,
             last_fallback.as_ref().and_then(|(tier, _)| tier.as_deref()),
+            has_full_context_worker_path,
         ),
         model_tier_counts: obs
             .map(|o| {
@@ -898,7 +904,7 @@ fn build_ab_record(
         tool_dispatch_ref_write_count: obs
             .map(|o| o.total_tool_dispatch_ref_write_count)
             .unwrap_or(0),
-        typed_path_signal: derive_typed_path_signal(obs),
+        typed_path_signal: derive_typed_path_signal(obs, has_full_context_worker_path),
         tool_dispatch_failure_taxonomy: obs
             .map(|o| o.tool_dispatch_failure_taxonomy.clone())
             .unwrap_or_default(),
@@ -934,9 +940,11 @@ fn canonicalize_artifact_target_pairs(targets: Vec<(String, Option<String>)>) ->
         targets
             .iter()
             .filter_map(|(_, target_path)| {
-                target_path.as_ref().map(|path| crate::core::boss_acceptance::BossArtifactExpectation {
-                    path: std::path::PathBuf::from(path),
-                    kind: crate::core::boss_acceptance::BossArtifactKind::File,
+                target_path.as_ref().map(|path| {
+                    crate::core::boss_acceptance::BossArtifactExpectation {
+                        path: std::path::PathBuf::from(path),
+                        kind: crate::core::boss_acceptance::BossArtifactKind::File,
+                    }
                 })
             })
             .collect(),
@@ -1060,7 +1068,7 @@ mod tests {
                 }),
                 stage_execution_contract: StageExecutionContract::default(),
                 stage_continuation_context: None,
-                        executor_b_stage_memory: None,
+                executor_b_stage_memory: None,
             }],
             history_summary: Vec::new(),
             observability_summary: None,
@@ -1085,7 +1093,7 @@ mod tests {
             lism_policy: Default::default(),
             stage_execution_contract: StageExecutionContract::default(),
             stage_continuation_context: None,
-                        executor_b_stage_memory: None,
+            executor_b_stage_memory: None,
         };
 
         let record = build_ab_record(
@@ -1131,7 +1139,7 @@ mod tests {
                 routed_metadata: Some(BossStepRoutedMetadata::default()),
                 stage_execution_contract: StageExecutionContract::default(),
                 stage_continuation_context: None,
-                        executor_b_stage_memory: None,
+                executor_b_stage_memory: None,
             }],
             history_summary: Vec::new(),
             observability_summary: None,
@@ -1140,7 +1148,7 @@ mod tests {
             lism_policy: Default::default(),
             stage_execution_contract: StageExecutionContract::default(),
             stage_continuation_context: None,
-                        executor_b_stage_memory: None,
+            executor_b_stage_memory: None,
         };
 
         let record = build_ab_record(
@@ -1195,7 +1203,7 @@ mod tests {
                 }),
                 stage_execution_contract: StageExecutionContract::default(),
                 stage_continuation_context: None,
-                        executor_b_stage_memory: None,
+                executor_b_stage_memory: None,
             }],
             history_summary: Vec::new(),
             observability_summary: None,
@@ -1223,7 +1231,7 @@ mod tests {
             lism_policy: Default::default(),
             stage_execution_contract: StageExecutionContract::default(),
             stage_continuation_context: None,
-                        executor_b_stage_memory: None,
+            executor_b_stage_memory: None,
         };
 
         let record = build_ab_record(
@@ -1267,7 +1275,7 @@ mod tests {
                 }),
                 stage_execution_contract: StageExecutionContract::default(),
                 stage_continuation_context: None,
-                        executor_b_stage_memory: None,
+                executor_b_stage_memory: None,
             }],
             history_summary: Vec::new(),
             observability_summary: None,
@@ -1276,7 +1284,7 @@ mod tests {
             lism_policy: Default::default(),
             stage_execution_contract: StageExecutionContract::default(),
             stage_continuation_context: None,
-                        executor_b_stage_memory: None,
+            executor_b_stage_memory: None,
         };
 
         let record = build_ab_record(
@@ -1326,7 +1334,7 @@ mod tests {
                 }),
                 stage_execution_contract: StageExecutionContract::default(),
                 stage_continuation_context: None,
-                        executor_b_stage_memory: None,
+                executor_b_stage_memory: None,
             }],
             history_summary: Vec::new(),
             observability_summary: None,
@@ -1335,7 +1343,7 @@ mod tests {
             lism_policy: Default::default(),
             stage_execution_contract: StageExecutionContract::default(),
             stage_continuation_context: None,
-                        executor_b_stage_memory: None,
+            executor_b_stage_memory: None,
         };
 
         let record = build_ab_record(
@@ -1471,6 +1479,115 @@ mod tests {
         assert_eq!(
             record.step_failure_classifications,
             vec!["verification_repair_continuation".to_string()]
+        );
+    }
+
+    #[test]
+    fn all_off_production_worker_usage_is_not_labeled_state_frame_only() {
+        let mut summary = crate::core::boss_state::BossObservabilitySummary {
+            total_input_tokens: 1200,
+            total_output_tokens: 240,
+            estimated_cost_micros_usd: 42_000,
+            ..crate::core::boss_state::BossObservabilitySummary::default()
+        };
+        summary
+            .fallback_reason_counts
+            .insert(PERSISTED_WORKER_TASK_USAGE_SIGNAL.into(), 1);
+        let report = BossReportPayload {
+            stage: BossStage::Execution,
+            current_step: Some(1),
+            total_steps: Some(1),
+            designer_a: empty_actor(),
+            executor_b: empty_actor(),
+            active_children: Vec::new(),
+            steps: vec![BossStepReport {
+                id: 1,
+                status: BossPlanStepStatus::Completed,
+                worker_task_id: Some("task-0".into()),
+                attempt_count: 1,
+                last_review_summary: None,
+                action_required: None,
+                blocker_reason: None,
+                routed_metadata: Some(BossStepRoutedMetadata::default()),
+                stage_execution_contract: StageExecutionContract::default(),
+                stage_continuation_context: None,
+                executor_b_stage_memory: None,
+            }],
+            history_summary: Vec::new(),
+            observability_summary: Some(summary),
+            rollout_policy_decision: None,
+            success_classification: None,
+            lism_policy: Default::default(),
+            stage_execution_contract: StageExecutionContract::default(),
+            stage_continuation_context: None,
+            executor_b_stage_memory: None,
+        };
+
+        let record = build_ab_record(
+            "run-all-off".into(),
+            false,
+            &report,
+            BossTestRunOutcome::Completed,
+            0,
+        );
+
+        assert_eq!(record.context_tier, "full_context_worker");
+        assert_ne!(record.context_tier, "state_frame_only");
+    }
+
+    #[test]
+    fn typed_path_signal_distinguishes_full_context_worker_from_state_frame_only() {
+        let mut summary = crate::core::boss_state::BossObservabilitySummary {
+            total_input_tokens: 1200,
+            total_output_tokens: 240,
+            estimated_cost_micros_usd: 42_000,
+            ..crate::core::boss_state::BossObservabilitySummary::default()
+        };
+        summary
+            .fallback_reason_counts
+            .insert(PERSISTED_WORKER_TASK_USAGE_SIGNAL.into(), 1);
+
+        assert_eq!(
+            derive_typed_path_signal(Some(&summary), true),
+            "full_context_worker"
+        );
+        assert_eq!(
+            derive_typed_path_signal(Some(&summary), false),
+            "state_frame_only"
+        );
+    }
+
+    #[test]
+    fn full_context_worker_path_keeps_zero_tool_dispatch_without_fake_typed_signal() {
+        let mut summary = crate::core::boss_state::BossObservabilitySummary {
+            total_input_tokens: 1200,
+            total_output_tokens: 240,
+            estimated_cost_micros_usd: 42_000,
+            ..crate::core::boss_state::BossObservabilitySummary::default()
+        };
+        summary
+            .fallback_reason_counts
+            .insert(PERSISTED_WORKER_TASK_USAGE_SIGNAL.into(), 1);
+
+        let signal = derive_typed_path_signal(Some(&summary), true);
+        assert_eq!(signal, "full_context_worker");
+        assert_eq!(summary.total_tool_dispatch_count, 0);
+        assert_eq!(summary.total_tool_dispatch_ref_write_count, 0);
+        assert_ne!(signal, "tool_dispatch_only");
+        assert_ne!(signal, "hydration+tool_dispatch");
+    }
+
+    #[test]
+    fn state_frame_only_label_is_reserved_for_true_no_worker_telemetry_path() {
+        let summary = crate::core::boss_state::BossObservabilitySummary::default();
+
+        assert_eq!(
+            derive_context_tier(Some(&summary), None, false),
+            "state_frame_only"
+        );
+        assert_eq!(
+            derive_typed_path_signal(Some(&summary), false),
+            "state_frame_only"
         );
     }
 }
@@ -1662,12 +1779,14 @@ fn aggregate_success_classification_counts(
 fn derive_context_tier(
     obs: Option<&crate::core::boss_state::BossObservabilitySummary>,
     fallback_tier: Option<&str>,
+    has_full_context_worker_path: bool,
 ) -> String {
     if let Some(tier) = fallback_tier {
         return format!("fallback:{tier}");
     }
     match obs {
         Some(summary) if summary.total_hydration_count > 0 => "typed_hydration".into(),
+        Some(_) if has_full_context_worker_path => "full_context_worker".into(),
         Some(_) => "state_frame_only".into(),
         None => "no_observability".into(),
     }
@@ -1675,10 +1794,18 @@ fn derive_context_tier(
 
 fn derive_typed_path_signal(
     obs: Option<&crate::core::boss_state::BossObservabilitySummary>,
+    has_full_context_worker_path: bool,
 ) -> String {
     let Some(summary) = obs else {
         return "no_observability".into();
     };
+    if has_full_context_worker_path
+        && summary.total_hydration_count == 0
+        && summary.total_tool_dispatch_count == 0
+        && summary.total_tool_dispatch_ref_write_count == 0
+    {
+        return "full_context_worker".into();
+    }
     match (
         summary.total_hydration_count > 0,
         summary.total_tool_dispatch_count > 0,
@@ -1691,6 +1818,14 @@ fn derive_typed_path_signal(
         (true, false, false) => "hydration_only".into(),
         _ => "state_frame_only".into(),
     }
+}
+
+fn has_persisted_worker_task_usage_signal(
+    summary: &crate::core::boss_state::BossObservabilitySummary,
+) -> bool {
+    summary
+        .fallback_reason_counts
+        .contains_key(PERSISTED_WORKER_TASK_USAGE_SIGNAL)
 }
 
 fn append_quality_signal(reason: String, summary: &LisMAbSummary) -> String {
