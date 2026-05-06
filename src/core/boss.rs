@@ -4519,7 +4519,11 @@ impl BossCoordinator {
             result: String::new(),
             next_action: String::new(),
             worker_role: record.worker_role,
-            orchestration_group_id: record.orchestration_group_id.clone(),
+            // This is a synthetic terminal-sync event for the tracked worker task itself.
+            // Preserve the concrete task id / step id mapping, but do not forward the
+            // child orchestration group id or on_task_event will treat it as an unrelated
+            // nested child event and ignore the terminal completion.
+            orchestration_group_id: None,
             phase: record.phase,
             validation_state: record.validation_state,
             step_id: Some(step_id),
@@ -7253,6 +7257,77 @@ mod tests {
             "completed child tail should not resolve to Ok(None)"
         );
         assert_eq!(coordinator.get_stage().await, BossStage::Completed);
+    }
+
+    #[tokio::test]
+    async fn completed_child_sync_ignores_group_id_for_tracked_worker_terminalization() {
+        let coordinator = Arc::new(BossCoordinator::new());
+        let tasks = Arc::new(TaskManager::new_with_output_root(std::env::temp_dir()));
+        let app_state = test_app_state_with_tasks(tasks.clone(), coordinator.clone());
+        coordinator
+            .attach_app_state_for_report_testing(app_state.clone())
+            .await;
+        {
+            let mut status = coordinator.status.write().await;
+            status.stage = BossStage::Execution;
+            status.current_step = Some(0);
+        }
+        {
+            let mut plan = coordinator.plan.write().await;
+            *plan = Some(BossPlan {
+                accepted_by_user: true,
+                auto_sequence: true,
+                steps: vec![BossPlanStep {
+                    id: 0,
+                    description: "run worker".into(),
+                    objective: Some("write artifact".into()),
+                    acceptance: Vec::new(),
+                    requires_approval: false,
+                    status: BossPlanStepStatus::Running,
+                    completed: false,
+                    result_diff: None,
+                    worker_task_id: Some("task-0".into()),
+                    attempt_count: 0,
+                    retry_budget: 3,
+                    last_review_summary: None,
+                    last_correction: None,
+                    stage_execution_contract: StageExecutionContract::default(),
+                    stage_continuation_context: None,
+                    executor_b_stage_memory: None,
+                    review_task_id: None,
+                    tool_execution_records: Vec::new(),
+                }],
+                ..BossPlan::default()
+            });
+        }
+        let record = tasks.create_with_type(
+            "worker",
+            TaskType::LocalAgent,
+            "test-session",
+            InteractionSurface::Cli,
+        );
+        assert_eq!(record.id, "task-0");
+        tasks.start("task-0");
+        tasks.set_orchestration_group_id("task-0", Some("boss-b-task".into()));
+        let dispatcher = NotificationDispatcher::new(TelegramGateway::default())
+            .with_boss_coordinator(coordinator.clone());
+        tasks.complete("task-0", &dispatcher);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        assert!(
+            coordinator
+                .sync_terminal_child_task_state(tasks.as_ref())
+                .await
+                .expect("sync")
+        );
+        let message = coordinator.advance_plan(&app_state).await.expect("advance");
+
+        assert!(message.is_some(), "terminal sync should finalize the completed child");
+        assert_eq!(coordinator.get_stage().await, BossStage::Completed);
+        let plan = coordinator.plan.read().await;
+        let step = &plan.as_ref().expect("plan").steps[0];
+        assert!(step.completed);
+        assert_eq!(step.status, BossPlanStepStatus::Completed);
     }
 
     #[test]
