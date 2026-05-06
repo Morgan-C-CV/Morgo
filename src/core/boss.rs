@@ -487,18 +487,38 @@ fn verification_first_shared_memory_blocker(shared: &SharedStepMemory) -> Option
             .or_else(|| fact.trim().strip_prefix("remaining blocker:"))
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .map(str::to_string)
+        .map(str::to_string)
     })
 }
 
-fn verification_first_shared_memory_lines_from_text(
-    target: &str,
-    text: &str,
-) -> Vec<String> {
-    let mut verified_target = None;
-    let mut verification_result = None;
-    let mut minimal_evidence = None;
-    let mut remaining_blocker = None;
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct VerificationFirstPatch {
+    verified_target: String,
+    verification_result: String,
+    minimal_evidence: String,
+    remaining_blocker: String,
+    evidence_refs: Vec<String>,
+}
+
+impl VerificationFirstPatch {
+    fn canonical_facts(&self) -> Vec<String> {
+        vec![
+            format!("verified_target: {}", self.verified_target),
+            format!("verification_result: {}", self.verification_result),
+            format!("minimal_evidence: {}", self.minimal_evidence),
+            format!("remaining_blocker: {}", self.remaining_blocker),
+        ]
+    }
+}
+
+fn parse_verification_first_patch(text: &str, target: &str) -> VerificationFirstPatch {
+    let mut patch = VerificationFirstPatch {
+        verified_target: target.to_string(),
+        verification_result: "verified".into(),
+        minimal_evidence: "none recorded".into(),
+        remaining_blocker: "none".into(),
+        evidence_refs: Vec::new(),
+    };
 
     for line in text.lines() {
         let trimmed = line.trim();
@@ -506,63 +526,86 @@ fn verification_first_shared_memory_lines_from_text(
             continue;
         }
         let lower = trimmed.to_ascii_lowercase();
-        if verified_target.is_none()
-            && (lower.starts_with("verified_target:")
-                || lower.starts_with("verified target:"))
-        {
-            verified_target = trimmed
-                .split_once(':')
-                .map(|(_, value)| value.trim().to_string())
-                .filter(|value| !value.is_empty());
+        if lower.starts_with("verified_target:") || lower.starts_with("verified target:") {
+            if let Some((_, value)) = trimmed.split_once(':') {
+                let value = normalize_verification_first_patch_ref(value);
+                if !value.is_empty() {
+                    patch.verified_target = value;
+                }
+            }
             continue;
         }
         if lower.starts_with("verification_result:") || lower.starts_with("verification result:") {
-            if verification_result.is_none() {
-                verification_result = trimmed
-                    .split_once(':')
-                    .map(|(_, value)| value.trim().to_string())
-                    .filter(|value| !value.is_empty());
+            if let Some((_, value)) = trimmed.split_once(':') {
+                let value = compact_verify_value(value);
+                if !value.is_empty() {
+                    patch.verification_result = value;
+                }
             }
             continue;
         }
         if lower.starts_with("minimal_evidence:") || lower.starts_with("minimal evidence:") {
-            if minimal_evidence.is_none() {
-                minimal_evidence = trimmed
-                    .split_once(':')
-                    .map(|(_, value)| value.trim().to_string())
-                    .filter(|value| !value.is_empty());
+            if let Some((_, value)) = trimmed.split_once(':') {
+                let value = compact_verify_value(value);
+                if !value.is_empty() {
+                    patch.minimal_evidence = value;
+                }
             }
             continue;
         }
         if lower.starts_with("remaining_blocker:") || lower.starts_with("remaining blocker:") {
-            if remaining_blocker.is_none() {
-                remaining_blocker = trimmed
-                    .split_once(':')
-                    .map(|(_, value)| value.trim().to_string())
-                    .filter(|value| !value.is_empty());
+            if let Some((_, value)) = trimmed.split_once(':') {
+                let value = compact_verify_value(value);
+                if !value.is_empty() {
+                    patch.remaining_blocker = value;
+                }
             }
             continue;
         }
+        if lower.starts_with("evidence_refs:") || lower.starts_with("evidence refs:") {
+            if let Some((_, value)) = trimmed.split_once(':') {
+                patch.evidence_refs = parse_verification_first_patch_refs(value);
+            }
+        }
     }
 
-    vec![
-        format!(
-            "verified_target: {}",
-            verified_target.unwrap_or_else(|| target.to_string())
-        ),
-        format!(
-            "verification_result: {}",
-            verification_result.unwrap_or_else(|| "verified".into())
-        ),
-        format!(
-            "minimal_evidence: {}",
-            minimal_evidence.unwrap_or_else(|| "none recorded".into())
-        ),
-        format!(
-            "remaining_blocker: {}",
-            remaining_blocker.unwrap_or_else(|| "none".into())
-        ),
-    ]
+    patch
+}
+
+fn parse_verification_first_patch_refs(value: &str) -> Vec<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("none") {
+        return Vec::new();
+    }
+    trimmed
+        .split(|ch| matches!(ch, ';' | '|' | ','))
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(normalize_verification_first_patch_ref)
+        .filter(|item| !item.is_empty() && item != "none")
+        .collect()
+}
+
+fn verification_first_shared_memory_lines_from_text(
+    target: &str,
+    text: &str,
+) -> Vec<String> {
+    parse_verification_first_patch(text, target).canonical_facts()
+}
+
+fn normalize_verification_first_patch_ref(value: &str) -> String {
+    let trimmed = value
+        .trim()
+        .trim_matches(|ch: char| matches!(ch, '"' | '\'' | '`' | ',' | ';'));
+    if trimmed.len() <= 200 {
+        trimmed.to_string()
+    } else {
+        let mut truncated = trimmed.chars().take(200).collect::<String>();
+        if let Some(idx) = truncated.rfind(' ') {
+            truncated.truncate(idx);
+        }
+        truncated.trim().to_string()
+    }
 }
 
 fn build_verification_first_shared_step_memory(
@@ -1234,7 +1277,7 @@ fn build_verification_first_task_message(contract: &ExecutorBAssignmentContract)
     };
     let blocker = verification_first_contract_blocker(contract);
     format!(
-        "verified_target: {target}\nverification_result: verified|blocked\nminimal_evidence: {evidence}\nremaining_blocker: {blocker}"
+        "verified_target: {target}\nverification_result: verified|blocked\nminimal_evidence: {evidence}\nremaining_blocker: {blocker}\nevidence_refs: none"
     )
 }
 
@@ -3208,33 +3251,27 @@ impl BossCoordinator {
                     "verify_artifact",
                 )
             });
+        let patch = parse_verification_first_patch(result_text, &target);
         memory.step_id = Some(step.id);
         memory.worker_role = Some(WorkerRole::Verify.as_str().to_string());
-        memory.target = Some(target.clone());
+        memory.target = Some(patch.verified_target.clone());
         memory.required_action = Some("verify_artifact".into());
-        memory.verified_facts = verification_first_shared_memory_lines_from_text(&target, result_text);
+        memory.verified_facts = patch.canonical_facts();
         memory.artifact_status = Some("present".into());
-        memory.verification_status = memory
-            .verified_facts
-            .iter()
-            .find_map(|fact| fact.trim().strip_prefix("verification_result:").map(str::trim))
-            .filter(|value| !value.is_empty())
-            .map(str::to_string)
-            .or_else(|| Some("unknown".into()));
-        memory.completion_evidence_status = memory
-            .verified_facts
-            .iter()
-            .find_map(|fact| fact.trim().strip_prefix("minimal_evidence:").map(str::trim))
-            .filter(|value| !value.is_empty())
-            .map(|value| {
-                if value == "none recorded" {
-                    "missing".into()
-                } else {
-                    "present".into()
-                }
-            })
-            .or_else(|| Some("unknown".into()));
-        memory.remaining_blocker = verification_first_shared_memory_blocker(&memory);
+        memory.verification_status = Some(patch.verification_result.clone());
+        memory.completion_evidence_status = Some(
+            if patch.minimal_evidence == "none recorded" {
+                "missing".into()
+            } else {
+                "present".into()
+            },
+        );
+        memory.remaining_blocker = if patch.remaining_blocker.eq_ignore_ascii_case("none") {
+            None
+        } else {
+            Some(patch.remaining_blocker.clone())
+        };
+        memory.evidence_refs = patch.evidence_refs.clone();
         self.shared_step_memory
             .write()
             .await
@@ -10651,20 +10688,26 @@ mod tests {
     }
 
     #[test]
-    fn verify_worker_result_updates_shared_step_memory_before_summary_projection() {
+    fn verification_first_patch_populates_shared_step_memory_directly() {
         let target = "/tmp/verification-first.md";
-        let mut memory = build_verification_first_shared_step_memory(
-            3,
-            WorkerRole::Verify,
-            target,
-            vec![
-                format!("verified_target: {target}"),
-                "verification_result: verified|blocked".into(),
-            ],
-            "verify_artifact",
-        );
-        let raw_output = "review prose that must not leak\nverified_target: /tmp/verification-first.md\nverification_result: verified\nminimal_evidence: Read succeeded\nremaining_blocker: none\nreplan required: no";
-        memory.verified_facts = verification_first_shared_memory_lines_from_text(target, raw_output);
+        let raw_output = "verified_target: /tmp/verification-first.md\nverification_result: verified\nminimal_evidence: Read succeeded\nremaining_blocker: none\nevidence_refs: artifact:/tmp/verification-first.md";
+        let patch = parse_verification_first_patch(raw_output, target);
+        let memory = SharedStepMemory {
+            step_id: Some(3),
+            worker_role: Some(WorkerRole::Verify.as_str().to_string()),
+            target: Some(patch.verified_target.clone()),
+            required_action: Some("verify_artifact".into()),
+            artifact_status: Some("present".into()),
+            verification_status: Some(patch.verification_result.clone()),
+            completion_evidence_status: Some("present".into()),
+            verified_facts: patch.canonical_facts(),
+            remaining_blocker: if patch.remaining_blocker.eq_ignore_ascii_case("none") {
+                None
+            } else {
+                Some(patch.remaining_blocker.clone())
+            },
+            evidence_refs: patch.evidence_refs.clone(),
+        };
 
         assert_eq!(
             memory.verified_facts,
@@ -10676,13 +10719,17 @@ mod tests {
             ]
         );
         assert_eq!(
+            memory.evidence_refs,
+            vec!["artifact:/tmp/verification-first.md".to_string()]
+        );
+        assert_eq!(
             render_shared_step_memory_summary(&memory),
             "verified_target: /tmp/verification-first.md\nverification_result: verified\nminimal_evidence: Read succeeded\nremaining_blocker: none"
         );
     }
 
     #[test]
-    fn boss_continuation_prefers_shared_step_memory_over_raw_verify_prose() {
+    fn verification_first_continuation_consumes_patch_without_prose_reparse() {
         let shared_step_memory = build_verification_first_shared_step_memory(
             7,
             WorkerRole::Verify,
@@ -10775,16 +10822,17 @@ mod tests {
     }
 
     #[test]
-    fn verification_first_shared_memory_lines_strip_acceptance_and_replan_prose() {
+    fn verification_first_patch_rejects_multisection_report_format() {
         let facts = verification_first_shared_memory_lines_from_text(
             "/tmp/verification-first.md",
-            "review prose\nverified_target: /tmp/verification-first.md\nverification_result: blocked\nminimal_evidence: Read succeeded\nremaining_blocker: none\nreplan required: later\nmore review prose",
+            "verified_target: /tmp/verification-first.md\nverification_result: blocked\nminimal_evidence: Read succeeded\nremaining_blocker: none\nevidence_refs: artifact:/tmp/verification-first.md",
         );
 
         assert_eq!(facts.len(), 4);
-        assert!(facts.iter().all(|fact| !fact.contains("review prose")));
-        assert!(facts.iter().all(|fact| !fact.contains("acceptance")));
-        assert!(facts.iter().all(|fact| !fact.contains("replan required")));
+        assert_eq!(facts[0], "verified_target: /tmp/verification-first.md");
+        assert_eq!(facts[1], "verification_result: blocked");
+        assert_eq!(facts[2], "minimal_evidence: Read succeeded");
+        assert_eq!(facts[3], "remaining_blocker: none");
     }
 
     #[test]
@@ -10859,7 +10907,7 @@ mod tests {
         let written = coordinator
             .sync_verification_first_shared_step_memory_from_result(
                 &step,
-                "review prose\nverified_target: /tmp/verification-first.md\nverification_result: blocked\nminimal_evidence: Read succeeded\nremaining_blocker: source file missing\nreplan required: later\nmore prose",
+                "review prose\nverified_target: /tmp/verification-first.md\nverification_result: blocked\nminimal_evidence: Read succeeded\nremaining_blocker: source file missing\nevidence_refs: artifact:/tmp/verification-first.md\nreplan required: later\nmore prose",
             )
             .await
             .expect("shared memory write");
@@ -11130,7 +11178,7 @@ mod tests {
         let written = coordinator
             .sync_verification_first_shared_step_memory_from_result(
                 &step,
-                "verified_target: /tmp/verification-first.md\nverification_result: verified\nminimal_evidence: Read succeeded\nremaining_blocker: none",
+                "verified_target: /tmp/verification-first.md\nverification_result: verified\nminimal_evidence: Read succeeded\nremaining_blocker: none\nevidence_refs: none",
             )
             .await
             .expect("shared memory write");
@@ -11154,11 +11202,15 @@ mod tests {
         let written = coordinator
             .sync_verification_first_shared_step_memory_from_result(
                 &step,
-                "verified_target: /tmp/verification-first.md\nverification_result: verified\nminimal_evidence: Read succeeded\nremaining_blocker: none",
+                "verified_target: /tmp/verification-first.md\nverification_result: verified\nminimal_evidence: Read succeeded\nremaining_blocker: none\nevidence_refs: artifact:/tmp/verification-first.md",
             )
             .await
             .expect("shared memory write");
         assert_eq!(written.verified_facts.len(), 4);
+        assert_eq!(
+            written.evidence_refs,
+            vec!["artifact:/tmp/verification-first.md".to_string()]
+        );
 
         let assignment = coordinator
             .build_executor_b_assignment_contract(0, "session-alpha", true)
@@ -11194,7 +11246,7 @@ mod tests {
         let written = coordinator
             .sync_verification_first_shared_step_memory_from_result(
                 &step,
-                "verified_target: /tmp/verification-first.md\nverification_result: verified\nminimal_evidence: Read succeeded and the file is present.\nremaining_blocker: none",
+                "verified_target: /tmp/verification-first.md\nverification_result: verified\nminimal_evidence: Read succeeded and the file is present.\nremaining_blocker: none\nevidence_refs: none",
             )
             .await
             .expect("shared memory write");
@@ -11224,7 +11276,7 @@ mod tests {
         let written = coordinator
             .sync_verification_first_shared_step_memory_from_result(
                 &step,
-                "verified_target: /tmp/verification-first.md\nverification_result: blocked\nminimal_evidence: Read succeeded\nremaining_blocker: target missing verification",
+                "verified_target: /tmp/verification-first.md\nverification_result: blocked\nminimal_evidence: Read succeeded\nremaining_blocker: target missing verification\nevidence_refs: none",
             )
             .await
             .expect("shared memory write");
@@ -11345,7 +11397,7 @@ mod tests {
         let written = coordinator
             .sync_verification_first_shared_step_memory_from_result(
                 &step,
-                "verified_target: /tmp/verification-first.md\nverification_result: blocked\nminimal_evidence: Read succeeded\nremaining_blocker: source file missing",
+                "verified_target: /tmp/verification-first.md\nverification_result: blocked\nminimal_evidence: Read succeeded\nremaining_blocker: source file missing\nevidence_refs: none",
             )
             .await
             .expect("shared memory write");
@@ -11359,6 +11411,10 @@ mod tests {
                 "minimal_evidence: Read succeeded".to_string(),
                 "remaining_blocker: source file missing".to_string(),
             ]
+        );
+        assert_eq!(
+            written.evidence_refs,
+            Vec::<String>::new()
         );
         assert!(coordinator.shared_step_memory_for_step(step.id).await.is_some());
     }
