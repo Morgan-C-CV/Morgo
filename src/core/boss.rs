@@ -1058,6 +1058,109 @@ fn verification_first_contract_facts(contract: &ExecutorBAssignmentContract) -> 
     facts
 }
 
+fn verification_first_shared_memory_compact_facts(shared: &SharedStepMemory) -> Vec<String> {
+    let mut facts = Vec::new();
+    let verification_result = shared.verified_facts.iter().find_map(|fact| {
+        let lower = fact.to_ascii_lowercase();
+        lower
+            .starts_with("verification_result:")
+            .then(|| fact.clone())
+    });
+    if let Some(result) = verification_result {
+        facts.push(result);
+    }
+
+    if let Some(evidence) = shared.verified_facts.iter().find_map(|fact| {
+        let lower = fact.to_ascii_lowercase();
+        (lower.starts_with("minimal_evidence:") || lower.starts_with("minimal evidence:"))
+            .then(|| compact_verification_first_fact(fact))
+    }) {
+        facts.push(evidence);
+    } else if let Some(evidence) = shared.verified_facts.iter().find(|fact| {
+        let lower = fact.to_ascii_lowercase();
+        !lower.starts_with("verified_target:")
+            && !lower.starts_with("verified target:")
+            && !lower.starts_with("verification_result:")
+            && !lower.starts_with("verification result:")
+            && !lower.starts_with("remaining_blocker:")
+            && !lower.starts_with("remaining blocker:")
+    }) {
+        facts.push((*evidence).clone());
+    }
+
+    facts.truncate(2);
+    facts
+}
+
+fn compact_verify_value(value: &str) -> String {
+    let trimmed = value.trim().trim_matches(|ch: char| matches!(ch, '"' | '\'' | '`' | ',' | ';'));
+    let mut candidates = trimmed
+        .split(|ch| matches!(ch, '.' | '!' | '?' | ';' | '\n' | '\r'))
+        .flat_map(|chunk| chunk.split(" and "))
+        .flat_map(|chunk| chunk.split(" but "))
+        .flat_map(|chunk| chunk.split(" because "))
+        .flat_map(|chunk| chunk.split(" so "))
+        .map(str::trim)
+        .filter(|chunk| !chunk.is_empty())
+        .map(|chunk| {
+            chunk
+                .split_whitespace()
+                .filter(|part| !part.is_empty())
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .filter(|chunk| !chunk.is_empty())
+        .collect::<Vec<_>>();
+    let mut multi_word_candidates = candidates
+        .iter()
+        .filter(|chunk| chunk.split_whitespace().count() >= 2)
+        .cloned()
+        .collect::<Vec<_>>();
+    multi_word_candidates.sort_by_key(|chunk| (chunk.len(), chunk.split_whitespace().count()));
+    let compacted = multi_word_candidates
+        .into_iter()
+        .next()
+        .or_else(|| {
+            candidates.sort_by_key(|chunk| (chunk.len(), chunk.split_whitespace().count()));
+            candidates.into_iter().next()
+        })
+        .unwrap_or_else(|| trimmed.split_whitespace().collect::<Vec<_>>().join(" "));
+    if compacted.len() <= 96 {
+        return compacted;
+    }
+    let mut truncated = compacted.chars().take(96).collect::<String>();
+    if let Some(idx) = truncated.rfind(' ') {
+        truncated.truncate(idx);
+    }
+    truncated.trim().to_string()
+}
+
+fn compact_verification_first_fact(fact: &str) -> String {
+    let trimmed = fact.trim();
+    let (label, value) = match trimmed.split_once(':') {
+        Some((label, value)) => (label.trim(), value.trim()),
+        None => return compact_verify_value(trimmed),
+    };
+    if label.eq_ignore_ascii_case("verification_result")
+        || label.eq_ignore_ascii_case("verification result")
+    {
+        return format!("verification_result: {}", compact_verify_value(value));
+    }
+    if label.eq_ignore_ascii_case("minimal_evidence") || label.eq_ignore_ascii_case("minimal evidence")
+    {
+        return format!("minimal_evidence: {}", compact_verify_value(value));
+    }
+    if label.eq_ignore_ascii_case("remaining_blocker") || label.eq_ignore_ascii_case("remaining blocker")
+    {
+        return format!("remaining_blocker: {}", compact_verify_value(value));
+    }
+    if label.eq_ignore_ascii_case("verified_target") || label.eq_ignore_ascii_case("verified target")
+    {
+        return format!("verified_target: {}", compact_verify_value(value));
+    }
+    compact_verify_value(trimmed)
+}
+
 fn verification_first_contract_blocker(contract: &ExecutorBAssignmentContract) -> String {
     if let Some(shared) = contract.shared_step_memory.as_ref() {
         if let Some(blocker) = verification_first_shared_memory_blocker(shared) {
@@ -1097,15 +1200,9 @@ fn build_continuation_payload(contract: &ExecutorBAssignmentContract) -> Continu
     let typed_context = contract.state_frame.stage_continuation_context.as_ref();
     if is_verification_first_assignment_contract(contract) {
         let target = verification_first_contract_target(contract);
-        let shared_facts = contract
-            .shared_step_memory
-            .as_ref()
-            .map(verification_first_shared_memory_facts)
-            .unwrap_or_default();
-        let shared_required_action = contract
-            .shared_step_memory
-            .as_ref()
-            .and_then(verification_first_shared_memory_required_action);
+        let shared_memory = contract.shared_step_memory.as_ref();
+        let use_shared_projection = shared_memory.is_some();
+        let shared_required_action = shared_memory.and_then(verification_first_shared_memory_required_action);
         return ContinuationPayload {
             failed_target: contract
                 .shared_step_memory
@@ -1130,8 +1227,12 @@ fn build_continuation_payload(contract: &ExecutorBAssignmentContract) -> Continu
                         .first()
                         .map(|artifact| artifact.path.clone())
                 }),
-            verified_facts: if !shared_facts.is_empty() {
-                shared_facts
+            verified_facts: if use_shared_projection {
+                if let Some(shared) = shared_memory {
+                    verification_first_shared_memory_compact_facts(shared)
+                } else {
+                    Vec::new()
+                }
             } else {
                 typed_context
                     .map(|context| {
@@ -1147,8 +1248,8 @@ fn build_continuation_payload(contract: &ExecutorBAssignmentContract) -> Continu
                     })
                     .unwrap_or_default()
             },
-            next_action: shared_required_action
-                .or_else(|| {
+            next_action: if use_shared_projection {
+                normalize_verification_first_next_action(shared_required_action.or_else(|| {
                     typed_context.and_then(|context| {
                         context.next_action.clone().or_else(|| {
                             context
@@ -1157,8 +1258,22 @@ fn build_continuation_payload(contract: &ExecutorBAssignmentContract) -> Continu
                                 .and_then(|intent| intent.next_action.clone())
                         })
                     })
-                })
-                .or_else(|| Some("verify_artifact".into())),
+                }))
+                .or_else(|| Some("verify_artifact".into()))
+            } else {
+                shared_required_action
+                    .or_else(|| {
+                        typed_context.and_then(|context| {
+                            context.next_action.clone().or_else(|| {
+                                context
+                                    .repair_intent
+                                    .as_ref()
+                                    .and_then(|intent| intent.next_action.clone())
+                            })
+                        })
+                    })
+                    .or_else(|| Some("verify_artifact".into()))
+            },
             continuity_mode: Some(
                 typed_context
                     .and_then(|context| context.continuity_mode.as_ref())
@@ -1243,6 +1358,20 @@ fn build_stage_memory_payload(
             .as_ref()
             .map(|value| format!("{value:?}").to_ascii_lowercase()),
     })
+}
+
+fn normalize_verification_first_next_action(action: Option<String>) -> Option<String> {
+    let action = action?.trim().to_ascii_lowercase();
+    if action.is_empty() || action == "none" {
+        return Some("none".into());
+    }
+    if action.contains("verify") {
+        return Some("verify_artifact".into());
+    }
+    if action.contains("repair") || action.contains("fix") || action.contains("blocked") {
+        return Some("repair_artifact".into());
+    }
+    Some("none".into())
 }
 
 fn build_stage_continuation_context(
@@ -10606,13 +10735,10 @@ mod tests {
             payload.failed_target.as_deref(),
             Some("/tmp/shared-first.md")
         );
-        assert_eq!(payload.verified_facts.len(), 2);
+        assert_eq!(payload.verified_facts.len(), 1);
         assert_eq!(
             payload.verified_facts,
-            vec![
-                "verified_target: /tmp/shared-first.md".to_string(),
-                "verification_result: verified|blocked".to_string(),
-            ]
+            vec!["verification_result: verified|blocked".to_string()]
         );
         assert_eq!(payload.next_action.as_deref(), Some("verify_artifact"));
         assert_eq!(payload.continuity_mode.as_deref(), Some("repair"));
@@ -11023,12 +11149,77 @@ mod tests {
         assert_eq!(
             payload.verified_facts,
             vec![
-                "verified_target: /tmp/verification-first.md".to_string(),
                 "verification_result: verified".to_string(),
                 "minimal_evidence: Read succeeded".to_string(),
-                "remaining_blocker: none".to_string(),
             ]
         );
+        assert_eq!(payload.next_action.as_deref(), Some("verify_artifact"));
+    }
+
+    #[tokio::test]
+    async fn all_on_continuation_payload_limits_verified_facts_to_result_plus_single_evidence() {
+        let (coordinator, step) =
+            verification_first_projection_coordinator(WorkerLisMPolicy::ForceOn).await;
+
+        let written = coordinator
+            .sync_verification_first_shared_step_memory_from_result(
+                &step,
+                "verified_target: /tmp/verification-first.md\nverification_result: verified\nminimal_evidence: Read succeeded and the file is present.\nremaining_blocker: none",
+            )
+            .await
+            .expect("shared memory write");
+        assert_eq!(written.verified_facts.len(), 4);
+
+        let assignment = coordinator
+            .build_executor_b_assignment_contract(0, "session-alpha", true)
+            .await
+            .expect("build assignment");
+
+        let payload = build_continuation_payload(&assignment);
+        assert_eq!(payload.verified_facts.len(), 2);
+        assert_eq!(
+            payload.verified_facts,
+            vec![
+                "verification_result: verified".to_string(),
+                "minimal_evidence: Read succeeded".to_string(),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn all_on_continuation_payload_clamps_next_action_to_short_enum_like_value() {
+        let (coordinator, step) =
+            verification_first_projection_coordinator(WorkerLisMPolicy::ForceOn).await;
+
+        let written = coordinator
+            .sync_verification_first_shared_step_memory_from_result(
+                &step,
+                "verified_target: /tmp/verification-first.md\nverification_result: blocked\nminimal_evidence: Read succeeded\nremaining_blocker: target missing verification",
+            )
+            .await
+            .expect("shared memory write");
+        assert_eq!(written.verified_facts.len(), 4);
+
+        let assignment = coordinator
+            .build_executor_b_assignment_contract(0, "session-alpha", true)
+            .await
+            .expect("build assignment");
+        let mut assignment = assignment;
+        if let Some(shared) = assignment.shared_step_memory.as_mut() {
+            shared.required_action = Some(
+                "tool dispatch failed: verification repair continuation exhausted / remaining verification evidence missing; last state: Verifying"
+                    .into(),
+            );
+            shared.verified_facts = vec![
+                "verified_target: /tmp/verification-first.md".into(),
+                "verification_result: blocked".into(),
+                "minimal_evidence: Read succeeded".into(),
+                "remaining_blocker: target missing verification".into(),
+            ];
+        }
+
+        let payload = build_continuation_payload(&assignment);
+        assert_eq!(payload.next_action.as_deref(), Some("repair_artifact"));
     }
 
     #[tokio::test]

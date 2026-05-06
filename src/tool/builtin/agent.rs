@@ -930,42 +930,40 @@ fn is_verify_contract_line(line: &str) -> bool {
 }
 
 fn compact_verify_value(value: &str) -> String {
-    let mut compacted = value
-        .split_whitespace()
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>()
-        .join(" ");
-    compacted = compacted
-        .trim()
-        .trim_matches(|ch: char| matches!(ch, '"' | '\'' | '`' | ',' | ';'))
-        .to_string();
-    let compacted = compacted
-        .split(|ch| matches!(ch, '.' | '!' | '?' | ';'))
+    let trimmed = value.trim().trim_matches(|ch: char| matches!(ch, '"' | '\'' | '`' | ',' | ';'));
+    let mut candidates = trimmed
+        .split(|ch| matches!(ch, '.' | '!' | '?' | ';' | '\n' | '\r'))
+        .flat_map(|chunk| chunk.split(" and "))
+        .flat_map(|chunk| chunk.split(" but "))
+        .flat_map(|chunk| chunk.split(" because "))
+        .flat_map(|chunk| chunk.split(" so "))
+        .map(str::trim)
+        .filter(|chunk| !chunk.is_empty())
+        .map(|chunk| {
+            chunk
+                .split_whitespace()
+                .filter(|part| !part.is_empty())
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .filter(|chunk| !chunk.is_empty())
+        .collect::<Vec<_>>();
+    let mut multi_word_candidates = candidates
+        .iter()
+        .filter(|chunk| chunk.split_whitespace().count() >= 2)
+        .cloned()
+        .collect::<Vec<_>>();
+    multi_word_candidates.sort_by_key(|chunk| (chunk.len(), chunk.split_whitespace().count()));
+    let compacted = multi_word_candidates
+        .into_iter()
         .next()
-        .unwrap_or_else(|| compacted.as_str())
-        .trim();
-    let compacted = compacted
-        .split(" and ")
-        .next()
-        .unwrap_or(compacted)
-        .trim();
-    let compacted = compacted
-        .split(" but ")
-        .next()
-        .unwrap_or(compacted)
-        .trim();
-    let compacted = compacted
-        .split(" because ")
-        .next()
-        .unwrap_or(compacted)
-        .trim();
-    let compacted = compacted
-        .split(" so ")
-        .next()
-        .unwrap_or(compacted)
-        .trim();
+        .or_else(|| {
+            candidates.sort_by_key(|chunk| (chunk.len(), chunk.split_whitespace().count()));
+            candidates.into_iter().next()
+        })
+        .unwrap_or_else(|| trimmed.split_whitespace().collect::<Vec<_>>().join(" "));
     if compacted.len() <= 96 {
-        return compacted.to_string();
+        return compacted;
     }
     let mut truncated = compacted.chars().take(96).collect::<String>();
     if let Some(idx) = truncated.rfind(' ') {
@@ -1180,6 +1178,28 @@ mod tests {
         assert_eq!(lines[1], "verification_result: blocked");
         assert_eq!(lines[2], "minimal_evidence: Read succeeded");
         assert_eq!(lines[3], "remaining_blocker: target missing verification");
+    }
+
+    #[test]
+    fn verify_output_normalization_keeps_only_single_short_evidence_phrase() {
+        let task_input = "Verify target artifact only: /tmp/report.md. Return a short verification result only.";
+        let raw_output = "verified_target: /tmp/report.md\nverification_result: verified\nminimal_evidence: Read succeeded and the file is present and ready\nremaining_blocker: none";
+        let normalized = normalize_verify_output(task_input, raw_output);
+        assert_eq!(
+            normalized,
+            "verified_target: /tmp/report.md\nverification_result: verified\nminimal_evidence: Read succeeded\nremaining_blocker: none"
+        );
+    }
+
+    #[test]
+    fn verify_output_normalization_drops_recommendations_and_validation_steps_completely() {
+        let task_input = "Verify target artifact only: /tmp/report.md. Return a short verification result only.";
+        let raw_output = "recommendations:\n- keep reading docs\nvalidation steps:\n- run stat\nverified_target: /tmp/report.md\nverification_result: blocked\nminimal_evidence: Read succeeded\nremaining_blocker: target missing verification";
+        let normalized = normalize_verify_output(task_input, raw_output);
+        assert_eq!(
+            normalized,
+            "verified_target: /tmp/report.md\nverification_result: blocked\nminimal_evidence: Read succeeded\nremaining_blocker: target missing verification"
+        );
     }
 
     #[test]
