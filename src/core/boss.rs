@@ -2272,6 +2272,28 @@ fn summarize_acceptance_items(step: &BossPlanStep) -> String {
     }
 }
 
+fn build_relevant_file_handle_source_text(
+    plan_task_description: &str,
+    step: &BossPlanStep,
+) -> String {
+    let mut sections = Vec::new();
+    if !plan_task_description.trim().is_empty() {
+        sections.push(plan_task_description.trim().to_string());
+    }
+    if !step.description.trim().is_empty() {
+        sections.push(step.description.trim().to_string());
+    }
+    if let Some(objective) = step.objective.as_deref().map(str::trim) {
+        if !objective.is_empty() {
+            sections.push(objective.to_string());
+        }
+    }
+    if !step.acceptance.is_empty() {
+        sections.push(step.acceptance.join("\n"));
+    }
+    sections.join("\n")
+}
+
 fn collect_recent_decisions(plan: &BossPlan, current_step_id: usize) -> Vec<String> {
     let mut decisions = plan
         .steps
@@ -6685,7 +6707,10 @@ impl BossCoordinator {
         };
         let plan_version = format!("{}:steps={}", plan.plan_id, plan.steps.len());
         let step_revision = format!("step-{}-attempt-{}", step.id, step.attempt_count);
-        let relevant_file_handles = extract_relevant_file_handles(step.objective(), &step_revision);
+        let relevant_file_handle_source_text =
+            build_relevant_file_handle_source_text(&plan.task_description, step);
+        let relevant_file_handles =
+            extract_relevant_file_handles(&relevant_file_handle_source_text, &step_revision);
         let target_files = collect_target_files(&relevant_file_handles);
         let target_artifacts = collect_target_artifacts(step, &target_files);
         let recent_decisions = collect_recent_decisions(plan, step.id);
@@ -16206,12 +16231,62 @@ mod tests {
         let contract = build_stage_execution_contract(&step, &target_artifacts);
         let targets = collect_content_evidence_targets(&handles, &contract);
 
-        assert_eq!(
-            targets,
-            vec![
-                "RustAgent/Agent/src/tool/definition.rs".to_string(),
-                "RustAgent/docs/31-token-efficiency-cost-performance.md".to_string(),
-            ]
+        assert_eq!(targets.len(), 2);
+        assert!(targets.iter().any(|target| target.ends_with("tool/definition.rs")));
+        assert!(targets.iter().any(|target| {
+            target.ends_with("docs/31-token-efficiency-cost-performance.md")
+        }));
+    }
+
+    #[test]
+    fn content_evidence_targets_still_collect_when_objective_omits_source_paths() {
+        let target_path = temp_report_path("content-evidence-from-task-description-output");
+        let step = BossPlanStep {
+            id: 3,
+            description: "write report".into(),
+            objective: Some(format!("write report to {target_path}")),
+            acceptance: vec![format!("target file exists and is non-empty: {target_path}")],
+            requires_approval: false,
+            status: BossPlanStepStatus::Pending,
+            completed: false,
+            result_diff: None,
+            worker_task_id: None,
+            attempt_count: 0,
+            retry_budget: 3,
+            last_review_summary: None,
+            last_correction: None,
+            stage_execution_contract: StageExecutionContract::default(),
+            stage_continuation_context: None,
+            executor_b_stage_memory: None,
+            review_task_id: None,
+            tool_execution_records: Vec::new(),
+        };
+        let source_text = build_relevant_file_handle_source_text(
+            "建议核验路径：\n- src/tool/definition.rs\n- ../docs/31-token-efficiency-cost-performance.md",
+            &step,
+        );
+        let handles = extract_relevant_file_handles(&source_text, "step-3-attempt-0");
+        let target_artifacts = vec![TargetArtifact {
+            path: target_path.clone(),
+            kind: "file".into(),
+            required_state: "exists_non_empty".into(),
+            source: "artifact_expectation".into(),
+        }];
+        let contract = build_stage_execution_contract(&step, &target_artifacts);
+        let targets = collect_content_evidence_targets(&handles, &contract);
+
+        assert_eq!(targets.len(), 2);
+        assert!(
+            targets
+                .iter()
+                .any(|target| target.ends_with("tool/definition.rs")),
+            "missing definition.rs target: {targets:?}"
+        );
+        assert!(
+            targets
+                .iter()
+                .any(|target| target.ends_with("docs/31-token-efficiency-cost-performance.md")),
+            "missing docs/31 target: {targets:?}"
         );
     }
 
