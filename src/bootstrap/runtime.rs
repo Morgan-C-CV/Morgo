@@ -258,14 +258,13 @@ const DEFAULT_BOSS_TASK_TIMEOUT_SECS: u64 = 900;
 
 fn terminal_tail_stalled(
     sync_result: &anyhow::Result<bool>,
-    terminal_result: &anyhow::Result<Option<String>>,
+    _terminal_result: &anyhow::Result<Option<String>>,
     live_tail_task: bool,
 ) -> bool {
     if live_tail_task {
         return false;
     }
     sync_result.as_ref().map(|value| !*value).unwrap_or(true)
-        || terminal_result.as_ref().map(|value| value.is_none()).unwrap_or(true)
 }
 
 fn task_is_terminal(
@@ -2233,6 +2232,10 @@ mod tests {
 
         let sync_result: anyhow::Result<bool> = Ok(true);
         let terminal_result: anyhow::Result<Option<String>> = Ok(Some("advance".into()));
+        assert!(!terminal_tail_stalled(&sync_result, &terminal_result, false));
+
+        let sync_result: anyhow::Result<bool> = Ok(true);
+        let terminal_result: anyhow::Result<Option<String>> = Ok(None);
         assert!(!terminal_tail_stalled(&sync_result, &terminal_result, false));
 
         let sync_result: anyhow::Result<bool> = Err(anyhow!("sync failed"));
