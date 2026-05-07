@@ -1237,7 +1237,8 @@ fn build_worker_structured_report(
     let completion = if matches!(
         completion,
         CompletionEvidenceStatus::MissingVerificationEvidence
-    ) && worker_has_target_scoped_verification_anchor(frame, &evidence_refs)
+    ) && (worker_has_target_scoped_verification_anchor(frame, &evidence_refs)
+        || worker_has_target_scoped_read_anchor(frame, &evidence_refs))
     {
         CompletionEvidenceStatus::Sufficient
     } else {
@@ -1291,8 +1292,10 @@ fn verification_terminal_outcome(
     }
 
     let evidence_refs = collect_evidence_refs(frame, Some(usage));
-    if summarize_verification_status(frame) == "verified"
-        && worker_has_target_scoped_read_anchor(frame, &evidence_refs)
+    let has_target_read_anchor = worker_has_target_scoped_read_anchor(frame, &evidence_refs);
+    if has_target_read_anchor
+        && (summarize_verification_status(frame) == "verified"
+            || matches!(usage.last_effective_tool_action.as_deref(), Some("Read")))
     {
         finalize_worker_usage_report(frame, usage);
         return Some(LoopOutcome::Done {
@@ -5455,6 +5458,50 @@ mod tests {
             LoopOutcome::Done { usage, .. } => {
                 let report = usage.worker_report.expect("worker report");
                 assert_eq!(report.completion_evidence_status, CompletionEvidenceStatus::Sufficient);
+                assert!(report
+                    .evidence_refs
+                    .iter()
+                    .any(|reference| reference == "read:/tmp/report.md"));
+            }
+            other => panic!("expected Done, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn verification_terminal_outcome_closes_on_target_read_anchor_without_explicit_verification_fact()
+    {
+        let mut frame = make_frame();
+        frame.state = AgentState::Executing;
+        frame.recent_evidence.clear();
+        push_completion_contract_with_refs(
+            &mut frame,
+            &["artifact:contract:0"],
+            &[],
+            &["artifact:contract:0"],
+        );
+        push_artifact_target_fact(&mut frame, "artifact:contract:0", "/tmp/report.md", "file");
+        frame.open_items.push(
+            "required_action:verify_artifact reason=completion gate blocked done because required verification evidence is missing missing_refs=artifact:contract:0".into(),
+        );
+        frame.recent_evidence.push(
+            "fact: file_facts ref=filefact:runtime:1:read path=/tmp/report.md kind=read_observation source=tool:Read source_event_id=tool-read:runtime:1 freshness=after-runtime-read confidence=1.00 status=active invalidated_by=none supersedes=none conflicts_with=none fact=runtime Read succeeded for /tmp/report.md".into(),
+        );
+        frame.recent_evidence.push(
+            "hydrated_context: file_snippet:/tmp/report.md source=tool:Read match_reason=call_tool_read trace=fact_name=file_facts ref=filefact:runtime:1:read source=tool:Read source_event_id=tool-read:runtime:1 freshness=after-runtime-read excerpt=# report".into(),
+        );
+
+        let mut usage = LoopUsage {
+            last_effective_tool_action: Some("Read".into()),
+            ..LoopUsage::default()
+        };
+
+        let outcome = super::verification_terminal_outcome(&frame, &mut usage)
+            .expect("target-scoped read anchor should close verification without extra verified fact");
+        match outcome {
+            LoopOutcome::Done { usage, .. } => {
+                let report = usage.worker_report.expect("worker report");
+                assert_eq!(report.completion_evidence_status, CompletionEvidenceStatus::Sufficient);
+                assert_eq!(report.verification_status, "unverified");
                 assert!(report
                     .evidence_refs
                     .iter()
