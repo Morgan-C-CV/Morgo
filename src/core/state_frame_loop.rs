@@ -416,16 +416,200 @@ fn permission_target_path(line: &str) -> Option<String> {
     (!path.is_empty()).then(|| path.to_string())
 }
 
-fn collect_evidence_refs(frame: &StateFrame) -> Vec<String> {
+fn declared_target_paths(frame: &StateFrame) -> Vec<String> {
+    let mut paths = Vec::new();
+    for artifact in &frame.stage_execution_contract.declared_artifacts {
+        if !artifact.path.trim().is_empty()
+            && !paths.iter().any(|existing| existing == &artifact.path)
+        {
+            paths.push(artifact.path.clone());
+        }
+    }
+    for verification in &frame.stage_execution_contract.verifications {
+        if let Some(path) = verification.target_path.as_ref() {
+            if !path.trim().is_empty() && !paths.iter().any(|existing| existing == path) {
+                paths.push(path.clone());
+            }
+        }
+    }
+    paths
+}
+
+fn parse_prefixed_path(text: &str, prefixes: &[&str]) -> Option<String> {
+    let trimmed = text.trim();
+    let lowered = trimmed.to_ascii_lowercase();
+    for prefix in prefixes {
+        if lowered.starts_with(prefix) {
+            let value = trimmed[prefix.len()..]
+                .trim()
+                .trim_matches(|ch: char| matches!(ch, '"' | '\'' | '`' | ',' | ';'));
+            if !value.is_empty() {
+                return Some(value.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn collect_target_scoped_evidence_refs_from_text(
+    text: &str,
+    target_paths: &[String],
+) -> Vec<String> {
     let mut refs = Vec::new();
-    for line in &frame.recent_evidence {
-        if let Some(reference) = evidence_field_value(line, "ref") {
-            if !refs.iter().any(|existing| existing == &reference) {
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let lowered = trimmed.to_ascii_lowercase();
+        if let Some(reference) = evidence_field_value(trimmed, "ref") {
+            if !reference.starts_with("artifact:")
+                && !refs.iter().any(|existing| existing == &reference)
+            {
                 refs.push(reference);
+            }
+        }
+        if let Some(reference) = evidence_field_value(trimmed, "evidence_ref") {
+            if !reference.starts_with("artifact:")
+                && !refs.iter().any(|existing| existing == &reference)
+            {
+                refs.push(reference);
+            }
+        }
+        if let Some(reference) = evidence_field_value(trimmed, "evidence_refs") {
+            for item in reference.split(|ch| matches!(ch, ';' | '|' | ',')) {
+                let item = item.trim();
+                if item.is_empty() || item.eq_ignore_ascii_case("none") {
+                    continue;
+                }
+                if !item.starts_with("artifact:")
+                    && !refs.iter().any(|existing| existing == item)
+                {
+                    refs.push(item.to_string());
+                }
+            }
+        }
+
+        if let Some(path) = parse_prefixed_path(
+            trimmed,
+            &[
+                "verified_target:",
+                "verified target:",
+                "target_path:",
+                "target path:",
+            ],
+        ) {
+            let anchor = format!("verification:{path}");
+            if !refs.iter().any(|existing| existing == &anchor) {
+                refs.push(anchor);
+            }
+        }
+
+        if let Some(path) = evidence_field_value(trimmed, "path")
+            .or_else(|| evidence_field_value(trimmed, "target_path"))
+            .filter(|_| trimmed.starts_with("fact: verification_status "))
+        {
+            if evidence_field_value(trimmed, "status").as_deref() == Some("verified") {
+                let anchor = format!("verification:{path}");
+                if !refs.iter().any(|existing| existing == &anchor) {
+                    refs.push(anchor);
+                }
+            }
+        }
+
+        if let Some(path) = evidence_field_value(trimmed, "path")
+            .filter(|_| trimmed.starts_with("fact: artifact_status "))
+        {
+            if evidence_field_value(trimmed, "status").as_deref() == Some("verified")
+                && (evidence_field_value(trimmed, "source").as_deref()
+                    == Some("tool:ArtifactVerify")
+                    || lowered.contains("artifact verification passed"))
+            {
+                let anchor = format!("verification:{path}");
+                if !refs.iter().any(|existing| existing == &anchor) {
+                    refs.push(anchor);
+                }
+            }
+        }
+
+        if let Some(path) = parse_prefixed_path(trimmed, &["read:", "write:"]) {
+            let prefix = trimmed.split(':').next().unwrap_or("verification");
+            let anchor = format!("{prefix}:{path}");
+            if !refs.iter().any(|existing| existing == &anchor) {
+                refs.push(anchor);
             }
         }
     }
     refs
+}
+
+fn collect_evidence_refs(frame: &StateFrame, usage: Option<&LoopUsage>) -> Vec<String> {
+    let mut refs = Vec::new();
+    let target_paths = declared_target_paths(frame);
+    let ingest_text = |text: &str, refs: &mut Vec<String>| {
+        for reference in collect_target_scoped_evidence_refs_from_text(text, &target_paths) {
+            if !refs.iter().any(|existing| existing == &reference) {
+                refs.push(reference);
+            }
+        }
+    };
+
+    for line in &frame.recent_evidence {
+        ingest_text(line, &mut refs);
+    }
+    for item in &frame.accepted_summary {
+        ingest_text(item, &mut refs);
+    }
+    for item in &frame.open_items {
+        ingest_text(item, &mut refs);
+    }
+    for item in &frame.blocked_items {
+        ingest_text(item, &mut refs);
+    }
+
+    if let Some(usage) = usage {
+        for record in &usage.tool_execution_records {
+            ingest_text(&record.summary, &mut refs);
+            if let Some(detail) = record.detail.as_deref() {
+                ingest_text(detail, &mut refs);
+            }
+            if let Some(observable_input) = record.observable_input.as_ref() {
+                ingest_text(&observable_input.value, &mut refs);
+            }
+        }
+        if let Some(outcome) = usage.last_failure_outcome.as_ref() {
+            if let Some(evidence_ref) = outcome.evidence_ref.as_ref() {
+                if !refs.iter().any(|existing| existing == evidence_ref) {
+                    refs.push(evidence_ref.clone());
+                }
+            }
+            if let Some(excerpt) = outcome.bounded_excerpt.as_ref() {
+                ingest_text(excerpt, &mut refs);
+            }
+        }
+    }
+
+    refs
+}
+
+fn worker_has_target_scoped_verification_anchor(frame: &StateFrame, refs: &[String]) -> bool {
+    let verification_refs = completion_contract_refs(frame, "verification_refs");
+    if verification_refs.is_empty() {
+        return false;
+    }
+    verification_refs.into_iter().all(|verification_ref| {
+        artifact_contract_target(frame, &verification_ref)
+            .map(|(path, _)| {
+                refs.iter().any(|evidence_ref| {
+                    evidence_ref.contains(&path)
+                        && !evidence_ref.starts_with("artifact:")
+                })
+            })
+            .unwrap_or_else(|| {
+                refs.iter()
+                    .any(|evidence_ref| evidence_ref.contains(&verification_ref))
+            })
+    })
 }
 
 fn infer_artifact_repair_turn(
@@ -759,7 +943,7 @@ fn collect_completion_evidence_gaps(frame: &StateFrame) -> Vec<CompletionEvidenc
 
 fn evaluate_completion_evidence(
     frame: &StateFrame,
-    _usage: &LoopUsage,
+    usage: &LoopUsage,
 ) -> CompletionEvidenceStatus {
     if completion_contract_requirement(frame, "artifact_evidence")
         && !missing_artifact_evidence_refs(frame).is_empty()
@@ -774,6 +958,10 @@ fn evaluate_completion_evidence(
     if completion_contract_requirement(frame, "verification_evidence")
         && !missing_verification_evidence_refs(frame).is_empty()
     {
+        let evidence_refs = collect_evidence_refs(frame, Some(usage));
+        if worker_has_target_scoped_verification_anchor(frame, &evidence_refs) {
+            return CompletionEvidenceStatus::Sufficient;
+        }
         return CompletionEvidenceStatus::MissingVerificationEvidence;
     }
     CompletionEvidenceStatus::Sufficient
@@ -962,6 +1150,16 @@ fn build_worker_structured_report(
     usage: &LoopUsage,
     completion: CompletionEvidenceStatus,
 ) -> WorkerStructuredReport {
+    let evidence_refs = collect_evidence_refs(frame, Some(usage));
+    let completion = if matches!(
+        completion,
+        CompletionEvidenceStatus::MissingVerificationEvidence
+    ) && worker_has_target_scoped_verification_anchor(frame, &evidence_refs)
+    {
+        CompletionEvidenceStatus::Sufficient
+    } else {
+        completion
+    };
     let completion_evidence_gaps = collect_completion_evidence_gaps(frame);
     WorkerStructuredReport {
         worker_state: frame.state,
@@ -973,7 +1171,7 @@ fn build_worker_structured_report(
         verification_status: summarize_verification_status(frame),
         stage_execution_contract: frame.stage_execution_contract.clone(),
         stage_continuation_context: None,
-        evidence_refs: collect_evidence_refs(frame),
+        evidence_refs,
         completion_evidence_gaps,
         remaining_risks: collect_remaining_risks(frame, &completion),
         completion_evidence_status: completion,
@@ -982,8 +1180,9 @@ fn build_worker_structured_report(
 
 fn finalize_worker_usage_report(frame: &StateFrame, usage: &mut LoopUsage) {
     let completion = evaluate_completion_evidence(frame, usage);
-    usage.completion_evidence_status = Some(completion.clone());
-    usage.worker_report = Some(build_worker_structured_report(frame, usage, completion));
+    let report = build_worker_structured_report(frame, usage, completion);
+    usage.completion_evidence_status = Some(report.completion_evidence_status.clone());
+    usage.worker_report = Some(report);
 }
 
 fn verification_terminal_outcome(
@@ -4324,6 +4523,99 @@ mod tests {
             }
             other => panic!("expected Done, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn worker_report_collects_target_scoped_anchor_from_short_verify_output() {
+        let mut frame = make_frame();
+        frame.accepted_summary = vec![
+            "verified_target: /tmp/report.md".into(),
+            "verification_result: verified".into(),
+            "minimal_evidence: Read succeeded".into(),
+            "remaining_blocker: none".into(),
+        ];
+        push_completion_contract(&mut frame, false, false, true);
+        push_artifact_target_fact(&mut frame, "artifact:contract:0", "/tmp/report.md", "file");
+
+        let usage = LoopUsage {
+            last_effective_tool_action: Some("ArtifactVerify".into()),
+            tool_execution_records: vec![crate::tool::result::ToolExecutionRecord {
+                tool_name: "ArtifactVerify".into(),
+                outcome: "Text".into(),
+                kind: crate::tool::result::ToolExecutionOutcomeKind::Success,
+                summary: "read-back verified /tmp/report.md".into(),
+                detail: Some("verified_target: /tmp/report.md".into()),
+                pending_approval: None,
+                report_modifier: crate::tool::result::ToolReportModifier::None,
+                observable_input: None,
+                batch_context: crate::tool::result::ToolBatchContext {
+                    batch_index: 0,
+                    batch_size: 1,
+                    executed_in_batch: false,
+                },
+            }],
+            ..LoopUsage::default()
+        };
+
+        let report = super::build_worker_structured_report(
+            &frame,
+            &usage,
+            CompletionEvidenceStatus::MissingVerificationEvidence,
+        );
+
+        assert!(report
+            .evidence_refs
+            .iter()
+            .any(|reference| reference.contains("/tmp/report.md")));
+        assert!(report
+            .evidence_refs
+            .iter()
+            .any(|reference| reference.starts_with("verification:")));
+        assert_eq!(
+            report.completion_evidence_status,
+            CompletionEvidenceStatus::Sufficient
+        );
+    }
+
+    #[test]
+    fn verification_completion_status_becomes_sufficient_when_target_anchor_is_present() {
+        let mut frame = make_frame();
+        push_completion_contract(&mut frame, false, false, true);
+        push_artifact_target_fact(&mut frame, "artifact:contract:0", "/tmp/report.md", "file");
+        frame.recent_evidence.push(
+            "fact: recent_changes_in_files ref=change:1 path=/tmp/report.md source=tool:Write source_event_id=tool-write:1 freshness=after-runtime confidence=1.00 status=active invalidated_by=none supersedes=none conflicts_with=none summary=updated /tmp/report.md".into(),
+        );
+        frame.accepted_summary = vec![
+            "verified_target: /tmp/report.md".into(),
+            "verification_result: verified".into(),
+            "minimal_evidence: Read succeeded".into(),
+            "remaining_blocker: none".into(),
+        ];
+
+        let usage = LoopUsage {
+            last_effective_tool_action: Some("ArtifactVerify".into()),
+            tool_execution_records: vec![crate::tool::result::ToolExecutionRecord {
+                tool_name: "ArtifactVerify".into(),
+                outcome: "Text".into(),
+                kind: crate::tool::result::ToolExecutionOutcomeKind::Success,
+                summary: "artifact verification passed for /tmp/report.md".into(),
+                detail: Some("summary=verified_target: /tmp/report.md".into()),
+                pending_approval: None,
+                report_modifier: crate::tool::result::ToolReportModifier::None,
+                observable_input: None,
+                batch_context: crate::tool::result::ToolBatchContext {
+                    batch_index: 0,
+                    batch_size: 1,
+                    executed_in_batch: false,
+                },
+            }],
+            ..LoopUsage::default()
+        };
+
+        assert_eq!(
+            evaluate_completion_evidence(&frame, &usage),
+            CompletionEvidenceStatus::Sufficient
+        );
     }
 
     #[test]
