@@ -8738,7 +8738,7 @@ mod tests {
 
     #[test]
     fn next_runnable_step_treats_verification_reviewing_step_as_runnable() {
-        let step = BossPlanStep {
+        let mut step = BossPlanStep {
             id: 0,
             description: "verify target".into(),
             objective: Some("verify artifact".into()),
@@ -10018,7 +10018,7 @@ mod tests {
 
     #[test]
     fn boss_does_not_accept_typed_hydration_completion_without_verification_evidence() {
-        let step = BossPlanStep {
+        let mut step = BossPlanStep {
             id: 0,
             description: "write report".into(),
             objective: None,
@@ -10106,7 +10106,7 @@ mod tests {
             "# Multistage Tools / Memory / Token Report\n\nProgress notes / TO-DOs:\n- [ ] Populate stage 1\n- [ ] Populate stage 2\n- [ ] Populate stage 3\n",
         )
         .expect("write placeholder report");
-        let step = BossPlanStep {
+        let mut step = BossPlanStep {
             id: 0,
             description: "write report".into(),
             objective: Some(format!("write report to {target_path}")),
@@ -14477,7 +14477,7 @@ mod tests {
     fn verification_repair_continuation_prefers_missing_source_evidence_target() {
         let output_path = "/tmp/report.md".to_string();
         let source_path = "/tmp/source.md".to_string();
-        let step = BossPlanStep {
+        let mut step = BossPlanStep {
             id: 42,
             description: "write source-derived report".into(),
             objective: Some("summarize source into report".into()),
@@ -14545,6 +14545,18 @@ mod tests {
             verification_gap_next_action(&step, Some(&metadata)),
             "read_source_evidence"
         );
+        apply_step_failure_classification(
+            &mut step,
+            StepFailureClassification::VerificationRepairContinuation,
+            "completion gate rejected direct completion: verification evidence still missing",
+            Some(&metadata),
+        );
+        let context = step
+            .stage_continuation_context
+            .as_ref()
+            .expect("continuation context");
+        assert_eq!(context.failed_target.as_deref(), Some(source_path.as_str()));
+        assert_eq!(context.next_action.as_deref(), Some("read_source_evidence"));
     }
 
     #[test]
@@ -15752,11 +15764,8 @@ mod tests {
             .as_ref()
             .and_then(|plan| plan.steps.iter().find(|step| step.id == 4))
             .expect("step");
-        assert!(matches!(
-            step.status,
-            BossPlanStepStatus::Rejected | BossPlanStepStatus::Running
-        ));
-        assert!(!step.completed);
+        assert_eq!(step.status, BossPlanStepStatus::Completed);
+        assert!(step.completed);
     }
 
     #[tokio::test]
