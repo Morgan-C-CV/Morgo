@@ -98,6 +98,12 @@ fn step_completion_gate_error(
     step: &BossPlanStep,
     metadata: Option<&BossStepRoutedMetadata>,
 ) -> Option<(String, StepFailureClassification)> {
+    if step_report_body_looks_like_placeholder(step) {
+        return Some((
+            "completion gate rejected direct completion: report body still looks like skeleton or placeholder".into(),
+            StepFailureClassification::VerificationRepairContinuation,
+        ));
+    }
     if let Some(reason) = step_artifact_verification_error(step) {
         return Some((reason, StepFailureClassification::RepairableRecovery));
     }
@@ -118,6 +124,7 @@ fn step_completion_gate_error(
     let verification_gate_satisfied = completion_sufficient
         && worker_verification_verified
         && worker_completion_sufficient
+        && !step_report_body_looks_like_placeholder(step)
         && !metadata
             .completion_evidence_gaps
             .iter()
@@ -145,6 +152,26 @@ fn step_completion_gate_error(
         "completion gate rejected direct completion: verification evidence still missing".into(),
         classification,
     ))
+}
+
+fn report_body_looks_like_placeholder(content: &str) -> bool {
+    let lowered = content.to_ascii_lowercase();
+    lowered.contains("initial skeleton created")
+        || lowered.contains("progress notes / to-do")
+        || lowered.contains("will now read the cited files")
+        || lowered.contains("placeholder")
+        || lowered.contains("skeleton")
+        || lowered.lines().any(|line| line.trim_start().starts_with("- [ ]"))
+}
+
+fn step_report_body_looks_like_placeholder(step: &BossPlanStep) -> bool {
+    let Some(target_path) = primary_declared_artifact_path(step) else {
+        return false;
+    };
+    let Ok(content) = std::fs::read_to_string(&target_path) else {
+        return false;
+    };
+    report_body_looks_like_placeholder(&content)
 }
 
 fn primary_declared_artifact_path(step: &BossPlanStep) -> Option<String> {
@@ -9422,11 +9449,17 @@ mod tests {
 
     #[test]
     fn u8_placeholder_report_does_not_bypass_verification_gate() {
+        let target_path = temp_report_path("placeholder-struct");
+        std::fs::write(
+            &target_path,
+            "# Multistage Tools / Memory / Token Report\n\nProgress notes / TO-DOs:\n- [ ] Populate stage 1\n- [ ] Populate stage 2\n- [ ] Populate stage 3\n",
+        )
+        .expect("write placeholder report");
         let step = BossPlanStep {
             id: 0,
             description: "write report".into(),
-            objective: None,
-            acceptance: vec!["verification evidence required".into()],
+            objective: Some(format!("write report to {target_path}")),
+            acceptance: vec![format!("target file exists and is non-empty: {target_path}")],
             requires_approval: false,
             status: BossPlanStepStatus::Running,
             completed: false,
@@ -9437,14 +9470,21 @@ mod tests {
             last_review_summary: None,
             last_correction: None,
             stage_execution_contract: StageExecutionContract {
+                declared_artifacts: vec![DeclaredArtifactContract {
+                    ref_id: "artifact:step0:0".into(),
+                    path: target_path.clone(),
+                    kind: "file".into(),
+                    required_actions: vec!["write_artifact".into()],
+                    required_evidence: vec![target_path.clone()],
+                }],
                 verifications: vec![VerificationContract {
                     target_ref: "artifact:step0:0".into(),
-                    target_path: Some("/tmp/report.md".into()),
+                    target_path: Some(target_path.clone()),
                     required_actions: vec!["verify_artifact".into()],
-                    required_evidence: vec!["/tmp/report.md".into()],
+                    required_evidence: vec![target_path.clone()],
                 }],
                 required_actions: vec!["verify_artifact".into()],
-                required_evidence: vec!["/tmp/report.md".into()],
+                required_evidence: vec![target_path.clone()],
                 ..StageExecutionContract::default()
             },
             stage_continuation_context: None,
@@ -9457,17 +9497,17 @@ mod tests {
             worker_report: Some(WorkerStructuredReport {
                 worker_state: AgentState::Done,
                 last_tool_action: Some("Write".into()),
-                files_changed: vec!["/tmp/report.md".into()],
+                files_changed: vec![target_path.clone()],
                 tests_run: Vec::new(),
                 artifact_status: "verified".into(),
                 test_status: "not_required".into(),
-                verification_status: "unverified".into(),
+                verification_status: "verified".into(),
                 stage_execution_contract: step.stage_execution_contract.clone(),
                 stage_continuation_context: None,
-                evidence_refs: vec!["write:/tmp/report.md".into()],
+                evidence_refs: vec![format!("write:{target_path}")],
                 completion_evidence_gaps: Vec::new(),
                 remaining_risks: Vec::new(),
-                completion_evidence_status: CompletionEvidenceStatus::MissingVerificationEvidence,
+                completion_evidence_status: CompletionEvidenceStatus::Sufficient,
             }),
             completion_evidence_gaps: Vec::new(),
             ..BossStepRoutedMetadata::default()
@@ -9483,11 +9523,17 @@ mod tests {
 
     #[test]
     fn placeholder_report_is_rejected_even_if_target_file_exists() {
+        let target_path = temp_report_path("placeholder-content");
+        std::fs::write(
+            &target_path,
+            "# Multistage Tools / Memory / Token Report\n\nThis document is a multi-stage report produced by the worker. It will be populated in 4 stages:\n\n1) Tools system, tool registry, and tool contracts\n- [ ] Populate stage 1\n(Initial skeleton created; worker will now read the cited files and fill each section with evidence and analysis.)\n",
+        )
+        .expect("write skeleton report");
         let step = BossPlanStep {
             id: 2,
             description: "write report".into(),
-            objective: None,
-            acceptance: vec!["verification evidence required".into()],
+            objective: Some(format!("write report to {target_path}")),
+            acceptance: vec![format!("target file exists and is non-empty: {target_path}")],
             requires_approval: false,
             status: BossPlanStepStatus::Running,
             completed: false,
@@ -9498,14 +9544,21 @@ mod tests {
             last_review_summary: None,
             last_correction: None,
             stage_execution_contract: StageExecutionContract {
+                declared_artifacts: vec![DeclaredArtifactContract {
+                    ref_id: "artifact:step0:0".into(),
+                    path: target_path.clone(),
+                    kind: "file".into(),
+                    required_actions: vec!["write_artifact".into()],
+                    required_evidence: vec![target_path.clone()],
+                }],
                 verifications: vec![VerificationContract {
                     target_ref: "artifact:step0:0".into(),
-                    target_path: Some("/tmp/report.md".into()),
+                    target_path: Some(target_path.clone()),
                     required_actions: vec!["verify_artifact".into()],
-                    required_evidence: vec!["/tmp/report.md".into()],
+                    required_evidence: vec![target_path.clone()],
                 }],
                 required_actions: vec!["verify_artifact".into()],
-                required_evidence: vec!["/tmp/report.md".into()],
+                required_evidence: vec![target_path.clone()],
                 ..StageExecutionContract::default()
             },
             stage_continuation_context: None,
@@ -9518,14 +9571,14 @@ mod tests {
             worker_report: Some(WorkerStructuredReport {
                 worker_state: AgentState::Done,
                 last_tool_action: Some("Write".into()),
-                files_changed: vec!["/tmp/report.md".into()],
+                files_changed: vec![target_path.clone()],
                 tests_run: Vec::new(),
                 artifact_status: "verified".into(),
                 test_status: "not_required".into(),
-                verification_status: "unverified".into(),
+                verification_status: "verified".into(),
                 stage_execution_contract: step.stage_execution_contract.clone(),
                 stage_continuation_context: None,
-                evidence_refs: vec!["write:/tmp/report.md".into()],
+                evidence_refs: vec![format!("write:{target_path}")],
                 completion_evidence_gaps: Vec::new(),
                 remaining_risks: Vec::new(),
                 completion_evidence_status: CompletionEvidenceStatus::Sufficient,
@@ -9544,11 +9597,17 @@ mod tests {
 
     #[test]
     fn initial_skeleton_report_maps_to_verification_repair_continuation() {
+        let target_path = temp_report_path("initial-skeleton");
+        std::fs::write(
+            &target_path,
+            "# Multistage Tools / Memory / Token Report\n\nProgress notes / TO-DOs:\n- [ ] Populate stage 1\n- [ ] Populate stage 2\n- [ ] Populate stage 3\n- [ ] Write final synthesis\n",
+        )
+        .expect("write initial skeleton report");
         let step = BossPlanStep {
             id: 3,
             description: "write report".into(),
-            objective: None,
-            acceptance: vec!["verification evidence required".into()],
+            objective: Some(format!("write report to {target_path}")),
+            acceptance: vec![format!("target file exists and is non-empty: {target_path}")],
             requires_approval: false,
             status: BossPlanStepStatus::Running,
             completed: false,
@@ -9559,14 +9618,21 @@ mod tests {
             last_review_summary: None,
             last_correction: None,
             stage_execution_contract: StageExecutionContract {
+                declared_artifacts: vec![DeclaredArtifactContract {
+                    ref_id: "artifact:step0:0".into(),
+                    path: target_path.clone(),
+                    kind: "file".into(),
+                    required_actions: vec!["write_artifact".into()],
+                    required_evidence: vec![target_path.clone()],
+                }],
                 verifications: vec![VerificationContract {
                     target_ref: "artifact:step0:0".into(),
-                    target_path: Some("/tmp/report.md".into()),
+                    target_path: Some(target_path.clone()),
                     required_actions: vec!["verify_artifact".into()],
-                    required_evidence: vec!["/tmp/report.md".into()],
+                    required_evidence: vec![target_path.clone()],
                 }],
                 required_actions: vec!["verify_artifact".into()],
-                required_evidence: vec!["/tmp/report.md".into()],
+                required_evidence: vec![target_path.clone()],
                 ..StageExecutionContract::default()
             },
             stage_continuation_context: None,
@@ -9575,29 +9641,22 @@ mod tests {
             tool_execution_records: Vec::new(),
         };
         let metadata = BossStepRoutedMetadata {
-            completion_evidence_status: Some("missing_verification_evidence".into()),
-            completion_evidence_gaps: vec![CompletionEvidenceGap {
-                target_ref: "artifact:step0:0".into(),
-                target_path: Some("/tmp/report.md".into()),
-                missing_artifact_evidence: false,
-                missing_test_evidence: false,
-                missing_verification_evidence: true,
-                recommended_action: "verify_artifact".into(),
-            }],
+            completion_evidence_status: Some("sufficient".into()),
+            completion_evidence_gaps: Vec::new(),
             worker_report: Some(WorkerStructuredReport {
                 worker_state: AgentState::Done,
                 last_tool_action: Some("Read".into()),
-                files_changed: vec!["/tmp/report.md".into()],
+                files_changed: vec![target_path.clone()],
                 tests_run: Vec::new(),
                 artifact_status: "verified".into(),
                 test_status: "not_required".into(),
-                verification_status: "unverified".into(),
+                verification_status: "verified".into(),
                 stage_execution_contract: step.stage_execution_contract.clone(),
                 stage_continuation_context: None,
-                evidence_refs: vec!["read:/tmp/report.md".into()],
+                evidence_refs: vec![format!("read:{target_path}")],
                 completion_evidence_gaps: Vec::new(),
                 remaining_risks: Vec::new(),
-                completion_evidence_status: CompletionEvidenceStatus::MissingVerificationEvidence,
+                completion_evidence_status: CompletionEvidenceStatus::Sufficient,
             }),
             ..BossStepRoutedMetadata::default()
         };
@@ -9608,6 +9667,75 @@ mod tests {
             failure.1,
             StepFailureClassification::VerificationRepairContinuation
         );
+    }
+
+    #[test]
+    fn substantive_report_is_not_marked_placeholder() {
+        let target_path = temp_report_path("substantive");
+        std::fs::write(
+            &target_path,
+            "# Multistage Tools / Memory / Token Report\n\n## Stage 1\n- Tool registry and contracts are documented.\n\n## Stage 2\n- Memory backpressure limits are documented.\n\n## Stage 3\n- Token efficiency and cache notes are documented.\n",
+        )
+        .expect("write substantive report");
+        let step = BossPlanStep {
+            id: 4,
+            description: "write report".into(),
+            objective: Some(format!("write report to {target_path}")),
+            acceptance: vec![format!("target file exists and is non-empty: {target_path}")],
+            requires_approval: false,
+            status: BossPlanStepStatus::Running,
+            completed: false,
+            result_diff: None,
+            worker_task_id: None,
+            attempt_count: 0,
+            retry_budget: 3,
+            last_review_summary: None,
+            last_correction: None,
+            stage_execution_contract: StageExecutionContract {
+                declared_artifacts: vec![DeclaredArtifactContract {
+                    ref_id: "artifact:step0:0".into(),
+                    path: target_path.clone(),
+                    kind: "file".into(),
+                    required_actions: vec!["write_artifact".into()],
+                    required_evidence: vec![target_path.clone()],
+                }],
+                verifications: vec![VerificationContract {
+                    target_ref: "artifact:step0:0".into(),
+                    target_path: Some(target_path.clone()),
+                    required_actions: vec!["verify_artifact".into()],
+                    required_evidence: vec![target_path.clone()],
+                }],
+                required_actions: vec!["verify_artifact".into()],
+                required_evidence: vec![target_path.clone()],
+                ..StageExecutionContract::default()
+            },
+            stage_continuation_context: None,
+            executor_b_stage_memory: None,
+            review_task_id: None,
+            tool_execution_records: Vec::new(),
+        };
+        let metadata = BossStepRoutedMetadata {
+            completion_evidence_status: Some("sufficient".into()),
+            completion_evidence_gaps: Vec::new(),
+            worker_report: Some(WorkerStructuredReport {
+                worker_state: AgentState::Done,
+                last_tool_action: Some("Write".into()),
+                files_changed: vec![target_path.clone()],
+                tests_run: Vec::new(),
+                artifact_status: "verified".into(),
+                test_status: "not_required".into(),
+                verification_status: "verified".into(),
+                stage_execution_contract: step.stage_execution_contract.clone(),
+                stage_continuation_context: None,
+                evidence_refs: vec![format!("write:{target_path}")],
+                completion_evidence_gaps: Vec::new(),
+                remaining_risks: Vec::new(),
+                completion_evidence_status: CompletionEvidenceStatus::Sufficient,
+            }),
+            ..BossStepRoutedMetadata::default()
+        };
+
+        assert!(step_completion_gate_error(&step, Some(&metadata)).is_none());
     }
 
     #[test]
@@ -11168,6 +11296,14 @@ mod tests {
         }
 
         (coordinator, step)
+    }
+
+    fn temp_report_path(label: &str) -> String {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time before unix epoch")
+            .as_nanos();
+        format!("/tmp/rustagent-{label}-{nanos}.md")
     }
 
     #[test]
