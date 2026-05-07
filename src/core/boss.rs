@@ -128,11 +128,15 @@ fn step_completion_gate_error(
     let evidence_bound = worker_report.is_some_and(|report| {
         worker_report_has_target_scoped_evidence(step, report) || verification_first_read_closed
     });
+    let source_evidence_satisfied = worker_report.is_some_and(|report| {
+        worker_report_has_required_source_evidence(step, report)
+    });
     let unresolved_core_read_failure = step_has_unresolved_core_read_failure(step);
     let verification_gate_satisfied = completion_sufficient
         && worker_verification_satisfied
         && worker_completion_sufficient
         && evidence_bound
+        && source_evidence_satisfied
         && !unresolved_core_read_failure
         && !step_report_body_looks_like_placeholder(step)
         && !metadata
@@ -154,6 +158,7 @@ fn step_completion_gate_error(
         || !worker_completion_sufficient
         || !completion_sufficient
         || !evidence_bound
+        || !source_evidence_satisfied
         || unresolved_core_read_failure;
     let classification = if verification_gap {
         StepFailureClassification::VerificationRepairContinuation
@@ -355,6 +360,32 @@ fn worker_report_has_target_scoped_evidence(
     report.evidence_refs.iter().any(|evidence_ref| {
         !evidence_ref_is_artifact_presence_only(evidence_ref, &artifact_paths)
     })
+}
+
+fn worker_report_has_required_source_evidence(
+    step: &BossPlanStep,
+    report: &crate::core::state_frame::WorkerStructuredReport,
+) -> bool {
+    if step
+        .stage_execution_contract
+        .content_evidence_targets
+        .is_empty()
+    {
+        return true;
+    }
+    if report.evidence_refs.is_empty() {
+        return false;
+    }
+    step.stage_execution_contract
+        .content_evidence_targets
+        .iter()
+        .all(|target| {
+            let required_anchor = format!("read:{target}");
+            report
+                .evidence_refs
+                .iter()
+                .any(|evidence_ref| evidence_ref == &required_anchor)
+        })
 }
 
 fn verification_first_read_anchor_closed(
@@ -10247,6 +10278,157 @@ mod tests {
                 stage_execution_contract: step.stage_execution_contract.clone(),
                 stage_continuation_context: None,
                 evidence_refs: vec![format!("read:{source_path}"), format!("write:{target_path}")],
+                completion_evidence_gaps: Vec::new(),
+                remaining_risks: Vec::new(),
+                completion_evidence_status: CompletionEvidenceStatus::Sufficient,
+            }),
+            ..BossStepRoutedMetadata::default()
+        };
+
+        assert!(step_completion_gate_error(&step, Some(&metadata)).is_none());
+    }
+
+    #[test]
+    fn content_derived_task_without_source_reads_is_rejected_by_boss_gate() {
+        let target_path = temp_report_path("content-derived-no-source-read-target");
+        let source_path = temp_report_path("content-derived-no-source-read-source");
+        std::fs::write(
+            &target_path,
+            "# Multistage Tools / Memory / Token Report\n\n## Stage 1\n- Summary present.\n",
+        )
+        .expect("write target report");
+        let step = BossPlanStep {
+            id: 5,
+            description: "write report".into(),
+            objective: Some(format!("write report to {target_path}")),
+            acceptance: vec![format!("target file exists and is non-empty: {target_path}")],
+            requires_approval: false,
+            status: BossPlanStepStatus::Running,
+            completed: false,
+            result_diff: None,
+            worker_task_id: None,
+            attempt_count: 0,
+            retry_budget: 3,
+            last_review_summary: None,
+            last_correction: None,
+            stage_execution_contract: StageExecutionContract {
+                declared_artifacts: vec![DeclaredArtifactContract {
+                    ref_id: "artifact:step0:0".into(),
+                    path: target_path.clone(),
+                    kind: "file".into(),
+                    required_actions: vec!["write_artifact".into()],
+                    required_evidence: vec![target_path.clone(), source_path.clone()],
+                }],
+                verifications: vec![VerificationContract {
+                    target_ref: "artifact:step0:0".into(),
+                    target_path: Some(target_path.clone()),
+                    required_actions: vec!["verify_artifact".into()],
+                    required_evidence: vec![target_path.clone(), source_path.clone()],
+                }],
+                content_evidence_targets: vec![source_path.clone()],
+                required_actions: vec!["verify_artifact".into()],
+                required_evidence: vec![target_path.clone(), source_path.clone()],
+                ..StageExecutionContract::default()
+            },
+            stage_continuation_context: None,
+            executor_b_stage_memory: None,
+            review_task_id: None,
+            tool_execution_records: Vec::new(),
+        };
+        let metadata = BossStepRoutedMetadata {
+            completion_evidence_status: Some("sufficient".into()),
+            completion_evidence_gaps: Vec::new(),
+            worker_report: Some(WorkerStructuredReport {
+                worker_state: AgentState::Done,
+                last_tool_action: Some("Read".into()),
+                files_changed: vec![target_path.clone()],
+                tests_run: Vec::new(),
+                artifact_status: "verified".into(),
+                test_status: "not_required".into(),
+                verification_status: "verified".into(),
+                stage_execution_contract: step.stage_execution_contract.clone(),
+                stage_continuation_context: None,
+                evidence_refs: vec![format!("write:{target_path}"), format!("read:{target_path}")],
+                completion_evidence_gaps: Vec::new(),
+                remaining_risks: Vec::new(),
+                completion_evidence_status: CompletionEvidenceStatus::Sufficient,
+            }),
+            ..BossStepRoutedMetadata::default()
+        };
+
+        let failure = step_completion_gate_error(&step, Some(&metadata))
+            .expect("content-derived task without source reads should fail");
+        assert_eq!(
+            failure.1,
+            StepFailureClassification::VerificationRepairContinuation
+        );
+    }
+
+    #[test]
+    fn content_derived_task_with_source_reads_passes_boss_gate() {
+        let target_path = temp_report_path("content-derived-with-source-read-target");
+        let source_path = temp_report_path("content-derived-with-source-read-source");
+        std::fs::write(
+            &target_path,
+            "# Multistage Tools / Memory / Token Report\n\n## Stage 1\n- Summary present.\n",
+        )
+        .expect("write target report");
+        let step = BossPlanStep {
+            id: 6,
+            description: "write report".into(),
+            objective: Some(format!("write report to {target_path}")),
+            acceptance: vec![format!("target file exists and is non-empty: {target_path}")],
+            requires_approval: false,
+            status: BossPlanStepStatus::Running,
+            completed: false,
+            result_diff: None,
+            worker_task_id: None,
+            attempt_count: 0,
+            retry_budget: 3,
+            last_review_summary: None,
+            last_correction: None,
+            stage_execution_contract: StageExecutionContract {
+                declared_artifacts: vec![DeclaredArtifactContract {
+                    ref_id: "artifact:step0:0".into(),
+                    path: target_path.clone(),
+                    kind: "file".into(),
+                    required_actions: vec!["write_artifact".into()],
+                    required_evidence: vec![target_path.clone(), source_path.clone()],
+                }],
+                verifications: vec![VerificationContract {
+                    target_ref: "artifact:step0:0".into(),
+                    target_path: Some(target_path.clone()),
+                    required_actions: vec!["verify_artifact".into()],
+                    required_evidence: vec![target_path.clone(), source_path.clone()],
+                }],
+                content_evidence_targets: vec![source_path.clone()],
+                required_actions: vec!["verify_artifact".into()],
+                required_evidence: vec![target_path.clone(), source_path.clone()],
+                ..StageExecutionContract::default()
+            },
+            stage_continuation_context: None,
+            executor_b_stage_memory: None,
+            review_task_id: None,
+            tool_execution_records: Vec::new(),
+        };
+        let metadata = BossStepRoutedMetadata {
+            completion_evidence_status: Some("sufficient".into()),
+            completion_evidence_gaps: Vec::new(),
+            worker_report: Some(WorkerStructuredReport {
+                worker_state: AgentState::Done,
+                last_tool_action: Some("Read".into()),
+                files_changed: vec![target_path.clone()],
+                tests_run: Vec::new(),
+                artifact_status: "verified".into(),
+                test_status: "not_required".into(),
+                verification_status: "verified".into(),
+                stage_execution_contract: step.stage_execution_contract.clone(),
+                stage_continuation_context: None,
+                evidence_refs: vec![
+                    format!("read:{source_path}"),
+                    format!("write:{target_path}"),
+                    format!("read:{target_path}"),
+                ],
                 completion_evidence_gaps: Vec::new(),
                 remaining_risks: Vec::new(),
                 completion_evidence_status: CompletionEvidenceStatus::Sufficient,
