@@ -695,6 +695,11 @@ fn worker_has_target_scoped_read_anchor(frame: &StateFrame, refs: &[String]) -> 
     })
 }
 
+fn verification_read_anchor_closed(frame: &StateFrame, refs: &[String]) -> bool {
+    completion_contract_requirement(frame, "verification_evidence")
+        && worker_has_target_scoped_read_anchor(frame, refs)
+}
+
 fn infer_artifact_repair_turn(
     frame: &StateFrame,
     missing_artifact_ref: &str,
@@ -1042,7 +1047,9 @@ fn evaluate_completion_evidence(
         && !missing_verification_evidence_refs(frame).is_empty()
     {
         let evidence_refs = collect_evidence_refs(frame, Some(usage));
-        if worker_has_target_scoped_verification_anchor(frame, &evidence_refs) {
+        if worker_has_target_scoped_verification_anchor(frame, &evidence_refs)
+            || verification_read_anchor_closed(frame, &evidence_refs)
+        {
             return CompletionEvidenceStatus::Sufficient;
         }
         return CompletionEvidenceStatus::MissingVerificationEvidence;
@@ -1234,17 +1241,28 @@ fn build_worker_structured_report(
     completion: CompletionEvidenceStatus,
 ) -> WorkerStructuredReport {
     let evidence_refs = collect_evidence_refs(frame, Some(usage));
+    let read_anchor_closed = verification_read_anchor_closed(frame, &evidence_refs);
     let completion = if matches!(
         completion,
         CompletionEvidenceStatus::MissingVerificationEvidence
     ) && (worker_has_target_scoped_verification_anchor(frame, &evidence_refs)
-        || worker_has_target_scoped_read_anchor(frame, &evidence_refs))
+        || read_anchor_closed)
     {
         CompletionEvidenceStatus::Sufficient
     } else {
         completion
     };
-    let completion_evidence_gaps = collect_completion_evidence_gaps(frame);
+    let mut completion_evidence_gaps = collect_completion_evidence_gaps(frame);
+    if matches!(completion, CompletionEvidenceStatus::Sufficient) && read_anchor_closed {
+        completion_evidence_gaps.retain(|gap| !gap.missing_verification_evidence);
+    }
+    let verification_status = if matches!(completion, CompletionEvidenceStatus::Sufficient)
+        && read_anchor_closed
+    {
+        "verified".into()
+    } else {
+        summarize_verification_status(frame)
+    };
     WorkerStructuredReport {
         worker_state: frame.state,
         last_tool_action: usage.last_effective_tool_action.clone(),
@@ -1252,7 +1270,7 @@ fn build_worker_structured_report(
         tests_run: collect_tests_run(frame),
         artifact_status: summarize_artifact_status(frame),
         test_status: summarize_test_status(frame),
-        verification_status: summarize_verification_status(frame),
+        verification_status,
         stage_execution_contract: frame.stage_execution_contract.clone(),
         stage_continuation_context: None,
         evidence_refs,
@@ -5462,6 +5480,7 @@ mod tests {
             LoopOutcome::Done { usage, .. } => {
                 let report = usage.worker_report.expect("worker report");
                 assert_eq!(report.completion_evidence_status, CompletionEvidenceStatus::Sufficient);
+                assert_eq!(report.verification_status, "verified");
                 assert!(report
                     .evidence_refs
                     .iter()
@@ -5505,6 +5524,7 @@ mod tests {
             LoopOutcome::Done { usage, .. } => {
                 let report = usage.worker_report.expect("worker report");
                 assert_eq!(report.completion_evidence_status, CompletionEvidenceStatus::Sufficient);
+                assert_eq!(report.verification_status, "verified");
                 assert!(report
                     .evidence_refs
                     .iter()
@@ -5548,7 +5568,7 @@ mod tests {
             LoopOutcome::Done { usage, .. } => {
                 let report = usage.worker_report.expect("worker report");
                 assert_eq!(report.completion_evidence_status, CompletionEvidenceStatus::Sufficient);
-                assert_eq!(report.verification_status, "unverified");
+                assert_eq!(report.verification_status, "verified");
                 assert!(report
                     .evidence_refs
                     .iter()
