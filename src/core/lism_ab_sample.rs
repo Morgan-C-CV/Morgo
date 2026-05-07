@@ -940,11 +940,14 @@ fn canonicalize_artifact_target_pairs(targets: Vec<(String, Option<String>)>) ->
         targets
             .iter()
             .filter_map(|(_, target_path)| {
-                target_path.as_ref().map(|path| {
-                    crate::core::boss_acceptance::BossArtifactExpectation {
+                target_path.as_ref().and_then(|path| {
+                    if path.starts_with("command:") {
+                        return None;
+                    }
+                    Some(crate::core::boss_acceptance::BossArtifactExpectation {
                         path: std::path::PathBuf::from(path),
                         kind: crate::core::boss_acceptance::BossArtifactKind::File,
-                    }
+                    })
                 })
             })
             .collect(),
@@ -957,6 +960,9 @@ fn canonicalize_artifact_target_pairs(targets: Vec<(String, Option<String>)>) ->
         .into_iter()
         .filter_map(|(target_ref, target_path)| {
             let path = target_path?;
+            if path.starts_with("command:") {
+                return None;
+            }
             canonical_paths
                 .contains(&path)
                 .then(|| format!("{target_ref}:{path}"))
@@ -1250,6 +1256,106 @@ mod tests {
             record.rollout_denylist_targets,
             vec!["artifact:contract:1:/tmp/report.md".to_string()]
         );
+    }
+
+    #[test]
+    fn ab_sample_drops_command_targets_from_gap_and_rollout_aggregation() {
+        let report = BossReportPayload {
+            stage: BossStage::Execution,
+            current_step: Some(1),
+            total_steps: Some(1),
+            designer_a: empty_actor(),
+            executor_b: empty_actor(),
+            active_children: Vec::new(),
+            steps: vec![BossStepReport {
+                id: 1,
+                status: BossPlanStepStatus::Rejected,
+                worker_task_id: None,
+                attempt_count: 1,
+                last_review_summary: Some("repair".into()),
+                action_required: None,
+                blocker_reason: None,
+                routed_metadata: Some(BossStepRoutedMetadata {
+                    completion_evidence_gaps: vec![
+                        CompletionEvidenceGap {
+                            target_ref: "artifact:contract:1".into(),
+                            target_path: Some("/tmp/report.md".into()),
+                            missing_artifact_evidence: true,
+                            missing_test_evidence: false,
+                            missing_verification_evidence: true,
+                            recommended_action: "verify_artifact".into(),
+                        },
+                        CompletionEvidenceGap {
+                            target_ref: "artifact:step0:2:bash".into(),
+                            target_path: Some("command:wc -c /tmp/report.md".into()),
+                            missing_artifact_evidence: true,
+                            missing_test_evidence: false,
+                            missing_verification_evidence: true,
+                            recommended_action: "verify_artifact".into(),
+                        },
+                    ],
+                    ..BossStepRoutedMetadata::default()
+                }),
+                stage_execution_contract: StageExecutionContract::default(),
+                stage_continuation_context: None,
+                executor_b_stage_memory: None,
+            }],
+            history_summary: Vec::new(),
+            observability_summary: None,
+            rollout_policy_decision: Some(BossRolloutPolicyDecision {
+                denylist_targets: vec![
+                    BossRolloutTargetDecision {
+                        target_ref: "artifact:contract:1".into(),
+                        target_path: Some("/tmp/report.md".into()),
+                        missing_evidence_kinds: vec!["artifact_evidence".into()],
+                        recommended_policy: "denylist_direct_worker_lism".into(),
+                        recommended_fallback: "full_worker_dispatch".into(),
+                    },
+                    BossRolloutTargetDecision {
+                        target_ref: "artifact:step0:2:bash".into(),
+                        target_path: Some("command:wc -c /tmp/report.md".into()),
+                        missing_evidence_kinds: vec!["artifact_evidence".into()],
+                        recommended_policy: "denylist_direct_worker_lism".into(),
+                        recommended_fallback: "full_worker_dispatch".into(),
+                    },
+                ],
+                fallback_targets: vec![BossRolloutTargetDecision {
+                    target_ref: "artifact:step0:2:bash".into(),
+                    target_path: Some("command:wc -c /tmp/report.md".into()),
+                    missing_evidence_kinds: vec!["verification_evidence".into()],
+                    recommended_policy: "denylist_direct_worker_lism".into(),
+                    recommended_fallback: "full_worker_dispatch".into(),
+                }],
+                summary: "command target pollution".into(),
+            }),
+            success_classification: None,
+            lism_policy: Default::default(),
+            stage_execution_contract: StageExecutionContract::default(),
+            stage_continuation_context: None,
+            executor_b_stage_memory: None,
+        };
+
+        let record = build_ab_record(
+            "run-command-gap".into(),
+            true,
+            &report,
+            BossTestRunOutcome::Aborted,
+            0,
+        );
+
+        assert_eq!(
+            record.missing_artifact_evidence_targets,
+            vec!["artifact:contract:1:/tmp/report.md".to_string()]
+        );
+        assert_eq!(
+            record.missing_verification_evidence_targets,
+            vec!["artifact:contract:1:/tmp/report.md".to_string()]
+        );
+        assert_eq!(
+            record.rollout_denylist_targets,
+            vec!["artifact:contract:1:/tmp/report.md".to_string()]
+        );
+        assert!(record.automatic_fallback_targets.is_empty());
     }
 
     #[test]

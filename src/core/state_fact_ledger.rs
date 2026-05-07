@@ -716,18 +716,6 @@ pub fn append_runtime_tool_record(
             let Some(command) = observable_bash_command(record) else {
                 return;
             };
-            ledgers.artifact_refs.push(ArtifactRecord {
-                ref_id: format!("artifact:{ref_namespace}:bash"),
-                path: format!("command:{}", trim_excerpt(&command, 80)),
-                kind: "command_output".into(),
-                status: bash_artifact_status(record).into(),
-                summary: tool_record_summary(record),
-                source: "tool:Bash".into(),
-                source_event_id: format!("tool-bash:{ref_namespace}"),
-                freshness: "after-runtime-bash".into(),
-                confidence_milli: 1000,
-                lineage: active_lineage(),
-            });
             if is_test_command(&command) {
                 ledgers.test_refs.push(TestRecord {
                     ref_id: format!("test:{ref_namespace}:bash"),
@@ -1539,6 +1527,13 @@ mod tests {
                 .iter()
                 .any(|item| { item.source == "tool:Bash" && item.status == "failed" })
         );
+        assert!(
+            ledgers
+                .artifact_refs
+                .iter()
+                .all(|item| item.source != "tool:Bash"),
+            "bash observations must not be promoted into artifact refs"
+        );
     }
 
     #[test]
@@ -1725,6 +1720,36 @@ mod tests {
 
         append_runtime_tool_record(&contract, &mut ledgers, &record, "bash-python");
 
+        assert!(ledgers.verification_refs.is_empty());
+        assert!(ledgers.artifact_refs.is_empty());
+    }
+
+    #[test]
+    fn bash_observation_does_not_emit_command_artifact_record() {
+        let mut ledgers = StepFactLedgers::default();
+        let contract = StageExecutionContract::default();
+        let record = ToolExecutionRecord {
+            tool_name: "Bash".into(),
+            outcome: "Text".into(),
+            kind: ToolExecutionOutcomeKind::Success,
+            summary: "Bash succeeded".into(),
+            detail: Some("exit_code: 0\n42 /tmp/report.md".into()),
+            pending_approval: None,
+            report_modifier: ToolReportModifier::None,
+            observable_input: Some(ObservableInput {
+                value: r#"{"command":"wc -c /tmp/report.md"}"#.into(),
+                source: ObservableInputSource::Raw,
+            }),
+            batch_context: ToolBatchContext {
+                batch_index: 0,
+                batch_size: 1,
+                executed_in_batch: false,
+            },
+        };
+
+        append_runtime_tool_record(&contract, &mut ledgers, &record, "bash-wc");
+
+        assert!(ledgers.artifact_refs.is_empty());
         assert!(ledgers.verification_refs.is_empty());
     }
 
