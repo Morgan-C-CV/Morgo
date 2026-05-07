@@ -558,7 +558,7 @@ fn build_worker_task_input(request: &SpawnAgentRequest) -> String {
                 .into(),
         );
         sections.push(
-            "keep minimal_evidence to one short factual phrase, keep remaining_blocker to a single short blocker or none, and keep evidence_refs compact"
+            "keep minimal_evidence to one short factual phrase, keep remaining_blocker to a single short blocker or none, and set evidence_refs to read:<verified_target> when verification_result is verified"
                 .into(),
         );
         sections.push("</verify-output-contract>".into());
@@ -646,7 +646,7 @@ fn with_verify_output_contract(role: WorkerRole, task_input: String) -> String {
     }
 
     format!(
-        "{task_input}\n<verify-output-contract>\nreturn exactly five short fields only: verified_target, verification_result, minimal_evidence, remaining_blocker, evidence_refs\ndo not include analysis, summary prose, recommendations, next_action, file lists, validation steps, risk notes, multi-section report formatting, or evidence prose\nkeep minimal_evidence to one short factual phrase, keep remaining_blocker to a single short blocker or none, and keep evidence_refs compact\n</verify-output-contract>"
+        "{task_input}\n<verify-output-contract>\nreturn exactly five short fields only: verified_target, verification_result, minimal_evidence, remaining_blocker, evidence_refs\ndo not include analysis, summary prose, recommendations, next_action, file lists, validation steps, risk notes, multi-section report formatting, or evidence prose\nkeep minimal_evidence to one short factual phrase, keep remaining_blocker to a single short blocker or none, and set evidence_refs to read:<verified_target> when verification_result is verified\n</verify-output-contract>"
     )
 }
 
@@ -828,12 +828,18 @@ fn build_verify_patch_output(task_input: &str, raw_output: &str) -> VerifyPatchO
         extract_labeled_value(raw_output, &["minimal_evidence", "minimal evidence"])
             .or_else(|| infer_minimal_evidence(raw_output, scrub_templates))
             .unwrap_or_else(|| "none recorded".into());
-    let evidence_refs = extract_evidence_refs(raw_output)
+    let mut evidence_refs = extract_evidence_refs(raw_output)
         .or_else(|| extract_evidence_refs(task_input))
         .unwrap_or_default();
+    let normalized_target = normalize_verify_patch_ref(&target);
+    ensure_verified_target_read_anchor(
+        &mut evidence_refs,
+        &normalized_target,
+        verification_result.trim(),
+    );
 
     VerifyPatchOutput {
-        verified_target: normalize_verify_patch_ref(&target),
+        verified_target: normalized_target,
         verification_result: verification_result.trim().to_string(),
         minimal_evidence: compact_verify_value(&minimal_evidence),
         remaining_blocker: compact_verify_value(&remaining_blocker),
@@ -959,10 +965,40 @@ fn verify_patch_output_matches_contract(patch: &VerifyPatchOutput) -> bool {
     if !is_concise_verify_value(&patch.remaining_blocker) {
         return false;
     }
-    patch
-        .evidence_refs
-        .iter()
-        .all(|value| is_concise_patch_ref(value))
+    if patch.evidence_refs.len() != 1
+        || !patch
+            .evidence_refs
+            .iter()
+            .all(|value| is_concise_patch_ref(value))
+    {
+        return false;
+    }
+    if patch.verification_result.eq_ignore_ascii_case("verified")
+        && !has_read_anchor_for_target(&patch.evidence_refs, &patch.verified_target)
+    {
+        return false;
+    }
+    true
+}
+
+fn ensure_verified_target_read_anchor(
+    evidence_refs: &mut Vec<String>,
+    verified_target: &str,
+    verification_result: &str,
+) {
+    if !verification_result.eq_ignore_ascii_case("verified")
+        || verified_target.is_empty()
+        || verified_target == "unknown"
+    {
+        return;
+    }
+    evidence_refs.clear();
+    evidence_refs.push(format!("read:{verified_target}"));
+}
+
+fn has_read_anchor_for_target(evidence_refs: &[String], verified_target: &str) -> bool {
+    let expected = format!("read:{verified_target}");
+    evidence_refs.iter().any(|value| value == &expected)
 }
 
 fn normalize_verify_patch_ref(value: &str) -> String {
@@ -1284,7 +1320,7 @@ mod tests {
         assert!(input.contains("return exactly five short fields only"));
         assert!(input.contains("do not include analysis"));
         assert!(input.contains("keep minimal_evidence to one short factual phrase"));
-        assert!(input.contains("keep evidence_refs compact"));
+        assert!(input.contains("set evidence_refs to read:<verified_target> when verification_result is verified"));
     }
 
     #[test]
@@ -1294,7 +1330,7 @@ mod tests {
         let normalized = normalize_verify_output(task_input, raw_output);
         assert_eq!(
             normalized,
-            "verified_target: /tmp/report.md\nverification_result: verified\nminimal_evidence: Read succeeded\nremaining_blocker: none\nevidence_refs: artifact:/tmp/report.md"
+            "verified_target: /tmp/report.md\nverification_result: verified\nminimal_evidence: Read succeeded\nremaining_blocker: none\nevidence_refs: read:/tmp/report.md"
         );
         assert_eq!(normalized.lines().count(), 5);
     }
@@ -1426,7 +1462,7 @@ mod tests {
         let normalized = normalize_verify_output(task_input, raw_output);
         assert_eq!(
             normalized,
-            "verified_target: /tmp/report.md\nverification_result: verified\nminimal_evidence: Read succeeded\nremaining_blocker: none\nevidence_refs: none"
+            "verified_target: /tmp/report.md\nverification_result: verified\nminimal_evidence: Read succeeded\nremaining_blocker: none\nevidence_refs: read:/tmp/report.md"
         );
         assert_eq!(normalized.lines().count(), 5);
     }
@@ -1452,7 +1488,7 @@ mod tests {
         let normalized = normalize_verify_output(task_input, raw_output);
         assert_eq!(
             normalized,
-            "verified_target: /tmp/report.md\nverification_result: verified\nminimal_evidence: Read succeeded\nremaining_blocker: none\nevidence_refs: none"
+            "verified_target: /tmp/report.md\nverification_result: verified\nminimal_evidence: Read succeeded\nremaining_blocker: none\nevidence_refs: read:/tmp/report.md"
         );
     }
 
@@ -1470,7 +1506,7 @@ mod tests {
     #[test]
     fn verify_output_contract_requires_exact_five_prefixed_lines() {
         assert!(verify_output_matches_contract(
-            "verified_target: /tmp/report.md\nverification_result: verified\nminimal_evidence: Read succeeded\nremaining_blocker: none\nevidence_refs: none"
+            "verified_target: /tmp/report.md\nverification_result: verified\nminimal_evidence: Read succeeded\nremaining_blocker: none\nevidence_refs: read:/tmp/report.md"
         ));
         assert!(!verify_output_matches_contract(
             "verified_target: /tmp/report.md\nverification_result: verified\nminimal_evidence: Read succeeded\nremaining_blocker: none\nevidence_refs: none\nnext_action: extra"
@@ -1499,7 +1535,7 @@ mod tests {
         assert_eq!(normalized.lines().count(), 5);
         assert_eq!(
             normalized,
-            "verified_target: /tmp/report.md\nverification_result: verified\nminimal_evidence: Read succeeded\nremaining_blocker: none\nevidence_refs: none"
+            "verified_target: /tmp/report.md\nverification_result: verified\nminimal_evidence: Read succeeded\nremaining_blocker: none\nevidence_refs: read:/tmp/report.md"
         );
     }
 
@@ -1533,7 +1569,7 @@ mod tests {
         let normalized = normalize_verify_output(task_input, raw_output);
         assert_eq!(
             normalized,
-            "verified_target: /tmp/report.md\nverification_result: verified\nminimal_evidence: Read succeeded\nremaining_blocker: none\nevidence_refs: none"
+            "verified_target: /tmp/report.md\nverification_result: verified\nminimal_evidence: Read succeeded\nremaining_blocker: none\nevidence_refs: read:/tmp/report.md"
         );
     }
 }

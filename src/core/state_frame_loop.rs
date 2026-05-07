@@ -17,7 +17,9 @@ use crate::tool::definition::ObservableInput;
 use crate::tool::definition::{ToolCall, ToolResult};
 use crate::tool::orchestrator::build_execution_record;
 use crate::tool::registry::ToolRegistry;
-use crate::tool::result::{ToolExecutionRecord, ToolOutcome, ToolOutcomeKind};
+use crate::tool::result::{
+    ToolExecutionOutcomeKind, ToolExecutionRecord, ToolOutcome, ToolOutcomeKind,
+};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
@@ -543,6 +545,27 @@ fn collect_target_scoped_evidence_refs_from_text(
     refs
 }
 
+fn path_matches_target_scope(path: &str, target_paths: &[String]) -> bool {
+    target_paths
+        .iter()
+        .any(|target| path == target || path.starts_with(&format!("{target}/")))
+}
+
+fn append_target_scoped_runtime_anchor(
+    refs: &mut Vec<String>,
+    prefix: &str,
+    path: &str,
+    target_paths: &[String],
+) {
+    if !path_matches_target_scope(path, target_paths) {
+        return;
+    }
+    let anchor = format!("{prefix}:{path}");
+    if !refs.iter().any(|existing| existing == &anchor) {
+        refs.push(anchor);
+    }
+}
+
 fn collect_evidence_refs(frame: &StateFrame, usage: Option<&LoopUsage>) -> Vec<String> {
     let mut refs = Vec::new();
     let target_paths = declared_target_paths(frame);
@@ -575,6 +598,25 @@ fn collect_evidence_refs(frame: &StateFrame, usage: Option<&LoopUsage>) -> Vec<S
             }
             if let Some(observable_input) = record.observable_input.as_ref() {
                 ingest_text(&observable_input.value, &mut refs);
+            }
+            if record.kind == ToolExecutionOutcomeKind::Success {
+                if let Some(path) = observable_path_from_input(record.observable_input.as_ref()) {
+                    match record.tool_name.as_str() {
+                        "Read" => append_target_scoped_runtime_anchor(
+                            &mut refs,
+                            "read",
+                            &path,
+                            &target_paths,
+                        ),
+                        "ArtifactVerify" => append_target_scoped_runtime_anchor(
+                            &mut refs,
+                            "verification",
+                            &path,
+                            &target_paths,
+                        ),
+                        _ => {}
+                    }
+                }
             }
         }
         if let Some(outcome) = usage.last_failure_outcome.as_ref() {
@@ -609,6 +651,18 @@ fn worker_has_target_scoped_verification_anchor(frame: &StateFrame, refs: &[Stri
                 refs.iter()
                     .any(|evidence_ref| evidence_ref.contains(&verification_ref))
             })
+    })
+}
+
+fn worker_has_target_scoped_read_anchor(frame: &StateFrame, refs: &[String]) -> bool {
+    let verification_refs = completion_contract_refs(frame, "verification_refs");
+    if verification_refs.is_empty() {
+        return false;
+    }
+    verification_refs.into_iter().all(|verification_ref| {
+        artifact_contract_target(frame, &verification_ref)
+            .map(|(path, _)| refs.iter().any(|evidence_ref| evidence_ref == &format!("read:{path}")))
+            .unwrap_or(false)
     })
 }
 
@@ -1193,6 +1247,17 @@ fn verification_terminal_outcome(
         || !completion_contract_requirement(frame, "verification_evidence")
     {
         return None;
+    }
+
+    let evidence_refs = collect_evidence_refs(frame, Some(usage));
+    if summarize_verification_status(frame) == "verified"
+        && worker_has_target_scoped_read_anchor(frame, &evidence_refs)
+    {
+        finalize_worker_usage_report(frame, usage);
+        return Some(LoopOutcome::Done {
+            final_state: AgentState::Done,
+            usage: usage.clone(),
+        });
     }
 
     let completion = evaluate_completion_evidence(frame, usage);
@@ -3138,6 +3203,8 @@ mod tests {
     use crate::core::state_frame_hydration::hydrate_needed_context;
     use crate::service::api::client::ModelProviderClient;
     use crate::service::api::streaming::{ProviderFailureDisposition, StreamError, StreamEvent};
+    use crate::tool::definition::{ObservableInput, ObservableInputSource};
+    use crate::tool::result::{ToolBatchContext, ToolExecutionOutcomeKind, ToolExecutionRecord};
     use crate::state::permission_context::{PermissionMode, ToolPermissionContext};
     use crate::tool::builtin::bash::BashTool;
     use crate::tool::builtin::file_edit::FileEditTool;
@@ -5187,6 +5254,104 @@ mod tests {
             CompletionEvidenceStatus::Sufficient
         );
         assert!(super::collect_completion_evidence_gaps(&frame).is_empty());
+    }
+
+    #[test]
+    fn collect_evidence_refs_adds_read_anchor_for_target_scoped_read() {
+        let mut frame = make_frame();
+        frame.recent_evidence.clear();
+        push_completion_contract_with_refs(
+            &mut frame,
+            &["artifact:contract:0"],
+            &[],
+            &["artifact:contract:0"],
+        );
+        push_artifact_target_fact(&mut frame, "artifact:contract:0", "/tmp/report.md", "file");
+
+        let usage = LoopUsage {
+            tool_execution_records: vec![ToolExecutionRecord {
+                tool_name: "Read".into(),
+                outcome: "Text".into(),
+                kind: ToolExecutionOutcomeKind::Success,
+                summary: "Read succeeded".into(),
+                detail: None,
+                pending_approval: None,
+                report_modifier: crate::tool::result::ToolReportModifier::None,
+                observable_input: Some(ObservableInput {
+                    value: r#"{"file_path":"/tmp/report.md"}"#.into(),
+                    source: ObservableInputSource::Raw,
+                }),
+                batch_context: ToolBatchContext {
+                    batch_index: 0,
+                    batch_size: 1,
+                    executed_in_batch: false,
+                },
+            }],
+            ..LoopUsage::default()
+        };
+
+        let evidence_refs = super::collect_evidence_refs(&frame, Some(&usage));
+        assert!(evidence_refs.iter().any(|reference| reference == "read:/tmp/report.md"));
+        assert!(super::worker_has_target_scoped_read_anchor(
+            &frame,
+            &evidence_refs
+        ));
+    }
+
+    #[test]
+    fn verification_terminal_outcome_closes_on_verified_status_plus_target_read_anchor() {
+        let mut frame = make_frame();
+        frame.state = AgentState::Verifying;
+        frame.recent_evidence.clear();
+        push_completion_contract_with_refs(
+            &mut frame,
+            &["artifact:contract:0"],
+            &[],
+            &["artifact:contract:0"],
+        );
+        push_artifact_target_fact(&mut frame, "artifact:contract:0", "/tmp/report.md", "file");
+        frame.recent_evidence.push(
+            "fact: artifact_status ref=artifact:contract:0 path=/tmp/report.md kind=file status=verified source=tool:ArtifactVerify source_event_id=tool-artifact:1 freshness=after-runtime-artifact-verify confidence=1.00 lineage_status=active invalidated_by=none supersedes=none conflicts_with=none summary=artifact verification passed for /tmp/report.md".into(),
+        );
+        frame.recent_evidence.push(
+            "fact: verification_status ref=artifact:contract:0 path=/tmp/report.md status=verified source=tool:Read source_event_id=tool-read:1 freshness=after-runtime-read confidence=0.90 lineage_status=active invalidated_by=none supersedes=none conflicts_with=none summary=read-back verified /tmp/report.md".into(),
+        );
+        let mut usage = LoopUsage {
+            last_effective_tool_action: Some("Read".into()),
+            tool_execution_records: vec![ToolExecutionRecord {
+                tool_name: "Read".into(),
+                outcome: "Text".into(),
+                kind: ToolExecutionOutcomeKind::Success,
+                summary: "Read succeeded".into(),
+                detail: None,
+                pending_approval: None,
+                report_modifier: crate::tool::result::ToolReportModifier::None,
+                observable_input: Some(ObservableInput {
+                    value: r#"{"file_path":"/tmp/report.md"}"#.into(),
+                    source: ObservableInputSource::Raw,
+                }),
+                batch_context: ToolBatchContext {
+                    batch_index: 0,
+                    batch_size: 1,
+                    executed_in_batch: false,
+                },
+            }],
+            ..LoopUsage::default()
+        };
+
+        let outcome = super::verification_terminal_outcome(&frame, &mut usage)
+            .expect("verified target-scoped read should close verification");
+        match outcome {
+            LoopOutcome::Done { usage, .. } => {
+                let report = usage.worker_report.expect("worker report");
+                assert_eq!(report.completion_evidence_status, CompletionEvidenceStatus::Sufficient);
+                assert!(report
+                    .evidence_refs
+                    .iter()
+                    .any(|reference| reference == "read:/tmp/report.md"));
+            }
+            other => panic!("expected Done, got {other:?}"),
+        }
     }
 
     #[test]
