@@ -169,6 +169,7 @@ impl BossStateFrame {
         if !self.stage_execution_contract.declared_artifacts.is_empty()
             || !self.stage_execution_contract.verifications.is_empty()
             || !self.stage_execution_contract.tests.is_empty()
+            || !self.stage_execution_contract.content_evidence_targets.is_empty()
         {
             lines.push("stage_execution_contract:".into());
             for artifact in &self.stage_execution_contract.declared_artifacts {
@@ -197,6 +198,12 @@ impl BossStateFrame {
                     test.required_actions.join(", "),
                     test.required_evidence.join(", ")
                 ));
+            }
+            if !self.stage_execution_contract.content_evidence_targets.is_empty() {
+                lines.push("  - content_evidence_targets:".into());
+                for target in &self.stage_execution_contract.content_evidence_targets {
+                    lines.push(format!("    - {target}"));
+                }
             }
         }
         if let Some(continuation) = &self.stage_continuation_context {
@@ -305,4 +312,74 @@ pub fn assemble_brief_prompt(brief: &BossContextBrief, frame: &BossStateFrame) -
     assembly.push(brief.to_prompt_segment());
     assembly.push(frame.to_prompt_segment());
     assembly.assemble()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::boss_state::BossPlanStepStatus;
+    use crate::core::state_frame::{
+        DeclaredArtifactContract, StageExecutionContract, VerificationContract,
+    };
+
+    #[test]
+    fn prompt_surface_renders_content_evidence_targets() {
+        let brief = BossContextBrief {
+            plan_id: "plan-1".into(),
+            step_id: 0,
+            plan_version: "v1".into(),
+            step_revision: "r1".into(),
+            generated_at: "2026-05-07T00:00:00Z".into(),
+            objective: "write report".into(),
+            acceptance: vec!["target file exists".into()],
+            last_correction: None,
+            recent_decisions: Vec::new(),
+            relevant_file_handles: Vec::new(),
+            target_files: Vec::new(),
+            target_artifacts: Vec::new(),
+            allowed_tools: Vec::new(),
+            permission_scope: PermissionScopeView {
+                lism_policy: "inherit".into(),
+                inherit_context: true,
+                workspace_capability: "admin_bash".into(),
+                boss_actor_role: "boss".into(),
+            },
+            parent_session_id: "parent-1".into(),
+            context_strategy: BossContextStrategy::Brief,
+        };
+        let frame = BossStateFrame {
+            step_id: 0,
+            status: BossPlanStepStatus::Running,
+            stage_execution_contract: StageExecutionContract {
+                declared_artifacts: vec![DeclaredArtifactContract {
+                    ref_id: "artifact:step0:0".into(),
+                    path: "/tmp/report.md".into(),
+                    kind: "file".into(),
+                    required_actions: vec!["write".into()],
+                    required_evidence: vec!["/tmp/report.md".into()],
+                }],
+                verifications: vec![VerificationContract {
+                    target_ref: "artifact:step0:0".into(),
+                    target_path: Some("/tmp/report.md".into()),
+                    required_actions: vec!["verify".into()],
+                    required_evidence: vec!["/tmp/report.md".into()],
+                }],
+                content_evidence_targets: vec!["/tmp/source.md".into()],
+                required_actions: vec!["write".into(), "verify".into()],
+                required_evidence: vec!["/tmp/report.md".into(), "/tmp/source.md".into()],
+                ..StageExecutionContract::default()
+            },
+            stage_continuation_context: None,
+            executor_b_stage_memory: None,
+            open_items: Vec::new(),
+            blocked_items: Vec::new(),
+            recent_local_facts: Vec::new(),
+            allowed_actions: Vec::new(),
+            required_output_hint: None,
+        };
+
+        let prompt = assemble_brief_prompt(&brief, &frame);
+        assert!(prompt.contains("content_evidence_targets:"));
+        assert!(prompt.contains("/tmp/source.md"));
+    }
 }
