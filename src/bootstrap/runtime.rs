@@ -259,7 +259,11 @@ const DEFAULT_BOSS_TASK_TIMEOUT_SECS: u64 = 900;
 fn terminal_tail_stalled(
     sync_result: &anyhow::Result<bool>,
     terminal_result: &anyhow::Result<Option<String>>,
+    live_tail_task: bool,
 ) -> bool {
+    if live_tail_task {
+        return false;
+    }
     sync_result.as_ref().map(|value| !*value).unwrap_or(true)
         || terminal_result.as_ref().map(|value| value.is_none()).unwrap_or(true)
 }
@@ -765,7 +769,22 @@ impl RuntimeBootstrap {
                         ) {
                             break;
                         }
-                        if terminal_tail_stalled(&synced, &terminal_msg) {
+                        let live_tail_task = if let Some(task_manager) =
+                            app_arc.permission_context.task_manager.as_ref()
+                        {
+                            let b_task_live = boss
+                                .b_task_id()
+                                .await
+                                .is_some_and(|tid| !task_is_terminal(task_manager, Some(&tid)));
+                            let current_step_live = boss
+                                .current_step_worker_task_id()
+                                .await
+                                .is_some_and(|tid| !task_is_terminal(task_manager, Some(&tid)));
+                            b_task_live || current_step_live
+                        } else {
+                            false
+                        };
+                        if terminal_tail_stalled(&synced, &terminal_msg, live_tail_task) {
                             let run_id = boss.current_run_id().await;
                             let lism_enabled = crate::core::boss::effective_lism_enabled(
                                 boss.lism_policy().await,
@@ -2210,15 +2229,22 @@ mod tests {
     fn terminal_sample_is_emitted_when_completed_child_tail_cannot_advance() {
         let sync_result: anyhow::Result<bool> = Ok(false);
         let terminal_result: anyhow::Result<Option<String>> = Ok(None);
-        assert!(terminal_tail_stalled(&sync_result, &terminal_result));
+        assert!(terminal_tail_stalled(&sync_result, &terminal_result, false));
 
         let sync_result: anyhow::Result<bool> = Ok(true);
         let terminal_result: anyhow::Result<Option<String>> = Ok(Some("advance".into()));
-        assert!(!terminal_tail_stalled(&sync_result, &terminal_result));
+        assert!(!terminal_tail_stalled(&sync_result, &terminal_result, false));
 
         let sync_result: anyhow::Result<bool> = Err(anyhow!("sync failed"));
         let terminal_result: anyhow::Result<Option<String>> = Ok(None);
-        assert!(terminal_tail_stalled(&sync_result, &terminal_result));
+        assert!(terminal_tail_stalled(&sync_result, &terminal_result, false));
+    }
+
+    #[test]
+    fn terminal_tail_is_not_stalled_when_live_tail_task_remains() {
+        let sync_result: anyhow::Result<bool> = Ok(true);
+        let terminal_result: anyhow::Result<Option<String>> = Ok(None);
+        assert!(!terminal_tail_stalled(&sync_result, &terminal_result, true));
     }
 
     #[test]
