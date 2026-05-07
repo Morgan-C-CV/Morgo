@@ -201,6 +201,7 @@ fn build_completion_contract_fact(
 fn build_stage_execution_contract(
     step: Option<&crate::core::boss_state::BossPlanStep>,
     permission_facts: &[String],
+    file_facts: &[crate::core::state_fact_ledger::FileFactRecord],
     artifact_ledgers: &[crate::core::state_fact_ledger::ArtifactRecord],
     open_item_ledgers: &[crate::core::state_fact_ledger::OpenItemRecord],
     readonly_analysis: bool,
@@ -312,11 +313,30 @@ fn build_stage_execution_contract(
             .iter()
             .flat_map(|item| item.required_evidence.iter().cloned()),
     );
+    let artifact_paths = declared_artifacts
+        .iter()
+        .map(|artifact| artifact.path.as_str())
+        .collect::<Vec<_>>();
+    let content_evidence_targets = file_facts
+        .iter()
+        .filter(|item| matches!(item.kind.as_str(), "source_file" | "document"))
+        .map(|item| item.path.trim())
+        .filter(|path| {
+            !path.is_empty()
+                && !path.ends_with('/')
+                && !artifact_paths.iter().any(|artifact| *artifact == *path)
+        })
+        .fold(Vec::<String>::new(), |mut acc, path| {
+            if !acc.iter().any(|existing| existing == path) {
+                acc.push(path.to_string());
+            }
+            acc
+        });
     StageExecutionContract {
         declared_artifacts,
         verifications,
         tests,
-        content_evidence_targets: Vec::new(),
+        content_evidence_targets,
         required_actions,
         required_evidence,
     }
@@ -576,7 +596,7 @@ fn build_fact_ledger(
         let permission_facts = build_permission_facts(step.id, step.objective(), readonly_analysis);
         facts.extend(permission_facts.iter().cloned());
         if !ledgers.file_facts.is_empty() {
-            for item in ledgers.file_facts {
+            for item in &ledgers.file_facts {
                 facts.push(fact_line(
                     "file_facts",
                     format!(
@@ -765,6 +785,7 @@ fn build_fact_ledger(
         let stage_execution_contract = build_stage_execution_contract(
             current_step,
             &permission_facts,
+            &ledgers.file_facts,
             &ledgers.artifact_refs,
             &open_item_ledgers,
             readonly_analysis,
@@ -882,6 +903,10 @@ pub fn project_state_frame(
     let stage_execution_contract = build_stage_execution_contract(
         current_step,
         &permission_facts,
+        ledgers
+            .as_ref()
+            .map(|value| value.file_facts.as_slice())
+            .unwrap_or(&[]),
         ledgers
             .as_ref()
             .map(|value| value.artifact_refs.as_slice())
@@ -1239,5 +1264,72 @@ mod tests {
             .declared_artifacts
             .iter()
             .any(|artifact| artifact.path == "/tmp/beta.txt"));
+    }
+
+    #[test]
+    fn project_state_frame_collects_source_and_document_targets_into_content_evidence() {
+        let plan = BossPlan {
+            plan_id: "plan-5".into(),
+            task_description: "analyze tool surface".into(),
+            document_spec: String::new(),
+            pseudo_code: String::new(),
+            draft_spec: None,
+            review_feedback: None,
+            revision_notes: None,
+            finalized: false,
+            documentation_feedback: Vec::new(),
+            steps: vec![BossPlanStep {
+                id: 0,
+                description: "write report".into(),
+                objective: Some(
+                    "任务目标：\n- 目标文件：/tmp/report.md\n- 建议核验路径：\n  - src/tool/definition.rs\n  - ../docs/31-token-efficiency-cost-performance.md"
+                        .into(),
+                ),
+                acceptance: vec!["target file exists and is non-empty: /tmp/report.md".into()],
+                requires_approval: false,
+                status: BossPlanStepStatus::Running,
+                completed: false,
+                result_diff: None,
+                worker_task_id: None,
+                attempt_count: 0,
+                retry_budget: 3,
+                last_review_summary: None,
+                last_correction: None,
+                stage_execution_contract: StageExecutionContract::default(),
+                stage_continuation_context: None,
+                executor_b_stage_memory: None,
+                review_task_id: None,
+                tool_execution_records: Vec::new(),
+            }],
+            accepted_by_user: true,
+            auto_sequence: false,
+            session_snapshot: None,
+        };
+
+        let frame = project_state_frame(&plan, BossStage::Execution, Some(0), ActorRole::Worker);
+        assert!(
+            frame
+                .stage_execution_contract
+                .content_evidence_targets
+                .iter()
+                .any(|target| target.ends_with("tool/definition.rs"))
+        );
+        assert!(
+            frame
+                .stage_execution_contract
+                .content_evidence_targets
+                .iter()
+                .any(|target| target.ends_with("docs/31-token-efficiency-cost-performance.md"))
+        );
+        assert!(!frame
+            .stage_execution_contract
+            .declared_artifacts
+            .iter()
+            .any(|artifact| artifact.path.ends_with("tool/definition.rs")));
+        assert!(!frame
+            .stage_execution_contract
+            .declared_artifacts
+            .iter()
+            .any(|artifact| artifact.path.ends_with("docs/31-token-efficiency-cost-performance.md")));
     }
 }

@@ -2320,7 +2320,7 @@ fn collect_target_files(relevant_file_handles: &[RelevantFileHandle]) -> Vec<Str
     for handle in relevant_file_handles {
         if matches!(
             handle.kind.as_str(),
-            "target_file" | "target_directory" | "source_file" | "document"
+            "target_file" | "target_directory"
         ) && !target_files.iter().any(|path| path == &handle.path)
         {
             target_files.push(handle.path.clone());
@@ -16098,7 +16098,7 @@ mod tests {
     #[test]
     fn content_evidence_targets_excludes_output_artifacts_and_verification_targets() {
         let target_path = temp_report_path("content-evidence-output");
-        let source_path = temp_report_path("content-evidence-source");
+        let source_path = "RustAgent/Agent/src/tool/definition.rs".to_string();
         let handles = vec![
             RelevantFileHandle {
                 path: target_path.clone(),
@@ -16120,7 +16120,7 @@ mod tests {
         let step = BossPlanStep {
             id: 1,
             description: "write report".into(),
-            objective: Some(format!("write report to {target_path} using {source_path}")),
+            objective: Some(format!("write report to {target_path}")),
             acceptance: vec![format!("target file exists and is non-empty: {target_path}")],
             requires_approval: false,
             status: BossPlanStepStatus::Pending,
@@ -16137,12 +16137,20 @@ mod tests {
             review_task_id: None,
             tool_execution_records: Vec::new(),
         };
-        let target_artifacts = vec![TargetArtifact {
-            path: target_path.clone(),
-            kind: "file".into(),
-            required_state: "exists_non_empty".into(),
-            source: "artifact_expectation".into(),
-        }];
+        let target_files = collect_target_files(&handles);
+        let target_artifacts = collect_target_artifacts(&step, &target_files);
+        assert!(
+            !target_files
+                .iter()
+                .any(|target| target == &source_path),
+            "source file leaked into target files: {target_files:?}"
+        );
+        assert!(
+            !target_artifacts
+                .iter()
+                .any(|artifact| artifact.path == source_path),
+            "source file leaked into target artifacts: {target_artifacts:?}"
+        );
         let contract = build_stage_execution_contract(&step, &target_artifacts);
         let targets = collect_content_evidence_targets(&handles, &contract);
 
