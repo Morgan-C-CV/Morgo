@@ -648,11 +648,15 @@ fn completion_gate_failure(
     let worker_completion_sufficient = report.is_some_and(|report| {
         report.completion_evidence_status == CompletionEvidenceStatus::Sufficient
     });
+    let evidence_bound = report.is_some_and(|report| {
+        worker_report_has_target_scoped_evidence(stage_execution_contract, report)
+    });
     let completion_sufficient = matches!(
         completion_status,
         Some(CompletionEvidenceStatus::Sufficient)
     ) && worker_verification_verified
-        && worker_completion_sufficient;
+        && worker_completion_sufficient
+        && evidence_bound;
 
     if completion_sufficient && !has_gaps {
         return None;
@@ -661,6 +665,7 @@ fn completion_gate_failure(
     let failure_classification = if missing_verification_gap
         || !worker_verification_verified
         || !worker_completion_sufficient
+        || !evidence_bound
         || matches!(
             completion_status,
             Some(CompletionEvidenceStatus::MissingVerificationEvidence)
@@ -674,6 +679,86 @@ fn completion_gate_failure(
             .into(),
         failure_classification,
     ))
+}
+
+fn artifact_like_paths(contract: &StageExecutionContract) -> Vec<&str> {
+    let mut paths: Vec<&str> = contract
+        .declared_artifacts
+        .iter()
+        .map(|artifact| artifact.path.as_str())
+        .collect();
+    for target_path in contract
+        .verifications
+        .iter()
+        .filter_map(|verification| verification.target_path.as_deref())
+    {
+        if !paths.iter().any(|existing| *existing == target_path) {
+            paths.push(target_path);
+        }
+    }
+    paths
+}
+
+fn required_non_artifact_evidence_targets(contract: &StageExecutionContract) -> Vec<&str> {
+    let artifact_paths = artifact_like_paths(contract);
+    let mut targets = Vec::new();
+    for target in contract
+        .required_evidence
+        .iter()
+        .chain(
+            contract
+                .verifications
+                .iter()
+                .flat_map(|verification| verification.required_evidence.iter()),
+        )
+        .map(|value| value.as_str())
+    {
+        if artifact_paths.iter().any(|artifact| *artifact == target)
+            || targets.iter().any(|existing| *existing == target)
+        {
+            continue;
+        }
+        targets.push(target);
+    }
+    targets
+}
+
+fn evidence_ref_mentions_target(evidence_ref: &str, target: &str) -> bool {
+    evidence_ref.contains(target)
+}
+
+fn evidence_ref_is_artifact_presence_only(evidence_ref: &str, artifact_paths: &[&str]) -> bool {
+    if evidence_ref.starts_with("artifact:") {
+        return true;
+    }
+    artifact_paths.iter().any(|artifact| {
+        evidence_ref.contains(artifact)
+            && (evidence_ref.starts_with("read:")
+                || evidence_ref.starts_with("write:")
+                || evidence_ref.starts_with("artifact:"))
+    })
+}
+
+fn worker_report_has_target_scoped_evidence(
+    contract: &StageExecutionContract,
+    report: &crate::core::state_frame::WorkerStructuredReport,
+) -> bool {
+    if report.evidence_refs.is_empty() {
+        return false;
+    }
+    let artifact_paths = artifact_like_paths(contract);
+    let required_targets = required_non_artifact_evidence_targets(contract);
+    if !required_targets.is_empty() {
+        return required_targets.iter().all(|target| {
+            report
+                .evidence_refs
+                .iter()
+                .any(|evidence_ref| evidence_ref_mentions_target(evidence_ref, target))
+        });
+    }
+    report.evidence_refs.iter().any(|evidence_ref| {
+        !evidence_ref_is_artifact_presence_only(evidence_ref, &artifact_paths)
+    })
 }
 
 #[cfg(test)]
@@ -733,6 +818,20 @@ mod tests {
             }],
             required_actions: vec!["verify_artifact".into()],
             required_evidence: vec!["/tmp/report.md".into()],
+            ..StageExecutionContract::default()
+        }
+    }
+
+    fn verification_contract_with_required_input(input_path: &str) -> StageExecutionContract {
+        StageExecutionContract {
+            verifications: vec![crate::core::state_frame::VerificationContract {
+                target_ref: "artifact:step0:0".into(),
+                target_path: Some("/tmp/report.md".into()),
+                required_actions: vec!["verify_artifact".into()],
+                required_evidence: vec!["/tmp/report.md".into(), input_path.into()],
+            }],
+            required_actions: vec!["verify_artifact".into()],
+            required_evidence: vec!["/tmp/report.md".into(), input_path.into()],
             ..StageExecutionContract::default()
         }
     }
@@ -1260,6 +1359,91 @@ mod tests {
                     remaining_risks: Vec::new(),
                     completion_evidence_status:
                         crate::core::state_frame::CompletionEvidenceStatus::MissingVerificationEvidence,
+                }),
+                ..LoopUsage::default()
+            },
+        };
+
+        match map_loop_outcome(outcome, &verification_contract(), None) {
+            StepOutcome::Failed {
+                failure_classification,
+                ..
+            } => {
+                assert_eq!(
+                    failure_classification,
+                    StepFailureClassification::VerificationRepairContinuation
+                );
+            }
+            other => panic!("expected failed outcome, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn generic_report_without_target_evidence_anchor_cannot_pass_completion_gate() {
+        let contract = verification_contract_with_required_input("/tmp/source.md");
+        let outcome = LoopOutcome::Done {
+            final_state: AgentState::Done,
+            usage: LoopUsage {
+                completion_evidence_status: Some(
+                    crate::core::state_frame::CompletionEvidenceStatus::Sufficient,
+                ),
+                worker_report: Some(crate::core::state_frame::WorkerStructuredReport {
+                    worker_state: AgentState::Done,
+                    last_tool_action: Some("Write".into()),
+                    files_changed: vec!["/tmp/report.md".into()],
+                    tests_run: Vec::new(),
+                    artifact_status: "verified".into(),
+                    test_status: "not_required".into(),
+                    verification_status: "verified".into(),
+                    stage_execution_contract: contract.clone(),
+                    stage_continuation_context: None,
+                    evidence_refs: vec!["write:/tmp/report.md".into()],
+                    completion_evidence_gaps: Vec::new(),
+                    remaining_risks: Vec::new(),
+                    completion_evidence_status:
+                        crate::core::state_frame::CompletionEvidenceStatus::Sufficient,
+                }),
+                ..LoopUsage::default()
+            },
+        };
+
+        match map_loop_outcome(outcome, &contract, None) {
+            StepOutcome::Failed {
+                failure_classification,
+                ..
+            } => {
+                assert_eq!(
+                    failure_classification,
+                    StepFailureClassification::VerificationRepairContinuation
+                );
+            }
+            other => panic!("expected failed outcome, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn report_with_only_artifact_presence_evidence_cannot_finish_verification_contract() {
+        let outcome = LoopOutcome::Done {
+            final_state: AgentState::Done,
+            usage: LoopUsage {
+                completion_evidence_status: Some(
+                    crate::core::state_frame::CompletionEvidenceStatus::Sufficient,
+                ),
+                worker_report: Some(crate::core::state_frame::WorkerStructuredReport {
+                    worker_state: AgentState::Done,
+                    last_tool_action: Some("Read".into()),
+                    files_changed: vec!["/tmp/report.md".into()],
+                    tests_run: Vec::new(),
+                    artifact_status: "verified".into(),
+                    test_status: "not_required".into(),
+                    verification_status: "verified".into(),
+                    stage_execution_contract: verification_contract(),
+                    stage_continuation_context: None,
+                    evidence_refs: vec!["read:/tmp/report.md".into()],
+                    completion_evidence_gaps: Vec::new(),
+                    remaining_risks: Vec::new(),
+                    completion_evidence_status:
+                        crate::core::state_frame::CompletionEvidenceStatus::Sufficient,
                 }),
                 ..LoopUsage::default()
             },

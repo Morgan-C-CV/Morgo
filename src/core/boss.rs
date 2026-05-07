@@ -121,9 +121,14 @@ fn step_completion_gate_error(
     let worker_completion_sufficient = worker_report.is_some_and(|report| {
         report.completion_evidence_status == CompletionEvidenceStatus::Sufficient
     });
+    let evidence_bound = worker_report
+        .is_some_and(|report| worker_report_has_target_scoped_evidence(step, report));
+    let unresolved_core_read_failure = step_has_unresolved_core_read_failure(step);
     let verification_gate_satisfied = completion_sufficient
         && worker_verification_verified
         && worker_completion_sufficient
+        && evidence_bound
+        && !unresolved_core_read_failure
         && !step_report_body_looks_like_placeholder(step)
         && !metadata
             .completion_evidence_gaps
@@ -142,7 +147,9 @@ fn step_completion_gate_error(
         )
         || !worker_verification_verified
         || !worker_completion_sufficient
-        || !completion_sufficient;
+        || !completion_sufficient
+        || !evidence_bound
+        || unresolved_core_read_failure;
     let classification = if verification_gap {
         StepFailureClassification::VerificationRepairContinuation
     } else {
@@ -152,6 +159,144 @@ fn step_completion_gate_error(
         "completion gate rejected direct completion: verification evidence still missing".into(),
         classification,
     ))
+}
+
+fn declared_artifact_paths(step: &BossPlanStep) -> Vec<&str> {
+    step.stage_execution_contract
+        .declared_artifacts
+        .iter()
+        .map(|artifact| artifact.path.as_str())
+        .collect()
+}
+
+fn required_non_artifact_evidence_targets(step: &BossPlanStep) -> Vec<&str> {
+    let artifact_paths = declared_artifact_paths(step);
+    let mut targets = Vec::new();
+    for target in step
+        .stage_execution_contract
+        .required_evidence
+        .iter()
+        .chain(
+            step.stage_execution_contract
+                .verifications
+                .iter()
+                .flat_map(|verification| verification.required_evidence.iter()),
+        )
+        .map(|value| value.as_str())
+    {
+        if artifact_paths.iter().any(|artifact| *artifact == target)
+            || targets.iter().any(|existing| *existing == target)
+        {
+            continue;
+        }
+        targets.push(target);
+    }
+    targets
+}
+
+fn evidence_ref_mentions_target(evidence_ref: &str, target: &str) -> bool {
+    evidence_ref.contains(target)
+}
+
+fn evidence_ref_is_artifact_presence_only(evidence_ref: &str, artifact_paths: &[&str]) -> bool {
+    if evidence_ref.starts_with("artifact:") {
+        return true;
+    }
+    artifact_paths.iter().any(|artifact| {
+        evidence_ref.contains(artifact)
+            && (evidence_ref.starts_with("read:")
+                || evidence_ref.starts_with("write:")
+                || evidence_ref.starts_with("artifact:"))
+    })
+}
+
+fn worker_report_has_target_scoped_evidence(
+    step: &BossPlanStep,
+    report: &crate::core::state_frame::WorkerStructuredReport,
+) -> bool {
+    if report.evidence_refs.is_empty() {
+        return false;
+    }
+    let artifact_paths = declared_artifact_paths(step);
+    let required_targets = required_non_artifact_evidence_targets(step);
+    if !required_targets.is_empty() {
+        return required_targets.iter().all(|target| {
+            report
+                .evidence_refs
+                .iter()
+                .any(|evidence_ref| evidence_ref_mentions_target(evidence_ref, target))
+        });
+    }
+    report.evidence_refs.iter().any(|evidence_ref| {
+        !evidence_ref_is_artifact_presence_only(evidence_ref, &artifact_paths)
+    })
+}
+
+fn parse_failed_read_path(detail: &str) -> Option<String> {
+    let marker = "failed to read ";
+    let start = detail.find(marker)? + marker.len();
+    let remainder = &detail[start..];
+    let end = remainder.find(':').unwrap_or(remainder.len());
+    let path = remainder[..end].trim();
+    if path.is_empty() {
+        return None;
+    }
+    Some(path.to_string())
+}
+
+fn parse_successful_read_path(text: &str) -> Option<String> {
+    for marker in [
+        "read-back verified ",
+        "Read succeeded ",
+        "read succeeded ",
+        "verified read ",
+    ] {
+        if let Some(start) = text.find(marker) {
+            let remainder = &text[start + marker.len()..];
+            let path = remainder
+                .split_whitespace()
+                .next()
+                .unwrap_or_default()
+                .trim();
+            if !path.is_empty() {
+                return Some(path.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn step_has_unresolved_core_read_failure(step: &BossPlanStep) -> bool {
+    let artifact_paths = declared_artifact_paths(step);
+    let mut successful_paths = Vec::new();
+    for record in &step.tool_execution_records {
+        if record.tool_name != "Read" || record.kind != ToolExecutionOutcomeKind::Success {
+            continue;
+        }
+        if let Some(path) = record
+            .detail
+            .as_deref()
+            .and_then(parse_successful_read_path)
+            .or_else(|| parse_successful_read_path(&record.summary))
+        {
+            successful_paths.push(path);
+        }
+    }
+    step.tool_execution_records.iter().any(|record| {
+        if record.tool_name != "Read"
+            || !matches!(
+                record.kind,
+                ToolExecutionOutcomeKind::Interrupted | ToolExecutionOutcomeKind::Denied
+            )
+        {
+            return false;
+        }
+        let Some(path) = record.detail.as_deref().and_then(parse_failed_read_path) else {
+            return false;
+        };
+        !artifact_paths.iter().any(|artifact| *artifact == path)
+            && !successful_paths.iter().any(|success| success == &path)
+    })
 }
 
 fn report_body_looks_like_placeholder(content: &str) -> bool {
@@ -9672,6 +9817,7 @@ mod tests {
     #[test]
     fn substantive_report_is_not_marked_placeholder() {
         let target_path = temp_report_path("substantive");
+        let source_path = temp_report_path("substantive-source");
         std::fs::write(
             &target_path,
             "# Multistage Tools / Memory / Token Report\n\n## Stage 1\n- Tool registry and contracts are documented.\n\n## Stage 2\n- Memory backpressure limits are documented.\n\n## Stage 3\n- Token efficiency and cache notes are documented.\n",
@@ -9679,6 +9825,150 @@ mod tests {
         .expect("write substantive report");
         let step = BossPlanStep {
             id: 4,
+            description: "write report".into(),
+            objective: Some(format!("write report to {target_path}")),
+            acceptance: vec![format!("target file exists and is non-empty: {target_path}")],
+            requires_approval: false,
+            status: BossPlanStepStatus::Running,
+            completed: false,
+            result_diff: None,
+            worker_task_id: None,
+            attempt_count: 0,
+            retry_budget: 3,
+            last_review_summary: None,
+            last_correction: None,
+            stage_execution_contract: StageExecutionContract {
+                declared_artifacts: vec![DeclaredArtifactContract {
+                    ref_id: "artifact:step0:0".into(),
+                    path: target_path.clone(),
+                    kind: "file".into(),
+                    required_actions: vec!["write_artifact".into()],
+                    required_evidence: vec![target_path.clone(), source_path.clone()],
+                }],
+                verifications: vec![VerificationContract {
+                    target_ref: "artifact:step0:0".into(),
+                    target_path: Some(target_path.clone()),
+                    required_actions: vec!["verify_artifact".into()],
+                    required_evidence: vec![target_path.clone(), source_path.clone()],
+                }],
+                required_actions: vec!["verify_artifact".into()],
+                required_evidence: vec![target_path.clone(), source_path.clone()],
+                ..StageExecutionContract::default()
+            },
+            stage_continuation_context: None,
+            executor_b_stage_memory: None,
+            review_task_id: None,
+            tool_execution_records: Vec::new(),
+        };
+        let metadata = BossStepRoutedMetadata {
+            completion_evidence_status: Some("sufficient".into()),
+            completion_evidence_gaps: Vec::new(),
+            worker_report: Some(WorkerStructuredReport {
+                worker_state: AgentState::Done,
+                last_tool_action: Some("Write".into()),
+                files_changed: vec![target_path.clone()],
+                tests_run: Vec::new(),
+                artifact_status: "verified".into(),
+                test_status: "not_required".into(),
+                verification_status: "verified".into(),
+                stage_execution_contract: step.stage_execution_contract.clone(),
+                stage_continuation_context: None,
+                evidence_refs: vec![format!("read:{source_path}"), format!("write:{target_path}")],
+                completion_evidence_gaps: Vec::new(),
+                remaining_risks: Vec::new(),
+                completion_evidence_status: CompletionEvidenceStatus::Sufficient,
+            }),
+            ..BossStepRoutedMetadata::default()
+        };
+
+        assert!(step_completion_gate_error(&step, Some(&metadata)).is_none());
+    }
+
+    #[test]
+    fn boss_gate_requires_target_scoped_evidence_refs_not_just_artifact_presence() {
+        let target_path = temp_report_path("evidence-bound-target");
+        let source_path = temp_report_path("evidence-bound-source");
+        std::fs::write(
+            &target_path,
+            "# Multistage Tools / Memory / Token Report\n\n## Stage 1\n- Summary present.\n",
+        )
+        .expect("write target report");
+        let step = BossPlanStep {
+            id: 5,
+            description: "write report".into(),
+            objective: Some(format!("write report to {target_path}")),
+            acceptance: vec![format!("target file exists and is non-empty: {target_path}")],
+            requires_approval: false,
+            status: BossPlanStepStatus::Running,
+            completed: false,
+            result_diff: None,
+            worker_task_id: None,
+            attempt_count: 0,
+            retry_budget: 3,
+            last_review_summary: None,
+            last_correction: None,
+            stage_execution_contract: StageExecutionContract {
+                declared_artifacts: vec![DeclaredArtifactContract {
+                    ref_id: "artifact:step0:0".into(),
+                    path: target_path.clone(),
+                    kind: "file".into(),
+                    required_actions: vec!["write_artifact".into()],
+                    required_evidence: vec![target_path.clone(), source_path.clone()],
+                }],
+                verifications: vec![VerificationContract {
+                    target_ref: "artifact:step0:0".into(),
+                    target_path: Some(target_path.clone()),
+                    required_actions: vec!["verify_artifact".into()],
+                    required_evidence: vec![target_path.clone(), source_path.clone()],
+                }],
+                required_actions: vec!["verify_artifact".into()],
+                required_evidence: vec![target_path.clone(), source_path.clone()],
+                ..StageExecutionContract::default()
+            },
+            stage_continuation_context: None,
+            executor_b_stage_memory: None,
+            review_task_id: None,
+            tool_execution_records: Vec::new(),
+        };
+        let metadata = BossStepRoutedMetadata {
+            completion_evidence_status: Some("sufficient".into()),
+            completion_evidence_gaps: Vec::new(),
+            worker_report: Some(WorkerStructuredReport {
+                worker_state: AgentState::Done,
+                last_tool_action: Some("Write".into()),
+                files_changed: vec![target_path.clone()],
+                tests_run: Vec::new(),
+                artifact_status: "verified".into(),
+                test_status: "not_required".into(),
+                verification_status: "verified".into(),
+                stage_execution_contract: step.stage_execution_contract.clone(),
+                stage_continuation_context: None,
+                evidence_refs: vec![format!("write:{target_path}")],
+                completion_evidence_gaps: Vec::new(),
+                remaining_risks: Vec::new(),
+                completion_evidence_status: CompletionEvidenceStatus::Sufficient,
+            }),
+            ..BossStepRoutedMetadata::default()
+        };
+
+        let failure = step_completion_gate_error(&step, Some(&metadata))
+            .expect("missing target-scoped evidence should fail");
+        assert_eq!(
+            failure.1,
+            StepFailureClassification::VerificationRepairContinuation
+        );
+    }
+
+    #[test]
+    fn artifact_exists_but_claims_are_not_evidence_bound_maps_to_verification_repair_continuation() {
+        let target_path = temp_report_path("generic-nonempty");
+        std::fs::write(
+            &target_path,
+            "# Multistage Tools / Memory / Token Report\n\n## Stage 1\n- Generic summary without source-backed evidence.\n",
+        )
+        .expect("write generic report");
+        let step = BossPlanStep {
+            id: 6,
             description: "write report".into(),
             objective: Some(format!("write report to {target_path}")),
             acceptance: vec![format!("target file exists and is non-empty: {target_path}")],
@@ -9719,6 +10009,97 @@ mod tests {
             completion_evidence_gaps: Vec::new(),
             worker_report: Some(WorkerStructuredReport {
                 worker_state: AgentState::Done,
+                last_tool_action: Some("Read".into()),
+                files_changed: vec![target_path.clone()],
+                tests_run: Vec::new(),
+                artifact_status: "verified".into(),
+                test_status: "not_required".into(),
+                verification_status: "verified".into(),
+                stage_execution_contract: step.stage_execution_contract.clone(),
+                stage_continuation_context: None,
+                evidence_refs: vec![format!("read:{target_path}")],
+                completion_evidence_gaps: Vec::new(),
+                remaining_risks: Vec::new(),
+                completion_evidence_status: CompletionEvidenceStatus::Sufficient,
+            }),
+            ..BossStepRoutedMetadata::default()
+        };
+
+        let failure = step_completion_gate_error(&step, Some(&metadata))
+            .expect("artifact presence alone should not satisfy evidence-bound completion");
+        assert_eq!(
+            failure.1,
+            StepFailureClassification::VerificationRepairContinuation
+        );
+    }
+
+    #[test]
+    fn missing_core_read_evidence_cannot_be_upgraded_to_completed_by_nonempty_report() {
+        let target_path = temp_report_path("missing-core-read");
+        let source_path = temp_report_path("missing-core-read-source");
+        std::fs::write(
+            &target_path,
+            "# Multistage Tools / Memory / Token Report\n\n## Stage 1\n- Generic report text.\n",
+        )
+        .expect("write report");
+        let step = BossPlanStep {
+            id: 7,
+            description: "write report".into(),
+            objective: Some(format!("write report to {target_path}")),
+            acceptance: vec![format!("target file exists and is non-empty: {target_path}")],
+            requires_approval: false,
+            status: BossPlanStepStatus::Running,
+            completed: false,
+            result_diff: None,
+            worker_task_id: None,
+            attempt_count: 0,
+            retry_budget: 3,
+            last_review_summary: None,
+            last_correction: None,
+            stage_execution_contract: StageExecutionContract {
+                declared_artifacts: vec![DeclaredArtifactContract {
+                    ref_id: "artifact:step0:0".into(),
+                    path: target_path.clone(),
+                    kind: "file".into(),
+                    required_actions: vec!["write_artifact".into()],
+                    required_evidence: vec![target_path.clone(), source_path.clone()],
+                }],
+                verifications: vec![VerificationContract {
+                    target_ref: "artifact:step0:0".into(),
+                    target_path: Some(target_path.clone()),
+                    required_actions: vec!["verify_artifact".into()],
+                    required_evidence: vec![target_path.clone(), source_path.clone()],
+                }],
+                required_actions: vec!["verify_artifact".into()],
+                required_evidence: vec![target_path.clone(), source_path.clone()],
+                ..StageExecutionContract::default()
+            },
+            stage_continuation_context: None,
+            executor_b_stage_memory: None,
+            review_task_id: None,
+            tool_execution_records: vec![ToolExecutionRecord {
+                tool_name: "Read".into(),
+                outcome: "Error".into(),
+                kind: ToolExecutionOutcomeKind::Interrupted,
+                summary: "read source failed".into(),
+                detail: Some(format!(
+                    "failed to read {source_path}: No such file or directory (os error 2)"
+                )),
+                pending_approval: None,
+                report_modifier: ToolReportModifier::None,
+                observable_input: None,
+                batch_context: ToolBatchContext {
+                    batch_index: 0,
+                    batch_size: 1,
+                    executed_in_batch: false,
+                },
+            }],
+        };
+        let metadata = BossStepRoutedMetadata {
+            completion_evidence_status: Some("sufficient".into()),
+            completion_evidence_gaps: Vec::new(),
+            worker_report: Some(WorkerStructuredReport {
+                worker_state: AgentState::Done,
                 last_tool_action: Some("Write".into()),
                 files_changed: vec![target_path.clone()],
                 tests_run: Vec::new(),
@@ -9735,7 +10116,12 @@ mod tests {
             ..BossStepRoutedMetadata::default()
         };
 
-        assert!(step_completion_gate_error(&step, Some(&metadata)).is_none());
+        let failure = step_completion_gate_error(&step, Some(&metadata))
+            .expect("missing core read evidence should fail completion");
+        assert_eq!(
+            failure.1,
+            StepFailureClassification::VerificationRepairContinuation
+        );
     }
 
     #[test]
