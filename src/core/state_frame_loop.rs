@@ -4,7 +4,7 @@ use crate::core::state_fact_ledger::{
 };
 use crate::core::state_frame::{
     AgentState, CompletionEvidenceGap, CompletionEvidenceStatus, CompletionGateBlock, DecisionKind,
-    RepairNeeded, StateFrame, StageExecutionContract, StatePatch, WorkerStructuredReport,
+    RepairNeeded, StageExecutionContract, StateFrame, StatePatch, WorkerStructuredReport,
     validate_state_decision,
 };
 use crate::core::state_frame_hydration::{
@@ -484,9 +484,7 @@ fn collect_target_scoped_evidence_refs_from_text(
                 if item.is_empty() || item.eq_ignore_ascii_case("none") {
                     continue;
                 }
-                if !item.starts_with("artifact:")
-                    && !refs.iter().any(|existing| existing == item)
-                {
+                if !item.starts_with("artifact:") && !refs.iter().any(|existing| existing == item) {
                     refs.push(item.to_string());
                 }
             }
@@ -660,7 +658,54 @@ fn collect_evidence_refs(frame: &StateFrame, usage: Option<&LoopUsage>) -> Vec<S
         }
     }
 
+    append_required_source_read_anchors(frame, usage, &mut refs);
+
     refs
+}
+
+fn append_required_source_read_anchors(
+    frame: &StateFrame,
+    usage: Option<&LoopUsage>,
+    refs: &mut Vec<String>,
+) {
+    let source_targets = &frame.stage_execution_contract.content_evidence_targets;
+    if source_targets.is_empty() {
+        return;
+    }
+    let mut append_anchor = |path: &str| {
+        if !source_targets.iter().any(|target| target == path) {
+            return;
+        }
+        let anchor = format!("read:{path}");
+        if !refs.iter().any(|existing| existing == &anchor) {
+            refs.push(anchor);
+        }
+    };
+
+    for line in frame
+        .recent_evidence
+        .iter()
+        .filter(|line| line.starts_with("fact: file_facts "))
+    {
+        if evidence_field_value(line, "kind").as_deref() == Some("read_observation")
+            && evidence_field_value(line, "source").as_deref() == Some("tool:Read")
+        {
+            if let Some(path) = evidence_field_value(line, "path") {
+                append_anchor(&path);
+            }
+        }
+    }
+
+    if let Some(usage) = usage {
+        for record in &usage.tool_execution_records {
+            if record.kind != ToolExecutionOutcomeKind::Success || record.tool_name != "Read" {
+                continue;
+            }
+            if let Some(path) = observable_path_from_input(record.observable_input.as_ref()) {
+                append_anchor(&path);
+            }
+        }
+    }
 }
 
 fn worker_has_target_scoped_verification_anchor(frame: &StateFrame, refs: &[String]) -> bool {
@@ -672,8 +717,7 @@ fn worker_has_target_scoped_verification_anchor(frame: &StateFrame, refs: &[Stri
         artifact_contract_target(frame, &verification_ref)
             .map(|(path, _)| {
                 refs.iter().any(|evidence_ref| {
-                    evidence_ref.contains(&path)
-                        && !evidence_ref.starts_with("artifact:")
+                    evidence_ref.contains(&path) && !evidence_ref.starts_with("artifact:")
                 })
             })
             .unwrap_or_else(|| {
@@ -690,7 +734,10 @@ fn worker_has_target_scoped_read_anchor(frame: &StateFrame, refs: &[String]) -> 
     }
     verification_refs.into_iter().all(|verification_ref| {
         artifact_contract_target(frame, &verification_ref)
-            .map(|(path, _)| refs.iter().any(|evidence_ref| evidence_ref == &format!("read:{path}")))
+            .map(|(path, _)| {
+                refs.iter()
+                    .any(|evidence_ref| evidence_ref == &format!("read:{path}"))
+            })
             .unwrap_or(false)
     })
 }
@@ -749,7 +796,11 @@ fn repair_turn_open_item(repair_turn: &ArtifactRepairTurn) -> String {
     )
 }
 
-fn repair_turn_fact_line(repair_turn: &ArtifactRepairTurn, reference: &str, summary: String) -> String {
+fn repair_turn_fact_line(
+    repair_turn: &ArtifactRepairTurn,
+    reference: &str,
+    summary: String,
+) -> String {
     format!(
         "fact: repair_turn ref={} target_path={} parent_dir={} permission_ref={} missing_reason={} recommended_write_strategy={} create_parent_directory={} write_target_file={} summary={}",
         reference,
@@ -769,7 +820,8 @@ fn has_verified_artifact_for_path(frame: &StateFrame, path: &str) -> bool {
         if candidate == path {
             return true;
         }
-        frame.stage_execution_contract
+        frame
+            .stage_execution_contract
             .verification_by_target_path(path)
             .and_then(|verification| {
                 frame
@@ -972,6 +1024,35 @@ fn missing_verification_evidence_refs(frame: &StateFrame) -> Vec<String> {
         .collect()
 }
 
+fn missing_source_evidence_targets(frame: &StateFrame, evidence_refs: &[String]) -> Vec<String> {
+    if !source_evidence_gate_enabled(frame) {
+        return Vec::new();
+    }
+    frame
+        .stage_execution_contract
+        .content_evidence_targets
+        .iter()
+        .filter(|target| {
+            let required_anchor = format!("read:{target}");
+            !evidence_refs
+                .iter()
+                .any(|evidence_ref| evidence_ref == &required_anchor)
+        })
+        .cloned()
+        .collect()
+}
+
+fn source_evidence_gate_enabled(frame: &StateFrame) -> bool {
+    !frame
+        .stage_execution_contract
+        .content_evidence_targets
+        .is_empty()
+        && (!frame.stage_execution_contract.declared_artifacts.is_empty()
+            || !frame.stage_execution_contract.verifications.is_empty()
+            || completion_contract_requirement(frame, "artifact_evidence")
+            || completion_contract_requirement(frame, "verification_evidence"))
+}
+
 fn recommended_action_for_gap(
     missing_artifact_evidence: bool,
     missing_test_evidence: bool,
@@ -989,9 +1070,18 @@ fn recommended_action_for_gap(
 }
 
 fn collect_completion_evidence_gaps(frame: &StateFrame) -> Vec<CompletionEvidenceGap> {
+    let evidence_refs = collect_evidence_refs(frame, None);
+    collect_completion_evidence_gaps_with_refs(frame, &evidence_refs)
+}
+
+fn collect_completion_evidence_gaps_with_refs(
+    frame: &StateFrame,
+    evidence_refs: &[String],
+) -> Vec<CompletionEvidenceGap> {
     let missing_artifact_refs = missing_artifact_evidence_refs(frame);
     let missing_test_refs = missing_test_evidence_refs(frame);
     let missing_verification_refs = missing_verification_evidence_refs(frame);
+    let missing_source_targets = missing_source_evidence_targets(frame, evidence_refs);
     let mut ordered_refs: Vec<String> = Vec::new();
     for ref_id in missing_artifact_refs
         .iter()
@@ -1026,13 +1116,23 @@ fn collect_completion_evidence_gaps(frame: &StateFrame) -> Vec<CompletionEvidenc
                 ),
             }
         })
+        .chain(
+            missing_source_targets
+                .into_iter()
+                .map(|target_path| CompletionEvidenceGap {
+                    target_ref: format!("content_evidence:{target_path}"),
+                    target_path: Some(target_path),
+                    missing_artifact_evidence: false,
+                    missing_test_evidence: false,
+                    missing_verification_evidence: true,
+                    recommended_action: "read_source_evidence".into(),
+                }),
+        )
         .collect()
 }
 
-fn evaluate_completion_evidence(
-    frame: &StateFrame,
-    usage: &LoopUsage,
-) -> CompletionEvidenceStatus {
+fn evaluate_completion_evidence(frame: &StateFrame, usage: &LoopUsage) -> CompletionEvidenceStatus {
+    let evidence_refs = collect_evidence_refs(frame, Some(usage));
     if completion_contract_requirement(frame, "artifact_evidence")
         && !missing_artifact_evidence_refs(frame).is_empty()
     {
@@ -1043,10 +1143,12 @@ fn evaluate_completion_evidence(
     {
         return CompletionEvidenceStatus::MissingTestEvidence;
     }
+    if !missing_source_evidence_targets(frame, &evidence_refs).is_empty() {
+        return CompletionEvidenceStatus::MissingVerificationEvidence;
+    }
     if completion_contract_requirement(frame, "verification_evidence")
         && !missing_verification_evidence_refs(frame).is_empty()
     {
-        let evidence_refs = collect_evidence_refs(frame, Some(usage));
         if worker_has_target_scoped_verification_anchor(frame, &evidence_refs)
             || verification_read_anchor_closed(frame, &evidence_refs)
         {
@@ -1086,10 +1188,7 @@ fn inject_completion_gate_block(frame: &mut StateFrame, block: &CompletionGateBl
             .iter()
             .find_map(|missing_ref| infer_artifact_repair_turn(frame, missing_ref, &block.reason))
         {
-            push_unique(
-                &mut frame.open_items,
-                repair_turn_open_item(&repair_turn),
-            );
+            push_unique(&mut frame.open_items, repair_turn_open_item(&repair_turn));
             push_unique(
                 &mut frame.recent_evidence,
                 repair_turn_fact_line(
@@ -1149,10 +1248,33 @@ fn enforce_completion_gate(
             missing_test_evidence_refs(frame),
         ),
         CompletionEvidenceStatus::MissingVerificationEvidence => (
-            "verify_artifact".to_string(),
-            "completion gate blocked done because required verification evidence is missing"
-                .to_string(),
-            missing_verification_evidence_refs(frame),
+            {
+                let evidence_refs = collect_evidence_refs(frame, Some(usage));
+                if missing_source_evidence_targets(frame, &evidence_refs).is_empty() {
+                    "verify_artifact".to_string()
+                } else {
+                    "read_source_evidence".to_string()
+                }
+            },
+            {
+                let evidence_refs = collect_evidence_refs(frame, Some(usage));
+                if missing_source_evidence_targets(frame, &evidence_refs).is_empty() {
+                    "completion gate blocked done because required verification evidence is missing"
+                        .to_string()
+                } else {
+                    "completion gate blocked done because required source evidence has not been read"
+                        .to_string()
+                }
+            },
+            {
+                let evidence_refs = collect_evidence_refs(frame, Some(usage));
+                let source_targets = missing_source_evidence_targets(frame, &evidence_refs);
+                if source_targets.is_empty() {
+                    missing_verification_evidence_refs(frame)
+                } else {
+                    source_targets
+                }
+            },
         ),
         CompletionEvidenceStatus::Sufficient => unreachable!(),
     };
@@ -1180,7 +1302,9 @@ fn verification_only_completion_gate_block(frame: &StateFrame) -> Option<Complet
     Some(CompletionGateBlock {
         status: CompletionEvidenceStatus::MissingVerificationEvidence,
         required_action: "verify_artifact".into(),
-        reason: "artifact repair recovered; remaining verification evidence requires short re-verify".into(),
+        reason:
+            "artifact repair recovered; remaining verification evidence requires short re-verify"
+                .into(),
         missing_evidence_refs,
     })
 }
@@ -1252,17 +1376,17 @@ fn build_worker_structured_report(
     } else {
         completion
     };
-    let mut completion_evidence_gaps = collect_completion_evidence_gaps(frame);
+    let mut completion_evidence_gaps =
+        collect_completion_evidence_gaps_with_refs(frame, &evidence_refs);
     if matches!(completion, CompletionEvidenceStatus::Sufficient) && read_anchor_closed {
         completion_evidence_gaps.retain(|gap| !gap.missing_verification_evidence);
     }
-    let verification_status = if matches!(completion, CompletionEvidenceStatus::Sufficient)
-        && read_anchor_closed
-    {
-        "verified".into()
-    } else {
-        summarize_verification_status(frame)
-    };
+    let verification_status =
+        if matches!(completion, CompletionEvidenceStatus::Sufficient) && read_anchor_closed {
+            "verified".into()
+        } else {
+            summarize_verification_status(frame)
+        };
     WorkerStructuredReport {
         worker_state: frame.state,
         last_tool_action: usage.last_effective_tool_action.clone(),
@@ -1296,10 +1420,7 @@ fn verify_terminal_diagnostics_enabled() -> bool {
         .unwrap_or(false)
 }
 
-fn verification_terminal_outcome(
-    frame: &StateFrame,
-    usage: &mut LoopUsage,
-) -> Option<LoopOutcome> {
+fn verification_terminal_outcome(frame: &StateFrame, usage: &mut LoopUsage) -> Option<LoopOutcome> {
     if !completion_contract_requirement(frame, "verification_evidence") {
         return None;
     }
@@ -1325,10 +1446,9 @@ fn verification_terminal_outcome(
         .last_effective_tool_action
         .as_deref()
         .unwrap_or("none");
-    let read_short_circuit_candidate =
-        has_target_read_anchor && (verification_status == "verified" || last_effective_tool_action == "Read");
-    if read_short_circuit_candidate
-    {
+    let read_short_circuit_candidate = has_target_read_anchor
+        && (verification_status == "verified" || last_effective_tool_action == "Read");
+    if read_short_circuit_candidate {
         if verify_terminal_diagnostics_enabled() {
             eprintln!(
                 "verify_terminal_outcome: done state={:?} last_effective_tool_action={} has_target_read_anchor={} verification_status={} evidence_refs={}",
@@ -1365,9 +1485,10 @@ fn verification_terminal_outcome(
         });
     }
 
-    let attempted_target_scoped_verification =
-        matches!(usage.last_effective_tool_action.as_deref(), Some("ArtifactVerify"))
-            && usage.last_failure_outcome.is_none();
+    let attempted_target_scoped_verification = matches!(
+        usage.last_effective_tool_action.as_deref(),
+        Some("ArtifactVerify")
+    ) && usage.last_failure_outcome.is_none();
     if attempted_target_scoped_verification
         && matches!(
             completion,
@@ -1531,16 +1652,16 @@ fn inject_missing_path_recovery_gate(frame: &mut StateFrame, usage: &mut LoopUsa
         return false;
     };
     let mut changed = false;
-    changed |= push_unique(
-        &mut frame.open_items,
-        repair_turn_open_item(&repair_turn),
-    );
+    changed |= push_unique(&mut frame.open_items, repair_turn_open_item(&repair_turn));
     changed |= push_unique(
         &mut frame.recent_evidence,
         repair_turn_fact_line(
             &repair_turn,
             "repair:missing_path",
-            format!("missing path recovery required for {}", repair_turn.target_path),
+            format!(
+                "missing path recovery required for {}",
+                repair_turn.target_path
+            ),
         ),
     );
     if changed {
@@ -1594,7 +1715,8 @@ fn inject_request_context_recovery_gate(frame: &mut StateFrame, usage: &mut Loop
     if usage.hydration_ref_missing > 0 || usage.hydration_miss_no_match_count > 0 {
         let changed = push_unique(
             &mut frame.recent_evidence,
-            "recovery_gate: source=request_context outcome=context_unavailable classified=no_match".into(),
+            "recovery_gate: source=request_context outcome=context_unavailable classified=no_match"
+                .into(),
         );
         if changed {
             usage.recovery_attempted = true;
@@ -1719,37 +1841,53 @@ fn activate_recent_local_history_fallback(frame: &mut StateFrame, requested: &[S
 }
 
 fn requested_selector_has_contract_gap(frame: &StateFrame, requested: &[String]) -> bool {
-    requested.iter().any(|raw| match parse_needed_context_selector(raw) {
-        NeededContextSelector::ArtifactRef { query } => query
-            .as_deref()
-            .map(|q| {
-                frame.stage_execution_contract.declared_artifact_by_ref(q).is_some()
-                    || frame.stage_execution_contract.declared_artifact_by_path(q).is_some()
-                    || frame.stage_execution_contract.verification_by_target_ref(q).is_some()
-                    || frame.stage_execution_contract.verification_by_target_path(q).is_some()
-            })
-            .unwrap_or(!frame.stage_execution_contract.declared_artifacts.is_empty()),
-        NeededContextSelector::Artifact { path } => path
-            .as_deref()
-            .map(|p| {
-                frame.stage_execution_contract.declared_artifact_by_path(
-                    p.trim().trim_end_matches(":exists_confirmation"),
-                )
-                .is_some()
-                    || frame
+    requested
+        .iter()
+        .any(|raw| match parse_needed_context_selector(raw) {
+            NeededContextSelector::ArtifactRef { query } => query
+                .as_deref()
+                .map(|q| {
+                    frame
                         .stage_execution_contract
-                        .verification_by_target_path(
+                        .declared_artifact_by_ref(q)
+                        .is_some()
+                        || frame
+                            .stage_execution_contract
+                            .declared_artifact_by_path(q)
+                            .is_some()
+                        || frame
+                            .stage_execution_contract
+                            .verification_by_target_ref(q)
+                            .is_some()
+                        || frame
+                            .stage_execution_contract
+                            .verification_by_target_path(q)
+                            .is_some()
+                })
+                .unwrap_or(!frame.stage_execution_contract.declared_artifacts.is_empty()),
+            NeededContextSelector::Artifact { path } => path
+                .as_deref()
+                .map(|p| {
+                    frame
+                        .stage_execution_contract
+                        .declared_artifact_by_path(
                             p.trim().trim_end_matches(":exists_confirmation"),
                         )
                         .is_some()
-            })
-            .unwrap_or(!frame.stage_execution_contract.declared_artifacts.is_empty()),
-        NeededContextSelector::TestFailure { query } => query
-            .as_deref()
-            .map(|q| frame.stage_execution_contract.test_by_name(q).is_some())
-            .unwrap_or(!frame.stage_execution_contract.tests.is_empty()),
-        _ => false,
-    })
+                        || frame
+                            .stage_execution_contract
+                            .verification_by_target_path(
+                                p.trim().trim_end_matches(":exists_confirmation"),
+                            )
+                            .is_some()
+                })
+                .unwrap_or(!frame.stage_execution_contract.declared_artifacts.is_empty()),
+            NeededContextSelector::TestFailure { query } => query
+                .as_deref()
+                .map(|q| frame.stage_execution_contract.test_by_name(q).is_some())
+                .unwrap_or(!frame.stage_execution_contract.tests.is_empty()),
+            _ => false,
+        })
 }
 
 fn activate_full_context_fallback(frame: &mut StateFrame, requested: &[String]) -> bool {
@@ -2744,9 +2882,8 @@ fn push_tool_failure_feedback(
             }
             if has_create_permission_for_path(frame, &path) {
                 if std::path::Path::new(&path).extension().is_some() {
-                    feedback_tail.push_str(
-                        " recovery_hint=create_parent_directory_and_write_target_file",
-                    );
+                    feedback_tail
+                        .push_str(" recovery_hint=create_parent_directory_and_write_target_file");
                 } else {
                     feedback_tail.push_str(" recovery_hint=create_directory_then_write_files");
                 }
@@ -2912,8 +3049,10 @@ pub async fn run_decision_loop_with_tools(
                 let mut last_repair = first_repair;
                 let mut resolved = None;
                 for _attempt in 0..config.repair_budget {
-                    let repair_prompt =
-                        build_state_decision_repair_prompt(&last_repair.reason, &last_repair.raw_json);
+                    let repair_prompt = build_state_decision_repair_prompt(
+                        &last_repair.reason,
+                        &last_repair.raw_json,
+                    );
                     let repair_prompt_chars = repair_prompt.chars().count();
                     total_usage.original_prompt_chars += repair_prompt_chars;
                     total_usage.sent_prompt_chars += repair_prompt_chars;
@@ -3033,17 +3172,14 @@ pub async fn run_decision_loop_with_tools(
             DecisionKind::RequestContext => {
                 let mut summary = hydrate_needed_context(&mut frame, &decision.needed_context);
                 total_usage.hydration_count += summary.hydrated.len();
-                total_usage.hydration_from_contract_count +=
-                    summary.hydration_from_contract_count;
+                total_usage.hydration_from_contract_count += summary.hydration_from_contract_count;
                 total_usage.hydration_from_ledger_count += summary.hydration_from_ledger_count;
                 total_usage.stale_ref_count += summary.stale.len();
                 total_usage.hydration_ref_missing += summary.unavailable.len();
                 total_usage.hydration_miss_unsupported_count +=
                     summary.hydration_miss_unsupported_count;
-                total_usage.hydration_miss_stale_count +=
-                    summary.hydration_miss_stale_count;
-                total_usage.hydration_miss_no_match_count +=
-                    summary.hydration_miss_no_match_count;
+                total_usage.hydration_miss_stale_count += summary.hydration_miss_stale_count;
+                total_usage.hydration_miss_no_match_count += summary.hydration_miss_no_match_count;
                 frame.state = decision.state;
                 if summary.hydrated.is_empty() {
                     if let Some(file_path) = tool_backed_hydration_path(&decision.needed_context) {
@@ -3312,15 +3448,15 @@ mod tests {
     use crate::core::state_frame_hydration::hydrate_needed_context;
     use crate::service::api::client::ModelProviderClient;
     use crate::service::api::streaming::{ProviderFailureDisposition, StreamError, StreamEvent};
-    use crate::tool::definition::{ObservableInput, ObservableInputSource};
-    use crate::tool::result::{ToolBatchContext, ToolExecutionOutcomeKind, ToolExecutionRecord};
     use crate::state::permission_context::{PermissionMode, ToolPermissionContext};
     use crate::tool::builtin::bash::BashTool;
     use crate::tool::builtin::file_edit::FileEditTool;
     use crate::tool::builtin::file_read::FileReadTool;
+    use crate::tool::definition::{ObservableInput, ObservableInputSource};
     use crate::tool::definition::{Tool, ToolCall, ToolMetadata, ToolResult};
     use crate::tool::orchestrator::build_execution_record;
     use crate::tool::registry::ToolRegistry;
+    use crate::tool::result::{ToolBatchContext, ToolExecutionOutcomeKind, ToolExecutionRecord};
     use crate::tool::result::{ToolOutcome, ToolOutcomeKind};
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -3441,8 +3577,7 @@ mod tests {
                 && item.contains("allowed_actions=read_file|edit_file")
         }));
         assert!(frame.recent_evidence.iter().any(|item| {
-            item.contains("fact: increase_max_tool_calls")
-                && item.contains("status=not_needed")
+            item.contains("fact: increase_max_tool_calls") && item.contains("status=not_needed")
         }));
     }
 
@@ -3644,11 +3779,7 @@ mod tests {
                     path: path.to_string(),
                     kind: kind.to_string(),
                     required_actions: vec!["create".into(), "write".into()],
-                    required_evidence: vec![
-                        ref_id.to_string(),
-                        path.to_string(),
-                        kind.to_string(),
-                    ],
+                    required_evidence: vec![ref_id.to_string(), path.to_string(), kind.to_string()],
                 });
         }
         for verification in frame.stage_execution_contract.verifications.iter_mut() {
@@ -3713,8 +3844,7 @@ mod tests {
     #[test]
     fn ledger_fallback_only_happens_after_contract_miss() {
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let request_json =
-            r#"{"state":"executing","decision":"request_context","needed_context":["review_ref:review:step1:runtime:0"]}"#;
+        let request_json = r#"{"state":"executing","decision":"request_context","needed_context":["review_ref:review:step1:runtime:0"]}"#;
         let done_json = r#"{"state":"done","decision":"done"}"#;
         let client = ModelProviderClient::with_scripted_turns(vec![
             vec![StreamEvent::TextDelta(request_json.into())],
@@ -4125,23 +4255,28 @@ mod tests {
     #[test]
     fn broad_discovery_tool_is_rejected_when_declared_target_already_exists() {
         let mut frame = make_frame();
-        frame.stage_execution_contract.declared_artifacts.push(DeclaredArtifactContract {
-            ref_id: "artifact:demo".into(),
-            path: "src/demo.rs".into(),
-            kind: "file".into(),
-            required_actions: vec!["write_artifact".into()],
-            required_evidence: vec!["artifact_evidence".into()],
-        });
+        frame
+            .stage_execution_contract
+            .declared_artifacts
+            .push(DeclaredArtifactContract {
+                ref_id: "artifact:demo".into(),
+                path: "src/demo.rs".into(),
+                kind: "file".into(),
+                required_actions: vec!["write_artifact".into()],
+                required_evidence: vec!["artifact_evidence".into()],
+            });
         let decision_json = r#"{"state":"executing","decision":"call_tool","next_action":{"action_type":"Glob","args":{"pattern":"src/**/*.rs"}}}"#;
         let err = parse_and_validate_decision(&frame, decision_json)
             .expect_err("broad discovery should be rejected when target path is already declared");
         assert!(
-            err.reason.contains("broad discovery tool Glob is not allowed"),
+            err.reason
+                .contains("broad discovery tool Glob is not allowed"),
             "expected broad discovery guard, got {}",
             err.reason
         );
         assert!(
-            err.reason.contains("request_context:file_snippet:src/demo.rs")
+            err.reason
+                .contains("request_context:file_snippet:src/demo.rs")
                 || err.reason.contains("narrow Read on that exact path"),
             "expected direct-path repair hint, got {}",
             err.reason
@@ -4293,7 +4428,10 @@ mod tests {
         )
         .expect("headless repair wrapper should normalize");
         assert_eq!(decision.state, AgentState::Correcting);
-        assert_eq!(decision.decision, crate::core::state_frame::DecisionKind::CallTool);
+        assert_eq!(
+            decision.decision,
+            crate::core::state_frame::DecisionKind::CallTool
+        );
     }
 
     #[test]
@@ -4344,7 +4482,9 @@ mod tests {
             recommended_next_action: "create_parent_directory_and_write_target_file".into(),
             target_path: Some(target_path.into()),
         });
-        assert!(super::inject_missing_path_recovery_gate(&mut frame, &mut usage));
+        assert!(super::inject_missing_path_recovery_gate(
+            &mut frame, &mut usage
+        ));
         let repair_line = frame
             .recent_evidence
             .iter()
@@ -4353,9 +4493,11 @@ mod tests {
         assert!(repair_line.contains("target_path=/tmp/headless-repair/report.md"));
         assert!(repair_line.contains("create_parent_directory=true"));
         assert!(repair_line.contains("write_target_file=true"));
-        assert!(repair_line.contains(
-            "recommended_write_strategy=create_parent_directory_and_write_target_file"
-        ));
+        assert!(
+            repair_line.contains(
+                "recommended_write_strategy=create_parent_directory_and_write_target_file"
+            )
+        );
     }
 
     #[test]
@@ -4429,8 +4571,7 @@ mod tests {
     fn request_context_no_progress_can_inject_missing_path_recovery_gate() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let target = "/tmp/recovery-gate-report.md";
-        let request_json =
-            r#"{"state":"executing","decision":"request_context","needed_context":["symbol:MissingSymbol"]}"#;
+        let request_json = r#"{"state":"executing","decision":"request_context","needed_context":["symbol:MissingSymbol"]}"#;
         let done_json = r#"{"state":"done","decision":"done"}"#;
         let client = ModelProviderClient::with_scripted_turns(vec![
             vec![StreamEvent::TextDelta(request_json.into())],
@@ -4454,12 +4595,17 @@ mod tests {
         match outcome {
             LoopOutcome::RepairExhausted { usage, .. } => {
                 assert_eq!(usage.recovery_tier.as_deref(), Some("artifact_repair_turn"));
-                assert_eq!(usage.recovery_outcome.as_deref(), Some("repair_turn_injected"));
+                assert_eq!(
+                    usage.recovery_outcome.as_deref(),
+                    Some("repair_turn_injected")
+                );
                 let report = usage.worker_report.expect("worker report");
-                assert!(report
-                    .remaining_risks
-                    .iter()
-                    .any(|item| item.contains("repair_turn:artifact_missing")));
+                assert!(
+                    report
+                        .remaining_risks
+                        .iter()
+                        .any(|item| item.contains("repair_turn:artifact_missing"))
+                );
             }
             other => panic!("expected RepairExhausted, got {other:?}"),
         }
@@ -4468,8 +4614,7 @@ mod tests {
     #[test]
     fn verification_failure_enters_repair_instead_of_terminal_fail() {
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let request_json =
-            r#"{"state":"executing","decision":"request_context","needed_context":["symbol:MissingSymbol"]}"#;
+        let request_json = r#"{"state":"executing","decision":"request_context","needed_context":["symbol:MissingSymbol"]}"#;
         let done_json = r#"{"state":"done","decision":"done"}"#;
         let client = ModelProviderClient::with_scripted_turns(vec![
             vec![StreamEvent::TextDelta(request_json.into())],
@@ -4491,11 +4636,17 @@ mod tests {
         match outcome {
             LoopOutcome::RepairExhausted { usage, .. } => {
                 assert_eq!(
-                    usage.completion_evidence_status.as_ref().map(|s| s.as_str()),
+                    usage
+                        .completion_evidence_status
+                        .as_ref()
+                        .map(|s| s.as_str()),
                     Some("missing_verification_evidence")
                 );
                 assert_eq!(usage.recovery_tier.as_deref(), Some("artifact_repair_turn"));
-                assert_eq!(usage.recovery_outcome.as_deref(), Some("repair_turn_injected"));
+                assert_eq!(
+                    usage.recovery_outcome.as_deref(),
+                    Some("repair_turn_injected")
+                );
             }
             other => panic!("expected RepairExhausted, got {other:?}"),
         }
@@ -4739,14 +4890,18 @@ mod tests {
             CompletionEvidenceStatus::MissingVerificationEvidence,
         );
 
-        assert!(report
-            .evidence_refs
-            .iter()
-            .any(|reference| reference.contains("/tmp/report.md")));
-        assert!(report
-            .evidence_refs
-            .iter()
-            .any(|reference| reference.starts_with("verification:")));
+        assert!(
+            report
+                .evidence_refs
+                .iter()
+                .any(|reference| reference.contains("/tmp/report.md"))
+        );
+        assert!(
+            report
+                .evidence_refs
+                .iter()
+                .any(|reference| reference.starts_with("verification:"))
+        );
         assert_eq!(
             report.completion_evidence_status,
             CompletionEvidenceStatus::Sufficient
@@ -4869,7 +5024,11 @@ mod tests {
             ))
             .expect("loop should not error");
         match outcome {
-            LoopOutcome::ToolDispatchFailed { last_state, reason, usage } => {
+            LoopOutcome::ToolDispatchFailed {
+                last_state,
+                reason,
+                usage,
+            } => {
                 assert_eq!(last_state, AgentState::Verifying);
                 assert!(reason.contains("verification repair continuation exhausted"));
                 assert_eq!(
@@ -4961,7 +5120,10 @@ mod tests {
         match outcome {
             LoopOutcome::Done { usage, .. } => {
                 assert_eq!(
-                    usage.completion_evidence_status.as_ref().map(|s| s.as_str()),
+                    usage
+                        .completion_evidence_status
+                        .as_ref()
+                        .map(|s| s.as_str()),
                     Some("sufficient")
                 );
             }
@@ -5038,7 +5200,10 @@ mod tests {
         match outcome {
             LoopOutcome::Done { usage, .. } => {
                 assert_eq!(
-                    usage.completion_evidence_status.as_ref().map(|s| s.as_str()),
+                    usage
+                        .completion_evidence_status
+                        .as_ref()
+                        .map(|s| s.as_str()),
                     Some("sufficient")
                 );
             }
@@ -5074,7 +5239,10 @@ mod tests {
             LoopOutcome::ToolDispatchFailed { reason, usage, .. } => {
                 assert!(reason.contains("verification evidence still missing"));
                 assert_eq!(
-                    usage.completion_evidence_status.as_ref().map(|s| s.as_str()),
+                    usage
+                        .completion_evidence_status
+                        .as_ref()
+                        .map(|s| s.as_str()),
                     Some("missing_verification_evidence")
                 );
             }
@@ -5135,9 +5303,11 @@ mod tests {
         assert!(repair_line.contains("target_path=/tmp/report.md"));
         assert!(repair_line.contains("parent_dir=/tmp"));
         assert!(repair_line.contains("permission_ref=permission:step1:0"));
-        assert!(repair_line.contains(
-            "recommended_write_strategy=create_parent_directory_and_write_target_file"
-        ));
+        assert!(
+            repair_line.contains(
+                "recommended_write_strategy=create_parent_directory_and_write_target_file"
+            )
+        );
         assert!(repair_line.contains("create_parent_directory=true"));
         assert!(repair_line.contains("write_target_file=true"));
         assert_eq!(usage.recovery_tier.as_deref(), Some("artifact_repair_turn"));
@@ -5193,6 +5363,63 @@ mod tests {
             status,
             CompletionEvidenceStatus::MissingVerificationEvidence
         );
+    }
+
+    #[test]
+    fn content_source_gap_requires_runtime_read_anchor_not_output_readback() {
+        let mut frame = make_frame();
+        frame.recent_evidence.clear();
+        frame.stage_execution_contract.content_evidence_targets = vec!["/tmp/source.md".into()];
+        push_completion_contract(&mut frame, true, false, true);
+        push_artifact_target_fact(&mut frame, "artifact:contract:0", "/tmp/report.md", "file");
+        frame.recent_evidence.push(
+            "fact: recent_changes_in_files ref=change:1 path=/tmp/report.md source=tool:Write source_event_id=tool-write:1 freshness=after-runtime confidence=1.00 status=active invalidated_by=none supersedes=none conflicts_with=none summary=updated /tmp/report.md".into(),
+        );
+        frame.recent_evidence.push(
+            "fact: verification_status ref=artifact:contract:0 path=/tmp/report.md status=verified source=tool:Read source_event_id=tool-read:1 freshness=after-runtime-read confidence=0.90 lineage_status=active invalidated_by=none supersedes=none conflicts_with=none summary=read-back verified /tmp/report.md".into(),
+        );
+        frame
+            .accepted_summary
+            .push("worker claims read:/tmp/source.md in report prose".into());
+
+        let usage = LoopUsage::default();
+        let status = evaluate_completion_evidence(&frame, &usage);
+        assert_eq!(
+            status,
+            CompletionEvidenceStatus::MissingVerificationEvidence
+        );
+        let gaps = super::collect_completion_evidence_gaps(&frame);
+        let source_gap = gaps
+            .iter()
+            .find(|gap| gap.recommended_action == "read_source_evidence")
+            .expect("source evidence gap");
+        assert_eq!(source_gap.target_path.as_deref(), Some("/tmp/source.md"));
+        assert!(source_gap.missing_verification_evidence);
+    }
+
+    #[test]
+    fn content_source_gap_clears_after_required_source_read() {
+        let mut frame = make_frame();
+        frame.recent_evidence.clear();
+        frame.stage_execution_contract.content_evidence_targets = vec!["/tmp/source.md".into()];
+        push_completion_contract(&mut frame, true, false, true);
+        push_artifact_target_fact(&mut frame, "artifact:contract:0", "/tmp/report.md", "file");
+        frame.recent_evidence.push(
+            "fact: recent_changes_in_files ref=change:1 path=/tmp/report.md source=tool:Write source_event_id=tool-write:1 freshness=after-runtime confidence=1.00 status=active invalidated_by=none supersedes=none conflicts_with=none summary=updated /tmp/report.md".into(),
+        );
+        frame.recent_evidence.push(
+            "fact: verification_status ref=artifact:contract:0 path=/tmp/report.md status=verified source=tool:Read source_event_id=tool-read:1 freshness=after-runtime-read confidence=0.90 lineage_status=active invalidated_by=none supersedes=none conflicts_with=none summary=read-back verified /tmp/report.md".into(),
+        );
+        frame.recent_evidence.push(
+            "fact: file_facts ref=filefact:runtime:1:read path=/tmp/source.md kind=read_observation source=tool:Read source_event_id=tool-read:runtime:1 freshness=after-runtime-read confidence=1.00 status=active invalidated_by=none supersedes=none conflicts_with=none fact=runtime Read succeeded for /tmp/source.md".into(),
+        );
+
+        let usage = LoopUsage::default();
+        assert_eq!(
+            evaluate_completion_evidence(&frame, &usage),
+            CompletionEvidenceStatus::Sufficient
+        );
+        assert!(super::collect_completion_evidence_gaps(&frame).is_empty());
     }
 
     #[test]
@@ -5326,7 +5553,10 @@ mod tests {
         frame.recent_evidence.push(
             "fact: verification_status ref=artifact:contract:0 path=/tmp/report.md status=verified source=tool:Read source_event_id=tool-read:1 freshness=after-runtime-read confidence=0.90 lineage_status=active invalidated_by=none supersedes=none conflicts_with=none summary=read-back verified /tmp/report.md".into(),
         );
-        assert!(super::has_verified_artifact_for_path(&frame, "/tmp/report.md"));
+        assert!(super::has_verified_artifact_for_path(
+            &frame,
+            "/tmp/report.md"
+        ));
         assert!(super::has_explicit_verification_fact(
             &frame,
             "artifact:contract:0"
@@ -5400,7 +5630,11 @@ mod tests {
         };
 
         let evidence_refs = super::collect_evidence_refs(&frame, Some(&usage));
-        assert!(evidence_refs.iter().any(|reference| reference == "read:/tmp/report.md"));
+        assert!(
+            evidence_refs
+                .iter()
+                .any(|reference| reference == "read:/tmp/report.md")
+        );
         assert!(super::worker_has_target_scoped_read_anchor(
             &frame,
             &evidence_refs
@@ -5426,7 +5660,11 @@ mod tests {
         );
 
         let evidence_refs = super::collect_evidence_refs(&frame, None);
-        assert!(evidence_refs.iter().any(|reference| reference == "read:/tmp/report.md"));
+        assert!(
+            evidence_refs
+                .iter()
+                .any(|reference| reference == "read:/tmp/report.md")
+        );
         assert!(super::worker_has_target_scoped_read_anchor(
             &frame,
             &evidence_refs
@@ -5479,12 +5717,17 @@ mod tests {
         match outcome {
             LoopOutcome::Done { usage, .. } => {
                 let report = usage.worker_report.expect("worker report");
-                assert_eq!(report.completion_evidence_status, CompletionEvidenceStatus::Sufficient);
+                assert_eq!(
+                    report.completion_evidence_status,
+                    CompletionEvidenceStatus::Sufficient
+                );
                 assert_eq!(report.verification_status, "verified");
-                assert!(report
-                    .evidence_refs
-                    .iter()
-                    .any(|reference| reference == "read:/tmp/report.md"));
+                assert!(
+                    report
+                        .evidence_refs
+                        .iter()
+                        .any(|reference| reference == "read:/tmp/report.md")
+                );
             }
             other => panic!("expected Done, got {other:?}"),
         }
@@ -5492,7 +5735,7 @@ mod tests {
 
     #[test]
     fn verification_terminal_outcome_closes_after_successful_target_read_even_if_state_stays_executing()
-    {
+     {
         let mut frame = make_frame();
         frame.state = AgentState::Executing;
         frame.recent_evidence.clear();
@@ -5523,12 +5766,17 @@ mod tests {
         match outcome {
             LoopOutcome::Done { usage, .. } => {
                 let report = usage.worker_report.expect("worker report");
-                assert_eq!(report.completion_evidence_status, CompletionEvidenceStatus::Sufficient);
+                assert_eq!(
+                    report.completion_evidence_status,
+                    CompletionEvidenceStatus::Sufficient
+                );
                 assert_eq!(report.verification_status, "verified");
-                assert!(report
-                    .evidence_refs
-                    .iter()
-                    .any(|reference| reference == "read:/tmp/report.md"));
+                assert!(
+                    report
+                        .evidence_refs
+                        .iter()
+                        .any(|reference| reference == "read:/tmp/report.md")
+                );
             }
             other => panic!("expected Done, got {other:?}"),
         }
@@ -5536,7 +5784,7 @@ mod tests {
 
     #[test]
     fn verification_terminal_outcome_closes_on_target_read_anchor_without_explicit_verification_fact()
-    {
+     {
         let mut frame = make_frame();
         frame.state = AgentState::Executing;
         frame.recent_evidence.clear();
@@ -5562,17 +5810,23 @@ mod tests {
             ..LoopUsage::default()
         };
 
-        let outcome = super::verification_terminal_outcome(&frame, &mut usage)
-            .expect("target-scoped read anchor should close verification without extra verified fact");
+        let outcome = super::verification_terminal_outcome(&frame, &mut usage).expect(
+            "target-scoped read anchor should close verification without extra verified fact",
+        );
         match outcome {
             LoopOutcome::Done { usage, .. } => {
                 let report = usage.worker_report.expect("worker report");
-                assert_eq!(report.completion_evidence_status, CompletionEvidenceStatus::Sufficient);
+                assert_eq!(
+                    report.completion_evidence_status,
+                    CompletionEvidenceStatus::Sufficient
+                );
                 assert_eq!(report.verification_status, "verified");
-                assert!(report
-                    .evidence_refs
-                    .iter()
-                    .any(|reference| reference == "read:/tmp/report.md"));
+                assert!(
+                    report
+                        .evidence_refs
+                        .iter()
+                        .any(|reference| reference == "read:/tmp/report.md")
+                );
             }
             other => panic!("expected Done, got {other:?}"),
         }
@@ -5669,14 +5923,20 @@ mod tests {
 
         assert_eq!(frame.state, AgentState::Verifying);
         assert_eq!(
-            usage.completion_evidence_status.as_ref().map(|s| s.as_str()),
+            usage
+                .completion_evidence_status
+                .as_ref()
+                .map(|s| s.as_str()),
             Some("missing_verification_evidence")
         );
         assert_eq!(
             usage.recovery_tier.as_deref(),
             Some("verification_repair_continuation")
         );
-        assert_eq!(usage.recovery_outcome.as_deref(), Some("repair_turn_injected"));
+        assert_eq!(
+            usage.recovery_outcome.as_deref(),
+            Some("repair_turn_injected")
+        );
         assert!(
             frame
                 .open_items
@@ -5719,11 +5979,18 @@ mod tests {
             .expect("loop should not error");
 
         match outcome {
-            LoopOutcome::ToolDispatchFailed { last_state, reason, usage } => {
+            LoopOutcome::ToolDispatchFailed {
+                last_state,
+                reason,
+                usage,
+            } => {
                 assert_eq!(last_state, AgentState::Verifying);
                 assert!(reason.contains("verification repair continuation exhausted"));
                 assert_eq!(
-                    usage.completion_evidence_status.as_ref().map(|s| s.as_str()),
+                    usage
+                        .completion_evidence_status
+                        .as_ref()
+                        .map(|s| s.as_str()),
                     Some("missing_verification_evidence")
                 );
                 assert_eq!(
@@ -5759,9 +6026,12 @@ mod tests {
             report.completion_evidence_status.as_str(),
             "missing_verification_evidence"
         );
-        assert!(report.completion_evidence_gaps.iter().all(|gap| {
-            !gap.missing_artifact_evidence && gap.missing_verification_evidence
-        }));
+        assert!(
+            report
+                .completion_evidence_gaps
+                .iter()
+                .all(|gap| { !gap.missing_artifact_evidence && gap.missing_verification_evidence })
+        );
         assert!(report.completion_evidence_gaps.iter().any(|gap| {
             gap.target_path.as_deref() == Some("/tmp/example-site/README.md")
                 && gap.recommended_action == "verify_artifact"
@@ -5786,14 +6056,21 @@ mod tests {
             .expect("loop should not error");
 
         match outcome {
-            LoopOutcome::ToolDispatchFailed { last_state, reason, usage } => {
+            LoopOutcome::ToolDispatchFailed {
+                last_state,
+                reason,
+                usage,
+            } => {
                 assert_eq!(last_state, AgentState::Verifying);
                 assert!(reason.contains("verification repair continuation exhausted"));
                 assert_eq!(
                     usage.recovery_tier.as_deref(),
                     Some("verification_repair_continuation")
                 );
-                assert_eq!(usage.recovery_outcome.as_deref(), Some("repair_turn_injected"));
+                assert_eq!(
+                    usage.recovery_outcome.as_deref(),
+                    Some("repair_turn_injected")
+                );
             }
             other => panic!("expected ToolDispatchFailed, got {other:?}"),
         }
@@ -5819,12 +6096,7 @@ mod tests {
     fn directory_target_evidence_is_not_evaluated_as_file_only_evidence() {
         let mut frame = make_frame();
         frame.recent_evidence.clear();
-        push_completion_contract_with_refs(
-            &mut frame,
-            &["artifact:contract:dir"],
-            &[],
-            &[],
-        );
+        push_completion_contract_with_refs(&mut frame, &["artifact:contract:dir"], &[], &[]);
         push_artifact_target_fact(
             &mut frame,
             "artifact:contract:dir",

@@ -592,7 +592,10 @@ fn classify_request_transport_error(error: reqwest::Error) -> ApiError {
 }
 
 fn classify_response_body_error(error: reqwest::Error) -> ApiError {
-    let message = format!("failed reading provider stream: {}", format_error_chain(&error));
+    let message = format!(
+        "failed reading provider stream: {}",
+        format_error_chain(&error)
+    );
     if error.is_timeout() {
         ApiError::timeout(message)
     } else if is_connection_reset_error(&error) {

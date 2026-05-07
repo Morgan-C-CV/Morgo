@@ -101,7 +101,6 @@ fn build_command(plan: SandboxExecutionPlan, command: &str, cwd: &Path) -> Comma
             process.arg("-lc").arg(command);
             process
         }
-
     };
 
     process

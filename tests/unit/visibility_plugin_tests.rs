@@ -44,8 +44,8 @@ use rust_agent::state::permission_context::{PermissionMode, ToolPermissionContex
 use rust_agent::task::manager::TaskManager;
 use rust_agent::tool::definition::{ToolCall, ToolResult};
 use rust_agent::tool::registry::ToolRegistry;
-use tokio::time::{Duration, timeout};
 use tokio::sync::RwLock;
+use tokio::time::{Duration, timeout};
 
 fn unique_temp_path(prefix: &str) -> PathBuf {
     let nanos = SystemTime::now()

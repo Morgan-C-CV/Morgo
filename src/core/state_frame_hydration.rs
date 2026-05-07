@@ -968,9 +968,11 @@ fn hydrate_selector(
         ),
         NeededContextSelector::Artifact { path } => {
             let path = path.as_deref().map(artifact_lookup_query);
-            if let Some(contract_artifact) = contract_index.artifacts.iter().find(|item| {
-                path.map(|p| item.path == p).unwrap_or(true)
-            }) {
+            if let Some(contract_artifact) = contract_index
+                .artifacts
+                .iter()
+                .find(|item| path.map(|p| item.path == p).unwrap_or(true))
+            {
                 let contract_match = resolve_fact_match(
                     index,
                     "artifact_status",
@@ -1012,11 +1014,7 @@ fn hydrate_selector(
                 } else {
                     "latest_artifact"
                 },
-                |item| {
-                    path
-                        .map(|p| field_eq(item, "path", p))
-                        .unwrap_or(true)
-                },
+                |item| path.map(|p| field_eq(item, "path", p)).unwrap_or(true),
             );
             match artifact_resolution {
                 SelectorResolution::Unavailable { .. } => match resolve_fact_match(
@@ -1030,11 +1028,7 @@ fn hydrate_selector(
                     } else {
                         "latest_change"
                     },
-                    |item| {
-                        path
-                            .map(|p| field_eq(item, "path", p))
-                            .unwrap_or(true)
-                    },
+                    |item| path.map(|p| field_eq(item, "path", p)).unwrap_or(true),
                 ) {
                     SelectorResolution::Unavailable { .. } => match resolve_fact_match(
                         index,
@@ -1047,11 +1041,7 @@ fn hydrate_selector(
                         } else {
                             "latest_file_fact"
                         },
-                        |item| {
-                            path
-                                .map(|p| field_eq(item, "path", p))
-                                .unwrap_or(true)
-                        },
+                        |item| path.map(|p| field_eq(item, "path", p)).unwrap_or(true),
                     ) {
                         SelectorResolution::Unavailable { .. } => SelectorResolution::Unavailable {
                             line: format_unavailable_line(selector, "no_match", "typed_index"),
@@ -1215,19 +1205,25 @@ mod tests {
     fn make_contract_frame() -> StateFrame {
         let mut frame = make_frame();
         frame.objective = "generic objective".into();
-        frame.stage_execution_contract.declared_artifacts = vec![crate::core::state_frame::DeclaredArtifactContract {
-            ref_id: "artifact:declared:0".into(),
-            path: "/tmp/declared.txt".into(),
-            kind: "file".into(),
-            required_actions: vec!["create".into(), "write".into()],
-            required_evidence: vec!["artifact:declared:0".into(), "/tmp/declared.txt".into(), "file".into()],
-        }];
-        frame.stage_execution_contract.verifications = vec![crate::core::state_frame::VerificationContract {
-            target_ref: "artifact:declared:0".into(),
-            target_path: Some("/tmp/declared.txt".into()),
-            required_actions: vec!["verify".into()],
-            required_evidence: vec!["artifact:declared:0".into(), "/tmp/declared.txt".into()],
-        }];
+        frame.stage_execution_contract.declared_artifacts =
+            vec![crate::core::state_frame::DeclaredArtifactContract {
+                ref_id: "artifact:declared:0".into(),
+                path: "/tmp/declared.txt".into(),
+                kind: "file".into(),
+                required_actions: vec!["create".into(), "write".into()],
+                required_evidence: vec![
+                    "artifact:declared:0".into(),
+                    "/tmp/declared.txt".into(),
+                    "file".into(),
+                ],
+            }];
+        frame.stage_execution_contract.verifications =
+            vec![crate::core::state_frame::VerificationContract {
+                target_ref: "artifact:declared:0".into(),
+                target_path: Some("/tmp/declared.txt".into()),
+                required_actions: vec!["verify".into()],
+                required_evidence: vec!["artifact:declared:0".into(), "/tmp/declared.txt".into()],
+            }];
         frame.stage_execution_contract.tests = vec![crate::core::state_frame::TestContract {
             name: "cargo test -p rust_agent".into(),
             required_actions: vec!["run_test".into()],
@@ -1550,14 +1546,18 @@ mod tests {
         assert!(summary.changed);
         assert_eq!(summary.unavailable.len(), 0);
         assert_eq!(summary.hydrated.len(), 2);
-        assert!(summary
-            .hydrated
-            .iter()
-            .any(|item| item.contains("hydrated_context: fact:allow_worker_tool_calls")));
-        assert!(summary
-            .hydrated
-            .iter()
-            .any(|item| item.contains("hydrated_context: fact:increase_max_tool_calls")));
+        assert!(
+            summary
+                .hydrated
+                .iter()
+                .any(|item| item.contains("hydrated_context: fact:allow_worker_tool_calls"))
+        );
+        assert!(
+            summary
+                .hydrated
+                .iter()
+                .any(|item| item.contains("hydrated_context: fact:increase_max_tool_calls"))
+        );
     }
 
     #[test]
@@ -1640,27 +1640,25 @@ mod tests {
     #[test]
     fn legacy_artifact_status_selector_is_canonicalized_to_typed_artifact_selector() {
         let mut frame = make_contract_frame();
-        let summary = hydrate_needed_context(
-            &mut frame,
-            &["artifact_status:/tmp/declared.txt".into()],
-        );
+        let summary =
+            hydrate_needed_context(&mut frame, &["artifact_status:/tmp/declared.txt".into()]);
 
         assert!(summary.changed);
         assert!(summary.unavailable.is_empty());
         assert_eq!(summary.hydration_from_contract_count, 1);
-        assert!(summary
-            .hydrated
-            .iter()
-            .any(|item| item.contains("hydrated_context: artifact:/tmp/declared.txt")));
+        assert!(
+            summary
+                .hydrated
+                .iter()
+                .any(|item| item.contains("hydrated_context: artifact:/tmp/declared.txt"))
+        );
     }
 
     #[test]
     fn unsupported_legacy_selector_stays_explicitly_unsupported() {
         let mut frame = make_contract_frame();
-        let summary = hydrate_needed_context(
-            &mut frame,
-            &["operator_action:write_artifact".into()],
-        );
+        let summary =
+            hydrate_needed_context(&mut frame, &["operator_action:write_artifact".into()]);
 
         assert!(summary.changed);
         assert_eq!(summary.hydration_miss_unsupported_count, 1);

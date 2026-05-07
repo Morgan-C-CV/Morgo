@@ -112,11 +112,15 @@ pub struct StageExecutionContract {
 
 impl StageExecutionContract {
     pub fn declared_artifact_by_ref(&self, ref_id: &str) -> Option<&DeclaredArtifactContract> {
-        self.declared_artifacts.iter().find(|item| item.ref_id == ref_id)
+        self.declared_artifacts
+            .iter()
+            .find(|item| item.ref_id == ref_id)
     }
 
     pub fn declared_artifact_by_path(&self, path: &str) -> Option<&DeclaredArtifactContract> {
-        self.declared_artifacts.iter().find(|item| item.path == path)
+        self.declared_artifacts
+            .iter()
+            .find(|item| item.path == path)
     }
 
     pub fn verification_by_target_ref(&self, target_ref: &str) -> Option<&VerificationContract> {
@@ -462,8 +466,8 @@ fn normalize_state_decision_value(value: Value) -> Result<Value, String> {
         .get("decision")
         .and_then(Value::as_str)
         .or_else(|| nested.and_then(|m| m.get("decision").and_then(Value::as_str)));
-    let next_action_present = root.get("next_action").is_some()
-        || nested.and_then(|m| m.get("next_action")).is_some();
+    let next_action_present =
+        root.get("next_action").is_some() || nested.and_then(|m| m.get("next_action")).is_some();
     let decision = infer_decision_kind(
         decision_raw,
         Some(state),
@@ -511,7 +515,7 @@ fn normalize_state_decision_value(value: Value) -> Result<Value, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{DecisionKind, AgentState, validate_state_decision};
+    use super::{AgentState, DecisionKind, validate_state_decision};
 
     #[test]
     fn invalid_repair_json_is_normalized_into_headless_safe_continuation() {

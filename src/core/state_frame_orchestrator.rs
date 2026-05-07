@@ -116,33 +116,40 @@ fn infer_preflight_requirements_from_state_frame(frame: &StateFrame) -> ToolCont
             .iter()
             .any(|artifact| {
                 artifact.required_actions.iter().any(|action| {
-                    matches!(action.as_str(), "write_file" | "edit_file" | "create" | "write")
+                    matches!(
+                        action.as_str(),
+                        "write_file" | "edit_file" | "create" | "write"
+                    )
                 })
             });
     let requires_command_execution = !readonly_contract
-        && (frame
-            .stage_execution_contract
-            .tests
-            .iter()
-            .any(|test| test.required_actions.iter().any(|action| action == "run_command"))
-            || frame
-                .stage_execution_contract
-                .verifications
+        && (frame.stage_execution_contract.tests.iter().any(|test| {
+            test.required_actions
                 .iter()
-                .any(|verification| {
-                    verification
-                        .required_actions
-                        .iter()
-                        .any(|action| action == "run_command")
-                }));
+                .any(|action| action == "run_command")
+        }) || frame
+            .stage_execution_contract
+            .verifications
+            .iter()
+            .any(|verification| {
+                verification
+                    .required_actions
+                    .iter()
+                    .any(|action| action == "run_command")
+            }));
     let writable_probe_path = frame
         .stage_execution_contract
         .declared_artifacts
         .iter()
         .find(|artifact| {
             artifact.required_actions.iter().any(|action| {
-                matches!(action.as_str(), "write_file" | "edit_file" | "create" | "write")
-            }) && std::path::Path::new(artifact.path.as_str()).extension().is_some()
+                matches!(
+                    action.as_str(),
+                    "write_file" | "edit_file" | "create" | "write"
+                )
+            }) && std::path::Path::new(artifact.path.as_str())
+                .extension()
+                .is_some()
         })
         .map(|artifact| artifact.path.clone());
 
@@ -242,33 +249,33 @@ pub fn requires_external_tool_execution(
         && contains_external_effect_marker(&frame.objective)
 }
 
-    fn external_tool_execution_unsupported() -> StepOutcome {
-        StepOutcome::Failed {
+fn external_tool_execution_unsupported() -> StepOutcome {
+    StepOutcome::Failed {
             reason: "StateFrame direct execution cannot yet perform required filesystem or command side effects; use full worker path or wire tool dispatch before enabling LisM for this step".into(),
             failure_classification: StepFailureClassification::UnsupportedRequest,
             usage: None,
             tool_registry_snapshot: None,
             tool_contract_mismatch: None,
         }
-    }
+}
 
-    #[test]
-    fn verification_repair_continuation_with_missing_evidence_is_not_generic_failure() {
-        let usage = LoopUsage {
-            recovery_tier: Some("verification_repair_continuation".into()),
-            completion_evidence_status: Some(
-                crate::core::state_frame::CompletionEvidenceStatus::MissingVerificationEvidence,
-            ),
-            ..LoopUsage::default()
-        };
+#[test]
+fn verification_repair_continuation_with_missing_evidence_is_not_generic_failure() {
+    let usage = LoopUsage {
+        recovery_tier: Some("verification_repair_continuation".into()),
+        completion_evidence_status: Some(
+            crate::core::state_frame::CompletionEvidenceStatus::MissingVerificationEvidence,
+        ),
+        ..LoopUsage::default()
+    };
 
-        assert_eq!(
-            classify_usage_failure(Some(&usage)),
-            StepFailureClassification::VerificationRepairContinuation
-        );
-    }
+    assert_eq!(
+        classify_usage_failure(Some(&usage)),
+        StepFailureClassification::VerificationRepairContinuation
+    );
+}
 
-    fn classify_usage_failure(usage: Option<&LoopUsage>) -> StepFailureClassification {
+fn classify_usage_failure(usage: Option<&LoopUsage>) -> StepFailureClassification {
     let Some(usage) = usage else {
         return StepFailureClassification::GenericFailure;
     };
@@ -620,12 +627,15 @@ fn stage_execution_contract_requires_verification(
     stage_execution_contract: &StageExecutionContract,
 ) -> bool {
     !stage_execution_contract.verifications.is_empty()
-        || stage_execution_contract.required_actions.iter().any(|action| {
-            matches!(
-                action.as_str(),
-                "verify" | "verify_artifact" | "run_verification"
-            )
-        })
+        || stage_execution_contract
+            .required_actions
+            .iter()
+            .any(|action| {
+                matches!(
+                    action.as_str(),
+                    "verify" | "verify_artifact" | "run_verification"
+                )
+            })
 }
 
 fn completion_gate_failure(
@@ -767,9 +777,10 @@ fn worker_report_has_target_scoped_evidence(
                 .any(|evidence_ref| evidence_ref_mentions_target(evidence_ref, target))
         });
     }
-    report.evidence_refs.iter().any(|evidence_ref| {
-        !evidence_ref_is_artifact_presence_only(evidence_ref, &artifact_paths)
-    })
+    report
+        .evidence_refs
+        .iter()
+        .any(|evidence_ref| !evidence_ref_is_artifact_presence_only(evidence_ref, &artifact_paths))
 }
 
 fn worker_report_has_required_source_evidence(
@@ -821,9 +832,9 @@ fn worker_report_has_target_scoped_read_anchor(
 mod tests {
     use super::{
         DecisionLoopConfig, LoopOutcome, LoopUsage, RoutedStateFrame, StepFailureClassification,
-        StepOutcome, StepRuntimeResolutionContext,
-        apply_tool_registry_contract, infer_preflight_requirements_from_state_frame,
-        map_loop_outcome, requires_external_tool_execution, run_routed_step_with_runtime,
+        StepOutcome, StepRuntimeResolutionContext, apply_tool_registry_contract,
+        infer_preflight_requirements_from_state_frame, map_loop_outcome,
+        requires_external_tool_execution, run_routed_step_with_runtime,
         tool_assembly_context_for_role,
     };
     use crate::core::boss_state::{BossActorRole, BossStage};
@@ -987,10 +998,8 @@ mod tests {
             },
         );
         frame.stage_execution_contract.required_actions = vec!["write_file".into()];
-        frame.stage_execution_contract.required_evidence = vec![
-            "artifact:step0:0".into(),
-            "/tmp/out.txt".into(),
-        ];
+        frame.stage_execution_contract.required_evidence =
+            vec!["artifact:step0:0".into(), "/tmp/out.txt".into()];
         let routed = RoutedStateFrame {
             frame,
             model_route: ModelRoute {
@@ -1071,7 +1080,9 @@ mod tests {
                 &infer_preflight_requirements_from_state_frame(&frame),
             )
             .await
-            .expect_err("write path still lacks bash/write capability, but Edit should not be denied");
+            .expect_err(
+                "write path still lacks bash/write capability, but Edit should not be denied",
+            );
         let _ = std::fs::remove_dir_all(&temp_dir);
         assert!(
             !mismatch
@@ -1121,7 +1132,10 @@ mod tests {
                 path: "/tmp/p0-artifact/report.md".into(),
                 kind: "file".into(),
                 required_actions: vec!["write_file".into()],
-                required_evidence: vec!["artifact:step0:0".into(), "/tmp/p0-artifact/report.md".into()],
+                required_evidence: vec![
+                    "artifact:step0:0".into(),
+                    "/tmp/p0-artifact/report.md".into(),
+                ],
             },
         );
         let snapshot = apply_tool_registry_contract(&mut frame, &runtime)
@@ -1313,7 +1327,8 @@ mod tests {
     }
 
     #[test]
-    fn verification_required_contract_cannot_finish_with_empty_missing_targets_only_by_done_state() {
+    fn verification_required_contract_cannot_finish_with_empty_missing_targets_only_by_done_state()
+    {
         let outcome = LoopOutcome::Done {
             final_state: AgentState::Done,
             usage: LoopUsage {

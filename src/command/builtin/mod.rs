@@ -22,6 +22,7 @@ pub mod um;
 use crate::command::registry::CommandRegistry;
 use std::sync::Arc;
 
+use self::um::UMCommand;
 use clear::ClearCommand;
 use compact::CompactCommand;
 use computer::ComputerCommand;
@@ -39,7 +40,6 @@ use resume::ResumeCommand;
 use session::SessionCommand;
 use skills::SkillsCommand;
 use status::StatusCommand;
-use self::um::UMCommand;
 use swarm::SwarmCommand;
 use tasks::TasksCommand;
 

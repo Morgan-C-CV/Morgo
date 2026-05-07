@@ -288,7 +288,8 @@ fn step_terminal_from_tracked_ids(
     b_task_id: Option<&str>,
     current_step_task_id: Option<&str>,
 ) -> bool {
-    task_is_terminal(task_manager, b_task_id) || task_is_terminal(task_manager, current_step_task_id)
+    task_is_terminal(task_manager, b_task_id)
+        || task_is_terminal(task_manager, current_step_task_id)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2174,9 +2175,8 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        step_terminal_from_tracked_ids, terminal_tail_stalled, BootstrapCli,
-        DEFAULT_BOSS_TASK_TIMEOUT_SECS, preview_chars,
-        resolve_skill_project_root,
+        BootstrapCli, DEFAULT_BOSS_TASK_TIMEOUT_SECS, preview_chars, resolve_skill_project_root,
+        step_terminal_from_tracked_ids, terminal_tail_stalled,
     };
     use anyhow::anyhow;
 
@@ -2232,11 +2232,19 @@ mod tests {
 
         let sync_result: anyhow::Result<bool> = Ok(true);
         let terminal_result: anyhow::Result<Option<String>> = Ok(Some("advance".into()));
-        assert!(!terminal_tail_stalled(&sync_result, &terminal_result, false));
+        assert!(!terminal_tail_stalled(
+            &sync_result,
+            &terminal_result,
+            false
+        ));
 
         let sync_result: anyhow::Result<bool> = Ok(true);
         let terminal_result: anyhow::Result<Option<String>> = Ok(None);
-        assert!(!terminal_tail_stalled(&sync_result, &terminal_result, false));
+        assert!(!terminal_tail_stalled(
+            &sync_result,
+            &terminal_result,
+            false
+        ));
 
         let sync_result: anyhow::Result<bool> = Err(anyhow!("sync failed"));
         let terminal_result: anyhow::Result<Option<String>> = Ok(None);

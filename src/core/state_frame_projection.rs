@@ -243,11 +243,7 @@ fn build_stage_execution_contract(
                 } else {
                     vec!["create".into(), "write".into()]
                 },
-                required_evidence: vec![
-                    format!("artifact:step{}:{idx}", step.id),
-                    path,
-                    kind,
-                ],
+                required_evidence: vec![format!("artifact:step{}:{idx}", step.id), path, kind],
             });
         }
     }
@@ -1090,7 +1086,7 @@ mod tests {
                 last_correction: None,
                 stage_execution_contract: StageExecutionContract::default(),
                 stage_continuation_context: None,
-                        executor_b_stage_memory: None,
+                executor_b_stage_memory: None,
                 review_task_id: None,
                 tool_execution_records: Vec::new(),
             }],
@@ -1110,7 +1106,10 @@ mod tests {
         );
         assert_eq!(frame.stage_execution_contract.declared_artifacts.len(), 1);
         assert_eq!(frame.stage_execution_contract.verifications.len(), 1);
-        assert_eq!(frame.stage_execution_contract.required_actions, vec!["create", "write", "verify"]);
+        assert_eq!(
+            frame.stage_execution_contract.required_actions,
+            vec!["create", "write", "verify"]
+        );
     }
 
     #[test]
@@ -1141,7 +1140,7 @@ mod tests {
                 last_correction: None,
                 stage_execution_contract: StageExecutionContract::default(),
                 stage_continuation_context: None,
-                        executor_b_stage_memory: None,
+                executor_b_stage_memory: None,
                 review_task_id: None,
                 tool_execution_records: Vec::new(),
             }],
@@ -1199,15 +1198,19 @@ mod tests {
 
         let frame = project_state_frame(&plan, BossStage::Execution, Some(0), ActorRole::Worker);
         assert!(!frame.stage_execution_contract.declared_artifacts.is_empty());
-        assert!(frame
-            .stage_execution_contract
-            .declared_artifacts
-            .iter()
-            .all(|artifact| !artifact.path.trim().is_empty()));
-        assert!(frame
-            .recent_evidence
-            .iter()
-            .any(|item| item.starts_with("fact: declared_artifact_contract ")));
+        assert!(
+            frame
+                .stage_execution_contract
+                .declared_artifacts
+                .iter()
+                .all(|artifact| !artifact.path.trim().is_empty())
+        );
+        assert!(
+            frame
+                .recent_evidence
+                .iter()
+                .any(|item| item.starts_with("fact: declared_artifact_contract "))
+        );
         assert!(!frame.recent_evidence.iter().any(|item| {
             item.contains("source=objective") && item.contains("fact: completion_contract ")
         }));
@@ -1228,9 +1231,7 @@ mod tests {
             steps: vec![BossPlanStep {
                 id: 0,
                 description: "report".into(),
-                objective: Some(
-                    "create /tmp/alpha.txt and also create /tmp/beta.txt".into(),
-                ),
+                objective: Some("create /tmp/alpha.txt and also create /tmp/beta.txt".into()),
                 acceptance: vec!["done".into()],
                 requires_approval: false,
                 status: BossPlanStepStatus::Running,
@@ -1243,7 +1244,7 @@ mod tests {
                 last_correction: None,
                 stage_execution_contract: StageExecutionContract::default(),
                 stage_continuation_context: None,
-                        executor_b_stage_memory: None,
+                executor_b_stage_memory: None,
                 review_task_id: None,
                 tool_execution_records: Vec::new(),
             }],
@@ -1254,16 +1255,20 @@ mod tests {
 
         let frame = project_state_frame(&plan, BossStage::Execution, Some(0), ActorRole::Worker);
         assert_eq!(frame.stage_execution_contract.declared_artifacts.len(), 2);
-        assert!(frame
-            .stage_execution_contract
-            .declared_artifacts
-            .iter()
-            .any(|artifact| artifact.path == "/tmp/alpha.txt"));
-        assert!(frame
-            .stage_execution_contract
-            .declared_artifacts
-            .iter()
-            .any(|artifact| artifact.path == "/tmp/beta.txt"));
+        assert!(
+            frame
+                .stage_execution_contract
+                .declared_artifacts
+                .iter()
+                .any(|artifact| artifact.path == "/tmp/alpha.txt")
+        );
+        assert!(
+            frame
+                .stage_execution_contract
+                .declared_artifacts
+                .iter()
+                .any(|artifact| artifact.path == "/tmp/beta.txt")
+        );
     }
 
     #[test]
@@ -1321,15 +1326,21 @@ mod tests {
                 .iter()
                 .any(|target| target.ends_with("docs/31-token-efficiency-cost-performance.md"))
         );
-        assert!(!frame
-            .stage_execution_contract
-            .declared_artifacts
-            .iter()
-            .any(|artifact| artifact.path.ends_with("tool/definition.rs")));
-        assert!(!frame
-            .stage_execution_contract
-            .declared_artifacts
-            .iter()
-            .any(|artifact| artifact.path.ends_with("docs/31-token-efficiency-cost-performance.md")));
+        assert!(
+            !frame
+                .stage_execution_contract
+                .declared_artifacts
+                .iter()
+                .any(|artifact| artifact.path.ends_with("tool/definition.rs"))
+        );
+        assert!(
+            !frame
+                .stage_execution_contract
+                .declared_artifacts
+                .iter()
+                .any(|artifact| artifact
+                    .path
+                    .ends_with("docs/31-token-efficiency-cost-performance.md"))
+        );
     }
 }

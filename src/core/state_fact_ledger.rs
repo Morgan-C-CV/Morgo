@@ -575,9 +575,7 @@ fn bash_test_status(record: &ToolExecutionRecord) -> &'static str {
 }
 
 fn contract_mentions_path(contract: &StageExecutionContract, path: &str) -> bool {
-    contract
-        .declared_artifact_by_path(path)
-        .is_some()
+    contract.declared_artifact_by_path(path).is_some()
         || contract.verification_by_target_path(path).is_some()
 }
 
@@ -605,10 +603,16 @@ fn is_target_scoped_readback(
     record: &ToolExecutionRecord,
     path: &str,
 ) -> bool {
-    if !contract_mentions_path(contract, path) || !contract_has_explicit_verify_intent(contract, path) {
+    if !contract_mentions_path(contract, path)
+        || !contract_has_explicit_verify_intent(contract, path)
+    {
         return false;
     }
-    let detail = record.detail.as_deref().unwrap_or_default().to_ascii_lowercase();
+    let detail = record
+        .detail
+        .as_deref()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
     detail.contains("verified")
         || detail.contains("read-back")
         || detail.contains("read back")
@@ -617,7 +621,10 @@ fn is_target_scoped_readback(
 
 fn infer_bash_readback_path(contract: &StageExecutionContract, command: &str) -> Option<String> {
     let read_only_prefixes = ["cat ", "ls ", "stat ", "test -f ", "test -d "];
-    if !read_only_prefixes.iter().any(|prefix| command.contains(prefix)) {
+    if !read_only_prefixes
+        .iter()
+        .any(|prefix| command.contains(prefix))
+    {
         return None;
     }
     extract_artifact_expectations(command)
@@ -1312,12 +1319,14 @@ pub fn build_step_fact_ledgers(step: &BossPlanStep) -> StepFactLedgers {
 #[cfg(test)]
 mod tests {
     use super::{
-        append_runtime_tool_record,
-        LedgerLineage, ReviewRecord, build_blocker_records, build_open_item_records,
-        build_rejected_approach_records, build_step_fact_ledgers, StepFactLedgers,
+        LedgerLineage, ReviewRecord, StepFactLedgers, append_runtime_tool_record,
+        build_blocker_records, build_open_item_records, build_rejected_approach_records,
+        build_step_fact_ledgers,
     };
     use crate::core::boss_state::{BossPlanStep, BossPlanStepStatus, BossStage};
-    use crate::core::state_frame::{DeclaredArtifactContract, StageExecutionContract, VerificationContract};
+    use crate::core::state_frame::{
+        DeclaredArtifactContract, StageExecutionContract, VerificationContract,
+    };
     use crate::tool::definition::{ObservableInput, ObservableInputSource};
     use crate::tool::result::{
         ToolBatchContext, ToolExecutionOutcomeKind, ToolExecutionRecord, ToolReportModifier,
@@ -1423,7 +1432,7 @@ mod tests {
             last_correction: None,
             stage_execution_contract: StageExecutionContract::default(),
             stage_continuation_context: None,
-                        executor_b_stage_memory: None,
+            executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
         };
@@ -1565,7 +1574,7 @@ mod tests {
             last_correction: None,
             stage_execution_contract: StageExecutionContract::default(),
             stage_continuation_context: None,
-                        executor_b_stage_memory: None,
+            executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
         };
@@ -1884,7 +1893,7 @@ mod tests {
             last_correction: Some("preserve the auth guard branch".into()),
             stage_execution_contract: StageExecutionContract::default(),
             stage_continuation_context: None,
-                        executor_b_stage_memory: None,
+            executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
         };

@@ -406,7 +406,6 @@ async fn run_background_process(
         .stderr(std::process::Stdio::piped())
         .env("RUST_AGENT_SANDBOX_POLICY", format!("{:?}", policy));
 
-
     let mut child = process
         .spawn()
         .map_err(|error| anyhow::anyhow!("failed to spawn background bash command: {error}"))?;

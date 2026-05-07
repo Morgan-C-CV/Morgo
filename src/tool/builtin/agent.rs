@@ -1,7 +1,7 @@
+use crate::core::boss_state::{ExecutorBStageMemory, SharedStepMemory};
 use crate::core::concurrency::{
     BossBudgetDecision, current_memory_pressure_level, evaluate_boss_budget,
 };
-use crate::core::boss_state::{ExecutorBStageMemory, SharedStepMemory};
 use async_trait::async_trait;
 use serde::Deserialize;
 
@@ -415,7 +415,10 @@ fn parse_agent_request(input: &str) -> anyhow::Result<AgentRequest> {
             let boss_step_context = if request.step_id.is_some()
                 || request.boss_plan_id.is_some()
                 || request.step_objective.is_some()
-                || request.step_acceptance.as_ref().is_some_and(|items| !items.is_empty())
+                || request
+                    .step_acceptance
+                    .as_ref()
+                    .is_some_and(|items| !items.is_empty())
                 || request.parent_session_id.is_some()
                 || request.continuation_payload.is_some()
                 || request.executor_b_stage_memory.is_some()
@@ -635,7 +638,12 @@ fn render_worker_local_memory_section(memory: &ExecutorBStageMemory) -> Vec<Stri
     }
     if !memory.verified_targets.is_empty() {
         sections.push("verified_targets:".into());
-        sections.extend(memory.verified_targets.iter().map(|item| format!("- {item}")));
+        sections.extend(
+            memory
+                .verified_targets
+                .iter()
+                .map(|item| format!("- {item}")),
+        );
     }
     sections
 }
@@ -679,7 +687,12 @@ fn build_continue_task_input(
         }
         if !context.step_acceptance.is_empty() {
             sections.push("acceptance:".into());
-            sections.extend(context.step_acceptance.iter().map(|item| format!("- {item}")));
+            sections.extend(
+                context
+                    .step_acceptance
+                    .iter()
+                    .map(|item| format!("- {item}")),
+            );
         }
         if let Some(parent_session_id) = context.parent_session_id.as_deref() {
             sections.push(format!("parent_session_id: {parent_session_id}"));
@@ -747,10 +760,7 @@ fn append_subagent_output(
         } else {
             normalize_verify_output(task_input, &raw_output)
         };
-        tasks.append_output(
-            task_id,
-            format!("{normalized}\n"),
-        );
+        tasks.append_output(task_id, format!("{normalized}\n"));
         return;
     }
 
@@ -799,10 +809,18 @@ fn verify_output_matches_contract(raw_output: &str) -> bool {
         return false;
     }
 
-    if !lines[0].to_ascii_lowercase().starts_with("verified_target:")
-        || !lines[1].to_ascii_lowercase().starts_with("verification_result:")
-        || !lines[2].to_ascii_lowercase().starts_with("minimal_evidence:")
-        || !lines[3].to_ascii_lowercase().starts_with("remaining_blocker:")
+    if !lines[0]
+        .to_ascii_lowercase()
+        .starts_with("verified_target:")
+        || !lines[1]
+            .to_ascii_lowercase()
+            .starts_with("verification_result:")
+        || !lines[2]
+            .to_ascii_lowercase()
+            .starts_with("minimal_evidence:")
+        || !lines[3]
+            .to_ascii_lowercase()
+            .starts_with("remaining_blocker:")
         || !lines[4].to_ascii_lowercase().starts_with("evidence_refs:")
     {
         return false;
@@ -889,8 +907,7 @@ fn parse_verify_patch_output(raw_output: &str) -> VerifyPatchOutput {
             continue;
         }
         if remaining_blocker.is_none()
-            && (lower.starts_with("remaining_blocker:")
-                || lower.starts_with("remaining blocker:"))
+            && (lower.starts_with("remaining_blocker:") || lower.starts_with("remaining blocker:"))
         {
             remaining_blocker = trimmed
                 .split_once(':')
@@ -901,9 +918,9 @@ fn parse_verify_patch_output(raw_output: &str) -> VerifyPatchOutput {
         if evidence_refs.is_none() && lower.starts_with("evidence_refs:") {
             evidence_refs = Some(
                 trimmed
-                .split_once(':')
-                .map(|(_, value)| parse_verify_patch_refs(value))
-                .unwrap_or_default(),
+                    .split_once(':')
+                    .map(|(_, value)| parse_verify_patch_refs(value))
+                    .unwrap_or_default(),
             );
         }
     }
@@ -945,11 +962,7 @@ fn extract_evidence_refs(text: &str) -> Option<Vec<String>> {
                 .map(|(_, value)| parse_verify_patch_refs(value))
         })
         .unwrap_or_default();
-    if refs.is_empty() {
-        None
-    } else {
-        Some(refs)
-    }
+    if refs.is_empty() { None } else { Some(refs) }
 }
 
 fn verify_patch_output_matches_contract(patch: &VerifyPatchOutput) -> bool {
@@ -1112,9 +1125,8 @@ fn infer_minimal_evidence(raw_output: &str, scrub_templates: bool) -> Option<Str
     if explicit_evidence.is_some() || scrub_templates {
         return explicit_evidence;
     }
-    explicit_evidence.or_else(|| {
-        shortest_noncontract_line(raw_output).map(|line| compact_verify_value(&line))
-    })
+    explicit_evidence
+        .or_else(|| shortest_noncontract_line(raw_output).map(|line| compact_verify_value(&line)))
 }
 
 fn shortest_noncontract_line(text: &str) -> Option<String> {
@@ -1181,7 +1193,9 @@ fn contains_multistage_report_template(raw_output: &str) -> bool {
 }
 
 fn compact_verify_value(value: &str) -> String {
-    let trimmed = value.trim().trim_matches(|ch: char| matches!(ch, '"' | '\'' | '`' | ',' | ';'));
+    let trimmed = value
+        .trim()
+        .trim_matches(|ch: char| matches!(ch, '"' | '\'' | '`' | ',' | ';'));
     let mut candidates = trimmed
         .split(|ch| matches!(ch, '.' | '!' | '?' | ';' | '\n' | '\r'))
         .flat_map(|chunk| chunk.split(" and "))
@@ -1224,7 +1238,10 @@ fn compact_verify_value(value: &str) -> String {
 }
 
 fn is_valid_verification_result(value: &str) -> bool {
-    matches!(value.trim().to_ascii_lowercase().as_str(), "verified" | "blocked")
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "verified" | "blocked"
+    )
 }
 
 fn is_concise_verify_value(value: &str) -> bool {
@@ -1320,12 +1337,15 @@ mod tests {
         assert!(input.contains("return exactly five short fields only"));
         assert!(input.contains("do not include analysis"));
         assert!(input.contains("keep minimal_evidence to one short factual phrase"));
-        assert!(input.contains("set evidence_refs to read:<verified_target> when verification_result is verified"));
+        assert!(input.contains(
+            "set evidence_refs to read:<verified_target> when verification_result is verified"
+        ));
     }
 
     #[test]
     fn verification_first_emits_structured_patch_instead_of_report_prose() {
-        let task_input = "Verify target artifact only: /tmp/report.md. Return a short verification result only.";
+        let task_input =
+            "Verify target artifact only: /tmp/report.md. Return a short verification result only.";
         let raw_output = "verification_result: verified\nminimal_evidence: Read succeeded and the file is present.\nremaining_blocker: none\nverified_target: /tmp/report.md\nevidence_refs: artifact:/tmp/report.md";
         let normalized = normalize_verify_output(task_input, raw_output);
         assert_eq!(
@@ -1371,7 +1391,9 @@ mod tests {
             recent_verification_refs: vec!["verify ref".into()],
             failed_targets: vec!["/tmp/local.md".into()],
             verified_targets: vec!["/tmp/local.md".into()],
-            continuity: Some(crate::core::boss_state::ExecutorBStageMemoryContinuity::ReuseWithinStep),
+            continuity: Some(
+                crate::core::boss_state::ExecutorBStageMemoryContinuity::ReuseWithinStep,
+            ),
         };
         let context = ContinueBossStepContext {
             step_id: Some(7),
@@ -1392,8 +1414,12 @@ mod tests {
         assert!(rendered.contains("src/lib.rs"));
         assert!(!rendered.contains("acceptance_contract:"));
         assert!(!rendered.contains("executor_b_stage_memory:"));
-        let shared_index = rendered.find("shared_step_memory:").expect("shared section");
-        let local_index = rendered.find("worker_local_memory:").expect("local section");
+        let shared_index = rendered
+            .find("shared_step_memory:")
+            .expect("shared section");
+        let local_index = rendered
+            .find("worker_local_memory:")
+            .expect("local section");
         assert!(shared_index < local_index);
     }
 
@@ -1457,7 +1483,8 @@ mod tests {
 
     #[test]
     fn verify_output_normalization_rewrites_multistage_report_template_to_four_line_short_form() {
-        let task_input = "Verify target artifact only: /tmp/report.md. Return a short verification result only.";
+        let task_input =
+            "Verify target artifact only: /tmp/report.md. Return a short verification result only.";
         let raw_output = "阶段 1：overview\n阶段 2：evidence\n阶段 3：analysis\n阶段 4：wrap\n证据来源\n- README\n- docs\n我做了什么 / 变更说明\n- wrote report\n如何运行与验证\n- cat report\n剩余风险与后续工作\n- rerun later\nverification_result: verified\nminimal_evidence: Read succeeded and the file is present.\nremaining_blocker: none\nnext_action: continue";
         let normalized = normalize_verify_output(task_input, raw_output);
         assert_eq!(
@@ -1469,7 +1496,8 @@ mod tests {
 
     #[test]
     fn verify_output_normalization_discards_evidence_sources_and_run_instructions() {
-        let task_input = "Verify target artifact only: /tmp/report.md. Return a short verification result only.";
+        let task_input =
+            "Verify target artifact only: /tmp/report.md. Return a short verification result only.";
         let raw_output = "证据来源\n- RustAgent/docs/29-memory-backpressure-and-resource-limits.md\n- RustAgent/docs/31-token-efficiency-cost-performance.md\n如何运行与验证\n- cargo test --quiet\n- bash RustAgent/Agent/tests/run_boss_lism_matrix.sh\nverification_result: blocked\nminimal_evidence: Read succeeded and the file is present.\nremaining_blocker: target missing verification\nnext_action: rerun with stat";
         let normalized = normalize_verify_output(task_input, raw_output);
         assert!(!normalized.contains("证据来源"));
@@ -1483,7 +1511,8 @@ mod tests {
 
     #[test]
     fn verify_output_normalization_keeps_only_single_short_evidence_phrase() {
-        let task_input = "Verify target artifact only: /tmp/report.md. Return a short verification result only.";
+        let task_input =
+            "Verify target artifact only: /tmp/report.md. Return a short verification result only.";
         let raw_output = "verified_target: /tmp/report.md\nverification_result: verified\nminimal_evidence: Read succeeded and the file is present and ready\nremaining_blocker: none";
         let normalized = normalize_verify_output(task_input, raw_output);
         assert_eq!(
@@ -1494,7 +1523,8 @@ mod tests {
 
     #[test]
     fn verify_output_normalization_drops_recommendations_and_validation_steps_completely() {
-        let task_input = "Verify target artifact only: /tmp/report.md. Return a short verification result only.";
+        let task_input =
+            "Verify target artifact only: /tmp/report.md. Return a short verification result only.";
         let raw_output = "recommendations:\n- keep reading docs\nvalidation steps:\n- run stat\nverified_target: /tmp/report.md\nverification_result: blocked\nminimal_evidence: Read succeeded\nremaining_blocker: target missing verification";
         let normalized = normalize_verify_output(task_input, raw_output);
         assert_eq!(
@@ -1541,7 +1571,8 @@ mod tests {
 
     #[test]
     fn verify_completion_short_form_drops_recommendations_and_risk_notes() {
-        let task_input = "Verify target artifact only: /tmp/report.md. Return a short verification result only.";
+        let task_input =
+            "Verify target artifact only: /tmp/report.md. Return a short verification result only.";
         let raw_output = "risk notes: the workspace may drift\nverified_target: /tmp/report.md\nverification_result: blocked\nminimal_evidence: Read succeeded\nremaining_blocker: target missing verification\nnext_action: rerun with stat\nvalidation steps: read docs";
         let normalized = normalize_verify_output(task_input, raw_output);
         assert_eq!(
@@ -1564,7 +1595,8 @@ mod tests {
 
     #[test]
     fn normalize_verify_output_defaults_verified_when_no_blocker_is_present() {
-        let task_input = "Verify target artifact only: /tmp/report.md. Return a short verification result only.";
+        let task_input =
+            "Verify target artifact only: /tmp/report.md. Return a short verification result only.";
         let raw_output = "Read succeeded\nhow to validate: stat report";
         let normalized = normalize_verify_output(task_input, raw_output);
         assert_eq!(

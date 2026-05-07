@@ -11,16 +11,8 @@ fn allowed_actions_for_route(route: &ToolsetRoute) -> Vec<String> {
     match route.toolset_id.as_deref() {
         Some("designer-planning") => vec!["read_file".into(), "write_spec".into()],
         Some("designer-review") => vec!["read_file".into(), "summarize_findings".into()],
-        Some("executor-edit") => vec![
-            "read_file".into(),
-            "edit_file".into(),
-            "run_test".into(),
-        ],
-        Some("worker-minimal") => vec![
-            "read_file".into(),
-            "edit_file".into(),
-            "run_test".into(),
-        ],
+        Some("executor-edit") => vec!["read_file".into(), "edit_file".into(), "run_test".into()],
+        Some("worker-minimal") => vec!["read_file".into(), "edit_file".into(), "run_test".into()],
         Some("verifier-readonly") => vec!["read_file".into(), "summarize_findings".into()],
         Some("summarizer-readonly") => vec!["read_file".into(), "summarize_findings".into()],
         None => vec!["read_file".into()],

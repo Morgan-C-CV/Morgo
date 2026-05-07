@@ -333,7 +333,10 @@ mod tests {
         ]);
 
         assert_eq!(expectations.len(), 1);
-        assert_eq!(expectations[0].path, PathBuf::from("/tmp/example-report.md"));
+        assert_eq!(
+            expectations[0].path,
+            PathBuf::from("/tmp/example-report.md")
+        );
     }
 
     #[test]

@@ -72,15 +72,15 @@ mod tests {
     use crate::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
     use crate::core::boss::BossCoordinator;
     use crate::cost::tracker::CostTracker;
-    use crate::interaction::envelope::NormalizedInput;
     use crate::interaction::dispatcher::NotificationDispatcher;
+    use crate::interaction::envelope::NormalizedInput;
     use crate::interaction::telegram::gateway::TelegramGateway;
     use crate::security::audit::AuditLog;
     use crate::service::observability::ServiceObservabilityTracker;
-    use crate::state::permission_context::{PermissionMode, ToolPermissionContext};
     use crate::state::app_state::ActiveModelProviderSummary;
-    use std::sync::{Arc, Mutex};
+    use crate::state::permission_context::{PermissionMode, ToolPermissionContext};
     use std::sync::atomic::AtomicU64;
+    use std::sync::{Arc, Mutex};
     use tokio_util::sync::CancellationToken;
 
     fn test_app_state(coordinator: Option<Arc<BossCoordinator>>) -> AppState {
@@ -99,9 +99,7 @@ mod tests {
             plugin_load_result: None,
             cost_tracker: CostTracker::default(),
             service_observability_tracker: ServiceObservabilityTracker::default(),
-            notification_dispatcher: NotificationDispatcher::new(
-                TelegramGateway::default(),
-            ),
+            notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
             audit_log: Arc::new(Mutex::new(AuditLog::default())),
             startup_trace: Vec::new(),
             active_model_runtime: None,

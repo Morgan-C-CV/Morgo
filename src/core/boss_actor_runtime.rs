@@ -495,10 +495,7 @@ async fn handle_executor_b_command(
             } else {
                 format!("b-task-step-{step_id}")
             };
-            BossActorEvent::StepDispatched {
-                step_id,
-                task_id,
-            }
+            BossActorEvent::StepDispatched { step_id, task_id }
         }
         ExecutorBCommand::ContinueStep {
             step_id,

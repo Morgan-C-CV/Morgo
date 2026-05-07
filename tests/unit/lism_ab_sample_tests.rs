@@ -248,10 +248,19 @@ fn r1_1_record_derives_typed_path_signal_from_hydration_and_tool_dispatch() {
         total_sent_chars: 400,
     });
 
-    sink.record_run("typed-path-run", true, &report, BossTestRunOutcome::Completed, 0);
+    sink.record_run(
+        "typed-path-run",
+        true,
+        &report,
+        BossTestRunOutcome::Completed,
+        0,
+    );
 
     let record = &sink.records()[0];
-    assert_eq!(record.typed_path_signal, "hydration+tool_dispatch+ref_write");
+    assert_eq!(
+        record.typed_path_signal,
+        "hydration+tool_dispatch+ref_write"
+    );
 }
 
 #[test]

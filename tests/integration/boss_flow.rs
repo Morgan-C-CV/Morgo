@@ -28,9 +28,9 @@ use rust_agent::core::lism_ab_sample::new_shared_ab_sink;
 use rust_agent::core::prompt_budget::{
     BudgetDecision, PromptCacheCapability, ProviderProfile, evaluate_prompt_budget,
 };
-use rust_agent::core::state_frame::StageExecutionContract;
 use rust_agent::core::prompt_cache_adapter::apply_cache_control;
 use rust_agent::core::prompt_segment::{PromptAssembly, PromptSegment, PromptSegmentKind};
+use rust_agent::core::state_frame::StageExecutionContract;
 use rust_agent::cost::tracker::CostTracker;
 use rust_agent::history::session::{
     InMemorySessionStore, SessionHistory, SessionHistoryEntry, SessionId, SessionSnapshot,
@@ -3319,22 +3319,19 @@ async fn reject_updates_continuation_context_instead_of_preserving_old_failed_ta
         let plan = guard.as_mut().unwrap();
         plan.steps[0].worker_task_id = Some("b-task-refresh".into());
         plan.steps[0].status = BossPlanStepStatus::Reviewing;
-        plan.steps[0].stage_continuation_context = Some(
-            rust_agent::core::state_frame::StageContinuationContext {
+        plan.steps[0].stage_continuation_context =
+            Some(rust_agent::core::state_frame::StageContinuationContext {
                 repair_intent: Some(rust_agent::core::state_frame::RepairIntent {
                     failed_target: Some("/tmp/old-target.md".into()),
                     verified_facts: vec!["old fact".into()],
                     next_action: Some("old action".into()),
-                    continuity_mode: Some(
-                        rust_agent::core::state_frame::ContinuityMode::Repair,
-                    ),
+                    continuity_mode: Some(rust_agent::core::state_frame::ContinuityMode::Repair),
                 }),
                 failed_target: Some("/tmp/old-target.md".into()),
                 verified_facts: vec!["old fact".into()],
                 next_action: Some("old action".into()),
                 continuity_mode: Some(rust_agent::core::state_frame::ContinuityMode::Repair),
-            },
-        );
+            });
     }
 
     coordinator
@@ -3348,9 +3345,18 @@ async fn reject_updates_continuation_context_instead_of_preserving_old_failed_ta
         .stage_continuation_context
         .as_ref()
         .expect("continuation should exist");
-    assert_eq!(continuation.failed_target.as_deref(), Some("/tmp/new-target.md"));
-    assert_eq!(continuation.next_action.as_deref(), Some("/tmp/new-target.md"));
-    assert_eq!(continuation.verified_facts, vec!["Boss review verdict: rejected"]);
+    assert_eq!(
+        continuation.failed_target.as_deref(),
+        Some("/tmp/new-target.md")
+    );
+    assert_eq!(
+        continuation.next_action.as_deref(),
+        Some("/tmp/new-target.md")
+    );
+    assert_eq!(
+        continuation.verified_facts,
+        vec!["Boss review verdict: rejected"]
+    );
 
     let _ = std::fs::remove_file(plan_path);
 }
@@ -3358,10 +3364,7 @@ async fn reject_updates_continuation_context_instead_of_preserving_old_failed_ta
 #[tokio::test]
 async fn successful_review_clears_stale_continuation_before_next_step() {
     let (coordinator, plan_path) = coordinator_with_plan(
-        boss_plan(vec![
-            boss_step(0, "Step 0"),
-            boss_step(1, "Step 1"),
-        ]),
+        boss_plan(vec![boss_step(0, "Step 0"), boss_step(1, "Step 1")]),
         "test_boss_clear_continuation_after_success.json",
     )
     .await;
@@ -3370,22 +3373,19 @@ async fn successful_review_clears_stale_continuation_before_next_step() {
         let mut guard = coordinator.plan.write().await;
         let plan = guard.as_mut().unwrap();
         plan.steps[0].status = BossPlanStepStatus::Reviewing;
-        plan.steps[0].stage_continuation_context = Some(
-            rust_agent::core::state_frame::StageContinuationContext {
+        plan.steps[0].stage_continuation_context =
+            Some(rust_agent::core::state_frame::StageContinuationContext {
                 repair_intent: Some(rust_agent::core::state_frame::RepairIntent {
                     failed_target: Some("/tmp/stale-target.md".into()),
                     verified_facts: vec!["stale fact".into()],
                     next_action: Some("stale action".into()),
-                    continuity_mode: Some(
-                        rust_agent::core::state_frame::ContinuityMode::Repair,
-                    ),
+                    continuity_mode: Some(rust_agent::core::state_frame::ContinuityMode::Repair),
                 }),
                 failed_target: Some("/tmp/stale-target.md".into()),
                 verified_facts: vec!["stale fact".into()],
                 next_action: Some("stale action".into()),
                 continuity_mode: Some(rust_agent::core::state_frame::ContinuityMode::Repair),
-            },
-        );
+            });
     }
 
     coordinator
@@ -3497,7 +3497,8 @@ async fn continue_payload_reuses_executor_b_local_stage_memory() {
                 report_modifier: rust_agent::tool::result::ToolReportModifier::None,
                 observable_input: Some(rust_agent::tool::definition::ObservableInput {
                     source: rust_agent::tool::definition::ObservableInputSource::Raw,
-                    value: serde_json::json!({"path":"/tmp/report.md","status":"verified"}).to_string(),
+                    value: serde_json::json!({"path":"/tmp/report.md","status":"verified"})
+                        .to_string(),
                 }),
                 batch_context: rust_agent::tool::result::ToolBatchContext {
                     batch_index: 0,
@@ -3506,15 +3507,14 @@ async fn continue_payload_reuses_executor_b_local_stage_memory() {
                 },
             },
         ];
-        plan.steps[0].stage_continuation_context = Some(
-            rust_agent::core::state_frame::StageContinuationContext {
+        plan.steps[0].stage_continuation_context =
+            Some(rust_agent::core::state_frame::StageContinuationContext {
                 repair_intent: None,
                 failed_target: Some("/tmp/report.md".into()),
                 verified_facts: vec!["artifact verification passed for /tmp/report.md".into()],
                 next_action: Some("refine artifact".into()),
                 continuity_mode: Some(rust_agent::core::state_frame::ContinuityMode::Repair),
-            },
-        );
+            });
     }
 
     let continue_payload = coordinator
@@ -10439,7 +10439,8 @@ async fn t27_r1_format_report_includes_hit_ratio_and_tokens_saved() {
                 step_failure_classification: None,
                 ..Default::default()
             }),
-            stage_execution_contract: rust_agent::core::state_frame::StageExecutionContract::default(),
+            stage_execution_contract:
+                rust_agent::core::state_frame::StageExecutionContract::default(),
             stage_continuation_context: None,
             executor_b_stage_memory: None,
         }],
@@ -10900,8 +10901,7 @@ async fn lism_enabled_boss_completed_step_auto_advances_to_next_step() {
     if plan.steps[0].status != BossPlanStepStatus::Completed {
         panic!(
             "unexpected step status: {:?}; advance_plan result={result:?}; review_summary={:?}",
-            plan.steps[0].status,
-            plan.steps[0].last_review_summary
+            plan.steps[0].status, plan.steps[0].last_review_summary
         );
     }
     assert_eq!(plan.steps[1].status, BossPlanStepStatus::Completed);
@@ -12375,8 +12375,7 @@ async fn t27_8_lism_boss_production_path_with_registry_on_disk_uses_worker_overr
     if plan.steps[0].status != BossPlanStepStatus::Completed {
         panic!(
             "unexpected step status: {:?}; advance_plan result={result:?}; review_summary={:?}",
-            plan.steps[0].status,
-            plan.steps[0].last_review_summary
+            plan.steps[0].status, plan.steps[0].last_review_summary
         );
     }
 

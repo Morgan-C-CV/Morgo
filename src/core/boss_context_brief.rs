@@ -1,6 +1,6 @@
 use crate::core::boss_state::{BossPlanStepStatus, ExecutorBStageMemory};
-use crate::core::state_frame::{StageContinuationContext, StageExecutionContract};
 use crate::core::prompt_segment::{PromptAssembly, PromptSegment, PromptSegmentKind};
+use crate::core::state_frame::{StageContinuationContext, StageExecutionContract};
 use serde::{Deserialize, Serialize};
 
 /// Which context strategy was used to build the B/child initial prompt.
@@ -169,7 +169,10 @@ impl BossStateFrame {
         if !self.stage_execution_contract.declared_artifacts.is_empty()
             || !self.stage_execution_contract.verifications.is_empty()
             || !self.stage_execution_contract.tests.is_empty()
-            || !self.stage_execution_contract.content_evidence_targets.is_empty()
+            || !self
+                .stage_execution_contract
+                .content_evidence_targets
+                .is_empty()
         {
             lines.push("stage_execution_contract:".into());
             for artifact in &self.stage_execution_contract.declared_artifacts {
@@ -199,7 +202,11 @@ impl BossStateFrame {
                     test.required_evidence.join(", ")
                 ));
             }
-            if !self.stage_execution_contract.content_evidence_targets.is_empty() {
+            if !self
+                .stage_execution_contract
+                .content_evidence_targets
+                .is_empty()
+            {
                 lines.push("  - content_evidence_targets:".into());
                 for target in &self.stage_execution_contract.content_evidence_targets {
                     lines.push(format!("    - {target}"));

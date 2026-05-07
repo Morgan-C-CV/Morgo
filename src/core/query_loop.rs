@@ -9,11 +9,11 @@ use crate::service::api::streaming::{
 use crate::service::compact::{
     AUTO_COMPACT_INPUT_CHAR_LIMIT, CompactRecoveryErrorContext, CompactServiceNextStep,
 };
+use crate::state::app_state::WorkerRole;
 use crate::tool::orchestrator::{ToolExecutionOutcome, aggregate_execution_records};
 use crate::tool::result::{
     ToolExecutionRecord, ToolExecutionReport, ToolReportContextModifier, ToolReportModifier,
 };
-use crate::state::app_state::WorkerRole;
 use tokio::time::{Duration, timeout};
 
 const WORKER_MAILBOX_IDLE_TIMEOUT_MS: u64 = 2_000;
@@ -2222,8 +2222,8 @@ impl QueryLoopStateExt for QueryLoopState {
 mod tests {
     use super::{
         LoopState, QueryParams, apply_tool_report_context, batch_follow_up_message,
-        classify_pre_stream_failure_code, classify_stream_failure_code,
-        extract_read_target_path, extract_verified_target_from_messages, is_broad_discovery_tool,
+        classify_pre_stream_failure_code, classify_stream_failure_code, extract_read_target_path,
+        extract_verified_target_from_messages, is_broad_discovery_tool,
         is_prompt_only_discovery_gate_record, prompt_only_discovery_gate_outcome,
         prompt_only_output_contract_from_messages, report_detail_or_summary,
         should_discourage_repeated_discovery_search, should_gate_prompt_only_discovery,
