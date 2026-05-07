@@ -298,6 +298,31 @@ fn verification_gap_next_action(
         .unwrap_or_else(|| "verify_artifact".into())
 }
 
+fn gap_requires_source_evidence_read(gap: &CompletionEvidenceGap) -> bool {
+    gap.recommended_action == "read_source_evidence"
+        || gap
+            .target_ref
+            .strip_prefix("content_evidence:")
+            .is_some()
+}
+
+fn step_continuation_requires_source_evidence_read(step: &BossPlanStep) -> bool {
+    step.stage_continuation_context
+        .as_ref()
+        .is_some_and(|context| {
+            context
+                .next_action
+                .as_deref()
+                .is_some_and(|action| action == "read_source_evidence")
+                || context.repair_intent.as_ref().is_some_and(|intent| {
+                    intent
+                        .next_action
+                        .as_deref()
+                        .is_some_and(|action| action == "read_source_evidence")
+                })
+        })
+}
+
 fn activate_verification_gap_continuation(
     step: &mut BossPlanStep,
     metadata: Option<&BossStepRoutedMetadata>,
@@ -4270,8 +4295,18 @@ impl BossCoordinator {
             .any(|gap| gap.missing_verification_evidence);
         let has_test_gap = affected_gaps.iter().any(|gap| gap.missing_test_evidence);
         let verification_only_gap = has_verification_gap && !has_artifact_gap && !has_test_gap;
+        let has_source_evidence_gap = affected_gaps.iter().any(gap_requires_source_evidence_read);
         if has_artifact_gap || has_verification_gap {
-            if verification_only_gap {
+            if has_source_evidence_gap {
+                Some(StepRolloutExecutionPolicy {
+                    forced_worker_lism_policy: WorkerLisMPolicy::ForceOff,
+                    fallback_tier: "source_evidence_repair",
+                    fallback_reason: "rollout_policy_source_evidence_gap",
+                    worker_role: WorkerRole::Implement,
+                    force_fresh_spawn: false,
+                    affected_gaps,
+                })
+            } else if verification_only_gap {
                 Some(StepRolloutExecutionPolicy {
                     forced_worker_lism_policy: WorkerLisMPolicy::ForceOff,
                     fallback_tier: "verification_first",
@@ -6800,7 +6835,12 @@ impl BossCoordinator {
             .as_ref()
             .map(|policy| policy.worker_role)
             .unwrap_or(WorkerRole::Implement);
+        let source_evidence_repair = step_continuation_requires_source_evidence_read(step)
+            || rollout_execution_policy
+                .as_ref()
+                .is_some_and(|policy| policy.affected_gaps.iter().any(gap_requires_source_evidence_read));
         let verification_first_short_form = worker_role == WorkerRole::Verify
+            && !source_evidence_repair
             && rollout_execution_policy
                 .as_ref()
                 .is_some_and(|policy| policy.fallback_tier == "verification_first");
@@ -14557,6 +14597,107 @@ mod tests {
             .expect("continuation context");
         assert_eq!(context.failed_target.as_deref(), Some(source_path.as_str()));
         assert_eq!(context.next_action.as_deref(), Some("read_source_evidence"));
+    }
+
+    #[tokio::test]
+    async fn source_evidence_repair_dispatch_does_not_use_verification_first_short_form() {
+        let coordinator = BossCoordinator::new();
+        {
+            let mut plan = coordinator.plan.write().await;
+            *plan = Some(BossPlan {
+                plan_id: "plan-source-evidence".into(),
+                accepted_by_user: true,
+                steps: vec![BossPlanStep {
+                    id: 0,
+                    description: "write source-derived report".into(),
+                    objective: Some(
+                        "Read /tmp/source.md and write source-derived report to /tmp/report.md"
+                            .into(),
+                    ),
+                    acceptance: vec!["report is backed by source read".into()],
+                    requires_approval: false,
+                    status: BossPlanStepStatus::Rejected,
+                    completed: false,
+                    result_diff: None,
+                    worker_task_id: None,
+                    attempt_count: 1,
+                    retry_budget: 3,
+                    last_review_summary: Some("source evidence missing".into()),
+                    last_correction: Some("read_source_evidence".into()),
+                    stage_execution_contract: StageExecutionContract {
+                        content_evidence_targets: vec!["/tmp/source.md".into()],
+                        ..StageExecutionContract::default()
+                    },
+                    stage_continuation_context: Some(
+                        crate::core::state_frame::StageContinuationContext {
+                            repair_intent: Some(crate::core::state_frame::RepairIntent {
+                                failed_target: Some("/tmp/source.md".into()),
+                                verified_facts: Vec::new(),
+                                next_action: Some("read_source_evidence".into()),
+                                continuity_mode: Some(
+                                    crate::core::state_frame::ContinuityMode::Repair,
+                                ),
+                            }),
+                            failed_target: Some("/tmp/source.md".into()),
+                            verified_facts: Vec::new(),
+                            next_action: Some("read_source_evidence".into()),
+                            continuity_mode: Some(crate::core::state_frame::ContinuityMode::Repair),
+                        },
+                    ),
+                    executor_b_stage_memory: None,
+                    review_task_id: None,
+                    tool_execution_records: Vec::new(),
+                }],
+                ..BossPlan::default()
+            });
+        }
+        {
+            let mut metadata = coordinator.routed_step_metadata.write().await;
+            metadata.insert(
+                0,
+                BossStepRoutedMetadata {
+                    completion_evidence_gaps: vec![CompletionEvidenceGap {
+                        target_ref: "content_evidence:/tmp/source.md".into(),
+                        target_path: Some("/tmp/source.md".into()),
+                        missing_artifact_evidence: false,
+                        missing_test_evidence: false,
+                        missing_verification_evidence: true,
+                        recommended_action: "read_source_evidence".into(),
+                    }],
+                    fallback_tier: Some("source_evidence_repair".into()),
+                    fallback_reason: Some("rollout_policy_source_evidence_gap".into()),
+                    ..BossStepRoutedMetadata::default()
+                },
+            );
+        }
+
+        let assignment = coordinator
+            .build_executor_b_assignment_contract(0, "session-alpha", true)
+            .await
+            .expect("build assignment");
+
+        assert_eq!(assignment.worker_role, WorkerRole::Implement);
+        assert!(assignment.shared_step_memory.is_none());
+        assert_eq!(
+            assignment
+                .state_frame
+                .stage_continuation_context
+                .as_ref()
+                .and_then(|context| context.next_action.as_deref()),
+            Some("read_source_evidence")
+        );
+        assert_eq!(
+            assignment.state_frame.allowed_actions,
+            vec!["implement".to_string()]
+        );
+        assert!(
+            !assignment
+                .state_frame
+                .required_output_hint
+                .as_deref()
+                .unwrap_or_default()
+                .contains("verified_target:")
+        );
     }
 
     #[test]
