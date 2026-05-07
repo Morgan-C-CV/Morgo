@@ -657,12 +657,16 @@ fn completion_gate_failure(
         worker_report_has_target_scoped_evidence(stage_execution_contract, report)
             || verification_first_read_anchor_closed
     });
+    let source_evidence_satisfied = report.is_some_and(|report| {
+        worker_report_has_required_source_evidence(stage_execution_contract, report)
+    });
     let completion_sufficient = matches!(
         completion_status,
         Some(CompletionEvidenceStatus::Sufficient)
     ) && worker_verification_satisfied
         && worker_completion_sufficient
-        && evidence_bound;
+        && evidence_bound
+        && source_evidence_satisfied;
 
     if completion_sufficient && !has_gaps {
         return None;
@@ -672,6 +676,7 @@ fn completion_gate_failure(
         || !worker_verification_satisfied
         || !worker_completion_sufficient
         || !evidence_bound
+        || !source_evidence_satisfied
         || matches!(
             completion_status,
             Some(CompletionEvidenceStatus::MissingVerificationEvidence)
@@ -764,6 +769,25 @@ fn worker_report_has_target_scoped_evidence(
     }
     report.evidence_refs.iter().any(|evidence_ref| {
         !evidence_ref_is_artifact_presence_only(evidence_ref, &artifact_paths)
+    })
+}
+
+fn worker_report_has_required_source_evidence(
+    contract: &StageExecutionContract,
+    report: &crate::core::state_frame::WorkerStructuredReport,
+) -> bool {
+    if contract.content_evidence_targets.is_empty() {
+        return true;
+    }
+    if report.evidence_refs.is_empty() {
+        return false;
+    }
+    contract.content_evidence_targets.iter().all(|target| {
+        let required_anchor = format!("read:{target}");
+        report
+            .evidence_refs
+            .iter()
+            .any(|evidence_ref| evidence_ref == &required_anchor)
     })
 }
 
@@ -862,6 +886,7 @@ mod tests {
                 required_actions: vec!["verify_artifact".into()],
                 required_evidence: vec!["/tmp/report.md".into(), input_path.into()],
             }],
+            content_evidence_targets: vec![input_path.into()],
             required_actions: vec!["verify_artifact".into()],
             required_evidence: vec!["/tmp/report.md".into(), input_path.into()],
             ..StageExecutionContract::default()
@@ -1450,6 +1475,91 @@ mod tests {
                 );
             }
             other => panic!("expected failed outcome, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn write_then_read_output_only_cannot_complete_content_derived_task() {
+        let contract = verification_contract_with_required_input("/tmp/source.md");
+        let outcome = LoopOutcome::Done {
+            final_state: AgentState::Done,
+            usage: LoopUsage {
+                completion_evidence_status: Some(
+                    crate::core::state_frame::CompletionEvidenceStatus::Sufficient,
+                ),
+                worker_report: Some(crate::core::state_frame::WorkerStructuredReport {
+                    worker_state: AgentState::Done,
+                    last_tool_action: Some("Read".into()),
+                    files_changed: vec!["/tmp/report.md".into()],
+                    tests_run: Vec::new(),
+                    artifact_status: "verified".into(),
+                    test_status: "not_required".into(),
+                    verification_status: "verified".into(),
+                    stage_execution_contract: contract.clone(),
+                    stage_continuation_context: None,
+                    evidence_refs: vec![
+                        "write:/tmp/report.md".into(),
+                        "read:/tmp/report.md".into(),
+                    ],
+                    completion_evidence_gaps: Vec::new(),
+                    remaining_risks: Vec::new(),
+                    completion_evidence_status:
+                        crate::core::state_frame::CompletionEvidenceStatus::Sufficient,
+                }),
+                ..LoopUsage::default()
+            },
+        };
+
+        match map_loop_outcome(outcome, &contract, None) {
+            StepOutcome::Failed {
+                failure_classification,
+                ..
+            } => {
+                assert_eq!(
+                    failure_classification,
+                    StepFailureClassification::VerificationRepairContinuation
+                );
+            }
+            other => panic!("expected failed outcome, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn content_derived_task_completes_after_required_source_reads() {
+        let contract = verification_contract_with_required_input("/tmp/source.md");
+        let outcome = LoopOutcome::Done {
+            final_state: AgentState::Done,
+            usage: LoopUsage {
+                completion_evidence_status: Some(
+                    crate::core::state_frame::CompletionEvidenceStatus::Sufficient,
+                ),
+                worker_report: Some(crate::core::state_frame::WorkerStructuredReport {
+                    worker_state: AgentState::Done,
+                    last_tool_action: Some("Read".into()),
+                    files_changed: vec!["/tmp/report.md".into()],
+                    tests_run: Vec::new(),
+                    artifact_status: "verified".into(),
+                    test_status: "not_required".into(),
+                    verification_status: "verified".into(),
+                    stage_execution_contract: contract.clone(),
+                    stage_continuation_context: None,
+                    evidence_refs: vec![
+                        "read:/tmp/source.md".into(),
+                        "write:/tmp/report.md".into(),
+                        "read:/tmp/report.md".into(),
+                    ],
+                    completion_evidence_gaps: Vec::new(),
+                    remaining_risks: Vec::new(),
+                    completion_evidence_status:
+                        crate::core::state_frame::CompletionEvidenceStatus::Sufficient,
+                }),
+                ..LoopUsage::default()
+            },
+        };
+
+        match map_loop_outcome(outcome, &contract, None) {
+            StepOutcome::Completed { .. } => {}
+            other => panic!("expected completed outcome, got {other:?}"),
         }
     }
 

@@ -103,6 +103,8 @@ pub struct StageExecutionContract {
     #[serde(default)]
     pub tests: Vec<TestContract>,
     #[serde(default)]
+    pub content_evidence_targets: Vec<String>,
+    #[serde(default)]
     pub required_actions: Vec<String>,
     #[serde(default)]
     pub required_evidence: Vec<String>,

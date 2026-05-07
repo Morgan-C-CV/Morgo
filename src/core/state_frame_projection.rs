@@ -316,6 +316,7 @@ fn build_stage_execution_contract(
         declared_artifacts,
         verifications,
         tests,
+        content_evidence_targets: Vec::new(),
         required_actions,
         required_evidence,
     }

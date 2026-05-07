@@ -807,6 +807,7 @@ fn build_verification_first_minimal_contract(target: &str, kind: &str) -> StageE
             required_evidence: vec![target.into()],
         }],
         tests: Vec::new(),
+        content_evidence_targets: Vec::new(),
         required_actions: vec!["verify".into()],
         required_evidence: vec![target.into()],
     }
@@ -1202,6 +1203,7 @@ fn build_stage_execution_contract(
         declared_artifacts,
         verifications,
         tests,
+        content_evidence_targets: Vec::new(),
         required_actions,
         required_evidence,
     }
@@ -6746,6 +6748,9 @@ impl BossCoordinator {
             };
         let content_evidence_targets =
             collect_content_evidence_targets(&relevant_file_handles, &effective_stage_execution_contract);
+        let mut effective_stage_execution_contract = effective_stage_execution_contract;
+        effective_stage_execution_contract.content_evidence_targets =
+            content_evidence_targets.clone();
         let _ = self
             .content_evidence_targets
             .write()
