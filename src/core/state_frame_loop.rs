@@ -1201,7 +1201,7 @@ fn inject_completion_gate_block(frame: &mut StateFrame, block: &CompletionGateBl
     }
     frame.state = match block.required_action.as_str() {
         "write_artifact" => AgentState::Executing,
-        "run_verification" | "verify_artifact" => AgentState::Verifying,
+        "run_verification" | "verify_artifact" | "read_source_evidence" => AgentState::Verifying,
         _ => AgentState::Correcting,
     };
 }
@@ -1212,7 +1212,16 @@ fn record_completion_gate_recovery(
     block: &CompletionGateBlock,
 ) {
     usage.recovery_attempted = true;
-    usage.recovery_tier = Some("artifact_repair_turn".into());
+    usage.recovery_tier = Some(
+        match block.required_action.as_str() {
+            "write_artifact" => "artifact_repair_turn",
+            "read_source_evidence" | "run_verification" | "verify_artifact" => {
+                "verification_repair_continuation"
+            }
+            _ => "artifact_repair_turn",
+        }
+        .into(),
+    );
     usage.recovery_outcome = Some("repair_turn_injected".into());
     usage.terminal_blocker_kind = None;
     usage.last_recovery_attempt = Some(RecoveryAttempt {
@@ -1441,20 +1450,26 @@ fn verification_terminal_outcome(frame: &StateFrame, usage: &mut LoopUsage) -> O
 
     let evidence_refs = collect_evidence_refs(frame, Some(usage));
     let has_target_read_anchor = worker_has_target_scoped_read_anchor(frame, &evidence_refs);
+    let source_evidence_closed = missing_source_evidence_targets(frame, &evidence_refs).is_empty();
+    let verification_target_read_count = verification_target_successful_read_count(frame, usage);
     let verification_status = summarize_verification_status(frame);
     let last_effective_tool_action = usage
         .last_effective_tool_action
         .as_deref()
         .unwrap_or("none");
     let read_short_circuit_candidate = has_target_read_anchor
+        && source_evidence_closed
         && (verification_status == "verified" || last_effective_tool_action == "Read");
+    let read_tailspin_candidate =
+        verification_target_read_count >= 2 && has_target_read_anchor && source_evidence_closed;
     if read_short_circuit_candidate {
         if verify_terminal_diagnostics_enabled() {
             eprintln!(
-                "verify_terminal_outcome: done state={:?} last_effective_tool_action={} has_target_read_anchor={} verification_status={} evidence_refs={}",
+                "verify_terminal_outcome: done state={:?} last_effective_tool_action={} has_target_read_anchor={} source_evidence_closed={} verification_status={} evidence_refs={}",
                 frame.state,
                 last_effective_tool_action,
                 has_target_read_anchor,
+                source_evidence_closed,
                 verification_status,
                 evidence_refs.join("|")
             );
@@ -1470,11 +1485,30 @@ fn verification_terminal_outcome(frame: &StateFrame, usage: &mut LoopUsage) -> O
     if matches!(completion, CompletionEvidenceStatus::Sufficient) {
         if verify_terminal_diagnostics_enabled() {
             eprintln!(
-                "verify_terminal_outcome: done_via_completion state={:?} last_effective_tool_action={} has_target_read_anchor={} verification_status={} evidence_refs={}",
+                "verify_terminal_outcome: done_via_completion state={:?} last_effective_tool_action={} has_target_read_anchor={} source_evidence_closed={} verification_status={} evidence_refs={}",
                 frame.state,
                 last_effective_tool_action,
                 has_target_read_anchor,
+                source_evidence_closed,
                 verification_status,
+                evidence_refs.join("|")
+            );
+        }
+        finalize_worker_usage_report(frame, usage);
+        return Some(LoopOutcome::Done {
+            final_state: AgentState::Done,
+            usage: usage.clone(),
+        });
+    }
+    if read_tailspin_candidate {
+        if verify_terminal_diagnostics_enabled() {
+            eprintln!(
+                "verify_terminal_outcome: forced_done_after_repeated_read state={:?} last_effective_tool_action={} verification_target_read_count={} has_target_read_anchor={} source_evidence_closed={} evidence_refs={}",
+                frame.state,
+                last_effective_tool_action,
+                verification_target_read_count,
+                has_target_read_anchor,
+                source_evidence_closed,
                 evidence_refs.join("|")
             );
         }
@@ -1525,6 +1559,67 @@ fn verification_terminal_outcome(frame: &StateFrame, usage: &mut LoopUsage) -> O
     }
 
     None
+}
+
+fn verification_target_successful_read_count(frame: &StateFrame, usage: &LoopUsage) -> usize {
+    let verification_targets = completion_contract_refs(frame, "verification_refs")
+        .into_iter()
+        .filter_map(|verification_ref| {
+            artifact_contract_target(frame, &verification_ref)
+                .map(|(path, _)| path)
+                .or_else(|| Some(verification_ref))
+        })
+        .collect::<Vec<_>>();
+    if verification_targets.is_empty() {
+        return 0;
+    }
+    usage
+        .tool_execution_records
+        .iter()
+        .filter(|record| record.kind == ToolExecutionOutcomeKind::Success)
+        .filter(|record| record.tool_name == "Read")
+        .filter(|record| {
+            observable_path_from_input(record.observable_input.as_ref())
+                .is_some_and(|path| verification_targets.iter().any(|target| target == &path))
+        })
+        .count()
+}
+
+fn verification_report_read_tailspin_reason(
+    frame: &StateFrame,
+    usage: &LoopUsage,
+    decision: &crate::core::state_frame::StateDecision,
+) -> Option<(String, Vec<String>)> {
+    let target_path = current_action_target_path(decision)?;
+    let verification_targets = completion_contract_refs(frame, "verification_refs")
+        .into_iter()
+        .filter_map(|verification_ref| {
+            artifact_contract_target(frame, &verification_ref)
+                .map(|(path, _)| path)
+                .or_else(|| Some(verification_ref))
+        })
+        .collect::<Vec<_>>();
+    if !verification_targets.iter().any(|path| path == &target_path) {
+        return None;
+    }
+    let evidence_refs = collect_evidence_refs(frame, Some(usage));
+    if !evidence_refs
+        .iter()
+        .any(|evidence_ref| evidence_ref == &format!("read:{target_path}"))
+    {
+        return None;
+    }
+    let missing_source_targets = missing_source_evidence_targets(frame, &evidence_refs);
+    if missing_source_targets.is_empty() {
+        return None;
+    }
+    Some((
+        format!(
+            "repeated verification-target read of {} while source evidence remains missing",
+            target_path
+        ),
+        missing_source_targets,
+    ))
 }
 
 fn current_action_target_path(
@@ -3328,6 +3423,34 @@ pub async fn run_decision_loop_with_tools(
                     total_usage.terminal_blocker_kind = Some("same_invalid_strategy".into());
                     finalize_worker_usage_report(&frame, &mut total_usage);
                     return Ok(LoopOutcome::NoProgress {
+                        last_state: frame.state,
+                        reason,
+                        usage: total_usage,
+                    });
+                }
+                if let Some((reason, missing_source_targets)) =
+                    verification_report_read_tailspin_reason(&frame, &total_usage, &decision)
+                {
+                    let block = CompletionGateBlock {
+                        status: CompletionEvidenceStatus::MissingVerificationEvidence,
+                        required_action: "read_source_evidence".into(),
+                        reason: reason.clone(),
+                        missing_evidence_refs: missing_source_targets,
+                    };
+                    inject_completion_gate_block(&mut frame, &block);
+                    total_usage.completion_evidence_status =
+                        Some(CompletionEvidenceStatus::MissingVerificationEvidence);
+                    total_usage.recovery_attempted = true;
+                    total_usage.recovery_tier = Some("verification_repair_continuation".into());
+                    total_usage.recovery_outcome = Some("repair_turn_injected".into());
+                    total_usage.terminal_blocker_kind = None;
+                    total_usage.last_recovery_attempt = Some(RecoveryAttempt {
+                        failure_kind: block.status.as_str().to_string(),
+                        recommended_next_action: block.required_action.clone(),
+                        target_path: current_action_target_path(&decision),
+                    });
+                    finalize_worker_usage_report(&frame, &mut total_usage);
+                    return Ok(LoopOutcome::ToolDispatchFailed {
                         last_state: frame.state,
                         reason,
                         usage: total_usage,
@@ -5829,6 +5952,188 @@ mod tests {
                 );
             }
             other => panic!("expected Done, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn verification_terminal_outcome_forces_done_after_repeated_target_read_with_closed_source_evidence()
+     {
+        let mut frame = make_frame();
+        frame.state = AgentState::Verifying;
+        frame.recent_evidence.clear();
+        push_completion_contract_with_refs(
+            &mut frame,
+            &["artifact:contract:0"],
+            &[],
+            &["artifact:contract:0"],
+        );
+        push_artifact_target_fact(&mut frame, "artifact:contract:0", "/tmp/report.md", "file");
+        frame.recent_evidence.push(
+            "fact: file_facts ref=filefact:runtime:1:read path=/tmp/report.md kind=read_observation source=tool:Read source_event_id=tool-read:runtime:1 freshness=after-runtime-read confidence=1.00 status=active invalidated_by=none supersedes=none conflicts_with=none fact=runtime Read succeeded for /tmp/report.md".into(),
+        );
+        frame.recent_evidence.push(
+            "fact: verification_status ref=artifact:contract:0 path=/tmp/report.md status=verified source=tool:Read source_event_id=tool-read:1 freshness=after-runtime-read confidence=0.90 lineage_status=active invalidated_by=none supersedes=none conflicts_with=none summary=read-back verified /tmp/report.md".into(),
+        );
+        let mut usage = LoopUsage {
+            last_effective_tool_action: Some("Read".into()),
+            tool_execution_records: vec![
+                ToolExecutionRecord {
+                    tool_name: "Read".into(),
+                    outcome: "Text".into(),
+                    kind: ToolExecutionOutcomeKind::Success,
+                    summary: "Read succeeded".into(),
+                    detail: None,
+                    pending_approval: None,
+                    report_modifier: crate::tool::result::ToolReportModifier::None,
+                    observable_input: Some(ObservableInput {
+                        value: r#"{"file_path":"/tmp/report.md"}"#.into(),
+                        source: ObservableInputSource::Raw,
+                    }),
+                    batch_context: ToolBatchContext {
+                        batch_index: 0,
+                        batch_size: 1,
+                        executed_in_batch: false,
+                    },
+                },
+                ToolExecutionRecord {
+                    tool_name: "Read".into(),
+                    outcome: "Text".into(),
+                    kind: ToolExecutionOutcomeKind::Success,
+                    summary: "Read succeeded again".into(),
+                    detail: None,
+                    pending_approval: None,
+                    report_modifier: crate::tool::result::ToolReportModifier::None,
+                    observable_input: Some(ObservableInput {
+                        value: r#"{"file_path":"/tmp/report.md"}"#.into(),
+                        source: ObservableInputSource::Raw,
+                    }),
+                    batch_context: ToolBatchContext {
+                        batch_index: 0,
+                        batch_size: 1,
+                        executed_in_batch: false,
+                    },
+                },
+            ],
+            ..LoopUsage::default()
+        };
+
+        let outcome = super::verification_terminal_outcome(&frame, &mut usage)
+            .expect("repeated verification read should force terminalization");
+        match outcome {
+            LoopOutcome::Done { usage, .. } => {
+                let report = usage.worker_report.expect("worker report");
+                assert_eq!(
+                    report.completion_evidence_status,
+                    CompletionEvidenceStatus::Sufficient
+                );
+                assert_eq!(report.verification_status, "verified");
+                assert!(
+                    report
+                        .evidence_refs
+                        .iter()
+                        .any(|reference| reference == "read:/tmp/report.md")
+                );
+            }
+            other => panic!("expected Done, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn repeated_verification_target_read_without_source_evidence_is_redirected_to_source_repair() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let report_path = unique_temp_path("verification_tailspin_report");
+        let source_path = unique_temp_path("verification_tailspin_source");
+        std::fs::write(&report_path, "report contents").expect("report should be written");
+        std::fs::write(&source_path, "source contents").expect("source should be written");
+
+        let read_report_json = format!(
+            r#"{{"state":"verifying","decision":"call_tool","next_action":{{"action_type":"Read","args":{{"file_path":"{}"}}}}}}"#,
+            report_path.display()
+        );
+        let done_json = r#"{"state":"done","decision":"done"}"#;
+        let client = ModelProviderClient::with_scripted_turns(vec![
+            vec![StreamEvent::TextDelta(read_report_json.clone())],
+            vec![StreamEvent::TextDelta(read_report_json)],
+            vec![StreamEvent::TextDelta(done_json.into())],
+        ]);
+
+        let mut frame = make_frame();
+        frame.state = AgentState::Verifying;
+        frame.recent_evidence.clear();
+        frame.allowed_actions.push("read_file".into());
+        frame.allowed_tools.push("Read".into());
+        push_artifact_target_fact(
+            &mut frame,
+            "artifact:contract:report",
+            report_path.to_str().unwrap(),
+            "file",
+        );
+        push_completion_contract_with_refs(
+            &mut frame,
+            &["artifact:contract:report"],
+            &[],
+            &["artifact:contract:report"],
+        );
+        frame.stage_execution_contract.content_evidence_targets =
+            vec![source_path.display().to_string()];
+
+        let tool_runtime = StateFrameToolRuntime {
+            registry: ToolRegistry::new().register(Arc::new(FileReadTool)),
+            permissions: ToolPermissionContext::new(PermissionMode::Default),
+            cwd: test_runtime_paths().0,
+            config_root: test_runtime_paths().1,
+        };
+
+        let outcome = rt
+            .block_on(run_decision_loop_with_tools(
+                &client,
+                frame,
+                DecisionLoopConfig {
+                    max_iterations: 4,
+                    ..DecisionLoopConfig::default()
+                },
+                Some(tool_runtime),
+            ))
+            .expect("loop should not error");
+
+        let _ = std::fs::remove_file(&report_path);
+        let _ = std::fs::remove_file(&source_path);
+
+        match outcome {
+            LoopOutcome::ToolDispatchFailed {
+                last_state,
+                reason,
+                usage,
+            } => {
+                assert_eq!(last_state, AgentState::Verifying);
+                assert!(reason.contains("source evidence remains missing"));
+                assert_eq!(
+                    usage.recovery_tier.as_deref(),
+                    Some("verification_repair_continuation")
+                );
+                assert_eq!(
+                    usage.recovery_outcome.as_deref(),
+                    Some("repair_turn_injected")
+                );
+                assert_eq!(
+                    usage
+                        .completion_evidence_status
+                        .as_ref()
+                        .map(|status| status.as_str()),
+                    Some("missing_verification_evidence")
+                );
+                assert_eq!(usage.tool_dispatch_count, 1);
+                assert_eq!(usage.tool_dispatch_success_count, 1);
+                assert!(
+                    usage
+                        .worker_report
+                        .expect("worker report")
+                        .evidence_refs
+                        .iter()
+                        .any(|reference| reference == &format!("read:{}", report_path.display()))
+                );
+            }
+            other => panic!("expected ToolDispatchFailed, got {other:?}"),
         }
     }
 
