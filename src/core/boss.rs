@@ -64,6 +64,7 @@ pub struct BossCoordinator {
 
     pub auto_advance_app_state: Arc<RwLock<Option<Arc<crate::state::app_state::AppState>>>>,
     routed_step_metadata: Arc<RwLock<std::collections::HashMap<usize, BossStepRoutedMetadata>>>,
+    content_evidence_targets: Arc<RwLock<std::collections::HashMap<usize, Vec<String>>>>,
     runtime_key: Arc<RwLock<Option<String>>>,
     runtime_owner: Arc<BossRuntimeOwner>,
     lism_policy: Arc<RwLock<BossLisMPolicy>>,
@@ -1206,6 +1207,64 @@ fn build_stage_execution_contract(
     }
 }
 
+fn collect_content_evidence_targets(
+    relevant_file_handles: &[RelevantFileHandle],
+    contract: &StageExecutionContract,
+) -> Vec<String> {
+    let artifact_paths = contract
+        .declared_artifacts
+        .iter()
+        .map(|artifact| artifact.path.as_str())
+        .collect::<Vec<_>>();
+    let verification_paths = contract
+        .verifications
+        .iter()
+        .filter_map(|verification| verification.target_path.as_deref())
+        .collect::<Vec<_>>();
+    let mut targets = Vec::new();
+    for handle in relevant_file_handles {
+        let path = handle.path.trim();
+        if !is_content_evidence_candidate_path(path, handle.kind.as_str()) {
+            continue;
+        }
+        if artifact_paths.iter().any(|artifact| *artifact == path)
+            || verification_paths.iter().any(|target| *target == path)
+        {
+            continue;
+        }
+        if !targets.iter().any(|existing| existing == path) {
+            targets.push(path.to_string());
+        }
+    }
+    targets
+}
+
+fn is_content_evidence_candidate_path(path: &str, kind: &str) -> bool {
+    let trimmed = path.trim();
+    if trimmed.is_empty()
+        || trimmed == "/"
+        || trimmed == "/boss"
+        || trimmed.starts_with("/boss/")
+        || trimmed.starts_with("/mcp")
+        || trimmed.starts_with("/skills")
+        || trimmed.starts_with("/lism")
+        || trimmed.starts_with("/effort")
+        || trimmed.starts_with("/status")
+        || trimmed.starts_with("command:")
+        || trimmed.ends_with('/')
+    {
+        return false;
+    }
+    if matches!(kind, "target_directory" | "data_or_log" | "path") {
+        return false;
+    }
+    let lowered = trimmed.to_ascii_lowercase();
+    if lowered.ends_with(".log") || lowered.ends_with(".jsonl") {
+        return false;
+    }
+    std::path::Path::new(trimmed).extension().is_some()
+}
+
 fn inject_declared_writable_artifact_paths(
     permissions: &crate::state::permission_context::ToolPermissionContext,
     contract: &StageExecutionContract,
@@ -1348,6 +1407,7 @@ struct ExecutorBAssignmentContract {
     lism_policy: String,
     worker_role: WorkerRole,
     shared_step_memory: Option<SharedStepMemory>,
+    content_evidence_targets: Vec<String>,
     assignment_fingerprint: String,
 }
 
@@ -2554,6 +2614,7 @@ impl BossCoordinator {
             actor_registry: Arc::new(RwLock::new(None)),
             auto_advance_app_state: Arc::new(RwLock::new(None)),
             routed_step_metadata: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            content_evidence_targets: Arc::new(RwLock::new(std::collections::HashMap::new())),
             runtime_key: Arc::new(RwLock::new(None)),
             runtime_owner,
             lism_policy: Arc::new(RwLock::new(BossLisMPolicy::Inherit)),
@@ -2760,6 +2821,7 @@ impl BossCoordinator {
             actor_registry: self.actor_registry.clone(),
             auto_advance_app_state: self.auto_advance_app_state.clone(),
             routed_step_metadata: self.routed_step_metadata.clone(),
+            content_evidence_targets: self.content_evidence_targets.clone(),
             runtime_key: self.runtime_key.clone(),
             runtime_owner: self.runtime_owner.clone(),
             lism_policy: self.lism_policy.clone(),
@@ -3600,6 +3662,15 @@ impl BossCoordinator {
         self.shared_step_memory.read().await.get(&step_id).cloned()
     }
 
+    async fn content_evidence_targets_for_step(&self, step_id: usize) -> Vec<String> {
+        self.content_evidence_targets
+            .read()
+            .await
+            .get(&step_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
     async fn upsert_shared_step_memory(
         &self,
         step_id: usize,
@@ -3750,6 +3821,7 @@ impl BossCoordinator {
             let mut session_guard = self.session.write().await;
             *session_guard = Some(BossSession::from_plan_id(&plan_id, BossStage::Execution));
         }
+        self.content_evidence_targets.write().await.clear();
     }
 
     /// Stable run identifier derived from plan_id, or a timestamp fallback.
@@ -6672,6 +6744,13 @@ impl BossCoordinator {
             } else {
                 build_stage_execution_contract(step, &target_artifacts)
             };
+        let content_evidence_targets =
+            collect_content_evidence_targets(&relevant_file_handles, &effective_stage_execution_contract);
+        let _ = self
+            .content_evidence_targets
+            .write()
+            .await
+            .insert(step.id, content_evidence_targets.clone());
         let brief = BossContextBrief {
             plan_id: plan.plan_id.clone(),
             step_id: step.id,
@@ -6809,6 +6888,7 @@ impl BossCoordinator {
             "relevant_file_handles": effective_relevant_file_handles,
             "target_files": effective_target_files,
             "target_artifacts": effective_target_artifacts,
+            "content_evidence_targets": content_evidence_targets,
             "allowed_tools": allowed_tools,
             "permission_scope": {
                 "lism_policy": permission_scope.lism_policy,
@@ -6826,6 +6906,7 @@ impl BossCoordinator {
             lism_policy,
             worker_role,
             shared_step_memory,
+            content_evidence_targets,
             assignment_fingerprint,
         })
     }
@@ -6948,6 +7029,7 @@ refresh_reason: {}\n\n{}",
             "continuation_payload": continuation_payload,
             "executor_b_stage_memory": executor_b_stage_memory,
             "shared_step_memory": contract.shared_step_memory.clone(),
+            "content_evidence_targets": contract.content_evidence_targets.clone(),
             "recent_local_facts": if verification_first_short_form {
                 Vec::<String>::new()
             } else {
@@ -7032,6 +7114,7 @@ refresh_reason: {}\n\n{}",
             "continuation_payload": continuation_payload,
             "executor_b_stage_memory": executor_b_stage_memory,
             "shared_step_memory": contract.shared_step_memory.clone(),
+            "content_evidence_targets": contract.content_evidence_targets.clone(),
         })
         .to_string();
 
@@ -11094,6 +11177,7 @@ mod tests {
             lism_policy: "force_on".into(),
             worker_role: WorkerRole::Implement,
             shared_step_memory: None,
+            content_evidence_targets: Vec::new(),
             assignment_fingerprint: "fingerprint".into(),
         };
 
@@ -11967,6 +12051,7 @@ mod tests {
             lism_policy: "force_on".into(),
             worker_role: WorkerRole::Verify,
             shared_step_memory: Some(shared_step_memory),
+            content_evidence_targets: Vec::new(),
             assignment_fingerprint: "fingerprint".into(),
         };
 
@@ -15795,6 +15880,151 @@ mod tests {
                 .iter()
                 .any(|handle| handle.path == "/tmp/example/report.md"
                     && handle.kind == "target_file")
+        );
+    }
+
+    #[test]
+    fn content_evidence_targets_excludes_output_artifacts_and_verification_targets() {
+        let target_path = temp_report_path("content-evidence-output");
+        let source_path = temp_report_path("content-evidence-source");
+        let handles = vec![
+            RelevantFileHandle {
+                path: target_path.clone(),
+                kind: "target_file".into(),
+                source: "boss_step_objective".into(),
+                freshness: "current".into(),
+                why_relevant: "referenced as output target".into(),
+                step_revision: "step-1-attempt-0".into(),
+            },
+            RelevantFileHandle {
+                path: source_path.clone(),
+                kind: "source_file".into(),
+                source: "boss_step_objective".into(),
+                freshness: "current".into(),
+                why_relevant: "referenced as source input".into(),
+                step_revision: "step-1-attempt-0".into(),
+            },
+        ];
+        let step = BossPlanStep {
+            id: 1,
+            description: "write report".into(),
+            objective: Some(format!("write report to {target_path} using {source_path}")),
+            acceptance: vec![format!("target file exists and is non-empty: {target_path}")],
+            requires_approval: false,
+            status: BossPlanStepStatus::Pending,
+            completed: false,
+            result_diff: None,
+            worker_task_id: None,
+            attempt_count: 0,
+            retry_budget: 3,
+            last_review_summary: None,
+            last_correction: None,
+            stage_execution_contract: StageExecutionContract::default(),
+            stage_continuation_context: None,
+            executor_b_stage_memory: None,
+            review_task_id: None,
+            tool_execution_records: Vec::new(),
+        };
+        let target_artifacts = vec![TargetArtifact {
+            path: target_path.clone(),
+            kind: "file".into(),
+            required_state: "exists_non_empty".into(),
+            source: "artifact_expectation".into(),
+        }];
+        let contract = build_stage_execution_contract(&step, &target_artifacts);
+        let targets = collect_content_evidence_targets(&handles, &contract);
+
+        assert_eq!(targets, vec![source_path]);
+    }
+
+    #[test]
+    fn content_evidence_targets_collects_explicit_input_files_only() {
+        let target_path = temp_report_path("content-evidence-explicit-output");
+        let handles = vec![
+            RelevantFileHandle {
+                path: target_path.clone(),
+                kind: "target_file".into(),
+                source: "boss_step_objective".into(),
+                freshness: "current".into(),
+                why_relevant: "referenced as output target".into(),
+                step_revision: "step-2-attempt-0".into(),
+            },
+            RelevantFileHandle {
+                path: "RustAgent/Agent/src/tool/definition.rs".into(),
+                kind: "source_file".into(),
+                source: "boss_step_objective".into(),
+                freshness: "current".into(),
+                why_relevant: "explicit source input".into(),
+                step_revision: "step-2-attempt-0".into(),
+            },
+            RelevantFileHandle {
+                path: "RustAgent/docs/31-token-efficiency-cost-performance.md".into(),
+                kind: "document".into(),
+                source: "boss_step_objective".into(),
+                freshness: "current".into(),
+                why_relevant: "explicit document input".into(),
+                step_revision: "step-2-attempt-0".into(),
+            },
+            RelevantFileHandle {
+                path: "command:/tmp/ignored-input.txt".into(),
+                kind: "path".into(),
+                source: "boss_step_objective".into(),
+                freshness: "current".into(),
+                why_relevant: "command pseudo target".into(),
+                step_revision: "step-2-attempt-0".into(),
+            },
+            RelevantFileHandle {
+                path: "/tmp/example/run.log".into(),
+                kind: "data_or_log".into(),
+                source: "boss_step_objective".into(),
+                freshness: "current".into(),
+                why_relevant: "log output".into(),
+                step_revision: "step-2-attempt-0".into(),
+            },
+            RelevantFileHandle {
+                path: "/tmp/example/output/".into(),
+                kind: "target_directory".into(),
+                source: "boss_step_objective".into(),
+                freshness: "current".into(),
+                why_relevant: "directory placeholder".into(),
+                step_revision: "step-2-attempt-0".into(),
+            },
+        ];
+        let step = BossPlanStep {
+            id: 2,
+            description: "write report".into(),
+            objective: Some(format!("write report to {target_path}")),
+            acceptance: vec![format!("target file exists and is non-empty: {target_path}")],
+            requires_approval: false,
+            status: BossPlanStepStatus::Pending,
+            completed: false,
+            result_diff: None,
+            worker_task_id: None,
+            attempt_count: 0,
+            retry_budget: 3,
+            last_review_summary: None,
+            last_correction: None,
+            stage_execution_contract: StageExecutionContract::default(),
+            stage_continuation_context: None,
+            executor_b_stage_memory: None,
+            review_task_id: None,
+            tool_execution_records: Vec::new(),
+        };
+        let target_artifacts = vec![TargetArtifact {
+            path: target_path.clone(),
+            kind: "file".into(),
+            required_state: "exists_non_empty".into(),
+            source: "artifact_expectation".into(),
+        }];
+        let contract = build_stage_execution_contract(&step, &target_artifacts);
+        let targets = collect_content_evidence_targets(&handles, &contract);
+
+        assert_eq!(
+            targets,
+            vec![
+                "RustAgent/Agent/src/tool/definition.rs".to_string(),
+                "RustAgent/docs/31-token-efficiency-cost-performance.md".to_string(),
+            ]
         );
     }
 
