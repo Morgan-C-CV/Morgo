@@ -1269,6 +1269,15 @@ fn finalize_worker_usage_report(frame: &StateFrame, usage: &mut LoopUsage) {
     usage.worker_report = Some(report);
 }
 
+fn verify_terminal_diagnostics_enabled() -> bool {
+    std::env::var("RUST_AGENT_VERIFY_TERMINAL_DIAGNOSTICS")
+        .map(|value| {
+            let normalized = value.trim().to_ascii_lowercase();
+            matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
+        })
+        .unwrap_or(false)
+}
+
 fn verification_terminal_outcome(
     frame: &StateFrame,
     usage: &mut LoopUsage,
@@ -1293,10 +1302,25 @@ fn verification_terminal_outcome(
 
     let evidence_refs = collect_evidence_refs(frame, Some(usage));
     let has_target_read_anchor = worker_has_target_scoped_read_anchor(frame, &evidence_refs);
-    if has_target_read_anchor
-        && (summarize_verification_status(frame) == "verified"
-            || matches!(usage.last_effective_tool_action.as_deref(), Some("Read")))
+    let verification_status = summarize_verification_status(frame);
+    let last_effective_tool_action = usage
+        .last_effective_tool_action
+        .as_deref()
+        .unwrap_or("none");
+    let read_short_circuit_candidate =
+        has_target_read_anchor && (verification_status == "verified" || last_effective_tool_action == "Read");
+    if read_short_circuit_candidate
     {
+        if verify_terminal_diagnostics_enabled() {
+            eprintln!(
+                "verify_terminal_outcome: done state={:?} last_effective_tool_action={} has_target_read_anchor={} verification_status={} evidence_refs={}",
+                frame.state,
+                last_effective_tool_action,
+                has_target_read_anchor,
+                verification_status,
+                evidence_refs.join("|")
+            );
+        }
         finalize_worker_usage_report(frame, usage);
         return Some(LoopOutcome::Done {
             final_state: AgentState::Done,
@@ -1306,6 +1330,16 @@ fn verification_terminal_outcome(
 
     let completion = evaluate_completion_evidence(frame, usage);
     if matches!(completion, CompletionEvidenceStatus::Sufficient) {
+        if verify_terminal_diagnostics_enabled() {
+            eprintln!(
+                "verify_terminal_outcome: done_via_completion state={:?} last_effective_tool_action={} has_target_read_anchor={} verification_status={} evidence_refs={}",
+                frame.state,
+                last_effective_tool_action,
+                has_target_read_anchor,
+                verification_status,
+                evidence_refs.join("|")
+            );
+        }
         finalize_worker_usage_report(frame, usage);
         return Some(LoopOutcome::Done {
             final_state: AgentState::Done,
@@ -1336,6 +1370,19 @@ fn verification_terminal_outcome(
             ),
             usage: usage.clone(),
         });
+    }
+
+    if verify_terminal_diagnostics_enabled() {
+        eprintln!(
+            "verify_terminal_outcome: no_done state={:?} last_effective_tool_action={} has_target_read_anchor={} verification_status={} completion={} verify_context_active={} evidence_refs={}",
+            frame.state,
+            last_effective_tool_action,
+            has_target_read_anchor,
+            verification_status,
+            completion.as_str(),
+            verify_context_active,
+            evidence_refs.join("|")
+        );
     }
 
     None
