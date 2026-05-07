@@ -642,17 +642,25 @@ fn completion_gate_failure(
         .unwrap_or(&[]);
     let has_gaps = !gaps.is_empty();
     let missing_verification_gap = gaps.iter().any(|gap| gap.missing_verification_evidence);
+    let worker_verification_verified = report
+        .map(|report| report.verification_status.as_str() == "verified")
+        .unwrap_or(false);
+    let worker_completion_sufficient = report.is_some_and(|report| {
+        report.completion_evidence_status == CompletionEvidenceStatus::Sufficient
+    });
     let completion_sufficient = matches!(
         completion_status,
         Some(CompletionEvidenceStatus::Sufficient)
-    ) && report
-        .is_some_and(|report| report.completion_evidence_status == CompletionEvidenceStatus::Sufficient);
+    ) && worker_verification_verified
+        && worker_completion_sufficient;
 
     if completion_sufficient && !has_gaps {
         return None;
     }
 
     let failure_classification = if missing_verification_gap
+        || !worker_verification_verified
+        || !worker_completion_sufficient
         || matches!(
             completion_status,
             Some(CompletionEvidenceStatus::MissingVerificationEvidence)
@@ -1176,6 +1184,97 @@ mod tests {
 
         match map_loop_outcome(outcome, &verification_contract(), None) {
             StepOutcome::Failed { .. } => {}
+            other => panic!("expected failed outcome, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unverified_worker_report_cannot_pass_completion_gate() {
+        let outcome = LoopOutcome::Done {
+            final_state: AgentState::Done,
+            usage: LoopUsage {
+                completion_evidence_status: Some(
+                    crate::core::state_frame::CompletionEvidenceStatus::Sufficient,
+                ),
+                worker_report: Some(crate::core::state_frame::WorkerStructuredReport {
+                    worker_state: AgentState::Done,
+                    last_tool_action: Some("Write".into()),
+                    files_changed: vec!["/tmp/report.md".into()],
+                    tests_run: Vec::new(),
+                    artifact_status: "verified".into(),
+                    test_status: "not_required".into(),
+                    verification_status: "unverified".into(),
+                    stage_execution_contract: verification_contract(),
+                    stage_continuation_context: None,
+                    evidence_refs: vec!["write:/tmp/report.md".into()],
+                    completion_evidence_gaps: Vec::new(),
+                    remaining_risks: Vec::new(),
+                    completion_evidence_status:
+                        crate::core::state_frame::CompletionEvidenceStatus::Sufficient,
+                }),
+                ..LoopUsage::default()
+            },
+        };
+
+        match map_loop_outcome(outcome, &verification_contract(), None) {
+            StepOutcome::Failed {
+                failure_classification,
+                ..
+            } => {
+                assert_eq!(
+                    failure_classification,
+                    StepFailureClassification::VerificationRepairContinuation
+                );
+            }
+            other => panic!("expected failed outcome, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn missing_verification_evidence_forces_failed_not_completed() {
+        let outcome = LoopOutcome::Done {
+            final_state: AgentState::Done,
+            usage: LoopUsage {
+                completion_evidence_status: Some(
+                    crate::core::state_frame::CompletionEvidenceStatus::MissingVerificationEvidence,
+                ),
+                worker_report: Some(crate::core::state_frame::WorkerStructuredReport {
+                    worker_state: AgentState::Done,
+                    last_tool_action: Some("Write".into()),
+                    files_changed: vec!["/tmp/report.md".into()],
+                    tests_run: Vec::new(),
+                    artifact_status: "verified".into(),
+                    test_status: "not_required".into(),
+                    verification_status: "unverified".into(),
+                    stage_execution_contract: verification_contract(),
+                    stage_continuation_context: None,
+                    evidence_refs: vec!["write:/tmp/report.md".into()],
+                    completion_evidence_gaps: vec![crate::core::state_frame::CompletionEvidenceGap {
+                        target_ref: "artifact:step0:0".into(),
+                        target_path: Some("/tmp/report.md".into()),
+                        missing_artifact_evidence: false,
+                        missing_test_evidence: false,
+                        missing_verification_evidence: true,
+                        recommended_action: "verify_artifact".into(),
+                    }],
+                    remaining_risks: Vec::new(),
+                    completion_evidence_status:
+                        crate::core::state_frame::CompletionEvidenceStatus::MissingVerificationEvidence,
+                }),
+                ..LoopUsage::default()
+            },
+        };
+
+        match map_loop_outcome(outcome, &verification_contract(), None) {
+            StepOutcome::Failed {
+                failure_classification,
+                ..
+            } => {
+                assert_eq!(
+                    failure_classification,
+                    StepFailureClassification::VerificationRepairContinuation
+                );
+            }
             other => panic!("expected failed outcome, got {other:?}"),
         }
     }

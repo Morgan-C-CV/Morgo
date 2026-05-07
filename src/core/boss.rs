@@ -108,20 +108,35 @@ fn step_completion_gate_error(
     let completion_sufficient = matches!(
         metadata.completion_evidence_status.as_deref(),
         Some("sufficient")
-    ) && metadata.worker_report.as_ref().is_some_and(|report| {
+    );
+    let worker_report = metadata.worker_report.as_ref();
+    let worker_verification_verified = worker_report
+        .is_some_and(|report| report.verification_status.as_str() == "verified");
+    let worker_completion_sufficient = worker_report.is_some_and(|report| {
         report.completion_evidence_status == CompletionEvidenceStatus::Sufficient
     });
-    if completion_sufficient && metadata.completion_evidence_gaps.is_empty() {
+    let verification_gate_satisfied = completion_sufficient
+        && worker_verification_verified
+        && worker_completion_sufficient
+        && !metadata
+            .completion_evidence_gaps
+            .iter()
+            .any(|gap| gap.missing_verification_evidence);
+    if verification_gate_satisfied && metadata.completion_evidence_gaps.is_empty() {
         return None;
     }
-    let classification = if metadata
+    let verification_gap = metadata
         .completion_evidence_gaps
         .iter()
         .any(|gap| gap.missing_verification_evidence)
         || matches!(
             metadata.completion_evidence_status.as_deref(),
             Some("missing_verification_evidence")
-        ) {
+        )
+        || !worker_verification_verified
+        || !worker_completion_sufficient
+        || !completion_sufficient;
+    let classification = if verification_gap {
         StepFailureClassification::VerificationRepairContinuation
     } else {
         StepFailureClassification::RepairableRecovery
@@ -9460,7 +9475,139 @@ mod tests {
 
         let failure = step_completion_gate_error(&step, Some(&metadata))
             .expect("placeholder completion should not bypass verification gate");
-        assert_eq!(failure.1, StepFailureClassification::RepairableRecovery);
+        assert_eq!(
+            failure.1,
+            StepFailureClassification::VerificationRepairContinuation
+        );
+    }
+
+    #[test]
+    fn placeholder_report_is_rejected_even_if_target_file_exists() {
+        let step = BossPlanStep {
+            id: 2,
+            description: "write report".into(),
+            objective: None,
+            acceptance: vec!["verification evidence required".into()],
+            requires_approval: false,
+            status: BossPlanStepStatus::Running,
+            completed: false,
+            result_diff: None,
+            worker_task_id: None,
+            attempt_count: 0,
+            retry_budget: 3,
+            last_review_summary: None,
+            last_correction: None,
+            stage_execution_contract: StageExecutionContract {
+                verifications: vec![VerificationContract {
+                    target_ref: "artifact:step0:0".into(),
+                    target_path: Some("/tmp/report.md".into()),
+                    required_actions: vec!["verify_artifact".into()],
+                    required_evidence: vec!["/tmp/report.md".into()],
+                }],
+                required_actions: vec!["verify_artifact".into()],
+                required_evidence: vec!["/tmp/report.md".into()],
+                ..StageExecutionContract::default()
+            },
+            stage_continuation_context: None,
+            executor_b_stage_memory: None,
+            review_task_id: None,
+            tool_execution_records: Vec::new(),
+        };
+        let metadata = BossStepRoutedMetadata {
+            completion_evidence_status: Some("sufficient".into()),
+            worker_report: Some(WorkerStructuredReport {
+                worker_state: AgentState::Done,
+                last_tool_action: Some("Write".into()),
+                files_changed: vec!["/tmp/report.md".into()],
+                tests_run: Vec::new(),
+                artifact_status: "verified".into(),
+                test_status: "not_required".into(),
+                verification_status: "unverified".into(),
+                stage_execution_contract: step.stage_execution_contract.clone(),
+                stage_continuation_context: None,
+                evidence_refs: vec!["write:/tmp/report.md".into()],
+                completion_evidence_gaps: Vec::new(),
+                remaining_risks: Vec::new(),
+                completion_evidence_status: CompletionEvidenceStatus::Sufficient,
+            }),
+            completion_evidence_gaps: Vec::new(),
+            ..BossStepRoutedMetadata::default()
+        };
+
+        let failure = step_completion_gate_error(&step, Some(&metadata))
+            .expect("placeholder completion should not bypass verification gate");
+        assert_eq!(
+            failure.1,
+            StepFailureClassification::VerificationRepairContinuation
+        );
+    }
+
+    #[test]
+    fn initial_skeleton_report_maps_to_verification_repair_continuation() {
+        let step = BossPlanStep {
+            id: 3,
+            description: "write report".into(),
+            objective: None,
+            acceptance: vec!["verification evidence required".into()],
+            requires_approval: false,
+            status: BossPlanStepStatus::Running,
+            completed: false,
+            result_diff: None,
+            worker_task_id: None,
+            attempt_count: 0,
+            retry_budget: 3,
+            last_review_summary: None,
+            last_correction: None,
+            stage_execution_contract: StageExecutionContract {
+                verifications: vec![VerificationContract {
+                    target_ref: "artifact:step0:0".into(),
+                    target_path: Some("/tmp/report.md".into()),
+                    required_actions: vec!["verify_artifact".into()],
+                    required_evidence: vec!["/tmp/report.md".into()],
+                }],
+                required_actions: vec!["verify_artifact".into()],
+                required_evidence: vec!["/tmp/report.md".into()],
+                ..StageExecutionContract::default()
+            },
+            stage_continuation_context: None,
+            executor_b_stage_memory: None,
+            review_task_id: None,
+            tool_execution_records: Vec::new(),
+        };
+        let metadata = BossStepRoutedMetadata {
+            completion_evidence_status: Some("missing_verification_evidence".into()),
+            completion_evidence_gaps: vec![CompletionEvidenceGap {
+                target_ref: "artifact:step0:0".into(),
+                target_path: Some("/tmp/report.md".into()),
+                missing_artifact_evidence: false,
+                missing_test_evidence: false,
+                missing_verification_evidence: true,
+                recommended_action: "verify_artifact".into(),
+            }],
+            worker_report: Some(WorkerStructuredReport {
+                worker_state: AgentState::Done,
+                last_tool_action: Some("Read".into()),
+                files_changed: vec!["/tmp/report.md".into()],
+                tests_run: Vec::new(),
+                artifact_status: "verified".into(),
+                test_status: "not_required".into(),
+                verification_status: "unverified".into(),
+                stage_execution_contract: step.stage_execution_contract.clone(),
+                stage_continuation_context: None,
+                evidence_refs: vec!["read:/tmp/report.md".into()],
+                completion_evidence_gaps: Vec::new(),
+                remaining_risks: Vec::new(),
+                completion_evidence_status: CompletionEvidenceStatus::MissingVerificationEvidence,
+            }),
+            ..BossStepRoutedMetadata::default()
+        };
+
+        let failure = step_completion_gate_error(&step, Some(&metadata))
+            .expect("skeleton report should not bypass verification gate");
+        assert_eq!(
+            failure.1,
+            StepFailureClassification::VerificationRepairContinuation
+        );
     }
 
     #[test]
