@@ -534,6 +534,35 @@ fn collect_target_scoped_evidence_refs_from_text(
             }
         }
 
+        if let Some(path) = evidence_field_value(trimmed, "path")
+            .filter(|_| trimmed.starts_with("fact: file_facts "))
+        {
+            if evidence_field_value(trimmed, "kind").as_deref() == Some("read_observation")
+                && path_matches_target_scope(&path, target_paths)
+            {
+                let anchor = format!("read:{path}");
+                if !refs.iter().any(|existing| existing == &anchor) {
+                    refs.push(anchor);
+                }
+            }
+        }
+
+        if let Some(rest) = trimmed.strip_prefix("hydrated_context: file_snippet:") {
+            if lowered.contains("source=tool:read") {
+                let path = rest
+                    .split_once(' ')
+                    .map(|(path, _)| path)
+                    .unwrap_or(rest)
+                    .trim();
+                if !path.is_empty() && path_matches_target_scope(path, target_paths) {
+                    let anchor = format!("read:{path}");
+                    if !refs.iter().any(|existing| existing == &anchor) {
+                        refs.push(anchor);
+                    }
+                }
+            }
+        }
+
         if let Some(path) = parse_prefixed_path(trimmed, &["read:", "write:"]) {
             let prefix = trimmed.split(':').next().unwrap_or("verification");
             let anchor = format!("{prefix}:{path}");
@@ -1243,9 +1272,21 @@ fn verification_terminal_outcome(
     frame: &StateFrame,
     usage: &mut LoopUsage,
 ) -> Option<LoopOutcome> {
-    if frame.state != AgentState::Verifying
-        || !completion_contract_requirement(frame, "verification_evidence")
-    {
+    if !completion_contract_requirement(frame, "verification_evidence") {
+        return None;
+    }
+
+    let verify_context_active = frame.state == AgentState::Verifying
+        || matches!(
+            usage.last_effective_tool_action.as_deref(),
+            Some("Read" | "ArtifactVerify")
+        )
+        || frame
+            .open_items
+            .iter()
+            .any(|item| item.starts_with("required_action:verify_artifact"));
+
+    if !verify_context_active {
         return None;
     }
 
@@ -5299,6 +5340,32 @@ mod tests {
     }
 
     #[test]
+    fn collect_evidence_refs_recovers_read_anchor_from_recent_evidence_lines() {
+        let mut frame = make_frame();
+        frame.recent_evidence.clear();
+        push_completion_contract_with_refs(
+            &mut frame,
+            &["artifact:contract:0"],
+            &[],
+            &["artifact:contract:0"],
+        );
+        push_artifact_target_fact(&mut frame, "artifact:contract:0", "/tmp/report.md", "file");
+        frame.recent_evidence.push(
+            "fact: file_facts ref=filefact:runtime:1:read path=/tmp/report.md kind=read_observation source=tool:Read source_event_id=tool-read:runtime:1 freshness=after-runtime-read confidence=1.00 status=active invalidated_by=none supersedes=none conflicts_with=none fact=runtime Read succeeded for /tmp/report.md".into(),
+        );
+        frame.recent_evidence.push(
+            "hydrated_context: file_snippet:/tmp/report.md source=tool:Read match_reason=call_tool_read trace=fact_name=file_facts ref=filefact:runtime:1:read source=tool:Read source_event_id=tool-read:runtime:1 freshness=after-runtime-read excerpt=# report".into(),
+        );
+
+        let evidence_refs = super::collect_evidence_refs(&frame, None);
+        assert!(evidence_refs.iter().any(|reference| reference == "read:/tmp/report.md"));
+        assert!(super::worker_has_target_scoped_read_anchor(
+            &frame,
+            &evidence_refs
+        ));
+    }
+
+    #[test]
     fn verification_terminal_outcome_closes_on_verified_status_plus_target_read_anchor() {
         let mut frame = make_frame();
         frame.state = AgentState::Verifying;
@@ -5341,6 +5408,49 @@ mod tests {
 
         let outcome = super::verification_terminal_outcome(&frame, &mut usage)
             .expect("verified target-scoped read should close verification");
+        match outcome {
+            LoopOutcome::Done { usage, .. } => {
+                let report = usage.worker_report.expect("worker report");
+                assert_eq!(report.completion_evidence_status, CompletionEvidenceStatus::Sufficient);
+                assert!(report
+                    .evidence_refs
+                    .iter()
+                    .any(|reference| reference == "read:/tmp/report.md"));
+            }
+            other => panic!("expected Done, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn verification_terminal_outcome_closes_after_successful_target_read_even_if_state_stays_executing()
+    {
+        let mut frame = make_frame();
+        frame.state = AgentState::Executing;
+        frame.recent_evidence.clear();
+        push_completion_contract_with_refs(
+            &mut frame,
+            &["artifact:contract:0"],
+            &[],
+            &["artifact:contract:0"],
+        );
+        push_artifact_target_fact(&mut frame, "artifact:contract:0", "/tmp/report.md", "file");
+        frame.open_items.push(
+            "required_action:verify_artifact reason=artifact verification failure requires repair continuation missing_refs=artifact:contract:0".into(),
+        );
+        frame.recent_evidence.push(
+            "fact: verification_status ref=artifact:contract:0 path=/tmp/report.md status=verified source=tool:Read source_event_id=tool-read:1 freshness=after-runtime-read confidence=0.90 lineage_status=active invalidated_by=none supersedes=none conflicts_with=none summary=read-back verified /tmp/report.md".into(),
+        );
+        frame.recent_evidence.push(
+            "fact: file_facts ref=filefact:runtime:1:read path=/tmp/report.md kind=read_observation source=tool:Read source_event_id=tool-read:runtime:1 freshness=after-runtime-read confidence=1.00 status=active invalidated_by=none supersedes=none conflicts_with=none fact=runtime Read succeeded for /tmp/report.md".into(),
+        );
+
+        let mut usage = LoopUsage {
+            last_effective_tool_action: Some("Read".into()),
+            ..LoopUsage::default()
+        };
+
+        let outcome = super::verification_terminal_outcome(&frame, &mut usage)
+            .expect("successful target-scoped read should close verification even if state lags");
         match outcome {
             LoopOutcome::Done { usage, .. } => {
                 let report = usage.worker_report.expect("worker report");
