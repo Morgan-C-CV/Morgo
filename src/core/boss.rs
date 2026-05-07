@@ -161,6 +161,126 @@ fn step_completion_gate_error(
     ))
 }
 
+fn metadata_has_open_verification_gap(metadata: Option<&BossStepRoutedMetadata>) -> bool {
+    let Some(metadata) = metadata else {
+        return false;
+    };
+    metadata.step_failure_classification == Some(StepFailureClassification::VerificationRepairContinuation)
+        || matches!(
+            metadata.completion_evidence_status.as_deref(),
+            Some("missing_verification_evidence")
+        )
+        || metadata
+            .completion_evidence_gaps
+            .iter()
+            .any(|gap| gap.missing_verification_evidence)
+        || metadata.worker_report.as_ref().is_some_and(|report| {
+            report.completion_evidence_status == CompletionEvidenceStatus::MissingVerificationEvidence
+                || report
+                    .completion_evidence_gaps
+                    .iter()
+                    .any(|gap| gap.missing_verification_evidence)
+        })
+}
+
+fn terminalization_blocked_step(
+    plan: &BossPlan,
+    routed_step_metadata: &std::collections::HashMap<usize, BossStepRoutedMetadata>,
+) -> Option<(usize, String)> {
+    plan.steps.iter().find_map(|step| {
+        let metadata = routed_step_metadata.get(&step.id);
+        if !step.completed || !metadata_has_open_verification_gap(metadata) {
+            return None;
+        }
+        let reason = step_completion_gate_error(step, metadata)
+            .map(|(reason, _)| reason)
+            .or_else(|| step.last_review_summary.clone())
+            .unwrap_or_else(|| {
+                "verification evidence still missing; completion remains blocked".into()
+            });
+        Some((step.id, reason))
+    })
+}
+
+fn verification_gap_target(
+    step: &BossPlanStep,
+    metadata: Option<&BossStepRoutedMetadata>,
+) -> Option<String> {
+    let from_metadata = metadata.and_then(|metadata| {
+        metadata
+            .completion_evidence_gaps
+            .iter()
+            .find(|gap| gap.missing_verification_evidence)
+            .and_then(|gap| gap.target_path.clone())
+            .or_else(|| {
+                metadata.worker_report.as_ref().and_then(|report| {
+                    report
+                        .completion_evidence_gaps
+                        .iter()
+                        .find(|gap| gap.missing_verification_evidence)
+                        .and_then(|gap| gap.target_path.clone())
+                })
+            })
+    });
+    from_metadata
+        .or_else(|| {
+            step.stage_continuation_context
+                .as_ref()
+                .and_then(|context| context.failed_target.clone())
+        })
+        .or_else(|| primary_declared_artifact_path(step))
+}
+
+fn verification_gap_next_action(
+    step: &BossPlanStep,
+    metadata: Option<&BossStepRoutedMetadata>,
+) -> String {
+    let hinted_action = metadata.and_then(|metadata| {
+        metadata
+            .completion_evidence_gaps
+            .iter()
+            .find(|gap| gap.missing_verification_evidence)
+            .map(|gap| gap.recommended_action.as_str())
+            .or_else(|| {
+                metadata.worker_report.as_ref().and_then(|report| {
+                    report
+                        .completion_evidence_gaps
+                        .iter()
+                        .find(|gap| gap.missing_verification_evidence)
+                        .map(|gap| gap.recommended_action.as_str())
+                })
+            })
+    });
+    let artifact_needs_repair =
+        step_artifact_verification_error(step).is_some() || step_report_body_looks_like_placeholder(step);
+    if artifact_needs_repair {
+        return "repair_artifact".into();
+    }
+    normalize_verification_first_next_action(hinted_action.map(|value| value.to_string()))
+        .filter(|value| value != "none")
+        .unwrap_or_else(|| "verify_artifact".into())
+}
+
+fn activate_verification_gap_continuation(
+    step: &mut BossPlanStep,
+    metadata: Option<&BossStepRoutedMetadata>,
+    reason: &str,
+) {
+    let failed_target = verification_gap_target(step, metadata);
+    let next_action = Some(verification_gap_next_action(step, metadata));
+    let verified_facts = continuation_verified_facts(step);
+    step.completed = false;
+    step.last_review_summary = Some(reason.to_string());
+    step.status = BossPlanStepStatus::Rejected;
+    update_step_continuation_context(
+        step,
+        crate::core::state_frame::ContinuityMode::Repair,
+        failed_target,
+        next_action,
+        verified_facts,
+    );
+}
+
 fn declared_artifact_paths(step: &BossPlanStep) -> Vec<&str> {
     step.stage_execution_contract
         .declared_artifacts
@@ -1475,6 +1595,32 @@ fn build_continuation_payload(contract: &ExecutorBAssignmentContract) -> Continu
         let shared_memory = contract.shared_step_memory.as_ref();
         let use_shared_projection = shared_memory.is_some();
         let shared_required_action = shared_memory.and_then(verification_first_shared_memory_required_action);
+        let typed_failed_target = typed_context.and_then(|context| {
+            let typed_next_action = normalize_verification_first_next_action(
+                context
+                    .next_action
+                    .clone()
+                    .or_else(|| {
+                        context
+                            .repair_intent
+                            .as_ref()
+                            .and_then(|intent| intent.next_action.clone())
+                    }),
+            );
+            if matches!(
+                typed_next_action.as_deref(),
+                Some("verify_artifact") | Some("repair_artifact")
+            ) {
+                context.failed_target.clone().or_else(|| {
+                    context
+                        .repair_intent
+                        .as_ref()
+                        .and_then(|intent| intent.failed_target.clone())
+                })
+            } else {
+                None
+            }
+        });
         let blocker_code = normalize_verification_first_blocker_code(
             shared_required_action.as_deref().or_else(|| {
                 typed_context.and_then(|context| {
@@ -1488,20 +1634,12 @@ fn build_continuation_payload(contract: &ExecutorBAssignmentContract) -> Continu
             }),
         );
         return ContinuationPayload {
-            failed_target: contract
-                .shared_step_memory
-                .as_ref()
-                .and_then(verification_first_shared_memory_target)
+            failed_target: typed_failed_target
                 .or_else(|| {
-                    typed_context
-                        .and_then(|context| {
-                            context.failed_target.clone().or_else(|| {
-                                context
-                                    .repair_intent
-                                    .as_ref()
-                                    .and_then(|intent| intent.failed_target.clone())
-                            })
-                        })
+                    contract
+                        .shared_step_memory
+                        .as_ref()
+                        .and_then(verification_first_shared_memory_target)
                 })
                 .or_else(|| {
                     contract
@@ -4827,6 +4965,7 @@ impl BossCoordinator {
         step_id: usize,
         decision: &crate::core::boss_actor_runtime::ReviewDecision,
     ) -> anyhow::Result<()> {
+        let routed_metadata = self.routed_step_metadata.read().await.get(&step_id).cloned();
         let (should_auto_advance, artifact_recovery_status) = {
             let mut plan_guard = self.plan.write().await;
             let Some(plan) = plan_guard.as_mut() else {
@@ -4896,16 +5035,54 @@ impl BossCoordinator {
                             "verified",
                             "artifact verification passed",
                         );
-                        step.last_review_summary =
-                            Some(if is_verification_first_continuation(step) {
+                        if let Some((reason, failure_classification)) =
+                            step_completion_gate_error(step, routed_metadata.as_ref())
+                        {
+                            step.last_review_summary = Some(reason.clone());
+                            step.attempt_count += 1;
+                            if step.attempt_count >= step.retry_budget {
+                                step.status = BossPlanStepStatus::Failed;
+                                update_step_continuation_context(
+                                    step,
+                                    crate::core::state_frame::ContinuityMode::Repair,
+                                    extract_artifact_expectations(step.objective())
+                                        .into_iter()
+                                        .next()
+                                        .map(|expectation| expectation.path.display().to_string()),
+                                    Some("verify_artifact".into())
+                                        .or_else(|| build_verification_repair_instruction(step)),
+                                    continuation_verified_facts(step),
+                                );
+                                step.completed = false;
+                                (
+                                    false,
+                                    Some((
+                                        "terminal_after_repair_exhausted",
+                                        Some("missing_verification_evidence"),
+                                    )),
+                                )
+                            } else {
+                                apply_step_failure_classification(
+                                    step,
+                                    failure_classification,
+                                    &reason,
+                                );
+                                (
+                                    false,
+                                    Some(("repair_dispatched", None)),
+                                )
+                            }
+                        } else {
+                            step.last_review_summary = Some(if is_verification_first_continuation(step) {
                                 normalize_verification_first_short_form(step, summary, None)
                             } else {
                                 summary.clone()
                             });
-                        step.completed = true;
-                        step.status = BossPlanStepStatus::Completed;
-                        clear_step_continuation_context(step);
-                        (true, None)
+                            step.completed = true;
+                            step.status = BossPlanStepStatus::Completed;
+                            clear_step_continuation_context(step);
+                            (true, None)
+                        }
                     }
                 }
                 crate::core::boss_actor_runtime::ReviewDecision::Correct {
@@ -5397,6 +5574,7 @@ impl BossCoordinator {
         app_state: &Arc<crate::state::app_state::AppState>,
     ) -> anyhow::Result<Option<String>> {
         let parent_session_id = app_state.active_session_id.clone();
+        let routed_step_metadata_snapshot = self.routed_step_metadata.read().await.clone();
         let next_action = {
             let mut plan_guard = self.plan.write().await;
             let plan = plan_guard
@@ -5407,7 +5585,18 @@ impl BossCoordinator {
                 return Ok(None);
             }
 
-            if plan.steps.iter().all(|step| step.completed) {
+            if let Some((step_id, reason)) =
+                terminalization_blocked_step(plan, &routed_step_metadata_snapshot)
+            {
+                if let Some(step) = plan.steps.iter_mut().find(|step| step.id == step_id) {
+                    activate_verification_gap_continuation(
+                        step,
+                        routed_step_metadata_snapshot.get(&step_id),
+                        &reason,
+                    );
+                }
+                Some(AdvanceOutcome::Dispatch(step_id))
+            } else if plan.steps.iter().all(|step| step.completed) {
                 Some(AdvanceOutcome::PlanComplete)
             } else if let Some(step) = plan
                 .steps
@@ -5437,6 +5626,33 @@ impl BossCoordinator {
                     step.status = BossPlanStepStatus::Running;
                     Some(AdvanceOutcome::Dispatch(step_id))
                 }
+            } else if let Some(step_id) = plan.steps.iter().find_map(|step| {
+                (step.status == BossPlanStepStatus::ReplanRequired
+                    && metadata_has_open_verification_gap(
+                        routed_step_metadata_snapshot.get(&step.id),
+                    ))
+                .then_some(step.id)
+            }) {
+                let reason = routed_step_metadata_snapshot
+                    .get(&step_id)
+                    .and_then(|metadata| step_completion_gate_error(
+                        plan.steps.iter().find(|step| step.id == step_id)?,
+                        Some(metadata),
+                    ))
+                    .map(|(reason, _)| reason)
+                    .unwrap_or_else(|| {
+                        "verification evidence still missing; continuing repair verification"
+                            .to_string()
+                    });
+                if let Some(step) = plan.steps.iter_mut().find(|step| step.id == step_id) {
+                    activate_verification_gap_continuation(
+                        step,
+                        routed_step_metadata_snapshot.get(&step_id),
+                        &reason,
+                    );
+                    step.status = BossPlanStepStatus::Running;
+                }
+                Some(AdvanceOutcome::Dispatch(step_id))
             } else if let Some(step) = plan
                 .steps
                 .iter()
@@ -14017,6 +14233,1161 @@ mod tests {
 
         std::fs::remove_file(&plan_path).unwrap();
         std::fs::remove_dir_all(temp_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn verification_repair_continuation_cannot_finalize_as_completed() {
+        let coordinator = BossCoordinator::new();
+        let target_path = temp_report_path("verification-repair-continuation");
+        std::fs::write(
+            &target_path,
+            "# Multistage Tools / Memory / Token Report\n\n## Stage 1\n- Verified target contents.\n",
+        )
+        .expect("write target report");
+        {
+            let mut plan = coordinator.plan.write().await;
+            *plan = Some(BossPlan {
+                plan_id: "plan-verification-repair".into(),
+                task_description: "verify report".into(),
+                accepted_by_user: true,
+                auto_sequence: true,
+                steps: vec![BossPlanStep {
+                    id: 1,
+                    description: "verify report".into(),
+                    objective: Some(format!("write report to {target_path}")),
+                    acceptance: vec![format!(
+                        "target file exists and is non-empty: {target_path}"
+                    )],
+                    requires_approval: false,
+                    status: BossPlanStepStatus::Reviewing,
+                    completed: false,
+                    result_diff: None,
+                    worker_task_id: None,
+                    attempt_count: 0,
+                    retry_budget: 3,
+                    last_review_summary: None,
+                    last_correction: None,
+                    stage_execution_contract: StageExecutionContract {
+                        declared_artifacts: vec![DeclaredArtifactContract {
+                            ref_id: "artifact:step1:0".into(),
+                            path: target_path.clone(),
+                            kind: "file".into(),
+                            required_actions: vec!["write_artifact".into()],
+                            required_evidence: vec![target_path.clone()],
+                        }],
+                        verifications: vec![VerificationContract {
+                            target_ref: "artifact:step1:0".into(),
+                            target_path: Some(target_path.clone()),
+                            required_actions: vec!["verify_artifact".into()],
+                            required_evidence: vec![target_path.clone()],
+                        }],
+                        required_actions: vec!["verify_artifact".into()],
+                        required_evidence: vec![target_path.clone()],
+                        ..StageExecutionContract::default()
+                    },
+                    stage_continuation_context: None,
+                    executor_b_stage_memory: None,
+                    review_task_id: None,
+                    tool_execution_records: vec![ToolExecutionRecord {
+                        tool_name: "Read".into(),
+                        outcome: "Text".into(),
+                        kind: ToolExecutionOutcomeKind::Success,
+                        summary: format!("read-back verified {target_path}"),
+                        detail: Some(format!("read-back verified {target_path}")),
+                        pending_approval: None,
+                        report_modifier: ToolReportModifier::None,
+                        observable_input: None,
+                        batch_context: ToolBatchContext {
+                            batch_index: 0,
+                            batch_size: 1,
+                            executed_in_batch: false,
+                        },
+                    }],
+                }],
+                ..BossPlan::default()
+            });
+        }
+        {
+            let mut metadata = coordinator.routed_step_metadata.write().await;
+            metadata.insert(
+                1,
+                BossStepRoutedMetadata {
+                    completion_evidence_status: Some("missing_verification_evidence".into()),
+                    completion_evidence_gaps: vec![CompletionEvidenceGap {
+                        target_ref: "artifact:step1:0".into(),
+                        target_path: Some(target_path.clone()),
+                        missing_artifact_evidence: false,
+                        missing_test_evidence: false,
+                        missing_verification_evidence: true,
+                        recommended_action: "verify_artifact".into(),
+                    }],
+                    worker_report: Some(WorkerStructuredReport {
+                        worker_state: AgentState::Done,
+                        last_tool_action: Some("Read".into()),
+                        files_changed: vec![target_path.clone()],
+                        tests_run: Vec::new(),
+                        artifact_status: "verified".into(),
+                        test_status: "not_required".into(),
+                        verification_status: "verified".into(),
+                        stage_execution_contract: StageExecutionContract {
+                            verifications: vec![VerificationContract {
+                                target_ref: "artifact:step1:0".into(),
+                                target_path: Some(target_path.clone()),
+                                required_actions: vec!["verify_artifact".into()],
+                                required_evidence: vec![target_path.clone()],
+                            }],
+                            required_actions: vec!["verify_artifact".into()],
+                            required_evidence: vec![target_path.clone()],
+                            ..StageExecutionContract::default()
+                        },
+                        stage_continuation_context: None,
+                        evidence_refs: vec![format!("read:{target_path}")],
+                        completion_evidence_gaps: vec![CompletionEvidenceGap {
+                            target_ref: "artifact:step1:0".into(),
+                            target_path: Some(target_path.clone()),
+                            missing_artifact_evidence: false,
+                            missing_test_evidence: false,
+                            missing_verification_evidence: true,
+                            recommended_action: "verify_artifact".into(),
+                        }],
+                        remaining_risks: Vec::new(),
+                        completion_evidence_status:
+                            crate::core::state_frame::CompletionEvidenceStatus::MissingVerificationEvidence,
+                    }),
+                    ..BossStepRoutedMetadata::default()
+                },
+            );
+        }
+
+        coordinator
+            .apply_review_verdict(
+                1,
+                &crate::core::boss_actor_runtime::ReviewDecision::Accept {
+                    summary: "worker says done".into(),
+                },
+            )
+            .await
+            .expect("apply review verdict");
+
+        let plan = coordinator.plan.read().await;
+        let step = plan
+            .as_ref()
+            .and_then(|plan| plan.steps.iter().find(|step| step.id == 1))
+            .expect("step");
+        assert_eq!(step.status, BossPlanStepStatus::Rejected);
+        assert!(!step.completed);
+    }
+
+    #[tokio::test]
+    async fn missing_verification_evidence_targets_keep_step_out_of_completed() {
+        let coordinator = BossCoordinator::new();
+        let target_path = temp_report_path("missing-verification-target");
+        let source_path = temp_report_path("missing-verification-source");
+        std::fs::write(
+            &target_path,
+            "# Multistage Tools / Memory / Token Report\n\n## Stage 1\n- Verified target contents.\n",
+        )
+        .expect("write target report");
+        std::fs::write(&source_path, "source evidence").expect("write source evidence");
+        {
+            let mut plan = coordinator.plan.write().await;
+            *plan = Some(BossPlan {
+                plan_id: "plan-missing-target".into(),
+                task_description: "verify report".into(),
+                accepted_by_user: true,
+                auto_sequence: true,
+                steps: vec![BossPlanStep {
+                    id: 2,
+                    description: "verify report".into(),
+                    objective: Some(format!("write report to {target_path}")),
+                    acceptance: vec![format!(
+                        "target file exists and is non-empty: {target_path}"
+                    )],
+                    requires_approval: false,
+                    status: BossPlanStepStatus::Reviewing,
+                    completed: false,
+                    result_diff: None,
+                    worker_task_id: None,
+                    attempt_count: 0,
+                    retry_budget: 3,
+                    last_review_summary: None,
+                    last_correction: None,
+                    stage_execution_contract: StageExecutionContract {
+                        declared_artifacts: vec![DeclaredArtifactContract {
+                            ref_id: "artifact:step2:0".into(),
+                            path: target_path.clone(),
+                            kind: "file".into(),
+                            required_actions: vec!["write_artifact".into()],
+                            required_evidence: vec![target_path.clone()],
+                        }],
+                        verifications: vec![VerificationContract {
+                            target_ref: "artifact:step2:0".into(),
+                            target_path: Some(target_path.clone()),
+                            required_actions: vec!["verify_artifact".into()],
+                            required_evidence: vec![
+                                target_path.clone(),
+                                source_path.clone(),
+                            ],
+                        }],
+                        required_actions: vec!["verify_artifact".into()],
+                        required_evidence: vec![
+                            target_path.clone(),
+                            source_path.clone(),
+                        ],
+                        ..StageExecutionContract::default()
+                    },
+                    stage_continuation_context: None,
+                    executor_b_stage_memory: None,
+                    review_task_id: None,
+                    tool_execution_records: vec![ToolExecutionRecord {
+                        tool_name: "Read".into(),
+                        outcome: "Text".into(),
+                        kind: ToolExecutionOutcomeKind::Success,
+                        summary: format!("read-back verified {target_path}"),
+                        detail: Some(format!("read-back verified {target_path}")),
+                        pending_approval: None,
+                        report_modifier: ToolReportModifier::None,
+                        observable_input: None,
+                        batch_context: ToolBatchContext {
+                            batch_index: 0,
+                            batch_size: 1,
+                            executed_in_batch: false,
+                        },
+                    }],
+                }],
+                ..BossPlan::default()
+            });
+        }
+        {
+            let mut metadata = coordinator.routed_step_metadata.write().await;
+            metadata.insert(
+                2,
+                BossStepRoutedMetadata {
+                    completion_evidence_status: Some("missing_verification_evidence".into()),
+                    completion_evidence_gaps: vec![CompletionEvidenceGap {
+                        target_ref: "artifact:step2:0".into(),
+                        target_path: Some(target_path.clone()),
+                        missing_artifact_evidence: false,
+                        missing_test_evidence: false,
+                        missing_verification_evidence: true,
+                        recommended_action: "verify_artifact".into(),
+                    }],
+                    worker_report: Some(WorkerStructuredReport {
+                        worker_state: AgentState::Done,
+                        last_tool_action: Some("Read".into()),
+                        files_changed: vec![target_path.clone()],
+                        tests_run: Vec::new(),
+                        artifact_status: "verified".into(),
+                        test_status: "not_required".into(),
+                        verification_status: "verified".into(),
+                        stage_execution_contract: StageExecutionContract {
+                            verifications: vec![VerificationContract {
+                                target_ref: "artifact:step2:0".into(),
+                                target_path: Some(target_path.clone()),
+                                required_actions: vec!["verify_artifact".into()],
+                                required_evidence: vec![
+                                    target_path.clone(),
+                                    source_path.clone(),
+                                ],
+                            }],
+                            required_actions: vec!["verify_artifact".into()],
+                            required_evidence: vec![
+                                target_path.clone(),
+                                source_path.clone(),
+                            ],
+                            ..StageExecutionContract::default()
+                        },
+                        stage_continuation_context: None,
+                        evidence_refs: vec![format!("read:{target_path}")],
+                        completion_evidence_gaps: vec![CompletionEvidenceGap {
+                            target_ref: "artifact:step2:0".into(),
+                            target_path: Some(target_path.clone()),
+                            missing_artifact_evidence: false,
+                            missing_test_evidence: false,
+                            missing_verification_evidence: true,
+                            recommended_action: "verify_artifact".into(),
+                        }],
+                        remaining_risks: Vec::new(),
+                        completion_evidence_status:
+                            crate::core::state_frame::CompletionEvidenceStatus::MissingVerificationEvidence,
+                    }),
+                    ..BossStepRoutedMetadata::default()
+                },
+            );
+        }
+
+        coordinator
+            .apply_review_verdict(
+                2,
+                &crate::core::boss_actor_runtime::ReviewDecision::Accept {
+                    summary: "worker says done".into(),
+                },
+            )
+            .await
+            .expect("apply review verdict");
+
+        let plan = coordinator.plan.read().await;
+        let step = plan
+            .as_ref()
+            .and_then(|plan| plan.steps.iter().find(|step| step.id == 2))
+            .expect("step");
+        assert_eq!(step.status, BossPlanStepStatus::Rejected);
+        assert!(!step.completed);
+    }
+
+    #[tokio::test]
+    async fn nonempty_report_with_verification_gap_does_not_advance_plan_to_completed() {
+        let coordinator = Arc::new(BossCoordinator::new());
+        let target_path = temp_report_path("plan-finalization-gap");
+        std::fs::write(
+            &target_path,
+            "# Multistage Tools / Memory / Token Report\n\n## Stage 1\n- Verified target contents.\n",
+        )
+        .expect("write target report");
+        {
+            let mut plan = coordinator.plan.write().await;
+            *plan = Some(BossPlan {
+                plan_id: "plan-finalization-gap".into(),
+                task_description: "verify report".into(),
+                accepted_by_user: true,
+                auto_sequence: true,
+                steps: vec![BossPlanStep {
+                    id: 3,
+                    description: "verify report".into(),
+                    objective: Some(format!("write report to {target_path}")),
+                    acceptance: vec![format!(
+                        "target file exists and is non-empty: {target_path}"
+                    )],
+                    requires_approval: false,
+                    status: BossPlanStepStatus::Completed,
+                    completed: true,
+                    result_diff: Some("report body".into()),
+                    worker_task_id: None,
+                    attempt_count: 1,
+                    retry_budget: 3,
+                    last_review_summary: Some("verification missing".into()),
+                    last_correction: Some("verify_artifact".into()),
+                    stage_execution_contract: StageExecutionContract {
+                        declared_artifacts: vec![DeclaredArtifactContract {
+                            ref_id: "artifact:step3:0".into(),
+                            path: target_path.clone(),
+                            kind: "file".into(),
+                            required_actions: vec!["write_artifact".into()],
+                            required_evidence: vec![target_path.clone()],
+                        }],
+                        verifications: vec![VerificationContract {
+                            target_ref: "artifact:step3:0".into(),
+                            target_path: Some(target_path.clone()),
+                            required_actions: vec!["verify_artifact".into()],
+                            required_evidence: vec![target_path.clone()],
+                        }],
+                        required_actions: vec!["verify_artifact".into()],
+                        required_evidence: vec![target_path.clone()],
+                        ..StageExecutionContract::default()
+                    },
+                    stage_continuation_context: Some(crate::core::state_frame::StageContinuationContext {
+                        repair_intent: Some(crate::core::state_frame::RepairIntent {
+                            failed_target: Some(target_path.clone()),
+                            verified_facts: vec!["read target".into()],
+                            next_action: Some("verify_artifact".into()),
+                            continuity_mode: Some(crate::core::state_frame::ContinuityMode::Repair),
+                        }),
+                        failed_target: Some(target_path.clone()),
+                        verified_facts: vec!["read target".into()],
+                        next_action: Some("verify_artifact".into()),
+                        continuity_mode: Some(crate::core::state_frame::ContinuityMode::Repair),
+                    }),
+                    executor_b_stage_memory: Some(ExecutorBStageMemory {
+                        continuity: Some(ExecutorBStageMemoryContinuity::VerificationFirstIsolated),
+                        ..ExecutorBStageMemory::default()
+                    }),
+                    review_task_id: None,
+                    tool_execution_records: vec![ToolExecutionRecord {
+                        tool_name: "Read".into(),
+                        outcome: "Text".into(),
+                        kind: ToolExecutionOutcomeKind::Success,
+                        summary: format!("read-back verified {target_path}"),
+                        detail: Some(format!("read-back verified {target_path}")),
+                        pending_approval: None,
+                        report_modifier: ToolReportModifier::None,
+                        observable_input: None,
+                        batch_context: ToolBatchContext {
+                            batch_index: 0,
+                            batch_size: 1,
+                            executed_in_batch: false,
+                        },
+                    }],
+                }],
+                ..BossPlan::default()
+            });
+        }
+        {
+            let mut metadata = coordinator.routed_step_metadata.write().await;
+            metadata.insert(
+                3,
+                BossStepRoutedMetadata {
+                    completion_evidence_status: Some("missing_verification_evidence".into()),
+                    completion_evidence_gaps: vec![CompletionEvidenceGap {
+                        target_ref: "artifact:step3:0".into(),
+                        target_path: Some(target_path.clone()),
+                        missing_artifact_evidence: false,
+                        missing_test_evidence: false,
+                        missing_verification_evidence: true,
+                        recommended_action: "verify_artifact".into(),
+                    }],
+                    worker_report: Some(WorkerStructuredReport {
+                        worker_state: AgentState::Done,
+                        last_tool_action: Some("Read".into()),
+                        files_changed: vec![target_path.clone()],
+                        tests_run: Vec::new(),
+                        artifact_status: "verified".into(),
+                        test_status: "not_required".into(),
+                        verification_status: "verified".into(),
+                        stage_execution_contract: StageExecutionContract {
+                            verifications: vec![VerificationContract {
+                                target_ref: "artifact:step3:0".into(),
+                                target_path: Some(target_path.clone()),
+                                required_actions: vec!["verify_artifact".into()],
+                                required_evidence: vec![target_path.clone()],
+                            }],
+                            required_actions: vec!["verify_artifact".into()],
+                            required_evidence: vec![target_path.clone()],
+                            ..StageExecutionContract::default()
+                        },
+                        stage_continuation_context: Some(crate::core::state_frame::StageContinuationContext {
+                            repair_intent: Some(crate::core::state_frame::RepairIntent {
+                                failed_target: Some(target_path.clone()),
+                                verified_facts: vec!["read target".into()],
+                                next_action: Some("verify_artifact".into()),
+                                continuity_mode: Some(crate::core::state_frame::ContinuityMode::Repair),
+                            }),
+                            failed_target: Some(target_path.clone()),
+                            verified_facts: vec!["read target".into()],
+                            next_action: Some("verify_artifact".into()),
+                            continuity_mode: Some(crate::core::state_frame::ContinuityMode::Repair),
+                        }),
+                        evidence_refs: vec![format!("read:{target_path}")],
+                        completion_evidence_gaps: vec![CompletionEvidenceGap {
+                            target_ref: "artifact:step3:0".into(),
+                            target_path: Some(target_path.clone()),
+                            missing_artifact_evidence: false,
+                            missing_test_evidence: false,
+                            missing_verification_evidence: true,
+                            recommended_action: "verify_artifact".into(),
+                        }],
+                        remaining_risks: Vec::new(),
+                        completion_evidence_status:
+                            crate::core::state_frame::CompletionEvidenceStatus::MissingVerificationEvidence,
+                    }),
+                    step_failure_classification: Some(
+                        StepFailureClassification::VerificationRepairContinuation,
+                    ),
+                    ..BossStepRoutedMetadata::default()
+                },
+            );
+        }
+
+        let app_state = test_app_state_with_tasks(
+            Arc::new(TaskManager::new_with_output_root(std::env::temp_dir())),
+            coordinator.clone(),
+        );
+        let message = coordinator
+            .advance_plan(&app_state)
+            .await
+            .expect("advance plan");
+
+        assert_ne!(coordinator.get_stage().await, BossStage::Completed);
+        assert!(!message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("Boss plan complete"));
+        let plan = coordinator.plan.read().await;
+        let step = plan.as_ref().and_then(|plan| plan.steps.iter().find(|step| step.id == 3));
+        assert!(step.is_some());
+        let step = step.unwrap();
+        assert!(matches!(
+            step.status,
+            BossPlanStepStatus::Rejected | BossPlanStepStatus::Running
+        ));
+        assert!(!step.completed);
+    }
+
+    #[tokio::test]
+    async fn terminalization_preserves_repair_continuation_until_evidence_closes() {
+        let coordinator = Arc::new(BossCoordinator::new());
+        let target_path = temp_report_path("terminalization-closes");
+        std::fs::write(
+            &target_path,
+            "# Multistage Tools / Memory / Token Report\n\n## Stage 1\n- Verified target contents.\n",
+        )
+        .expect("write target report");
+        {
+            let mut plan = coordinator.plan.write().await;
+            *plan = Some(BossPlan {
+                plan_id: "plan-close-gap".into(),
+                task_description: "verify report".into(),
+                accepted_by_user: true,
+                auto_sequence: true,
+                steps: vec![BossPlanStep {
+                    id: 4,
+                    description: "verify report".into(),
+                    objective: Some(format!("write report to {target_path}")),
+                    acceptance: vec![format!(
+                        "target file exists and is non-empty: {target_path}"
+                    )],
+                    requires_approval: false,
+                    status: BossPlanStepStatus::Reviewing,
+                    completed: false,
+                    result_diff: None,
+                    worker_task_id: None,
+                    attempt_count: 0,
+                    retry_budget: 3,
+                    last_review_summary: None,
+                    last_correction: None,
+                    stage_execution_contract: StageExecutionContract {
+                        declared_artifacts: vec![DeclaredArtifactContract {
+                            ref_id: "artifact:step4:0".into(),
+                            path: target_path.clone(),
+                            kind: "file".into(),
+                            required_actions: vec!["write_artifact".into()],
+                            required_evidence: vec![target_path.clone()],
+                        }],
+                        verifications: vec![VerificationContract {
+                            target_ref: "artifact:step4:0".into(),
+                            target_path: Some(target_path.clone()),
+                            required_actions: vec!["verify_artifact".into()],
+                            required_evidence: vec![target_path.clone()],
+                        }],
+                        required_actions: vec!["verify_artifact".into()],
+                        required_evidence: vec![target_path.clone()],
+                        ..StageExecutionContract::default()
+                    },
+                    stage_continuation_context: None,
+                    executor_b_stage_memory: None,
+                    review_task_id: None,
+                    tool_execution_records: vec![ToolExecutionRecord {
+                        tool_name: "Read".into(),
+                        outcome: "Text".into(),
+                        kind: ToolExecutionOutcomeKind::Success,
+                        summary: format!("read-back verified {target_path}"),
+                        detail: Some(format!("read-back verified {target_path}")),
+                        pending_approval: None,
+                        report_modifier: ToolReportModifier::None,
+                        observable_input: None,
+                        batch_context: ToolBatchContext {
+                            batch_index: 0,
+                            batch_size: 1,
+                            executed_in_batch: false,
+                        },
+                    }],
+                }],
+                ..BossPlan::default()
+            });
+        }
+        {
+            let mut metadata = coordinator.routed_step_metadata.write().await;
+            metadata.insert(
+                4,
+                BossStepRoutedMetadata {
+                    completion_evidence_status: Some("missing_verification_evidence".into()),
+                    completion_evidence_gaps: vec![CompletionEvidenceGap {
+                        target_ref: "artifact:step4:0".into(),
+                        target_path: Some(target_path.clone()),
+                        missing_artifact_evidence: false,
+                        missing_test_evidence: false,
+                        missing_verification_evidence: true,
+                        recommended_action: "verify_artifact".into(),
+                    }],
+                    worker_report: Some(WorkerStructuredReport {
+                        worker_state: AgentState::Done,
+                        last_tool_action: Some("Read".into()),
+                        files_changed: vec![target_path.clone()],
+                        tests_run: Vec::new(),
+                        artifact_status: "verified".into(),
+                        test_status: "not_required".into(),
+                        verification_status: "verified".into(),
+                        stage_execution_contract: StageExecutionContract {
+                            verifications: vec![VerificationContract {
+                                target_ref: "artifact:step4:0".into(),
+                                target_path: Some(target_path.clone()),
+                                required_actions: vec!["verify_artifact".into()],
+                                required_evidence: vec![target_path.clone()],
+                            }],
+                            required_actions: vec!["verify_artifact".into()],
+                            required_evidence: vec![target_path.clone()],
+                            ..StageExecutionContract::default()
+                        },
+                        stage_continuation_context: None,
+                        evidence_refs: vec![format!("read:{target_path}")],
+                        completion_evidence_gaps: vec![CompletionEvidenceGap {
+                            target_ref: "artifact:step4:0".into(),
+                            target_path: Some(target_path.clone()),
+                            missing_artifact_evidence: false,
+                            missing_test_evidence: false,
+                            missing_verification_evidence: true,
+                            recommended_action: "verify_artifact".into(),
+                        }],
+                        remaining_risks: Vec::new(),
+                        completion_evidence_status:
+                            crate::core::state_frame::CompletionEvidenceStatus::MissingVerificationEvidence,
+                    }),
+                    step_failure_classification: Some(
+                        StepFailureClassification::VerificationRepairContinuation,
+                    ),
+                    ..BossStepRoutedMetadata::default()
+                },
+            );
+        }
+        {
+            let mut plan = coordinator.plan.write().await;
+            let step = plan
+                .as_mut()
+                .and_then(|plan| plan.steps.iter_mut().find(|step| step.id == 4))
+                .expect("step");
+            step.status = BossPlanStepStatus::Reviewing;
+            step.completed = false;
+        }
+
+        coordinator
+            .apply_review_verdict(
+                4,
+                &crate::core::boss_actor_runtime::ReviewDecision::Accept {
+                    summary: "worker says done".into(),
+                },
+            )
+            .await
+            .expect("first apply review verdict");
+        {
+            let plan = coordinator.plan.read().await;
+            let step = plan
+                .as_ref()
+                .and_then(|plan| plan.steps.iter().find(|step| step.id == 4))
+                .expect("step");
+            assert_eq!(step.status, BossPlanStepStatus::Rejected);
+            assert!(!step.completed);
+        }
+
+        {
+            let mut metadata = coordinator.routed_step_metadata.write().await;
+            metadata.insert(
+                4,
+                BossStepRoutedMetadata {
+                    completion_evidence_status: Some("sufficient".into()),
+                    completion_evidence_gaps: Vec::new(),
+                    worker_report: Some(WorkerStructuredReport {
+                        worker_state: AgentState::Done,
+                        last_tool_action: Some("Read".into()),
+                        files_changed: vec![target_path.clone()],
+                        tests_run: Vec::new(),
+                        artifact_status: "verified".into(),
+                        test_status: "not_required".into(),
+                        verification_status: "verified".into(),
+                        stage_execution_contract: StageExecutionContract {
+                            verifications: vec![VerificationContract {
+                                target_ref: "artifact:step4:0".into(),
+                                target_path: Some(target_path.clone()),
+                                required_actions: vec!["verify_artifact".into()],
+                                required_evidence: vec![target_path.clone()],
+                            }],
+                            required_actions: vec!["verify_artifact".into()],
+                            required_evidence: vec![target_path.clone()],
+                            ..StageExecutionContract::default()
+                        },
+                        stage_continuation_context: None,
+                        evidence_refs: vec![format!("read:{target_path}")],
+                        completion_evidence_gaps: Vec::new(),
+                        remaining_risks: Vec::new(),
+                        completion_evidence_status:
+                            crate::core::state_frame::CompletionEvidenceStatus::Sufficient,
+                    }),
+                    ..BossStepRoutedMetadata::default()
+                },
+            );
+        }
+        {
+            let mut plan = coordinator.plan.write().await;
+            let step = plan
+                .as_mut()
+                .and_then(|plan| plan.steps.iter_mut().find(|step| step.id == 4))
+                .expect("step");
+            step.status = BossPlanStepStatus::Reviewing;
+            step.completed = false;
+        }
+
+        coordinator
+            .apply_review_verdict(
+                4,
+                &crate::core::boss_actor_runtime::ReviewDecision::Accept {
+                    summary: "worker says done".into(),
+                },
+            )
+            .await
+            .expect("second apply review verdict");
+
+        let plan = coordinator.plan.read().await;
+        let step = plan
+            .as_ref()
+            .and_then(|plan| plan.steps.iter().find(|step| step.id == 4))
+            .expect("step");
+        assert!(matches!(
+            step.status,
+            BossPlanStepStatus::Rejected | BossPlanStepStatus::Running
+        ));
+        assert!(!step.completed);
+    }
+
+    #[tokio::test]
+    async fn verification_repair_continuation_requeues_step_instead_of_terminal_failure() {
+        let coordinator = Arc::new(BossCoordinator::new());
+        let tasks = Arc::new(TaskManager::new_with_output_root(std::env::temp_dir()));
+        let app_state = test_app_state_with_tasks(tasks, coordinator.clone());
+        let target_path = temp_report_path("verification-gap-requeue");
+        {
+            let mut status = coordinator.status.write().await;
+            status.stage = BossStage::Execution;
+            status.current_step = Some(5);
+        }
+        {
+            let mut plan = coordinator.plan.write().await;
+            *plan = Some(BossPlan {
+                accepted_by_user: true,
+                auto_sequence: true,
+                steps: vec![BossPlanStep {
+                    id: 5,
+                    description: "verify report".into(),
+                    objective: Some(format!("verify {target_path}")),
+                    acceptance: vec![format!("verify {target_path}")],
+                    requires_approval: false,
+                    status: BossPlanStepStatus::ReplanRequired,
+                    completed: false,
+                    result_diff: Some("placeholder".into()),
+                    worker_task_id: None,
+                    attempt_count: 1,
+                    retry_budget: 3,
+                    last_review_summary: Some("verification evidence missing".into()),
+                    last_correction: Some("replan required: missing verification evidence".into()),
+                    stage_execution_contract: StageExecutionContract {
+                        declared_artifacts: vec![DeclaredArtifactContract {
+                            ref_id: "artifact:step5:0".into(),
+                            path: target_path.clone(),
+                            kind: "file".into(),
+                            required_actions: vec!["write_artifact".into()],
+                            required_evidence: vec![target_path.clone()],
+                        }],
+                        verifications: vec![VerificationContract {
+                            target_ref: "artifact:step5:0".into(),
+                            target_path: Some(target_path.clone()),
+                            required_actions: vec!["verify_artifact".into()],
+                            required_evidence: vec![target_path.clone()],
+                        }],
+                        required_actions: vec!["verify_artifact".into()],
+                        required_evidence: vec![target_path.clone()],
+                        ..StageExecutionContract::default()
+                    },
+                    stage_continuation_context: None,
+                    executor_b_stage_memory: Some(ExecutorBStageMemory {
+                        continuity: Some(ExecutorBStageMemoryContinuity::VerificationFirstIsolated),
+                        ..ExecutorBStageMemory::default()
+                    }),
+                    review_task_id: None,
+                    tool_execution_records: Vec::new(),
+                }],
+                ..BossPlan::default()
+            });
+        }
+        {
+            let mut metadata = coordinator.routed_step_metadata.write().await;
+            metadata.insert(
+                5,
+                BossStepRoutedMetadata {
+                    step_failure_classification: Some(
+                        StepFailureClassification::VerificationRepairContinuation,
+                    ),
+                    completion_evidence_status: Some("missing_verification_evidence".into()),
+                    completion_evidence_gaps: vec![CompletionEvidenceGap {
+                        target_ref: "artifact:step5:0".into(),
+                        target_path: Some(target_path.clone()),
+                        missing_artifact_evidence: false,
+                        missing_test_evidence: false,
+                        missing_verification_evidence: true,
+                        recommended_action: "verify_artifact".into(),
+                    }],
+                    ..BossStepRoutedMetadata::default()
+                },
+            );
+        }
+
+        let message = coordinator.advance_plan(&app_state).await.expect("advance");
+        let step = coordinator
+            .plan
+            .read()
+            .await
+            .as_ref()
+            .and_then(|plan| plan.steps.iter().find(|step| step.id == 5))
+            .cloned()
+            .expect("step");
+
+        assert_eq!(coordinator.get_stage().await, BossStage::Execution);
+        assert_eq!(step.status, BossPlanStepStatus::Running);
+        assert!(!step.completed);
+        assert!(message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("\"role\":\"verify\""));
+    }
+
+    #[tokio::test]
+    async fn missing_verification_evidence_target_is_reused_as_next_verify_target() {
+        let coordinator = Arc::new(BossCoordinator::new());
+        let tasks = Arc::new(TaskManager::new_with_output_root(std::env::temp_dir()));
+        let app_state = test_app_state_with_tasks(tasks, coordinator.clone());
+        let target_path = temp_report_path("verification-gap-target");
+        {
+            let mut status = coordinator.status.write().await;
+            status.stage = BossStage::Execution;
+            status.current_step = Some(6);
+        }
+        {
+            let mut plan = coordinator.plan.write().await;
+            *plan = Some(BossPlan {
+                accepted_by_user: true,
+                auto_sequence: true,
+                steps: vec![BossPlanStep {
+                    id: 6,
+                    description: "verify report".into(),
+                    objective: Some(format!("verify {target_path}")),
+                    acceptance: vec![format!("verify {target_path}")],
+                    requires_approval: false,
+                    status: BossPlanStepStatus::ReplanRequired,
+                    completed: false,
+                    result_diff: Some("placeholder".into()),
+                    worker_task_id: None,
+                    attempt_count: 1,
+                    retry_budget: 3,
+                    last_review_summary: Some("verification evidence missing".into()),
+                    last_correction: None,
+                    stage_execution_contract: StageExecutionContract {
+                        declared_artifacts: vec![DeclaredArtifactContract {
+                            ref_id: "artifact:step6:0".into(),
+                            path: "/tmp/stale-artifact.md".into(),
+                            kind: "file".into(),
+                            required_actions: vec!["write_artifact".into()],
+                            required_evidence: vec!["/tmp/stale-artifact.md".into()],
+                        }],
+                        verifications: vec![VerificationContract {
+                            target_ref: "artifact:step6:0".into(),
+                            target_path: Some("/tmp/stale-artifact.md".into()),
+                            required_actions: vec!["verify_artifact".into()],
+                            required_evidence: vec![target_path.clone()],
+                        }],
+                        required_actions: vec!["verify_artifact".into()],
+                        required_evidence: vec![target_path.clone()],
+                        ..StageExecutionContract::default()
+                    },
+                    stage_continuation_context: Some(
+                        crate::core::state_frame::StageContinuationContext {
+                            repair_intent: Some(crate::core::state_frame::RepairIntent {
+                                failed_target: Some("/tmp/stale-artifact.md".into()),
+                                verified_facts: Vec::new(),
+                                next_action: Some("repair_artifact".into()),
+                                continuity_mode: Some(
+                                    crate::core::state_frame::ContinuityMode::Repair,
+                                ),
+                            }),
+                            failed_target: Some("/tmp/stale-artifact.md".into()),
+                            verified_facts: Vec::new(),
+                            next_action: Some("repair_artifact".into()),
+                            continuity_mode: Some(crate::core::state_frame::ContinuityMode::Repair),
+                        },
+                    ),
+                    executor_b_stage_memory: Some(ExecutorBStageMemory {
+                        continuity: Some(ExecutorBStageMemoryContinuity::VerificationFirstIsolated),
+                        ..ExecutorBStageMemory::default()
+                    }),
+                    review_task_id: None,
+                    tool_execution_records: Vec::new(),
+                }],
+                ..BossPlan::default()
+            });
+        }
+        {
+            let mut metadata = coordinator.routed_step_metadata.write().await;
+            metadata.insert(
+                6,
+                BossStepRoutedMetadata {
+                    step_failure_classification: Some(
+                        StepFailureClassification::VerificationRepairContinuation,
+                    ),
+                    completion_evidence_status: Some("missing_verification_evidence".into()),
+                    completion_evidence_gaps: vec![CompletionEvidenceGap {
+                        target_ref: "artifact:step6:0".into(),
+                        target_path: Some(target_path.clone()),
+                        missing_artifact_evidence: false,
+                        missing_test_evidence: false,
+                        missing_verification_evidence: true,
+                        recommended_action: "verify_artifact".into(),
+                    }],
+                    ..BossStepRoutedMetadata::default()
+                },
+            );
+        }
+
+        let message = coordinator.advance_plan(&app_state).await.expect("advance");
+        let payload = message.expect("spawn payload");
+        let json: serde_json::Value = serde_json::from_str(&payload).expect("json payload");
+        assert_eq!(
+            json.pointer("/continuation_payload/failed_target")
+                .and_then(|value| value.as_str()),
+            Some(target_path.as_str())
+        );
+        assert_eq!(
+            json.pointer("/continuation_payload/next_action")
+                .and_then(|value| value.as_str()),
+            Some("verify_artifact")
+        );
+    }
+
+    #[tokio::test]
+    async fn verification_gap_path_stays_actionable_until_evidence_closes() {
+        let coordinator = Arc::new(BossCoordinator::new());
+        let tasks = Arc::new(TaskManager::new_with_output_root(std::env::temp_dir()));
+        let app_state = test_app_state_with_tasks(tasks, coordinator.clone());
+        let target_path = temp_report_path("verification-gap-actionable");
+        {
+            let mut status = coordinator.status.write().await;
+            status.stage = BossStage::Execution;
+            status.current_step = Some(7);
+        }
+        {
+            let mut plan = coordinator.plan.write().await;
+            *plan = Some(BossPlan {
+                accepted_by_user: true,
+                auto_sequence: true,
+                steps: vec![BossPlanStep {
+                    id: 7,
+                    description: "verify report".into(),
+                    objective: Some(format!("verify {target_path}")),
+                    acceptance: vec![format!("verify {target_path}")],
+                    requires_approval: false,
+                    status: BossPlanStepStatus::Completed,
+                    completed: true,
+                    result_diff: Some("placeholder".into()),
+                    worker_task_id: None,
+                    attempt_count: 1,
+                    retry_budget: 3,
+                    last_review_summary: Some("done".into()),
+                    last_correction: None,
+                    stage_execution_contract: StageExecutionContract {
+                        declared_artifacts: vec![DeclaredArtifactContract {
+                            ref_id: "artifact:step7:0".into(),
+                            path: target_path.clone(),
+                            kind: "file".into(),
+                            required_actions: vec!["write_artifact".into()],
+                            required_evidence: vec![target_path.clone()],
+                        }],
+                        verifications: vec![VerificationContract {
+                            target_ref: "artifact:step7:0".into(),
+                            target_path: Some(target_path.clone()),
+                            required_actions: vec!["verify_artifact".into()],
+                            required_evidence: vec![target_path.clone()],
+                        }],
+                        required_actions: vec!["verify_artifact".into()],
+                        required_evidence: vec![target_path.clone()],
+                        ..StageExecutionContract::default()
+                    },
+                    stage_continuation_context: None,
+                    executor_b_stage_memory: Some(ExecutorBStageMemory {
+                        continuity: Some(ExecutorBStageMemoryContinuity::VerificationFirstIsolated),
+                        ..ExecutorBStageMemory::default()
+                    }),
+                    review_task_id: None,
+                    tool_execution_records: Vec::new(),
+                }],
+                ..BossPlan::default()
+            });
+        }
+        {
+            let mut metadata = coordinator.routed_step_metadata.write().await;
+            metadata.insert(
+                7,
+                BossStepRoutedMetadata {
+                    step_failure_classification: Some(
+                        StepFailureClassification::VerificationRepairContinuation,
+                    ),
+                    completion_evidence_status: Some("missing_verification_evidence".into()),
+                    completion_evidence_gaps: vec![CompletionEvidenceGap {
+                        target_ref: "artifact:step7:0".into(),
+                        target_path: Some(target_path.clone()),
+                        missing_artifact_evidence: false,
+                        missing_test_evidence: false,
+                        missing_verification_evidence: true,
+                        recommended_action: "verify_artifact".into(),
+                    }],
+                    ..BossStepRoutedMetadata::default()
+                },
+            );
+        }
+
+        let message = coordinator.advance_plan(&app_state).await.expect("advance");
+        assert_ne!(coordinator.get_stage().await, BossStage::Completed);
+        assert!(!message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("requires replanning before execution can continue"));
+        let step = coordinator
+            .plan
+            .read()
+            .await
+            .as_ref()
+            .and_then(|plan| plan.steps.iter().find(|step| step.id == 7))
+            .cloned()
+            .expect("step");
+        assert_eq!(step.status, BossPlanStepStatus::Running);
+        assert!(!step.completed);
+    }
+
+    #[tokio::test]
+    async fn completed_is_restored_only_after_missing_verification_targets_clear() {
+        let coordinator = Arc::new(BossCoordinator::new());
+        let tasks = Arc::new(TaskManager::new_with_output_root(std::env::temp_dir()));
+        let app_state = test_app_state_with_tasks(tasks, coordinator.clone());
+        let target_path = temp_report_path("verification-gap-restore");
+        {
+            let mut status = coordinator.status.write().await;
+            status.stage = BossStage::Execution;
+            status.current_step = Some(8);
+        }
+        {
+            let mut plan = coordinator.plan.write().await;
+            *plan = Some(BossPlan {
+                accepted_by_user: true,
+                auto_sequence: true,
+                steps: vec![BossPlanStep {
+                    id: 8,
+                    description: "verify report".into(),
+                    objective: Some(format!("verify {target_path}")),
+                    acceptance: vec![format!("verify {target_path}")],
+                    requires_approval: false,
+                    status: BossPlanStepStatus::Completed,
+                    completed: true,
+                    result_diff: Some("substantive report body".into()),
+                    worker_task_id: None,
+                    attempt_count: 1,
+                    retry_budget: 3,
+                    last_review_summary: Some("done".into()),
+                    last_correction: None,
+                    stage_execution_contract: StageExecutionContract {
+                        declared_artifacts: vec![DeclaredArtifactContract {
+                            ref_id: "artifact:step8:0".into(),
+                            path: target_path.clone(),
+                            kind: "file".into(),
+                            required_actions: vec!["write_artifact".into()],
+                            required_evidence: vec![target_path.clone()],
+                        }],
+                        verifications: vec![VerificationContract {
+                            target_ref: "artifact:step8:0".into(),
+                            target_path: Some(target_path.clone()),
+                            required_actions: vec!["verify_artifact".into()],
+                            required_evidence: vec![target_path.clone()],
+                        }],
+                        required_actions: vec!["verify_artifact".into()],
+                        required_evidence: vec![target_path.clone()],
+                        ..StageExecutionContract::default()
+                    },
+                    stage_continuation_context: None,
+                    executor_b_stage_memory: Some(ExecutorBStageMemory {
+                        continuity: Some(ExecutorBStageMemoryContinuity::VerificationFirstIsolated),
+                        ..ExecutorBStageMemory::default()
+                    }),
+                    review_task_id: None,
+                    tool_execution_records: Vec::new(),
+                }],
+                ..BossPlan::default()
+            });
+        }
+        {
+            let mut metadata = coordinator.routed_step_metadata.write().await;
+            metadata.insert(
+                8,
+                BossStepRoutedMetadata {
+                    step_failure_classification: Some(
+                        StepFailureClassification::VerificationRepairContinuation,
+                    ),
+                    completion_evidence_status: Some("missing_verification_evidence".into()),
+                    completion_evidence_gaps: vec![CompletionEvidenceGap {
+                        target_ref: "artifact:step8:0".into(),
+                        target_path: Some(target_path.clone()),
+                        missing_artifact_evidence: false,
+                        missing_test_evidence: false,
+                        missing_verification_evidence: true,
+                        recommended_action: "verify_artifact".into(),
+                    }],
+                    ..BossStepRoutedMetadata::default()
+                },
+            );
+        }
+
+        let first = coordinator.advance_plan(&app_state).await.expect("advance");
+        assert!(!first
+            .as_deref()
+            .unwrap_or_default()
+            .contains("Boss plan complete"));
+        assert_ne!(coordinator.get_stage().await, BossStage::Completed);
+
+        {
+            let mut plan = coordinator.plan.write().await;
+            let step = plan
+                .as_mut()
+                .and_then(|plan| plan.steps.iter_mut().find(|step| step.id == 8))
+                .expect("step");
+            step.status = BossPlanStepStatus::Completed;
+            step.completed = true;
+            step.stage_continuation_context = None;
+        }
+        {
+            let mut metadata = coordinator.routed_step_metadata.write().await;
+            metadata.insert(
+                8,
+                BossStepRoutedMetadata {
+                    completion_evidence_status: Some("sufficient".into()),
+                    completion_evidence_gaps: Vec::new(),
+                    worker_report: Some(WorkerStructuredReport {
+                        worker_state: AgentState::Done,
+                        last_tool_action: Some("Read".into()),
+                        files_changed: vec![target_path.clone()],
+                        tests_run: Vec::new(),
+                        artifact_status: "verified".into(),
+                        test_status: "not_required".into(),
+                        verification_status: "verified".into(),
+                        stage_execution_contract: StageExecutionContract {
+                            verifications: vec![VerificationContract {
+                                target_ref: "artifact:step8:0".into(),
+                                target_path: Some(target_path.clone()),
+                                required_actions: vec!["verify_artifact".into()],
+                                required_evidence: vec![target_path.clone()],
+                            }],
+                            required_actions: vec!["verify_artifact".into()],
+                            required_evidence: vec![target_path.clone()],
+                            ..StageExecutionContract::default()
+                        },
+                        stage_continuation_context: None,
+                        evidence_refs: vec![format!("read:{target_path}")],
+                        completion_evidence_gaps: Vec::new(),
+                        remaining_risks: Vec::new(),
+                        completion_evidence_status:
+                            crate::core::state_frame::CompletionEvidenceStatus::Sufficient,
+                    }),
+                    ..BossStepRoutedMetadata::default()
+                },
+            );
+        }
+
+        let second = coordinator.advance_plan(&app_state).await.expect("advance");
+        assert!(second
+            .as_deref()
+            .unwrap_or_default()
+            .contains("Boss plan complete"));
+        assert_eq!(coordinator.get_stage().await, BossStage::Completed);
     }
 
     #[tokio::test]
