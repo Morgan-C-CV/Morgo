@@ -82,17 +82,17 @@ fn step_artifact_verification_error(step: &BossPlanStep) -> Option<String> {
 }
 
 fn step_requires_verification_evidence(step: &BossPlanStep) -> bool {
-    !step.stage_execution_contract.verifications.is_empty()
-        || step
-            .stage_execution_contract
-            .required_actions
-            .iter()
-            .any(|action| {
-                matches!(
-                    action.as_str(),
-                    "verify" | "verify_artifact" | "run_verification"
-                )
-            })
+    contract_requires_verification_evidence(&step.stage_execution_contract)
+}
+
+fn contract_requires_verification_evidence(contract: &StageExecutionContract) -> bool {
+    !contract.verifications.is_empty()
+        || contract.required_actions.iter().any(|action| {
+            matches!(
+                action.as_str(),
+                "verify" | "verify_artifact" | "run_verification"
+            )
+        })
 }
 
 fn step_completion_gate_error(
@@ -108,10 +108,14 @@ fn step_completion_gate_error(
     if let Some(reason) = step_artifact_verification_error(step) {
         return Some((reason, StepFailureClassification::RepairableRecovery));
     }
-    if !step_requires_verification_evidence(step) {
+    let metadata = metadata?;
+    let report_contract_requires_verification =
+        metadata.worker_report.as_ref().is_some_and(|report| {
+            contract_requires_verification_evidence(&report.stage_execution_contract)
+        });
+    if !step_requires_verification_evidence(step) && !report_contract_requires_verification {
         return None;
     }
-    let metadata = metadata?;
     let completion_sufficient = matches!(
         metadata.completion_evidence_status.as_deref(),
         Some("sufficient")
@@ -300,10 +304,7 @@ fn verification_gap_next_action(
 
 fn gap_requires_source_evidence_read(gap: &CompletionEvidenceGap) -> bool {
     gap.recommended_action == "read_source_evidence"
-        || gap
-            .target_ref
-            .strip_prefix("content_evidence:")
-            .is_some()
+        || gap.target_ref.strip_prefix("content_evidence:").is_some()
 }
 
 fn step_continuation_requires_source_evidence_read(step: &BossPlanStep) -> bool {
@@ -351,29 +352,21 @@ fn declared_artifact_paths(step: &BossPlanStep) -> Vec<&str> {
         .collect()
 }
 
-fn required_non_artifact_evidence_targets(step: &BossPlanStep) -> Vec<&str> {
-    let artifact_paths = declared_artifact_paths(step);
-    let mut targets = Vec::new();
-    for target in step
-        .stage_execution_contract
-        .required_evidence
-        .iter()
-        .chain(
-            step.stage_execution_contract
-                .verifications
-                .iter()
-                .flat_map(|verification| verification.required_evidence.iter()),
-        )
-        .map(|value| value.as_str())
+fn effective_stage_execution_contract_for_report<'a>(
+    step: &'a BossPlanStep,
+    report: &'a crate::core::state_frame::WorkerStructuredReport,
+) -> &'a StageExecutionContract {
+    if !step.stage_execution_contract.declared_artifacts.is_empty()
+        || !step.stage_execution_contract.verifications.is_empty()
+        || !step
+            .stage_execution_contract
+            .content_evidence_targets
+            .is_empty()
     {
-        if artifact_paths.iter().any(|artifact| *artifact == target)
-            || targets.iter().any(|existing| *existing == target)
-        {
-            continue;
-        }
-        targets.push(target);
+        &step.stage_execution_contract
+    } else {
+        &report.stage_execution_contract
     }
-    targets
 }
 
 fn evidence_ref_mentions_target(evidence_ref: &str, target: &str) -> bool {
@@ -399,8 +392,31 @@ fn worker_report_has_target_scoped_evidence(
     if report.evidence_refs.is_empty() {
         return false;
     }
-    let artifact_paths = declared_artifact_paths(step);
-    let required_targets = required_non_artifact_evidence_targets(step);
+    let contract = effective_stage_execution_contract_for_report(step, report);
+    let artifact_paths = contract
+        .declared_artifacts
+        .iter()
+        .map(|artifact| artifact.path.as_str())
+        .collect::<Vec<_>>();
+    let mut required_targets = Vec::new();
+    for target in contract
+        .required_evidence
+        .iter()
+        .chain(
+            contract
+                .verifications
+                .iter()
+                .flat_map(|verification| verification.required_evidence.iter()),
+        )
+        .map(|value| value.as_str())
+    {
+        if artifact_paths.iter().any(|artifact| *artifact == target)
+            || required_targets.iter().any(|existing| *existing == target)
+        {
+            continue;
+        }
+        required_targets.push(target);
+    }
     if !required_targets.is_empty() {
         return required_targets.iter().all(|target| {
             report
@@ -419,26 +435,20 @@ fn worker_report_has_required_source_evidence(
     step: &BossPlanStep,
     report: &crate::core::state_frame::WorkerStructuredReport,
 ) -> bool {
-    if step
-        .stage_execution_contract
-        .content_evidence_targets
-        .is_empty()
-    {
+    let contract = effective_stage_execution_contract_for_report(step, report);
+    if contract.content_evidence_targets.is_empty() {
         return true;
     }
     if report.evidence_refs.is_empty() {
         return false;
     }
-    step.stage_execution_contract
-        .content_evidence_targets
-        .iter()
-        .all(|target| {
-            let required_anchor = format!("read:{target}");
-            report
-                .evidence_refs
-                .iter()
-                .any(|evidence_ref| evidence_ref == &required_anchor)
-        })
+    contract.content_evidence_targets.iter().all(|target| {
+        let required_anchor = format!("read:{target}");
+        report
+            .evidence_refs
+            .iter()
+            .any(|evidence_ref| evidence_ref == &required_anchor)
+    })
 }
 
 fn verification_first_read_anchor_closed(
@@ -2192,10 +2202,14 @@ fn strip_to_path_start(candidate: &str) -> &str {
     if candidate.starts_with("./") || candidate.starts_with("../") || candidate.starts_with('/') {
         return candidate;
     }
+    let Some(slash_idx) = candidate.find('/') else {
+        return candidate;
+    };
+    let prefix = &candidate[..slash_idx];
+    if prefix.contains('=') {
+        return &candidate[slash_idx..];
+    }
     candidate
-        .find('/')
-        .map(|idx| &candidate[idx..])
-        .unwrap_or(candidate)
 }
 
 fn is_probably_filesystem_hint(candidate: &str) -> bool {
@@ -6836,9 +6850,12 @@ impl BossCoordinator {
             .map(|policy| policy.worker_role)
             .unwrap_or(WorkerRole::Implement);
         let source_evidence_repair = step_continuation_requires_source_evidence_read(step)
-            || rollout_execution_policy
-                .as_ref()
-                .is_some_and(|policy| policy.affected_gaps.iter().any(gap_requires_source_evidence_read));
+            || rollout_execution_policy.as_ref().is_some_and(|policy| {
+                policy
+                    .affected_gaps
+                    .iter()
+                    .any(gap_requires_source_evidence_read)
+            });
         let verification_first_short_form = worker_role == WorkerRole::Verify
             && !source_evidence_repair
             && rollout_execution_policy
@@ -10583,6 +10600,84 @@ mod tests {
                 test_status: "not_required".into(),
                 verification_status: "verified".into(),
                 stage_execution_contract: step.stage_execution_contract.clone(),
+                stage_continuation_context: None,
+                evidence_refs: vec![
+                    format!("read:{source_path}"),
+                    format!("write:{target_path}"),
+                    format!("read:{target_path}"),
+                ],
+                completion_evidence_gaps: Vec::new(),
+                remaining_risks: Vec::new(),
+                completion_evidence_status: CompletionEvidenceStatus::Sufficient,
+            }),
+            ..BossStepRoutedMetadata::default()
+        };
+
+        assert!(step_completion_gate_error(&step, Some(&metadata)).is_none());
+    }
+
+    #[test]
+    fn boss_gate_uses_worker_report_contract_when_step_contract_is_empty() {
+        let target_path = temp_report_path("content-derived-worker-contract-target");
+        let source_path = temp_report_path("content-derived-worker-contract-source");
+        std::fs::write(
+            &target_path,
+            "# Multistage Tools / Memory / Token Report\n\n## Stage 1\n- Summary present.\n",
+        )
+        .expect("write target report");
+        let step = BossPlanStep {
+            id: 7,
+            description: "write report".into(),
+            objective: Some(format!("write report to {target_path}")),
+            acceptance: vec![format!(
+                "target file exists and is non-empty: {target_path}"
+            )],
+            requires_approval: false,
+            status: BossPlanStepStatus::Running,
+            completed: false,
+            result_diff: None,
+            worker_task_id: None,
+            attempt_count: 0,
+            retry_budget: 3,
+            last_review_summary: None,
+            last_correction: None,
+            stage_execution_contract: StageExecutionContract::default(),
+            stage_continuation_context: None,
+            executor_b_stage_memory: None,
+            review_task_id: None,
+            tool_execution_records: Vec::new(),
+        };
+        let worker_contract = StageExecutionContract {
+            declared_artifacts: vec![DeclaredArtifactContract {
+                ref_id: "artifact:step0:0".into(),
+                path: target_path.clone(),
+                kind: "file".into(),
+                required_actions: vec!["write_artifact".into()],
+                required_evidence: vec![target_path.clone(), source_path.clone()],
+            }],
+            verifications: vec![VerificationContract {
+                target_ref: "artifact:step0:0".into(),
+                target_path: Some(target_path.clone()),
+                required_actions: vec!["verify_artifact".into()],
+                required_evidence: vec![target_path.clone(), source_path.clone()],
+            }],
+            content_evidence_targets: vec![source_path.clone()],
+            required_actions: vec!["verify_artifact".into()],
+            required_evidence: vec![target_path.clone(), source_path.clone()],
+            ..StageExecutionContract::default()
+        };
+        let metadata = BossStepRoutedMetadata {
+            completion_evidence_status: Some("sufficient".into()),
+            completion_evidence_gaps: Vec::new(),
+            worker_report: Some(WorkerStructuredReport {
+                worker_state: AgentState::Done,
+                last_tool_action: Some("Read".into()),
+                files_changed: vec![target_path.clone()],
+                tests_run: Vec::new(),
+                artifact_status: "verified".into(),
+                test_status: "not_required".into(),
+                verification_status: "verified".into(),
+                stage_execution_contract: worker_contract,
                 stage_continuation_context: None,
                 evidence_refs: vec![
                     format!("read:{source_path}"),
@@ -16450,6 +16545,38 @@ mod tests {
             )
             .as_deref(),
             Some("RustAgent/docs/30-boss-mode-and-dual-agent-workflow.md")
+        );
+    }
+
+    #[test]
+    fn extract_relevant_file_handles_preserves_relative_source_prefixes() {
+        let handles = extract_relevant_file_handles(
+            "建议核验路径：\n- src/tool/definition.rs\n- src/tool/registry.rs\n- ../docs/31-token-efficiency-cost-performance.md",
+            "step-1-attempt-0",
+        );
+
+        assert!(
+            handles.iter().any(
+                |handle| (handle.path == "RustAgent/Agent/src/tool/definition.rs"
+                    || handle.path == "src/tool/definition.rs")
+                    && handle.kind == "source_file"
+            ),
+            "definition.rs was not normalized from src/... correctly: {handles:?}"
+        );
+        assert!(
+            handles.iter().any(
+                |handle| (handle.path == "RustAgent/Agent/src/tool/registry.rs"
+                    || handle.path == "src/tool/registry.rs")
+                    && handle.kind == "source_file"
+            ),
+            "registry.rs was not normalized from src/... correctly: {handles:?}"
+        );
+        assert!(
+            !handles
+                .iter()
+                .any(|handle| handle.path == "/tool/definition.rs"
+                    || handle.path == "/tool/registry.rs"),
+            "relative source path was incorrectly stripped to root-relative handle: {handles:?}"
         );
     }
 
