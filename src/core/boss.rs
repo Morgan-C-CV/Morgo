@@ -22,8 +22,8 @@ use crate::core::context::WorkerLisMPolicy;
 use crate::core::lism_ab_sample::SharedLisMAbSampleSink;
 use crate::core::prompt_budget::{BudgetDecision, evaluate_message_budget};
 use crate::core::state_frame::{
-    ActorRole, CompletionEvidenceStatus, DeclaredArtifactContract, StageExecutionContract,
-    VerificationContract,
+    ActorRole, CompletionEvidenceGap, CompletionEvidenceStatus, DeclaredArtifactContract,
+    StageExecutionContract, VerificationContract,
 };
 use crate::core::state_frame_loop::{DecisionLoopConfig, StateFrameToolRuntime};
 use crate::core::state_frame_model_router::ModelTier;

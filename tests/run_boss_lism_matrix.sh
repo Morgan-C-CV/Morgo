@@ -40,7 +40,7 @@ BIN_PATH="$AGENT_DIR/target/debug/morgo"
 
 DEFAULT_OUT_DIR="${TMPDIR:-/tmp}/rustagent-boss-lism-matrix-$(date +%Y%m%d-%H%M%S)"
 DEFAULT_MODEL="${RUST_AGENT_AB_MODEL:-gpt-5-mini-2025-08-07}"
-DEFAULT_TIMEOUT_SECS="${RUST_AGENT_BOSS_TASK_TIMEOUT_SECS:-300}"
+DEFAULT_TIMEOUT_SECS="${RUST_AGENT_BOSS_TASK_TIMEOUT_SECS:-180}"
 DEFAULT_PLAN="3x3"
 DEFAULT_SINGLE_MODE="all_on"
 
@@ -132,6 +132,11 @@ die() {
 ensure_binary() {
   if [ ! -x "$BIN_PATH" ]; then
     echo "binary missing at $BIN_PATH; building morgo" >&2
+    cargo build --manifest-path "$AGENT_DIR/Cargo.toml" --bin morgo
+    return
+  fi
+  if [ -n "$(find "$AGENT_DIR/src" "$AGENT_DIR/Cargo.toml" -newer "$BIN_PATH" -print -quit)" ]; then
+    echo "binary at $BIN_PATH is older than source; rebuilding morgo" >&2
     cargo build --manifest-path "$AGENT_DIR/Cargo.toml" --bin morgo
   fi
 }
