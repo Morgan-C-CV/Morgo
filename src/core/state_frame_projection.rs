@@ -5,8 +5,8 @@ use crate::core::state_fact_ledger::{
     build_step_fact_ledgers,
 };
 use crate::core::state_frame::{
-    ActorRole, AgentState, DeclaredArtifactContract, StageExecutionContract, StateBudget,
-    StateFrame, TestContract, VerificationContract,
+    ActorRole, AgentState, DeclaredArtifactContract, StageContinuationContext,
+    StageExecutionContract, StateBudget, StateFrame, TestContract, VerificationContract,
 };
 use crate::core::state_frame_archive::{
     archive_to_summary, build_accepted_archive, retain_blocked_items, retain_open_items,
@@ -389,6 +389,53 @@ fn build_stage_contract_facts(contract: &StageExecutionContract) -> Vec<String> 
         ));
     }
     facts
+}
+
+fn build_stage_continuation_fact_lines(context: &StageContinuationContext) -> Vec<String> {
+    let next_action = context.next_action.as_deref().unwrap_or("none");
+    let failed_target = context.failed_target.as_deref().unwrap_or("none");
+    let continuity_mode = context
+        .continuity_mode
+        .as_ref()
+        .map(|mode| format!("{mode:?}").to_ascii_lowercase())
+        .unwrap_or_else(|| "none".into());
+    let mut facts = vec![fact_line(
+        "stage_continuation",
+        format!(
+            "continuity_mode={} next_action={} failed_target={} verified_facts={}",
+            continuity_mode,
+            next_action,
+            failed_target,
+            summarize_list(&context.verified_facts)
+        ),
+    )];
+    if next_action == "read_source_evidence" && failed_target != "none" {
+        facts.push(fact_line(
+            "missing_source_evidence",
+            format!(
+                "target_path={} required_action=read_source_evidence summary=read this source file before verifying the output artifact",
+                failed_target
+            ),
+        ));
+    }
+    facts
+}
+
+fn build_stage_continuation_open_items(context: &StageContinuationContext) -> Vec<String> {
+    if context.next_action.as_deref() != Some("read_source_evidence") {
+        return Vec::new();
+    }
+    context
+        .failed_target
+        .as_deref()
+        .filter(|target| !target.trim().is_empty())
+        .map(|target| {
+            vec![format!(
+                "required_action:read_source_evidence target_path={} reason=content evidence source has not been read",
+                target
+            )]
+        })
+        .unwrap_or_default()
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -877,11 +924,21 @@ pub fn project_state_frame(
         .unwrap_or_else(|| plan.task_description.clone());
 
     // open_items: unsatisfied acceptance criteria of the current step.
-    let open_items = step_id
+    let mut open_items = step_id
         .and_then(|id| plan.steps.iter().find(|s| s.id == id))
         .filter(|s| !s.completed)
         .map(|s| retain_open_items(&s.acceptance, &archive))
         .unwrap_or_default();
+    if let Some(context) = step_id
+        .and_then(|id| plan.steps.iter().find(|s| s.id == id))
+        .and_then(|step| step.stage_continuation_context.as_ref())
+    {
+        for item in build_stage_continuation_open_items(context) {
+            if !open_items.iter().any(|existing| existing == &item) {
+                open_items.push(item);
+            }
+        }
+    }
 
     // blocked_items: stage-driven via archive.
     let blocked_items = retain_blocked_items(stage, &archive);
@@ -928,6 +985,9 @@ pub fn project_state_frame(
         if let Some(c) = &step.last_correction {
             recent_evidence.push(format!("correction: {c}"));
         }
+        if let Some(context) = step.stage_continuation_context.as_ref() {
+            recent_evidence.extend(build_stage_continuation_fact_lines(context));
+        }
     }
 
     let mut frame = StateFrame {
@@ -971,7 +1031,8 @@ mod tests {
     use super::{collect_projection_diagnostics, project_state_frame};
     use crate::core::boss_state::{BossPlan, BossPlanStep, BossPlanStepStatus, BossStage};
     use crate::core::state_frame::{
-        ActorRole, AgentState, StageExecutionContract, StateBudget, StateFrame,
+        ActorRole, AgentState, ContinuityMode, StageContinuationContext, StageExecutionContract,
+        StateBudget, StateFrame,
     };
 
     #[test]
@@ -1110,6 +1171,72 @@ mod tests {
             frame.stage_execution_contract.required_actions,
             vec!["create", "write", "verify"]
         );
+    }
+
+    #[test]
+    fn project_state_frame_projects_source_evidence_continuation_to_prompt_surface() {
+        let source_path = "RustAgent/Agent/src/tool/registry.rs";
+        let plan = BossPlan {
+            plan_id: "plan-source-continuation".into(),
+            task_description: "build source backed report".into(),
+            document_spec: String::new(),
+            pseudo_code: String::new(),
+            draft_spec: None,
+            review_feedback: None,
+            revision_notes: None,
+            finalized: false,
+            documentation_feedback: Vec::new(),
+            steps: vec![BossPlanStep {
+                id: 0,
+                description: "report".into(),
+                objective: Some(
+                    "write report to /tmp/report.md using RustAgent/Agent/src/tool/registry.rs"
+                        .into(),
+                ),
+                acceptance: vec!["report exists".into()],
+                requires_approval: false,
+                status: BossPlanStepStatus::Rejected,
+                completed: false,
+                result_diff: None,
+                worker_task_id: None,
+                attempt_count: 1,
+                retry_budget: 3,
+                last_review_summary: Some(
+                    "completion gate rejected direct completion: verification contract remains unsatisfied"
+                        .into(),
+                ),
+                last_correction: Some("read_source_evidence".into()),
+                stage_execution_contract: StageExecutionContract::default(),
+                stage_continuation_context: Some(StageContinuationContext {
+                    failed_target: Some(source_path.into()),
+                    next_action: Some("read_source_evidence".into()),
+                    continuity_mode: Some(ContinuityMode::Repair),
+                    ..StageContinuationContext::default()
+                }),
+                executor_b_stage_memory: None,
+                review_task_id: None,
+                tool_execution_records: Vec::new(),
+            }],
+            accepted_by_user: true,
+            auto_sequence: true,
+            session_snapshot: None,
+        };
+
+        let frame = project_state_frame(&plan, BossStage::Execution, Some(0), ActorRole::Worker);
+
+        assert!(frame.open_items.iter().any(|item| {
+            item.contains("required_action:read_source_evidence") && item.contains(source_path)
+        }));
+        assert!(frame.recent_evidence.iter().any(|item| {
+            item.contains("fact: stage_continuation")
+                && item.contains("next_action=read_source_evidence")
+                && item.contains(source_path)
+        }));
+        assert!(frame.recent_evidence.iter().any(|item| {
+            item.contains("fact: missing_source_evidence")
+                && item.contains("required_action=read_source_evidence")
+                && item.contains(source_path)
+        }));
     }
 
     #[test]

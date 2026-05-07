@@ -1995,16 +1995,38 @@ fn apply_step_failure_classification(
     step: &mut BossPlanStep,
     failure_classification: StepFailureClassification,
     reason: &str,
+    metadata: Option<&BossStepRoutedMetadata>,
 ) {
     step.completed = false;
     step.last_review_summary = Some(reason.to_string());
     if classify_repairable_failure(failure_classification) {
+        let failed_target = if failure_classification
+            == StepFailureClassification::VerificationRepairContinuation
+        {
+            verification_gap_target(step, metadata)
+                .or_else(|| {
+                    step.stage_execution_contract
+                        .content_evidence_targets
+                        .first()
+                        .cloned()
+                })
+                .or_else(|| primary_declared_artifact_path(step))
+        } else {
+            primary_declared_artifact_path(step)
+        };
+        let next_action = if failure_classification
+            == StepFailureClassification::VerificationRepairContinuation
+        {
+            Some(verification_gap_next_action(step, metadata))
+        } else {
+            Some(reason.to_string())
+        };
         step.status = BossPlanStepStatus::Rejected;
         update_step_continuation_context(
             step,
             crate::core::state_frame::ContinuityMode::Repair,
-            primary_declared_artifact_path(step),
-            Some(reason.to_string()),
+            failed_target,
+            next_action,
             continuation_verified_facts(step),
         );
     } else {
@@ -5299,6 +5321,7 @@ impl BossCoordinator {
                                     step,
                                     failure_classification,
                                     &reason,
+                                    routed_metadata.as_ref(),
                                 );
                                 (false, Some(("repair_dispatched", None)))
                             }
@@ -6330,9 +6353,13 @@ impl BossCoordinator {
 
                         match outcome {
                             StepOutcome::Completed { .. } => {
+                                let metadata_snapshot = self
+                                    .routed_step_metadata
+                                    .read()
+                                    .await
+                                    .get(&step_id)
+                                    .cloned();
                                 let completion_gate_failure = {
-                                    let routed_metadata = self.routed_step_metadata.read().await;
-                                    let metadata = routed_metadata.get(&step_id);
                                     let plan_guard = self.plan.read().await;
                                     let plan = plan_guard
                                         .as_ref()
@@ -6344,7 +6371,7 @@ impl BossCoordinator {
                                         .ok_or_else(|| {
                                             anyhow::anyhow!("Unknown boss step {step_id}")
                                         })?;
-                                    step_completion_gate_error(step, metadata)
+                                    step_completion_gate_error(step, metadata_snapshot.as_ref())
                                 };
                                 {
                                     let mut plan_guard = self.plan.write().await;
@@ -6366,6 +6393,7 @@ impl BossCoordinator {
                                             step,
                                             failure_classification,
                                             &reason,
+                                            metadata_snapshot.as_ref(),
                                         );
                                         let repairable_continuation_dispatched =
                                             should_continue_repairable_failure(
@@ -6442,6 +6470,12 @@ impl BossCoordinator {
                                 ..
                             } => {
                                 let reason_clone = reason.clone();
+                                let metadata_snapshot = self
+                                    .routed_step_metadata
+                                    .read()
+                                    .await
+                                    .get(&step_id)
+                                    .cloned();
                                 let repairable_continuation_dispatched = {
                                     let mut dispatched = false;
                                     let mut plan_guard = self.plan.write().await;
@@ -6459,6 +6493,7 @@ impl BossCoordinator {
                                         step,
                                         failure_classification,
                                         &reason_clone,
+                                        metadata_snapshot.as_ref(),
                                     );
                                     dispatched = should_continue_repairable_failure(
                                         failure_classification,
@@ -9703,6 +9738,7 @@ mod tests {
             &mut step,
             StepFailureClassification::RepairableRecovery,
             "missing artifact evidence",
+            None,
         );
 
         assert_eq!(step.status, BossPlanStepStatus::Rejected);
@@ -9761,6 +9797,7 @@ mod tests {
             &mut step,
             StepFailureClassification::RepairableRecovery,
             "repair artifact",
+            None,
         );
 
         assert_eq!(step.status, BossPlanStepStatus::Rejected);
@@ -9800,6 +9837,7 @@ mod tests {
             &mut step,
             StepFailureClassification::UnsupportedRequest,
             "unsupported selector",
+            None,
         );
 
         assert_eq!(step.status, BossPlanStepStatus::Failed);
