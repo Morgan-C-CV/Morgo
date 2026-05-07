@@ -1375,11 +1375,13 @@ fn build_worker_structured_report(
 ) -> WorkerStructuredReport {
     let evidence_refs = collect_evidence_refs(frame, Some(usage));
     let read_anchor_closed = verification_read_anchor_closed(frame, &evidence_refs);
+    let source_evidence_closed = missing_source_evidence_targets(frame, &evidence_refs).is_empty();
     let completion = if matches!(
         completion,
         CompletionEvidenceStatus::MissingVerificationEvidence
-    ) && (worker_has_target_scoped_verification_anchor(frame, &evidence_refs)
-        || read_anchor_closed)
+    ) && source_evidence_closed
+        && (worker_has_target_scoped_verification_anchor(frame, &evidence_refs)
+            || read_anchor_closed)
     {
         CompletionEvidenceStatus::Sufficient
     } else {
@@ -1387,15 +1389,20 @@ fn build_worker_structured_report(
     };
     let mut completion_evidence_gaps =
         collect_completion_evidence_gaps_with_refs(frame, &evidence_refs);
-    if matches!(completion, CompletionEvidenceStatus::Sufficient) && read_anchor_closed {
+    if matches!(completion, CompletionEvidenceStatus::Sufficient)
+        && read_anchor_closed
+        && source_evidence_closed
+    {
         completion_evidence_gaps.retain(|gap| !gap.missing_verification_evidence);
     }
-    let verification_status =
-        if matches!(completion, CompletionEvidenceStatus::Sufficient) && read_anchor_closed {
-            "verified".into()
-        } else {
-            summarize_verification_status(frame)
-        };
+    let verification_status = if matches!(completion, CompletionEvidenceStatus::Sufficient)
+        && read_anchor_closed
+        && source_evidence_closed
+    {
+        "verified".into()
+    } else {
+        summarize_verification_status(frame)
+    };
     WorkerStructuredReport {
         worker_state: frame.state,
         last_tool_action: usage.last_effective_tool_action.clone(),
