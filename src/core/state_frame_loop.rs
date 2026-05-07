@@ -4772,7 +4772,10 @@ mod tests {
                         .map(|s| s.as_str()),
                     Some("missing_verification_evidence")
                 );
-                assert_eq!(usage.recovery_tier.as_deref(), Some("artifact_repair_turn"));
+                assert_eq!(
+                    usage.recovery_tier.as_deref(),
+                    Some("verification_repair_continuation")
+                );
                 assert_eq!(
                     usage.recovery_outcome.as_deref(),
                     Some("repair_turn_injected")
