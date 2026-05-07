@@ -352,6 +352,40 @@ fn worker_report_has_target_scoped_evidence(
     })
 }
 
+fn verification_gap_is_closed_by_report(
+    gap: &crate::core::state_frame::CompletionEvidenceGap,
+    completion_evidence_status: CompletionEvidenceStatus,
+    evidence_refs: &[String],
+) -> bool {
+    if completion_evidence_status != CompletionEvidenceStatus::Sufficient {
+        return false;
+    }
+    evidence_refs.iter().any(|evidence_ref| {
+        gap.target_path
+            .as_deref()
+            .is_some_and(|target_path| evidence_ref.contains(target_path))
+            || evidence_ref.contains(&gap.target_ref)
+    })
+}
+
+fn prune_resolved_verification_gaps(
+    completion_evidence_status: CompletionEvidenceStatus,
+    evidence_refs: &[String],
+    gaps: &mut Vec<crate::core::state_frame::CompletionEvidenceGap>,
+) {
+    if completion_evidence_status != CompletionEvidenceStatus::Sufficient {
+        return;
+    }
+    gaps.retain(|gap| {
+        !gap.missing_verification_evidence
+            || !verification_gap_is_closed_by_report(
+                gap,
+                completion_evidence_status.clone(),
+                evidence_refs,
+            )
+    });
+}
+
 fn parse_failed_read_path(detail: &str) -> Option<String> {
     let marker = "failed to read ";
     let start = detail.find(marker)? + marker.len();
@@ -3842,9 +3876,21 @@ impl BossCoordinator {
             .completion_evidence_status
             .as_ref()
             .map(|status| status.as_str().to_string());
-        routed_metadata.worker_report = usage.worker_report.clone();
-        routed_metadata.completion_evidence_gaps = usage
-            .worker_report
+        let mut worker_report = usage.worker_report.clone();
+        if let Some(report) = worker_report.as_mut() {
+            if let Some(status) = usage.completion_evidence_status.as_ref() {
+                report.completion_evidence_status = status.clone();
+            }
+            let completion_evidence_status = report.completion_evidence_status.clone();
+            let evidence_refs = report.evidence_refs.clone();
+            prune_resolved_verification_gaps(
+                completion_evidence_status,
+                &evidence_refs,
+                &mut report.completion_evidence_gaps,
+            );
+        }
+        routed_metadata.worker_report = worker_report.clone();
+        routed_metadata.completion_evidence_gaps = worker_report
             .as_ref()
             .map(|report| report.completion_evidence_gaps.clone())
             .unwrap_or_default();
@@ -10677,6 +10723,78 @@ mod tests {
 
         BossCoordinator::apply_loop_usage_to_routed_metadata(&mut routed_metadata, &usage);
         assert!(routed_metadata.completion_evidence_gaps.is_empty());
+    }
+
+    #[test]
+    fn boss_metadata_clears_resolved_verification_gap_after_sufficient_evidence_refs() {
+        let target_path = "/tmp/report.md";
+        let step = BossPlanStep {
+            id: 7,
+            description: "verify report".into(),
+            objective: Some(format!("write report to {target_path}")),
+            acceptance: vec![format!("target file exists and is non-empty: {target_path}")],
+            requires_approval: false,
+            status: BossPlanStepStatus::Running,
+            completed: false,
+            result_diff: None,
+            worker_task_id: None,
+            attempt_count: 0,
+            retry_budget: 3,
+            last_review_summary: None,
+            last_correction: None,
+            stage_execution_contract: StageExecutionContract {
+                declared_artifacts: vec![DeclaredArtifactContract {
+                    ref_id: "artifact:contract:0".into(),
+                    path: target_path.into(),
+                    kind: "file".into(),
+                    required_actions: vec!["write_artifact".into()],
+                    required_evidence: vec![target_path.into()],
+                }],
+                verifications: vec![VerificationContract {
+                    target_ref: "artifact:contract:0".into(),
+                    target_path: Some(target_path.into()),
+                    required_actions: vec!["verify_artifact".into()],
+                    required_evidence: vec![target_path.into()],
+                }],
+                required_actions: vec!["verify_artifact".into()],
+                required_evidence: vec![target_path.into()],
+                ..StageExecutionContract::default()
+            },
+            stage_continuation_context: None,
+            executor_b_stage_memory: None,
+            review_task_id: None,
+            tool_execution_records: Vec::new(),
+        };
+        let usage = LoopUsage {
+            completion_evidence_status: Some(CompletionEvidenceStatus::Sufficient),
+            worker_report: Some(WorkerStructuredReport {
+                worker_state: AgentState::Done,
+                last_tool_action: Some("ArtifactVerify".into()),
+                files_changed: vec![target_path.into()],
+                tests_run: Vec::new(),
+                artifact_status: "verified".into(),
+                test_status: "not_required".into(),
+                verification_status: "verified".into(),
+                stage_execution_contract: step.stage_execution_contract.clone(),
+                stage_continuation_context: None,
+                evidence_refs: vec![format!("read:{target_path}")],
+                completion_evidence_gaps: vec![CompletionEvidenceGap {
+                    target_ref: "artifact:contract:0".into(),
+                    target_path: Some(target_path.into()),
+                    missing_artifact_evidence: false,
+                    missing_test_evidence: false,
+                    missing_verification_evidence: true,
+                    recommended_action: "verify_artifact".into(),
+                }],
+                remaining_risks: Vec::new(),
+                completion_evidence_status: CompletionEvidenceStatus::Sufficient,
+            }),
+            ..LoopUsage::default()
+        };
+        let mut routed_metadata = BossStepRoutedMetadata::default();
+        BossCoordinator::apply_loop_usage_to_routed_metadata(&mut routed_metadata, &usage);
+        assert!(routed_metadata.completion_evidence_gaps.is_empty());
+        assert!(!metadata_has_open_verification_gap(Some(&routed_metadata)));
     }
 
     #[test]
