@@ -774,6 +774,54 @@ fn verification_read_anchor_closed(frame: &StateFrame, refs: &[String]) -> bool 
         && worker_has_target_scoped_read_anchor(frame, refs)
 }
 
+fn verification_runtime_read_anchor_closed(frame: &StateFrame, usage: &LoopUsage) -> bool {
+    if !completion_contract_requirement(frame, "verification_evidence") {
+        return false;
+    }
+    let target_paths = declared_target_paths(frame);
+    if target_paths.is_empty() {
+        return false;
+    }
+
+    let mut refs = Vec::new();
+    for line in frame
+        .recent_evidence
+        .iter()
+        .filter(|line| line.starts_with("fact: file_facts "))
+    {
+        if evidence_field_value(line, "kind").as_deref() != Some("read_observation") {
+            continue;
+        }
+        if evidence_field_value(line, "source").as_deref() != Some("tool:Read") {
+            continue;
+        }
+        if let Some(path) = evidence_field_value(line, "path") {
+            let anchor = format!("read:{path}");
+            if !refs.iter().any(|existing| existing == &anchor)
+                && path_matches_target_scope(&path, &target_paths)
+            {
+                refs.push(anchor);
+            }
+        }
+    }
+
+    for record in &usage.tool_execution_records {
+        if record.kind != ToolExecutionOutcomeKind::Success || record.tool_name != "Read" {
+            continue;
+        }
+        if let Some(path) = observable_path_from_input(record.observable_input.as_ref()) {
+            let anchor = format!("read:{path}");
+            if !refs.iter().any(|existing| existing == &anchor)
+                && path_matches_target_scope(&path, &target_paths)
+            {
+                refs.push(anchor);
+            }
+        }
+    }
+
+    worker_has_target_scoped_read_anchor(frame, &refs)
+}
+
 fn infer_artifact_repair_turn(
     frame: &StateFrame,
     missing_artifact_ref: &str,
@@ -1236,6 +1284,7 @@ fn collect_completion_evidence_gaps_with_refs(
 
 fn evaluate_completion_evidence(frame: &StateFrame, usage: &LoopUsage) -> CompletionEvidenceStatus {
     let evidence_refs = collect_evidence_refs(frame, Some(usage));
+    let runtime_read_anchor_closed = verification_runtime_read_anchor_closed(frame, usage);
     if completion_contract_requirement(frame, "artifact_evidence")
         && !missing_artifact_evidence_refs(frame).is_empty()
     {
@@ -1254,6 +1303,7 @@ fn evaluate_completion_evidence(frame: &StateFrame, usage: &LoopUsage) -> Comple
     {
         if worker_has_target_scoped_verification_anchor(frame, &evidence_refs)
             || verification_read_anchor_closed(frame, &evidence_refs)
+            || runtime_read_anchor_closed
         {
             return CompletionEvidenceStatus::Sufficient;
         }
@@ -1531,7 +1581,8 @@ fn build_worker_structured_report(
     completion: CompletionEvidenceStatus,
 ) -> WorkerStructuredReport {
     let evidence_refs = collect_evidence_refs(frame, Some(usage));
-    let read_anchor_closed = verification_read_anchor_closed(frame, &evidence_refs);
+    let read_anchor_closed = verification_read_anchor_closed(frame, &evidence_refs)
+        || verification_runtime_read_anchor_closed(frame, usage);
     let source_evidence_closed = missing_source_evidence_targets(frame, &evidence_refs).is_empty();
     let completion = if matches!(
         completion,
@@ -1613,7 +1664,8 @@ fn verification_terminal_outcome(frame: &StateFrame, usage: &mut LoopUsage) -> O
     }
 
     let evidence_refs = collect_evidence_refs(frame, Some(usage));
-    let has_target_read_anchor = worker_has_target_scoped_read_anchor(frame, &evidence_refs);
+    let has_target_read_anchor = worker_has_target_scoped_read_anchor(frame, &evidence_refs)
+        || verification_runtime_read_anchor_closed(frame, usage);
     let source_evidence_closed = missing_source_evidence_targets(frame, &evidence_refs).is_empty();
     let verification_target_read_count = verification_target_successful_read_count(frame, usage);
     let verification_status = summarize_verification_status(frame);
