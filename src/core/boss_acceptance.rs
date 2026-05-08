@@ -185,8 +185,7 @@ fn python_demo_component_artifact_tokens(line: &str, is_python_task: bool) -> Ve
     if lowered.contains("runtime") {
         push("runtime.py");
     }
-    if lowered.contains("model stub") || (lowered.contains("model") && lowered.contains("stub"))
-    {
+    if lowered.contains("model stub") || (lowered.contains("model") && lowered.contains("stub")) {
         push("model.py");
     }
     if lowered.contains("demo entry")

@@ -681,7 +681,9 @@ fn bash_assignment_values(command: &str) -> Vec<(String, String)> {
                 .trim_matches('"')
                 .trim_matches('\'')
                 .trim_end_matches('/');
-            value.starts_with('/').then(|| (name.to_string(), value.to_string()))
+            value
+                .starts_with('/')
+                .then(|| (name.to_string(), value.to_string()))
         })
         .collect()
 }
@@ -723,7 +725,9 @@ fn infer_bash_literal_write_paths(command: &str) -> Vec<String> {
         let token = tokens[idx];
         let candidate = if matches!(token, ">" | ">>") {
             idx += 1;
-            tokens.get(idx).and_then(|value| clean_bash_write_path_token(value))
+            tokens
+                .get(idx)
+                .and_then(|value| clean_bash_write_path_token(value))
         } else if let Some(rest) = token.strip_prefix(">>") {
             clean_bash_write_path_token(rest)
         } else if let Some(rest) = token.strip_prefix('>') {
@@ -733,7 +737,9 @@ fn infer_bash_literal_write_paths(command: &str) -> Vec<String> {
             while tokens.get(idx).is_some_and(|value| value.starts_with('-')) {
                 idx += 1;
             }
-            tokens.get(idx).and_then(|value| clean_bash_write_path_token(value))
+            tokens
+                .get(idx)
+                .and_then(|value| clean_bash_write_path_token(value))
         } else {
             None
         };

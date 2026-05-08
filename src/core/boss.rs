@@ -258,20 +258,13 @@ fn verification_gap_target(
                         .find(|gap| gap.recommended_action == "read_source_evidence")
                 })
             })
-            .or_else(|| {
-                metadata
-                    .completion_evidence_gaps
-                    .iter()
-                    .find(|gap| gap.missing_verification_evidence)
-            })
             .and_then(|gap| gap.target_path.clone())
             .or_else(|| {
+                preferred_missing_verification_gap_path(step, &metadata.completion_evidence_gaps)
+            })
+            .or_else(|| {
                 metadata.worker_report.as_ref().and_then(|report| {
-                    report
-                        .completion_evidence_gaps
-                        .iter()
-                        .find(|gap| gap.missing_verification_evidence)
-                        .and_then(|gap| gap.target_path.clone())
+                    preferred_missing_verification_gap_path(step, &report.completion_evidence_gaps)
                 })
             })
     });
@@ -282,6 +275,37 @@ fn verification_gap_target(
                 .and_then(|context| context.failed_target.clone())
         })
         .or_else(|| primary_declared_artifact_path(step))
+}
+
+fn preferred_missing_verification_gap_path(
+    step: &BossPlanStep,
+    gaps: &[CompletionEvidenceGap],
+) -> Option<String> {
+    let candidates = gaps
+        .iter()
+        .filter(|gap| gap.missing_verification_evidence)
+        .filter_map(|gap| gap.target_path.as_deref())
+        .filter(|path| !path.trim().is_empty())
+        .collect::<Vec<_>>();
+    candidates
+        .iter()
+        .find(|path| {
+            !declared_artifact_path_is_directory(step, path) && !is_readme_like_artifact_path(path)
+        })
+        .or_else(|| {
+            candidates
+                .iter()
+                .find(|path| !declared_artifact_path_is_directory(step, path))
+        })
+        .or_else(|| candidates.first())
+        .map(|path| (*path).to_string())
+}
+
+fn declared_artifact_path_is_directory(step: &BossPlanStep, path: &str) -> bool {
+    step.stage_execution_contract
+        .declared_artifacts
+        .iter()
+        .any(|artifact| artifact.path == path && artifact.kind == "directory")
 }
 
 fn verification_gap_next_action(
@@ -649,7 +673,9 @@ fn preferred_artifact_expectation_path(text: &str) -> Option<String> {
         .or_else(|| {
             expectations
                 .iter()
-                .find(|expectation| expectation.kind == crate::core::boss_acceptance::BossArtifactKind::File)
+                .find(|expectation| {
+                    expectation.kind == crate::core::boss_acceptance::BossArtifactKind::File
+                })
                 .map(|expectation| expectation.path.display().to_string())
         })
 }
@@ -659,7 +685,9 @@ fn preferred_non_readme_declared_artifact_path(
 ) -> Option<String> {
     artifacts
         .iter()
-        .find(|artifact| artifact.kind != "directory" && !is_readme_like_artifact_path(&artifact.path))
+        .find(|artifact| {
+            artifact.kind != "directory" && !is_readme_like_artifact_path(&artifact.path)
+        })
         .map(|artifact| artifact.path.clone())
         .or_else(|| {
             artifacts
@@ -672,7 +700,9 @@ fn preferred_non_readme_declared_artifact_path(
 fn preferred_non_readme_target_artifact_path(artifacts: &[TargetArtifact]) -> Option<String> {
     artifacts
         .iter()
-        .find(|artifact| artifact.kind != "directory" && !is_readme_like_artifact_path(&artifact.path))
+        .find(|artifact| {
+            artifact.kind != "directory" && !is_readme_like_artifact_path(&artifact.path)
+        })
         .map(|artifact| artifact.path.clone())
         .or_else(|| {
             artifacts
@@ -687,7 +717,9 @@ fn build_artifact_repair_instruction(step: &BossPlanStep, missing_reason: &str) 
         .stage_execution_contract
         .declared_artifacts
         .iter()
-        .find(|artifact| artifact.kind != "directory" && !is_readme_like_artifact_path(&artifact.path))
+        .find(|artifact| {
+            artifact.kind != "directory" && !is_readme_like_artifact_path(&artifact.path)
+        })
         .or_else(|| {
             step.stage_execution_contract
                 .declared_artifacts
@@ -716,8 +748,8 @@ fn build_artifact_repair_instruction(step: &BossPlanStep, missing_reason: &str) 
 }
 
 fn build_verification_repair_instruction(step: &BossPlanStep) -> Option<String> {
-    let target_path = verification_first_target_path(step)
-        .or_else(|| primary_declared_artifact_path(step))?;
+    let target_path =
+        verification_first_target_path(step).or_else(|| primary_declared_artifact_path(step))?;
     Some(format!(
         "re-verify artifact evidence for target_path={}",
         target_path
@@ -926,7 +958,10 @@ fn verification_first_target_path_from_contract(
     contract: &ExecutorBAssignmentContract,
 ) -> Option<String> {
     preferred_non_readme_declared_artifact_path(
-        &contract.state_frame.stage_execution_contract.declared_artifacts,
+        &contract
+            .state_frame
+            .stage_execution_contract
+            .declared_artifacts,
     )
     .or_else(|| preferred_non_readme_target_artifact_path(&contract.brief.target_artifacts))
     .or_else(|| {
@@ -1346,6 +1381,11 @@ fn continuation_required_evidence_targets(
             push_unique_required_evidence(&mut targets, target.clone());
         }
     }
+    if targets.is_empty() && action == "verify_artifact" {
+        if let Some(target) = failed_target {
+            push_unique_required_evidence(&mut targets, target.to_string());
+        }
+    }
     if targets.is_empty() {
         for artifact in step
             .stage_execution_contract
@@ -1405,6 +1445,7 @@ fn continuation_failure_reason(
     if step_report_body_looks_like_placeholder(step) {
         return "completion blocked: report body still looks like skeleton or placeholder".into();
     }
+    let action = next_action.unwrap_or_default();
     if let Some(reason) = step
         .last_review_summary
         .as_deref()
@@ -1412,24 +1453,43 @@ fn continuation_failure_reason(
         .filter(|reason| !reason.is_empty())
     {
         let compact = compact_continuation_text(reason);
-        if compact != "completion blocked: verification contract remains unsatisfied" {
+        let lowered = compact.to_ascii_lowercase();
+        let generic_or_tailspin = lowered.contains("verification repair continuation exhausted")
+            || lowered.contains("remaining verification evidence missing")
+            || lowered.contains("max iterations reached")
+            || lowered.contains("verification contract remains unsatisfied")
+            || lowered.contains("verification evidence still missing");
+        if !generic_or_tailspin {
             return compact;
         }
     }
-    if !required_evidence_targets.is_empty() {
+    if action == "read_source_evidence" {
         return format!(
-            "completion blocked: required artifact set remains incomplete: {}",
-            required_evidence_targets.join(" | ")
+            "completion blocked: required source evidence has not been read: {}",
+            if required_evidence_targets.is_empty() {
+                "none".into()
+            } else {
+                required_evidence_targets.join(" | ")
+            }
         );
     }
-    match next_action.unwrap_or_default() {
-        "read_source_evidence" => {
-            "completion blocked: required source evidence has not been read".into()
-        }
+    match action {
         "verify_artifact" => {
-            "completion blocked: artifact verification evidence is still missing".into()
+            if required_evidence_targets.is_empty() {
+                "completion blocked: artifact verification runtime Read evidence is still missing"
+                    .into()
+            } else {
+                format!(
+                    "completion blocked: artifact verification runtime Read evidence is missing for {}",
+                    required_evidence_targets.join(" | ")
+                )
+            }
         }
         "repair_artifact" => "completion blocked: artifact repair is still required".into(),
+        _ if !required_evidence_targets.is_empty() => format!(
+            "completion blocked: required evidence gaps remain open: {}",
+            required_evidence_targets.join(" | ")
+        ),
         _ => "completion blocked: evidence gap remains open".into(),
     }
 }
@@ -2157,6 +2217,9 @@ fn verification_first_repair_brief_lines(contract: &ExecutorBAssignmentContract)
             lines.push(format!("- {target}"));
         }
     }
+    lines.push(
+        "required_runtime_evidence: use Read on each required target; after a successful Read, return evidence_refs: read:<target>. Self-claims without runtime Read do not satisfy the gate.".into(),
+    );
     lines
 }
 
@@ -2174,7 +2237,7 @@ fn build_verification_first_task_message(contract: &ExecutorBAssignmentContract)
         lines.push(String::new());
     }
     lines.push(format!(
-        "verified_target: {target}\nverification_result: verified|blocked\nminimal_evidence: {evidence}\nremaining_blocker: {blocker}\nevidence_refs: none"
+        "verified_target: {target}\nverification_result: verified|blocked\nminimal_evidence: {evidence}\nremaining_blocker: {blocker}\nevidence_refs: read:{target}"
     ));
     lines.join("\n")
 }
@@ -12138,7 +12201,11 @@ mod tests {
         assert!(brief_objective.contains("/tmp/python-demo/runtime.py"));
         assert!(!brief_objective.contains("README.md"));
         let acceptance = build_verification_first_acceptance(&step);
-        assert!(acceptance.iter().any(|line| line.contains("/tmp/python-demo/runtime.py")));
+        assert!(
+            acceptance
+                .iter()
+                .any(|line| line.contains("/tmp/python-demo/runtime.py"))
+        );
         assert!(!acceptance.iter().any(|line| line.contains("README.md")));
     }
 
@@ -12930,6 +12997,26 @@ mod tests {
     }
 
     #[test]
+    fn verification_first_patch_recovers_read_anchor_from_runtime_tool_read_result() {
+        let target = "/tmp/demo/runtime.py";
+        let raw_output = "verified_target: /tmp/demo/runtime.py\nverification_result: verified\nminimal_evidence: Read succeeded\nremaining_blocker: none\n\ntool Read result: Read succeeded (541 chars)\ntool result for Read: def boss_lism(model, objective):\n    return model.handle_lism({'summary': 'short'})\n\nSummary: /tmp/demo/runtime.py defines the runtime helpers.";
+
+        let patch = parse_verification_first_patch(raw_output, target);
+
+        assert_eq!(patch.evidence_refs, vec![format!("read:{target}")]);
+    }
+
+    #[test]
+    fn verification_first_patch_does_not_recover_read_anchor_from_self_claim_only() {
+        let target = "/tmp/demo/runtime.py";
+        let raw_output = "verified_target: /tmp/demo/runtime.py\nverification_result: verified\nminimal_evidence: I inspected /tmp/demo/runtime.py\nremaining_blocker: none\nSummary: read succeeded according to the report.";
+
+        let patch = parse_verification_first_patch(raw_output, target);
+
+        assert!(patch.evidence_refs.is_empty());
+    }
+
+    #[test]
     fn verification_first_continuation_consumes_patch_without_prose_reparse() {
         let shared_step_memory = build_verification_first_shared_step_memory(
             7,
@@ -13661,6 +13748,8 @@ mod tests {
         );
         assert!(message.contains("required_evidence_targets:"));
         assert!(message.contains("/tmp/source.md"));
+        assert!(message.contains("required_runtime_evidence: use Read"));
+        assert!(message.contains("evidence_refs: read:/tmp/verification-first.md"));
     }
 
     #[tokio::test]
@@ -15230,6 +15319,125 @@ mod tests {
             .expect("continuation context");
         assert_eq!(context.failed_target.as_deref(), Some(source_path.as_str()));
         assert_eq!(context.next_action.as_deref(), Some("read_source_evidence"));
+    }
+
+    #[test]
+    fn verification_repair_continuation_prefers_non_readme_file_gap_target() {
+        let root = "/tmp/python-demo".to_string();
+        let readme = format!("{root}/README.md");
+        let runtime = format!("{root}/runtime.py");
+        let demo = format!("{root}/demo.py");
+        let mut step = BossPlanStep {
+            id: 43,
+            description: "build python demo".into(),
+            objective: Some("create a minimal runnable Python demo".into()),
+            acceptance: vec!["demo files are verified".into()],
+            requires_approval: false,
+            status: BossPlanStepStatus::Running,
+            completed: false,
+            result_diff: None,
+            worker_task_id: None,
+            attempt_count: 0,
+            retry_budget: 3,
+            last_review_summary: Some(
+                "tool dispatch failed: verification repair continuation exhausted / remaining verification evidence missing; last state: Verifying".into(),
+            ),
+            last_correction: None,
+            stage_execution_contract: StageExecutionContract {
+                declared_artifacts: vec![
+                    DeclaredArtifactContract {
+                        ref_id: "artifact:contract:0".into(),
+                        path: root.clone(),
+                        kind: "directory".into(),
+                        required_actions: vec!["write_artifact".into()],
+                        required_evidence: vec![root.clone()],
+                    },
+                    DeclaredArtifactContract {
+                        ref_id: "artifact:contract:1".into(),
+                        path: readme.clone(),
+                        kind: "file".into(),
+                        required_actions: vec!["write_artifact".into()],
+                        required_evidence: vec![readme.clone()],
+                    },
+                    DeclaredArtifactContract {
+                        ref_id: "artifact:contract:2".into(),
+                        path: runtime.clone(),
+                        kind: "file".into(),
+                        required_actions: vec!["write_artifact".into()],
+                        required_evidence: vec![runtime.clone()],
+                    },
+                    DeclaredArtifactContract {
+                        ref_id: "artifact:contract:3".into(),
+                        path: demo.clone(),
+                        kind: "file".into(),
+                        required_actions: vec!["write_artifact".into()],
+                        required_evidence: vec![demo.clone()],
+                    },
+                ],
+                required_actions: vec!["verify_artifact".into()],
+                required_evidence: vec![runtime.clone()],
+                ..StageExecutionContract::default()
+            },
+            stage_continuation_context: None,
+            executor_b_stage_memory: None,
+            review_task_id: None,
+            tool_execution_records: Vec::new(),
+        };
+        let metadata = BossStepRoutedMetadata {
+            completion_evidence_gaps: vec![
+                CompletionEvidenceGap {
+                    target_ref: "artifact:contract:0".into(),
+                    target_path: Some(root.clone()),
+                    missing_artifact_evidence: false,
+                    missing_test_evidence: false,
+                    missing_verification_evidence: true,
+                    recommended_action: "verify_artifact".into(),
+                },
+                CompletionEvidenceGap {
+                    target_ref: "artifact:contract:1".into(),
+                    target_path: Some(readme.clone()),
+                    missing_artifact_evidence: false,
+                    missing_test_evidence: false,
+                    missing_verification_evidence: true,
+                    recommended_action: "verify_artifact".into(),
+                },
+                CompletionEvidenceGap {
+                    target_ref: "artifact:contract:2".into(),
+                    target_path: Some(runtime.clone()),
+                    missing_artifact_evidence: false,
+                    missing_test_evidence: false,
+                    missing_verification_evidence: true,
+                    recommended_action: "verify_artifact".into(),
+                },
+            ],
+            ..BossStepRoutedMetadata::default()
+        };
+
+        assert_eq!(
+            verification_gap_target(&step, Some(&metadata)).as_deref(),
+            Some(runtime.as_str())
+        );
+        apply_step_failure_classification(
+            &mut step,
+            StepFailureClassification::VerificationRepairContinuation,
+            "tool dispatch failed: verification repair continuation exhausted / remaining verification evidence missing; last state: Verifying",
+            Some(&metadata),
+        );
+        let context = step
+            .stage_continuation_context
+            .as_ref()
+            .expect("continuation context");
+        assert_eq!(context.failed_target.as_deref(), Some(runtime.as_str()));
+        assert_eq!(context.next_action.as_deref(), Some("verify_artifact"));
+        assert!(
+            context
+                .verified_facts
+                .iter()
+                .any(|fact| { fact == &format!("required_evidence_targets: {runtime}") })
+        );
+        assert!(context.verified_facts.iter().any(|fact| {
+            fact.contains("artifact verification runtime Read evidence is missing")
+        }));
     }
 
     #[tokio::test]
