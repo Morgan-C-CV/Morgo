@@ -1069,6 +1069,82 @@ fn recommended_action_for_gap(
     }
 }
 
+fn completion_gate_repair_targets(
+    frame: &StateFrame,
+    block: &CompletionGateBlock,
+) -> (Vec<String>, Vec<String>) {
+    let mut read_targets = Vec::new();
+    let mut verify_targets = Vec::new();
+
+    let push_unique_target = |targets: &mut Vec<String>, target: String| {
+        if !targets.iter().any(|existing| existing == &target) {
+            targets.push(target);
+        }
+    };
+
+    for missing_ref in &block.missing_evidence_refs {
+        if block.required_action == "read_source_evidence" && !missing_ref.starts_with("artifact:")
+        {
+            push_unique_target(&mut read_targets, missing_ref.clone());
+            continue;
+        }
+
+        if let Some((path, kind)) = artifact_contract_target(frame, missing_ref) {
+            if kind == "directory" {
+                let prefix = format!("{}/", path.trim_end_matches('/'));
+                let mut found_child = false;
+                for child_path in frame
+                    .stage_execution_contract
+                    .declared_artifacts
+                    .iter()
+                    .filter(|artifact| {
+                        artifact.kind == "file" && artifact.path.starts_with(&prefix)
+                    })
+                    .map(|artifact| artifact.path.clone())
+                {
+                    found_child = true;
+                    push_unique_target(&mut read_targets, child_path);
+                }
+                if !found_child {
+                    push_unique_target(&mut verify_targets, path);
+                }
+            } else {
+                push_unique_target(&mut read_targets, path);
+            }
+        } else if missing_ref.starts_with("artifact:") {
+            push_unique_target(&mut verify_targets, missing_ref.clone());
+        } else {
+            push_unique_target(&mut read_targets, missing_ref.clone());
+        }
+    }
+
+    (read_targets, verify_targets)
+}
+
+fn completion_gate_required_evidence_refs(
+    read_targets: &[String],
+    verify_targets: &[String],
+) -> Vec<String> {
+    let mut refs = Vec::new();
+    for target in read_targets {
+        let anchor = format!("read:{target}");
+        if !refs.iter().any(|existing| existing == &anchor) {
+            refs.push(anchor);
+        }
+    }
+    for target in verify_targets {
+        let anchor = format!("verification:{target}");
+        if !refs.iter().any(|existing| existing == &anchor) {
+            refs.push(anchor);
+        }
+    }
+    refs
+}
+
+fn completion_gate_forbidden_evidence() -> &'static str {
+    "Bash|Glob|cat|sed|ls|self_claims|report_prose"
+}
+
 fn collect_completion_evidence_gaps(frame: &StateFrame) -> Vec<CompletionEvidenceGap> {
     let evidence_refs = collect_evidence_refs(frame, None);
     collect_completion_evidence_gaps_with_refs(frame, &evidence_refs)
@@ -1165,6 +1241,36 @@ fn inject_completion_gate_block(frame: &mut StateFrame, block: &CompletionGateBl
     } else {
         block.missing_evidence_refs.join("|")
     };
+    let (read_targets, verify_targets) = completion_gate_repair_targets(frame, block);
+    let required_evidence_refs =
+        completion_gate_required_evidence_refs(&read_targets, &verify_targets);
+    let required_read_targets = if read_targets.is_empty() {
+        "none".to_string()
+    } else {
+        read_targets.join("|")
+    };
+    let required_verify_targets = if verify_targets.is_empty() {
+        "none".to_string()
+    } else {
+        verify_targets.join("|")
+    };
+    let required_evidence_refs_text = if required_evidence_refs.is_empty() {
+        "none".to_string()
+    } else {
+        required_evidence_refs.join("|")
+    };
+    let sanitized_reason = block
+        .reason
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join("_");
+    let repair_direction = match block.required_action.as_str() {
+        "read_source_evidence" => "read_required_source_targets_then_return_read_anchors",
+        "verify_artifact" => "read_required_artifact_targets_then_return_read_anchors",
+        "run_verification" => "run_verification_then_return_verification_anchors",
+        "write_artifact" => "write_missing_artifacts_then_return_write_anchors",
+        _ => "follow_required_action_and_return_runtime_anchors",
+    };
     push_unique(
         &mut frame.open_items,
         format!(
@@ -1173,13 +1279,29 @@ fn inject_completion_gate_block(frame: &mut StateFrame, block: &CompletionGateBl
         ),
     );
     push_unique(
+        &mut frame.open_items,
+        format!(
+            "completion_gate_repair: failure_reason={} modification_direction={} required_read_targets={} required_verification_targets={} required_evidence_refs={} forbidden_evidence={}",
+            sanitized_reason,
+            repair_direction,
+            required_read_targets,
+            required_verify_targets,
+            required_evidence_refs_text,
+            completion_gate_forbidden_evidence()
+        ),
+    );
+    push_unique(
         &mut frame.recent_evidence,
         format!(
-            "completion_gate: status={} required_action={} reason={} missing_evidence_refs={}",
+            "completion_gate: status={} required_action={} reason={} missing_evidence_refs={} required_read_targets={} required_verification_targets={} required_evidence_refs={} forbidden_evidence={}",
             block.status.as_str(),
             block.required_action,
             block.reason,
-            missing_refs
+            missing_refs,
+            required_read_targets,
+            required_verify_targets,
+            required_evidence_refs_text,
+            completion_gate_forbidden_evidence()
         ),
     );
     if block.required_action == "write_artifact" {
@@ -1227,11 +1349,19 @@ fn record_completion_gate_recovery(
     usage.last_recovery_attempt = Some(RecoveryAttempt {
         failure_kind: block.status.as_str().to_string(),
         recommended_next_action: block.required_action.clone(),
-        target_path: block
-            .missing_evidence_refs
-            .iter()
-            .find_map(|missing_ref| infer_artifact_repair_turn(frame, missing_ref, &block.reason))
-            .map(|repair_turn| repair_turn.target_path),
+        target_path: completion_gate_repair_targets(frame, block)
+            .0
+            .into_iter()
+            .next()
+            .or_else(|| {
+                block
+                    .missing_evidence_refs
+                    .iter()
+                    .find_map(|missing_ref| {
+                        infer_artifact_repair_turn(frame, missing_ref, &block.reason)
+                    })
+                    .map(|repair_turn| repair_turn.target_path)
+            }),
     });
 }
 
@@ -1793,6 +1923,21 @@ fn inject_request_context_recovery_gate(frame: &mut StateFrame, usage: &mut Loop
         Some(CompletionEvidenceStatus::MissingVerificationEvidence)
     );
     if verification_gap {
+        let evidence_refs = collect_evidence_refs(frame, Some(usage));
+        let missing_source_targets = missing_source_evidence_targets(frame, &evidence_refs);
+        if !missing_source_targets.is_empty() {
+            let block = CompletionGateBlock {
+                status: CompletionEvidenceStatus::MissingVerificationEvidence,
+                required_action: "read_source_evidence".into(),
+                reason:
+                    "source evidence missing requires runtime Read on the declared input targets"
+                        .into(),
+                missing_evidence_refs: missing_source_targets,
+            };
+            inject_completion_gate_block(frame, &block);
+            record_completion_gate_recovery(frame, usage, &block);
+            return true;
+        }
         let block = CompletionGateBlock {
             status: CompletionEvidenceStatus::MissingVerificationEvidence,
             required_action: "verify_artifact".into(),
@@ -5409,6 +5554,93 @@ mod tests {
                 .iter()
                 .any(|line| line.contains("completion_gate:")
                     && line.contains("required_action=verify_artifact"))
+        );
+    }
+
+    #[test]
+    fn completion_gate_injects_required_read_targets_for_source_gap() {
+        let mut frame = make_frame();
+        frame.recent_evidence.clear();
+        frame.stage_execution_contract.content_evidence_targets = vec!["/tmp/source.md".into()];
+        push_completion_contract(&mut frame, false, false, true);
+        push_artifact_target_fact(&mut frame, "artifact:contract:0", "/tmp/report.md", "file");
+        frame.recent_evidence.push(
+            "fact: artifact_status ref=artifact:contract:0 path=/tmp/report.md kind=file status=created source=tool:Write source_event_id=tool-write:1 freshness=after-runtime confidence=1.00 lineage_status=active invalidated_by=none supersedes=none conflicts_with=none summary=artifact created".into(),
+        );
+
+        let mut usage = LoopUsage::default();
+        let block =
+            super::enforce_completion_gate(&mut frame, &mut usage).expect_err("gate should block");
+        assert_eq!(block.required_action, "read_source_evidence");
+
+        super::inject_completion_gate_block(&mut frame, &block);
+
+        assert!(
+            frame
+                .open_items
+                .iter()
+                .any(|item| item.contains("completion_gate_repair:")
+                    && item.contains("required_read_targets=/tmp/source.md")
+                    && item.contains("required_evidence_refs=read:/tmp/source.md")
+                    && item.contains(
+                        "forbidden_evidence=Bash|Glob|cat|sed|ls|self_claims|report_prose"
+                    ))
+        );
+        assert!(
+            frame
+                .recent_evidence
+                .iter()
+                .any(|line| line.contains("completion_gate:")
+                    && line.contains("required_action=read_source_evidence")
+                    && line.contains("required_read_targets=/tmp/source.md")
+                    && line.contains("required_evidence_refs=read:/tmp/source.md"))
+        );
+    }
+
+    #[test]
+    fn completion_gate_expands_directory_verification_gap_into_child_file_reads() {
+        let mut frame = make_frame();
+        frame.recent_evidence.clear();
+        push_completion_contract_with_refs(
+            &mut frame,
+            &["artifact:contract:dir", "artifact:contract:file"],
+            &[],
+            &["artifact:contract:dir", "artifact:contract:file"],
+        );
+        push_artifact_target_fact(
+            &mut frame,
+            "artifact:contract:dir",
+            "/tmp/example-site",
+            "directory",
+        );
+        push_artifact_target_fact(
+            &mut frame,
+            "artifact:contract:file",
+            "/tmp/example-site/README.md",
+            "file",
+        );
+        frame.recent_evidence.push(
+            "fact: recent_changes_in_files ref=change:readme path=/tmp/example-site/README.md source=tool:Write source_event_id=tool-write:1 freshness=after-runtime confidence=1.00 status=active invalidated_by=none supersedes=none conflicts_with=none summary=updated README".into(),
+        );
+
+        let mut usage = LoopUsage::default();
+        let block =
+            super::enforce_completion_gate(&mut frame, &mut usage).expect_err("gate should block");
+        assert_eq!(block.required_action, "verify_artifact");
+
+        super::inject_completion_gate_block(&mut frame, &block);
+
+        let repair_line = frame
+            .recent_evidence
+            .iter()
+            .find(|line| line.contains("completion_gate:"))
+            .expect("completion gate evidence");
+        assert!(repair_line.contains("required_read_targets=/tmp/example-site/README.md"));
+        assert!(!repair_line.contains("required_read_targets=/tmp/example-site|"));
+        assert!(repair_line.contains("required_evidence_refs=read:/tmp/example-site/README.md"));
+        assert!(
+            repair_line
+                .contains("forbidden_evidence=Bash|Glob|cat|sed|ls|self_claims|report_prose")
         );
     }
 

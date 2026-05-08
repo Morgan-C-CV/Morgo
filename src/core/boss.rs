@@ -364,11 +364,7 @@ fn declared_child_file_artifact_paths(step: &BossPlanStep, directory: &str) -> V
         .collect()
 }
 
-fn push_readable_verification_target(
-    targets: &mut Vec<String>,
-    step: &BossPlanStep,
-    target: &str,
-) {
+fn push_readable_verification_target(targets: &mut Vec<String>, step: &BossPlanStep, target: &str) {
     if declared_artifact_path_is_directory(step, target) {
         let child_files = declared_child_file_artifact_paths(step, target);
         if !child_files.is_empty() {
@@ -584,7 +580,11 @@ fn verification_first_step_required_runtime_targets(step: &BossPlanStep) -> Vec<
         }
     }
     if raw_targets.is_empty() {
-        raw_targets.extend(step.stage_execution_contract.content_evidence_targets.clone());
+        raw_targets.extend(
+            step.stage_execution_contract
+                .content_evidence_targets
+                .clone(),
+        );
     }
     if raw_targets.is_empty() {
         if let Some(target) =
@@ -1418,9 +1418,7 @@ fn parse_verification_first_patch(text: &str, target: &str) -> VerificationFirst
             }
             continue;
         }
-        if lower.starts_with("verification_stance:")
-            || lower.starts_with("verification stance:")
-        {
+        if lower.starts_with("verification_stance:") || lower.starts_with("verification stance:") {
             if let Some((_, value)) = trimmed.split_once(':') {
                 let value = value.trim().to_ascii_lowercase();
                 patch.verification_result = if value.contains("unverified")
@@ -16171,7 +16169,9 @@ mod tests {
                 repair_intent: Some(crate::core::state_frame::RepairIntent {
                     failed_target: Some(root.clone()),
                     verified_facts: vec![
-                        format!("required_evidence_targets: {root} | {readme} | {runtime} | {model} | {demo}"),
+                        format!(
+                            "required_evidence_targets: {root} | {readme} | {runtime} | {model} | {demo}"
+                        ),
                         "verification_result: blocked".into(),
                     ],
                     next_action: Some("verify_artifact".into()),
@@ -16179,7 +16179,9 @@ mod tests {
                 }),
                 failed_target: Some(root.clone()),
                 verified_facts: vec![
-                    format!("required_evidence_targets: {root} | {readme} | {runtime} | {model} | {demo}"),
+                    format!(
+                        "required_evidence_targets: {root} | {readme} | {runtime} | {model} | {demo}"
+                    ),
                     "verification_result: blocked".into(),
                 ],
                 next_action: Some("verify_artifact".into()),
@@ -16400,7 +16402,9 @@ mod tests {
                 repair_intent: Some(crate::core::state_frame::RepairIntent {
                     failed_target: Some(root.clone()),
                     verified_facts: vec![
-                        format!("required_evidence_targets: {root} | {readme} | {runtime} | {model} | {demo}"),
+                        format!(
+                            "required_evidence_targets: {root} | {readme} | {runtime} | {model} | {demo}"
+                        ),
                         "verification_result: blocked".into(),
                     ],
                     next_action: Some("verify_artifact".into()),
@@ -16408,7 +16412,9 @@ mod tests {
                 }),
                 failed_target: Some(root.clone()),
                 verified_facts: vec![
-                    format!("required_evidence_targets: {root} | {readme} | {runtime} | {model} | {demo}"),
+                    format!(
+                        "required_evidence_targets: {root} | {readme} | {runtime} | {model} | {demo}"
+                    ),
                     "verification_result: blocked".into(),
                 ],
                 next_action: Some("verify_artifact".into()),
