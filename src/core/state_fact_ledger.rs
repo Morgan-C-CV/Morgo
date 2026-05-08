@@ -659,6 +659,142 @@ fn infer_bash_readback_path(contract: &StageExecutionContract, command: &str) ->
         .filter(|path| contract_has_explicit_verify_intent(contract, path))
 }
 
+fn bash_assignment_values(command: &str) -> Vec<(String, String)> {
+    command
+        .split_whitespace()
+        .filter_map(|raw| {
+            let token = raw.trim_end_matches(';');
+            let (name, value) = token.split_once('=')?;
+            if name.is_empty()
+                || !name
+                    .chars()
+                    .all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+                || !name
+                    .chars()
+                    .next()
+                    .is_some_and(|ch| ch == '_' || ch.is_ascii_alphabetic())
+            {
+                return None;
+            }
+            let value = value
+                .trim()
+                .trim_matches('"')
+                .trim_matches('\'')
+                .trim_end_matches('/');
+            value.starts_with('/').then(|| (name.to_string(), value.to_string()))
+        })
+        .collect()
+}
+
+fn bash_command_writes_target(command: &str, target: &str) -> bool {
+    [
+        format!("> \"{target}\""),
+        format!("> '{target}'"),
+        format!("> {target}"),
+        format!(">> \"{target}\""),
+        format!(">> '{target}'"),
+        format!(">> {target}"),
+        format!("tee \"{target}\""),
+        format!("tee '{target}'"),
+        format!("tee {target}"),
+    ]
+    .iter()
+    .any(|pattern| command.contains(pattern))
+}
+
+fn clean_bash_write_path_token(raw: &str) -> Option<String> {
+    let token = raw
+        .trim()
+        .trim_matches('"')
+        .trim_matches('\'')
+        .trim_end_matches([';', ')', ']']);
+    if token.is_empty() || token.starts_with('$') || token.contains(">&") {
+        return None;
+    }
+    (token.starts_with('/') || token.starts_with("./") || token.starts_with("../"))
+        .then(|| normalize_runtime_path(token))
+}
+
+fn infer_bash_literal_write_paths(command: &str) -> Vec<String> {
+    let tokens = command.split_whitespace().collect::<Vec<_>>();
+    let mut paths = Vec::new();
+    let mut idx = 0usize;
+    while idx < tokens.len() {
+        let token = tokens[idx];
+        let candidate = if matches!(token, ">" | ">>") {
+            idx += 1;
+            tokens.get(idx).and_then(|value| clean_bash_write_path_token(value))
+        } else if let Some(rest) = token.strip_prefix(">>") {
+            clean_bash_write_path_token(rest)
+        } else if let Some(rest) = token.strip_prefix('>') {
+            clean_bash_write_path_token(rest)
+        } else if token == "tee" {
+            idx += 1;
+            while tokens.get(idx).is_some_and(|value| value.starts_with('-')) {
+                idx += 1;
+            }
+            tokens.get(idx).and_then(|value| clean_bash_write_path_token(value))
+        } else {
+            None
+        };
+        if let Some(path) = candidate {
+            if !paths.iter().any(|existing| existing == &path) {
+                paths.push(path);
+            }
+        }
+        idx += 1;
+    }
+    paths
+}
+
+fn infer_bash_declared_artifact_write_paths(
+    contract: &StageExecutionContract,
+    command: &str,
+) -> Vec<String> {
+    let assignments = bash_assignment_values(command);
+    let mut paths = Vec::new();
+    for artifact in &contract.declared_artifacts {
+        if artifact.kind == "directory" {
+            continue;
+        }
+        let path = normalize_runtime_path(&artifact.path);
+        let path_ref = Path::new(&path);
+        if bash_command_writes_target(command, &path) {
+            if !paths.iter().any(|existing| existing == &path) {
+                paths.push(path);
+            }
+            continue;
+        }
+        let Some(file_name) = path_ref.file_name().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        let Some(parent) = path_ref
+            .parent()
+            .map(|value| value.to_string_lossy().trim_end_matches('/').to_string())
+        else {
+            continue;
+        };
+        let mut matched = false;
+        for (name, value) in &assignments {
+            if value.trim_end_matches('/') != parent {
+                continue;
+            }
+            let shell_ref = format!("${name}/{file_name}");
+            let braced_shell_ref = format!("${{{name}}}/{file_name}");
+            if bash_command_writes_target(command, &shell_ref)
+                || bash_command_writes_target(command, &braced_shell_ref)
+            {
+                matched = true;
+                break;
+            }
+        }
+        if matched && !paths.iter().any(|existing| existing == &path) {
+            paths.push(path);
+        }
+    }
+    paths
+}
+
 pub fn append_runtime_tool_record(
     contract: &StageExecutionContract,
     ledgers: &mut StepFactLedgers,
@@ -761,6 +897,39 @@ pub fn append_runtime_tool_record(
                 });
             }
             if record.kind == ToolExecutionOutcomeKind::Success {
+                let mut write_paths = infer_bash_literal_write_paths(&command);
+                for path in infer_bash_declared_artifact_write_paths(contract, &command) {
+                    if !write_paths.iter().any(|existing| existing == &path) {
+                        write_paths.push(path);
+                    }
+                }
+                for (idx, path) in write_paths.into_iter().enumerate() {
+                    ledgers.change_refs.push(ChangeRecord {
+                        ref_id: format!("change:{ref_namespace}:bash-write:{idx}"),
+                        path: path.clone(),
+                        summary: tool_record_summary(record),
+                        source: "tool:Bash".into(),
+                        source_event_id: format!("tool-bash:{ref_namespace}"),
+                        freshness: "after-runtime-bash".into(),
+                        confidence_milli: 900,
+                        lineage: active_lineage(),
+                    });
+                    push_file_fact(
+                        ledgers,
+                        FileFactRecord {
+                            ref_id: format!("filefact:{ref_namespace}:bash-write:{idx}"),
+                            path: path.clone(),
+                            kind: "written_file".into(),
+                            fact: format!("runtime Bash wrote declared artifact {path}"),
+                            symbol: None,
+                            source: "tool:Bash".into(),
+                            source_event_id: format!("tool-bash:{ref_namespace}"),
+                            freshness: "after-runtime-bash".into(),
+                            confidence_milli: 900,
+                            lineage: active_lineage(),
+                        },
+                    );
+                }
                 if let Some(path) = infer_bash_readback_path(contract, &command) {
                     push_verification_record(
                         ledgers,
@@ -1785,6 +1954,70 @@ mod tests {
 
         assert!(ledgers.artifact_refs.is_empty());
         assert!(ledgers.verification_refs.is_empty());
+    }
+
+    #[test]
+    fn bash_declared_artifact_write_with_shell_variable_emits_change_facts_only() {
+        let mut ledgers = StepFactLedgers::default();
+        let contract = StageExecutionContract {
+            declared_artifacts: vec![
+                DeclaredArtifactContract {
+                    ref_id: "artifact:runtime".into(),
+                    path: "/tmp/python-demo/runtime.py".into(),
+                    kind: "file".into(),
+                    required_actions: vec!["create".into(), "write".into()],
+                    required_evidence: vec!["artifact_evidence".into()],
+                },
+                DeclaredArtifactContract {
+                    ref_id: "artifact:demo".into(),
+                    path: "/tmp/python-demo/demo.py".into(),
+                    kind: "file".into(),
+                    required_actions: vec!["create".into(), "write".into()],
+                    required_evidence: vec!["artifact_evidence".into()],
+                },
+            ],
+            ..StageExecutionContract::default()
+        };
+        let record = ToolExecutionRecord {
+            tool_name: "Bash".into(),
+            outcome: "Text".into(),
+            kind: ToolExecutionOutcomeKind::Success,
+            summary: "Bash succeeded".into(),
+            detail: Some("exit_code: 0".into()),
+            pending_approval: None,
+            report_modifier: ToolReportModifier::None,
+            observable_input: Some(ObservableInput {
+                value: r#"{"command":"BASE=\"/tmp/python-demo\"\ncat > \"$BASE/runtime.py\" <<'PY'\nprint('runtime')\nPY\ncat > \"$BASE/demo.py\" <<'PY'\nprint('demo')\nPY"}"#.into(),
+                source: ObservableInputSource::Raw,
+            }),
+            batch_context: ToolBatchContext {
+                batch_index: 0,
+                batch_size: 1,
+                executed_in_batch: false,
+            },
+        };
+
+        append_runtime_tool_record(&contract, &mut ledgers, &record, "bash-write");
+
+        for path in ["/tmp/python-demo/runtime.py", "/tmp/python-demo/demo.py"] {
+            assert!(
+                ledgers
+                    .change_refs
+                    .iter()
+                    .any(|item| item.source == "tool:Bash" && item.path == path),
+                "missing bash change ref for {path}: {:?}",
+                ledgers.change_refs
+            );
+            assert!(
+                ledgers
+                    .file_facts
+                    .iter()
+                    .any(|item| item.source == "tool:Bash" && item.path == path),
+                "missing bash file fact for {path}: {:?}",
+                ledgers.file_facts
+            );
+        }
+        assert!(ledgers.artifact_refs.is_empty());
     }
 
     #[test]
