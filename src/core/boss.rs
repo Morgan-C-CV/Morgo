@@ -50,6 +50,30 @@ use tokio::sync::RwLock;
 
 pub(crate) const PERSISTED_WORKER_TASK_USAGE_SIGNAL: &str = "persisted_worker_task_usage";
 
+fn current_task_contract_text(text: &str) -> String {
+    const HISTORICAL_CONTEXT_MARKERS: &[&str] = &[
+        "参考材料摘录",
+        "参考材料：",
+        "历史材料",
+        "历史上下文",
+        "背景材料摘录",
+        "roadmap 摘录",
+        "Roadmap 摘录",
+    ];
+    let mut lines = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if HISTORICAL_CONTEXT_MARKERS
+            .iter()
+            .any(|marker| trimmed.starts_with(marker))
+        {
+            break;
+        }
+        lines.push(line);
+    }
+    lines.join("\n")
+}
+
 #[derive(Debug)]
 pub struct BossCoordinator {
     pub status: Arc<RwLock<BossStatus>>,
@@ -76,7 +100,7 @@ pub struct BossCoordinator {
 }
 
 fn step_artifact_verification_error(step: &BossPlanStep) -> Option<String> {
-    verify_artifact_expectations(step.objective())
+    verify_artifact_expectations(&current_task_contract_text(step.objective()))
         .err()
         .map(|reason| format!("artifact verification failed: {reason}"))
 }
@@ -2376,16 +2400,22 @@ fn build_relevant_file_handle_source_text(
     step: &BossPlanStep,
 ) -> String {
     let mut sections = Vec::new();
+    let plan_task_description = current_task_contract_text(plan_task_description);
     if !plan_task_description.trim().is_empty() {
         sections.push(plan_task_description.trim().to_string());
     }
-    if !step.description.trim().is_empty() {
-        sections.push(step.description.trim().to_string());
+    let step_description = current_task_contract_text(&step.description);
+    if !step_description.trim().is_empty() {
+        sections.push(step_description.trim().to_string());
     }
-    if let Some(objective) = step.objective.as_deref().map(str::trim) {
-        if !objective.is_empty() {
-            sections.push(objective.to_string());
-        }
+    let objective = step
+        .objective
+        .as_deref()
+        .map(current_task_contract_text)
+        .unwrap_or_default();
+    let objective = objective.trim();
+    if !objective.is_empty() {
+        sections.push(objective.to_string());
     }
     if !step.acceptance.is_empty() {
         sections.push(step.acceptance.join("\n"));
@@ -2428,7 +2458,8 @@ fn collect_target_files(relevant_file_handles: &[RelevantFileHandle]) -> Vec<Str
 
 fn collect_target_artifacts(step: &BossPlanStep, target_files: &[String]) -> Vec<TargetArtifact> {
     let mut artifacts = Vec::new();
-    for expectation in extract_artifact_expectations(step.objective()) {
+    let current_objective = current_task_contract_text(step.objective());
+    for expectation in extract_artifact_expectations(&current_objective) {
         let kind = match expectation.kind {
             crate::core::boss_acceptance::BossArtifactKind::File => "file",
             crate::core::boss_acceptance::BossArtifactKind::Directory => "directory",
@@ -16829,6 +16860,95 @@ mod tests {
                 .iter()
                 .any(|target| target.ends_with("docs/31-token-efficiency-cost-performance.md")),
             "missing docs/31 target: {targets:?}"
+        );
+    }
+
+    #[test]
+    fn historical_reference_paths_do_not_become_content_evidence_targets() {
+        let target_path = temp_report_path("content-evidence-history-filter-output");
+        let step = BossPlanStep {
+            id: 4,
+            description: "write current demo".into(),
+            objective: Some(format!(
+                "任务目标：\n- 目标目录：/tmp/current-demo\n\n参考材料摘录：\n- 已完成：/Users/wangmorgan/MProject/MorgoTest/reports/multistage-tools-memory-token-report.md\n- 目标目录：/Users/wangmorgan/MProject/MorgoTest/lism-jsonl-analyzer\n- src/tool/definition.rs\n- 目标文件：{target_path}"
+            )),
+            acceptance: vec![format!(
+                "target file exists and is non-empty: {target_path}"
+            )],
+            requires_approval: false,
+            status: BossPlanStepStatus::Pending,
+            completed: false,
+            result_diff: None,
+            worker_task_id: None,
+            attempt_count: 0,
+            retry_budget: 3,
+            last_review_summary: None,
+            last_correction: None,
+            stage_execution_contract: StageExecutionContract::default(),
+            stage_continuation_context: None,
+            executor_b_stage_memory: None,
+            review_task_id: None,
+            tool_execution_records: Vec::new(),
+        };
+        let source_text = build_relevant_file_handle_source_text(step.objective(), &step);
+        let handles = extract_relevant_file_handles(&source_text, "step-4-attempt-0");
+        let target_artifacts = collect_target_artifacts(&step, &collect_target_files(&handles));
+        let contract = build_stage_execution_contract(&step, &target_artifacts);
+        let targets = collect_content_evidence_targets(&handles, &contract);
+
+        assert!(
+            !handles
+                .iter()
+                .any(|handle| handle.path.contains("MorgoTest")),
+            "historical paths leaked into handles: {handles:?}"
+        );
+        assert!(
+            !targets.iter().any(|target| target.contains("MorgoTest")),
+            "historical paths leaked into content evidence targets: {targets:?}"
+        );
+    }
+
+    #[test]
+    fn historical_target_directory_reference_does_not_become_declared_artifact() {
+        let current_dir = "/tmp/current-demo-output";
+        let historical_dir = "/Users/wangmorgan/MProject/MorgoTest/lism-jsonl-analyzer";
+        let step = BossPlanStep {
+            id: 5,
+            description: "create current demo".into(),
+            objective: Some(format!(
+                "任务目标：\n- 目标目录：{current_dir}\n\n参考材料摘录：\n- 目标目录：{historical_dir}"
+            )),
+            acceptance: vec![format!("target directory exists and is non-empty: {current_dir}")],
+            requires_approval: false,
+            status: BossPlanStepStatus::Pending,
+            completed: false,
+            result_diff: None,
+            worker_task_id: None,
+            attempt_count: 0,
+            retry_budget: 3,
+            last_review_summary: None,
+            last_correction: None,
+            stage_execution_contract: StageExecutionContract::default(),
+            stage_continuation_context: None,
+            executor_b_stage_memory: None,
+            review_task_id: None,
+            tool_execution_records: Vec::new(),
+        };
+        let source_text = build_relevant_file_handle_source_text(step.objective(), &step);
+        let handles = extract_relevant_file_handles(&source_text, "step-5-attempt-0");
+        let target_artifacts = collect_target_artifacts(&step, &collect_target_files(&handles));
+
+        assert!(
+            target_artifacts
+                .iter()
+                .any(|artifact| artifact.path == current_dir),
+            "current target directory missing: {target_artifacts:?}"
+        );
+        assert!(
+            !target_artifacts
+                .iter()
+                .any(|artifact| artifact.path == historical_dir),
+            "historical target directory leaked into artifacts: {target_artifacts:?}"
         );
     }
 
