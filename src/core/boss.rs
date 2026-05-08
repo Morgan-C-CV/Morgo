@@ -1477,6 +1477,10 @@ fn parse_verification_first_patch(text: &str, target: &str) -> VerificationFirst
     };
 
     let mut collecting_evidence_refs = false;
+    let mut saw_explicit_verification_result = false;
+    let mut saw_explicit_minimal_evidence = false;
+    let mut saw_explicit_remaining_blocker = false;
+    let mut saw_explicit_evidence_refs = false;
     for line in text.lines() {
         let raw_trimmed = line.trim();
         if raw_trimmed.is_empty() {
@@ -1517,6 +1521,7 @@ fn parse_verification_first_patch(text: &str, target: &str) -> VerificationFirst
                 let value = compact_verify_value(value);
                 if !value.is_empty() {
                     patch.verification_result = value;
+                    saw_explicit_verification_result = true;
                 }
             }
             continue;
@@ -1542,6 +1547,7 @@ fn parse_verification_first_patch(text: &str, target: &str) -> VerificationFirst
                 let value = compact_verify_value(value);
                 if !value.is_empty() {
                     patch.minimal_evidence = value;
+                    saw_explicit_minimal_evidence = true;
                 }
             }
             continue;
@@ -1551,6 +1557,7 @@ fn parse_verification_first_patch(text: &str, target: &str) -> VerificationFirst
                 let value = compact_verify_value(value);
                 if !value.is_empty() {
                     patch.remaining_blocker = value;
+                    saw_explicit_remaining_blocker = true;
                 }
             }
             continue;
@@ -1562,8 +1569,23 @@ fn parse_verification_first_patch(text: &str, target: &str) -> VerificationFirst
                     collecting_evidence_refs = true;
                 } else {
                     patch.evidence_refs = refs;
+                    saw_explicit_evidence_refs = true;
                 }
             }
+        }
+    }
+
+    let prose_evidence_refs = verification_first_prose_evidence_refs_from_text(text);
+    if patch.evidence_refs.is_empty() && !prose_evidence_refs.is_empty() {
+        patch.evidence_refs = prose_evidence_refs;
+        if !saw_explicit_verification_result {
+            patch.verification_result = "blocked".into();
+        }
+        if !saw_explicit_minimal_evidence {
+            patch.minimal_evidence = verification_first_prose_minimal_evidence_from_text(text);
+        }
+        if !saw_explicit_remaining_blocker {
+            patch.remaining_blocker = "needs review".into();
         }
     }
 
@@ -1573,7 +1595,98 @@ fn parse_verification_first_patch(text: &str, target: &str) -> VerificationFirst
         patch.evidence_refs = vec![format!("read:{}", patch.verified_target)];
     }
 
+    if patch.evidence_refs.is_empty()
+        && !saw_explicit_evidence_refs
+        && !saw_explicit_verification_result
+        && !saw_explicit_minimal_evidence
+        && !saw_explicit_remaining_blocker
+        && text.lines().any(|line| !line.trim().is_empty())
+    {
+        patch.minimal_evidence = verification_first_prose_minimal_evidence_from_text(text);
+        patch.remaining_blocker = "needs review".into();
+        patch.verification_result = "blocked".into();
+    }
+
     patch
+}
+
+fn verification_first_prose_evidence_refs_from_text(text: &str) -> Vec<String> {
+    let mut refs = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let lowered = trimmed.to_ascii_lowercase();
+        let marker = if lowered.contains("read succeeded") {
+            Some(("read", "read succeeded"))
+        } else if lowered.contains("write succeeded") {
+            Some(("write", "write succeeded"))
+        } else if lowered.contains("artifact verification passed") {
+            Some(("verification", "artifact verification passed"))
+        } else {
+            None
+        };
+        let Some((prefix, marker_text)) = marker else {
+            continue;
+        };
+        let Some(idx) = lowered.find(marker_text) else {
+            continue;
+        };
+        let candidate = trimmed[..idx]
+            .trim()
+            .trim_start_matches('-')
+            .trim()
+            .trim_end_matches(|ch: char| {
+                matches!(ch, ':' | '-' | '—' | ' ' | '\t' | '•' | '·' | '.' | ',')
+            });
+        let candidate = normalize_verification_first_patch_ref(candidate);
+        if candidate.is_empty()
+            || !candidate.contains('/')
+                && !candidate.starts_with('.')
+                && !candidate.starts_with("RustAgent")
+        {
+            continue;
+        }
+        let anchor = format!("{prefix}:{candidate}");
+        if !refs.iter().any(|existing| existing == &anchor) {
+            refs.push(anchor);
+        }
+    }
+
+    refs
+}
+
+fn verification_first_prose_minimal_evidence_from_text(text: &str) -> String {
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let lowered = trimmed.to_ascii_lowercase();
+        if lowered.starts_with("outcome:")
+            || lowered.starts_with("summary:")
+            || lowered.starts_with("execution evidence")
+            || lowered.starts_with("reads performed")
+            || lowered.starts_with("writes performed")
+            || lowered.starts_with("files changed")
+            || lowered.starts_with("verification stance:")
+        {
+            return compact_verify_value(trimmed);
+        }
+        if lowered.contains("read succeeded")
+            || lowered.contains("write succeeded")
+            || lowered.contains("artifact verification passed")
+        {
+            return compact_verify_value(trimmed);
+        }
+    }
+
+    text.lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(compact_verify_value)
+        .unwrap_or_else(|| "prose summary preserved".into())
 }
 
 fn verification_first_tool_read_result_mentions_target(text: &str, target: &str) -> bool {
@@ -13763,6 +13876,26 @@ mod tests {
         let patch = parse_verification_first_patch(raw_output, target);
 
         assert!(patch.evidence_refs.is_empty());
+    }
+
+    #[test]
+    fn verification_first_patch_recovers_read_anchors_from_prose_evidence_and_marks_review_needed()
+    {
+        let target = "/tmp/demo/runtime.py";
+        let raw_output = "Outcome: completed\nExecution evidence (concise)\n- RustAgent/Agent/src/tool/definition.rs — Read succeeded\n- RustAgent/Agent/src/tool/registry.rs — Read succeeded\nNotes: report preserved for review.";
+
+        let patch = parse_verification_first_patch(raw_output, target);
+
+        assert_eq!(
+            patch.evidence_refs,
+            vec![
+                "read:RustAgent/Agent/src/tool/definition.rs".to_string(),
+                "read:RustAgent/Agent/src/tool/registry.rs".to_string(),
+            ]
+        );
+        assert_eq!(patch.verification_result, "blocked");
+        assert_eq!(patch.remaining_blocker, "needs review");
+        assert_eq!(patch.minimal_evidence, "Outcome: completed");
     }
 
     #[tokio::test]
