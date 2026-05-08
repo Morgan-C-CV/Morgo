@@ -3589,6 +3589,12 @@ pub async fn run_decision_loop_with_tools(
 
     for _iter in 0..config.max_iterations {
         append_runtime_contract_facts(&mut frame);
+        if let Some(outcome) = completion_gate_repair_terminal_outcome(&frame, &mut total_usage) {
+            return Ok(outcome);
+        }
+        if let Some(outcome) = verification_terminal_outcome(&frame, &mut total_usage) {
+            return Ok(outcome);
+        }
         let prompt = format!(
             "{}\n{}",
             STATE_DECISION_INSTRUCTION,
@@ -3775,6 +3781,16 @@ pub async fn run_decision_loop_with_tools(
                                 total_usage.last_failure_outcome = None;
                                 clear_recovery_after_success(&mut total_usage);
                                 total_usage.tool_execution_records.push(record);
+                                if let Some(outcome) =
+                                    completion_gate_repair_terminal_outcome(&frame, &mut total_usage)
+                                {
+                                    return Ok(outcome);
+                                }
+                                if let Some(outcome) =
+                                    verification_terminal_outcome(&frame, &mut total_usage)
+                                {
+                                    return Ok(outcome);
+                                }
                                 if changed {
                                     summary = hydrate_needed_context(
                                         &mut frame,
@@ -3960,6 +3976,10 @@ pub async fn run_decision_loop_with_tools(
                         total_usage.tool_execution_records.push(record);
                         if let Some(outcome) =
                             completion_gate_repair_terminal_outcome(&frame, &mut total_usage)
+                        {
+                            return Ok(outcome);
+                        }
+                        if let Some(outcome) = verification_terminal_outcome(&frame, &mut total_usage)
                         {
                             return Ok(outcome);
                         }
@@ -7190,6 +7210,91 @@ mod tests {
                 assert_eq!(
                     usage.tool_dispatch_count, 0,
                     "closed stage continuation should terminalize before consuming another tool"
+                );
+                let report = usage.worker_report.expect("worker report");
+                assert_eq!(
+                    report.completion_evidence_status,
+                    CompletionEvidenceStatus::Sufficient
+                );
+                assert!(report.completion_evidence_gaps.is_empty());
+            }
+            other => panic!("expected Done, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn closed_stage_continuation_terminalizes_before_polling_model_again() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let root = "/tmp/example-stage-continuation-close";
+        let required_paths = [
+            format!("{root}/README.md"),
+            format!("{root}/runtime.py"),
+            format!("{root}/model.py"),
+            format!("{root}/demo.py"),
+        ];
+        let mut frame = make_frame();
+        frame.recent_evidence.clear();
+        frame.state = AgentState::Executing;
+        frame.allowed_actions = vec!["run_command".into()];
+        frame.allowed_tools = vec!["Bash".into()];
+        push_completion_contract_with_refs(
+            &mut frame,
+            &[
+                "artifact:contract:dir",
+                "artifact:contract:readme",
+                "artifact:contract:runtime",
+                "artifact:contract:model",
+                "artifact:contract:demo",
+            ],
+            &[],
+            &[
+                "artifact:contract:dir",
+                "artifact:contract:readme",
+                "artifact:contract:runtime",
+                "artifact:contract:model",
+                "artifact:contract:demo",
+            ],
+        );
+        push_artifact_target_fact(&mut frame, "artifact:contract:dir", root, "directory");
+        for (ref_id, path) in [
+            ("artifact:contract:readme", &required_paths[0]),
+            ("artifact:contract:runtime", &required_paths[1]),
+            ("artifact:contract:model", &required_paths[2]),
+            ("artifact:contract:demo", &required_paths[3]),
+        ] {
+            push_artifact_target_fact(&mut frame, ref_id, path, "file");
+            frame.recent_evidence.push(format!(
+                "fact: file_facts ref=filefact:runtime:1:read path={path} kind=read_observation source=tool:Read source_event_id=tool-read:runtime:1 freshness=after-runtime-read confidence=1.00 status=active invalidated_by=none supersedes=none conflicts_with=none fact=runtime Read succeeded for {path}"
+            ));
+        }
+        frame.recent_evidence.push(format!(
+            "fact: stage_continuation continuity_mode=repair next_action=verify_artifact failed_target={root} verified_facts=required_evidence_targets: {root} | failure_reason: completion blocked: artifact verification runtime Read evidence is missing | modification_direction: read declared artifacts and return runtime anchors"
+        ));
+
+        let required_targets = super::completion_gate_required_read_targets(&frame);
+        assert_eq!(required_targets, required_paths);
+        assert!(super::completion_gate_required_reads_closed(
+            &frame,
+            &LoopUsage::default()
+        ));
+
+        let client = ModelProviderClient::with_scripted_turns(Vec::new());
+        let outcome = rt
+            .block_on(run_decision_loop_with_tools(
+                &client,
+                frame,
+                DecisionLoopConfig {
+                    max_iterations: 1,
+                    ..DecisionLoopConfig::default()
+                },
+                None,
+            ))
+            .expect("loop should not error");
+        match outcome {
+            LoopOutcome::Done { usage, .. } => {
+                assert_eq!(
+                    usage.tool_dispatch_count, 0,
+                    "closed stage continuation should terminalize before polling the model again"
                 );
                 let report = usage.worker_report.expect("worker report");
                 assert_eq!(

@@ -821,6 +821,28 @@ fn worker_report_has_target_scoped_read_anchor(
         return false;
     }
     verification_targets.iter().all(|target| {
+        if contract
+            .declared_artifacts
+            .iter()
+            .any(|artifact| artifact.path == *target && artifact.kind == "directory")
+        {
+            let prefix = format!("{}/", target.trim_end_matches('/'));
+            let child_files = contract
+                .declared_artifacts
+                .iter()
+                .filter(|artifact| artifact.kind != "directory" && artifact.path.starts_with(&prefix))
+                .map(|artifact| artifact.path.as_str())
+                .collect::<Vec<_>>();
+            if !child_files.is_empty() {
+                return child_files.iter().all(|child_path| {
+                    let read_anchor = format!("read:{child_path}");
+                    report
+                        .evidence_refs
+                        .iter()
+                        .any(|evidence_ref| evidence_ref == &read_anchor)
+                });
+            }
+        }
         report
             .evidence_refs
             .iter()
@@ -885,6 +907,76 @@ mod tests {
             }],
             required_actions: vec!["verify_artifact".into()],
             required_evidence: vec!["/tmp/report.md".into()],
+            ..StageExecutionContract::default()
+        }
+    }
+
+    fn directory_verification_contract() -> StageExecutionContract {
+        StageExecutionContract {
+            declared_artifacts: vec![
+                crate::core::state_frame::DeclaredArtifactContract {
+                    ref_id: "artifact:step0:dir".into(),
+                    path: "/tmp/demo".into(),
+                    kind: "directory".into(),
+                    required_actions: vec!["create".into(), "write".into()],
+                    required_evidence: vec!["artifact:step0:dir".into(), "/tmp/demo".into()],
+                },
+                crate::core::state_frame::DeclaredArtifactContract {
+                    ref_id: "artifact:step0:readme".into(),
+                    path: "/tmp/demo/README.md".into(),
+                    kind: "file".into(),
+                    required_actions: vec!["create".into(), "write".into()],
+                    required_evidence: vec![
+                        "artifact:step0:readme".into(),
+                        "/tmp/demo/README.md".into(),
+                    ],
+                },
+                crate::core::state_frame::DeclaredArtifactContract {
+                    ref_id: "artifact:step0:runtime".into(),
+                    path: "/tmp/demo/runtime.py".into(),
+                    kind: "file".into(),
+                    required_actions: vec!["create".into(), "write".into()],
+                    required_evidence: vec![
+                        "artifact:step0:runtime".into(),
+                        "/tmp/demo/runtime.py".into(),
+                    ],
+                },
+            ],
+            verifications: vec![
+                crate::core::state_frame::VerificationContract {
+                    target_ref: "artifact:step0:dir".into(),
+                    target_path: Some("/tmp/demo".into()),
+                    required_actions: vec!["verify".into()],
+                    required_evidence: vec!["artifact:step0:dir".into(), "/tmp/demo".into()],
+                },
+                crate::core::state_frame::VerificationContract {
+                    target_ref: "artifact:step0:readme".into(),
+                    target_path: Some("/tmp/demo/README.md".into()),
+                    required_actions: vec!["verify".into()],
+                    required_evidence: vec![
+                        "artifact:step0:readme".into(),
+                        "/tmp/demo/README.md".into(),
+                    ],
+                },
+                crate::core::state_frame::VerificationContract {
+                    target_ref: "artifact:step0:runtime".into(),
+                    target_path: Some("/tmp/demo/runtime.py".into()),
+                    required_actions: vec!["verify".into()],
+                    required_evidence: vec![
+                        "artifact:step0:runtime".into(),
+                        "/tmp/demo/runtime.py".into(),
+                    ],
+                },
+            ],
+            required_actions: vec!["create".into(), "write".into(), "verify".into()],
+            required_evidence: vec![
+                "artifact:step0:dir".into(),
+                "/tmp/demo".into(),
+                "artifact:step0:readme".into(),
+                "/tmp/demo/README.md".into(),
+                "artifact:step0:runtime".into(),
+                "/tmp/demo/runtime.py".into(),
+            ],
             ..StageExecutionContract::default()
         }
     }
@@ -1323,6 +1415,44 @@ mod tests {
                 );
             }
             other => panic!("expected failed outcome, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn directory_verification_child_read_anchors_pass_orchestrator_gate() {
+        let contract = directory_verification_contract();
+        let outcome = LoopOutcome::Done {
+            final_state: AgentState::Done,
+            usage: LoopUsage {
+                completion_evidence_status: Some(
+                    crate::core::state_frame::CompletionEvidenceStatus::Sufficient,
+                ),
+                worker_report: Some(crate::core::state_frame::WorkerStructuredReport {
+                    worker_state: AgentState::Done,
+                    last_tool_action: Some("Read".into()),
+                    files_changed: vec!["/tmp/demo/README.md".into()],
+                    tests_run: Vec::new(),
+                    artifact_status: "verified".into(),
+                    test_status: "not_required".into(),
+                    verification_status: "verified".into(),
+                    stage_execution_contract: contract.clone(),
+                    stage_continuation_context: None,
+                    evidence_refs: vec![
+                        "read:/tmp/demo/README.md".into(),
+                        "read:/tmp/demo/runtime.py".into(),
+                    ],
+                    completion_evidence_gaps: Vec::new(),
+                    remaining_risks: Vec::new(),
+                    completion_evidence_status:
+                        crate::core::state_frame::CompletionEvidenceStatus::Sufficient,
+                }),
+                ..LoopUsage::default()
+            },
+        };
+
+        match map_loop_outcome(outcome, &contract, None) {
+            StepOutcome::Completed { .. } => {}
+            other => panic!("expected completed outcome, got {other:?}"),
         }
     }
 
