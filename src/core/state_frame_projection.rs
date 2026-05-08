@@ -17,6 +17,30 @@ fn contains_any(haystack: &str, needles: &[&str]) -> bool {
     needles.iter().any(|needle| haystack.contains(needle))
 }
 
+fn current_task_contract_text(text: &str) -> String {
+    const HISTORICAL_CONTEXT_MARKERS: &[&str] = &[
+        "参考材料摘录",
+        "参考材料：",
+        "历史材料",
+        "历史上下文",
+        "背景材料摘录",
+        "roadmap 摘录",
+        "Roadmap 摘录",
+    ];
+    let mut lines = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if HISTORICAL_CONTEXT_MARKERS
+            .iter()
+            .any(|marker| trimmed.starts_with(marker))
+        {
+            break;
+        }
+        lines.push(line);
+    }
+    lines.join("\n")
+}
+
 fn is_readonly_analysis(plan: &BossPlan, step_id: Option<usize>) -> bool {
     let objective = step_id
         .and_then(|id| plan.steps.iter().find(|s| s.id == id))
@@ -920,8 +944,8 @@ pub fn project_state_frame(
     // objective: current step objective if available, else plan task description.
     let objective = step_id
         .and_then(|id| plan.steps.iter().find(|s| s.id == id))
-        .map(|s| s.objective().to_string())
-        .unwrap_or_else(|| plan.task_description.clone());
+        .map(|s| current_task_contract_text(s.objective()))
+        .unwrap_or_else(|| current_task_contract_text(&plan.task_description));
 
     // open_items: unsatisfied acceptance criteria of the current step.
     let mut open_items = step_id
@@ -947,7 +971,13 @@ pub fn project_state_frame(
     let accepted_summary = archive_to_summary(&archive);
     let current_step = step_id.and_then(|id| plan.steps.iter().find(|s| s.id == id));
     let permission_facts = current_step
-        .map(|step| build_permission_facts(step.id, step.objective(), readonly_analysis))
+        .map(|step| {
+            build_permission_facts(
+                step.id,
+                &current_task_contract_text(step.objective()),
+                readonly_analysis,
+            )
+        })
         .unwrap_or_default();
     let ledgers = current_step.map(build_step_fact_ledgers);
     let open_item_ledgers = current_step

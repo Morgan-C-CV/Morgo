@@ -7,6 +7,30 @@ use crate::tool::result::{ToolExecutionOutcomeKind, ToolExecutionRecord};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
+fn current_task_contract_text(text: &str) -> String {
+    const HISTORICAL_CONTEXT_MARKERS: &[&str] = &[
+        "参考材料摘录",
+        "参考材料：",
+        "历史材料",
+        "历史上下文",
+        "背景材料摘录",
+        "roadmap 摘录",
+        "Roadmap 摘录",
+    ];
+    let mut lines = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if HISTORICAL_CONTEXT_MARKERS
+            .iter()
+            .any(|marker| trimmed.starts_with(marker))
+        {
+            break;
+        }
+        lines.push(line);
+    }
+    lines.join("\n")
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileFactRecord {
     pub ref_id: String,
@@ -972,8 +996,9 @@ fn build_artifact_ledgers(ledgers: &mut StepFactLedgers, step: &BossPlanStep) {
     if !ledgers.artifact_refs.is_empty() {
         return;
     }
-    let verification_error = verify_artifact_expectations(step.objective()).err();
-    for (idx, expectation) in extract_artifact_expectations(step.objective())
+    let objective = current_task_contract_text(step.objective());
+    let verification_error = verify_artifact_expectations(&objective).err();
+    for (idx, expectation) in extract_artifact_expectations(&objective)
         .into_iter()
         .enumerate()
     {
@@ -1111,7 +1136,7 @@ pub fn build_step_fact_ledgers(step: &BossPlanStep) -> StepFactLedgers {
     let mut ledgers = StepFactLedgers::default();
     apply_runtime_tool_records(&mut ledgers, step);
 
-    let objective = step.objective();
+    let objective = current_task_contract_text(step.objective());
     for (idx, (path, line)) in extract_path_candidates(objective).into_iter().enumerate() {
         let kind = classify_path_kind(&path, &line);
         let symbol = extract_symbol_for_path(
