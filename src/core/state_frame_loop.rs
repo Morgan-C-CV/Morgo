@@ -1,3 +1,6 @@
+use crate::core::evidence_scope::{
+    evidence_path_scope_matches, evidence_refs_have_anchor_scope, matching_target_scope,
+};
 use crate::core::message::Message;
 use crate::core::state_fact_ledger::{
     StepFactLedgers, append_runtime_tool_record, fact_lines_from_ledgers,
@@ -538,7 +541,10 @@ fn collect_target_scoped_evidence_refs_from_text(
             if evidence_field_value(trimmed, "kind").as_deref() == Some("read_observation")
                 && path_matches_target_scope(&path, target_paths)
             {
-                let anchor = format!("read:{path}");
+                let anchor = format!(
+                    "read:{}",
+                    matching_target_scope(&path, target_paths).unwrap_or(&path)
+                );
                 if !refs.iter().any(|existing| existing == &anchor) {
                     refs.push(anchor);
                 }
@@ -553,7 +559,10 @@ fn collect_target_scoped_evidence_refs_from_text(
                     .unwrap_or(rest)
                     .trim();
                 if !path.is_empty() && path_matches_target_scope(path, target_paths) {
-                    let anchor = format!("read:{path}");
+                    let anchor = format!(
+                        "read:{}",
+                        matching_target_scope(path, target_paths).unwrap_or(path)
+                    );
                     if !refs.iter().any(|existing| existing == &anchor) {
                         refs.push(anchor);
                     }
@@ -561,9 +570,24 @@ fn collect_target_scoped_evidence_refs_from_text(
             }
         }
 
+        if let Some(path) = parse_prefixed_path(trimmed, &["file_snippet:"]) {
+            if let Some(target) = matching_target_scope(&path, target_paths) {
+                let anchor = format!("read:{target}");
+                if !refs.iter().any(|existing| existing == &anchor) {
+                    refs.push(anchor);
+                }
+            }
+        }
+
         if let Some(path) = parse_prefixed_path(trimmed, &["read:", "write:"]) {
             let prefix = trimmed.split(':').next().unwrap_or("verification");
-            let anchor = format!("{prefix}:{path}");
+            let anchor = if prefix == "read" {
+                matching_target_scope(&path, target_paths)
+                    .map(|target| format!("{prefix}:{target}"))
+                    .unwrap_or_else(|| format!("{prefix}:{path}"))
+            } else {
+                format!("{prefix}:{path}")
+            };
             if !refs.iter().any(|existing| existing == &anchor) {
                 refs.push(anchor);
             }
@@ -573,9 +597,7 @@ fn collect_target_scoped_evidence_refs_from_text(
 }
 
 fn path_matches_target_scope(path: &str, target_paths: &[String]) -> bool {
-    target_paths
-        .iter()
-        .any(|target| path == target || path.starts_with(&format!("{target}/")))
+    matching_target_scope(path, target_paths).is_some()
 }
 
 fn append_target_scoped_runtime_anchor(
@@ -584,10 +606,10 @@ fn append_target_scoped_runtime_anchor(
     path: &str,
     target_paths: &[String],
 ) {
-    if !path_matches_target_scope(path, target_paths) {
+    let Some(target) = matching_target_scope(path, target_paths) else {
         return;
-    }
-    let anchor = format!("{prefix}:{path}");
+    };
+    let anchor = format!("{prefix}:{target}");
     if !refs.iter().any(|existing| existing == &anchor) {
         refs.push(anchor);
     }
@@ -674,10 +696,10 @@ fn append_required_source_read_anchors(
         return;
     }
     let mut append_anchor = |path: &str| {
-        if !source_targets.iter().any(|target| target == path) {
+        let Some(target) = matching_target_scope(path, source_targets) else {
             return;
-        }
-        let anchor = format!("read:{path}");
+        };
+        let anchor = format!("read:{target}");
         if !refs.iter().any(|existing| existing == &anchor) {
             refs.push(anchor);
         }
@@ -806,14 +828,17 @@ fn push_completion_gate_required_read_target(
         .stage_execution_contract
         .declared_artifacts
         .iter()
-        .any(|artifact| artifact.path == target && artifact.kind == "directory")
+        .any(|artifact| {
+            artifact.kind == "directory" && evidence_path_scope_matches(&artifact.path, target)
+        })
     {
-        let prefix = format!("{}/", target.trim_end_matches('/'));
         let child_paths = frame
             .stage_execution_contract
             .declared_artifacts
             .iter()
-            .filter(|artifact| artifact.kind == "file" && artifact.path.starts_with(&prefix))
+            .filter(|artifact| {
+                artifact.kind == "file" && evidence_path_scope_matches(&artifact.path, target)
+            })
             .map(|artifact| artifact.path.clone())
             .collect::<Vec<_>>();
         if child_paths.is_empty() {
@@ -865,7 +890,10 @@ fn append_completion_gate_read_anchors(
     }
     let runtime_reads = runtime_read_observation_paths(frame, usage);
     for target in required_targets {
-        if runtime_reads.iter().any(|path| path == &target) {
+        if runtime_reads
+            .iter()
+            .any(|path| evidence_path_scope_matches(path, &target))
+        {
             let anchor = format!("read:{target}");
             push_unique(refs, anchor);
         }
@@ -878,9 +906,11 @@ fn completion_gate_required_reads_closed(frame: &StateFrame, usage: &LoopUsage) 
         return false;
     }
     let runtime_reads = runtime_read_observation_paths(frame, Some(usage));
-    required_targets
-        .iter()
-        .all(|target| runtime_reads.iter().any(|path| path == target))
+    required_targets.iter().all(|target| {
+        runtime_reads
+            .iter()
+            .any(|path| evidence_path_scope_matches(path, target))
+    })
 }
 
 fn worker_has_target_scoped_verification_anchor(frame: &StateFrame, refs: &[String]) -> bool {
@@ -890,11 +920,7 @@ fn worker_has_target_scoped_verification_anchor(frame: &StateFrame, refs: &[Stri
     }
     verification_refs.into_iter().all(|verification_ref| {
         artifact_contract_target(frame, &verification_ref)
-            .map(|(path, _)| {
-                refs.iter().any(|evidence_ref| {
-                    evidence_ref.contains(&path) && !evidence_ref.starts_with("artifact:")
-                })
-            })
+            .map(|(path, _)| evidence_refs_have_anchor_scope(refs, "verification", &path))
             .unwrap_or_else(|| {
                 refs.iter()
                     .any(|evidence_ref| evidence_ref.contains(&verification_ref))
@@ -913,8 +939,7 @@ fn worker_has_target_scoped_read_anchor(frame: &StateFrame, refs: &[String]) -> 
                 if kind == "directory" {
                     return directory_child_file_reads_closed(frame, &path, refs);
                 }
-                refs.iter()
-                    .any(|evidence_ref| evidence_ref == &format!("read:{path}"))
+                evidence_refs_have_anchor_scope(refs, "read", &path)
             })
             .unwrap_or(false)
     })
@@ -934,14 +959,11 @@ fn directory_child_file_reads_closed(
         .map(|artifact| artifact.path.as_str())
         .collect::<Vec<_>>();
     if child_file_paths.is_empty() {
-        return refs
-            .iter()
-            .any(|evidence_ref| evidence_ref == &format!("read:{directory_path}"));
+        return evidence_refs_have_anchor_scope(refs, "read", directory_path);
     }
-    child_file_paths.iter().all(|path| {
-        refs.iter()
-            .any(|evidence_ref| evidence_ref == &format!("read:{path}"))
-    })
+    child_file_paths
+        .iter()
+        .all(|path| evidence_refs_have_anchor_scope(refs, "read", path))
 }
 
 fn verification_read_anchor_closed(frame: &StateFrame, refs: &[String]) -> bool {
@@ -971,7 +993,10 @@ fn verification_runtime_read_anchor_closed(frame: &StateFrame, usage: &LoopUsage
             continue;
         }
         if let Some(path) = evidence_field_value(line, "path") {
-            let anchor = format!("read:{path}");
+            let anchor = format!(
+                "read:{}",
+                matching_target_scope(&path, &target_paths).unwrap_or(&path)
+            );
             if !refs.iter().any(|existing| existing == &anchor)
                 && path_matches_target_scope(&path, &target_paths)
             {
@@ -985,7 +1010,10 @@ fn verification_runtime_read_anchor_closed(frame: &StateFrame, usage: &LoopUsage
             continue;
         }
         if let Some(path) = observable_path_from_input(record.observable_input.as_ref()) {
-            let anchor = format!("read:{path}");
+            let anchor = format!(
+                "read:{}",
+                matching_target_scope(&path, &target_paths).unwrap_or(&path)
+            );
             if !refs.iter().any(|existing| existing == &anchor)
                 && path_matches_target_scope(&path, &target_paths)
             {
@@ -1067,7 +1095,7 @@ fn repair_turn_fact_line(
 
 fn has_verified_artifact_for_path(frame: &StateFrame, path: &str) -> bool {
     let path_matches = |candidate: &str| {
-        if candidate == path {
+        if evidence_path_scope_matches(candidate, path) {
             return true;
         }
         frame
@@ -1079,7 +1107,7 @@ fn has_verified_artifact_for_path(frame: &StateFrame, path: &str) -> bool {
                     .declared_artifact_by_ref(&verification.target_ref)
             })
             .is_some_and(|artifact| {
-                artifact.kind == "directory" && candidate.starts_with(&format!("{path}/"))
+                artifact.kind == "directory" && evidence_path_scope_matches(candidate, path)
             })
     };
     frame.recent_evidence.iter().any(|line| {
@@ -1119,11 +1147,9 @@ fn has_completion_verification_signal(frame: &StateFrame) -> bool {
         })
 }
 
-fn artifact_path_has_material_evidence(frame: &StateFrame, path: &str, kind: &str) -> bool {
-    let is_directory = kind == "directory";
-    let path_matches = |candidate: &str| {
-        candidate == path || (is_directory && candidate.starts_with(&format!("{path}/")))
-    };
+fn artifact_path_has_material_evidence(frame: &StateFrame, path: &str, _kind: &str) -> bool {
+    let path_matches =
+        |candidate: &str| candidate == path || evidence_path_scope_matches(candidate, path);
     let acceptable_status =
         |status: &str| matches!(status, "created" | "touched" | "verified" | "observed");
 
@@ -1282,12 +1308,7 @@ fn missing_source_evidence_targets(frame: &StateFrame, evidence_refs: &[String])
         .stage_execution_contract
         .content_evidence_targets
         .iter()
-        .filter(|target| {
-            let required_anchor = format!("read:{target}");
-            !evidence_refs
-                .iter()
-                .any(|evidence_ref| evidence_ref == &required_anchor)
-        })
+        .filter(|target| !evidence_refs_have_anchor_scope(evidence_refs, "read", target))
         .cloned()
         .collect()
 }
@@ -2042,8 +2063,11 @@ fn verification_target_successful_read_count(frame: &StateFrame, usage: &LoopUsa
         .filter(|record| record.kind == ToolExecutionOutcomeKind::Success)
         .filter(|record| record.tool_name == "Read")
         .filter(|record| {
-            observable_path_from_input(record.observable_input.as_ref())
-                .is_some_and(|path| verification_targets.iter().any(|target| target == &path))
+            observable_path_from_input(record.observable_input.as_ref()).is_some_and(|path| {
+                verification_targets
+                    .iter()
+                    .any(|target| evidence_path_scope_matches(&path, target))
+            })
         })
         .count()
 }
@@ -2062,14 +2086,14 @@ fn verification_report_read_tailspin_reason(
                 .or_else(|| Some(verification_ref))
         })
         .collect::<Vec<_>>();
-    if !verification_targets.iter().any(|path| path == &target_path) {
+    if !verification_targets
+        .iter()
+        .any(|path| evidence_path_scope_matches(path, &target_path))
+    {
         return None;
     }
     let evidence_refs = collect_evidence_refs(frame, Some(usage));
-    if !evidence_refs
-        .iter()
-        .any(|evidence_ref| evidence_ref == &format!("read:{target_path}"))
-    {
+    if !evidence_refs_have_anchor_scope(&evidence_refs, "read", &target_path) {
         return None;
     }
     let missing_source_targets = missing_source_evidence_targets(frame, &evidence_refs);
@@ -3781,9 +3805,10 @@ pub async fn run_decision_loop_with_tools(
                                 total_usage.last_failure_outcome = None;
                                 clear_recovery_after_success(&mut total_usage);
                                 total_usage.tool_execution_records.push(record);
-                                if let Some(outcome) =
-                                    completion_gate_repair_terminal_outcome(&frame, &mut total_usage)
-                                {
+                                if let Some(outcome) = completion_gate_repair_terminal_outcome(
+                                    &frame,
+                                    &mut total_usage,
+                                ) {
                                     return Ok(outcome);
                                 }
                                 if let Some(outcome) =
@@ -3979,7 +4004,8 @@ pub async fn run_decision_loop_with_tools(
                         {
                             return Ok(outcome);
                         }
-                        if let Some(outcome) = verification_terminal_outcome(&frame, &mut total_usage)
+                        if let Some(outcome) =
+                            verification_terminal_outcome(&frame, &mut total_usage)
                         {
                             return Ok(outcome);
                         }
@@ -6396,6 +6422,42 @@ mod tests {
             &frame,
             &evidence_refs
         ));
+    }
+
+    #[test]
+    fn collect_evidence_refs_normalizes_absolute_file_snippet_reads_to_target_scope() {
+        let mut frame = make_frame();
+        frame.recent_evidence.clear();
+        push_completion_contract_with_refs(
+            &mut frame,
+            &["artifact:contract:0"],
+            &[],
+            &["artifact:contract:0"],
+        );
+        let target = "RustAgent/Agent/src/core/state_frame_projection.rs";
+        let absolute = "/Users/wangmorgan/MProject/LearnCCfromCC/RustAgent/Agent/src/core/state_frame_projection.rs";
+        push_artifact_target_fact(&mut frame, "artifact:contract:0", target, "file");
+        frame.recent_evidence.push(format!(
+            "fact: file_facts ref=filefact:runtime:1:read path={absolute} kind=read_observation source=tool:Read source_event_id=tool-read:runtime:1 freshness=after-runtime-read confidence=1.00 status=active invalidated_by=none supersedes=none conflicts_with=none fact=runtime Read succeeded for {absolute}"
+        ));
+        frame.recent_evidence.push(format!(
+            "hydrated_context: file_snippet:{absolute} source=tool:Read match_reason=call_tool_read trace=fact_name=file_facts ref=filefact:runtime:1:read source=tool:Read source_event_id=tool-read:runtime:1 freshness=after-runtime-read excerpt=# report"
+        ));
+
+        let evidence_refs = super::collect_evidence_refs(&frame, None);
+        assert!(
+            evidence_refs
+                .iter()
+                .any(|reference| reference == &format!("read:{target}"))
+        );
+        assert!(super::worker_has_target_scoped_read_anchor(
+            &frame,
+            &evidence_refs
+        ));
+        assert_eq!(
+            super::evaluate_completion_evidence(&frame, &LoopUsage::default()),
+            CompletionEvidenceStatus::Sufficient
+        );
     }
 
     #[test]

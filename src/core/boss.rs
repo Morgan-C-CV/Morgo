@@ -19,6 +19,7 @@ use crate::core::boss_state::{
 };
 use crate::core::boss_test_readiness::BossTestRunOutcome;
 use crate::core::context::WorkerLisMPolicy;
+use crate::core::evidence_scope::{evidence_path_scope_matches, evidence_refs_have_anchor_scope};
 use crate::core::lism_ab_sample::SharedLisMAbSampleSink;
 use crate::core::prompt_budget::{BudgetDecision, evaluate_message_budget};
 use crate::core::state_frame::{
@@ -488,6 +489,7 @@ fn effective_stage_execution_contract_for_report<'a>(
 
 fn evidence_ref_mentions_target(evidence_ref: &str, target: &str) -> bool {
     evidence_ref.contains(target)
+        || crate::core::evidence_scope::evidence_ref_mentions_scope(evidence_ref, target)
 }
 
 fn evidence_ref_is_artifact_presence_only(evidence_ref: &str, artifact_paths: &[&str]) -> bool {
@@ -495,7 +497,7 @@ fn evidence_ref_is_artifact_presence_only(evidence_ref: &str, artifact_paths: &[
         return true;
     }
     artifact_paths.iter().any(|artifact| {
-        evidence_ref.contains(artifact)
+        evidence_ref_mentions_target(evidence_ref, artifact)
             && (evidence_ref.starts_with("read:")
                 || evidence_ref.starts_with("write:")
                 || evidence_ref.starts_with("artifact:"))
@@ -582,30 +584,22 @@ fn worker_report_has_target_scoped_read_anchor(
             .iter()
             .any(|artifact| artifact.path == *target_path && artifact.kind == "directory");
         if is_directory {
-            let prefix = format!("{}/", target_path.trim_end_matches('/'));
             let child_files = contract
                 .declared_artifacts
                 .iter()
                 .filter(|artifact| {
-                    artifact.kind != "directory" && artifact.path.starts_with(&prefix)
+                    artifact.kind != "directory"
+                        && evidence_path_scope_matches(&artifact.path, target_path)
                 })
                 .map(|artifact| artifact.path.as_str())
                 .collect::<Vec<_>>();
             if !child_files.is_empty() {
                 return child_files.iter().all(|child_path| {
-                    let read_anchor = format!("read:{child_path}");
-                    report
-                        .evidence_refs
-                        .iter()
-                        .any(|evidence_ref| evidence_ref == &read_anchor)
+                    evidence_refs_have_anchor_scope(&report.evidence_refs, "read", child_path)
                 });
             }
         }
-        let read_anchor = format!("read:{target_path}");
-        report
-            .evidence_refs
-            .iter()
-            .any(|evidence_ref| evidence_ref == &read_anchor)
+        evidence_refs_have_anchor_scope(&report.evidence_refs, "read", target_path)
     })
 }
 
@@ -620,13 +614,10 @@ fn worker_report_has_required_source_evidence(
     if report.evidence_refs.is_empty() {
         return false;
     }
-    contract.content_evidence_targets.iter().all(|target| {
-        let required_anchor = format!("read:{target}");
-        report
-            .evidence_refs
-            .iter()
-            .any(|evidence_ref| evidence_ref == &required_anchor)
-    })
+    contract
+        .content_evidence_targets
+        .iter()
+        .all(|target| evidence_refs_have_anchor_scope(&report.evidence_refs, "read", target))
 }
 
 fn verification_first_step_required_runtime_targets(step: &BossPlanStep) -> Vec<String> {
@@ -675,19 +666,11 @@ fn verification_first_read_anchor_closed(
         else {
             return false;
         };
-        let read_anchor = format!("read:{target_path}");
-        return report
-            .evidence_refs
-            .iter()
-            .any(|evidence_ref| evidence_ref == &read_anchor);
+        return evidence_refs_have_anchor_scope(&report.evidence_refs, "read", &target_path);
     }
-    required_targets.iter().all(|target| {
-        let read_anchor = format!("read:{target}");
-        report
-            .evidence_refs
-            .iter()
-            .any(|evidence_ref| evidence_ref == &read_anchor)
-    })
+    required_targets
+        .iter()
+        .all(|target| evidence_refs_have_anchor_scope(&report.evidence_refs, "read", target))
 }
 
 fn verification_gap_is_closed_by_report(
@@ -701,8 +684,8 @@ fn verification_gap_is_closed_by_report(
     evidence_refs.iter().any(|evidence_ref| {
         gap.target_path
             .as_deref()
-            .is_some_and(|target_path| evidence_ref.contains(target_path))
-            || evidence_ref.contains(&gap.target_ref)
+            .is_some_and(|target_path| evidence_ref_mentions_target(evidence_ref, target_path))
+            || evidence_ref_mentions_target(evidence_ref, &gap.target_ref)
     })
 }
 
@@ -732,21 +715,17 @@ fn evidence_refs_close_declared_directory_gap(
     if !declared_artifact_path_is_directory(step, target_path) {
         return false;
     }
-    let prefix = format!("{}/", target_path.trim_end_matches('/'));
     let child_files = step
         .stage_execution_contract
         .declared_artifacts
         .iter()
         .filter(|artifact| artifact.kind != "directory")
-        .filter(|artifact| artifact.path.starts_with(&prefix))
+        .filter(|artifact| evidence_path_scope_matches(&artifact.path, target_path))
         .collect::<Vec<_>>();
     !child_files.is_empty()
-        && child_files.iter().all(|artifact| {
-            let read_anchor = format!("read:{}", artifact.path);
-            evidence_refs
-                .iter()
-                .any(|evidence_ref| evidence_ref == &read_anchor)
-        })
+        && child_files
+            .iter()
+            .all(|artifact| evidence_refs_have_anchor_scope(evidence_refs, "read", &artifact.path))
 }
 
 fn verification_gap_is_closed_by_step_evidence_refs(
@@ -757,8 +736,8 @@ fn verification_gap_is_closed_by_step_evidence_refs(
     evidence_refs.iter().any(|evidence_ref| {
         gap.target_path
             .as_deref()
-            .is_some_and(|target_path| evidence_ref.contains(target_path))
-            || evidence_ref.contains(&gap.target_ref)
+            .is_some_and(|target_path| evidence_ref_mentions_target(evidence_ref, target_path))
+            || evidence_ref_mentions_target(evidence_ref, &gap.target_ref)
     }) || gap.target_path.as_deref().is_some_and(|target_path| {
         evidence_refs_close_declared_directory_gap(step, target_path, evidence_refs)
     })
@@ -1362,11 +1341,11 @@ fn verification_first_target_path_from_contract(
 }
 
 fn verification_first_handle_matches_target(handle: &RelevantFileHandle, target: &str) -> bool {
-    handle.path == target || target.starts_with(&handle.path) || handle.path.starts_with(target)
+    evidence_path_scope_matches(&handle.path, target)
 }
 
 fn verification_first_artifact_matches_target(artifact: &TargetArtifact, target: &str) -> bool {
-    artifact.path == target
+    evidence_path_scope_matches(&artifact.path, target)
 }
 
 fn verification_first_contract_fact_is_target_scoped(fact: &str, target: &str) -> bool {
@@ -1786,8 +1765,8 @@ fn verification_first_read_evidence_refs_from_records(
             record.tool_name == "Read" && record.kind == ToolExecutionOutcomeKind::Success
         })
         .filter_map(observable_path_local)
-        .filter(|path| path == target)
-        .map(|path| format!("read:{path}"))
+        .filter(|path| evidence_path_scope_matches(path, target))
+        .map(|_| format!("read:{target}"))
         .fold(Vec::new(), |mut refs, reference| {
             if !refs.iter().any(|existing| existing == &reference) {
                 refs.push(reference);
@@ -14442,6 +14421,75 @@ mod tests {
                 .any(|gap| gap.target_ref == "verification_first:needs_review"
                     && gap.recommended_action == "verify_artifact")
         );
+    }
+
+    #[tokio::test]
+    async fn verification_first_needs_review_can_close_after_absolute_read_anchor_matches_scope() {
+        let coordinator = BossCoordinator::new();
+        coordinator.set_shared_memory_enabled(true).await;
+        let target = "RustAgent/Agent/src/core/state_frame_projection.rs";
+        let absolute_target = "/Users/wangmorgan/MProject/LearnCCfromCC/RustAgent/Agent/src/core/state_frame_projection.rs";
+        let step =
+            verification_first_review_step(target, Some("verification missing".into()), Vec::new());
+        {
+            let mut routed = coordinator.routed_step_metadata.write().await;
+            routed.insert(
+                step.id,
+                BossStepRoutedMetadata {
+                    completion_evidence_status: Some("missing_verification_evidence".into()),
+                    completion_evidence_gaps: vec![CompletionEvidenceGap {
+                        target_ref: "artifact:step0:0".into(),
+                        target_path: Some(target.into()),
+                        missing_artifact_evidence: false,
+                        missing_test_evidence: false,
+                        missing_verification_evidence: true,
+                        recommended_action: "verify_artifact".into(),
+                    }],
+                    worker_report: None,
+                    ..BossStepRoutedMetadata::default()
+                },
+            );
+        }
+
+        let prose_memory = coordinator
+            .sync_verification_first_shared_step_memory_from_result(
+                &step,
+                &format!(
+                    "Outcome: completed\nExecution evidence\n- {absolute_target} — Read succeeded\nNotes: report preserved for review."
+                ),
+            )
+            .await
+            .expect("shared memory");
+
+        assert_eq!(
+            prose_memory.remaining_blocker.as_deref(),
+            Some("needs review")
+        );
+        assert_eq!(prose_memory.verification_status.as_deref(), Some("blocked"));
+
+        let repaired_memory = coordinator
+            .sync_verification_first_shared_step_memory_from_result(
+                &step,
+                &format!(
+                    "verified_target: {target}\nverification_result: verified\nminimal_evidence: Read succeeded\nremaining_blocker: none\nevidence_refs:\n- read:{absolute_target}"
+                ),
+            )
+            .await
+            .expect("shared memory");
+
+        assert_eq!(repaired_memory.remaining_blocker, None);
+        assert_eq!(
+            repaired_memory.verification_status.as_deref(),
+            Some("verified")
+        );
+
+        let routed = coordinator.routed_step_metadata.read().await;
+        let metadata = routed.get(&step.id).expect("routed metadata");
+        assert_eq!(
+            metadata.completion_evidence_status.as_deref(),
+            Some("sufficient")
+        );
+        assert!(metadata.completion_evidence_gaps.is_empty());
     }
 
     fn verification_first_review_step(

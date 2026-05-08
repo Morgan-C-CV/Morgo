@@ -11,6 +11,7 @@ pub mod concurrency;
 pub mod context;
 pub mod engine;
 pub mod events;
+pub mod evidence_scope;
 pub mod housekeeping;
 pub mod lism_ab_sample;
 pub mod message;
