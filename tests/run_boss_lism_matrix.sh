@@ -42,8 +42,10 @@ DEFAULT_OUT_DIR="${TMPDIR:-/tmp}/rustagent-boss-lism-matrix-$(date +%Y%m%d-%H%M%
 DEFAULT_MODEL="${RUST_AGENT_AB_MODEL:-gpt-5-mini-2025-08-07}"
 DEFAULT_TIMEOUT_SECS="${RUST_AGENT_BOSS_TASK_TIMEOUT_SECS:-180}"
 DEFAULT_PROGRAM_TIMEOUT_SECS="${RUST_AGENT_PROGRAM_TIMEOUT_SECS:-480}"
+MAX_SCRIPT_RUNTIME_SECS=500
 DEFAULT_PLAN="3x3"
 DEFAULT_SINGLE_MODE="all_on"
+SCRIPT_START_SECONDS="$SECONDS"
 
 usage() {
   cat <<EOF
@@ -78,6 +80,7 @@ Options:
   --timeout SECONDS     --boss-task-timeout-secs. Default: $DEFAULT_TIMEOUT_SECS
   --program-timeout SECONDS
                         Max wall time for each morgo invocation. Default: $DEFAULT_PROGRAM_TIMEOUT_SECS
+                        This is capped by the remaining script-wide $MAX_SCRIPT_RUNTIME_SECS second budget.
   --prepare-only        Only generate usecases/configs, do not run.
   --summary-only DIR    Skip execution, summarize an existing output directory.
   --list-cases          Print supported use cases and exit.
@@ -100,6 +103,7 @@ Plan semantics:
 
 Notes:
   - Run this matrix outside sandboxed execution; provider DNS/network access must be real.
+  - The whole script has a hard runtime budget of $MAX_SCRIPT_RUNTIME_SECS seconds.
   - This script automatically generates isolated cache keys per output root + use case + mode.
   - For u6-u10 build tasks, it also rewrites target paths per mode/run to avoid artifact reuse.
   - Final summary deduplicates records by run_id because aborted samples may be appended twice.
@@ -132,15 +136,68 @@ die() {
   exit 1
 }
 
+remaining_runtime_secs() {
+  local elapsed=$((SECONDS - SCRIPT_START_SECONDS))
+  local remaining=$((MAX_SCRIPT_RUNTIME_SECS - elapsed))
+  if [ "$remaining" -lt 0 ]; then
+    remaining=0
+  fi
+  printf '%s\n' "$remaining"
+}
+
+assert_runtime_budget() {
+  local remaining
+  remaining="$(remaining_runtime_secs)"
+  if [ "$remaining" -le 0 ]; then
+    echo "script runtime timeout after ${MAX_SCRIPT_RUNTIME_SECS}s" >&2
+    exit 124
+  fi
+}
+
+start_script_watchdog() {
+  (
+    sleep "$MAX_SCRIPT_RUNTIME_SECS"
+    echo "script runtime timeout after ${MAX_SCRIPT_RUNTIME_SECS}s; terminating pid $$" >&2
+    pkill -TERM -P "$$" 2>/dev/null || true
+    kill -TERM "$$" 2>/dev/null || true
+    sleep 2
+    pkill -KILL -P "$$" 2>/dev/null || true
+    kill -KILL "$$" 2>/dev/null || true
+  ) &
+  SCRIPT_WATCHDOG_PID="$!"
+  trap 'kill "$SCRIPT_WATCHDOG_PID" 2>/dev/null || true' EXIT
+}
+
+cap_program_timeout() {
+  local requested="$1"
+  local remaining
+  remaining="$(remaining_runtime_secs)"
+
+  if [ "$remaining" -le 0 ]; then
+    echo "script runtime timeout after ${MAX_SCRIPT_RUNTIME_SECS}s" >&2
+    exit 124
+  fi
+  if [ -z "$requested" ] || [ "$requested" -le 0 ]; then
+    printf '%s\n' "$remaining"
+    return
+  fi
+  if [ "$requested" -gt "$remaining" ]; then
+    printf '%s\n' "$remaining"
+    return
+  fi
+  printf '%s\n' "$requested"
+}
+
 ensure_binary() {
+  assert_runtime_budget
   if [ ! -x "$BIN_PATH" ]; then
     echo "binary missing at $BIN_PATH; building morgo" >&2
-    cargo build --manifest-path "$AGENT_DIR/Cargo.toml" --bin morgo
+    run_with_program_timeout "$(remaining_runtime_secs)" cargo build --manifest-path "$AGENT_DIR/Cargo.toml" --bin morgo
     return
   fi
   if [ -n "$(find "$AGENT_DIR/src" "$AGENT_DIR/Cargo.toml" -newer "$BIN_PATH" -print -quit)" ]; then
     echo "binary at $BIN_PATH is older than source; rebuilding morgo" >&2
-    cargo build --manifest-path "$AGENT_DIR/Cargo.toml" --bin morgo
+    run_with_program_timeout "$(remaining_runtime_secs)" cargo build --manifest-path "$AGENT_DIR/Cargo.toml" --bin morgo
   fi
 }
 
@@ -395,6 +452,7 @@ run_one() {
   src_mode="$(source_mode_for_label "$mode")"
   boss_policy="$(boss_policy_for_label "$mode")"
   worker_policy="$(worker_policy_for_label "$mode")"
+  program_timeout_secs="$(cap_program_timeout "$program_timeout_secs")"
 
   make_mode_config "$out_dir" "$usecase" "$mode" "$run_tag" "$src_mode"
   task_file="$(rewrite_task_for_run "$out_dir" "$usecase" "$mode" "$run_id")"
@@ -428,9 +486,13 @@ run_with_program_timeout() {
   local timeout_secs="$1"
   shift
 
-  if [ -z "$timeout_secs" ] || [ "$timeout_secs" -le 0 ]; then
+  if [ -z "$timeout_secs" ]; then
     "$@"
     return
+  fi
+  if [ "$timeout_secs" -le 0 ]; then
+    echo "program timeout before command start" >&2
+    return 124
   fi
 
   "$@" &
@@ -579,7 +641,8 @@ prepare_run_root() {
   local out_dir="$1"
   local model="$2"
   prepare_dirs "$out_dir"
-  RUST_AGENT_AB_MODEL="$model" bash "$PREPARE_SCRIPT" prepare "$out_dir" >/dev/null
+  run_with_program_timeout "$(remaining_runtime_secs)" \
+    env RUST_AGENT_AB_MODEL="$model" bash "$PREPARE_SCRIPT" prepare "$out_dir" >/dev/null
 }
 
 cases_spec="all"
@@ -659,6 +722,8 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+start_script_watchdog
+
 if [ "$list_cases" = "true" ]; then
   print_cases
   exit 0
@@ -706,6 +771,7 @@ if [ -z "$runs" ]; then
   fi
 fi
 
+assert_runtime_budget
 ensure_binary
 prepare_run_root "$out_dir" "$model"
 
@@ -728,6 +794,7 @@ echo "Runs per mode: $runs"
 echo "Model: $model"
 echo "Timeout secs: $timeout_secs"
 echo "Program timeout secs: $program_timeout_secs"
+echo "Script max runtime secs: $MAX_SCRIPT_RUNTIME_SECS"
 echo
 
 read_lines_into_array mode_sequence <<EOF
@@ -737,6 +804,7 @@ EOF
 for usecase in "${selected_cases[@]}"; do
   for mode in "${mode_sequence[@]}"; do
     for run_id in $(seq 1 "$runs"); do
+      assert_runtime_budget
       run_one "$out_dir" "$usecase" "$mode" "$run_id" "$run_tag" "$timeout_secs" "$program_timeout_secs"
     done
   done
