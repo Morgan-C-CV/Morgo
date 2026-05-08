@@ -268,13 +268,69 @@ fn verification_gap_target(
                 })
             })
     });
-    from_metadata
+    normalize_verification_gap_target_path(step, from_metadata)
         .or_else(|| {
             step.stage_continuation_context
                 .as_ref()
                 .and_then(|context| context.failed_target.clone())
         })
         .or_else(|| primary_declared_artifact_path(step))
+}
+
+fn verification_gap_required_targets(
+    step: &BossPlanStep,
+    metadata: Option<&BossStepRoutedMetadata>,
+) -> Vec<String> {
+    let mut targets = Vec::new();
+    let mut collect_from_gaps = |gaps: &[CompletionEvidenceGap]| {
+        for gap in gaps.iter().filter(|gap| gap.missing_verification_evidence) {
+            if let Some(path) = gap
+                .target_path
+                .as_deref()
+                .filter(|path| !path.trim().is_empty())
+            {
+                if declared_artifact_path_is_directory(step, path) {
+                    for artifact in step
+                        .stage_execution_contract
+                        .declared_artifacts
+                        .iter()
+                        .filter(|artifact| artifact.kind != "directory")
+                    {
+                        push_unique_required_evidence(&mut targets, artifact.path.clone());
+                    }
+                } else {
+                    push_unique_required_evidence(&mut targets, path.to_string());
+                }
+            }
+        }
+    };
+    if let Some(metadata) = metadata {
+        collect_from_gaps(&metadata.completion_evidence_gaps);
+        if let Some(report) = metadata.worker_report.as_ref() {
+            collect_from_gaps(&report.completion_evidence_gaps);
+        }
+    }
+    if targets.is_empty() {
+        if let Some(target) = verification_gap_target(step, metadata) {
+            push_unique_required_evidence(&mut targets, target);
+        }
+    }
+    targets
+}
+
+fn normalize_verification_gap_target_path(
+    step: &BossPlanStep,
+    target: Option<String>,
+) -> Option<String> {
+    match target {
+        Some(target) if declared_artifact_path_is_directory(step, &target) => {
+            preferred_non_readme_declared_artifact_path(
+                &step.stage_execution_contract.declared_artifacts,
+            )
+            .or(Some(target))
+        }
+        target => target,
+    }
 }
 
 fn preferred_missing_verification_gap_path(
@@ -550,6 +606,66 @@ fn prune_resolved_verification_gaps(
                 evidence_refs,
             )
     });
+}
+
+fn evidence_refs_close_declared_directory_gap(
+    step: &BossPlanStep,
+    target_path: &str,
+    evidence_refs: &[String],
+) -> bool {
+    if !declared_artifact_path_is_directory(step, target_path) {
+        return false;
+    }
+    let prefix = format!("{}/", target_path.trim_end_matches('/'));
+    let child_files = step
+        .stage_execution_contract
+        .declared_artifacts
+        .iter()
+        .filter(|artifact| artifact.kind != "directory")
+        .filter(|artifact| artifact.path.starts_with(&prefix))
+        .collect::<Vec<_>>();
+    !child_files.is_empty()
+        && child_files.iter().all(|artifact| {
+            let read_anchor = format!("read:{}", artifact.path);
+            evidence_refs
+                .iter()
+                .any(|evidence_ref| evidence_ref == &read_anchor)
+        })
+}
+
+fn verification_gap_is_closed_by_step_evidence_refs(
+    step: &BossPlanStep,
+    gap: &crate::core::state_frame::CompletionEvidenceGap,
+    evidence_refs: &[String],
+) -> bool {
+    evidence_refs.iter().any(|evidence_ref| {
+        gap.target_path
+            .as_deref()
+            .is_some_and(|target_path| evidence_ref.contains(target_path))
+            || evidence_ref.contains(&gap.target_ref)
+    }) || gap.target_path.as_deref().is_some_and(|target_path| {
+        evidence_refs_close_declared_directory_gap(step, target_path, evidence_refs)
+    })
+}
+
+fn prune_resolved_verification_gaps_with_step(
+    step: &BossPlanStep,
+    evidence_refs: &[String],
+    gaps: &mut Vec<crate::core::state_frame::CompletionEvidenceGap>,
+) {
+    if evidence_refs.is_empty() {
+        return;
+    }
+    gaps.retain(|gap| {
+        !gap.missing_verification_evidence
+            || !verification_gap_is_closed_by_step_evidence_refs(step, gap, evidence_refs)
+    });
+}
+
+fn push_unique_evidence_ref(refs: &mut Vec<String>, evidence_ref: &str) {
+    if !evidence_ref.trim().is_empty() && !refs.iter().any(|existing| existing == evidence_ref) {
+        refs.push(evidence_ref.to_string());
+    }
 }
 
 fn parse_failed_read_path(detail: &str) -> Option<String> {
@@ -946,8 +1062,62 @@ fn normalize_verification_first_short_form(
     shape_verification_first_result_text(step, candidate.trim())
 }
 
+fn collect_required_evidence_targets_from_facts(facts: &[String]) -> Vec<String> {
+    let mut targets = Vec::new();
+    for fact in facts {
+        let trimmed = fact.trim();
+        if !trimmed
+            .to_ascii_lowercase()
+            .starts_with("required_evidence_targets:")
+        {
+            continue;
+        }
+        let values = trimmed
+            .split_once(':')
+            .map(|(_, value)| value.trim())
+            .unwrap_or_default();
+        if values.is_empty() || values.eq_ignore_ascii_case("none") {
+            continue;
+        }
+        for target in values.split('|').map(str::trim) {
+            push_unique_required_evidence(&mut targets, target.to_string());
+        }
+    }
+    targets
+}
+
+fn continuation_context_required_evidence_targets(step: &BossPlanStep) -> Vec<String> {
+    let Some(context) = step.stage_continuation_context.as_ref() else {
+        return Vec::new();
+    };
+    let mut facts = context.verified_facts.clone();
+    if let Some(intent) = context.repair_intent.as_ref() {
+        facts.extend(intent.verified_facts.clone());
+    }
+    collect_required_evidence_targets_from_facts(&facts)
+}
+
 fn verification_first_target_path(step: &BossPlanStep) -> Option<String> {
-    preferred_non_readme_declared_artifact_path(&step.stage_execution_contract.declared_artifacts)
+    continuation_context_required_evidence_targets(step)
+        .into_iter()
+        .find(|target| {
+            !declared_artifact_path_is_directory(step, target)
+                && !is_readme_like_artifact_path(target)
+        })
+        .or_else(|| {
+            step.stage_continuation_context
+                .as_ref()
+                .and_then(|context| context.failed_target.clone())
+                .filter(|target| {
+                    !declared_artifact_path_is_directory(step, target)
+                        && !is_readme_like_artifact_path(target)
+                })
+        })
+        .or_else(|| {
+            preferred_non_readme_declared_artifact_path(
+                &step.stage_execution_contract.declared_artifacts,
+            )
+        })
         .or_else(|| {
             preferred_artifact_expectation_path(&current_task_contract_text(step.objective()))
         })
@@ -1106,11 +1276,32 @@ fn parse_verification_first_patch(text: &str, target: &str) -> VerificationFirst
         evidence_refs: Vec::new(),
     };
 
+    let mut collecting_evidence_refs = false;
     for line in text.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
+        let raw_trimmed = line.trim();
+        if raw_trimmed.is_empty() {
             continue;
         }
+        if collecting_evidence_refs {
+            if let Some(value) = raw_trimmed.strip_prefix('-').map(str::trim) {
+                let value = normalize_verification_first_patch_ref(value);
+                if !value.is_empty()
+                    && value != "none"
+                    && !patch
+                        .evidence_refs
+                        .iter()
+                        .any(|existing| existing == &value)
+                {
+                    patch.evidence_refs.push(value);
+                }
+                continue;
+            }
+            collecting_evidence_refs = false;
+        }
+        let trimmed = raw_trimmed
+            .strip_prefix('-')
+            .map(str::trim)
+            .unwrap_or(raw_trimmed);
         let lower = trimmed.to_ascii_lowercase();
         if lower.starts_with("verified_target:") || lower.starts_with("verified target:") {
             if let Some((_, value)) = trimmed.split_once(':') {
@@ -1150,7 +1341,12 @@ fn parse_verification_first_patch(text: &str, target: &str) -> VerificationFirst
         }
         if lower.starts_with("evidence_refs:") || lower.starts_with("evidence refs:") {
             if let Some((_, value)) = trimmed.split_once(':') {
-                patch.evidence_refs = parse_verification_first_patch_refs(value);
+                let refs = parse_verification_first_patch_refs(value);
+                if refs.is_empty() {
+                    collecting_evidence_refs = true;
+                } else {
+                    patch.evidence_refs = refs;
+                }
             }
         }
     }
@@ -1193,6 +1389,26 @@ fn parse_verification_first_patch_refs(value: &str) -> Vec<String> {
 
 fn verification_first_shared_memory_lines_from_text(target: &str, text: &str) -> Vec<String> {
     parse_verification_first_patch(text, target).canonical_facts()
+}
+
+fn verification_first_read_evidence_refs_from_records(
+    step: &BossPlanStep,
+    target: &str,
+) -> Vec<String> {
+    step.tool_execution_records
+        .iter()
+        .filter(|record| {
+            record.tool_name == "Read" && record.kind == ToolExecutionOutcomeKind::Success
+        })
+        .filter_map(observable_path_local)
+        .filter(|path| path == target)
+        .map(|path| format!("read:{path}"))
+        .fold(Vec::new(), |mut refs, reference| {
+            if !refs.iter().any(|existing| existing == &reference) {
+                refs.push(reference);
+            }
+            refs
+        })
 }
 
 fn normalize_verification_first_patch_ref(value: &str) -> String {
@@ -1383,7 +1599,16 @@ fn continuation_required_evidence_targets(
     }
     if targets.is_empty() && action == "verify_artifact" {
         if let Some(target) = failed_target {
-            push_unique_required_evidence(&mut targets, target.to_string());
+            if !declared_artifact_path_is_directory(step, target) {
+                push_unique_required_evidence(&mut targets, target.to_string());
+            }
+        }
+    }
+    if targets.is_empty() && action == "verify_artifact" {
+        if let Some(target) = preferred_non_readme_declared_artifact_path(
+            &step.stage_execution_contract.declared_artifacts,
+        ) {
+            push_unique_required_evidence(&mut targets, target);
         }
     }
     if targets.is_empty() {
@@ -2129,10 +2354,8 @@ fn verification_first_repair_brief_lines(contract: &ExecutorBAssignmentContract)
     let mut required_targets = Vec::new();
     if let Some(context) = context {
         let mut facts = context.verified_facts.clone();
-        if facts.is_empty() {
-            if let Some(intent) = context.repair_intent.as_ref() {
-                facts = intent.verified_facts.clone();
-            }
+        if let Some(intent) = context.repair_intent.as_ref() {
+            facts.extend(intent.verified_facts.clone());
         }
         for fact in &facts {
             let lowered = fact.trim().to_ascii_lowercase();
@@ -2156,23 +2379,9 @@ fn verification_first_repair_brief_lines(contract: &ExecutorBAssignmentContract)
                     .filter(|value| !value.is_empty());
                 continue;
             }
-            if lowered.starts_with("required_evidence_targets:") && fact.split_once(':').is_some() {
-                let values = fact
-                    .split_once(':')
-                    .map(|(_, value)| value.trim())
-                    .unwrap_or_default();
-                if values.eq_ignore_ascii_case("none") || values.is_empty() {
-                    continue;
-                }
-                for target in values.split('|').map(str::trim) {
-                    if !target.is_empty()
-                        && !required_targets.iter().any(|existing| existing == target)
-                    {
-                        required_targets.push(target.to_string());
-                    }
-                }
-                continue;
-            }
+        }
+        for target in collect_required_evidence_targets_from_facts(&facts) {
+            push_unique_required_evidence(&mut required_targets, target);
         }
     }
     if required_targets.is_empty() {
@@ -2489,12 +2698,36 @@ fn apply_step_failure_classification(
             Some(reason.to_string())
         };
         step.status = BossPlanStepStatus::Rejected;
+        let mut verified_facts = continuation_verified_facts(step);
+        if failure_classification == StepFailureClassification::VerificationRepairContinuation {
+            let required_targets = verification_gap_required_targets(step, metadata);
+            if !required_targets.is_empty() {
+                verified_facts.insert(
+                    0,
+                    "modification_direction: Read each listed artifact target with the Read tool; if any artifact is placeholder-only or does not satisfy the objective, repair it first, then return evidence_refs for every read target.".into(),
+                );
+                verified_facts.insert(
+                    0,
+                    format!(
+                        "failure_reason: completion blocked: verification runtime Read evidence is missing for {}",
+                        required_targets.join(" | ")
+                    ),
+                );
+                verified_facts.insert(
+                    0,
+                    format!(
+                        "required_evidence_targets: {}",
+                        required_targets.join(" | ")
+                    ),
+                );
+            }
+        }
         update_step_continuation_context(
             step,
             crate::core::state_frame::ContinuityMode::Repair,
             failed_target,
             next_action,
-            continuation_verified_facts(step),
+            verified_facts,
         );
     } else {
         step.status = BossPlanStepStatus::Failed;
@@ -3027,10 +3260,12 @@ fn observable_path_local(record: &ToolExecutionRecord) -> Option<String> {
         serde_json::from_str::<serde_json::Value>(&input.value)
             .ok()
             .and_then(|value| {
-                value
-                    .get("path")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_string)
+                ["path", "file_path", "target_path"].iter().find_map(|key| {
+                    value
+                        .get(*key)
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string)
+                })
             })
     })
 }
@@ -4286,6 +4521,57 @@ impl BossCoordinator {
         memory
     }
 
+    async fn apply_verification_first_memory_to_routed_metadata(
+        &self,
+        step: &BossPlanStep,
+        memory: &SharedStepMemory,
+    ) {
+        let read_evidence_refs = memory
+            .evidence_refs
+            .iter()
+            .filter(|evidence_ref| evidence_ref.starts_with("read:"))
+            .cloned()
+            .collect::<Vec<_>>();
+        if read_evidence_refs.is_empty()
+            || !memory
+                .verification_status
+                .as_deref()
+                .is_some_and(|status| status.eq_ignore_ascii_case("verified"))
+        {
+            return;
+        }
+        let mut routed_step_metadata = self.routed_step_metadata.write().await;
+        let Some(metadata) = routed_step_metadata.get_mut(&step.id) else {
+            return;
+        };
+        prune_resolved_verification_gaps_with_step(
+            step,
+            &read_evidence_refs,
+            &mut metadata.completion_evidence_gaps,
+        );
+        if let Some(report) = metadata.worker_report.as_mut() {
+            for evidence_ref in &read_evidence_refs {
+                push_unique_evidence_ref(&mut report.evidence_refs, evidence_ref);
+            }
+            prune_resolved_verification_gaps_with_step(
+                step,
+                &read_evidence_refs,
+                &mut report.completion_evidence_gaps,
+            );
+            if report.completion_evidence_gaps.is_empty() {
+                report.completion_evidence_status = CompletionEvidenceStatus::Sufficient;
+                report.verification_status = "verified".into();
+            }
+        }
+        if metadata.completion_evidence_gaps.is_empty() {
+            metadata.completion_evidence_status = Some("sufficient".into());
+            metadata.step_failure_classification = None;
+            metadata.terminal_blocker_kind = None;
+            metadata.recovery_outcome = Some("verification_first_success".into());
+        }
+        metadata.success_classification = classify_step_success(Some(metadata));
+    }
+
     async fn sync_verification_first_shared_step_memory_from_result(
         &self,
         step: &BossPlanStep,
@@ -4309,7 +4595,11 @@ impl BossCoordinator {
                     "verify_artifact",
                 )
             });
-        let patch = parse_verification_first_patch(result_text, &target);
+        let mut patch = parse_verification_first_patch(result_text, &target);
+        if patch.evidence_refs.is_empty() {
+            patch.evidence_refs =
+                verification_first_read_evidence_refs_from_records(step, &patch.verified_target);
+        }
         memory.step_id = Some(step.id);
         memory.worker_role = Some(WorkerRole::Verify.as_str().to_string());
         memory.target = Some(patch.verified_target.clone());
@@ -4332,6 +4622,8 @@ impl BossCoordinator {
             .write()
             .await
             .insert(step.id, memory.clone());
+        self.apply_verification_first_memory_to_routed_metadata(step, &memory)
+            .await;
         Some(memory)
     }
 
@@ -5454,10 +5746,7 @@ impl BossCoordinator {
                     sync_step_tool_execution_records(step, tasks.as_deref(), &event.task_id);
                     store_step_result_diff(step, &event.result, Some(&event.summary));
                     let shared_step_memory = self
-                        .sync_verification_first_shared_step_memory_from_result(
-                            step,
-                            step.result_diff.as_deref().unwrap_or(&event.result),
-                        )
+                        .sync_verification_first_shared_step_memory_from_result(step, &event.result)
                         .await;
                     if self
                         .verification_first_shared_memory_projection_enabled()
@@ -5507,10 +5796,7 @@ impl BossCoordinator {
                 sync_step_tool_execution_records(step, tasks.as_deref(), &event.task_id);
                 store_step_result_diff(step, &event.result, Some(&event.summary));
                 let shared_step_memory = self
-                    .sync_verification_first_shared_step_memory_from_result(
-                        step,
-                        step.result_diff.as_deref().unwrap_or(&event.result),
-                    )
+                    .sync_verification_first_shared_step_memory_from_result(step, &event.result)
                     .await;
                 let artifact_verification_reason = step_artifact_verification_error(step);
                 step.last_review_summary = artifact_verification_reason
@@ -6045,9 +6331,7 @@ impl BossCoordinator {
                     let shared_step_memory = self
                         .sync_verification_first_shared_step_memory_from_result(
                             step,
-                            step.result_diff
-                                .as_deref()
-                                .unwrap_or(notification.body.as_str()),
+                            notification.body.as_str(),
                         )
                         .await;
                     if self
@@ -6120,9 +6404,7 @@ impl BossCoordinator {
                 let shared_step_memory = self
                     .sync_verification_first_shared_step_memory_from_result(
                         step,
-                        step.result_diff
-                            .as_deref()
-                            .unwrap_or(notification.body.as_str()),
+                        notification.body.as_str(),
                     )
                     .await;
                 let artifact_verification_reason = step_artifact_verification_error(step);
@@ -13007,6 +13289,36 @@ mod tests {
     }
 
     #[test]
+    fn verification_first_patch_parses_multiline_evidence_refs_block() {
+        let target = "/tmp/demo/runtime.py";
+        let raw_output = "verified_target: /tmp/demo/runtime.py\nverification_result: verified\nminimal_evidence: Read succeeded\nremaining_blocker: none\nevidence_refs:\n- read:/tmp/demo/runtime.py\n- artifact:/tmp/demo/runtime.py";
+
+        let patch = parse_verification_first_patch(raw_output, target);
+
+        assert_eq!(
+            patch.evidence_refs,
+            vec![
+                "read:/tmp/demo/runtime.py".to_string(),
+                "artifact:/tmp/demo/runtime.py".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn verification_first_patch_parses_bullet_prefixed_field_labels() {
+        let target = "/tmp/demo/runtime.py";
+        let raw_output = "verification_stance: verified\n- verified_target: /tmp/demo/runtime.py\n- verification_result: verified\n- minimal_evidence: Read succeeded\n- remaining_blocker: none\n- evidence_refs: read:/tmp/demo/runtime.py";
+
+        let patch = parse_verification_first_patch(raw_output, target);
+
+        assert_eq!(patch.verified_target, target);
+        assert_eq!(patch.verification_result, "verified");
+        assert_eq!(patch.minimal_evidence, "Read succeeded");
+        assert_eq!(patch.remaining_blocker, "none");
+        assert_eq!(patch.evidence_refs, vec![format!("read:{target}")]);
+    }
+
+    #[test]
     fn verification_first_patch_does_not_recover_read_anchor_from_self_claim_only() {
         let target = "/tmp/demo/runtime.py";
         let raw_output = "verified_target: /tmp/demo/runtime.py\nverification_result: verified\nminimal_evidence: I inspected /tmp/demo/runtime.py\nremaining_blocker: none\nSummary: read succeeded according to the report.";
@@ -13014,6 +13326,171 @@ mod tests {
         let patch = parse_verification_first_patch(raw_output, target);
 
         assert!(patch.evidence_refs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn verification_first_shared_memory_recovers_read_anchor_from_tool_record_file_path() {
+        let coordinator = BossCoordinator::new();
+        coordinator.set_shared_memory_enabled(true).await;
+        let target = "/tmp/demo/runtime.py";
+        let step = verification_first_review_step(
+            target,
+            Some("verified_target: /tmp/demo/runtime.py\nverification_result: verified\nminimal_evidence: none recorded\nremaining_blocker: none\nevidence_refs: none".into()),
+            vec![ToolExecutionRecord {
+                tool_name: "Read".into(),
+                outcome: "Text".into(),
+                kind: ToolExecutionOutcomeKind::Success,
+                summary: "Read succeeded".into(),
+                detail: None,
+                pending_approval: None,
+                report_modifier: ToolReportModifier::None,
+                observable_input: Some(observable_input_json(json!({
+                    "file_path": target
+                }))),
+                batch_context: ToolBatchContext {
+                    batch_index: 0,
+                    batch_size: 1,
+                    executed_in_batch: false,
+                },
+            }],
+        );
+
+        let memory = coordinator
+            .sync_verification_first_shared_step_memory_from_result(
+                &step,
+                "verified_target: /tmp/demo/runtime.py\nverification_result: verified\nminimal_evidence: none recorded\nremaining_blocker: none\nevidence_refs: none",
+            )
+            .await
+            .expect("shared memory");
+
+        assert_eq!(memory.evidence_refs, vec![format!("read:{target}")]);
+    }
+
+    #[tokio::test]
+    async fn verification_first_shared_memory_reconciles_routed_metadata_after_evidence_refs_return()
+     {
+        let coordinator = BossCoordinator::new();
+        coordinator.set_shared_memory_enabled(true).await;
+        let root = "/tmp/python-demo";
+        let readme = format!("{root}/README.md");
+        let runtime = format!("{root}/runtime.py");
+        let model = format!("{root}/model.py");
+        let demo = format!("{root}/demo.py");
+        let step = verification_first_review_step(
+            &runtime,
+            Some("verified_target: /tmp/demo/runtime.py\nverification_result: verified\nminimal_evidence: none recorded\nremaining_blocker: none\nevidence_refs: none".into()),
+            Vec::new(),
+        );
+        {
+            let mut routed = coordinator.routed_step_metadata.write().await;
+            routed.insert(
+                step.id,
+                BossStepRoutedMetadata {
+                    completion_evidence_status: Some("missing_verification_evidence".into()),
+                    completion_evidence_gaps: vec![
+                        crate::core::state_frame::CompletionEvidenceGap {
+                            target_ref: "artifact:step0:0".into(),
+                            target_path: Some(root.into()),
+                            missing_artifact_evidence: false,
+                            missing_test_evidence: false,
+                            missing_verification_evidence: true,
+                            recommended_action: "verify_artifact".into(),
+                        },
+                        crate::core::state_frame::CompletionEvidenceGap {
+                            target_ref: "artifact:step0:1".into(),
+                            target_path: Some(readme.clone()),
+                            missing_artifact_evidence: false,
+                            missing_test_evidence: false,
+                            missing_verification_evidence: true,
+                            recommended_action: "verify_artifact".into(),
+                        },
+                        crate::core::state_frame::CompletionEvidenceGap {
+                            target_ref: "artifact:step0:2".into(),
+                            target_path: Some(runtime.clone()),
+                            missing_artifact_evidence: false,
+                            missing_test_evidence: false,
+                            missing_verification_evidence: true,
+                            recommended_action: "verify_artifact".into(),
+                        },
+                        crate::core::state_frame::CompletionEvidenceGap {
+                            target_ref: "artifact:step0:3".into(),
+                            target_path: Some(model.clone()),
+                            missing_artifact_evidence: false,
+                            missing_test_evidence: false,
+                            missing_verification_evidence: true,
+                            recommended_action: "verify_artifact".into(),
+                        },
+                        crate::core::state_frame::CompletionEvidenceGap {
+                            target_ref: "artifact:step0:4".into(),
+                            target_path: Some(demo.clone()),
+                            missing_artifact_evidence: false,
+                            missing_test_evidence: false,
+                            missing_verification_evidence: true,
+                            recommended_action: "verify_artifact".into(),
+                        },
+                    ],
+                    worker_report: Some(crate::core::state_frame::WorkerStructuredReport {
+                        worker_state: crate::core::state_frame::AgentState::Executing,
+                        last_tool_action: Some("Read".into()),
+                        files_changed: Vec::new(),
+                        tests_run: Vec::new(),
+                        artifact_status: "present".into(),
+                        test_status: "not_run".into(),
+                        verification_status: "pending".into(),
+                        stage_execution_contract: StageExecutionContract::default(),
+                        stage_continuation_context: None,
+                        evidence_refs: Vec::new(),
+                        completion_evidence_gaps: Vec::new(),
+                        remaining_risks: Vec::new(),
+                        completion_evidence_status:
+                            crate::core::state_frame::CompletionEvidenceStatus::MissingVerificationEvidence,
+                    }),
+                    ..BossStepRoutedMetadata::default()
+                },
+            );
+        }
+
+        let memory = coordinator
+            .sync_verification_first_shared_step_memory_from_result(
+                &step,
+                &format!(
+                    "verified_target: {runtime}\nverification_result: verified\nminimal_evidence: Read succeeded\nremaining_blocker: none\nevidence_refs:\n- read:{readme}\n- read:{runtime}\n- read:{model}\n- read:{demo}"
+                ),
+            )
+            .await
+            .expect("shared memory");
+
+        assert_eq!(
+            memory.evidence_refs,
+            vec![
+                format!("read:{readme}"),
+                format!("read:{runtime}"),
+                format!("read:{model}"),
+                format!("read:{demo}"),
+            ]
+        );
+
+        let routed = coordinator.routed_step_metadata.read().await;
+        let metadata = routed.get(&step.id).expect("routed metadata");
+        assert_eq!(
+            metadata.completion_evidence_status.as_deref(),
+            Some("sufficient")
+        );
+        assert!(metadata.completion_evidence_gaps.is_empty());
+        let report = metadata.worker_report.as_ref().expect("worker report");
+        assert_eq!(
+            report.completion_evidence_status,
+            crate::core::state_frame::CompletionEvidenceStatus::Sufficient
+        );
+        assert_eq!(
+            report.evidence_refs,
+            vec![
+                format!("read:{readme}"),
+                format!("read:{runtime}"),
+                format!("read:{model}"),
+                format!("read:{demo}"),
+            ]
+        );
     }
 
     #[test]
@@ -15438,6 +15915,110 @@ mod tests {
         assert!(context.verified_facts.iter().any(|fact| {
             fact.contains("artifact verification runtime Read evidence is missing")
         }));
+    }
+
+    #[test]
+    fn verification_repair_continuation_uses_file_target_when_gap_target_is_directory() {
+        let root = "/tmp/python-demo".to_string();
+        let readme = format!("{root}/README.md");
+        let runtime = format!("{root}/runtime.py");
+        let model = format!("{root}/model.py");
+        let demo = format!("{root}/demo.py");
+        let mut step = BossPlanStep {
+            id: 44,
+            description: "build python demo".into(),
+            objective: Some("create a minimal runnable Python demo".into()),
+            acceptance: vec!["demo files are verified".into()],
+            requires_approval: false,
+            status: BossPlanStepStatus::Running,
+            completed: false,
+            result_diff: None,
+            worker_task_id: None,
+            attempt_count: 0,
+            retry_budget: 3,
+            last_review_summary: Some(
+                "tool dispatch failed: verification repair continuation exhausted / remaining verification evidence missing; last state: Verifying".into(),
+            ),
+            last_correction: None,
+            stage_execution_contract: StageExecutionContract {
+                declared_artifacts: vec![
+                    DeclaredArtifactContract {
+                        ref_id: "artifact:contract:0".into(),
+                        path: root.clone(),
+                        kind: "directory".into(),
+                        required_actions: vec!["write_artifact".into()],
+                        required_evidence: vec![root.clone()],
+                    },
+                    DeclaredArtifactContract {
+                        ref_id: "artifact:contract:1".into(),
+                        path: readme.clone(),
+                        kind: "file".into(),
+                        required_actions: vec!["write_artifact".into()],
+                        required_evidence: vec![readme.clone()],
+                    },
+                    DeclaredArtifactContract {
+                        ref_id: "artifact:contract:2".into(),
+                        path: runtime.clone(),
+                        kind: "file".into(),
+                        required_actions: vec!["write_artifact".into()],
+                        required_evidence: vec![runtime.clone()],
+                    },
+                    DeclaredArtifactContract {
+                        ref_id: "artifact:contract:3".into(),
+                        path: model.clone(),
+                        kind: "file".into(),
+                        required_actions: vec!["write_artifact".into()],
+                        required_evidence: vec![model.clone()],
+                    },
+                    DeclaredArtifactContract {
+                        ref_id: "artifact:contract:4".into(),
+                        path: demo.clone(),
+                        kind: "file".into(),
+                        required_actions: vec!["write_artifact".into()],
+                        required_evidence: vec![demo.clone()],
+                    },
+                ],
+                required_actions: vec!["verify_artifact".into()],
+                required_evidence: vec![runtime.clone()],
+                ..StageExecutionContract::default()
+            },
+            stage_continuation_context: None,
+            executor_b_stage_memory: None,
+            review_task_id: None,
+            tool_execution_records: Vec::new(),
+        };
+        let metadata = BossStepRoutedMetadata {
+            completion_evidence_gaps: vec![CompletionEvidenceGap {
+                target_ref: "artifact:contract:0".into(),
+                target_path: Some(root.clone()),
+                missing_artifact_evidence: false,
+                missing_test_evidence: false,
+                missing_verification_evidence: true,
+                recommended_action: "verify_artifact".into(),
+            }],
+            ..BossStepRoutedMetadata::default()
+        };
+
+        apply_step_failure_classification(
+            &mut step,
+            StepFailureClassification::VerificationRepairContinuation,
+            "tool dispatch failed: verification repair continuation exhausted / remaining verification evidence missing; last state: Verifying",
+            Some(&metadata),
+        );
+
+        let context = step
+            .stage_continuation_context
+            .as_ref()
+            .expect("continuation context");
+        let required_targets_fact = context
+            .verified_facts
+            .iter()
+            .find(|fact| fact.starts_with("required_evidence_targets:"))
+            .expect("required_evidence_targets fact");
+        assert!(required_targets_fact.contains(&readme));
+        assert!(required_targets_fact.contains(&runtime));
+        assert!(required_targets_fact.contains(&model));
+        assert!(required_targets_fact.contains(&demo));
     }
 
     #[tokio::test]
