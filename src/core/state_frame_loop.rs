@@ -734,11 +734,38 @@ fn worker_has_target_scoped_read_anchor(frame: &StateFrame, refs: &[String]) -> 
     }
     verification_refs.into_iter().all(|verification_ref| {
         artifact_contract_target(frame, &verification_ref)
-            .map(|(path, _)| {
+            .map(|(path, kind)| {
+                if kind == "directory" {
+                    return directory_child_file_reads_closed(frame, &path, refs);
+                }
                 refs.iter()
                     .any(|evidence_ref| evidence_ref == &format!("read:{path}"))
             })
             .unwrap_or(false)
+    })
+}
+
+fn directory_child_file_reads_closed(
+    frame: &StateFrame,
+    directory_path: &str,
+    refs: &[String],
+) -> bool {
+    let prefix = format!("{}/", directory_path.trim_end_matches('/'));
+    let child_file_paths = frame
+        .stage_execution_contract
+        .declared_artifacts
+        .iter()
+        .filter(|artifact| artifact.kind == "file" && artifact.path.starts_with(&prefix))
+        .map(|artifact| artifact.path.as_str())
+        .collect::<Vec<_>>();
+    if child_file_paths.is_empty() {
+        return refs
+            .iter()
+            .any(|evidence_ref| evidence_ref == &format!("read:{directory_path}"));
+    }
+    child_file_paths.iter().all(|path| {
+        refs.iter()
+            .any(|evidence_ref| evidence_ref == &format!("read:{path}"))
     })
 }
 
@@ -6419,6 +6446,81 @@ mod tests {
             CompletionEvidenceStatus::Sufficient
         );
         assert!(super::collect_completion_evidence_gaps(&frame).is_empty());
+    }
+
+    #[test]
+    fn directory_verification_closes_after_declared_child_file_reads() {
+        let mut frame = make_frame();
+        frame.recent_evidence.clear();
+        frame.state = AgentState::Verifying;
+        push_completion_contract_with_refs(
+            &mut frame,
+            &[
+                "artifact:contract:dir",
+                "artifact:contract:readme",
+                "artifact:contract:runtime",
+            ],
+            &[],
+            &[
+                "artifact:contract:dir",
+                "artifact:contract:readme",
+                "artifact:contract:runtime",
+            ],
+        );
+        push_artifact_target_fact(
+            &mut frame,
+            "artifact:contract:dir",
+            "/tmp/example-site",
+            "directory",
+        );
+        push_artifact_target_fact(
+            &mut frame,
+            "artifact:contract:readme",
+            "/tmp/example-site/README.md",
+            "file",
+        );
+        push_artifact_target_fact(
+            &mut frame,
+            "artifact:contract:runtime",
+            "/tmp/example-site/runtime.py",
+            "file",
+        );
+        frame.recent_evidence.push(
+            "fact: recent_changes_in_files ref=change:readme path=/tmp/example-site/README.md source=tool:Write source_event_id=tool-write:1 freshness=after-runtime confidence=1.00 status=active invalidated_by=none supersedes=none conflicts_with=none summary=updated README".into(),
+        );
+        frame.recent_evidence.push(
+            "fact: recent_changes_in_files ref=change:runtime path=/tmp/example-site/runtime.py source=tool:Write source_event_id=tool-write:2 freshness=after-runtime confidence=1.00 status=active invalidated_by=none supersedes=none conflicts_with=none summary=updated runtime".into(),
+        );
+        frame.recent_evidence.push(
+            "fact: file_facts ref=filefact:runtime:1:read path=/tmp/example-site/README.md kind=read_observation source=tool:Read source_event_id=tool-read:runtime:1 freshness=after-runtime-read confidence=1.00 status=active invalidated_by=none supersedes=none conflicts_with=none fact=runtime Read succeeded for /tmp/example-site/README.md".into(),
+        );
+        frame.recent_evidence.push(
+            "fact: file_facts ref=filefact:runtime:2:read path=/tmp/example-site/runtime.py kind=read_observation source=tool:Read source_event_id=tool-read:runtime:2 freshness=after-runtime-read confidence=1.00 status=active invalidated_by=none supersedes=none conflicts_with=none fact=runtime Read succeeded for /tmp/example-site/runtime.py".into(),
+        );
+
+        let refs = super::collect_evidence_refs(&frame, None);
+        assert!(super::worker_has_target_scoped_read_anchor(&frame, &refs));
+        assert_eq!(
+            super::evaluate_completion_evidence(&frame, &LoopUsage::default()),
+            CompletionEvidenceStatus::Sufficient
+        );
+
+        let mut usage = LoopUsage {
+            last_effective_tool_action: Some("Read".into()),
+            ..LoopUsage::default()
+        };
+        match super::verification_terminal_outcome(&frame, &mut usage)
+            .expect("directory child reads should close verification")
+        {
+            LoopOutcome::Done { usage, .. } => {
+                let report = usage.worker_report.expect("worker report");
+                assert_eq!(
+                    report.completion_evidence_status,
+                    CompletionEvidenceStatus::Sufficient
+                );
+            }
+            other => panic!("expected Done, got {other:?}"),
+        }
     }
 
     fn u7_recovered_artifact_frame_missing_verification() -> StateFrame {
