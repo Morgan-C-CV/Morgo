@@ -1120,7 +1120,26 @@ fn parse_verification_first_patch(text: &str, target: &str) -> VerificationFirst
         }
     }
 
+    if patch.evidence_refs.is_empty()
+        && verification_first_tool_read_result_mentions_target(text, &patch.verified_target)
+    {
+        patch.evidence_refs = vec![format!("read:{}", patch.verified_target)];
+    }
+
     patch
+}
+
+fn verification_first_tool_read_result_mentions_target(text: &str, target: &str) -> bool {
+    let target = target.trim();
+    if target.is_empty() || !text.contains(target) {
+        return false;
+    }
+    text.lines().any(|line| {
+        let lower = line.to_ascii_lowercase();
+        lower.contains("tool read result: read succeeded")
+            || lower.contains("tool result for read:")
+            || lower.contains("tool:read")
+    })
 }
 
 fn parse_verification_first_patch_refs(value: &str) -> Vec<String> {
