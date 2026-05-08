@@ -630,25 +630,74 @@ fn primary_declared_artifact_path(step: &BossPlanStep) -> Option<String> {
         })
 }
 
+fn is_readme_like_artifact_path(path: &str) -> bool {
+    let lowered = path.trim().to_ascii_lowercase();
+    matches!(lowered.as_str(), "readme" | "readme.md")
+        || lowered.ends_with("/readme")
+        || lowered.ends_with("/readme.md")
+}
+
+fn preferred_artifact_expectation_path(text: &str) -> Option<String> {
+    let expectations = extract_artifact_expectations(text);
+    expectations
+        .iter()
+        .find(|expectation| {
+            expectation.kind == crate::core::boss_acceptance::BossArtifactKind::File
+                && !is_readme_like_artifact_path(expectation.path.to_string_lossy().as_ref())
+        })
+        .map(|expectation| expectation.path.display().to_string())
+        .or_else(|| {
+            expectations
+                .iter()
+                .find(|expectation| expectation.kind == crate::core::boss_acceptance::BossArtifactKind::File)
+                .map(|expectation| expectation.path.display().to_string())
+        })
+}
+
+fn preferred_non_readme_declared_artifact_path(
+    artifacts: &[crate::core::state_frame::DeclaredArtifactContract],
+) -> Option<String> {
+    artifacts
+        .iter()
+        .find(|artifact| artifact.kind != "directory" && !is_readme_like_artifact_path(&artifact.path))
+        .map(|artifact| artifact.path.clone())
+        .or_else(|| {
+            artifacts
+                .iter()
+                .find(|artifact| artifact.kind != "directory")
+                .map(|artifact| artifact.path.clone())
+        })
+}
+
+fn preferred_non_readme_target_artifact_path(artifacts: &[TargetArtifact]) -> Option<String> {
+    artifacts
+        .iter()
+        .find(|artifact| artifact.kind != "directory" && !is_readme_like_artifact_path(&artifact.path))
+        .map(|artifact| artifact.path.clone())
+        .or_else(|| {
+            artifacts
+                .iter()
+                .find(|artifact| artifact.kind != "directory")
+                .map(|artifact| artifact.path.clone())
+        })
+}
+
 fn build_artifact_repair_instruction(step: &BossPlanStep, missing_reason: &str) -> Option<String> {
     let expectation = step
         .stage_execution_contract
         .declared_artifacts
-        .first()
+        .iter()
+        .find(|artifact| artifact.kind != "directory" && !is_readme_like_artifact_path(&artifact.path))
+        .or_else(|| {
+            step.stage_execution_contract
+                .declared_artifacts
+                .iter()
+                .find(|artifact| artifact.kind != "directory")
+        })
         .map(|artifact| (artifact.path.clone(), artifact.kind.clone()))
         .or_else(|| {
-            extract_artifact_expectations(&current_task_contract_text(step.objective()))
-                .into_iter()
-                .next()
-                .map(|expectation| {
-                    let kind = match expectation.kind {
-                        crate::core::boss_acceptance::BossArtifactKind::File => "file".to_string(),
-                        crate::core::boss_acceptance::BossArtifactKind::Directory => {
-                            "directory".to_string()
-                        }
-                    };
-                    (expectation.path.display().to_string(), kind)
-                })
+            preferred_artifact_expectation_path(&current_task_contract_text(step.objective()))
+                .map(|path| (path, "file".to_string()))
         })?;
     let target_path = expectation.0;
     let parent_dir = std::path::Path::new(&target_path)
@@ -667,7 +716,8 @@ fn build_artifact_repair_instruction(step: &BossPlanStep, missing_reason: &str) 
 }
 
 fn build_verification_repair_instruction(step: &BossPlanStep) -> Option<String> {
-    let target_path = primary_declared_artifact_path(step)?;
+    let target_path = verification_first_target_path(step)
+        .or_else(|| primary_declared_artifact_path(step))?;
     Some(format!(
         "re-verify artifact evidence for target_path={}",
         target_path
@@ -758,7 +808,9 @@ fn target_scoped_verification_evidence(step: &BossPlanStep) -> Vec<String> {
 }
 
 fn build_brief_verification_review_summary(step: &BossPlanStep, source: &str) -> String {
-    let verified_target = primary_declared_artifact_path(step).unwrap_or_else(|| "unknown".into());
+    let verified_target = verification_first_target_path(step)
+        .or_else(|| primary_declared_artifact_path(step))
+        .unwrap_or_else(|| "unknown".into());
     let evidence = target_scoped_verification_evidence(step);
     let evidence_line = if evidence.is_empty() {
         "none".to_string()
@@ -771,12 +823,16 @@ fn build_brief_verification_review_summary(step: &BossPlanStep, source: &str) ->
 }
 
 fn build_verification_first_brief_objective(step: &BossPlanStep) -> String {
-    let target = primary_declared_artifact_path(step).unwrap_or_else(|| "unknown".into());
+    let target = verification_first_target_path(step)
+        .or_else(|| primary_declared_artifact_path(step))
+        .unwrap_or_else(|| "unknown".into());
     format!("Verify target artifact only: {target}. Return a short verification result only.")
 }
 
 fn build_verification_first_acceptance(step: &BossPlanStep) -> Vec<String> {
-    let target = primary_declared_artifact_path(step).unwrap_or_else(|| "unknown".into());
+    let target = verification_first_target_path(step)
+        .or_else(|| primary_declared_artifact_path(step))
+        .unwrap_or_else(|| "unknown".into());
     vec![
         format!("verified_target: {target}"),
         "verification_result: verified|blocked".into(),
@@ -784,7 +840,9 @@ fn build_verification_first_acceptance(step: &BossPlanStep) -> Vec<String> {
 }
 
 fn shape_verification_first_result_text(step: &BossPlanStep, text: &str) -> String {
-    let target = primary_declared_artifact_path(step).unwrap_or_else(|| "unknown".into());
+    let target = verification_first_target_path(step)
+        .or_else(|| primary_declared_artifact_path(step))
+        .unwrap_or_else(|| "unknown".into());
     let mut verification_result = None;
     let mut minimal_evidence = None;
     let mut remaining_blocker = None;
@@ -857,26 +915,31 @@ fn normalize_verification_first_short_form(
 }
 
 fn verification_first_target_path(step: &BossPlanStep) -> Option<String> {
-    primary_declared_artifact_path(step)
+    preferred_non_readme_declared_artifact_path(&step.stage_execution_contract.declared_artifacts)
+        .or_else(|| {
+            preferred_artifact_expectation_path(&current_task_contract_text(step.objective()))
+        })
+        .or_else(|| primary_declared_artifact_path(step))
 }
 
 fn verification_first_target_path_from_contract(
     contract: &ExecutorBAssignmentContract,
 ) -> Option<String> {
-    contract
-        .state_frame
-        .stage_execution_contract
-        .declared_artifacts
-        .first()
-        .map(|artifact| artifact.path.clone())
-        .or_else(|| contract.brief.target_files.first().cloned())
-        .or_else(|| {
-            contract
-                .brief
-                .target_artifacts
-                .first()
-                .map(|artifact| artifact.path.clone())
-        })
+    preferred_non_readme_declared_artifact_path(
+        &contract.state_frame.stage_execution_contract.declared_artifacts,
+    )
+    .or_else(|| preferred_non_readme_target_artifact_path(&contract.brief.target_artifacts))
+    .or_else(|| {
+        contract
+            .brief
+            .target_files
+            .iter()
+            .find(|path| !is_readme_like_artifact_path(path))
+            .cloned()
+    })
+    .or_else(|| contract.brief.target_files.first().cloned())
+    .or_else(|| preferred_artifact_expectation_path(&contract.brief.objective))
+    .or_else(|| Some(contract.brief.objective.clone()))
 }
 
 fn verification_first_handle_matches_target(handle: &RelevantFileHandle, target: &str) -> bool {
@@ -1265,6 +1328,16 @@ fn continuation_required_evidence_targets(
         }
     }
     if targets.is_empty() {
+        for artifact in step
+            .stage_execution_contract
+            .declared_artifacts
+            .iter()
+            .filter(|artifact| artifact.kind != "directory")
+        {
+            push_unique_required_evidence(&mut targets, artifact.path.clone());
+        }
+    }
+    if targets.is_empty() {
         if let Some(target) = failed_target {
             push_unique_required_evidence(&mut targets, target.to_string());
         }
@@ -1287,7 +1360,11 @@ fn continuation_modification_direction(
             "Read the required source evidence targets first, update the artifact from those sources if needed, then verify the output artifact again.".into()
         }
         "verify_artifact" => {
-            "Verify the target artifact against the required evidence targets; do not self-certify from the artifact alone when source evidence is required.".into()
+            if required_evidence_targets.len() > 1 {
+                "Implement or repair the listed artifact files, then rerun the demo and verify the full artifact set before claiming completion.".into()
+            } else {
+                "Verify the target artifact against the required evidence targets; do not self-certify from the artifact alone when source evidence is required.".into()
+            }
         }
         "repair_artifact" => {
             "Repair the failed target artifact, then re-run verification with runtime evidence anchors.".into()
@@ -1301,14 +1378,30 @@ fn continuation_modification_direction(
     }
 }
 
-fn continuation_failure_reason(step: &BossPlanStep, next_action: Option<&str>) -> String {
+fn continuation_failure_reason(
+    step: &BossPlanStep,
+    next_action: Option<&str>,
+    required_evidence_targets: &[String],
+) -> String {
+    if step_report_body_looks_like_placeholder(step) {
+        return "completion blocked: report body still looks like skeleton or placeholder".into();
+    }
     if let Some(reason) = step
         .last_review_summary
         .as_deref()
         .map(str::trim)
         .filter(|reason| !reason.is_empty())
     {
-        return compact_continuation_text(reason);
+        let compact = compact_continuation_text(reason);
+        if compact != "completion blocked: verification contract remains unsatisfied" {
+            return compact;
+        }
+    }
+    if !required_evidence_targets.is_empty() {
+        return format!(
+            "completion blocked: required artifact set remains incomplete: {}",
+            required_evidence_targets.join(" | ")
+        );
     }
     match next_action.unwrap_or_default() {
         "read_source_evidence" => {
@@ -1352,7 +1445,11 @@ fn update_step_continuation_context(
         effective_failed_target.as_deref(),
         effective_next_action.as_deref(),
     );
-    let failure_reason = continuation_failure_reason(step, effective_next_action.as_deref());
+    let failure_reason = continuation_failure_reason(
+        step,
+        effective_next_action.as_deref(),
+        &required_evidence_targets,
+    );
     let modification_direction = continuation_modification_direction(
         effective_failed_target.as_deref(),
         effective_next_action.as_deref(),
@@ -1738,20 +1835,7 @@ fn verification_first_contract_target(contract: &ExecutorBAssignmentContract) ->
             return target;
         }
     }
-    contract
-        .state_frame
-        .stage_execution_contract
-        .declared_artifacts
-        .first()
-        .map(|artifact| artifact.path.clone())
-        .or_else(|| contract.brief.target_files.first().cloned())
-        .or_else(|| {
-            contract
-                .brief
-                .target_artifacts
-                .first()
-                .map(|artifact| artifact.path.clone())
-        })
+    verification_first_target_path_from_contract(contract)
         .unwrap_or_else(|| contract.brief.objective.clone())
 }
 
@@ -11956,6 +12040,87 @@ mod tests {
         assert_eq!(payload.next_action.as_deref(), Some("write_artifact"));
         assert_eq!(payload.verified_facts, vec!["fact: file missing"]);
         assert_eq!(payload.continuity_mode.as_deref(), Some("continue"));
+    }
+
+    #[test]
+    fn verification_first_prefers_non_readme_artifact_over_readme_shell() {
+        let step = BossPlanStep {
+            id: 0,
+            description: "verify demo artifact".into(),
+            objective: Some(
+                "真实 /boss A/B use case 7：在独立目录抽象一个最小 Python 运行时 demo.\n\n任务目标：\n- 目标目录：/tmp/python-demo\n- 代码结构至少包含：runtime、model stub、demo entry、README".into(),
+            ),
+            acceptance: vec!["target file exists and is non-empty: /tmp/python-demo/README.md".into()],
+            requires_approval: false,
+            status: BossPlanStepStatus::Rejected,
+            completed: false,
+            result_diff: None,
+            worker_task_id: None,
+            attempt_count: 1,
+            retry_budget: 3,
+            last_review_summary: Some("verification missing".into()),
+            last_correction: Some("verify_artifact".into()),
+            stage_execution_contract: StageExecutionContract {
+                declared_artifacts: vec![
+                    DeclaredArtifactContract {
+                        ref_id: "artifact:0".into(),
+                        path: "/tmp/python-demo".into(),
+                        kind: "directory".into(),
+                        required_actions: vec!["create".into(), "write".into()],
+                        required_evidence: vec!["artifact:0".into()],
+                    },
+                    DeclaredArtifactContract {
+                        ref_id: "artifact:1".into(),
+                        path: "/tmp/python-demo/README.md".into(),
+                        kind: "file".into(),
+                        required_actions: vec!["create".into(), "write".into()],
+                        required_evidence: vec!["artifact:1".into()],
+                    },
+                    DeclaredArtifactContract {
+                        ref_id: "artifact:2".into(),
+                        path: "/tmp/python-demo/runtime.py".into(),
+                        kind: "file".into(),
+                        required_actions: vec!["create".into(), "write".into()],
+                        required_evidence: vec!["artifact:2".into()],
+                    },
+                    DeclaredArtifactContract {
+                        ref_id: "artifact:3".into(),
+                        path: "/tmp/python-demo/model.py".into(),
+                        kind: "file".into(),
+                        required_actions: vec!["create".into(), "write".into()],
+                        required_evidence: vec!["artifact:3".into()],
+                    },
+                ],
+                ..StageExecutionContract::default()
+            },
+            stage_continuation_context: Some(crate::core::state_frame::StageContinuationContext {
+                repair_intent: Some(crate::core::state_frame::RepairIntent {
+                    failed_target: Some("/tmp/python-demo/README.md".into()),
+                    verified_facts: vec!["Write succeeded".into()],
+                    next_action: Some("verify_artifact".into()),
+                    continuity_mode: Some(crate::core::state_frame::ContinuityMode::Repair),
+                }),
+                failed_target: Some("/tmp/python-demo/README.md".into()),
+                verified_facts: vec!["Write succeeded".into()],
+                next_action: Some("verify_artifact".into()),
+                continuity_mode: Some(crate::core::state_frame::ContinuityMode::Repair),
+            }),
+            executor_b_stage_memory: Some(ExecutorBStageMemory {
+                continuity: Some(ExecutorBStageMemoryContinuity::VerificationFirstIsolated),
+                ..ExecutorBStageMemory::default()
+            }),
+            review_task_id: None,
+            tool_execution_records: Vec::new(),
+        };
+
+        let target = verification_first_target_path(&step).expect("verification target");
+        assert_eq!(target, "/tmp/python-demo/runtime.py");
+        let brief_objective = build_verification_first_brief_objective(&step);
+        assert!(brief_objective.contains("/tmp/python-demo/runtime.py"));
+        assert!(!brief_objective.contains("README.md"));
+        let acceptance = build_verification_first_acceptance(&step);
+        assert!(acceptance.iter().any(|line| line.contains("/tmp/python-demo/runtime.py")));
+        assert!(!acceptance.iter().any(|line| line.contains("README.md")));
     }
 
     #[tokio::test]

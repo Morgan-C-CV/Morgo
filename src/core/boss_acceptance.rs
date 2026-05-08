@@ -170,9 +170,38 @@ fn relative_artifact_tokens(line: &str) -> Vec<PathBuf> {
     artifacts
 }
 
+fn python_demo_component_artifact_tokens(line: &str, is_python_task: bool) -> Vec<PathBuf> {
+    if !is_python_task {
+        return Vec::new();
+    }
+    let lowered = line.to_lowercase();
+    let mut artifacts = Vec::new();
+    let mut push = |path: &str| {
+        let path = PathBuf::from(path);
+        if !artifacts.iter().any(|item| item == &path) {
+            artifacts.push(path);
+        }
+    };
+    if lowered.contains("runtime") {
+        push("runtime.py");
+    }
+    if lowered.contains("model stub") || (lowered.contains("model") && lowered.contains("stub"))
+    {
+        push("model.py");
+    }
+    if lowered.contains("demo entry")
+        || lowered.contains("demo entrypoint")
+        || (lowered.contains("demo") && lowered.contains("entry"))
+    {
+        push("demo.py");
+    }
+    artifacts
+}
+
 pub fn extract_artifact_expectations(text: &str) -> Vec<BossArtifactExpectation> {
     let mut expectations = Vec::new();
     let mut relative_file_expectations = Vec::new();
+    let is_python_task = text.to_lowercase().contains("python");
     for line in text.lines() {
         if is_artifact_scope_boundary(line) {
             break;
@@ -195,6 +224,14 @@ pub fn extract_artifact_expectations(text: &str) -> Vec<BossArtifactExpectation>
                 }
             }
             for artifact in relative_artifact_tokens(line) {
+                if !relative_file_expectations
+                    .iter()
+                    .any(|item| item == &artifact)
+                {
+                    relative_file_expectations.push(artifact);
+                }
+            }
+            for artifact in python_demo_component_artifact_tokens(line, is_python_task) {
                 if !relative_file_expectations
                     .iter()
                     .any(|item| item == &artifact)
@@ -423,6 +460,28 @@ mod tests {
         assert!(!expectations.iter().any(|item| {
             item.kind == BossArtifactKind::File && item.path == PathBuf::from("/tmp/demo/stale.py")
         }));
+    }
+
+    #[test]
+    fn derives_python_demo_component_expectations_from_structured_roles() {
+        let text = "\
+真实 /boss A/B use case 7：在独立目录抽象一个最小 Python 运行时 demo。
+
+任务目标：
+- 目标目录：/tmp/python-demo
+- Python 3 标准库优先，不依赖重型第三方库
+- 代码结构至少包含：runtime、model stub、demo entry、README";
+
+        let expectations = extract_artifact_expectations(text);
+        for expected in ["runtime.py", "model.py", "demo.py", "README.md"] {
+            assert!(
+                expectations.iter().any(|item| {
+                    item.kind == BossArtifactKind::File
+                        && item.path == PathBuf::from("/tmp/python-demo").join(expected)
+                }),
+                "missing expected artifact {expected}: {expectations:?}"
+            );
+        }
     }
 
     #[test]
