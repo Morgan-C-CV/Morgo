@@ -40,7 +40,8 @@ BIN_PATH="$AGENT_DIR/target/debug/morgo"
 
 DEFAULT_OUT_DIR="${TMPDIR:-/tmp}/rustagent-boss-lism-matrix-$(date +%Y%m%d-%H%M%S)"
 DEFAULT_MODEL="${RUST_AGENT_AB_MODEL:-gpt-5-mini-2025-08-07}"
-DEFAULT_TIMEOUT_SECS="${RUST_AGENT_BOSS_TASK_TIMEOUT_SECS:-360}"
+DEFAULT_TIMEOUT_SECS="${RUST_AGENT_BOSS_TASK_TIMEOUT_SECS:-180}"
+DEFAULT_PROGRAM_TIMEOUT_SECS="${RUST_AGENT_PROGRAM_TIMEOUT_SECS:-480}"
 DEFAULT_PLAN="3x3"
 DEFAULT_SINGLE_MODE="all_on"
 
@@ -75,6 +76,8 @@ Options:
   --out DIR             Output root. Default: $DEFAULT_OUT_DIR
   --model MODEL         Override model written into generated config.
   --timeout SECONDS     --boss-task-timeout-secs. Default: $DEFAULT_TIMEOUT_SECS
+  --program-timeout SECONDS
+                        Max wall time for each morgo invocation. Default: $DEFAULT_PROGRAM_TIMEOUT_SECS
   --prepare-only        Only generate usecases/configs, do not run.
   --summary-only DIR    Skip execution, summarize an existing output directory.
   --list-cases          Print supported use cases and exit.
@@ -378,6 +381,7 @@ run_one() {
   local run_id="$4"
   local run_tag="$5"
   local timeout_secs="$6"
+  local program_timeout_secs="$7"
 
   local src_mode
   local boss_policy
@@ -404,24 +408,54 @@ run_one() {
   (
     export RUST_AGENT_CONFIG_ROOT="$config_root"
     export RUST_AGENT_API_CALL_LOG="$api_log_file"
+    cmd=(
+      "$BIN_PATH"
+      --lism-policy "$boss_policy"
+      --worker-lism-policy "$worker_policy"
+      --lism-ab-sample "$sample_file"
+      --boss-task "$(cat "$task_file")"
+      --boss-task-timeout-secs "$timeout_secs"
+    )
     if [ "$shared_memory_enabled" = "true" ]; then
-      "$BIN_PATH" \
-        --lism-policy "$boss_policy" \
-        --worker-lism-policy "$worker_policy" \
-        --shared-memory-enabled \
-        --lism-ab-sample "$sample_file" \
-        --boss-task "$(cat "$task_file")" \
-        --boss-task-timeout-secs "$timeout_secs"
-    else
-      "$BIN_PATH" \
-        --lism-policy "$boss_policy" \
-        --worker-lism-policy "$worker_policy" \
-        --lism-ab-sample "$sample_file" \
-        --boss-task "$(cat "$task_file")" \
-        --boss-task-timeout-secs "$timeout_secs"
+      cmd+=(--shared-memory-enabled)
     fi
+    run_with_program_timeout "$program_timeout_secs" "${cmd[@]}"
   ) >"$log_file" 2>&1
   echo "=== END $usecase $mode run$run_id $(date '+%F %T') ==="
+}
+
+run_with_program_timeout() {
+  local timeout_secs="$1"
+  shift
+
+  if [ -z "$timeout_secs" ] || [ "$timeout_secs" -le 0 ]; then
+    "$@"
+    return
+  fi
+
+  "$@" &
+  local child_pid="$!"
+  local deadline=$((SECONDS + timeout_secs))
+
+  while kill -0 "$child_pid" 2>/dev/null; do
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      echo "program timeout after ${timeout_secs}s; terminating pid $child_pid" >&2
+      kill "$child_pid" 2>/dev/null || true
+      sleep 2
+      if kill -0 "$child_pid" 2>/dev/null; then
+        kill -KILL "$child_pid" 2>/dev/null || true
+      fi
+      wait "$child_pid" 2>/dev/null || true
+      return 124
+    fi
+    sleep 1
+  done
+
+  set +e
+  wait "$child_pid"
+  local status=$?
+  set -e
+  return "$status"
 }
 
 summarize_out_dir() {
@@ -555,6 +589,7 @@ runs=""
 out_dir="$DEFAULT_OUT_DIR"
 model="$DEFAULT_MODEL"
 timeout_secs="$DEFAULT_TIMEOUT_SECS"
+program_timeout_secs="$DEFAULT_PROGRAM_TIMEOUT_SECS"
 shared_memory_enabled="false"
 prepare_only="false"
 summary_only=""
@@ -592,6 +627,10 @@ while [ $# -gt 0 ]; do
       ;;
     --timeout)
       timeout_secs="${2:-}"
+      shift 2
+      ;;
+    --program-timeout)
+      program_timeout_secs="${2:-}"
       shift 2
       ;;
     --prepare-only)
@@ -688,6 +727,7 @@ echo "Plan: $plan"
 echo "Runs per mode: $runs"
 echo "Model: $model"
 echo "Timeout secs: $timeout_secs"
+echo "Program timeout secs: $program_timeout_secs"
 echo
 
 read_lines_into_array mode_sequence <<EOF
@@ -697,7 +737,7 @@ EOF
 for usecase in "${selected_cases[@]}"; do
   for mode in "${mode_sequence[@]}"; do
     for run_id in $(seq 1 "$runs"); do
-      run_one "$out_dir" "$usecase" "$mode" "$run_id" "$run_tag" "$timeout_secs"
+      run_one "$out_dir" "$usecase" "$mode" "$run_id" "$run_tag" "$timeout_secs" "$program_timeout_secs"
     done
   done
 done
