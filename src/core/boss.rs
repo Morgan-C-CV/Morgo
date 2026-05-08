@@ -289,18 +289,7 @@ fn verification_gap_required_targets(
                 .as_deref()
                 .filter(|path| !path.trim().is_empty())
             {
-                if declared_artifact_path_is_directory(step, path) {
-                    for artifact in step
-                        .stage_execution_contract
-                        .declared_artifacts
-                        .iter()
-                        .filter(|artifact| artifact.kind != "directory")
-                    {
-                        push_unique_required_evidence(&mut targets, artifact.path.clone());
-                    }
-                } else {
-                    push_unique_required_evidence(&mut targets, path.to_string());
-                }
+                push_readable_verification_target(&mut targets, step, path);
             }
         }
     };
@@ -312,7 +301,7 @@ fn verification_gap_required_targets(
     }
     if targets.is_empty() {
         if let Some(target) = verification_gap_target(step, metadata) {
-            push_unique_required_evidence(&mut targets, target);
+            push_readable_verification_target(&mut targets, step, &target);
         }
     }
     targets
@@ -362,6 +351,34 @@ fn declared_artifact_path_is_directory(step: &BossPlanStep, path: &str) -> bool 
         .declared_artifacts
         .iter()
         .any(|artifact| artifact.path == path && artifact.kind == "directory")
+}
+
+fn declared_child_file_artifact_paths(step: &BossPlanStep, directory: &str) -> Vec<String> {
+    let prefix = format!("{}/", directory.trim_end_matches('/'));
+    step.stage_execution_contract
+        .declared_artifacts
+        .iter()
+        .filter(|artifact| artifact.kind != "directory")
+        .filter(|artifact| artifact.path.starts_with(&prefix))
+        .map(|artifact| artifact.path.clone())
+        .collect()
+}
+
+fn push_readable_verification_target(
+    targets: &mut Vec<String>,
+    step: &BossPlanStep,
+    target: &str,
+) {
+    if declared_artifact_path_is_directory(step, target) {
+        let child_files = declared_child_file_artifact_paths(step, target);
+        if !child_files.is_empty() {
+            for child in child_files {
+                push_unique_required_evidence(targets, child);
+            }
+            return;
+        }
+    }
+    push_unique_required_evidence(targets, target.to_string());
 }
 
 fn verification_gap_next_action(
@@ -555,6 +572,34 @@ fn worker_report_has_required_source_evidence(
     })
 }
 
+fn verification_first_step_required_runtime_targets(step: &BossPlanStep) -> Vec<String> {
+    let mut raw_targets = Vec::new();
+    if let Some(context) = step.stage_continuation_context.as_ref() {
+        let mut facts = context.verified_facts.clone();
+        if let Some(intent) = context.repair_intent.as_ref() {
+            facts.extend(intent.verified_facts.clone());
+        }
+        for target in collect_required_evidence_targets_from_facts(&facts) {
+            push_unique_required_evidence(&mut raw_targets, target);
+        }
+    }
+    if raw_targets.is_empty() {
+        raw_targets.extend(step.stage_execution_contract.content_evidence_targets.clone());
+    }
+    if raw_targets.is_empty() {
+        if let Some(target) =
+            verification_first_target_path(step).or_else(|| primary_declared_artifact_path(step))
+        {
+            push_unique_required_evidence(&mut raw_targets, target);
+        }
+    }
+    let mut targets = Vec::new();
+    for target in raw_targets {
+        push_readable_verification_target(&mut targets, step, &target);
+    }
+    targets
+}
+
 fn verification_first_read_anchor_closed(
     step: &BossPlanStep,
     report: &crate::core::state_frame::WorkerStructuredReport,
@@ -562,16 +607,26 @@ fn verification_first_read_anchor_closed(
     if !is_verification_first_continuation(step) {
         return false;
     }
-    let Some(target_path) =
-        verification_first_target_path(step).or_else(|| primary_declared_artifact_path(step))
-    else {
-        return false;
-    };
-    let read_anchor = format!("read:{target_path}");
-    report
-        .evidence_refs
-        .iter()
-        .any(|evidence_ref| evidence_ref == &read_anchor)
+    let required_targets = verification_first_step_required_runtime_targets(step);
+    if required_targets.is_empty() {
+        let Some(target_path) =
+            verification_first_target_path(step).or_else(|| primary_declared_artifact_path(step))
+        else {
+            return false;
+        };
+        let read_anchor = format!("read:{target_path}");
+        return report
+            .evidence_refs
+            .iter()
+            .any(|evidence_ref| evidence_ref == &read_anchor);
+    }
+    required_targets.iter().all(|target| {
+        let read_anchor = format!("read:{target}");
+        report
+            .evidence_refs
+            .iter()
+            .any(|evidence_ref| evidence_ref == &read_anchor)
+    })
 }
 
 fn verification_gap_is_closed_by_report(
@@ -1230,6 +1285,48 @@ fn verification_first_shared_memory_facts(shared: &SharedStepMemory) -> Vec<Stri
         .collect()
 }
 
+fn preferred_runtime_verification_target(targets: &[String]) -> Option<String> {
+    targets
+        .iter()
+        .find(|target| !is_readme_like_artifact_path(target))
+        .or_else(|| targets.first())
+        .cloned()
+}
+
+fn verification_first_required_runtime_targets(
+    contract: &ExecutorBAssignmentContract,
+) -> Vec<String> {
+    let mut targets = Vec::new();
+    if let Some(context) = contract.state_frame.stage_continuation_context.as_ref() {
+        let mut facts = context.verified_facts.clone();
+        if let Some(intent) = context.repair_intent.as_ref() {
+            facts.extend(intent.verified_facts.clone());
+        }
+        for target in collect_required_evidence_targets_from_facts(&facts) {
+            push_unique_required_evidence(&mut targets, target);
+        }
+    }
+    if targets.is_empty() {
+        targets.extend(
+            contract
+                .state_frame
+                .stage_execution_contract
+                .content_evidence_targets
+                .iter()
+                .cloned(),
+        );
+    }
+    if targets.is_empty() {
+        if let Some(target) = verification_first_target_path_from_contract(contract) {
+            push_unique_required_evidence(&mut targets, target);
+        }
+    }
+    normalize_contract_readable_verification_targets(
+        &contract.state_frame.stage_execution_contract,
+        targets,
+    )
+}
+
 fn verification_first_shared_memory_blocker(shared: &SharedStepMemory) -> Option<String> {
     if let Some(blocker) = shared.remaining_blocker.as_ref() {
         let trimmed = blocker.trim();
@@ -1318,6 +1415,24 @@ fn parse_verification_first_patch(text: &str, target: &str) -> VerificationFirst
                 if !value.is_empty() {
                     patch.verification_result = value;
                 }
+            }
+            continue;
+        }
+        if lower.starts_with("verification_stance:")
+            || lower.starts_with("verification stance:")
+        {
+            if let Some((_, value)) = trimmed.split_once(':') {
+                let value = value.trim().to_ascii_lowercase();
+                patch.verification_result = if value.contains("unverified")
+                    || value.contains("blocked")
+                    || value.contains("failed")
+                {
+                    "blocked".into()
+                } else if value.contains("verified") {
+                    "verified".into()
+                } else {
+                    patch.verification_result.clone()
+                };
             }
             continue;
         }
@@ -1578,6 +1693,62 @@ fn push_unique_required_evidence(targets: &mut Vec<String>, target: impl Into<St
         return;
     }
     targets.push(trimmed.to_string());
+}
+
+fn contract_child_file_artifact_paths(
+    contract: &StageExecutionContract,
+    directory: &str,
+) -> Vec<String> {
+    let prefix = format!("{}/", directory.trim_end_matches('/'));
+    contract
+        .declared_artifacts
+        .iter()
+        .filter(|artifact| artifact.kind != "directory")
+        .filter(|artifact| artifact.path.starts_with(&prefix))
+        .map(|artifact| artifact.path.clone())
+        .collect()
+}
+
+fn contract_target_is_directory(contract: &StageExecutionContract, target: &str) -> bool {
+    contract
+        .declared_artifacts
+        .iter()
+        .any(|artifact| artifact.path == target && artifact.kind == "directory")
+}
+
+fn target_has_nested_required_target(target: &str, raw_targets: &[String]) -> bool {
+    let prefix = format!("{}/", target.trim_end_matches('/'));
+    raw_targets
+        .iter()
+        .any(|other| other != target && other.starts_with(&prefix))
+}
+
+fn normalize_contract_readable_verification_targets(
+    contract: &StageExecutionContract,
+    raw_targets: Vec<String>,
+) -> Vec<String> {
+    let mut targets = Vec::new();
+    let raw_target_list = raw_targets.clone();
+    for target in raw_targets {
+        let trimmed = target.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if contract_target_is_directory(contract, trimmed) {
+            let child_files = contract_child_file_artifact_paths(contract, trimmed);
+            if !child_files.is_empty() {
+                for child in child_files {
+                    push_unique_required_evidence(&mut targets, child);
+                }
+                continue;
+            }
+        }
+        if target_has_nested_required_target(trimmed, &raw_target_list) {
+            continue;
+        }
+        push_unique_required_evidence(&mut targets, trimmed.to_string());
+    }
+    targets
 }
 
 fn continuation_required_evidence_targets(
@@ -2134,12 +2305,23 @@ fn is_verification_first_assignment_contract(contract: &ExecutorBAssignmentContr
 }
 
 fn verification_first_contract_target(contract: &ExecutorBAssignmentContract) -> String {
+    let required_runtime_targets = verification_first_required_runtime_targets(contract);
     if let Some(shared) = contract.shared_step_memory.as_ref() {
         if let Some(target) = verification_first_shared_memory_target(shared) {
+            if contract_target_is_directory(&contract.state_frame.stage_execution_contract, &target)
+                || target_has_nested_required_target(&target, &required_runtime_targets)
+            {
+                if let Some(preferred) =
+                    preferred_runtime_verification_target(&required_runtime_targets)
+                {
+                    return preferred;
+                }
+            }
             return target;
         }
     }
-    verification_first_target_path_from_contract(contract)
+    preferred_runtime_verification_target(&required_runtime_targets)
+        .or_else(|| verification_first_target_path_from_contract(contract))
         .unwrap_or_else(|| contract.brief.objective.clone())
 }
 
@@ -2385,13 +2567,11 @@ fn verification_first_repair_brief_lines(contract: &ExecutorBAssignmentContract)
         }
     }
     if required_targets.is_empty() {
-        required_targets.extend(
-            contract
-                .state_frame
-                .stage_execution_contract
-                .content_evidence_targets
-                .iter()
-                .cloned(),
+        required_targets = verification_first_required_runtime_targets(contract);
+    } else {
+        required_targets = normalize_contract_readable_verification_targets(
+            &contract.state_frame.stage_execution_contract,
+            required_targets,
         );
     }
     if required_targets.is_empty() && has_repair_signal {
@@ -2399,7 +2579,10 @@ fn verification_first_repair_brief_lines(contract: &ExecutorBAssignmentContract)
             .and_then(|context| context.failed_target.clone())
             .or_else(|| verification_first_target_path_from_contract(contract))
         {
-            required_targets.push(target);
+            required_targets = normalize_contract_readable_verification_targets(
+                &contract.state_frame.stage_execution_contract,
+                vec![target],
+            );
         }
     }
     if failure_reason.is_none() && modification_direction.is_none() && required_targets.is_empty() {
@@ -2427,13 +2610,14 @@ fn verification_first_repair_brief_lines(contract: &ExecutorBAssignmentContract)
         }
     }
     lines.push(
-        "required_runtime_evidence: use Read on each required target; after a successful Read, return evidence_refs: read:<target>. Self-claims without runtime Read do not satisfy the gate.".into(),
+        "required_runtime_evidence: use Read on each listed file target; do not Read a directory path itself. After successful Read calls, return evidence_refs: read:<target>. Self-claims without runtime Read do not satisfy the gate.".into(),
     );
     lines
 }
 
 fn build_verification_first_task_message(contract: &ExecutorBAssignmentContract) -> String {
     let target = verification_first_contract_target(contract);
+    let required_runtime_targets = verification_first_required_runtime_targets(contract);
     let facts = verification_first_contract_facts(contract);
     let evidence = if facts.is_empty() {
         "none".into()
@@ -2445,8 +2629,17 @@ fn build_verification_first_task_message(contract: &ExecutorBAssignmentContract)
     if !lines.is_empty() {
         lines.push(String::new());
     }
+    let evidence_refs_contract = if required_runtime_targets.is_empty() {
+        format!("evidence_refs: read:{target}")
+    } else {
+        let mut refs = vec!["evidence_refs:".to_string()];
+        for target in &required_runtime_targets {
+            refs.push(format!("- read:{target}"));
+        }
+        refs.join("\n")
+    };
     lines.push(format!(
-        "verified_target: {target}\nverification_result: verified|blocked\nminimal_evidence: {evidence}\nremaining_blocker: {blocker}\nevidence_refs: read:{target}"
+        "verified_target: {target}\nverification_result: verified|blocked\nminimal_evidence: {evidence}\nremaining_blocker: {blocker}\n{evidence_refs_contract}"
     ));
     lines.join("\n")
 }
@@ -2545,7 +2738,6 @@ fn build_continuation_payload(contract: &ExecutorBAssignmentContract) -> Continu
             ),
         };
     }
-    let target = verification_first_contract_target(contract);
     ContinuationPayload {
         failed_target: typed_context
             .and_then(|context| {
@@ -4532,12 +4724,7 @@ impl BossCoordinator {
             .filter(|evidence_ref| evidence_ref.starts_with("read:"))
             .cloned()
             .collect::<Vec<_>>();
-        if read_evidence_refs.is_empty()
-            || !memory
-                .verification_status
-                .as_deref()
-                .is_some_and(|status| status.eq_ignore_ascii_case("verified"))
-        {
+        if read_evidence_refs.is_empty() {
             return;
         }
         let mut routed_step_metadata = self.routed_step_metadata.write().await;
@@ -14226,7 +14413,7 @@ mod tests {
         assert!(message.contains("required_evidence_targets:"));
         assert!(message.contains("/tmp/source.md"));
         assert!(message.contains("required_runtime_evidence: use Read"));
-        assert!(message.contains("evidence_refs: read:/tmp/verification-first.md"));
+        assert!(message.contains("- read:/tmp/source.md"));
     }
 
     #[tokio::test]
@@ -15918,6 +16105,129 @@ mod tests {
     }
 
     #[test]
+    fn verification_repair_continuation_expands_directory_gap_into_child_file_targets() {
+        let root = "/tmp/python-demo".to_string();
+        let readme = format!("{root}/README.md");
+        let runtime = format!("{root}/runtime.py");
+        let model = format!("{root}/model.py");
+        let demo = format!("{root}/demo.py");
+        let step = BossPlanStep {
+            id: 44,
+            description: "build python demo".into(),
+            objective: Some("create a minimal runnable Python demo".into()),
+            acceptance: vec!["demo files are verified".into()],
+            requires_approval: false,
+            status: BossPlanStepStatus::Running,
+            completed: false,
+            result_diff: None,
+            worker_task_id: None,
+            attempt_count: 0,
+            retry_budget: 3,
+            last_review_summary: None,
+            last_correction: None,
+            stage_execution_contract: StageExecutionContract {
+                declared_artifacts: vec![
+                    DeclaredArtifactContract {
+                        ref_id: "artifact:contract:0".into(),
+                        path: root.clone(),
+                        kind: "directory".into(),
+                        required_actions: vec!["write_artifact".into()],
+                        required_evidence: vec![root.clone()],
+                    },
+                    DeclaredArtifactContract {
+                        ref_id: "artifact:contract:1".into(),
+                        path: readme.clone(),
+                        kind: "file".into(),
+                        required_actions: vec!["write_artifact".into()],
+                        required_evidence: vec![readme.clone()],
+                    },
+                    DeclaredArtifactContract {
+                        ref_id: "artifact:contract:2".into(),
+                        path: runtime.clone(),
+                        kind: "file".into(),
+                        required_actions: vec!["write_artifact".into()],
+                        required_evidence: vec![runtime.clone()],
+                    },
+                    DeclaredArtifactContract {
+                        ref_id: "artifact:contract:3".into(),
+                        path: model.clone(),
+                        kind: "file".into(),
+                        required_actions: vec!["write_artifact".into()],
+                        required_evidence: vec![model.clone()],
+                    },
+                    DeclaredArtifactContract {
+                        ref_id: "artifact:contract:4".into(),
+                        path: demo.clone(),
+                        kind: "file".into(),
+                        required_actions: vec!["write_artifact".into()],
+                        required_evidence: vec![demo.clone()],
+                    },
+                ],
+                required_actions: vec!["verify_artifact".into()],
+                required_evidence: vec![runtime.clone()],
+                ..StageExecutionContract::default()
+            },
+            stage_continuation_context: Some(crate::core::state_frame::StageContinuationContext {
+                repair_intent: Some(crate::core::state_frame::RepairIntent {
+                    failed_target: Some(root.clone()),
+                    verified_facts: vec![
+                        format!("required_evidence_targets: {root} | {readme} | {runtime} | {model} | {demo}"),
+                        "verification_result: blocked".into(),
+                    ],
+                    next_action: Some("verify_artifact".into()),
+                    continuity_mode: Some(crate::core::state_frame::ContinuityMode::Repair),
+                }),
+                failed_target: Some(root.clone()),
+                verified_facts: vec![
+                    format!("required_evidence_targets: {root} | {readme} | {runtime} | {model} | {demo}"),
+                    "verification_result: blocked".into(),
+                ],
+                next_action: Some("verify_artifact".into()),
+                continuity_mode: Some(crate::core::state_frame::ContinuityMode::Repair),
+            }),
+            executor_b_stage_memory: None,
+            review_task_id: None,
+            tool_execution_records: Vec::new(),
+        };
+        let metadata = BossStepRoutedMetadata {
+            completion_evidence_gaps: vec![
+                CompletionEvidenceGap {
+                    target_ref: "artifact:contract:0".into(),
+                    target_path: Some(root.clone()),
+                    missing_artifact_evidence: false,
+                    missing_test_evidence: false,
+                    missing_verification_evidence: true,
+                    recommended_action: "verify_artifact".into(),
+                },
+                CompletionEvidenceGap {
+                    target_ref: "artifact:contract:1".into(),
+                    target_path: Some(readme.clone()),
+                    missing_artifact_evidence: false,
+                    missing_test_evidence: false,
+                    missing_verification_evidence: true,
+                    recommended_action: "verify_artifact".into(),
+                },
+                CompletionEvidenceGap {
+                    target_ref: "artifact:contract:2".into(),
+                    target_path: Some(runtime.clone()),
+                    missing_artifact_evidence: false,
+                    missing_test_evidence: false,
+                    missing_verification_evidence: true,
+                    recommended_action: "verify_artifact".into(),
+                },
+            ],
+            ..BossStepRoutedMetadata::default()
+        };
+
+        let targets = verification_gap_required_targets(&step, Some(&metadata));
+        assert!(!targets.iter().any(|target| target == &root));
+        assert!(targets.contains(&readme));
+        assert!(targets.contains(&runtime));
+        assert!(targets.contains(&model));
+        assert!(targets.contains(&demo));
+    }
+
+    #[test]
     fn verification_repair_continuation_uses_file_target_when_gap_target_is_directory() {
         let root = "/tmp/python-demo".to_string();
         let readme = format!("{root}/README.md");
@@ -16019,6 +16329,164 @@ mod tests {
         assert!(required_targets_fact.contains(&runtime));
         assert!(required_targets_fact.contains(&model));
         assert!(required_targets_fact.contains(&demo));
+    }
+
+    #[tokio::test]
+    async fn verification_first_shared_memory_closes_directory_gap_from_child_file_read_refs() {
+        let coordinator = BossCoordinator::new();
+        coordinator.set_shared_memory_enabled(true).await;
+        let root = "/tmp/python-demo".to_string();
+        let readme = format!("{root}/README.md");
+        let runtime = format!("{root}/runtime.py");
+        let model = format!("{root}/model.py");
+        let demo = format!("{root}/demo.py");
+        let step = BossPlanStep {
+            id: 7,
+            description: "build python demo".into(),
+            objective: Some("create a minimal runnable Python demo".into()),
+            acceptance: vec!["demo files are verified".into()],
+            requires_approval: false,
+            status: BossPlanStepStatus::Rejected,
+            completed: false,
+            result_diff: None,
+            worker_task_id: None,
+            attempt_count: 0,
+            retry_budget: 3,
+            last_review_summary: None,
+            last_correction: None,
+            stage_execution_contract: StageExecutionContract {
+                declared_artifacts: vec![
+                    DeclaredArtifactContract {
+                        ref_id: "artifact:contract:0".into(),
+                        path: root.clone(),
+                        kind: "directory".into(),
+                        required_actions: vec!["write_artifact".into()],
+                        required_evidence: vec![root.clone()],
+                    },
+                    DeclaredArtifactContract {
+                        ref_id: "artifact:contract:1".into(),
+                        path: readme.clone(),
+                        kind: "file".into(),
+                        required_actions: vec!["write_artifact".into()],
+                        required_evidence: vec![readme.clone()],
+                    },
+                    DeclaredArtifactContract {
+                        ref_id: "artifact:contract:2".into(),
+                        path: runtime.clone(),
+                        kind: "file".into(),
+                        required_actions: vec!["write_artifact".into()],
+                        required_evidence: vec![runtime.clone()],
+                    },
+                    DeclaredArtifactContract {
+                        ref_id: "artifact:contract:3".into(),
+                        path: model.clone(),
+                        kind: "file".into(),
+                        required_actions: vec!["write_artifact".into()],
+                        required_evidence: vec![model.clone()],
+                    },
+                    DeclaredArtifactContract {
+                        ref_id: "artifact:contract:4".into(),
+                        path: demo.clone(),
+                        kind: "file".into(),
+                        required_actions: vec!["write_artifact".into()],
+                        required_evidence: vec![demo.clone()],
+                    },
+                ],
+                required_actions: vec!["verify_artifact".into()],
+                required_evidence: vec![runtime.clone()],
+                ..StageExecutionContract::default()
+            },
+            stage_continuation_context: Some(crate::core::state_frame::StageContinuationContext {
+                repair_intent: Some(crate::core::state_frame::RepairIntent {
+                    failed_target: Some(root.clone()),
+                    verified_facts: vec![
+                        format!("required_evidence_targets: {root} | {readme} | {runtime} | {model} | {demo}"),
+                        "verification_result: blocked".into(),
+                    ],
+                    next_action: Some("verify_artifact".into()),
+                    continuity_mode: Some(crate::core::state_frame::ContinuityMode::Repair),
+                }),
+                failed_target: Some(root.clone()),
+                verified_facts: vec![
+                    format!("required_evidence_targets: {root} | {readme} | {runtime} | {model} | {demo}"),
+                    "verification_result: blocked".into(),
+                ],
+                next_action: Some("verify_artifact".into()),
+                continuity_mode: Some(crate::core::state_frame::ContinuityMode::Repair),
+            }),
+            executor_b_stage_memory: None,
+            review_task_id: None,
+            tool_execution_records: Vec::new(),
+        };
+        {
+            let mut routed = coordinator.routed_step_metadata.write().await;
+            routed.insert(
+                step.id,
+                BossStepRoutedMetadata {
+                    completion_evidence_gaps: vec![
+                        CompletionEvidenceGap {
+                            target_ref: "artifact:contract:0".into(),
+                            target_path: Some(root.clone()),
+                            missing_artifact_evidence: false,
+                            missing_test_evidence: false,
+                            missing_verification_evidence: true,
+                            recommended_action: "verify_artifact".into(),
+                        },
+                        CompletionEvidenceGap {
+                            target_ref: "artifact:contract:1".into(),
+                            target_path: Some(readme.clone()),
+                            missing_artifact_evidence: false,
+                            missing_test_evidence: false,
+                            missing_verification_evidence: true,
+                            recommended_action: "verify_artifact".into(),
+                        },
+                        CompletionEvidenceGap {
+                            target_ref: "artifact:contract:2".into(),
+                            target_path: Some(runtime.clone()),
+                            missing_artifact_evidence: false,
+                            missing_test_evidence: false,
+                            missing_verification_evidence: true,
+                            recommended_action: "verify_artifact".into(),
+                        },
+                        CompletionEvidenceGap {
+                            target_ref: "artifact:contract:3".into(),
+                            target_path: Some(model.clone()),
+                            missing_artifact_evidence: false,
+                            missing_test_evidence: false,
+                            missing_verification_evidence: true,
+                            recommended_action: "verify_artifact".into(),
+                        },
+                        CompletionEvidenceGap {
+                            target_ref: "artifact:contract:4".into(),
+                            target_path: Some(demo.clone()),
+                            missing_artifact_evidence: false,
+                            missing_test_evidence: false,
+                            missing_verification_evidence: true,
+                            recommended_action: "verify_artifact".into(),
+                        },
+                    ],
+                    completion_evidence_status: Some("missing_verification_evidence".into()),
+                    ..BossStepRoutedMetadata::default()
+                },
+            );
+        }
+
+        coordinator
+            .sync_verification_first_shared_step_memory_from_result(
+                &step,
+                &format!(
+                    "outcome: completed\nverification_stance: unverified (blocked)\nevidence_refs:\n- read:{readme}\n- read:{runtime}\n- read:{model}\n- read:{demo}"
+                ),
+            )
+            .await;
+
+        let routed = coordinator.routed_step_metadata.read().await;
+        let metadata = routed.get(&step.id).expect("routed metadata");
+        assert!(metadata.completion_evidence_gaps.is_empty());
+        assert_eq!(
+            metadata.completion_evidence_status.as_deref(),
+            Some("sufficient")
+        );
     }
 
     #[tokio::test]
