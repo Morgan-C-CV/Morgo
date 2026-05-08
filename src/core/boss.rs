@@ -784,6 +784,62 @@ fn push_unique_evidence_ref(refs: &mut Vec<String>, evidence_ref: &str) {
     }
 }
 
+fn verification_first_blocker_is_none(blocker: Option<&str>) -> bool {
+    let Some(blocker) = blocker else {
+        return true;
+    };
+    let normalized = blocker.trim().replace('_', " ").to_ascii_lowercase();
+    normalized.is_empty() || normalized == "none"
+}
+
+fn verification_first_blocker_needs_review(blocker: Option<&str>) -> bool {
+    let Some(blocker) = blocker else {
+        return false;
+    };
+    blocker
+        .trim()
+        .replace('_', " ")
+        .to_ascii_lowercase()
+        .contains("needs review")
+}
+
+fn verification_first_memory_follow_up_blocker(memory: &SharedStepMemory) -> Option<String> {
+    let blocker = verification_first_shared_memory_blocker(memory);
+    if !verification_first_blocker_is_none(blocker.as_deref()) {
+        return blocker;
+    }
+    None
+}
+
+fn push_verification_first_follow_up_gap(
+    step: &BossPlanStep,
+    target: Option<&str>,
+    blocker: &str,
+    gaps: &mut Vec<CompletionEvidenceGap>,
+) {
+    let target_path = target
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_string)
+        .or_else(|| verification_gap_target(step, None))
+        .or_else(|| primary_declared_artifact_path(step));
+    let target_ref = if verification_first_blocker_needs_review(Some(blocker)) {
+        "verification_first:needs_review"
+    } else {
+        "verification_first:blocked"
+    };
+    if gaps.iter().any(|gap| gap.target_ref == target_ref) {
+        return;
+    }
+    gaps.push(CompletionEvidenceGap {
+        target_ref: target_ref.into(),
+        target_path,
+        missing_artifact_evidence: false,
+        missing_test_evidence: false,
+        missing_verification_evidence: true,
+        recommended_action: "verify_artifact".into(),
+    });
+}
+
 fn parse_failed_read_path(detail: &str) -> Option<String> {
     let marker = "failed to read ";
     let start = detail.find(marker)? + marker.len();
@@ -2603,6 +2659,9 @@ fn normalize_verification_first_blocker_code(reason: Option<&str>) -> &'static s
     if reason.is_empty() || reason == "none" {
         return "none";
     }
+    if reason.contains("needs review") || reason.contains("needs_review") {
+        return "needs_review";
+    }
     if reason == "verify_artifact" || reason.contains("verify_artifact") {
         return "verification_evidence_missing";
     }
@@ -2631,6 +2690,7 @@ fn normalize_verification_first_next_action_from_blocker_code(
     blocker_code: &str,
 ) -> Option<String> {
     match blocker_code {
+        "needs_review" => Some("verify_artifact".into()),
         "source_evidence_missing" => Some("read_source_evidence".into()),
         "verification_evidence_missing" => Some("verify_artifact".into()),
         "artifact_missing" | "repair_exhausted" => Some("repair_artifact".into()),
@@ -4944,13 +5004,15 @@ impl BossCoordinator {
         step: &BossPlanStep,
         memory: &SharedStepMemory,
     ) {
+        let follow_up_blocker = verification_first_memory_follow_up_blocker(memory);
+        let completion_can_succeed = follow_up_blocker.is_none();
         let read_evidence_refs = memory
             .evidence_refs
             .iter()
             .filter(|evidence_ref| evidence_ref.starts_with("read:"))
             .cloned()
             .collect::<Vec<_>>();
-        if read_evidence_refs.is_empty() {
+        if read_evidence_refs.is_empty() && follow_up_blocker.is_none() {
             return;
         }
         let mut routed_step_metadata = self.routed_step_metadata.write().await;
@@ -4971,16 +5033,56 @@ impl BossCoordinator {
                 &read_evidence_refs,
                 &mut report.completion_evidence_gaps,
             );
-            if report.completion_evidence_gaps.is_empty() {
+            if report.completion_evidence_gaps.is_empty() && completion_can_succeed {
                 report.completion_evidence_status = CompletionEvidenceStatus::Sufficient;
                 report.verification_status = "verified".into();
+            } else if let Some(blocker) = follow_up_blocker.as_deref() {
+                push_verification_first_follow_up_gap(
+                    step,
+                    memory.target.as_deref(),
+                    blocker,
+                    &mut report.completion_evidence_gaps,
+                );
+                report.completion_evidence_status =
+                    CompletionEvidenceStatus::MissingVerificationEvidence;
+                report.verification_status =
+                    if verification_first_blocker_needs_review(Some(blocker)) {
+                        "needs_review".into()
+                    } else {
+                        "blocked".into()
+                    };
+                if !report.remaining_risks.iter().any(|risk| risk == blocker) {
+                    report.remaining_risks.push(blocker.to_string());
+                }
             }
         }
-        if metadata.completion_evidence_gaps.is_empty() {
+        if metadata.completion_evidence_gaps.is_empty() && completion_can_succeed {
             metadata.completion_evidence_status = Some("sufficient".into());
             metadata.step_failure_classification = None;
             metadata.terminal_blocker_kind = None;
             metadata.recovery_outcome = Some("verification_first_success".into());
+        } else if let Some(blocker) = follow_up_blocker.as_deref() {
+            push_verification_first_follow_up_gap(
+                step,
+                memory.target.as_deref(),
+                blocker,
+                &mut metadata.completion_evidence_gaps,
+            );
+            metadata.completion_evidence_status = Some("missing_verification_evidence".into());
+            metadata.step_failure_classification =
+                Some(StepFailureClassification::VerificationRepairContinuation);
+            metadata.terminal_blocker_kind =
+                Some(if verification_first_blocker_needs_review(Some(blocker)) {
+                    "needs_review".into()
+                } else {
+                    "missing_verification_evidence".into()
+                });
+            metadata.recovery_outcome =
+                Some(if verification_first_blocker_needs_review(Some(blocker)) {
+                    "verification_first_needs_review".into()
+                } else {
+                    "verification_first_blocked".into()
+                });
         }
         metadata.success_classification = classify_step_success(Some(metadata));
     }
@@ -14300,6 +14402,45 @@ mod tests {
         assert_eq!(
             written.completion_evidence_status.as_deref(),
             Some("present")
+        );
+    }
+
+    #[tokio::test]
+    async fn verification_first_needs_review_stays_recoverable_instead_of_sufficient() {
+        let (coordinator, step) =
+            verification_first_projection_coordinator(WorkerLisMPolicy::ForceOn).await;
+
+        let written = coordinator
+            .sync_verification_first_shared_step_memory_from_result(
+                &step,
+                "Outcome: completed\nExecution evidence\n- /tmp/verification-first.md — Read succeeded\nNotes: report preserved for review.",
+            )
+            .await
+            .expect("shared memory write");
+
+        assert_eq!(written.verification_status.as_deref(), Some("blocked"));
+        assert_eq!(written.remaining_blocker.as_deref(), Some("needs review"));
+
+        let routed = coordinator.routed_step_metadata.read().await;
+        let metadata = routed.get(&step.id).expect("routed metadata");
+        assert_eq!(
+            metadata.completion_evidence_status.as_deref(),
+            Some("missing_verification_evidence")
+        );
+        assert_eq!(
+            metadata.step_failure_classification,
+            Some(StepFailureClassification::VerificationRepairContinuation)
+        );
+        assert_eq!(
+            metadata.terminal_blocker_kind.as_deref(),
+            Some("needs_review")
+        );
+        assert!(
+            metadata
+                .completion_evidence_gaps
+                .iter()
+                .any(|gap| gap.target_ref == "verification_first:needs_review"
+                    && gap.recommended_action == "verify_artifact")
         );
     }
 
