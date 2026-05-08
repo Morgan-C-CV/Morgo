@@ -54,6 +54,7 @@ struct SpawnAgentRequest {
     parent_session_id: Option<String>,
     requires_verification: bool,
     lism_policy: WorkerLisMPolicy,
+    continuation_context: Option<StageContinuationContext>,
     shared_step_memory: Option<SharedStepMemory>,
     /// When set, the spawned subagent runtime is assembled with this boss actor policy.
     boss_actor_policy: Option<crate::state::permission_context::BossActorPolicy>,
@@ -467,6 +468,7 @@ fn parse_agent_request(input: &str) -> anyhow::Result<AgentRequest> {
                 parent_session_id: request.parent_session_id,
                 requires_verification: request.requires_verification.unwrap_or(false),
                 lism_policy: parse_worker_lism_policy(request.lism_policy.as_deref(), role)?,
+                continuation_context: request.continuation_payload,
                 shared_step_memory: request.shared_step_memory,
                 boss_actor_policy,
             }));
@@ -503,6 +505,7 @@ fn parse_agent_request(input: &str) -> anyhow::Result<AgentRequest> {
         parent_session_id: None,
         requires_verification: false,
         lism_policy: WorkerLisMPolicy::default_for_role(WorkerRole::Research),
+        continuation_context: None,
         shared_step_memory: None,
         boss_actor_policy: None,
     }))
@@ -520,6 +523,7 @@ fn build_worker_task_input(request: &SpawnAgentRequest) -> String {
         || request.step_objective.is_some()
         || !request.step_acceptance.is_empty()
         || request.parent_session_id.is_some()
+        || request.continuation_context.is_some()
         || request.shared_step_memory.is_some()
     {
         sections.push("<boss-step-context>".into());
@@ -543,6 +547,34 @@ fn build_worker_task_input(request: &SpawnAgentRequest) -> String {
         }
         if let Some(parent_session_id) = request.parent_session_id.as_deref() {
             sections.push(format!("parent_session_id: {parent_session_id}"));
+        }
+        if let Some(continuation) = request.continuation_context.as_ref() {
+            sections.push("stage_continuation_context:".into());
+            sections.push(format!(
+                "failed_target: {}",
+                continuation.failed_target.as_deref().unwrap_or("none")
+            ));
+            sections.push(format!(
+                "next_action: {}",
+                continuation.next_action.as_deref().unwrap_or("none")
+            ));
+            sections.push(format!(
+                "continuity_mode: {}",
+                continuation
+                    .continuity_mode
+                    .as_ref()
+                    .map(|mode| format!("{mode:?}").to_ascii_lowercase())
+                    .unwrap_or_else(|| "none".into())
+            ));
+            if !continuation.verified_facts.is_empty() {
+                sections.push("verified_facts:".into());
+                sections.extend(
+                    continuation
+                        .verified_facts
+                        .iter()
+                        .map(|fact| format!("- {fact}")),
+                );
+            }
         }
         if let Some(memory) = request.shared_step_memory.as_ref() {
             sections.extend(render_shared_step_memory_section(memory));
@@ -1289,6 +1321,7 @@ mod tests {
             parent_session_id: Some("parent-session".into()),
             requires_verification: false,
             lism_policy: WorkerLisMPolicy::default_for_role(WorkerRole::Implement),
+            continuation_context: None,
             shared_step_memory: None,
             boss_actor_policy: None,
         }
@@ -1326,6 +1359,32 @@ mod tests {
         assert!(input.contains("<boss-step-context>"));
         assert!(input.contains("objective: objective 1"));
         assert!(input.contains("plan_id: plan-1"));
+    }
+
+    #[test]
+    fn build_worker_task_input_renders_continuation_context_guidance() {
+        let mut request = sample_spawn_request();
+        request.continuation_context = Some(StageContinuationContext {
+            failed_target: Some("/tmp/output.md".into()),
+            next_action: Some("read_source_evidence".into()),
+            continuity_mode: Some(crate::core::state_frame::ContinuityMode::Repair),
+            verified_facts: vec![
+                "failure_reason: verification evidence is still missing".into(),
+                "modification_direction: read the required source evidence targets first, then verify the output artifact again".into(),
+                "required_evidence_targets: /tmp/source.md".into(),
+            ],
+            ..StageContinuationContext::default()
+        });
+        let input = build_worker_task_input(&request);
+        assert!(input.contains("stage_continuation_context:"));
+        assert!(input.contains("failure_reason: verification evidence is still missing"));
+        assert!(
+            input.contains(
+                "modification_direction: read the required source evidence targets first"
+            )
+        );
+        assert!(input.contains("required_evidence_targets:"));
+        assert!(input.contains("/tmp/source.md"));
     }
 
     #[test]

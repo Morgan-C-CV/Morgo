@@ -3355,7 +3355,12 @@ async fn reject_updates_continuation_context_instead_of_preserving_old_failed_ta
     );
     assert_eq!(
         continuation.verified_facts,
-        vec!["Boss review verdict: rejected"]
+        vec![
+            "Boss review verdict: rejected",
+            "failure_reason: new review summary",
+            "modification_direction: Close the listed required evidence gaps before claiming completion.",
+            "required_evidence_targets: /tmp/new-target.md",
+        ]
     );
 
     let _ = std::fs::remove_file(plan_path);

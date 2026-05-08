@@ -1226,6 +1226,102 @@ fn sync_legacy_correction_from_continuation(step: &mut BossPlanStep) {
     }
 }
 
+fn compact_continuation_text(value: &str) -> String {
+    let normalized = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.len() <= 240 {
+        return normalized;
+    }
+    let mut truncated = normalized.chars().take(240).collect::<String>();
+    if let Some(idx) = truncated.rfind(' ') {
+        truncated.truncate(idx);
+    }
+    truncated.trim().to_string()
+}
+
+fn push_unique_required_evidence(targets: &mut Vec<String>, target: impl Into<String>) {
+    let target = target.into();
+    let trimmed = target.trim();
+    if trimmed.is_empty() || targets.iter().any(|existing| existing == trimmed) {
+        return;
+    }
+    targets.push(trimmed.to_string());
+}
+
+fn continuation_required_evidence_targets(
+    step: &BossPlanStep,
+    failed_target: Option<&str>,
+    next_action: Option<&str>,
+) -> Vec<String> {
+    let mut targets = Vec::new();
+    let action = next_action.unwrap_or_default();
+    if action == "read_source_evidence"
+        && !step
+            .stage_execution_contract
+            .content_evidence_targets
+            .is_empty()
+    {
+        for target in &step.stage_execution_contract.content_evidence_targets {
+            push_unique_required_evidence(&mut targets, target.clone());
+        }
+    }
+    if targets.is_empty() {
+        if let Some(target) = failed_target {
+            push_unique_required_evidence(&mut targets, target.to_string());
+        }
+    }
+    if targets.is_empty() {
+        if let Some(target) = primary_declared_artifact_path(step) {
+            push_unique_required_evidence(&mut targets, target);
+        }
+    }
+    targets
+}
+
+fn continuation_modification_direction(
+    failed_target: Option<&str>,
+    next_action: Option<&str>,
+    required_evidence_targets: &[String],
+) -> String {
+    match next_action.unwrap_or_default() {
+        "read_source_evidence" => {
+            "Read the required source evidence targets first, update the artifact from those sources if needed, then verify the output artifact again.".into()
+        }
+        "verify_artifact" => {
+            "Verify the target artifact against the required evidence targets; do not self-certify from the artifact alone when source evidence is required.".into()
+        }
+        "repair_artifact" => {
+            "Repair the failed target artifact, then re-run verification with runtime evidence anchors.".into()
+        }
+        _ if !required_evidence_targets.is_empty() => {
+            "Close the listed required evidence gaps before claiming completion.".into()
+        }
+        _ => failed_target
+            .map(|target| format!("Address the blocked target {target} and close the evidence gap before completion."))
+            .unwrap_or_else(|| "Close the reported evidence gap before claiming completion.".into()),
+    }
+}
+
+fn continuation_failure_reason(step: &BossPlanStep, next_action: Option<&str>) -> String {
+    if let Some(reason) = step
+        .last_review_summary
+        .as_deref()
+        .map(str::trim)
+        .filter(|reason| !reason.is_empty())
+    {
+        return compact_continuation_text(reason);
+    }
+    match next_action.unwrap_or_default() {
+        "read_source_evidence" => {
+            "completion blocked: required source evidence has not been read".into()
+        }
+        "verify_artifact" => {
+            "completion blocked: artifact verification evidence is still missing".into()
+        }
+        "repair_artifact" => "completion blocked: artifact repair is still required".into(),
+        _ => "completion blocked: evidence gap remains open".into(),
+    }
+}
+
 fn update_step_continuation_context(
     step: &mut BossPlanStep,
     mode: crate::core::state_frame::ContinuityMode,
@@ -1243,7 +1339,7 @@ fn update_step_continuation_context(
             .as_ref()
             .and_then(|context| context.next_action.clone())
     });
-    let effective_verified_facts = if verified_facts.is_empty() {
+    let mut effective_verified_facts = if verified_facts.is_empty() {
         step.stage_continuation_context
             .as_ref()
             .map(|context| context.verified_facts.clone())
@@ -1251,6 +1347,38 @@ fn update_step_continuation_context(
     } else {
         verified_facts
     };
+    let required_evidence_targets = continuation_required_evidence_targets(
+        step,
+        effective_failed_target.as_deref(),
+        effective_next_action.as_deref(),
+    );
+    let failure_reason = continuation_failure_reason(step, effective_next_action.as_deref());
+    let modification_direction = continuation_modification_direction(
+        effective_failed_target.as_deref(),
+        effective_next_action.as_deref(),
+        &required_evidence_targets,
+    );
+    if matches!(&mode, crate::core::state_frame::ContinuityMode::Repair) {
+        for fact in [
+            format!("failure_reason: {failure_reason}"),
+            format!("modification_direction: {modification_direction}"),
+            format!(
+                "required_evidence_targets: {}",
+                if required_evidence_targets.is_empty() {
+                    "none".into()
+                } else {
+                    required_evidence_targets.join(" | ")
+                }
+            ),
+        ] {
+            if !effective_verified_facts
+                .iter()
+                .any(|existing| existing == &fact)
+            {
+                effective_verified_facts.push(fact);
+            }
+        }
+    }
     let context = crate::core::state_frame::StageContinuationContext {
         repair_intent: Some(crate::core::state_frame::RepairIntent {
             failed_target: effective_failed_target.clone(),
@@ -1820,6 +1948,115 @@ fn verification_first_contract_blocker(contract: &ExecutorBAssignmentContract) -
     "none".into()
 }
 
+fn verification_first_repair_brief_lines(contract: &ExecutorBAssignmentContract) -> Vec<String> {
+    let context = contract.state_frame.stage_continuation_context.as_ref();
+    let has_repair_signal = context.is_some()
+        || contract
+            .shared_step_memory
+            .as_ref()
+            .and_then(verification_first_shared_memory_blocker)
+            .is_some()
+        || !contract
+            .state_frame
+            .stage_execution_contract
+            .content_evidence_targets
+            .is_empty();
+    let mut failure_reason = None;
+    let mut modification_direction = None;
+    let mut required_targets = Vec::new();
+    if let Some(context) = context {
+        let mut facts = context.verified_facts.clone();
+        if facts.is_empty() {
+            if let Some(intent) = context.repair_intent.as_ref() {
+                facts = intent.verified_facts.clone();
+            }
+        }
+        for fact in &facts {
+            let lowered = fact.trim().to_ascii_lowercase();
+            if failure_reason.is_none()
+                && lowered.starts_with("failure_reason:")
+                && fact.split_once(':').is_some()
+            {
+                failure_reason = fact
+                    .split_once(':')
+                    .map(|(_, value)| value.trim().to_string())
+                    .filter(|value| !value.is_empty());
+                continue;
+            }
+            if modification_direction.is_none()
+                && lowered.starts_with("modification_direction:")
+                && fact.split_once(':').is_some()
+            {
+                modification_direction = fact
+                    .split_once(':')
+                    .map(|(_, value)| value.trim().to_string())
+                    .filter(|value| !value.is_empty());
+                continue;
+            }
+            if lowered.starts_with("required_evidence_targets:") && fact.split_once(':').is_some() {
+                let values = fact
+                    .split_once(':')
+                    .map(|(_, value)| value.trim())
+                    .unwrap_or_default();
+                if values.eq_ignore_ascii_case("none") || values.is_empty() {
+                    continue;
+                }
+                for target in values.split('|').map(str::trim) {
+                    if !target.is_empty()
+                        && !required_targets.iter().any(|existing| existing == target)
+                    {
+                        required_targets.push(target.to_string());
+                    }
+                }
+                continue;
+            }
+        }
+    }
+    if required_targets.is_empty() {
+        required_targets.extend(
+            contract
+                .state_frame
+                .stage_execution_contract
+                .content_evidence_targets
+                .iter()
+                .cloned(),
+        );
+    }
+    if required_targets.is_empty() && has_repair_signal {
+        if let Some(target) = context
+            .and_then(|context| context.failed_target.clone())
+            .or_else(|| verification_first_target_path_from_contract(contract))
+        {
+            required_targets.push(target);
+        }
+    }
+    if failure_reason.is_none() && modification_direction.is_none() && required_targets.is_empty() {
+        return Vec::new();
+    }
+
+    let mut lines = vec!["repair_brief:".into()];
+    lines.push(format!(
+        "failure_reason: {}",
+        failure_reason
+            .unwrap_or_else(|| "completion blocked: verification evidence gap remains open".into())
+    ));
+    lines.push(format!(
+        "modification_direction: {}",
+        modification_direction.unwrap_or_else(|| {
+            "close the listed evidence gaps before returning the verification patch".into()
+        })
+    ));
+    if required_targets.is_empty() {
+        lines.push("required_evidence_targets: none".into());
+    } else {
+        lines.push("required_evidence_targets:".into());
+        for target in required_targets {
+            lines.push(format!("- {target}"));
+        }
+    }
+    lines
+}
+
 fn build_verification_first_task_message(contract: &ExecutorBAssignmentContract) -> String {
     let target = verification_first_contract_target(contract);
     let facts = verification_first_contract_facts(contract);
@@ -1829,9 +2066,14 @@ fn build_verification_first_task_message(contract: &ExecutorBAssignmentContract)
         facts.join("; ")
     };
     let blocker = verification_first_contract_blocker(contract);
-    format!(
+    let mut lines = verification_first_repair_brief_lines(contract);
+    if !lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines.push(format!(
         "verified_target: {target}\nverification_result: verified|blocked\nminimal_evidence: {evidence}\nremaining_blocker: {blocker}\nevidence_refs: none"
-    )
+    ));
+    lines.join("\n")
 }
 
 fn build_continuation_payload(contract: &ExecutorBAssignmentContract) -> ContinuationPayload {
@@ -2723,7 +2965,8 @@ fn append_artifact_verification_runtime_records(
     status: &str,
     summary_prefix: &str,
 ) {
-    for expectation in extract_artifact_expectations(&current_task_contract_text(step.objective())) {
+    for expectation in extract_artifact_expectations(&current_task_contract_text(step.objective()))
+    {
         let path = expectation.path.to_string_lossy().to_string();
         let kind = match expectation.kind {
             crate::core::boss_acceptance::BossArtifactKind::File => "file",
@@ -2777,7 +3020,10 @@ fn build_step_review_summary(
     }
     let mut sections = vec![
         format!("{source} reported boss step {} complete.", step.id),
-        format!("Objective: {}", current_task_contract_text(step.objective())),
+        format!(
+            "Objective: {}",
+            current_task_contract_text(step.objective())
+        ),
         "Acceptance:".to_string(),
         summarize_acceptance_items(step),
     ];
@@ -5007,10 +5253,12 @@ impl BossCoordinator {
                         update_step_continuation_context(
                             step,
                             crate::core::state_frame::ContinuityMode::Repair,
-            extract_artifact_expectations(&current_task_contract_text(step.objective()))
-                                .into_iter()
-                                .next()
-                                .map(|expectation| expectation.path.display().to_string()),
+                            extract_artifact_expectations(&current_task_contract_text(
+                                step.objective(),
+                            ))
+                            .into_iter()
+                            .next()
+                            .map(|expectation| expectation.path.display().to_string()),
                             repair_instruction,
                             continuation_verified_facts(step),
                         );
@@ -5019,10 +5267,12 @@ impl BossCoordinator {
                         update_step_continuation_context(
                             step,
                             crate::core::state_frame::ContinuityMode::Repair,
-            extract_artifact_expectations(&current_task_contract_text(step.objective()))
-                                .into_iter()
-                                .next()
-                                .map(|expectation| expectation.path.display().to_string()),
+                            extract_artifact_expectations(&current_task_contract_text(
+                                step.objective(),
+                            ))
+                            .into_iter()
+                            .next()
+                            .map(|expectation| expectation.path.display().to_string()),
                             repair_instruction,
                             continuation_verified_facts(step),
                         );
@@ -5155,10 +5405,12 @@ impl BossCoordinator {
                     update_step_continuation_context(
                         step,
                         crate::core::state_frame::ContinuityMode::Repair,
-                        extract_artifact_expectations(&current_task_contract_text(step.objective()))
-                            .into_iter()
-                            .next()
-                            .map(|expectation| expectation.path.display().to_string()),
+                        extract_artifact_expectations(&current_task_contract_text(
+                            step.objective(),
+                        ))
+                        .into_iter()
+                        .next()
+                        .map(|expectation| expectation.path.display().to_string()),
                         next_action,
                         continuation_verified_facts(step),
                     );
@@ -5345,10 +5597,12 @@ impl BossCoordinator {
                             update_step_continuation_context(
                                 step,
                                 crate::core::state_frame::ContinuityMode::Repair,
-                                extract_artifact_expectations(&current_task_contract_text(step.objective()))
-                                    .into_iter()
-                                    .next()
-                                    .map(|expectation| expectation.path.display().to_string()),
+                                extract_artifact_expectations(&current_task_contract_text(
+                                    step.objective(),
+                                ))
+                                .into_iter()
+                                .next()
+                                .map(|expectation| expectation.path.display().to_string()),
                                 Some("verify_artifact".into()).or(verification_instruction),
                                 continuation_verified_facts(step),
                             );
@@ -5364,10 +5618,12 @@ impl BossCoordinator {
                             update_step_continuation_context(
                                 step,
                                 crate::core::state_frame::ContinuityMode::Repair,
-                                extract_artifact_expectations(&current_task_contract_text(step.objective()))
-                                    .into_iter()
-                                    .next()
-                                    .map(|expectation| expectation.path.display().to_string()),
+                                extract_artifact_expectations(&current_task_contract_text(
+                                    step.objective(),
+                                ))
+                                .into_iter()
+                                .next()
+                                .map(|expectation| expectation.path.display().to_string()),
                                 Some("verify_artifact".into()).or(verification_instruction),
                                 continuation_verified_facts(step),
                             );
@@ -5390,10 +5646,12 @@ impl BossCoordinator {
                                 update_step_continuation_context(
                                     step,
                                     crate::core::state_frame::ContinuityMode::Repair,
-                                    extract_artifact_expectations(&current_task_contract_text(step.objective()))
-                                        .into_iter()
-                                        .next()
-                                        .map(|expectation| expectation.path.display().to_string()),
+                                    extract_artifact_expectations(&current_task_contract_text(
+                                        step.objective(),
+                                    ))
+                                    .into_iter()
+                                    .next()
+                                    .map(|expectation| expectation.path.display().to_string()),
                                     Some("verify_artifact".into())
                                         .or_else(|| build_verification_repair_instruction(step)),
                                     continuation_verified_facts(step),
@@ -5578,10 +5836,12 @@ impl BossCoordinator {
                         update_step_continuation_context(
                             step,
                             crate::core::state_frame::ContinuityMode::Repair,
-                            extract_artifact_expectations(&current_task_contract_text(step.objective()))
-                                .into_iter()
-                                .next()
-                                .map(|expectation| expectation.path.display().to_string()),
+                            extract_artifact_expectations(&current_task_contract_text(
+                                step.objective(),
+                            ))
+                            .into_iter()
+                            .next()
+                            .map(|expectation| expectation.path.display().to_string()),
                             Some("verify_artifact".into()).or(verification_instruction),
                             continuation_verified_facts(step),
                         );
@@ -5590,10 +5850,12 @@ impl BossCoordinator {
                         update_step_continuation_context(
                             step,
                             crate::core::state_frame::ContinuityMode::Repair,
-                            extract_artifact_expectations(&current_task_contract_text(step.objective()))
-                                .into_iter()
-                                .next()
-                                .map(|expectation| expectation.path.display().to_string()),
+                            extract_artifact_expectations(&current_task_contract_text(
+                                step.objective(),
+                            ))
+                            .into_iter()
+                            .next()
+                            .map(|expectation| expectation.path.display().to_string()),
                             Some("verify_artifact".into()).or(verification_instruction),
                             continuation_verified_facts(step),
                         );
@@ -5764,10 +6026,12 @@ impl BossCoordinator {
                     update_step_continuation_context(
                         step,
                         crate::core::state_frame::ContinuityMode::Repair,
-                        extract_artifact_expectations(&current_task_contract_text(step.objective()))
-                            .into_iter()
-                            .next()
-                            .map(|expectation| expectation.path.display().to_string()),
+                        extract_artifact_expectations(&current_task_contract_text(
+                            step.objective(),
+                        ))
+                        .into_iter()
+                        .next()
+                        .map(|expectation| expectation.path.display().to_string()),
                         next_action,
                         continuation_verified_facts(step),
                     );
@@ -13173,6 +13437,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn verification_first_task_message_includes_repair_brief_for_continuation_context() {
+        let (coordinator, _) =
+            verification_first_projection_coordinator(WorkerLisMPolicy::ForceOn).await;
+        let mut assignment = coordinator
+            .build_executor_b_assignment_contract(0, "session-alpha", true)
+            .await
+            .expect("build assignment");
+        assignment.state_frame.stage_continuation_context = Some(
+            crate::core::state_frame::StageContinuationContext {
+                repair_intent: Some(crate::core::state_frame::RepairIntent {
+                    failed_target: Some("/tmp/report.md".into()),
+                    verified_facts: vec![
+                        "failure_reason: verification evidence is still missing".into(),
+                        "modification_direction: read the required source evidence targets first, then verify the output artifact again".into(),
+                        "required_evidence_targets: /tmp/source.md".into(),
+                    ],
+                    next_action: Some("read_source_evidence".into()),
+                    continuity_mode: Some(crate::core::state_frame::ContinuityMode::Repair),
+                }),
+                failed_target: Some("/tmp/report.md".into()),
+                verified_facts: vec![
+                    "failure_reason: verification evidence is still missing".into(),
+                    "modification_direction: read the required source evidence targets first, then verify the output artifact again".into(),
+                    "required_evidence_targets: /tmp/source.md".into(),
+                ],
+                next_action: Some("read_source_evidence".into()),
+                continuity_mode: Some(crate::core::state_frame::ContinuityMode::Repair),
+            },
+        );
+
+        let message = build_verification_first_task_message(&assignment);
+        assert!(message.contains("repair_brief:"));
+        assert!(message.contains("failure_reason: verification evidence is still missing"));
+        assert!(
+            message.contains(
+                "modification_direction: read the required source evidence targets first"
+            )
+        );
+        assert!(message.contains("required_evidence_targets:"));
+        assert!(message.contains("/tmp/source.md"));
+    }
+
+    #[tokio::test]
     async fn boss_on_only_review_summary_falls_back_to_non_shared_projection() {
         let (coordinator, step) =
             verification_first_projection_coordinator(WorkerLisMPolicy::ForceOff).await;
@@ -16934,7 +17241,9 @@ mod tests {
             objective: Some(format!(
                 "任务目标：\n- 目标目录：{current_dir}\n\n参考材料摘录：\n- 目标目录：{historical_dir}"
             )),
-            acceptance: vec![format!("target directory exists and is non-empty: {current_dir}")],
+            acceptance: vec![format!(
+                "target directory exists and is non-empty: {current_dir}"
+            )],
             requires_approval: false,
             status: BossPlanStepStatus::Pending,
             completed: false,

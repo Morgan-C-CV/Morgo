@@ -245,9 +245,10 @@ fn build_stage_execution_contract(
         })
         .collect::<Vec<_>>();
     if let Some(step) = step {
-        for (idx, expectation) in extract_artifact_expectations(&current_task_contract_text(step.objective()))
-            .into_iter()
-            .enumerate()
+        for (idx, expectation) in
+            extract_artifact_expectations(&current_task_contract_text(step.objective()))
+                .into_iter()
+                .enumerate()
         {
             let path = expectation.path.to_string_lossy().to_string();
             if declared_artifacts.iter().any(|item| item.path == path) {
