@@ -623,7 +623,7 @@ fn primary_declared_artifact_path(step: &BossPlanStep) -> Option<String> {
         .first()
         .map(|artifact| artifact.path.clone())
         .or_else(|| {
-            extract_artifact_expectations(step.objective())
+            extract_artifact_expectations(&current_task_contract_text(step.objective()))
                 .into_iter()
                 .next()
                 .map(|expectation| expectation.path.display().to_string())
@@ -637,7 +637,7 @@ fn build_artifact_repair_instruction(step: &BossPlanStep, missing_reason: &str) 
         .first()
         .map(|artifact| (artifact.path.clone(), artifact.kind.clone()))
         .or_else(|| {
-            extract_artifact_expectations(step.objective())
+            extract_artifact_expectations(&current_task_contract_text(step.objective()))
                 .into_iter()
                 .next()
                 .map(|expectation| {
@@ -2389,7 +2389,7 @@ fn summarize_acceptance_items(step: &BossPlanStep) -> String {
     } else {
         step.acceptance
             .iter()
-            .map(|item| format!("- {item}"))
+            .map(|item| format!("- {}", current_task_contract_text(item).trim()))
             .collect::<Vec<_>>()
             .join("\n")
     }
@@ -2418,7 +2418,13 @@ fn build_relevant_file_handle_source_text(
         sections.push(objective.to_string());
     }
     if !step.acceptance.is_empty() {
-        sections.push(step.acceptance.join("\n"));
+        sections.push(
+            step.acceptance
+                .iter()
+                .map(|item| current_task_contract_text(item).trim().to_string())
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
     }
     sections.join("\n")
 }
@@ -2432,7 +2438,11 @@ fn collect_recent_decisions(plan: &BossPlan, current_step_id: usize) -> Vec<Stri
             if let Some(summary) = step.last_review_summary.as_ref() {
                 Some(format!("step {} review: {}", step.id, summary))
             } else if step.status == BossPlanStepStatus::Completed {
-                Some(format!("step {} completed: {}", step.id, step.objective()))
+                Some(format!(
+                    "step {} completed: {}",
+                    step.id,
+                    current_task_contract_text(step.objective())
+                ))
             } else {
                 None
             }
@@ -2713,7 +2723,7 @@ fn append_artifact_verification_runtime_records(
     status: &str,
     summary_prefix: &str,
 ) {
-    for expectation in extract_artifact_expectations(step.objective()) {
+    for expectation in extract_artifact_expectations(&current_task_contract_text(step.objective())) {
         let path = expectation.path.to_string_lossy().to_string();
         let kind = match expectation.kind {
             crate::core::boss_acceptance::BossArtifactKind::File => "file",
@@ -2767,7 +2777,7 @@ fn build_step_review_summary(
     }
     let mut sections = vec![
         format!("{source} reported boss step {} complete.", step.id),
-        format!("Objective: {}", step.objective()),
+        format!("Objective: {}", current_task_contract_text(step.objective())),
         "Acceptance:".to_string(),
         summarize_acceptance_items(step),
     ];
@@ -3874,7 +3884,7 @@ impl BossCoordinator {
         }
         let target = verification_first_target_path(step)
             .or_else(|| primary_declared_artifact_path(step))
-            .unwrap_or_else(|| step.objective().to_string());
+            .unwrap_or_else(|| current_task_contract_text(step.objective()));
         let mut memory = self
             .shared_step_memory_for_step(step.id)
             .await
@@ -4997,7 +5007,7 @@ impl BossCoordinator {
                         update_step_continuation_context(
                             step,
                             crate::core::state_frame::ContinuityMode::Repair,
-                            extract_artifact_expectations(step.objective())
+            extract_artifact_expectations(&current_task_contract_text(step.objective()))
                                 .into_iter()
                                 .next()
                                 .map(|expectation| expectation.path.display().to_string()),
@@ -5009,7 +5019,7 @@ impl BossCoordinator {
                         update_step_continuation_context(
                             step,
                             crate::core::state_frame::ContinuityMode::Repair,
-                            extract_artifact_expectations(step.objective())
+            extract_artifact_expectations(&current_task_contract_text(step.objective()))
                                 .into_iter()
                                 .next()
                                 .map(|expectation| expectation.path.display().to_string()),
@@ -5145,7 +5155,7 @@ impl BossCoordinator {
                     update_step_continuation_context(
                         step,
                         crate::core::state_frame::ContinuityMode::Repair,
-                        extract_artifact_expectations(step.objective())
+                        extract_artifact_expectations(&current_task_contract_text(step.objective()))
                             .into_iter()
                             .next()
                             .map(|expectation| expectation.path.display().to_string()),
@@ -5335,7 +5345,7 @@ impl BossCoordinator {
                             update_step_continuation_context(
                                 step,
                                 crate::core::state_frame::ContinuityMode::Repair,
-                                extract_artifact_expectations(step.objective())
+                                extract_artifact_expectations(&current_task_contract_text(step.objective()))
                                     .into_iter()
                                     .next()
                                     .map(|expectation| expectation.path.display().to_string()),
@@ -5354,7 +5364,7 @@ impl BossCoordinator {
                             update_step_continuation_context(
                                 step,
                                 crate::core::state_frame::ContinuityMode::Repair,
-                                extract_artifact_expectations(step.objective())
+                                extract_artifact_expectations(&current_task_contract_text(step.objective()))
                                     .into_iter()
                                     .next()
                                     .map(|expectation| expectation.path.display().to_string()),
@@ -5380,7 +5390,7 @@ impl BossCoordinator {
                                 update_step_continuation_context(
                                     step,
                                     crate::core::state_frame::ContinuityMode::Repair,
-                                    extract_artifact_expectations(step.objective())
+                                    extract_artifact_expectations(&current_task_contract_text(step.objective()))
                                         .into_iter()
                                         .next()
                                         .map(|expectation| expectation.path.display().to_string()),
@@ -5568,7 +5578,7 @@ impl BossCoordinator {
                         update_step_continuation_context(
                             step,
                             crate::core::state_frame::ContinuityMode::Repair,
-                            extract_artifact_expectations(step.objective())
+                            extract_artifact_expectations(&current_task_contract_text(step.objective()))
                                 .into_iter()
                                 .next()
                                 .map(|expectation| expectation.path.display().to_string()),
@@ -5580,7 +5590,7 @@ impl BossCoordinator {
                         update_step_continuation_context(
                             step,
                             crate::core::state_frame::ContinuityMode::Repair,
-                            extract_artifact_expectations(step.objective())
+                            extract_artifact_expectations(&current_task_contract_text(step.objective()))
                                 .into_iter()
                                 .next()
                                 .map(|expectation| expectation.path.display().to_string()),
@@ -5754,7 +5764,7 @@ impl BossCoordinator {
                     update_step_continuation_context(
                         step,
                         crate::core::state_frame::ContinuityMode::Repair,
-                        extract_artifact_expectations(step.objective())
+                        extract_artifact_expectations(&current_task_contract_text(step.objective()))
                             .into_iter()
                             .next()
                             .map(|expectation| expectation.path.display().to_string()),
@@ -6867,7 +6877,10 @@ impl BossCoordinator {
         let open_items = if step.status == BossPlanStepStatus::Completed {
             Vec::new()
         } else {
-            step.acceptance.clone()
+            step.acceptance
+                .iter()
+                .map(|item| current_task_contract_text(item).to_string())
+                .collect::<Vec<_>>()
         };
         let blocked_items = collect_blocked_items(step);
         let recent_local_facts = if include_local_continuity {
@@ -6913,12 +6926,15 @@ impl BossCoordinator {
         let effective_objective = if verification_first_short_form {
             build_verification_first_brief_objective(step)
         } else {
-            step.objective().to_string()
+            current_task_contract_text(step.objective())
         };
         let effective_acceptance = if verification_first_short_form {
             build_verification_first_acceptance(step)
         } else {
-            step.acceptance.clone()
+            step.acceptance
+                .iter()
+                .map(|item| current_task_contract_text(item).to_string())
+                .collect::<Vec<_>>()
         };
         let verification_first_target = verification_first_short_form
             .then(|| verification_first_target_path(step))
@@ -7066,7 +7082,7 @@ impl BossCoordinator {
             let target = verification_first_target
                 .clone()
                 .or_else(|| primary_declared_artifact_path(step))
-                .unwrap_or_else(|| step.objective().to_string());
+                .unwrap_or_else(|| current_task_contract_text(step.objective()));
             let mut shared = self
                 .shared_step_memory_for_step(step.id)
                 .await

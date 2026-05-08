@@ -108,7 +108,7 @@ fn build_permission_facts(step_id: usize, objective: &str, readonly_analysis: bo
         return Vec::new();
     }
     let mut facts = Vec::new();
-    for (idx, expectation) in extract_artifact_expectations(objective)
+    for (idx, expectation) in extract_artifact_expectations(&current_task_contract_text(objective))
         .into_iter()
         .enumerate()
     {
@@ -245,7 +245,7 @@ fn build_stage_execution_contract(
         })
         .collect::<Vec<_>>();
     if let Some(step) = step {
-        for (idx, expectation) in extract_artifact_expectations(step.objective())
+        for (idx, expectation) in extract_artifact_expectations(&current_task_contract_text(step.objective()))
             .into_iter()
             .enumerate()
         {
@@ -638,7 +638,13 @@ fn build_fact_ledger(
         ));
         facts.push(fact_line(
             "accepted_constraints",
-            summarize_list(&step.acceptance),
+            summarize_list(
+                &step
+                    .acceptance
+                    .iter()
+                    .map(|item| current_task_contract_text(item))
+                    .collect::<Vec<_>>(),
+            ),
         ));
         facts.push(fact_line(
             "preferred_deployment_mode",
@@ -646,7 +652,7 @@ fn build_fact_ledger(
                 "ref=deploymode:step{} source=objective_inference source_event_id=deploymode:{} freshness=current confidence=0.85 status=active invalidated_by=none supersedes=none conflicts_with=none summary={}",
                 step.id,
                 step.id,
-                infer_preferred_deployment_mode(step.objective())
+                infer_preferred_deployment_mode(&current_task_contract_text(step.objective()))
             ),
         ));
         facts.push(fact_line(
@@ -660,7 +666,11 @@ fn build_fact_ledger(
             "recent_diff",
             step.result_diff.as_deref().unwrap_or("none recorded"),
         ));
-        let permission_facts = build_permission_facts(step.id, step.objective(), readonly_analysis);
+        let permission_facts = build_permission_facts(
+            step.id,
+            &current_task_contract_text(step.objective()),
+            readonly_analysis,
+        );
         facts.extend(permission_facts.iter().cloned());
         if !ledgers.file_facts.is_empty() {
             for item in &ledgers.file_facts {

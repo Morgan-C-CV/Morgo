@@ -1137,12 +1137,12 @@ pub fn build_step_fact_ledgers(step: &BossPlanStep) -> StepFactLedgers {
     apply_runtime_tool_records(&mut ledgers, step);
 
     let objective = current_task_contract_text(step.objective());
-    for (idx, (path, line)) in extract_path_candidates(objective).into_iter().enumerate() {
+    for (idx, (path, line)) in extract_path_candidates(&objective).into_iter().enumerate() {
         let kind = classify_path_kind(&path, &line);
         let symbol = extract_symbol_for_path(
             &path,
             &[
-                objective,
+                &objective,
                 step.result_diff.as_deref().unwrap_or_default(),
                 step.last_review_summary.as_deref().unwrap_or_default(),
             ],
@@ -1216,7 +1216,7 @@ pub fn build_step_fact_ledgers(step: &BossPlanStep) -> StepFactLedgers {
                         fact: format!(
                             "worker output indicates this file was read or inspected: {path}"
                         ),
-                        symbol: extract_symbol_for_path(&path, &[result_diff, objective]),
+                        symbol: extract_symbol_for_path(&path, &[result_diff, &objective]),
                         source: "worker_result".into(),
                         source_event_id: format!("worker-read:{}", step.id),
                         freshness: "after-worker-output".into(),
@@ -1293,7 +1293,7 @@ pub fn build_step_fact_ledgers(step: &BossPlanStep) -> StepFactLedgers {
                         fact: format!(
                             "review summary indicates this file was read or inspected: {path}"
                         ),
-                        symbol: extract_symbol_for_path(&path, &[review, objective]),
+                        symbol: extract_symbol_for_path(&path, &[review, &objective]),
                         source: "review_summary".into(),
                         source_event_id: format!("review-read:{}", step.id),
                         freshness: "after-review".into(),
