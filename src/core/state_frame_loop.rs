@@ -659,6 +659,7 @@ fn collect_evidence_refs(frame: &StateFrame, usage: Option<&LoopUsage>) -> Vec<S
     }
 
     append_required_source_read_anchors(frame, usage, &mut refs);
+    append_completion_gate_read_anchors(frame, usage, &mut refs);
 
     refs
 }
@@ -706,6 +707,84 @@ fn append_required_source_read_anchors(
             }
         }
     }
+}
+
+fn runtime_read_observation_paths(frame: &StateFrame, usage: Option<&LoopUsage>) -> Vec<String> {
+    let mut paths = Vec::new();
+
+    for line in frame
+        .recent_evidence
+        .iter()
+        .filter(|line| line.starts_with("fact: file_facts "))
+    {
+        if evidence_field_value(line, "kind").as_deref() == Some("read_observation")
+            && evidence_field_value(line, "source").as_deref() == Some("tool:Read")
+        {
+            if let Some(path) = evidence_field_value(line, "path") {
+                push_unique(&mut paths, path);
+            }
+        }
+    }
+
+    if let Some(usage) = usage {
+        for record in &usage.tool_execution_records {
+            if record.kind != ToolExecutionOutcomeKind::Success || record.tool_name != "Read" {
+                continue;
+            }
+            if let Some(path) = observable_path_from_input(record.observable_input.as_ref()) {
+                push_unique(&mut paths, path);
+            }
+        }
+    }
+
+    paths
+}
+
+fn completion_gate_required_read_targets(frame: &StateFrame) -> Vec<String> {
+    let mut targets = Vec::new();
+    for line in frame.open_items.iter().chain(frame.recent_evidence.iter()) {
+        let Some(required_refs) = evidence_field_value(line, "required_evidence_refs") else {
+            continue;
+        };
+        for item in split_contract_refs(&required_refs) {
+            if let Some(path) = item.strip_prefix("read:") {
+                let path = path.trim();
+                if !path.is_empty() {
+                    push_unique(&mut targets, path.to_string());
+                }
+            }
+        }
+    }
+    targets
+}
+
+fn append_completion_gate_read_anchors(
+    frame: &StateFrame,
+    usage: Option<&LoopUsage>,
+    refs: &mut Vec<String>,
+) {
+    let required_targets = completion_gate_required_read_targets(frame);
+    if required_targets.is_empty() {
+        return;
+    }
+    let runtime_reads = runtime_read_observation_paths(frame, usage);
+    for target in required_targets {
+        if runtime_reads.iter().any(|path| path == &target) {
+            let anchor = format!("read:{target}");
+            push_unique(refs, anchor);
+        }
+    }
+}
+
+fn completion_gate_required_reads_closed(frame: &StateFrame, usage: &LoopUsage) -> bool {
+    let required_targets = completion_gate_required_read_targets(frame);
+    if required_targets.is_empty() {
+        return false;
+    }
+    let runtime_reads = runtime_read_observation_paths(frame, Some(usage));
+    required_targets
+        .iter()
+        .all(|target| runtime_reads.iter().any(|path| path == target))
 }
 
 fn worker_has_target_scoped_verification_anchor(frame: &StateFrame, refs: &[String]) -> bool {
@@ -1285,6 +1364,7 @@ fn collect_completion_evidence_gaps_with_refs(
 fn evaluate_completion_evidence(frame: &StateFrame, usage: &LoopUsage) -> CompletionEvidenceStatus {
     let evidence_refs = collect_evidence_refs(frame, Some(usage));
     let runtime_read_anchor_closed = verification_runtime_read_anchor_closed(frame, usage);
+    let completion_gate_reads_closed = completion_gate_required_reads_closed(frame, usage);
     if completion_contract_requirement(frame, "artifact_evidence")
         && !missing_artifact_evidence_refs(frame).is_empty()
     {
@@ -1304,6 +1384,7 @@ fn evaluate_completion_evidence(frame: &StateFrame, usage: &LoopUsage) -> Comple
         if worker_has_target_scoped_verification_anchor(frame, &evidence_refs)
             || verification_read_anchor_closed(frame, &evidence_refs)
             || runtime_read_anchor_closed
+            || completion_gate_reads_closed
         {
             return CompletionEvidenceStatus::Sufficient;
         }
@@ -1583,13 +1664,15 @@ fn build_worker_structured_report(
     let evidence_refs = collect_evidence_refs(frame, Some(usage));
     let read_anchor_closed = verification_read_anchor_closed(frame, &evidence_refs)
         || verification_runtime_read_anchor_closed(frame, usage);
+    let completion_gate_reads_closed = completion_gate_required_reads_closed(frame, usage);
     let source_evidence_closed = missing_source_evidence_targets(frame, &evidence_refs).is_empty();
     let completion = if matches!(
         completion,
         CompletionEvidenceStatus::MissingVerificationEvidence
     ) && source_evidence_closed
         && (worker_has_target_scoped_verification_anchor(frame, &evidence_refs)
-            || read_anchor_closed)
+            || read_anchor_closed
+            || completion_gate_reads_closed)
     {
         CompletionEvidenceStatus::Sufficient
     } else {
@@ -1598,13 +1681,13 @@ fn build_worker_structured_report(
     let mut completion_evidence_gaps =
         collect_completion_evidence_gaps_with_refs(frame, &evidence_refs);
     if matches!(completion, CompletionEvidenceStatus::Sufficient)
-        && read_anchor_closed
         && source_evidence_closed
+        && (read_anchor_closed || completion_gate_reads_closed)
     {
         completion_evidence_gaps.retain(|gap| !gap.missing_verification_evidence);
     }
     let verification_status = if matches!(completion, CompletionEvidenceStatus::Sufficient)
-        && read_anchor_closed
+        && (read_anchor_closed || completion_gate_reads_closed)
         && source_evidence_closed
     {
         "verified".into()
@@ -1633,6 +1716,38 @@ fn finalize_worker_usage_report(frame: &StateFrame, usage: &mut LoopUsage) {
     let report = build_worker_structured_report(frame, usage, completion);
     usage.completion_evidence_status = Some(report.completion_evidence_status.clone());
     usage.worker_report = Some(report);
+}
+
+fn completion_gate_repair_active(frame: &StateFrame) -> bool {
+    frame.open_items.iter().chain(frame.recent_evidence.iter()).any(|item| {
+        item.starts_with("completion_gate_repair:")
+            || item.starts_with("completion_gate:")
+            || item.starts_with("required_action:verify_artifact")
+            || item.starts_with("required_action:read_source_evidence")
+    })
+}
+
+fn completion_gate_repair_terminal_outcome(
+    frame: &StateFrame,
+    usage: &mut LoopUsage,
+) -> Option<LoopOutcome> {
+    if !completion_gate_repair_active(frame) {
+        return None;
+    }
+    let completion = evaluate_completion_evidence(frame, usage);
+    if !matches!(completion, CompletionEvidenceStatus::Sufficient) {
+        return None;
+    }
+    let report = build_worker_structured_report(frame, usage, completion);
+    if !report.completion_evidence_gaps.is_empty() {
+        return None;
+    }
+    usage.completion_evidence_status = Some(report.completion_evidence_status.clone());
+    usage.worker_report = Some(report);
+    Some(LoopOutcome::Done {
+        final_state: AgentState::Done,
+        usage: usage.clone(),
+    })
 }
 
 fn verify_terminal_diagnostics_enabled() -> bool {
@@ -1666,6 +1781,7 @@ fn verification_terminal_outcome(frame: &StateFrame, usage: &mut LoopUsage) -> O
     let evidence_refs = collect_evidence_refs(frame, Some(usage));
     let has_target_read_anchor = worker_has_target_scoped_read_anchor(frame, &evidence_refs)
         || verification_runtime_read_anchor_closed(frame, usage);
+    let completion_gate_reads_closed = completion_gate_required_reads_closed(frame, usage);
     let source_evidence_closed = missing_source_evidence_targets(frame, &evidence_refs).is_empty();
     let verification_target_read_count = verification_target_successful_read_count(frame, usage);
     let verification_status = summarize_verification_status(frame);
@@ -1675,7 +1791,9 @@ fn verification_terminal_outcome(frame: &StateFrame, usage: &mut LoopUsage) -> O
         .unwrap_or("none");
     let read_short_circuit_candidate = has_target_read_anchor
         && source_evidence_closed
-        && (verification_status == "verified" || last_effective_tool_action == "Read");
+        && (verification_status == "verified"
+            || last_effective_tool_action == "Read"
+            || completion_gate_reads_closed);
     let read_tailspin_candidate =
         verification_target_read_count >= 2 && has_target_read_anchor && source_evidence_closed;
     if read_short_circuit_candidate {
@@ -3703,6 +3821,11 @@ pub async fn run_decision_loop_with_tools(
                         total_usage.last_failure_outcome = None;
                         clear_recovery_after_success(&mut total_usage);
                         total_usage.tool_execution_records.push(record);
+                        if let Some(outcome) =
+                            completion_gate_repair_terminal_outcome(&frame, &mut total_usage)
+                        {
+                            return Ok(outcome);
+                        }
                         if !changed {
                             finalize_worker_usage_report(&frame, &mut total_usage);
                             return Ok(LoopOutcome::NoProgress {
@@ -3756,6 +3879,9 @@ pub async fn run_decision_loop_with_tools(
             }
         }
 
+        if let Some(outcome) = completion_gate_repair_terminal_outcome(&frame, &mut total_usage) {
+            return Ok(outcome);
+        }
         if let Some(outcome) = verification_terminal_outcome(&frame, &mut total_usage) {
             return Ok(outcome);
         }
@@ -6459,6 +6585,131 @@ mod tests {
     }
 
     #[test]
+    fn verification_repair_loop_terminalizes_after_required_file_reads_before_extra_action() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let root = unique_temp_dir("required_file_read_loop");
+        std::fs::create_dir_all(&root).expect("target dir should be created");
+        let required_paths = [
+            root.join("README.md"),
+            root.join("runtime.py"),
+            root.join("model.py"),
+            root.join("demo.py"),
+        ];
+        for path in &required_paths {
+            std::fs::write(path, format!("contents for {}", path.display()))
+                .expect("target file should be written");
+        }
+
+        let done_json = r#"{"state":"done","decision":"done"}"#;
+        let read_json = |path: &std::path::Path| {
+            format!(
+                r#"{{"state":"verifying","decision":"call_tool","next_action":{{"action_type":"Read","args":{{"file_path":"{}"}}}}}}"#,
+                path.display()
+            )
+        };
+        let forbidden_bash_json = format!(
+            r#"{{"state":"executing","decision":"call_tool","next_action":{{"action_type":"Bash","args":{{"command":"python3 {}"}}}}}}"#,
+            required_paths[3].display()
+        );
+        let client = ModelProviderClient::with_scripted_turns(vec![
+            vec![StreamEvent::TextDelta(done_json.into())],
+            vec![StreamEvent::TextDelta(read_json(&required_paths[0]))],
+            vec![StreamEvent::TextDelta(read_json(&required_paths[1]))],
+            vec![StreamEvent::TextDelta(read_json(&required_paths[2]))],
+            vec![StreamEvent::TextDelta(read_json(&required_paths[3]))],
+            vec![StreamEvent::TextDelta(forbidden_bash_json)],
+        ]);
+
+        let mut frame = make_frame();
+        frame.recent_evidence.clear();
+        frame.state = AgentState::Executing;
+        frame.allowed_actions = vec!["read_file".into(), "run_command".into()];
+        frame.allowed_tools = vec!["Read".into(), "Bash".into()];
+        push_completion_contract_with_refs(
+            &mut frame,
+            &[
+                "artifact:contract:dir",
+                "artifact:contract:readme",
+                "artifact:contract:runtime",
+                "artifact:contract:model",
+                "artifact:contract:demo",
+            ],
+            &[],
+            &[
+                "artifact:contract:dir",
+                "artifact:contract:readme",
+                "artifact:contract:runtime",
+                "artifact:contract:model",
+                "artifact:contract:demo",
+            ],
+        );
+        push_artifact_target_fact(
+            &mut frame,
+            "artifact:contract:dir",
+            root.to_str().unwrap(),
+            "directory",
+        );
+        for (idx, (ref_id, path)) in [
+            ("artifact:contract:readme", &required_paths[0]),
+            ("artifact:contract:runtime", &required_paths[1]),
+            ("artifact:contract:model", &required_paths[2]),
+            ("artifact:contract:demo", &required_paths[3]),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            push_artifact_target_fact(&mut frame, ref_id, path.to_str().unwrap(), "file");
+            frame.recent_evidence.push(format!(
+                "fact: recent_changes_in_files ref=change:runtime:{idx} path={} source=tool:Bash source_event_id=tool-bash:runtime:{idx} freshness=after-runtime confidence=1.00 status=active invalidated_by=none supersedes=none conflicts_with=none summary=runtime write created declared artifact",
+                path.display()
+            ));
+        }
+        let tool_runtime = StateFrameToolRuntime {
+            registry: ToolRegistry::new()
+                .register(Arc::new(FileReadTool))
+                .register(Arc::new(BashTool)),
+            permissions: ToolPermissionContext::new(PermissionMode::Default),
+            cwd: root.clone(),
+            config_root: None,
+        };
+
+        let outcome = rt
+            .block_on(run_decision_loop_with_tools(
+                &client,
+                frame,
+                DecisionLoopConfig {
+                    max_iterations: 8,
+                    ..DecisionLoopConfig::default()
+                },
+                Some(tool_runtime),
+            ))
+            .expect("loop should not error");
+
+        let _ = std::fs::remove_dir_all(&root);
+
+        match outcome {
+            LoopOutcome::Done { usage, .. } => {
+                assert_eq!(usage.tool_dispatch_count, 4);
+                assert!(
+                    usage
+                        .tool_execution_records
+                        .iter()
+                        .all(|record| record.tool_name == "Read"),
+                    "loop should terminalize before consuming the scripted Bash turn: {:?}",
+                    usage.tool_execution_records
+                );
+                let report = usage.worker_report.expect("worker report");
+                assert_eq!(
+                    report.completion_evidence_status,
+                    CompletionEvidenceStatus::Sufficient
+                );
+                assert!(report.completion_evidence_gaps.is_empty());
+            }
+            other => panic!("expected Done after required reads, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn u7_directory_and_readme_verification_gap_closes_after_reverify() {
         let mut frame = make_frame();
         frame.recent_evidence.clear();
@@ -6570,6 +6821,152 @@ mod tests {
                     report.completion_evidence_status,
                     CompletionEvidenceStatus::Sufficient
                 );
+            }
+            other => panic!("expected Done, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn completion_gate_required_read_refs_close_only_after_runtime_read_observations() {
+        let mut frame = make_frame();
+        frame.recent_evidence.clear();
+        frame.state = AgentState::Verifying;
+        push_completion_contract_with_refs(
+            &mut frame,
+            &[
+                "artifact:contract:dir",
+                "artifact:contract:readme",
+                "artifact:contract:runtime",
+                "artifact:contract:model",
+                "artifact:contract:demo",
+            ],
+            &[],
+            &[
+                "artifact:contract:dir",
+                "artifact:contract:readme",
+                "artifact:contract:runtime",
+                "artifact:contract:model",
+                "artifact:contract:demo",
+            ],
+        );
+        let root = "/tmp/example-required-read-close";
+        let required_paths = [
+            format!("{root}/README.md"),
+            format!("{root}/runtime.py"),
+            format!("{root}/model.py"),
+            format!("{root}/demo.py"),
+        ];
+        push_artifact_target_fact(&mut frame, "artifact:contract:dir", root, "directory");
+        push_artifact_target_fact(
+            &mut frame,
+            "artifact:contract:readme",
+            &required_paths[0],
+            "file",
+        );
+        push_artifact_target_fact(
+            &mut frame,
+            "artifact:contract:runtime",
+            &required_paths[1],
+            "file",
+        );
+        push_artifact_target_fact(
+            &mut frame,
+            "artifact:contract:model",
+            &required_paths[2],
+            "file",
+        );
+        push_artifact_target_fact(
+            &mut frame,
+            "artifact:contract:demo",
+            &required_paths[3],
+            "file",
+        );
+        for (idx, path) in required_paths.iter().enumerate() {
+            frame.recent_evidence.push(format!(
+                "fact: recent_changes_in_files ref=change:runtime:{idx} path={path} source=tool:Bash source_event_id=tool-bash:runtime:{idx} freshness=after-runtime confidence=1.00 status=active invalidated_by=none supersedes=none conflicts_with=none summary=runtime write created declared artifact"
+            ));
+            frame.recent_evidence.push(format!(
+                "fact: artifact_status ref=artifact:runtime:{idx} path={path} kind=file status=created source=tool:Bash source_event_id=tool-bash:runtime:{idx} freshness=after-runtime confidence=1.00 lineage_status=active invalidated_by=none supersedes=none conflicts_with=none summary=artifact created"
+            ));
+        }
+        frame.open_items.push(format!(
+            "completion_gate_repair: failure_reason=missing_verification_reads modification_direction=read_required_artifact_targets required_read_targets={} required_verification_targets=none required_evidence_refs={} forbidden_evidence=Bash|Glob|cat|sed|ls|self_claims|report_prose",
+            required_paths.join("|"),
+            required_paths
+                .iter()
+                .map(|path| format!("read:{path}"))
+                .collect::<Vec<_>>()
+                .join("|")
+        ));
+
+        let refs_before = super::collect_evidence_refs(&frame, None);
+        assert!(
+            required_paths
+                .iter()
+                .all(|path| !refs_before.iter().any(|reference| reference == &format!("read:{path}"))),
+            "repair instruction text must not count as runtime evidence: {refs_before:?}"
+        );
+        assert!(!super::completion_gate_required_reads_closed(
+            &frame,
+            &LoopUsage::default()
+        ));
+        assert_eq!(
+            super::evaluate_completion_evidence(&frame, &LoopUsage::default()),
+            CompletionEvidenceStatus::MissingVerificationEvidence
+        );
+
+        for (idx, path) in required_paths.iter().enumerate() {
+            frame.recent_evidence.push(format!(
+                "fact: file_facts ref=filefact:runtime:{idx}:read path={path} kind=read_observation source=tool:Read source_event_id=tool-read:runtime:{idx} freshness=after-runtime-read confidence=1.00 status=active invalidated_by=none supersedes=none conflicts_with=none fact=runtime Read succeeded for {path}"
+            ));
+        }
+
+        let refs_after = super::collect_evidence_refs(&frame, None);
+        assert!(
+            required_paths
+                .iter()
+                .all(|path| refs_after.iter().any(|reference| reference == &format!("read:{path}"))),
+            "runtime Read observations should materialize required anchors: {refs_after:?}"
+        );
+
+        let mut usage = LoopUsage {
+            last_effective_tool_action: Some("Read".into()),
+            ..LoopUsage::default()
+        };
+        assert!(super::completion_gate_required_reads_closed(&frame, &usage));
+        assert_eq!(
+            super::evaluate_completion_evidence(&frame, &usage),
+            CompletionEvidenceStatus::Sufficient
+        );
+        match super::completion_gate_repair_terminal_outcome(&frame, &mut usage)
+            .expect("closed repair gate should terminalize without another model turn")
+        {
+            LoopOutcome::Done { usage, .. } => {
+                let report = usage.worker_report.expect("worker report");
+                assert_eq!(
+                    report.completion_evidence_status,
+                    CompletionEvidenceStatus::Sufficient
+                );
+                assert_eq!(report.verification_status, "verified");
+                assert!(report.completion_evidence_gaps.is_empty());
+            }
+            other => panic!("expected Done, got {other:?}"),
+        }
+        let mut usage = LoopUsage {
+            last_effective_tool_action: Some("Read".into()),
+            ..LoopUsage::default()
+        };
+        match super::verification_terminal_outcome(&frame, &mut usage)
+            .expect("closed required runtime reads should terminalize verification")
+        {
+            LoopOutcome::Done { usage, .. } => {
+                let report = usage.worker_report.expect("worker report");
+                assert_eq!(
+                    report.completion_evidence_status,
+                    CompletionEvidenceStatus::Sufficient
+                );
+                assert_eq!(report.verification_status, "verified");
+                assert!(report.completion_evidence_gaps.is_empty());
             }
             other => panic!("expected Done, got {other:?}"),
         }
