@@ -4549,13 +4549,51 @@ fn restricted_verifier_read_refs(output: &str, allowed_targets: &[String]) -> Ve
 }
 
 fn push_unique_review_target(targets: &mut Vec<String>, value: &str) {
-    let value = normalize_required_evidence_target(value);
+    let value = normalize_review_verifier_target(value);
     if value.is_empty() {
         return;
     }
     if !value.is_empty() && !targets.iter().any(|target| target == &value) {
         targets.push(value);
     }
+}
+
+fn normalize_review_verifier_target(value: &str) -> String {
+    normalize_review_verifier_target_with_cwd(value, std::env::current_dir().ok().as_deref())
+}
+
+fn normalize_review_verifier_target_with_cwd(value: &str, cwd: Option<&Path>) -> String {
+    let normalized = normalize_required_evidence_target(value);
+    if normalized.is_empty() {
+        return normalized;
+    }
+    let Some(cwd) = cwd else {
+        return normalized;
+    };
+    let candidate_path = Path::new(&normalized);
+    if candidate_path.is_absolute() {
+        return normalized;
+    }
+
+    let mut attempts: Vec<PathBuf> = Vec::new();
+    if normalized.starts_with("src/") {
+        attempts.push(cwd.join("RustAgent/Agent").join(candidate_path));
+    }
+    if let Some(rest) = normalized.strip_prefix("../docs/") {
+        attempts.push(cwd.join("RustAgent/docs").join(rest));
+    }
+    attempts.push(cwd.join(candidate_path));
+
+    for attempt in attempts {
+        if attempt.exists() {
+            if let Ok(relative) = attempt.strip_prefix(cwd) {
+                return relative.to_string_lossy().replace('\\', "/");
+            }
+            return attempt.to_string_lossy().replace('\\', "/");
+        }
+    }
+
+    normalized
 }
 
 impl BossCoordinator {
@@ -16189,6 +16227,51 @@ mod tests {
         assert!(!review_decision_requests_restricted_verification(
             &decision, true
         ));
+    }
+
+    #[test]
+    fn restricted_verifier_targets_normalize_agent_relative_paths() {
+        let coordinator = BossCoordinator::new();
+        let step = BossPlanStep {
+            id: 1,
+            description: "review".into(),
+            objective: Some("check review evidence".into()),
+            acceptance: vec![],
+            requires_approval: false,
+            status: BossPlanStepStatus::Pending,
+            completed: false,
+            result_diff: None,
+            worker_task_id: None,
+            attempt_count: 0,
+            retry_budget: 3,
+            last_review_summary: None,
+            last_correction: None,
+            stage_execution_contract: StageExecutionContract::default(),
+            stage_continuation_context: None,
+            executor_b_stage_memory: None,
+            review_task_id: None,
+            tool_execution_records: Vec::new(),
+        };
+        let decision = crate::core::boss_actor_runtime::ReviewDecision::RequestMissingEvidence {
+            summary: "need source evidence".into(),
+            audited_items: vec![],
+            evidence_used: vec![],
+            missing_evidence: vec!["read:src/tool/definition.rs".into()],
+            weak_evidence_used: vec![],
+            required_next_action: Some("restricted_verification".into()),
+        };
+
+        let normalized = normalize_review_verifier_target_with_cwd(
+            "read:src/tool/definition.rs",
+            Some(Path::new("/Users/wangmorgan/MProject/LearnCCfromCC")),
+        );
+        assert_eq!(
+            normalized,
+            "RustAgent/Agent/src/tool/definition.rs"
+        );
+
+        let targets = coordinator.restricted_verifier_targets(&step, None, &decision);
+        assert_eq!(targets, vec!["RustAgent/Agent/src/tool/definition.rs".to_string()]);
     }
 
     #[test]
