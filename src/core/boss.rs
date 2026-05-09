@@ -5286,7 +5286,7 @@ impl BossCoordinator {
             "inherit_context": false,
             "allowed_tools": ["Read"],
             "reuse_strategy": "fresh",
-            "max_turns": 4,
+            "max_turns": 20,
             "step_id": step_id,
             "boss_actor_role": "verify_child",
             "boss_lineage_depth": 1,

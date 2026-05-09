@@ -3834,7 +3834,7 @@ async fn swarm_teammates_lists_valid_registry() {
         "got: {text}"
     );
     assert!(text.contains("allowed_tools: Read, Edit"), "got: {text}");
-    assert!(text.contains("max_turns: 4"), "got: {text}");
+    assert!(text.contains("max_turns: 20"), "got: {text}");
 }
 
 #[tokio::test]
