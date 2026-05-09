@@ -1054,11 +1054,28 @@ fn has_only_verification_evidence_gap(step: &BossPlanStep) -> bool {
 }
 
 fn continuation_verified_facts(step: &BossPlanStep) -> Vec<String> {
-    step.tool_execution_records
-        .iter()
-        .map(|record| record.summary.clone())
-        .take(5)
-        .collect()
+    let mut facts = Vec::new();
+    for record in &step.tool_execution_records {
+        if record.kind != ToolExecutionOutcomeKind::Success {
+            continue;
+        }
+        let anchored_fact = observable_path_local(record).and_then(|path| {
+            let prefix = match record.tool_name.as_str() {
+                "Read" => "read",
+                "Edit" | "Write" => "write",
+                "ArtifactVerify" => "verification",
+                _ => return None,
+            };
+            Some(format!("{prefix}:{path}"))
+        });
+        if let Some(fact) = anchored_fact {
+            push_unique_required_evidence(&mut facts, fact);
+        } else if !record.summary.trim().is_empty() {
+            push_unique_required_evidence(&mut facts, record.summary.clone());
+        }
+    }
+    facts.truncate(16);
+    facts
 }
 
 fn is_verification_first_continuation(step: &BossPlanStep) -> bool {
@@ -14789,6 +14806,81 @@ mod tests {
         }
 
         (coordinator, step)
+    }
+
+    #[test]
+    fn continuation_verified_facts_preserve_runtime_read_paths_from_observable_input() {
+        let step = verification_first_review_step(
+            "/tmp/report.md",
+            Some("source evidence missing".into()),
+            vec![
+                ToolExecutionRecord {
+                    tool_name: "Read".into(),
+                    outcome: "Text".into(),
+                    kind: ToolExecutionOutcomeKind::Success,
+                    summary: "Read succeeded".into(),
+                    detail: Some(
+                        "report prose mentions RustAgent/Agent/src/tool/registry.rs".into(),
+                    ),
+                    pending_approval: None,
+                    report_modifier: ToolReportModifier::None,
+                    observable_input: Some(observable_input_json(json!({
+                        "file_path": "RustAgent/Agent/src/tool/orchestrator.rs"
+                    }))),
+                    batch_context: ToolBatchContext {
+                        batch_index: 0,
+                        batch_size: 1,
+                        executed_in_batch: false,
+                    },
+                },
+                ToolExecutionRecord {
+                    tool_name: "Read".into(),
+                    outcome: "Text".into(),
+                    kind: ToolExecutionOutcomeKind::Success,
+                    summary: "Read succeeded".into(),
+                    detail: None,
+                    pending_approval: None,
+                    report_modifier: ToolReportModifier::None,
+                    observable_input: Some(observable_input_json(json!({
+                        "path": "RustAgent/docs/31-token-efficiency-cost-performance.md"
+                    }))),
+                    batch_context: ToolBatchContext {
+                        batch_index: 0,
+                        batch_size: 1,
+                        executed_in_batch: false,
+                    },
+                },
+                ToolExecutionRecord {
+                    tool_name: "Write".into(),
+                    outcome: "Text".into(),
+                    kind: ToolExecutionOutcomeKind::Success,
+                    summary: "Write succeeded".into(),
+                    detail: None,
+                    pending_approval: None,
+                    report_modifier: ToolReportModifier::None,
+                    observable_input: Some(observable_input_json(json!({
+                        "file_path": "/tmp/report.md"
+                    }))),
+                    batch_context: ToolBatchContext {
+                        batch_index: 0,
+                        batch_size: 1,
+                        executed_in_batch: false,
+                    },
+                },
+            ],
+        );
+
+        let facts = continuation_verified_facts(&step);
+
+        assert!(facts.contains(&"read:RustAgent/Agent/src/tool/orchestrator.rs".to_string()));
+        assert!(
+            facts.contains(
+                &"read:RustAgent/docs/31-token-efficiency-cost-performance.md".to_string()
+            )
+        );
+        assert!(facts.contains(&"write:/tmp/report.md".to_string()));
+        assert!(!facts.contains(&"read:RustAgent/Agent/src/tool/registry.rs".to_string()));
+        assert!(!facts.contains(&"Read succeeded".to_string()));
     }
 
     fn temp_report_path(label: &str) -> String {
