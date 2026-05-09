@@ -146,7 +146,11 @@ fn step_completion_gate_error(
         Some("sufficient")
     );
     let worker_report = metadata.worker_report.as_ref();
-    let target_scoped_read_closed = worker_report
+    let runtime_refs = runtime_evidence_refs_from_tool_records(step);
+    let runtime_report =
+        worker_report.map(|report| worker_report_runtime_view(report, &runtime_refs));
+    let target_scoped_read_closed = runtime_report
+        .as_ref()
         .is_some_and(|report| worker_report_has_target_scoped_read_anchor(step, report));
     let worker_verification_satisfied = worker_report
         .is_some_and(|report| report.verification_status.as_str() == "verified")
@@ -154,10 +158,11 @@ fn step_completion_gate_error(
     let worker_completion_sufficient = worker_report.is_some_and(|report| {
         report.completion_evidence_status == CompletionEvidenceStatus::Sufficient
     });
-    let evidence_bound = worker_report.is_some_and(|report| {
+    let evidence_bound = runtime_report.as_ref().is_some_and(|report| {
         worker_report_has_target_scoped_evidence(step, report) || target_scoped_read_closed
     });
-    let source_evidence_satisfied = worker_report
+    let source_evidence_satisfied = runtime_report
+        .as_ref()
         .is_some_and(|report| worker_report_has_required_source_evidence(step, report));
     let unresolved_core_read_failure = step_has_unresolved_core_read_failure(step);
     let verification_gate_satisfied = completion_sufficient
@@ -462,6 +467,34 @@ fn activate_verification_gap_continuation(
     );
 }
 
+fn correction_repair_action(correction: Option<&str>) -> Option<String> {
+    let normalized =
+        normalize_verification_first_next_action(correction.map(|value| value.to_string()))?;
+    if normalized == "none" {
+        None
+    } else {
+        Some(normalized)
+    }
+}
+
+fn correction_repair_target(
+    step: &BossPlanStep,
+    metadata: Option<&BossStepRoutedMetadata>,
+    action: Option<&str>,
+) -> Option<String> {
+    match action {
+        Some("read_source_evidence") | Some("verify_artifact") => {
+            verification_gap_target(step, metadata)
+        }
+        Some("repair_artifact") => {
+            primary_declared_artifact_path(step).or_else(|| verification_gap_target(step, metadata))
+        }
+        _ => {
+            verification_gap_target(step, metadata).or_else(|| primary_declared_artifact_path(step))
+        }
+    }
+}
+
 fn declared_artifact_paths(step: &BossPlanStep) -> Vec<&str> {
     step.stage_execution_contract
         .declared_artifacts
@@ -620,6 +653,15 @@ fn worker_report_has_required_source_evidence(
         .all(|target| evidence_refs_have_anchor_scope(&report.evidence_refs, "read", target))
 }
 
+fn worker_report_runtime_view(
+    report: &crate::core::state_frame::WorkerStructuredReport,
+    runtime_refs: &[String],
+) -> crate::core::state_frame::WorkerStructuredReport {
+    let mut runtime_report = report.clone();
+    runtime_report.evidence_refs = runtime_refs.to_vec();
+    runtime_report
+}
+
 fn verification_first_step_required_runtime_targets(step: &BossPlanStep) -> Vec<String> {
     let mut raw_targets = Vec::new();
     if let Some(context) = step.stage_continuation_context.as_ref() {
@@ -755,6 +797,83 @@ fn prune_resolved_verification_gaps_with_step(
         !gap.missing_verification_evidence
             || !verification_gap_is_closed_by_step_evidence_refs(step, gap, evidence_refs)
     });
+}
+
+fn runtime_evidence_refs_from_tool_records(step: &BossPlanStep) -> Vec<String> {
+    let mut refs = Vec::new();
+    for record in &step.tool_execution_records {
+        if record.kind != ToolExecutionOutcomeKind::Success {
+            continue;
+        }
+        let Some(path) = observable_path_local(record) else {
+            continue;
+        };
+        let prefix = match record.tool_name.as_str() {
+            "Read" => "read",
+            "Edit" | "Write" => "write",
+            "ArtifactVerify" => "verification",
+            _ => continue,
+        };
+        push_unique_evidence_ref(&mut refs, &format!("{prefix}:{path}"));
+    }
+    refs
+}
+
+fn report_runtime_gate_can_be_sufficient(
+    step: &BossPlanStep,
+    report: &crate::core::state_frame::WorkerStructuredReport,
+    runtime_refs: &[String],
+) -> bool {
+    let runtime_report = worker_report_runtime_view(report, runtime_refs);
+    report.completion_evidence_gaps.is_empty()
+        && worker_report_has_required_source_evidence(step, &runtime_report)
+        && (worker_report_has_target_scoped_evidence(step, &runtime_report)
+            || worker_report_has_target_scoped_read_anchor(step, &runtime_report))
+}
+
+fn metadata_with_current_runtime_evidence(
+    step: &BossPlanStep,
+    metadata: &BossStepRoutedMetadata,
+) -> BossStepRoutedMetadata {
+    let runtime_refs = runtime_evidence_refs_from_tool_records(step);
+    if runtime_refs.is_empty() {
+        return metadata.clone();
+    }
+
+    let mut refreshed = metadata.clone();
+    prune_resolved_verification_gaps_with_step(
+        step,
+        &runtime_refs,
+        &mut refreshed.completion_evidence_gaps,
+    );
+
+    if let Some(report) = refreshed.worker_report.as_mut() {
+        for evidence_ref in &runtime_refs {
+            push_unique_evidence_ref(&mut report.evidence_refs, evidence_ref);
+        }
+        prune_resolved_verification_gaps_with_step(
+            step,
+            &runtime_refs,
+            &mut report.completion_evidence_gaps,
+        );
+        if report_runtime_gate_can_be_sufficient(step, report, &runtime_refs) {
+            report.completion_evidence_status = CompletionEvidenceStatus::Sufficient;
+            if report.verification_status.trim().is_empty()
+                || report.verification_status == "blocked"
+                || report.verification_status == "missing_verification_evidence"
+            {
+                report.verification_status = "needs_review".into();
+            }
+        }
+        refreshed.completion_evidence_gaps = report.completion_evidence_gaps.clone();
+        if report.completion_evidence_status == CompletionEvidenceStatus::Sufficient {
+            refreshed.completion_evidence_status = Some("sufficient".into());
+        }
+    } else if refreshed.completion_evidence_gaps.is_empty() {
+        refreshed.completion_evidence_status = Some("sufficient".into());
+    }
+
+    refreshed
 }
 
 fn push_unique_evidence_ref(refs: &mut Vec<String>, evidence_ref: &str) {
@@ -1636,9 +1755,7 @@ fn parse_verification_first_patch(text: &str, target: &str) -> VerificationFirst
         }
     }
 
-    let prose_evidence_refs = verification_first_prose_evidence_refs_from_text(text);
-    if patch.evidence_refs.is_empty() && !prose_evidence_refs.is_empty() {
-        patch.evidence_refs = prose_evidence_refs;
+    if patch.evidence_refs.is_empty() && verification_first_prose_has_evidence_claims(text) {
         if !saw_explicit_verification_result {
             patch.verification_result = "needs_review".into();
         }
@@ -1648,12 +1765,6 @@ fn parse_verification_first_patch(text: &str, target: &str) -> VerificationFirst
         if !saw_explicit_remaining_blocker {
             patch.remaining_blocker = "needs review".into();
         }
-    }
-
-    if patch.evidence_refs.is_empty()
-        && verification_first_tool_read_result_mentions_target(text, &patch.verified_target)
-    {
-        patch.evidence_refs = vec![format!("read:{}", patch.verified_target)];
     }
 
     if patch.evidence_refs.is_empty()
@@ -1671,51 +1782,16 @@ fn parse_verification_first_patch(text: &str, target: &str) -> VerificationFirst
     patch
 }
 
-fn verification_first_prose_evidence_refs_from_text(text: &str) -> Vec<String> {
-    let mut refs = Vec::new();
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let lowered = trimmed.to_ascii_lowercase();
-        let marker = if lowered.contains("read succeeded") {
-            Some(("read", "read succeeded"))
-        } else if lowered.contains("write succeeded") {
-            Some(("write", "write succeeded"))
-        } else if lowered.contains("artifact verification passed") {
-            Some(("verification", "artifact verification passed"))
-        } else {
-            None
-        };
-        let Some((prefix, marker_text)) = marker else {
-            continue;
-        };
-        let Some(idx) = lowered.find(marker_text) else {
-            continue;
-        };
-        let candidate = trimmed[..idx]
-            .trim()
-            .trim_start_matches('-')
-            .trim()
-            .trim_end_matches(|ch: char| {
-                matches!(ch, ':' | '-' | '—' | ' ' | '\t' | '•' | '·' | '.' | ',')
-            });
-        let candidate = normalize_verification_first_patch_ref(candidate);
-        if candidate.is_empty()
-            || !candidate.contains('/')
-                && !candidate.starts_with('.')
-                && !candidate.starts_with("RustAgent")
-        {
-            continue;
-        }
-        let anchor = format!("{prefix}:{candidate}");
-        if !refs.iter().any(|existing| existing == &anchor) {
-            refs.push(anchor);
-        }
-    }
-
-    refs
+fn verification_first_prose_has_evidence_claims(text: &str) -> bool {
+    text.lines().any(|line| {
+        let lowered = line.trim().to_ascii_lowercase();
+        lowered.contains("read succeeded")
+            || lowered.contains("write succeeded")
+            || lowered.contains("artifact verification passed")
+            || lowered.contains("evidence files read")
+            || lowered.contains("read source evidence files")
+            || lowered.contains("read operations completed")
+    })
 }
 
 fn verification_first_prose_minimal_evidence_from_text(text: &str) -> String {
@@ -1748,19 +1824,6 @@ fn verification_first_prose_minimal_evidence_from_text(text: &str) -> String {
         .find(|line| !line.is_empty())
         .map(compact_verify_value)
         .unwrap_or_else(|| "prose summary preserved".into())
-}
-
-fn verification_first_tool_read_result_mentions_target(text: &str, target: &str) -> bool {
-    let target = target.trim();
-    if target.is_empty() || !text.contains(target) {
-        return false;
-    }
-    text.lines().any(|line| {
-        let lower = line.to_ascii_lowercase();
-        lower.contains("tool read result: read succeeded")
-            || lower.contains("tool result for read:")
-            || lower.contains("tool:read")
-    })
 }
 
 fn parse_verification_first_patch_refs(value: &str) -> Vec<String> {
@@ -3789,9 +3852,12 @@ fn sync_step_tool_execution_records(
     tasks: Option<&TaskManager>,
     task_id: &str,
 ) {
-    step.tool_execution_records = tasks
+    let records = tasks
         .map(|manager| manager.tool_execution_records(task_id))
         .unwrap_or_default();
+    for record in records {
+        append_step_runtime_record(step, record);
+    }
 }
 
 fn append_step_runtime_record(step: &mut BossPlanStep, record: ToolExecutionRecord) {
@@ -3902,14 +3968,39 @@ fn build_step_review_summary(
         }
         return build_brief_verification_review_summary(step, source);
     }
+    let runtime_refs = runtime_evidence_refs_from_tool_records(step);
+    let runtime_section = if runtime_refs.is_empty() {
+        "Current runtime evidence:\n- none supplied".to_string()
+    } else {
+        format!("Current runtime evidence:\n- {}", runtime_refs.join("\n- "))
+    };
+    let stale_summary = step
+        .last_review_summary
+        .as_deref()
+        .filter(|summary| {
+            !summary.trim().is_empty()
+                && !details
+                    .iter()
+                    .any(|(_, value)| value.trim() == summary.trim())
+        })
+        .map(|summary| {
+            format!(
+                "Historical attempts (stale, not active blockers unless Current runtime evidence fails to close the gate):\n{summary}"
+            )
+        });
     let mut sections = vec![
-        format!("{source} reported boss step {} complete.", step.id),
+        format!(
+            "Current attempt: {source} reported boss step {} complete.",
+            step.id
+        ),
         format!(
             "Objective: {}",
             current_task_contract_text(step.objective())
         ),
         "Acceptance:".to_string(),
         summarize_acceptance_items(step),
+        runtime_section,
+        "Current worker prose/report:".to_string(),
     ];
     for (label, value) in details {
         let trimmed = value.trim();
@@ -3917,7 +4008,120 @@ fn build_step_review_summary(
             sections.push(format!("{label}: {trimmed}"));
         }
     }
+    if let Some(stale_summary) = stale_summary {
+        sections.push(stale_summary);
+    }
     sections.join("\n")
+}
+
+fn build_step_review_prompt(
+    step_id: usize,
+    verdict_hint: &str,
+    summary: &str,
+    correction: Option<&str>,
+) -> String {
+    let correction_section = correction
+        .map(|corr| format!("\nCoordinator correction:\n{corr}"))
+        .unwrap_or_default();
+    format!(
+        "You are Designer A reviewing a completed boss step.\n\
+         No tools are available in this review. Do not request, read, search, or inspect files.\n\
+         Use only the review package below, including current worker prose and current runtime evidence already included.\n\
+         Treat prose-only claims as weak evidence: they may justify ACCEPT with review risk when the coordinator verdict and supplied context support it, but they must not be reported as runtime-verified facts.\n\
+         Historical attempts marked stale are background only; do not reject because of stale blockers when Current runtime evidence resolves them.\n\
+         If the current attempt says source evidence remains missing, max iterations were reached, tool dispatch failed, or completion is blocked, return REJECT with a concrete correction unless the same package also includes explicit runtime evidence that resolves the blocker.\n\
+         Return exactly one of these forms:\n\
+         ACCEPT\n\
+         REJECT\nCORRECTION: <concrete correction>\n\
+         REPLAN_STEP\nREASON: <why the step needs replanning>\n\n\
+         Review step: {step_id}\n\
+         Coordinator verdict: {verdict_hint}\n\
+         Review package:\n{summary}{correction_section}"
+    )
+}
+
+fn review_summary_has_unresolved_completion_blocker(summary: &str) -> bool {
+    let active_summary = summary
+        .split("Historical attempts (stale")
+        .next()
+        .unwrap_or(summary);
+    let lower = active_summary.to_ascii_lowercase();
+    [
+        "source evidence remains missing",
+        "required source evidence has not been read",
+        "missing source evidence",
+        "missing_verification_evidence",
+        "completion blocked",
+        "tool dispatch failed",
+        "max iterations reached",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
+fn guard_review_decision_against_unresolved_blockers(
+    accepted_hint: bool,
+    summary: &str,
+    completion_gate_closed: bool,
+    decision: crate::core::boss_actor_runtime::ReviewDecision,
+) -> crate::core::boss_actor_runtime::ReviewDecision {
+    if accepted_hint
+        && !completion_gate_closed
+        && matches!(
+            decision,
+            crate::core::boss_actor_runtime::ReviewDecision::Accept { .. }
+        )
+        && review_summary_has_unresolved_completion_blocker(summary)
+    {
+        return crate::core::boss_actor_runtime::ReviewDecision::Correct {
+            summary: summary.to_string(),
+            correction: Some(
+                "Review package still reports unresolved completion/source evidence blocker; do not accept until runtime evidence closes the blocker."
+                    .into(),
+            ),
+        };
+    }
+    decision
+}
+
+fn review_correction_only_restates_stale_blocker(correction: Option<&str>) -> bool {
+    let Some(correction) = correction else {
+        return false;
+    };
+    let lower = correction.to_ascii_lowercase();
+    (lower.contains("source evidence remains missing")
+        || lower.contains("source evidence is missing")
+        || lower.contains("tool dispatch failed")
+        || lower.contains("missing runtime-evidence blocker")
+        || lower.contains("missing runtime evidence")
+        || lower.contains("missing_verification_evidence"))
+        && !lower.contains("stage 4")
+        && !lower.contains("not yet completed")
+        && !lower.contains("placeholder")
+        && !lower.contains("empty")
+}
+
+fn guard_review_reject_against_closed_gate(
+    accepted_hint: bool,
+    completion_gate_closed: bool,
+    decision: crate::core::boss_actor_runtime::ReviewDecision,
+) -> crate::core::boss_actor_runtime::ReviewDecision {
+    if !accepted_hint || !completion_gate_closed {
+        return decision;
+    }
+    match decision {
+        crate::core::boss_actor_runtime::ReviewDecision::Correct {
+            summary,
+            correction,
+        } if review_correction_only_restates_stale_blocker(correction.as_deref()) => {
+            crate::core::boss_actor_runtime::ReviewDecision::Accept {
+                summary: format!(
+                    "{summary}\nAccepted after current runtime evidence closed the stale review blocker; remaining prose-only claims are review risk, not runtime-verified facts."
+                ),
+            }
+        }
+        other => other,
+    }
 }
 
 impl BossCoordinator {
@@ -4480,19 +4684,27 @@ impl BossCoordinator {
                         guard.clone()
                     };
                     if let Some(app) = app_state {
-                        c.ensure_a_session(&app).await;
                         let verdict_hint = if accepted { "accepted" } else { "rejected" };
-                        let msg = match correction.as_deref() {
-                            Some(corr) => format!(
-                                "Review step {step_id}: coordinator verdict={verdict_hint}. Summary: {summary}. Correction: {corr}. Please respond with ACCEPT, REJECT, or REPLAN_STEP. If REJECT include CORRECTION: <your correction>. If REPLAN_STEP include REASON: <why this step needs replanning>."
-                            ),
-                            None => format!(
-                                "Review step {step_id}: coordinator verdict={verdict_hint}. Summary: {summary}. Please respond with ACCEPT, REJECT, or REPLAN_STEP. If REJECT include CORRECTION: <your correction>. If REPLAN_STEP include REASON: <why this step needs replanning>."
-                            ),
-                        };
-                        match c.ask_a_session(&app, msg).await {
+                        let completion_gate_closed = c.review_completion_gate_closed(step_id).await;
+                        let msg = build_step_review_prompt(
+                            step_id,
+                            verdict_hint,
+                            &summary,
+                            correction.as_deref(),
+                        );
+                        match c.ask_a_review_stateless(&app, msg, &summary).await {
                             Ok(response) => {
-                                let decision = Self::parse_a_review_decision(&response, &summary);
+                                let decision = guard_review_decision_against_unresolved_blockers(
+                                    accepted,
+                                    &summary,
+                                    completion_gate_closed,
+                                    response,
+                                );
+                                let decision = guard_review_reject_against_closed_gate(
+                                    accepted,
+                                    completion_gate_closed,
+                                    decision,
+                                );
                                 c.apply_review_verdict(step_id, &decision).await?;
                                 return Ok(decision);
                             }
@@ -4509,11 +4721,56 @@ impl BossCoordinator {
                             correction,
                         }
                     };
+                    let completion_gate_closed = c.review_completion_gate_closed(step_id).await;
+                    let decision = guard_review_decision_against_unresolved_blockers(
+                        accepted,
+                        &summary,
+                        completion_gate_closed,
+                        decision,
+                    );
+                    let decision = guard_review_reject_against_closed_gate(
+                        accepted,
+                        completion_gate_closed,
+                        decision,
+                    );
                     c.apply_review_verdict(step_id, &decision).await?;
                     Ok(decision)
                 })
             },
         )
+    }
+
+    async fn refresh_routed_metadata_for_review(
+        &self,
+        step_id: usize,
+    ) -> Option<(BossPlanStep, Option<BossStepRoutedMetadata>)> {
+        let metadata_snapshot = self
+            .routed_step_metadata
+            .read()
+            .await
+            .get(&step_id)
+            .cloned();
+        let plan_guard = self.plan.read().await;
+        let step = plan_guard
+            .as_ref()
+            .and_then(|plan| plan.steps.iter().find(|step| step.id == step_id))
+            .cloned()?;
+        drop(plan_guard);
+        let refreshed = metadata_snapshot
+            .as_ref()
+            .map(|metadata| metadata_with_current_runtime_evidence(&step, metadata));
+        if let Some(refreshed) = refreshed.as_ref() {
+            let mut metadata_guard = self.routed_step_metadata.write().await;
+            metadata_guard.insert(step_id, refreshed.clone());
+        }
+        Some((step, refreshed.or(metadata_snapshot)))
+    }
+
+    async fn review_completion_gate_closed(&self, step_id: usize) -> bool {
+        let Some((step, metadata)) = self.refresh_routed_metadata_for_review(step_id).await else {
+            return false;
+        };
+        step_completion_gate_error(&step, metadata.as_ref()).is_none()
     }
 
     fn build_doc_fn(
@@ -6324,6 +6581,13 @@ impl BossCoordinator {
                     step.worker_task_id = Some(event.task_id.clone());
                     sync_step_tool_execution_records(step, tasks.as_deref(), &event.task_id);
                     store_step_result_diff(step, &event.result, Some(&event.summary));
+                    if !is_verification_first_continuation(step) {
+                        step.last_review_summary = step
+                            .result_diff
+                            .clone()
+                            .or_else(|| Some(event.summary.clone()))
+                            .filter(|text| !text.trim().is_empty());
+                    }
                     let shared_step_memory = self
                         .sync_verification_first_shared_step_memory_from_result(step, &event.result)
                         .await;
@@ -6589,11 +6853,9 @@ impl BossCoordinator {
         decision: &crate::core::boss_actor_runtime::ReviewDecision,
     ) -> anyhow::Result<()> {
         let routed_metadata = self
-            .routed_step_metadata
-            .read()
+            .refresh_routed_metadata_for_review(step_id)
             .await
-            .get(&step_id)
-            .cloned();
+            .and_then(|(_, metadata)| metadata);
         let (should_auto_advance, artifact_recovery_status) = {
             let mut plan_guard = self.plan.write().await;
             let Some(plan) = plan_guard.as_mut() else {
@@ -6747,11 +7009,20 @@ impl BossCoordinator {
                         step.status = BossPlanStepStatus::Failed;
                     } else {
                         step.status = BossPlanStepStatus::Rejected;
+                        let next_action =
+                            correction_repair_action(correction.as_deref()).or_else(|| {
+                                Some(verification_gap_next_action(step, routed_metadata.as_ref()))
+                            });
+                        let failed_target = correction_repair_target(
+                            step,
+                            routed_metadata.as_ref(),
+                            next_action.as_deref(),
+                        );
                         update_step_continuation_context(
                             step,
                             crate::core::state_frame::ContinuityMode::Repair,
-                            correction.clone(),
-                            correction.clone(),
+                            failed_target,
+                            next_action,
                             continuation_verified_facts(step),
                         );
                     }
@@ -6793,8 +7064,11 @@ impl BossCoordinator {
                 .await
                 .as_ref()
                 .and_then(|p| next_unfinished_step_id(p));
+            let has_next_step = next_step.is_some();
             self.update_current_step(next_step).await;
-            self.maybe_auto_advance_after_completion().await?;
+            if has_next_step {
+                self.maybe_auto_advance_after_completion().await?;
+            }
         } else if matches!(artifact_recovery_status, Some(("repair_dispatched", None))) {
             self.maybe_auto_advance_after_completion().await?;
         }
@@ -7187,14 +7461,26 @@ impl BossCoordinator {
         let record = tasks
             .get(&task_id)
             .ok_or_else(|| anyhow::anyhow!("unknown child task {task_id}"))?;
+        let task_output = tasks
+            .get_output(&task_id, 0)
+            .map(|slice| slice.content)
+            .unwrap_or_default();
+        let summary = if task_output.trim().is_empty() {
+            String::new()
+        } else {
+            format!(
+                "terminal sync captured task output from {}",
+                record.output_file
+            )
+        };
         let event = TaskEvent {
             owner: record.owner.clone(),
             target_task_id: Some(task_id.clone()),
             task_id: task_id.clone(),
             task_type: record.task_type,
             status,
-            summary: String::new(),
-            result: String::new(),
+            summary,
+            result: task_output,
             next_action: String::new(),
             worker_role: record.worker_role,
             // This is a synthetic terminal-sync event for the tracked worker task itself.
@@ -8872,6 +9158,64 @@ refresh_reason: {}\n\n{}",
         }
     }
 
+    /// Ask Designer A for a step review through a one-shot model call.
+    /// This path intentionally does not reuse A's tool-enabled session, because
+    /// review must classify the supplied worker prose/evidence rather than
+    /// start fresh repository reads that can hang the terminal review.
+    async fn ask_a_review_stateless(
+        &self,
+        app_state: &Arc<crate::state::app_state::AppState>,
+        message: String,
+        summary: &str,
+    ) -> anyhow::Result<crate::core::boss_actor_runtime::ReviewDecision> {
+        let runtime = app_state
+            .active_model_runtime
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("active model runtime not available"))?;
+
+        let original_chars = message.len();
+        let message = if message.len() > B_CONTEXT_TRIM_THRESHOLD {
+            trim_context_payload(&message, B_CONTEXT_TRIM_THRESHOLD, B_CONTEXT_KEEP_CHARS)
+        } else {
+            message
+        };
+        {
+            let mut guard = self.status.write().await;
+            guard.last_a_dispatch_message = Some(message.clone());
+            guard.last_step_metrics = Some(BossStepMetrics {
+                compression_strategy: if original_chars == message.len() {
+                    CompressionStrategy::None
+                } else {
+                    CompressionStrategy::Trimmed
+                },
+                context_mode: ContextMode::Brief,
+                original_chars,
+                sent_chars: message.len(),
+                cache_creation_tokens: 0,
+                cache_read_tokens: 0,
+                cache_prefix_instability: false,
+            });
+        }
+
+        let snapshot = runtime.snapshot().await;
+        let msg = crate::core::message::Message::user(message);
+        let events = snapshot.client.stream_message(&msg).await;
+        let response: String = events
+            .into_iter()
+            .filter_map(|event| {
+                if let crate::service::api::streaming::StreamEvent::TextDelta(text) = event {
+                    Some(text)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        if response.trim().is_empty() {
+            anyhow::bail!("stateless review returned empty response");
+        }
+        Ok(Self::parse_a_review_decision(&response, summary))
+    }
+
     /// Parse A's LLM response text into a structured review decision.
     fn parse_a_review_decision(
         response: &str,
@@ -9095,12 +9439,12 @@ refresh_reason: {}\n\n{}",
         let parent_session_id = app_state.active_session_id.clone();
         Ok(json!({
             "task": format!(
-                "Designer A review session for plan {plan_id}. Stay idle until the coordinator sends the actual review/spec content. Do not search the repository, and do not use Glob/Grep just to locate the plan id."
+                "Designer A review session for plan {plan_id}. Stay idle until the coordinator sends the actual review/spec content. No tools are available; base review decisions only on text supplied by the coordinator."
             ),
             "role": "research",
-            "allowed_tools": ["Read"],
+            "allowed_tools": [],
             "boss_plan_id": plan_id,
-            "step_objective": "Review and approve boss plan steps as Designer A. Use only the text provided in-session unless a later message explicitly names a file path to inspect.",
+            "step_objective": "Review and approve boss plan steps as Designer A. Use only the text provided in-session; do not inspect files.",
             "parent_session_id": parent_session_id,
             "reuse_strategy": "running_only",
         })
@@ -14005,13 +14349,16 @@ mod tests {
     }
 
     #[test]
-    fn verification_first_patch_recovers_read_anchor_from_runtime_tool_read_result() {
+    fn verification_first_patch_does_not_recover_read_anchor_from_tool_result_prose() {
         let target = "/tmp/demo/runtime.py";
         let raw_output = "verified_target: /tmp/demo/runtime.py\nverification_result: verified\nminimal_evidence: Read succeeded\nremaining_blocker: none\n\ntool Read result: Read succeeded (541 chars)\ntool result for Read: def boss_lism(model, objective):\n    return model.handle_lism({'summary': 'short'})\n\nSummary: /tmp/demo/runtime.py defines the runtime helpers.";
 
         let patch = parse_verification_first_patch(raw_output, target);
 
-        assert_eq!(patch.evidence_refs, vec![format!("read:{target}")]);
+        assert!(patch.evidence_refs.is_empty());
+        assert_eq!(patch.verification_result, "verified");
+        assert_eq!(patch.minimal_evidence, "Read succeeded");
+        assert_eq!(patch.remaining_blocker, "none");
     }
 
     #[test]
@@ -14055,20 +14402,13 @@ mod tests {
     }
 
     #[test]
-    fn verification_first_patch_recovers_read_anchors_from_prose_evidence_and_marks_review_needed()
-    {
+    fn verification_first_patch_marks_prose_only_evidence_as_needs_review() {
         let target = "/tmp/demo/runtime.py";
         let raw_output = "Outcome: completed\nExecution evidence (concise)\n- RustAgent/Agent/src/tool/definition.rs — Read succeeded\n- RustAgent/Agent/src/tool/registry.rs — Read succeeded\nNotes: report preserved for review.";
 
         let patch = parse_verification_first_patch(raw_output, target);
 
-        assert_eq!(
-            patch.evidence_refs,
-            vec![
-                "read:RustAgent/Agent/src/tool/definition.rs".to_string(),
-                "read:RustAgent/Agent/src/tool/registry.rs".to_string(),
-            ]
-        );
+        assert!(patch.evidence_refs.is_empty());
         assert_eq!(patch.verification_result, "needs_review");
         assert_eq!(patch.remaining_blocker, "needs review");
         assert_eq!(patch.minimal_evidence, "Outcome: completed");
@@ -14881,6 +15221,245 @@ mod tests {
         assert!(facts.contains(&"write:/tmp/report.md".to_string()));
         assert!(!facts.contains(&"read:RustAgent/Agent/src/tool/registry.rs".to_string()));
         assert!(!facts.contains(&"Read succeeded".to_string()));
+    }
+
+    #[test]
+    fn step_review_prompt_passes_prose_but_forbids_tool_reads() {
+        let prompt = build_step_review_prompt(
+            0,
+            "accepted",
+            "Summary: worker prose says files were read\nResult: report body",
+            None,
+        );
+
+        assert!(prompt.contains("No tools are available"));
+        assert!(prompt.contains("Use only the review package below"));
+        assert!(prompt.contains("Treat prose-only claims as weak evidence"));
+        assert!(prompt.contains("Summary: worker prose says files were read"));
+        assert!(prompt.contains("ACCEPT"));
+        assert!(prompt.contains("REJECT"));
+        assert!(prompt.contains("REPLAN_STEP"));
+    }
+
+    #[test]
+    fn review_accept_guard_rejects_unresolved_source_evidence_blocker() {
+        let summary = "Summary: tool dispatch failed: repeated verification-target read while source evidence remains missing; last state: Verifying";
+        let guarded = guard_review_decision_against_unresolved_blockers(
+            true,
+            summary,
+            false,
+            crate::core::boss_actor_runtime::ReviewDecision::Accept {
+                summary: summary.into(),
+            },
+        );
+
+        assert!(matches!(
+            guarded,
+            crate::core::boss_actor_runtime::ReviewDecision::Correct { .. }
+        ));
+    }
+
+    #[test]
+    fn review_accept_guard_allows_stale_blocker_when_completion_gate_is_closed() {
+        let summary = "Summary: old source evidence remains missing text";
+        let guarded = guard_review_decision_against_unresolved_blockers(
+            true,
+            summary,
+            true,
+            crate::core::boss_actor_runtime::ReviewDecision::Accept {
+                summary: summary.into(),
+            },
+        );
+
+        assert!(matches!(
+            guarded,
+            crate::core::boss_actor_runtime::ReviewDecision::Accept { .. }
+        ));
+    }
+
+    #[test]
+    fn step_review_summary_marks_old_blocker_as_stale_and_shows_current_runtime_refs() {
+        let mut step = verification_first_review_step(
+            "/tmp/report.md",
+            Some("tool dispatch failed while source evidence remains missing".into()),
+            vec![successful_path_record("Read", "/tmp/source.md")],
+        );
+        step.executor_b_stage_memory = None;
+        step.stage_continuation_context = None;
+        step.last_correction = None;
+        step.result_diff = Some("current worker prose says report is ready".into());
+
+        let summary = build_step_review_summary(
+            &step,
+            "Worker task",
+            &[("Result", "current worker prose says report is ready")],
+        );
+
+        assert!(summary.contains("Current runtime evidence:"));
+        assert!(summary.contains("read:/tmp/source.md"));
+        assert!(summary.contains("Current worker prose/report:"));
+        assert!(summary.contains("Historical attempts (stale"));
+        assert!(!review_summary_has_unresolved_completion_blocker(&summary));
+    }
+
+    #[test]
+    fn current_runtime_anchors_prune_stale_source_and_artifact_gaps() {
+        std::fs::write("/tmp/report.md", "report").expect("write temp report");
+        let step = source_report_step_with_runtime_records(vec![
+            successful_path_record("Read", "/tmp/source.md"),
+            successful_path_record("Write", "/tmp/report.md"),
+            successful_path_record("Read", "/tmp/report.md"),
+        ]);
+        let metadata = BossStepRoutedMetadata {
+            completion_evidence_status: Some("missing_verification_evidence".into()),
+            completion_evidence_gaps: source_report_gaps(),
+            worker_report: Some(WorkerStructuredReport {
+                worker_state: AgentState::Done,
+                last_tool_action: None,
+                files_changed: vec!["/tmp/report.md".into()],
+                tests_run: Vec::new(),
+                artifact_status: "created".into(),
+                test_status: "not_run".into(),
+                verification_status: "needs_review".into(),
+                stage_execution_contract: step.stage_execution_contract.clone(),
+                stage_continuation_context: None,
+                evidence_refs: Vec::new(),
+                completion_evidence_gaps: source_report_gaps(),
+                remaining_risks: vec!["static review only".into()],
+                completion_evidence_status: CompletionEvidenceStatus::MissingVerificationEvidence,
+            }),
+            ..BossStepRoutedMetadata::default()
+        };
+
+        let refreshed = metadata_with_current_runtime_evidence(&step, &metadata);
+
+        assert_eq!(
+            refreshed.completion_evidence_status.as_deref(),
+            Some("sufficient")
+        );
+        assert!(refreshed.completion_evidence_gaps.is_empty());
+        let report = refreshed.worker_report.as_ref().expect("worker report");
+        assert!(report.evidence_refs.contains(&"read:/tmp/source.md".into()));
+        assert!(report.evidence_refs.contains(&"read:/tmp/report.md".into()));
+        assert_eq!(step_completion_gate_error(&step, Some(&refreshed)), None);
+    }
+
+    #[test]
+    fn correction_text_is_mapped_to_real_repair_target() {
+        let step = source_report_step_with_runtime_records(Vec::new());
+        let metadata = BossStepRoutedMetadata {
+            completion_evidence_gaps: source_report_gaps(),
+            ..BossStepRoutedMetadata::default()
+        };
+        let correction =
+            "Review package still reports unresolved completion/source evidence blocker";
+        let action = correction_repair_action(Some(correction));
+        let target = correction_repair_target(&step, Some(&metadata), action.as_deref());
+
+        assert_eq!(action.as_deref(), Some("read_source_evidence"));
+        assert_eq!(target.as_deref(), Some("/tmp/source.md"));
+        assert_ne!(target.as_deref(), Some(correction));
+    }
+
+    #[test]
+    fn stale_blocker_reject_is_accepted_when_gate_is_closed() {
+        let decision = guard_review_reject_against_closed_gate(
+            true,
+            true,
+            crate::core::boss_actor_runtime::ReviewDecision::Correct {
+                summary: "review package contained stale task-0 blocker".into(),
+                correction: Some(
+                    "The verification failed because source evidence remains missing".into(),
+                ),
+            },
+        );
+
+        assert!(matches!(
+            decision,
+            crate::core::boss_actor_runtime::ReviewDecision::Accept { .. }
+        ));
+    }
+
+    fn successful_path_record(tool_name: &str, path: &str) -> ToolExecutionRecord {
+        ToolExecutionRecord {
+            tool_name: tool_name.into(),
+            outcome: "Text".into(),
+            kind: ToolExecutionOutcomeKind::Success,
+            summary: format!("{tool_name} succeeded"),
+            detail: None,
+            pending_approval: None,
+            report_modifier: ToolReportModifier::None,
+            observable_input: Some(observable_input_json(json!({ "file_path": path }))),
+            batch_context: ToolBatchContext {
+                batch_index: 0,
+                batch_size: 1,
+                executed_in_batch: false,
+            },
+        }
+    }
+
+    fn source_report_gaps() -> Vec<CompletionEvidenceGap> {
+        vec![
+            CompletionEvidenceGap {
+                target_ref: "artifact:step0:0:/tmp/report.md".into(),
+                target_path: Some("/tmp/report.md".into()),
+                missing_artifact_evidence: false,
+                missing_test_evidence: false,
+                missing_verification_evidence: true,
+                recommended_action: "verify_artifact".into(),
+            },
+            CompletionEvidenceGap {
+                target_ref: "content_evidence:/tmp/source.md".into(),
+                target_path: Some("/tmp/source.md".into()),
+                missing_artifact_evidence: false,
+                missing_test_evidence: false,
+                missing_verification_evidence: true,
+                recommended_action: "read_source_evidence".into(),
+            },
+        ]
+    }
+
+    fn source_report_step_with_runtime_records(
+        tool_execution_records: Vec<ToolExecutionRecord>,
+    ) -> BossPlanStep {
+        BossPlanStep {
+            id: 0,
+            description: "write source report".into(),
+            objective: Some("write report to /tmp/report.md".into()),
+            acceptance: vec!["target file exists and is non-empty: /tmp/report.md".into()],
+            requires_approval: false,
+            status: BossPlanStepStatus::Reviewing,
+            completed: false,
+            result_diff: Some("current worker prose".into()),
+            worker_task_id: Some("task-current".into()),
+            attempt_count: 1,
+            retry_budget: 3,
+            last_review_summary: None,
+            last_correction: None,
+            stage_execution_contract: StageExecutionContract {
+                declared_artifacts: vec![DeclaredArtifactContract {
+                    ref_id: "artifact:step0:0:/tmp/report.md".into(),
+                    path: "/tmp/report.md".into(),
+                    kind: "file".into(),
+                    required_actions: vec!["create".into(), "write".into()],
+                    required_evidence: vec!["/tmp/report.md".into()],
+                }],
+                verifications: vec![VerificationContract {
+                    target_ref: "/tmp/report.md".into(),
+                    target_path: Some("/tmp/report.md".into()),
+                    required_actions: vec!["verify".into()],
+                    required_evidence: vec!["/tmp/report.md".into()],
+                }],
+                content_evidence_targets: vec!["/tmp/source.md".into()],
+                required_actions: vec!["verify".into()],
+                required_evidence: Vec::new(),
+                tests: Vec::new(),
+            },
+            stage_continuation_context: None,
+            executor_b_stage_memory: None,
+            review_task_id: None,
+            tool_execution_records,
+        }
     }
 
     fn temp_report_path(label: &str) -> String {
