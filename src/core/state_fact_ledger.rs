@@ -435,28 +435,44 @@ fn text_mentions_path_scope(text: &str, target: &str) -> bool {
         .any(|(path, _)| crate::core::evidence_scope::evidence_path_scope_matches(&path, target))
 }
 
-fn read_paths_from_tool_record(
-    contract: &StageExecutionContract,
-    record: &ToolExecutionRecord,
-) -> Vec<String> {
+fn read_paths_from_tool_record(record: &ToolExecutionRecord) -> Vec<String> {
     let mut paths = Vec::new();
     if let Some(path) = observable_path(record).map(|path| normalize_runtime_path(&path)) {
         paths.push(path);
     }
+    paths
+}
+
+fn prose_claimed_source_evidence_paths(
+    contract: &StageExecutionContract,
+    text: &str,
+    confirmed_paths: &[String],
+) -> Vec<String> {
+    if text.trim().is_empty() {
+        return Vec::new();
+    }
+    let mut paths = Vec::new();
+    for target in contract_read_evidence_targets(contract) {
+        if confirmed_paths
+            .iter()
+            .any(|path| crate::core::evidence_scope::evidence_path_scope_matches(path, &target))
+        {
+            continue;
+        }
+        if text_mentions_path_scope(text, &target) && !paths.iter().any(|path| path == &target) {
+            paths.push(target);
+        }
+    }
+    paths
+}
+
+fn read_claim_text_from_tool_record(record: &ToolExecutionRecord) -> String {
     let text = [
         record.summary.as_str(),
         record.detail.as_deref().unwrap_or_default(),
     ]
     .join("\n");
-    if !text.trim().is_empty() {
-        for target in contract_read_evidence_targets(contract) {
-            if text_mentions_path_scope(&text, &target) && !paths.iter().any(|path| path == &target)
-            {
-                paths.push(target);
-            }
-        }
-    }
-    paths
+    text
 }
 
 fn push_review_record(ledger: &mut StepFactLedgers, record: ReviewRecord) {
@@ -867,10 +883,8 @@ pub fn append_runtime_tool_record(
             if record.kind != ToolExecutionOutcomeKind::Success {
                 return;
             }
-            for (idx, path) in read_paths_from_tool_record(contract, record)
-                .into_iter()
-                .enumerate()
-            {
+            let confirmed_paths = read_paths_from_tool_record(record);
+            for (idx, path) in confirmed_paths.iter().cloned().enumerate() {
                 push_file_fact(
                     ledgers,
                     FileFactRecord {
@@ -905,6 +919,31 @@ pub fn append_runtime_tool_record(
                         },
                     );
                 }
+            }
+            let claim_text = read_claim_text_from_tool_record(record);
+            for (idx, path) in
+                prose_claimed_source_evidence_paths(contract, &claim_text, &confirmed_paths)
+                    .into_iter()
+                    .enumerate()
+            {
+                push_file_fact(
+                    ledgers,
+                    FileFactRecord {
+                        ref_id: format!("filefact:{ref_namespace}:prose-claim:{idx}"),
+                        path: path.clone(),
+                        kind: "claimed_source_evidence".into(),
+                        fact: format!(
+                            "prose mentions {path} as source evidence; runtime Read confirmation is still required; prose_excerpt={}",
+                            trim_excerpt(&claim_text, 500)
+                        ),
+                        symbol: extract_symbol_for_path(&path, &[&claim_text]),
+                        source: "prose_claim".into(),
+                        source_event_id: format!("tool-read-prose-claim:{ref_namespace}"),
+                        freshness: "after-runtime-read-prose".into(),
+                        confidence_milli: 500,
+                        lineage: active_lineage(),
+                    },
+                );
             }
         }
         "Edit" | "Write" => {
@@ -1447,17 +1486,17 @@ pub fn build_step_fact_ledgers(step: &BossPlanStep) -> StepFactLedgers {
                 push_file_fact(
                     &mut ledgers,
                     FileFactRecord {
-                        ref_id: format!("filefact:step{}:read:{idx}", step.id),
+                        ref_id: format!("filefact:step{}:prose-claim:{idx}", step.id),
                         path: path.clone(),
-                        kind: "read_observation".into(),
+                        kind: "claimed_source_evidence".into(),
                         fact: format!(
-                            "worker output indicates this file was read or inspected: {path}"
+                            "worker prose claims or implies this file was read or inspected: {path}; runtime Read confirmation is still required"
                         ),
                         symbol: extract_symbol_for_path(&path, &[result_diff, &objective]),
                         source: "worker_result".into(),
-                        source_event_id: format!("worker-read:{}", step.id),
+                        source_event_id: format!("worker-prose-claim:{}", step.id),
                         freshness: "after-worker-output".into(),
-                        confidence_milli: 850,
+                        confidence_milli: 500,
                         lineage: active_lineage(),
                     },
                 );
@@ -1524,17 +1563,17 @@ pub fn build_step_fact_ledgers(step: &BossPlanStep) -> StepFactLedgers {
                 push_file_fact(
                     &mut ledgers,
                     FileFactRecord {
-                        ref_id: format!("filefact:step{}:review-read:{idx}", step.id),
+                        ref_id: format!("filefact:step{}:review-prose-claim:{idx}", step.id),
                         path: path.clone(),
-                        kind: "read_observation".into(),
+                        kind: "claimed_source_evidence".into(),
                         fact: format!(
-                            "review summary indicates this file was read or inspected: {path}"
+                            "review prose claims or implies this file was read or inspected: {path}; runtime Read confirmation is still required"
                         ),
                         symbol: extract_symbol_for_path(&path, &[review, &objective]),
                         source: "review_summary".into(),
-                        source_event_id: format!("review-read:{}", step.id),
+                        source_event_id: format!("review-prose-claim:{}", step.id),
                         freshness: "after-review".into(),
-                        confidence_milli: 800,
+                        confidence_milli: 500,
                         lineage: active_lineage(),
                     },
                 );
@@ -1675,7 +1714,7 @@ mod tests {
     }
 
     #[test]
-    fn build_step_fact_ledgers_emits_read_observation_when_worker_reports_file_read() {
+    fn build_step_fact_ledgers_emits_weak_claim_when_worker_reports_file_read() {
         let step = BossPlanStep {
             id: 8,
             description: "read step".into(),
@@ -1701,14 +1740,17 @@ mod tests {
 
         let ledgers = build_step_fact_ledgers(&step);
         assert!(ledgers.file_facts.iter().any(|item| {
-            item.kind == "read_observation"
+            item.kind == "claimed_source_evidence"
                 && item.path.ends_with("src/core/state_fact_ledger.rs")
                 && item.symbol.as_deref() == Some("FileFactRecord")
+                && item
+                    .fact
+                    .contains("runtime Read confirmation is still required")
         }));
     }
 
     #[test]
-    fn build_step_fact_ledgers_extracts_source_evidence_read_block_paths() {
+    fn build_step_fact_ledgers_extracts_source_evidence_read_block_as_weak_claims() {
         let step = BossPlanStep {
             id: 18,
             description: "source evidence repair".into(),
@@ -1741,11 +1783,11 @@ mod tests {
 
         let ledgers = build_step_fact_ledgers(&step);
         assert!(ledgers.file_facts.iter().any(|item| {
-            item.kind == "read_observation"
+            item.kind == "claimed_source_evidence"
                 && item.path == "RustAgent/Agent/src/tool/builtin/glob.rs"
         }));
         assert!(ledgers.file_facts.iter().any(|item| {
-            item.kind == "read_observation"
+            item.kind == "claimed_source_evidence"
                 && item.path == "RustAgent/Agent/src/tool/builtin/grep.rs"
         }));
     }
@@ -1979,6 +2021,73 @@ mod tests {
                 .all(|item| item.source != "review_summary"),
             "runtime review records should suppress fallback inferred review entries"
         );
+    }
+
+    #[test]
+    fn runtime_read_detail_source_mentions_are_weak_claims_not_read_observations() {
+        let mut ledgers = StepFactLedgers::default();
+        let contract = StageExecutionContract {
+            content_evidence_targets: vec![
+                "RustAgent/Agent/src/tool/definition.rs".into(),
+                "RustAgent/Agent/src/tool/registry.rs".into(),
+            ],
+            ..StageExecutionContract::default()
+        };
+        let record = ToolExecutionRecord {
+            tool_name: "Read".into(),
+            outcome: "Text".into(),
+            kind: ToolExecutionOutcomeKind::Success,
+            summary: "Read succeeded".into(),
+            detail: Some(
+                "# report\nEvidence files read:\n- RustAgent/Agent/src/tool/definition.rs\n- RustAgent/Agent/src/tool/registry.rs"
+                    .into(),
+            ),
+            pending_approval: None,
+            report_modifier: ToolReportModifier::None,
+            observable_input: Some(ObservableInput {
+                value: r#"{"path":"/tmp/u8-report.md"}"#.into(),
+                source: ObservableInputSource::Raw,
+            }),
+            batch_context: ToolBatchContext {
+                batch_index: 0,
+                batch_size: 1,
+                executed_in_batch: false,
+            },
+        };
+
+        append_runtime_tool_record(&contract, &mut ledgers, &record, "u8-report-read");
+
+        assert!(ledgers.file_facts.iter().any(|item| {
+            item.kind == "read_observation"
+                && item.source == "tool:Read"
+                && item.path == "/tmp/u8-report.md"
+        }));
+        assert!(!ledgers.file_facts.iter().any(|item| {
+            item.kind == "read_observation"
+                && item.source == "tool:Read"
+                && item.path == "RustAgent/Agent/src/tool/definition.rs"
+        }));
+        assert!(!ledgers.file_facts.iter().any(|item| {
+            item.kind == "read_observation"
+                && item.source == "tool:Read"
+                && item.path == "RustAgent/Agent/src/tool/registry.rs"
+        }));
+        assert!(ledgers.file_facts.iter().any(|item| {
+            item.kind == "claimed_source_evidence"
+                && item.source == "prose_claim"
+                && item.path == "RustAgent/Agent/src/tool/definition.rs"
+                && item
+                    .fact
+                    .contains("runtime Read confirmation is still required")
+        }));
+        assert!(ledgers.file_facts.iter().any(|item| {
+            item.kind == "claimed_source_evidence"
+                && item.source == "prose_claim"
+                && item.path == "RustAgent/Agent/src/tool/registry.rs"
+                && item
+                    .fact
+                    .contains("runtime Read confirmation is still required")
+        }));
     }
 
     #[test]

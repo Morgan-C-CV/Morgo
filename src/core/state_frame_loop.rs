@@ -517,7 +517,7 @@ fn collect_target_scoped_evidence_refs_from_text(
             || lowered.contains("read completed")
         {
             if let Some(target) = prose_read_path_candidate(trimmed, target_paths) {
-                let anchor = format!("read:{target}");
+                let anchor = format!("claimed_read:{target}");
                 if !refs.iter().any(|existing| existing == &anchor) {
                     refs.push(anchor);
                 }
@@ -776,25 +776,12 @@ fn append_required_source_read_anchors(
     }
 
     if let Some(usage) = usage {
-        let target_paths = declared_target_paths(frame);
         for record in &usage.tool_execution_records {
             if record.kind != ToolExecutionOutcomeKind::Success || record.tool_name != "Read" {
                 continue;
             }
             if let Some(path) = observable_path_from_input(record.observable_input.as_ref()) {
                 append_anchor(&path);
-                continue;
-            }
-            for text in [
-                record.summary.as_str(),
-                record.detail.as_deref().unwrap_or_default(),
-            ] {
-                for reference in collect_target_scoped_evidence_refs_from_text(text, &target_paths)
-                {
-                    if let Some(path) = reference.strip_prefix("read:") {
-                        append_anchor(path);
-                    }
-                }
             }
         }
     }
@@ -818,25 +805,12 @@ fn runtime_read_observation_paths(frame: &StateFrame, usage: Option<&LoopUsage>)
     }
 
     if let Some(usage) = usage {
-        let target_paths = declared_target_paths(frame);
         for record in &usage.tool_execution_records {
             if record.kind != ToolExecutionOutcomeKind::Success || record.tool_name != "Read" {
                 continue;
             }
             if let Some(path) = observable_path_from_input(record.observable_input.as_ref()) {
                 push_unique(&mut paths, path);
-                continue;
-            }
-            for text in [
-                record.summary.as_str(),
-                record.detail.as_deref().unwrap_or_default(),
-            ] {
-                for reference in collect_target_scoped_evidence_refs_from_text(text, &target_paths)
-                {
-                    if let Some(path) = reference.strip_prefix("read:") {
-                        push_unique(&mut paths, path.to_string());
-                    }
-                }
             }
         }
     }
@@ -5914,7 +5888,7 @@ mod tests {
     }
 
     #[test]
-    fn prose_evidence_files_read_block_closes_content_evidence_targets() {
+    fn prose_evidence_files_read_block_records_claims_without_closing_targets() {
         let mut frame = make_clean_frame();
         frame.stage_execution_contract.declared_artifacts.push(
             crate::core::state_frame::DeclaredArtifactContract {
@@ -5940,16 +5914,18 @@ mod tests {
         );
 
         let refs = super::collect_evidence_refs(&frame, None);
-        assert!(refs.contains(&"read:RustAgent/Agent/src/tool/builtin/glob.rs".to_string()));
-        assert!(refs.contains(&"read:RustAgent/Agent/src/tool/builtin/grep.rs".to_string()));
         assert!(
-            refs.contains(
-                &"read:RustAgent/docs/31-token-efficiency-cost-performance.md".to_string()
-            )
+            refs.contains(&"claimed_read:RustAgent/Agent/src/tool/builtin/glob.rs".to_string())
         );
+        assert!(
+            refs.contains(&"claimed_read:RustAgent/Agent/src/tool/builtin/grep.rs".to_string())
+        );
+        assert!(refs.contains(
+            &"claimed_read:RustAgent/docs/31-token-efficiency-cost-performance.md".to_string()
+        ));
         assert_eq!(
             super::evaluate_completion_evidence(&frame, &LoopUsage::default()),
-            CompletionEvidenceStatus::Sufficient
+            CompletionEvidenceStatus::MissingVerificationEvidence
         );
     }
 
@@ -6262,6 +6238,76 @@ mod tests {
             .expect("source evidence gap");
         assert_eq!(source_gap.target_path.as_deref(), Some("/tmp/source.md"));
         assert!(source_gap.missing_verification_evidence);
+    }
+
+    #[test]
+    fn content_source_gap_ignores_report_read_detail_source_mentions() {
+        let mut frame = make_frame();
+        frame.recent_evidence.clear();
+        frame.stage_execution_contract.content_evidence_targets = vec![
+            "RustAgent/Agent/src/tool/definition.rs".into(),
+            "RustAgent/Agent/src/tool/registry.rs".into(),
+        ];
+        push_completion_contract(&mut frame, true, false, true);
+        push_artifact_target_fact(
+            &mut frame,
+            "artifact:contract:0",
+            "/tmp/u8-report.md",
+            "file",
+        );
+        frame.recent_evidence.push(
+            "fact: recent_changes_in_files ref=change:1 path=/tmp/u8-report.md source=tool:Write source_event_id=tool-write:1 freshness=after-runtime confidence=1.00 status=active invalidated_by=none supersedes=none conflicts_with=none summary=updated /tmp/u8-report.md".into(),
+        );
+        frame.recent_evidence.push(
+            "fact: verification_status ref=artifact:contract:0 path=/tmp/u8-report.md status=verified source=tool:Read source_event_id=tool-read:1 freshness=after-runtime-read confidence=0.90 lineage_status=active invalidated_by=none supersedes=none conflicts_with=none summary=read-back verified /tmp/u8-report.md".into(),
+        );
+
+        let usage = LoopUsage {
+            tool_execution_records: vec![ToolExecutionRecord {
+                tool_name: "Read".into(),
+                outcome: "Text".into(),
+                kind: ToolExecutionOutcomeKind::Success,
+                summary: "Read succeeded".into(),
+                detail: Some(
+                    "# report\nEvidence files read:\n- RustAgent/Agent/src/tool/definition.rs\n- RustAgent/Agent/src/tool/registry.rs"
+                        .into(),
+                ),
+                pending_approval: None,
+                report_modifier: crate::tool::result::ToolReportModifier::None,
+                observable_input: Some(ObservableInput {
+                    value: r#"{"path":"/tmp/u8-report.md"}"#.into(),
+                    source: ObservableInputSource::Raw,
+                }),
+                batch_context: ToolBatchContext {
+                    batch_index: 0,
+                    batch_size: 1,
+                    executed_in_batch: false,
+                },
+            }],
+            ..LoopUsage::default()
+        };
+
+        let refs = super::collect_evidence_refs(&frame, Some(&usage));
+        assert!(refs.contains(&"read:/tmp/u8-report.md".to_string()));
+        assert!(refs.contains(&"claimed_read:RustAgent/Agent/src/tool/definition.rs".to_string()));
+        assert!(refs.contains(&"claimed_read:RustAgent/Agent/src/tool/registry.rs".to_string()));
+        assert!(!refs.contains(&"read:RustAgent/Agent/src/tool/definition.rs".to_string()));
+        assert!(!refs.contains(&"read:RustAgent/Agent/src/tool/registry.rs".to_string()));
+        assert_eq!(
+            evaluate_completion_evidence(&frame, &usage),
+            CompletionEvidenceStatus::MissingVerificationEvidence
+        );
+        let gaps = super::collect_completion_evidence_gaps(&frame);
+        assert!(gaps.iter().any(|gap| {
+            gap.recommended_action == "read_source_evidence"
+                && gap.target_path.as_deref() == Some("RustAgent/Agent/src/tool/definition.rs")
+                && gap.missing_verification_evidence
+        }));
+        assert!(gaps.iter().any(|gap| {
+            gap.recommended_action == "read_source_evidence"
+                && gap.target_path.as_deref() == Some("RustAgent/Agent/src/tool/registry.rs")
+                && gap.missing_verification_evidence
+        }));
     }
 
     #[test]
