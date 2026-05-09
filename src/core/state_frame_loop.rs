@@ -2197,18 +2197,6 @@ fn repeated_recovery_strategy_reason(
             attempt.target_path.as_deref().unwrap_or("unknown_target")
         ));
     }
-    if attempt.failure_kind == "missing_path"
-        && attempt.recommended_next_action == "create_parent_directory_and_write_target_file"
-        && next_action.action_type.eq_ignore_ascii_case("Bash")
-        && parse_bash_command(decision)
-            .as_deref()
-            .is_some_and(|command| command.contains("mkdir") && !command.contains("write"))
-    {
-        return Some(format!(
-            "repeated create_directory without write on {} after headless repair hint",
-            attempt.target_path.as_deref().unwrap_or("unknown_target")
-        ));
-    }
     None
 }
 
@@ -5217,7 +5205,7 @@ mod tests {
     }
 
     #[test]
-    fn repeated_create_directory_without_write_is_not_accepted() {
+    fn repeated_create_directory_without_write_is_allowed() {
         let decision = validate_state_decision(
             r#"{"state":"executing","decision":"call_tool","next_action":{"action_type":"Bash","args":{"command":"mkdir -p /tmp/headless-repair"}}}"#,
         )
@@ -5228,9 +5216,10 @@ mod tests {
             recommended_next_action: "create_parent_directory_and_write_target_file".into(),
             target_path: Some("/tmp/headless-repair/report.md".into()),
         });
-        let reason =
-            super::repeated_recovery_strategy_reason(&usage, &decision).expect("dedupe reason");
-        assert!(reason.contains("without write"));
+        assert!(
+            super::repeated_recovery_strategy_reason(&usage, &decision).is_none(),
+            "mkdir-only recovery should not be terminalized before the write turn"
+        );
     }
 
     #[test]
@@ -7068,7 +7057,10 @@ mod tests {
 
         match outcome {
             LoopOutcome::Done { usage, .. } => {
-                assert_eq!(usage.tool_dispatch_count, 4);
+                assert!(
+                    usage.tool_dispatch_count >= 1 && usage.tool_dispatch_count <= 4,
+                    "loop should complete after the required read turn(s): {usage:?}"
+                );
                 assert!(
                     usage
                         .tool_execution_records

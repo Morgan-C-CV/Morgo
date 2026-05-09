@@ -164,7 +164,10 @@ impl QueryContext {
         }
         let lineage = build_nested_memory_lineage(self, &child_agent_id, config.inherit_context);
         permission_context.set_nested_memory_lineage(lineage);
-        let tool_registry = if permission_context.boss_actor_policy.is_some() {
+        let tool_registry = if permission_context
+            .boss_actor_policy
+            .is_some_and(|policy| policy.may_spawn())
+        {
             use crate::bootstrap::InteractionSurface;
             use crate::bootstrap::SessionMode;
             let assembled = self.tool_registry.assemble(

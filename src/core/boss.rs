@@ -42,6 +42,7 @@ use crate::tool::definition::{ObservableInput, ObservableInputSource, Tool, Tool
 use crate::tool::result::{
     ToolBatchContext, ToolExecutionOutcomeKind, ToolExecutionRecord, ToolReportModifier,
 };
+use serde::Deserialize;
 use serde_json::json;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -313,18 +314,62 @@ fn verification_gap_required_targets(
     targets
 }
 
+fn verification_gap_can_continue(step: &BossPlanStep, metadata: Option<&BossStepRoutedMetadata>) -> bool {
+    !verification_gap_required_targets(step, metadata).is_empty()
+}
+
+fn verification_gap_repair_can_continue(
+    step: &BossPlanStep,
+    metadata: Option<&BossStepRoutedMetadata>,
+) -> bool {
+    verification_gap_can_continue(step, metadata)
+        && (metadata_has_open_verification_gap(metadata)
+            || has_only_verification_evidence_gap(step))
+}
+
+fn step_has_blocking_terminal_failure(
+    step: &BossPlanStep,
+    metadata: Option<&BossStepRoutedMetadata>,
+) -> bool {
+    step.status.is_terminal_failure() && !verification_gap_repair_can_continue(step, metadata)
+}
+
+fn verification_gap_requires_source_evidence_read(
+    step: &BossPlanStep,
+    metadata: Option<&BossStepRoutedMetadata>,
+) -> bool {
+    if step_continuation_requires_source_evidence_read(step) {
+        return true;
+    }
+    let source_targets = &step.stage_execution_contract.content_evidence_targets;
+    if source_targets.is_empty() {
+        return false;
+    }
+    verification_gap_required_targets(step, metadata).iter().any(|target| {
+        source_targets.iter().any(|source_target| {
+            evidence_path_scope_matches(target, source_target)
+                || evidence_path_scope_matches(source_target, target)
+        })
+    })
+}
+
 fn normalize_verification_gap_target_path(
     step: &BossPlanStep,
     target: Option<String>,
 ) -> Option<String> {
     match target {
-        Some(target) if declared_artifact_path_is_directory(step, &target) => {
-            preferred_non_readme_declared_artifact_path(
-                &step.stage_execution_contract.declared_artifacts,
-            )
-            .or(Some(target))
+        Some(target) => {
+            let target = normalize_required_evidence_target(&target);
+            if declared_artifact_path_is_directory(step, &target) {
+                preferred_non_readme_declared_artifact_path(
+                    &step.stage_execution_contract.declared_artifacts,
+                )
+                .or(Some(target))
+            } else {
+                Some(target)
+            }
         }
-        target => target,
+        None => None,
     }
 }
 
@@ -349,7 +394,7 @@ fn preferred_missing_verification_gap_path(
                 .find(|path| !declared_artifact_path_is_directory(step, path))
         })
         .or_else(|| candidates.first())
-        .map(|path| (*path).to_string())
+        .map(|path| normalize_required_evidence_target(path))
 }
 
 fn declared_artifact_path_is_directory(step: &BossPlanStep, path: &str) -> bool {
@@ -387,6 +432,9 @@ fn verification_gap_next_action(
     step: &BossPlanStep,
     metadata: Option<&BossStepRoutedMetadata>,
 ) -> String {
+    if verification_gap_requires_source_evidence_read(step, metadata) {
+        return "read_source_evidence".into();
+    }
     let hinted_action = metadata.and_then(|metadata| {
         metadata
             .completion_evidence_gaps
@@ -468,13 +516,52 @@ fn activate_verification_gap_continuation(
 }
 
 fn correction_repair_action(correction: Option<&str>) -> Option<String> {
-    let normalized =
-        normalize_verification_first_next_action(correction.map(|value| value.to_string()))?;
+    if correction_explicit_target(correction).is_some() {
+        return correction.map(|value| value.trim().to_string());
+    }
+    let correction_text = correction?.trim();
+    let normalized = normalize_verification_first_next_action(Some(correction_text.to_string()))?;
+    let lower = correction_text.to_ascii_lowercase();
+    if normalized == "verify_artifact"
+        && !lower.contains("verify_artifact")
+        && !lower.contains("verification")
+        && !lower.contains("evidence")
+        && !lower.contains("artifact")
+    {
+        return None;
+    }
     if normalized == "none" {
         None
     } else {
         Some(normalized)
     }
+}
+
+fn correction_explicit_target(correction: Option<&str>) -> Option<String> {
+    let correction = correction?.trim();
+    if correction.is_empty() {
+        return None;
+    }
+    if correction.starts_with('/') || correction.starts_with("./") || correction.starts_with("../")
+    {
+        return Some(correction.to_string());
+    }
+    for token in correction.split_whitespace() {
+        let token = token.trim_matches(|ch: char| {
+            matches!(
+                ch,
+                '"' | '\'' | '`' | ',' | ';' | ':' | ')' | '(' | '[' | ']'
+            )
+        });
+        if token.starts_with('/')
+            || token.starts_with("./")
+            || token.starts_with("../")
+            || (token.contains('/') && (token.contains('.') || token.starts_with("src/")))
+        {
+            return Some(token.to_string());
+        }
+    }
+    None
 }
 
 fn correction_repair_target(
@@ -493,6 +580,12 @@ fn correction_repair_target(
             verification_gap_target(step, metadata).or_else(|| primary_declared_artifact_path(step))
         }
     }
+}
+
+fn invalid_typed_review_correction(correction: Option<&str>) -> bool {
+    correction
+        .map(str::trim)
+        .is_some_and(|value| value.starts_with("Designer A returned an invalid"))
 }
 
 fn declared_artifact_paths(step: &BossPlanStep) -> Vec<&str> {
@@ -658,7 +751,10 @@ fn worker_report_runtime_view(
     runtime_refs: &[String],
 ) -> crate::core::state_frame::WorkerStructuredReport {
     let mut runtime_report = report.clone();
-    runtime_report.evidence_refs = runtime_refs.to_vec();
+    runtime_report.evidence_refs.clear();
+    for evidence_ref in runtime_refs.iter().chain(report.evidence_refs.iter()) {
+        push_unique_evidence_ref(&mut runtime_report.evidence_refs, evidence_ref);
+    }
     runtime_report
 }
 
@@ -819,6 +915,77 @@ fn runtime_evidence_refs_from_tool_records(step: &BossPlanStep) -> Vec<String> {
     refs
 }
 
+fn runtime_content_evidence_section(step: &BossPlanStep) -> Option<String> {
+    let target_path = primary_declared_artifact_path(step)?;
+    let mut lines = Vec::new();
+
+    for record in &step.tool_execution_records {
+        if record.tool_name != "Read" || record.kind != ToolExecutionOutcomeKind::Success {
+            continue;
+        }
+        let Some(path) = observable_path_local(record) else {
+            continue;
+        };
+        if path != target_path {
+            continue;
+        }
+        let Some(detail) = record.detail.as_deref() else {
+            continue;
+        };
+        let headings = collect_report_heading_lines(detail);
+        let headings_text = if headings.is_empty() {
+            "none".to_string()
+        } else {
+            headings.join(" | ")
+        };
+        lines.push(format!(
+            "- read:{path} bytes={} headings=[{headings_text}] head={} tail={}",
+            detail.len(),
+            single_line_runtime_excerpt(detail, 200),
+            single_line_runtime_tail_excerpt(detail, 200),
+        ));
+    }
+
+    if lines.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "Current runtime content evidence:\n{}",
+            lines.join("\n")
+        ))
+    }
+}
+
+fn collect_report_heading_lines(text: &str) -> Vec<String> {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with("Stage ") || line.starts_with("## "))
+        .take(8)
+        .map(str::to_string)
+        .collect()
+}
+
+fn single_line_runtime_excerpt(text: &str, max_chars: usize) -> String {
+    trim_runtime_excerpt(text, max_chars).replace('\n', " ")
+}
+
+fn single_line_runtime_tail_excerpt(text: &str, max_chars: usize) -> String {
+    let trimmed = text.trim();
+    let total_chars = trimmed.chars().count();
+    if total_chars <= max_chars {
+        return trimmed.replace('\n', " ");
+    }
+    let tail = trimmed
+        .chars()
+        .rev()
+        .take(max_chars)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect::<String>();
+    format!("...{}", tail.replace('\n', " "))
+}
+
 fn report_runtime_gate_can_be_sufficient(
     step: &BossPlanStep,
     report: &crate::core::state_frame::WorkerStructuredReport,
@@ -874,6 +1041,26 @@ fn metadata_with_current_runtime_evidence(
     }
 
     refreshed
+}
+
+fn mark_metadata_review_accept_success(metadata: &mut BossStepRoutedMetadata) {
+    metadata.completion_evidence_status = Some("sufficient".into());
+    metadata.completion_evidence_gaps.clear();
+    metadata.step_failure_classification = None;
+    metadata.terminal_blocker_kind = None;
+    metadata.recovery_outcome = Some("review_accept_success".into());
+    if let Some(report) = metadata.worker_report.as_mut() {
+        report.completion_evidence_status = CompletionEvidenceStatus::Sufficient;
+        report.completion_evidence_gaps.clear();
+        if report.verification_status.trim().is_empty()
+            || report.verification_status == "blocked"
+            || report.verification_status == "missing_verification_evidence"
+            || report.verification_status == "unverified"
+        {
+            report.verification_status = "verified".into();
+        }
+    }
+    metadata.success_classification = classify_step_success(Some(metadata));
 }
 
 fn push_unique_evidence_ref(refs: &mut Vec<String>, evidence_ref: &str) {
@@ -1879,6 +2066,35 @@ fn normalize_verification_first_patch_ref(value: &str) -> String {
     }
 }
 
+fn normalize_required_evidence_target(value: &str) -> String {
+    let mut current = value.trim().trim_matches('`').trim_matches('"');
+    loop {
+        let Some(rest) = current
+            .strip_prefix("read:")
+            .or_else(|| current.strip_prefix("file:"))
+            .or_else(|| current.strip_prefix("content_evidence:"))
+            .or_else(|| current.strip_prefix("verification:"))
+        else {
+            break;
+        };
+        current = rest.trim();
+    }
+    let mut normalized = current.trim().to_string();
+    loop {
+        let Some((left, right)) = normalized.split_once(':') else {
+            break;
+        };
+        let left = left.trim();
+        let right = right.trim();
+        if !left.is_empty() && left == right {
+            normalized = left.to_string();
+            continue;
+        }
+        break;
+    }
+    normalized.trim().to_string()
+}
+
 fn build_verification_first_shared_step_memory(
     step_id: usize,
     worker_role: WorkerRole,
@@ -2025,12 +2241,11 @@ fn compact_continuation_text(value: &str) -> String {
 }
 
 fn push_unique_required_evidence(targets: &mut Vec<String>, target: impl Into<String>) {
-    let target = target.into();
-    let trimmed = target.trim();
-    if trimmed.is_empty() || targets.iter().any(|existing| existing == trimmed) {
+    let target = normalize_required_evidence_target(&target.into());
+    if target.is_empty() || targets.iter().any(|existing| existing == &target) {
         return;
     }
-    targets.push(trimmed.to_string());
+    targets.push(target);
 }
 
 fn contract_child_file_artifact_paths(
@@ -3285,11 +3500,17 @@ fn should_emit_terminal_aborted_sample(repair_continuation_dispatched: bool) -> 
 }
 
 fn should_continue_repairable_failure(
+    step: &BossPlanStep,
+    metadata: Option<&BossStepRoutedMetadata>,
     failure_classification: StepFailureClassification,
     step_status: BossPlanStepStatus,
 ) -> bool {
     classify_repairable_failure(failure_classification)
-        && step_status == BossPlanStepStatus::Rejected
+        && (step_status == BossPlanStepStatus::Rejected
+            || (step_status == BossPlanStepStatus::Failed
+                && failure_classification
+                    == StepFailureClassification::VerificationRepairContinuation
+                && verification_gap_repair_can_continue(step, metadata)))
 }
 
 fn push_unique_memory_item(items: &mut Vec<String>, item: Option<String>, limit: usize) {
@@ -3910,6 +4131,64 @@ fn append_review_runtime_record(
     );
 }
 
+fn append_restricted_verifier_runtime_records(
+    step: &mut BossPlanStep,
+    verifier_output: &str,
+    evidence_refs: &[String],
+) {
+    append_step_runtime_record(
+        step,
+        ToolExecutionRecord {
+            tool_name: "BossVerifyChild".into(),
+            outcome: "Text".into(),
+            kind: ToolExecutionOutcomeKind::Success,
+            summary: "restricted verifier child returned targeted evidence".into(),
+            detail: Some(verifier_output.to_string()),
+            pending_approval: None,
+            report_modifier: ToolReportModifier::None,
+            observable_input: Some(observable_input_json(json!({
+                "step_id": step.id,
+                "evidence_refs": evidence_refs,
+            }))),
+            batch_context: ToolBatchContext {
+                batch_index: 0,
+                batch_size: 1,
+                executed_in_batch: false,
+            },
+        },
+    );
+
+    for path in evidence_refs
+        .iter()
+        .filter_map(|evidence_ref| evidence_ref.strip_prefix("read:"))
+        .filter(|path| !path.trim().is_empty())
+    {
+        append_step_runtime_record(
+            step,
+            ToolExecutionRecord {
+                tool_name: "Read".into(),
+                outcome: "Text".into(),
+                kind: ToolExecutionOutcomeKind::Success,
+                summary: "Read succeeded via restricted verifier child".into(),
+                detail: Some(format!(
+                    "restricted verifier child recovered runtime evidence ref read:{path}"
+                )),
+                pending_approval: None,
+                report_modifier: ToolReportModifier::None,
+                observable_input: Some(observable_input_json(json!({
+                    "file_path": path,
+                    "source": "restricted_verifier_child",
+                }))),
+                batch_context: ToolBatchContext {
+                    batch_index: 0,
+                    batch_size: 1,
+                    executed_in_batch: false,
+                },
+            },
+        );
+    }
+}
+
 fn append_artifact_verification_runtime_records(
     step: &mut BossPlanStep,
     status: &str,
@@ -4000,6 +4279,8 @@ fn build_step_review_summary(
         "Acceptance:".to_string(),
         summarize_acceptance_items(step),
         runtime_section,
+        runtime_content_evidence_section(step)
+            .unwrap_or_else(|| "Current runtime content evidence:\n- none supplied".to_string()),
         "Current worker prose/report:".to_string(),
     ];
     for (label, value) in details {
@@ -4014,12 +4295,7 @@ fn build_step_review_summary(
     sections.join("\n")
 }
 
-fn build_step_review_prompt(
-    step_id: usize,
-    verdict_hint: &str,
-    summary: &str,
-    correction: Option<&str>,
-) -> String {
+fn build_step_review_prompt(step_id: usize, summary: &str, correction: Option<&str>) -> String {
     let correction_section = correction
         .map(|corr| format!("\nCoordinator correction:\n{corr}"))
         .unwrap_or_default();
@@ -4027,15 +4303,13 @@ fn build_step_review_prompt(
         "You are Designer A reviewing a completed boss step.\n\
          No tools are available in this review. Do not request, read, search, or inspect files.\n\
          Use only the review package below, including current worker prose and current runtime evidence already included.\n\
-         Treat prose-only claims as weak evidence: they may justify ACCEPT with review risk when the coordinator verdict and supplied context support it, but they must not be reported as runtime-verified facts.\n\
+         Treat prose-only claims as weak evidence: they can be listed in weak_evidence_used, but they must not be reported as runtime-verified facts.\n\
          Historical attempts marked stale are background only; do not reject because of stale blockers when Current runtime evidence resolves them.\n\
-         If the current attempt says source evidence remains missing, max iterations were reached, tool dispatch failed, or completion is blocked, return REJECT with a concrete correction unless the same package also includes explicit runtime evidence that resolves the blocker.\n\
-         Return exactly one of these forms:\n\
-         ACCEPT\n\
-         REJECT\nCORRECTION: <concrete correction>\n\
-         REPLAN_STEP\nREASON: <why the step needs replanning>\n\n\
+         If the current attempt says source evidence remains missing, max iterations were reached, tool dispatch failed, or completion is blocked, do not accept unless the same package also includes explicit runtime evidence that resolves the blocker.\n\
+         If only a targeted read-only check is missing, return request_missing_evidence instead of asking the worker to rerun the whole step.\n\
+         Return exactly one JSON object with these fields:\n\
+         {{\"verdict\":\"accept|reject|replan_step|request_missing_evidence|escalate_context\",\"summary\":\"short verdict basis\",\"audited_items\":[\"...\"],\"evidence_used\":[\"runtime evidence refs only\"],\"missing_evidence\":[\"specific missing target or evidence ref\"],\"weak_evidence_used\":[\"prose-only claims, if any\"],\"required_next_action\":null|\"restricted_verification|worker_correction|replan_step|escalate_context\",\"correction\":null|\"concrete correction for reject\",\"reason\":null|\"reason for replan/escalation\"}}\n\n\
          Review step: {step_id}\n\
-         Coordinator verdict: {verdict_hint}\n\
          Review package:\n{summary}{correction_section}"
     )
 }
@@ -4121,6 +4395,166 @@ fn guard_review_reject_against_closed_gate(
             }
         }
         other => other,
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct TypedReviewResponse {
+    verdict: Option<String>,
+    #[serde(default)]
+    summary: Option<String>,
+    #[serde(default)]
+    audited_items: Vec<String>,
+    #[serde(default)]
+    evidence_used: Vec<String>,
+    #[serde(default)]
+    missing_evidence: Vec<String>,
+    #[serde(default)]
+    weak_evidence_used: Vec<String>,
+    #[serde(default)]
+    required_next_action: Option<String>,
+    #[serde(default)]
+    correction: Option<String>,
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+fn extract_first_json_object(text: &str) -> Option<&str> {
+    let start = text.find('{')?;
+    let slice = &text[start..];
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+
+    for (idx, ch) in slice.char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            match ch {
+                '\\' => escaped = true,
+                '"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+
+        match ch {
+            '"' => in_string = true,
+            '{' => depth = depth.saturating_add(1),
+            '}' => {
+                if depth == 0 {
+                    return None;
+                }
+                depth -= 1;
+                if depth == 0 {
+                    return Some(&slice[..=idx]);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    None
+}
+
+fn parse_typed_review_response(response: &str) -> Option<TypedReviewResponse> {
+    let trimmed = response.trim();
+    if let Ok(typed) = serde_json::from_str::<TypedReviewResponse>(trimmed) {
+        return Some(typed);
+    }
+    extract_first_json_object(trimmed)
+        .and_then(|candidate| serde_json::from_str::<TypedReviewResponse>(candidate).ok())
+}
+
+fn missing_evidence_action_mentions_review_gap(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    lower.contains("missing evidence")
+        || lower.contains("missing_evidence")
+        || lower.contains("source evidence")
+        || lower.contains("verification evidence")
+        || lower.contains("completion blocked")
+        || lower.contains("required source evidence has not been read")
+        || lower.contains("tool dispatch failed")
+}
+
+fn review_decision_requests_restricted_verification(
+    decision: &crate::core::boss_actor_runtime::ReviewDecision,
+    completion_gate_closed: bool,
+) -> bool {
+    if completion_gate_closed {
+        return false;
+    }
+    match decision {
+        crate::core::boss_actor_runtime::ReviewDecision::RequestMissingEvidence { .. } => true,
+        crate::core::boss_actor_runtime::ReviewDecision::Correct { correction, .. } => correction
+            .as_deref()
+            .is_some_and(missing_evidence_action_mentions_review_gap),
+        _ => false,
+    }
+}
+
+fn unresolved_review_decision_to_final(
+    decision: crate::core::boss_actor_runtime::ReviewDecision,
+) -> crate::core::boss_actor_runtime::ReviewDecision {
+    match decision {
+        crate::core::boss_actor_runtime::ReviewDecision::RequestMissingEvidence {
+            summary,
+            missing_evidence,
+            required_next_action,
+            ..
+        } => crate::core::boss_actor_runtime::ReviewDecision::Correct {
+            summary,
+            correction: Some(format!(
+                "review requires missing evidence before acceptance: {}; required_next_action={}",
+                if missing_evidence.is_empty() {
+                    "unspecified".into()
+                } else {
+                    missing_evidence.join("; ")
+                },
+                required_next_action.unwrap_or_else(|| "restricted_verification".into())
+            )),
+        },
+        crate::core::boss_actor_runtime::ReviewDecision::EscalateContext {
+            summary,
+            reason,
+            ..
+        } => crate::core::boss_actor_runtime::ReviewDecision::ReplanStep { summary, reason },
+        other => other,
+    }
+}
+
+fn restricted_verifier_read_refs(output: &str, allowed_targets: &[String]) -> Vec<String> {
+    let mut refs = Vec::new();
+    for token in output
+        .split(|ch: char| ch.is_whitespace() || ch == ';' || ch == ',' || ch == '"' || ch == '`')
+    {
+        let token = token.trim().trim_start_matches("-").trim();
+        let Some(path) = token.strip_prefix("read:") else {
+            continue;
+        };
+        let path = path.trim();
+        if path.is_empty() {
+            continue;
+        }
+        if allowed_targets.iter().any(|target| {
+            let normalized_target = normalize_required_evidence_target(target);
+            evidence_path_scope_matches(path, &normalized_target)
+        }) {
+            push_unique_evidence_ref(&mut refs, &format!("read:{path}"));
+        }
+    }
+    refs
+}
+
+fn push_unique_review_target(targets: &mut Vec<String>, value: &str) {
+    let value = normalize_required_evidence_target(value);
+    if value.is_empty() {
+        return;
+    }
+    if !value.is_empty() && !targets.iter().any(|target| target == &value) {
+        targets.push(value);
     }
 }
 
@@ -4684,27 +5118,67 @@ impl BossCoordinator {
                         guard.clone()
                     };
                     if let Some(app) = app_state {
-                        let verdict_hint = if accepted { "accepted" } else { "rejected" };
                         let completion_gate_closed = c.review_completion_gate_closed(step_id).await;
-                        let msg = build_step_review_prompt(
-                            step_id,
-                            verdict_hint,
-                            &summary,
-                            correction.as_deref(),
-                        );
+                        let msg =
+                            build_step_review_prompt(step_id, &summary, correction.as_deref());
                         match c.ask_a_review_stateless(&app, msg, &summary).await {
                             Ok(response) => {
-                                let decision = guard_review_decision_against_unresolved_blockers(
-                                    accepted,
-                                    &summary,
-                                    completion_gate_closed,
-                                    response,
-                                );
-                                let decision = guard_review_reject_against_closed_gate(
+                                let mut decision =
+                                    guard_review_decision_against_unresolved_blockers(
+                                        accepted,
+                                        &summary,
+                                        completion_gate_closed,
+                                        response,
+                                    );
+                                decision = guard_review_reject_against_closed_gate(
                                     accepted,
                                     completion_gate_closed,
                                     decision,
                                 );
+                                if review_decision_requests_restricted_verification(
+                                    &decision,
+                                    completion_gate_closed,
+                                ) {
+                                    if let Ok(verifier_output) = c
+                                        .run_restricted_review_verifier(
+                                            &app, step_id, &decision, &summary,
+                                        )
+                                        .await
+                                    {
+                                        let augmented_summary = format!(
+                                            "{summary}\nRestricted verifier child evidence:\n{verifier_output}"
+                                        );
+                                        let followup_msg = build_step_review_prompt(
+                                            step_id,
+                                            &augmented_summary,
+                                            correction.as_deref(),
+                                        );
+                                        if let Ok(followup) = c
+                                            .ask_a_review_stateless(
+                                                &app,
+                                                followup_msg,
+                                                &augmented_summary,
+                                            )
+                                            .await
+                                        {
+                                            let refreshed_gate_closed =
+                                                c.review_completion_gate_closed(step_id).await;
+                                            decision =
+                                                guard_review_decision_against_unresolved_blockers(
+                                                    accepted,
+                                                    &augmented_summary,
+                                                    refreshed_gate_closed,
+                                                    followup,
+                                                );
+                                            decision = guard_review_reject_against_closed_gate(
+                                                accepted,
+                                                refreshed_gate_closed,
+                                                decision,
+                                            );
+                                        }
+                                    }
+                                }
+                                let decision = unresolved_review_decision_to_final(decision);
                                 c.apply_review_verdict(step_id, &decision).await?;
                                 return Ok(decision);
                             }
@@ -4773,6 +5247,155 @@ impl BossCoordinator {
         step_completion_gate_error(&step, metadata.as_ref()).is_none()
     }
 
+    async fn run_restricted_review_verifier(
+        &self,
+        app_state: &Arc<crate::state::app_state::AppState>,
+        step_id: usize,
+        decision: &crate::core::boss_actor_runtime::ReviewDecision,
+        review_summary: &str,
+    ) -> anyhow::Result<String> {
+        if app_state.active_model_runtime.is_none() {
+            anyhow::bail!("active model runtime not available for restricted verifier");
+        }
+        let tasks = app_state
+            .permission_context
+            .task_manager
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("task manager not available for restricted verifier"))?
+            .clone();
+        let (step, metadata) = self
+            .refresh_routed_metadata_for_review(step_id)
+            .await
+            .ok_or_else(|| anyhow::anyhow!("review step {step_id} not found"))?;
+        let targets = self.restricted_verifier_targets(&step, metadata.as_ref(), decision);
+        if targets.is_empty() {
+            anyhow::bail!("restricted verifier has no concrete target");
+        }
+        let task = format!(
+            "Restricted review verification for boss step {step_id}.\n\
+             You are verify_child. Do not spawn agents or broaden the task.\n\
+             Use only minimal read-only verification on these exact target(s):\n- {}\n\
+             Review package excerpt:\n{}\n\
+             Return the verify output contract fields only.",
+            targets.join("\n- "),
+            review_summary
+        );
+        let payload = json!({
+            "task": task,
+            "role": "verify",
+            "inherit_context": false,
+            "allowed_tools": ["Read"],
+            "reuse_strategy": "fresh",
+            "max_turns": 4,
+            "step_id": step_id,
+            "boss_actor_role": "verify_child",
+            "boss_lineage_depth": 1,
+            "parent_runtime_role": "designer_a",
+        })
+        .to_string();
+        let task_id = self
+            .invoke_agent_tool_with_task_id(app_state, &payload)
+            .await?;
+        self.record_review_verifier_child(step_id, &task_id).await;
+        let output = self
+            .wait_for_restricted_verifier_output(&tasks, &task_id)
+            .await?;
+        let evidence_refs = restricted_verifier_read_refs(&output, &targets);
+        {
+            let mut plan_guard = self.plan.write().await;
+            if let Some(step) = plan_guard
+                .as_mut()
+                .and_then(|plan| plan.steps.iter_mut().find(|step| step.id == step_id))
+            {
+                append_restricted_verifier_runtime_records(step, &output, &evidence_refs);
+            }
+        }
+        self.update_actor_status(
+            &format!("review-verifier-step-{step_id}-{task_id}"),
+            BossActorStatus::Completed,
+        )
+        .await;
+        Ok(output)
+    }
+
+    fn restricted_verifier_targets(
+        &self,
+        step: &BossPlanStep,
+        metadata: Option<&BossStepRoutedMetadata>,
+        decision: &crate::core::boss_actor_runtime::ReviewDecision,
+    ) -> Vec<String> {
+        let mut targets = Vec::new();
+        if let crate::core::boss_actor_runtime::ReviewDecision::RequestMissingEvidence {
+            missing_evidence,
+            ..
+        } = decision
+        {
+            for item in missing_evidence {
+                push_unique_review_target(&mut targets, item);
+            }
+        }
+        if targets.is_empty() {
+            for target in verification_gap_required_targets(step, metadata) {
+                push_unique_review_target(&mut targets, &target);
+            }
+        }
+        if targets.is_empty() {
+            for expectation in
+                extract_artifact_expectations(&current_task_contract_text(step.objective()))
+            {
+                push_unique_review_target(&mut targets, &expectation.path.display().to_string());
+            }
+        }
+        targets
+    }
+
+    async fn record_review_verifier_child(&self, step_id: usize, task_id: &str) {
+        let mut guard = self.session.write().await;
+        let Some(session) = guard.as_mut() else {
+            return;
+        };
+        let actor_id = format!("review-verifier-step-{step_id}-{task_id}");
+        let mut handle = BossActorHandle::new(
+            actor_id,
+            task_id.to_string(),
+            crate::core::boss_state::BossActorRole::VerifyChild,
+        );
+        handle.status = BossActorStatus::Active;
+        handle.lineage_depth = 1;
+        handle.task_id = Some(task_id.to_string());
+        handle.last_snapshot = Some(std::time::SystemTime::now());
+        session.active_children.push(handle);
+    }
+
+    async fn wait_for_restricted_verifier_output(
+        &self,
+        tasks: &Arc<TaskManager>,
+        task_id: &str,
+    ) -> anyhow::Result<String> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            if let Some(task) = tasks.get(task_id) {
+                if matches!(
+                    task.status,
+                    TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Killed
+                ) {
+                    let output = tasks
+                        .get_output(task_id, 0)
+                        .map(|slice| slice.content)
+                        .unwrap_or_default();
+                    if output.trim().is_empty() {
+                        anyhow::bail!("restricted verifier returned no evidence output");
+                    }
+                    return Ok(output);
+                }
+            }
+            if std::time::Instant::now() >= deadline {
+                anyhow::bail!("restricted verifier timed out");
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    }
+
     fn build_doc_fn(
         coordinator: &Self,
         app_state: &Arc<crate::state::app_state::AppState>,
@@ -4797,8 +5420,22 @@ impl BossCoordinator {
                             crate::core::boss_actor_runtime::ReviewDecision::Correct {
                                 correction,
                                 ..
-                            } => correction.unwrap_or_else(|| signal.clone()),
+                            } => {
+                                if invalid_typed_review_correction(correction.as_deref()) {
+                                    signal.clone()
+                                } else {
+                                    correction.unwrap_or_else(|| signal.clone())
+                                }
+                            }
                             crate::core::boss_actor_runtime::ReviewDecision::ReplanStep {
+                                reason,
+                                ..
+                            } => reason,
+                            crate::core::boss_actor_runtime::ReviewDecision::RequestMissingEvidence {
+                                required_next_action,
+                                ..
+                            } => required_next_action.unwrap_or_else(|| signal.clone()),
+                            crate::core::boss_actor_runtime::ReviewDecision::EscalateContext {
                                 reason,
                                 ..
                             } => reason,
@@ -4892,6 +5529,8 @@ impl BossCoordinator {
             (BossStage::Documentation, BossStage::WaitingForApproval) => true,
             (BossStage::WaitingForApproval, BossStage::Execution) => true,
             (BossStage::WaitingForApproval, BossStage::Documentation) => true, // Rejected by user
+            (BossStage::Documentation, BossStage::Completed) => true,
+            (BossStage::WaitingForApproval, BossStage::Completed) => true,
             (BossStage::Execution, BossStage::Completed) => true,
             (BossStage::Documentation, BossStage::Documentation) => true, // Re-entering valid
             (BossStage::Execution, BossStage::Documentation) => true,     // Fallback/Fatal failure
@@ -5275,7 +5914,7 @@ impl BossCoordinator {
             .filter(|evidence_ref| evidence_ref.starts_with("read:"))
             .cloned()
             .collect::<Vec<_>>();
-        if read_evidence_refs.is_empty() && follow_up_blocker.is_none() {
+        if read_evidence_refs.is_empty() && follow_up_blocker.is_none() && !needs_review_note {
             return;
         }
         let mut routed_step_metadata = self.routed_step_metadata.write().await;
@@ -5287,6 +5926,9 @@ impl BossCoordinator {
             &read_evidence_refs,
             &mut metadata.completion_evidence_gaps,
         );
+        if needs_review_note && completion_can_succeed {
+            metadata.completion_evidence_gaps.clear();
+        }
         if let Some(report) = metadata.worker_report.as_mut() {
             for evidence_ref in &read_evidence_refs {
                 push_unique_evidence_ref(&mut report.evidence_refs, evidence_ref);
@@ -5296,6 +5938,9 @@ impl BossCoordinator {
                 &read_evidence_refs,
                 &mut report.completion_evidence_gaps,
             );
+            if needs_review_note && completion_can_succeed {
+                report.completion_evidence_gaps.clear();
+            }
             if report.completion_evidence_gaps.is_empty() && completion_can_succeed {
                 report.completion_evidence_status = CompletionEvidenceStatus::Sufficient;
                 report.verification_status = if needs_review_note {
@@ -5555,10 +6200,11 @@ impl BossCoordinator {
     }
 
     pub async fn has_terminal_failure(&self) -> bool {
+        let routed_step_metadata = self.routed_step_metadata.read().await;
         self.plan.read().await.as_ref().is_some_and(|plan| {
-            plan.steps
-                .iter()
-                .any(|step| step.status.is_terminal_failure())
+            plan.steps.iter().any(|step| {
+                step_has_blocking_terminal_failure(step, routed_step_metadata.get(&step.id))
+            })
         })
     }
 
@@ -5738,6 +6384,13 @@ impl BossCoordinator {
         }
     }
 
+    async fn mark_routed_metadata_review_accept_success(&self, step_id: usize) {
+        let mut routed_step_metadata = self.routed_step_metadata.write().await;
+        if let Some(metadata) = routed_step_metadata.get_mut(&step_id) {
+            mark_metadata_review_accept_success(metadata);
+        }
+    }
+
     fn derive_rollout_policy_decision(
         steps: &[BossStepReport],
     ) -> Option<BossRolloutPolicyDecision> {
@@ -5897,8 +6550,8 @@ impl BossCoordinator {
                     forced_worker_lism_policy: WorkerLisMPolicy::ForceOff,
                     fallback_tier: "source_evidence_repair",
                     fallback_reason: "rollout_policy_source_evidence_gap",
-                    worker_role: WorkerRole::Implement,
-                    force_fresh_spawn: false,
+                    worker_role: WorkerRole::Verify,
+                    force_fresh_spawn: true,
                     affected_gaps,
                 })
             } else if verification_only_gap {
@@ -6518,6 +7171,7 @@ impl BossCoordinator {
         let Some(step_id) = event.step_id else {
             return Ok(());
         };
+        let routed_step_metadata_snapshot = self.routed_step_metadata.read().await.clone();
 
         let mut plan_guard = self.plan.write().await;
         let Some(plan) = plan_guard.as_mut() else {
@@ -6729,7 +7383,10 @@ impl BossCoordinator {
                     BossPlanStepStatus::Rejected => Some(("repair_dispatched", None)),
                     BossPlanStepStatus::Failed
                         if step.last_correction.is_some()
-                            && has_only_verification_evidence_gap(step) =>
+                            && verification_gap_repair_can_continue(
+                                step,
+                                routed_step_metadata_snapshot.get(&step.id),
+                            ) =>
                     {
                         Some(("repair_dispatched", None))
                     }
@@ -6929,8 +7586,11 @@ impl BossCoordinator {
                             "verified",
                             "artifact verification passed",
                         );
+                        let gate_metadata = routed_metadata
+                            .as_ref()
+                            .map(|metadata| metadata_with_current_runtime_evidence(step, metadata));
                         if let Some((reason, failure_classification)) =
-                            step_completion_gate_error(step, routed_metadata.as_ref())
+                            step_completion_gate_error(step, gate_metadata.as_ref())
                         {
                             step.last_review_summary = Some(reason.clone());
                             step.attempt_count += 1;
@@ -6941,7 +7601,7 @@ impl BossCoordinator {
                                     step,
                                     failure_classification,
                                     &reason,
-                                    routed_metadata.as_ref(),
+                                    gate_metadata.as_ref(),
                                 );
                                 (false, Some(("repair_dispatched", None)))
                             } else if step.attempt_count >= step.retry_budget {
@@ -6972,7 +7632,7 @@ impl BossCoordinator {
                                     step,
                                     failure_classification,
                                     &reason,
-                                    routed_metadata.as_ref(),
+                                    gate_metadata.as_ref(),
                                 );
                                 (false, Some(("repair_dispatched", None)))
                             }
@@ -7009,15 +7669,43 @@ impl BossCoordinator {
                         step.status = BossPlanStepStatus::Failed;
                     } else {
                         step.status = BossPlanStepStatus::Rejected;
-                        let next_action =
-                            correction_repair_action(correction.as_deref()).or_else(|| {
+                        let explicit_target = correction_explicit_target(correction.as_deref());
+                        let next_action = correction_repair_action(correction.as_deref())
+                            .or_else(|| {
+                                correction
+                                    .as_deref()
+                                    .map(str::trim)
+                                    .filter(|value| !value.is_empty())
+                                    .map(str::to_string)
+                            })
+                            .or_else(|| {
                                 Some(verification_gap_next_action(step, routed_metadata.as_ref()))
                             });
-                        let failed_target = correction_repair_target(
-                            step,
-                            routed_metadata.as_ref(),
-                            next_action.as_deref(),
-                        );
+                        let failed_target = explicit_target
+                            .or_else(|| {
+                                correction
+                                    .as_deref()
+                                    .map(str::trim)
+                                    .filter(|value| !value.is_empty())
+                                    .filter(|_| {
+                                        !matches!(
+                                            next_action.as_deref(),
+                                            Some(
+                                                "read_source_evidence"
+                                                    | "verify_artifact"
+                                                    | "repair_artifact"
+                                            )
+                                        )
+                                    })
+                                    .map(str::to_string)
+                            })
+                            .or_else(|| {
+                                correction_repair_target(
+                                    step,
+                                    routed_metadata.as_ref(),
+                                    next_action.as_deref(),
+                                )
+                            });
                         update_step_continuation_context(
                             step,
                             crate::core::state_frame::ContinuityMode::Repair,
@@ -7050,6 +7738,71 @@ impl BossCoordinator {
                     );
                     (false, None)
                 }
+                crate::core::boss_actor_runtime::ReviewDecision::RequestMissingEvidence {
+                    summary,
+                    missing_evidence,
+                    required_next_action,
+                    ..
+                } => {
+                    let correction = format!(
+                        "review requires missing evidence before acceptance: {}; required_next_action={}",
+                        if missing_evidence.is_empty() {
+                            "unspecified".into()
+                        } else {
+                            missing_evidence.join("; ")
+                        },
+                        required_next_action
+                            .clone()
+                            .unwrap_or_else(|| "restricted_verification".into())
+                    );
+                    append_review_runtime_record(
+                        step,
+                        "missing_evidence_requested",
+                        summary,
+                        Some(&correction),
+                    );
+                    step.last_review_summary = Some(summary.clone());
+                    step.attempt_count += 1;
+                    if step.attempt_count >= step.retry_budget {
+                        step.status = BossPlanStepStatus::Failed;
+                    } else {
+                        step.status = BossPlanStepStatus::Rejected;
+                        update_step_continuation_context(
+                            step,
+                            crate::core::state_frame::ContinuityMode::Repair,
+                            verification_gap_target(step, routed_metadata.as_ref()),
+                            Some(
+                                required_next_action
+                                    .clone()
+                                    .unwrap_or_else(|| "read_source_evidence".into()),
+                            ),
+                            continuation_verified_facts(step),
+                        );
+                    }
+                    (false, None)
+                }
+                crate::core::boss_actor_runtime::ReviewDecision::EscalateContext {
+                    summary,
+                    reason,
+                    ..
+                } => {
+                    append_review_runtime_record(
+                        step,
+                        "context_escalation_required",
+                        summary,
+                        Some(reason.as_str()),
+                    );
+                    step.last_review_summary = Some(summary.clone());
+                    step.status = BossPlanStepStatus::ReplanRequired;
+                    update_step_continuation_context(
+                        step,
+                        crate::core::state_frame::ContinuityMode::Repair,
+                        None,
+                        Some(format!("context escalation required: {reason}")),
+                        continuation_verified_facts(step),
+                    );
+                    (false, None)
+                }
             }
         };
         self.persist_plan_if_configured().await?;
@@ -7058,6 +7811,8 @@ impl BossCoordinator {
                 .await;
         }
         if should_auto_advance {
+            self.mark_routed_metadata_review_accept_success(step_id)
+                .await;
             let next_step = self
                 .plan
                 .read()
@@ -7113,6 +7868,7 @@ impl BossCoordinator {
             Some(id) => id,
             None => return Ok(()),
         };
+        let routed_step_metadata_snapshot = self.routed_step_metadata.read().await.clone();
         let tasks = self
             .auto_advance_app_state
             .read()
@@ -7370,6 +8126,15 @@ impl BossCoordinator {
                 .find(|s| s.id == step_id)
                 .and_then(|step| match step.status {
                     BossPlanStepStatus::Rejected => Some(("repair_dispatched", None)),
+                    BossPlanStepStatus::Failed
+                        if step.last_correction.is_some()
+                            && verification_gap_repair_can_continue(
+                                step,
+                                routed_step_metadata_snapshot.get(&step.id),
+                            ) =>
+                    {
+                        Some(("repair_dispatched", None))
+                    }
                     BossPlanStepStatus::Failed if step.last_correction.is_some() => Some((
                         "terminal_after_repair_exhausted",
                         Some("artifact_verification_failed"),
@@ -7523,6 +8288,40 @@ impl BossCoordinator {
                         routed_step_metadata_snapshot.get(&step_id),
                         &reason,
                     );
+                }
+                Some(AdvanceOutcome::Dispatch(step_id))
+            } else if let Some(step_id) = plan
+                .steps
+                .iter()
+                .find(|step| {
+                    step.status.is_terminal_failure()
+                        && verification_gap_repair_can_continue(
+                            step,
+                            routed_step_metadata_snapshot.get(&step.id),
+                        )
+                })
+                .map(|step| step.id)
+            {
+                let reason = routed_step_metadata_snapshot
+                    .get(&step_id)
+                    .and_then(|metadata| {
+                        step_completion_gate_error(
+                            plan.steps.iter().find(|step| step.id == step_id)?,
+                            Some(metadata),
+                        )
+                    })
+                    .map(|(reason, _)| reason)
+                    .unwrap_or_else(|| {
+                        "verification evidence still missing; continuing repair verification"
+                            .to_string()
+                    });
+                if let Some(step) = plan.steps.iter_mut().find(|step| step.id == step_id) {
+                    activate_verification_gap_continuation(
+                        step,
+                        routed_step_metadata_snapshot.get(&step_id),
+                        &reason,
+                    );
+                    step.status = BossPlanStepStatus::Running;
                 }
                 Some(AdvanceOutcome::Dispatch(step_id))
             } else if plan.steps.iter().all(|step| step.completed) {
@@ -8074,6 +8873,8 @@ impl BossCoordinator {
                                         );
                                         let repairable_continuation_dispatched =
                                             should_continue_repairable_failure(
+                                                step,
+                                                metadata_snapshot.as_ref(),
                                                 failure_classification,
                                                 step.status,
                                             );
@@ -8173,6 +8974,8 @@ impl BossCoordinator {
                                         metadata_snapshot.as_ref(),
                                     );
                                     dispatched = should_continue_repairable_failure(
+                                        step,
+                                        metadata_snapshot.as_ref(),
                                         failure_classification,
                                         step.status,
                                     );
@@ -8379,6 +9182,7 @@ impl BossCoordinator {
         let mut latest_message = None;
         loop {
             let message = self.advance_once(app_state).await?;
+            let routed_step_metadata_snapshot = self.routed_step_metadata.read().await.clone();
             let should_continue = {
                 let guard = self.plan.read().await;
                 guard.as_ref().is_some_and(|plan| {
@@ -8389,10 +9193,12 @@ impl BossCoordinator {
                                 .iter()
                                 .any(|step| step.status == BossPlanStepStatus::Rejected))
                         && !plan.steps.iter().all(|step| step.completed)
-                        && !plan
-                            .steps
-                            .iter()
-                            .any(|step| step.status.is_terminal_failure())
+                        && !plan.steps.iter().any(|step| {
+                            step_has_blocking_terminal_failure(
+                                step,
+                                routed_step_metadata_snapshot.get(&step.id),
+                            )
+                        })
                         && !plan
                             .steps
                             .iter()
@@ -8442,16 +9248,15 @@ impl BossCoordinator {
             .iter()
             .find(|step| step.id == step_id)
             .ok_or_else(|| anyhow::anyhow!("Unknown boss step {step_id}"))?;
-        let rollout_execution_policy = {
+        let routed_metadata = {
             let routed_step_metadata = self.routed_step_metadata.read().await;
-            routed_step_metadata
-                .get(&step_id)
-                .and_then(|metadata| Self::resolve_step_rollout_execution_policy(Some(metadata)))
+            routed_step_metadata.get(&step_id).cloned()
         };
-        let projected_stage_memory = {
-            let routed_step_metadata = self.routed_step_metadata.read().await;
-            project_executor_b_stage_memory(step, routed_step_metadata.get(&step_id))
-        };
+        let rollout_execution_policy = routed_metadata
+            .as_ref()
+            .and_then(|metadata| Self::resolve_step_rollout_execution_policy(Some(metadata)));
+        let projected_stage_memory =
+            { project_executor_b_stage_memory(step, routed_metadata.as_ref()) };
         let plan_version = format!("{}:steps={}", plan.plan_id, plan.steps.len());
         let step_revision = format!("step-{}-attempt-{}", step.id, step.attempt_count);
         let relevant_file_handle_source_text =
@@ -8488,10 +9293,10 @@ impl BossCoordinator {
                     .any(gap_requires_source_evidence_read)
             });
         let verification_first_short_form = worker_role == WorkerRole::Verify
-            && !source_evidence_repair
-            && rollout_execution_policy
-                .as_ref()
-                .is_some_and(|policy| policy.fallback_tier == "verification_first");
+            && rollout_execution_policy.as_ref().is_some_and(|policy| {
+                policy.fallback_tier == "verification_first"
+                    || policy.fallback_tier == "source_evidence_repair"
+            });
         let lism_policy = if let Some(policy) = rollout_execution_policy.as_ref() {
             policy.forced_worker_lism_policy.as_str().to_string()
         } else {
@@ -8524,7 +9329,14 @@ impl BossCoordinator {
                 .collect::<Vec<_>>()
         };
         let verification_first_target = verification_first_short_form
-            .then(|| verification_first_target_path(step))
+            .then(|| {
+                if source_evidence_repair {
+                    verification_gap_target(step, routed_metadata.as_ref())
+                        .or_else(|| verification_first_target_path(step))
+                } else {
+                    verification_first_target_path(step)
+                }
+            })
             .flatten();
         let effective_relevant_file_handles =
             if let Some(target) = verification_first_target.as_deref() {
@@ -8567,6 +9379,17 @@ impl BossCoordinator {
             &relevant_file_handles,
             &effective_stage_execution_contract,
         );
+        let mut content_evidence_targets = content_evidence_targets;
+        if content_evidence_targets.is_empty() && source_evidence_repair {
+            for target in verification_gap_required_targets(step, routed_metadata.as_ref()) {
+                push_unique_required_evidence(&mut content_evidence_targets, target);
+            }
+            if content_evidence_targets.is_empty() {
+                if let Some(target) = verification_gap_target(step, routed_metadata.as_ref()) {
+                    push_unique_required_evidence(&mut content_evidence_targets, target);
+                }
+            }
+        }
         let mut effective_stage_execution_contract = effective_stage_execution_contract;
         effective_stage_execution_contract.content_evidence_targets =
             content_evidence_targets.clone();
@@ -9221,6 +10044,75 @@ refresh_reason: {}\n\n{}",
         response: &str,
         summary: &str,
     ) -> crate::core::boss_actor_runtime::ReviewDecision {
+        if let Some(typed) = parse_typed_review_response(response) {
+            let response_summary = typed
+                .summary
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| summary.to_string());
+            match typed
+                .verdict
+                .as_deref()
+                .map(str::trim)
+                .map(str::to_ascii_lowercase)
+                .as_deref()
+            {
+                Some("accept") | Some("accepted") => {
+                    return crate::core::boss_actor_runtime::ReviewDecision::Accept {
+                        summary: response_summary,
+                    };
+                }
+                Some("reject") | Some("rejected") => {
+                    return crate::core::boss_actor_runtime::ReviewDecision::Correct {
+                        summary: response_summary,
+                        correction: typed.correction.filter(|value| !value.trim().is_empty()),
+                    };
+                }
+                Some("replan_step") | Some("replan") => {
+                    return crate::core::boss_actor_runtime::ReviewDecision::ReplanStep {
+                        summary: response_summary,
+                        reason: typed
+                            .reason
+                            .filter(|value| !value.trim().is_empty())
+                            .unwrap_or_else(|| "review requested step replanning".to_string()),
+                    };
+                }
+                Some("request_missing_evidence") | Some("missing_evidence") => {
+                    return crate::core::boss_actor_runtime::ReviewDecision::RequestMissingEvidence {
+                        summary: response_summary,
+                        audited_items: typed.audited_items,
+                        evidence_used: typed.evidence_used,
+                        missing_evidence: typed.missing_evidence,
+                        weak_evidence_used: typed.weak_evidence_used,
+                        required_next_action: typed.required_next_action,
+                    };
+                }
+                Some("escalate_context") | Some("escalate") => {
+                    return crate::core::boss_actor_runtime::ReviewDecision::EscalateContext {
+                        summary: response_summary,
+                        reason: typed
+                            .reason
+                            .filter(|value| !value.trim().is_empty())
+                            .unwrap_or_else(|| {
+                                "review requested broader context escalation".into()
+                            }),
+                        audited_items: typed.audited_items,
+                        evidence_used: typed.evidence_used,
+                        missing_evidence: typed.missing_evidence,
+                        weak_evidence_used: typed.weak_evidence_used,
+                        required_next_action: typed.required_next_action,
+                    };
+                }
+                _ => {
+                    return crate::core::boss_actor_runtime::ReviewDecision::Correct {
+                        summary: response_summary,
+                        correction: Some(
+                            "Designer A returned an invalid typed review verdict; acceptance requires a valid typed verdict."
+                                .into(),
+                        ),
+                    };
+                }
+            }
+        }
         let upper = response.to_uppercase();
         if upper.contains("REPLAN_STEP") {
             let reason = response
@@ -9245,8 +10137,38 @@ refresh_reason: {}\n\n{}",
                 correction,
             };
         }
-        crate::core::boss_actor_runtime::ReviewDecision::Accept {
+        if upper.contains("REQUEST_MISSING_EVIDENCE") {
+            return crate::core::boss_actor_runtime::ReviewDecision::RequestMissingEvidence {
+                summary: summary.to_string(),
+                audited_items: Vec::new(),
+                evidence_used: Vec::new(),
+                missing_evidence: Vec::new(),
+                weak_evidence_used: Vec::new(),
+                required_next_action: Some("restricted_verification".into()),
+            };
+        }
+        if upper.contains("ESCALATE_CONTEXT") {
+            return crate::core::boss_actor_runtime::ReviewDecision::EscalateContext {
+                summary: summary.to_string(),
+                reason: "review requested broader context escalation".into(),
+                audited_items: Vec::new(),
+                evidence_used: Vec::new(),
+                missing_evidence: Vec::new(),
+                weak_evidence_used: Vec::new(),
+                required_next_action: Some("escalate_context".into()),
+            };
+        }
+        if upper.contains("ACCEPT") {
+            return crate::core::boss_actor_runtime::ReviewDecision::Accept {
+                summary: summary.to_string(),
+            };
+        }
+        crate::core::boss_actor_runtime::ReviewDecision::Correct {
             summary: summary.to_string(),
+            correction: Some(
+                "Designer A returned an invalid non-JSON review verdict; acceptance requires a valid typed verdict."
+                    .into(),
+            ),
         }
     }
 
@@ -9818,6 +10740,16 @@ mod tests {
     async fn test_boss_coordinator_initial_stage_is_documentation() {
         let coordinator = BossCoordinator::new();
         assert_eq!(coordinator.get_stage().await, BossStage::Documentation);
+    }
+
+    #[tokio::test]
+    async fn transition_to_allows_completed_from_documentation() {
+        let coordinator = BossCoordinator::new();
+        coordinator
+            .transition_to(BossStage::Completed)
+            .await
+            .expect("documentation can complete directly");
+        assert_eq!(coordinator.get_stage().await, BossStage::Completed);
     }
 
     #[tokio::test]
@@ -15227,7 +16159,6 @@ mod tests {
     fn step_review_prompt_passes_prose_but_forbids_tool_reads() {
         let prompt = build_step_review_prompt(
             0,
-            "accepted",
             "Summary: worker prose says files were read\nResult: report body",
             None,
         );
@@ -15235,10 +16166,29 @@ mod tests {
         assert!(prompt.contains("No tools are available"));
         assert!(prompt.contains("Use only the review package below"));
         assert!(prompt.contains("Treat prose-only claims as weak evidence"));
+        assert!(!prompt.contains("Coordinator verdict:"));
         assert!(prompt.contains("Summary: worker prose says files were read"));
-        assert!(prompt.contains("ACCEPT"));
-        assert!(prompt.contains("REJECT"));
-        assert!(prompt.contains("REPLAN_STEP"));
+        assert!(prompt.contains("\"verdict\""));
+        assert!(prompt.contains("request_missing_evidence"));
+        assert!(prompt.contains("required_next_action"));
+    }
+
+    #[test]
+    fn review_decision_request_missing_evidence_triggers_restricted_verification() {
+        let decision = crate::core::boss_actor_runtime::ReviewDecision::RequestMissingEvidence {
+            summary: "need a targeted read".into(),
+            audited_items: vec!["artifact".into()],
+            evidence_used: vec!["read:/tmp/report.md".into()],
+            missing_evidence: vec!["read:/tmp/source.md".into()],
+            weak_evidence_used: vec!["worker prose".into()],
+            required_next_action: Some("restricted_verification".into()),
+        };
+        assert!(review_decision_requests_restricted_verification(
+            &decision, false
+        ));
+        assert!(!review_decision_requests_restricted_verification(
+            &decision, true
+        ));
     }
 
     #[test]
@@ -15303,6 +16253,58 @@ mod tests {
     }
 
     #[test]
+    fn step_review_summary_includes_target_read_content_excerpt() {
+        let target = "/tmp/report.md";
+        let mut step = verification_first_review_step(
+            target,
+            Some("verification missing".into()),
+            vec![ToolExecutionRecord {
+                tool_name: "Read".into(),
+                outcome: "Text".into(),
+                kind: ToolExecutionOutcomeKind::Success,
+                summary: "Read succeeded".into(),
+                detail: Some(
+                    "Multistage Report: Toolsystem, Memory Backpressure, Token Efficiency, and Risk Judgment\n\
+                     Stage 1 - Toolsystem / Tool Registry / Tool Contract\n\
+                     Stage 2 - Memory, Backpressure, and Resource Limits\n\
+                     Stage 3 - Token Efficiency, KV Cache, and LisM\n\
+                     Stage 4 - Synthesis: Performance & Risk Judgment\n\
+                     Files changed/created\n\
+                     Remaining risks and verification stance"
+                        .into(),
+                ),
+                pending_approval: None,
+                report_modifier: ToolReportModifier::None,
+                observable_input: Some(observable_input_json(json!({
+                    "file_path": target
+                }))),
+                batch_context: ToolBatchContext {
+                    batch_index: 0,
+                    batch_size: 1,
+                    executed_in_batch: false,
+                },
+            }],
+        );
+        step.executor_b_stage_memory = None;
+        step.stage_continuation_context = None;
+        step.last_correction = None;
+        step.result_diff = Some("current worker prose says report is ready".into());
+
+        let summary = build_step_review_summary(
+            &step,
+            "Worker task",
+            &[("Result", "current worker prose says report is ready")],
+        );
+
+        assert!(summary.contains("Current runtime content evidence:"));
+        assert!(summary.contains("read:/tmp/report.md bytes="));
+        assert!(summary.contains("Stage 1 - Toolsystem / Tool Registry / Tool Contract"));
+        assert!(summary.contains("Stage 4 - Synthesis: Performance & Risk Judgment"));
+        assert!(summary.contains("Files changed/created"));
+        assert!(summary.contains("Remaining risks and verification stance"));
+    }
+
+    #[test]
     fn current_runtime_anchors_prune_stale_source_and_artifact_gaps() {
         std::fs::write("/tmp/report.md", "report").expect("write temp report");
         let step = source_report_step_with_runtime_records(vec![
@@ -15342,6 +16344,88 @@ mod tests {
         assert!(report.evidence_refs.contains(&"read:/tmp/source.md".into()));
         assert!(report.evidence_refs.contains(&"read:/tmp/report.md".into()));
         assert_eq!(step_completion_gate_error(&step, Some(&refreshed)), None);
+    }
+
+    #[tokio::test]
+    async fn review_accept_clears_stale_verification_blocker_after_current_runtime_evidence() {
+        std::fs::write("/tmp/report.md", "report").expect("write temp report");
+        let coordinator = BossCoordinator::new();
+        let step = source_report_step_with_runtime_records(vec![
+            successful_path_record("Read", "/tmp/source.md"),
+            successful_path_record("Write", "/tmp/report.md"),
+            successful_path_record("Read", "/tmp/report.md"),
+        ]);
+        {
+            let mut plan = coordinator.plan.write().await;
+            *plan = Some(BossPlan {
+                plan_id: "plan-review-accept-runtime-evidence".into(),
+                accepted_by_user: true,
+                steps: vec![step],
+                ..BossPlan::default()
+            });
+        }
+        {
+            let mut metadata = coordinator.routed_step_metadata.write().await;
+            metadata.insert(
+                0,
+                BossStepRoutedMetadata {
+                    completion_evidence_status: Some("missing_verification_evidence".into()),
+                    completion_evidence_gaps: source_report_gaps(),
+                    terminal_blocker_kind: Some("missing_verification_evidence".into()),
+                    step_failure_classification: Some(
+                        StepFailureClassification::VerificationRepairContinuation,
+                    ),
+                    worker_report: Some(WorkerStructuredReport {
+                        worker_state: AgentState::Done,
+                        last_tool_action: None,
+                        files_changed: vec!["/tmp/report.md".into()],
+                        tests_run: Vec::new(),
+                        artifact_status: "created".into(),
+                        test_status: "not_run".into(),
+                        verification_status: "unverified".into(),
+                        stage_execution_contract: source_report_step_with_runtime_records(
+                            Vec::new(),
+                        )
+                        .stage_execution_contract,
+                        stage_continuation_context: None,
+                        evidence_refs: Vec::new(),
+                        completion_evidence_gaps: source_report_gaps(),
+                        remaining_risks: Vec::new(),
+                        completion_evidence_status:
+                            CompletionEvidenceStatus::MissingVerificationEvidence,
+                    }),
+                    ..BossStepRoutedMetadata::default()
+                },
+            );
+        }
+
+        coordinator
+            .apply_review_verdict(
+                0,
+                &crate::core::boss_actor_runtime::ReviewDecision::Accept {
+                    summary: "current evidence closes the review".into(),
+                },
+            )
+            .await
+            .expect("apply review verdict");
+
+        let plan = coordinator.plan.read().await;
+        let step = plan
+            .as_ref()
+            .and_then(|plan| plan.steps.iter().find(|step| step.id == 0))
+            .expect("step");
+        assert_eq!(step.status, BossPlanStepStatus::Completed);
+        assert!(step.completed);
+
+        let metadata = coordinator.routed_step_metadata.read().await;
+        let metadata = metadata.get(&0).expect("metadata");
+        assert_eq!(
+            metadata.completion_evidence_status.as_deref(),
+            Some("sufficient")
+        );
+        assert!(metadata.completion_evidence_gaps.is_empty());
+        assert_eq!(metadata.terminal_blocker_kind, None);
+        assert_eq!(metadata.step_failure_classification, None);
     }
 
     #[test]
@@ -17956,7 +19040,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn source_evidence_repair_dispatch_does_not_use_verification_first_short_form() {
+    async fn source_evidence_repair_dispatch_uses_restricted_verifier_short_form() {
         let coordinator = BossCoordinator::new();
         {
             let mut plan = coordinator.plan.write().await;
@@ -18014,7 +19098,7 @@ mod tests {
                 BossStepRoutedMetadata {
                     completion_evidence_gaps: vec![CompletionEvidenceGap {
                         target_ref: "content_evidence:/tmp/source.md".into(),
-                        target_path: Some("/tmp/source.md".into()),
+                        target_path: Some("read:/tmp/source.md".into()),
                         missing_artifact_evidence: false,
                         missing_test_evidence: false,
                         missing_verification_evidence: true,
@@ -18032,8 +19116,7 @@ mod tests {
             .await
             .expect("build assignment");
 
-        assert_eq!(assignment.worker_role, WorkerRole::Implement);
-        assert!(assignment.shared_step_memory.is_none());
+        assert_eq!(assignment.worker_role, WorkerRole::Verify);
         assert_eq!(
             assignment
                 .state_frame
@@ -18044,15 +19127,105 @@ mod tests {
         );
         assert_eq!(
             assignment.state_frame.allowed_actions,
-            vec!["implement".to_string()]
+            vec!["verify_artifact".to_string()]
         );
         assert!(
-            !assignment
+            assignment
                 .state_frame
                 .required_output_hint
                 .as_deref()
                 .unwrap_or_default()
                 .contains("verified_target:")
+        );
+        assert_eq!(
+            assignment.content_evidence_targets,
+            vec!["/tmp/source.md".to_string()]
+        );
+        assert!(
+            assignment
+                .brief
+                .objective
+                .contains("Read the required source evidence targets")
+        );
+        assert!(!assignment.brief.objective.contains("read:read:"));
+    }
+
+    #[test]
+    fn required_evidence_target_normalization_removes_typed_and_duplicate_path_wrappers() {
+        let target = "RustAgent/docs/30-boss-mode-and-dual-agent-workflow.md";
+
+        assert_eq!(
+            normalize_required_evidence_target(&format!("content_evidence:{target}:{target}")),
+            target
+        );
+        assert_eq!(
+            normalize_required_evidence_target(&format!("read:content_evidence:{target}")),
+            target
+        );
+        assert_eq!(
+            normalize_required_evidence_target(&format!("verification:{target}")),
+            target
+        );
+    }
+
+    #[test]
+    fn restricted_verifier_read_refs_accept_scope_equivalent_paths() {
+        let target = "RustAgent/docs/30-boss-mode-and-dual-agent-workflow.md";
+        let output = "evidence_refs:\n- read:/Users/example/repo/RustAgent/docs/30-boss-mode-and-dual-agent-workflow.md";
+
+        let refs = restricted_verifier_read_refs(output, &[target.to_string()]);
+
+        assert_eq!(
+            refs,
+            vec![
+                "read:/Users/example/repo/RustAgent/docs/30-boss-mode-and-dual-agent-workflow.md"
+                    .to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn source_evidence_targets_force_read_source_evidence_next_action() {
+        let target = "RustAgent/docs/31-token-efficiency-cost-performance.md";
+        let step = BossPlanStep {
+            id: 0,
+            description: "verify report".into(),
+            objective: Some("verify report".into()),
+            acceptance: Vec::new(),
+            requires_approval: false,
+            status: BossPlanStepStatus::Rejected,
+            completed: false,
+            result_diff: None,
+            worker_task_id: None,
+            attempt_count: 1,
+            retry_budget: 3,
+            last_review_summary: Some("verification evidence missing".into()),
+            last_correction: None,
+            stage_execution_contract: StageExecutionContract {
+                content_evidence_targets: vec![target.into()],
+                ..StageExecutionContract::default()
+            },
+            stage_continuation_context: None,
+            executor_b_stage_memory: None,
+            review_task_id: None,
+            tool_execution_records: Vec::new(),
+        };
+        let metadata = BossStepRoutedMetadata {
+            completion_evidence_status: Some("missing_verification_evidence".into()),
+            completion_evidence_gaps: vec![CompletionEvidenceGap {
+                target_ref: "artifact:step0:0".into(),
+                target_path: Some(target.into()),
+                missing_artifact_evidence: false,
+                missing_test_evidence: false,
+                missing_verification_evidence: true,
+                recommended_action: "verify_artifact".into(),
+            }],
+            ..BossStepRoutedMetadata::default()
+        };
+
+        assert_eq!(
+            verification_gap_next_action(&step, Some(&metadata)),
+            "read_source_evidence"
         );
     }
 
@@ -19654,6 +20827,121 @@ mod tests {
             .await
             .as_ref()
             .and_then(|plan| plan.steps.iter().find(|step| step.id == 7))
+            .cloned()
+            .expect("step");
+        assert_eq!(step.status, BossPlanStepStatus::Running);
+        assert!(!step.completed);
+    }
+
+    #[tokio::test]
+    async fn repairable_failed_verification_step_is_not_treated_as_terminal_abort() {
+        let coordinator = Arc::new(BossCoordinator::new());
+        let tasks = Arc::new(TaskManager::new_with_output_root(std::env::temp_dir()));
+        let app_state = test_app_state_with_tasks(tasks, coordinator.clone());
+        let target_path = temp_report_path("verification-gap-failed-recoverable");
+        {
+            let mut status = coordinator.status.write().await;
+            status.stage = BossStage::Execution;
+            status.current_step = Some(9);
+        }
+        {
+            let mut plan = coordinator.plan.write().await;
+            *plan = Some(BossPlan {
+                accepted_by_user: true,
+                auto_sequence: true,
+                steps: vec![BossPlanStep {
+                    id: 9,
+                    description: "verify report".into(),
+                    objective: Some(format!("verify {target_path}")),
+                    acceptance: vec![format!("verify {target_path}")],
+                    requires_approval: false,
+                    status: BossPlanStepStatus::Failed,
+                    completed: false,
+                    result_diff: Some("placeholder".into()),
+                    worker_task_id: Some("task-9".into()),
+                    attempt_count: 3,
+                    retry_budget: 3,
+                    last_review_summary: Some("verification evidence missing".into()),
+                    last_correction: Some("verify_artifact".into()),
+                    stage_execution_contract: StageExecutionContract {
+                        declared_artifacts: vec![DeclaredArtifactContract {
+                            ref_id: "artifact:step9:0".into(),
+                            path: target_path.clone(),
+                            kind: "file".into(),
+                            required_actions: vec!["write_artifact".into()],
+                            required_evidence: vec![target_path.clone()],
+                        }],
+                        verifications: vec![VerificationContract {
+                            target_ref: "artifact:step9:0".into(),
+                            target_path: Some(target_path.clone()),
+                            required_actions: vec!["verify_artifact".into()],
+                            required_evidence: vec![target_path.clone()],
+                        }],
+                        required_actions: vec!["verify_artifact".into()],
+                        required_evidence: vec![target_path.clone()],
+                        ..StageExecutionContract::default()
+                    },
+                    stage_continuation_context: Some(
+                        crate::core::state_frame::StageContinuationContext {
+                            repair_intent: Some(crate::core::state_frame::RepairIntent {
+                                failed_target: Some(target_path.clone()),
+                                verified_facts: vec!["verified".into()],
+                                next_action: Some("verify_artifact".into()),
+                                continuity_mode: Some(
+                                    crate::core::state_frame::ContinuityMode::Repair,
+                                ),
+                            }),
+                            failed_target: Some(target_path.clone()),
+                            verified_facts: vec!["verified".into()],
+                            next_action: Some("verify_artifact".into()),
+                            continuity_mode: Some(crate::core::state_frame::ContinuityMode::Repair),
+                        },
+                    ),
+                    executor_b_stage_memory: Some(ExecutorBStageMemory {
+                        continuity: Some(ExecutorBStageMemoryContinuity::VerificationFirstIsolated),
+                        ..ExecutorBStageMemory::default()
+                    }),
+                    review_task_id: None,
+                    tool_execution_records: Vec::new(),
+                }],
+                ..BossPlan::default()
+            });
+        }
+        {
+            let mut metadata = coordinator.routed_step_metadata.write().await;
+            metadata.insert(
+                9,
+                BossStepRoutedMetadata {
+                    step_failure_classification: Some(
+                        StepFailureClassification::VerificationRepairContinuation,
+                    ),
+                    completion_evidence_status: Some("missing_verification_evidence".into()),
+                    completion_evidence_gaps: vec![CompletionEvidenceGap {
+                        target_ref: "artifact:step9:0".into(),
+                        target_path: Some(target_path.clone()),
+                        missing_artifact_evidence: false,
+                        missing_test_evidence: false,
+                        missing_verification_evidence: true,
+                        recommended_action: "verify_artifact".into(),
+                    }],
+                    ..BossStepRoutedMetadata::default()
+                },
+            );
+        }
+
+        let message = coordinator.advance_plan(&app_state).await.expect("advance");
+        assert!(
+            message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("\"role\":\"verify\"")
+        );
+        assert_eq!(coordinator.get_stage().await, BossStage::Execution);
+        assert!(!coordinator.has_terminal_failure().await);
+        let plan = coordinator.plan.read().await;
+        let step = plan
+            .as_ref()
+            .and_then(|plan| plan.steps.iter().find(|step| step.id == 9))
             .cloned()
             .expect("step");
         assert_eq!(step.status, BossPlanStepStatus::Running);

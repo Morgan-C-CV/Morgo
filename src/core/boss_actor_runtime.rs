@@ -34,6 +34,23 @@ pub enum ReviewDecision {
         summary: String,
         reason: String,
     },
+    RequestMissingEvidence {
+        summary: String,
+        audited_items: Vec<String>,
+        evidence_used: Vec<String>,
+        missing_evidence: Vec<String>,
+        weak_evidence_used: Vec<String>,
+        required_next_action: Option<String>,
+    },
+    EscalateContext {
+        summary: String,
+        reason: String,
+        audited_items: Vec<String>,
+        evidence_used: Vec<String>,
+        missing_evidence: Vec<String>,
+        weak_evidence_used: Vec<String>,
+        required_next_action: Option<String>,
+    },
 }
 
 pub type ReviewFn = Arc<
@@ -450,9 +467,6 @@ async fn handle_designer_a_command(
                 } else {
                     BossStage::Documentation
                 };
-            }
-            if let Some(f) = doc_fn {
-                let _ = f(input).await;
             }
             BossActorEvent::ApprovalHandled { approved }
         }

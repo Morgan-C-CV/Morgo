@@ -674,6 +674,22 @@ fn app_state_with_tasks(active_session_id: &str, task_manager: Arc<TaskManager>)
     })
 }
 
+fn app_state_with_scripted_active_model(
+    active_session_id: &str,
+    task_manager: Arc<TaskManager>,
+    scripted_turns: Vec<Vec<rust_agent::service::api::streaming::StreamEvent>>,
+) -> Arc<AppState> {
+    let mut app = (*app_state_with_tasks(active_session_id, task_manager)).clone();
+    let runtime_snapshot = make_inherited_runtime_snapshot_with_scripted_turns(scripted_turns);
+    app.active_model_runtime = Some(
+        rust_agent::state::active_model_runtime::ActiveModelRuntime::new(runtime_snapshot.clone()),
+    );
+    app.active_model_profile_name = runtime_snapshot.active_profile_name.clone();
+    app.active_model_profile_source = runtime_snapshot.source.clone();
+    app.active_model_provider_summary = runtime_snapshot.summary.clone();
+    Arc::new(app)
+}
+
 fn task_event(task_id: &str, step_id: usize, status: TaskStatus) -> TaskEvent {
     TaskEvent {
         task_id: task_id.into(),
@@ -5168,8 +5184,18 @@ async fn t22_1_review_fn_initializes_a_session_id() {
     let runtime_owner = Arc::new(BossRuntimeOwner::default());
     let coordinator = Arc::new(BossCoordinator::new_with_runtime_owner(runtime_owner));
     let task_manager = Arc::new(TaskManager::default());
-    let app_state = app_state_with_tasks("session-t22-1-review", task_manager);
+    let app_state = app_state_with_scripted_active_model(
+        "session-t22-1-review",
+        task_manager,
+        vec![vec![rust_agent::service::api::streaming::StreamEvent::TextDelta(
+            r#"{"verdict":"accept","summary":"looks good","audited_items":["step 0"],"evidence_used":["runtime evidence"],"missing_evidence":[],"weak_evidence_used":[],"required_next_action":null,"correction":null,"reason":null}"#.into(),
+        )]],
+    );
 
+    {
+        let mut guard = coordinator.auto_advance_app_state.write().await;
+        *guard = Some(app_state.clone());
+    }
     coordinator
         .bootstrap_actor_registry_with_app_state(&app_state)
         .await;
@@ -5217,13 +5243,9 @@ async fn t22_1_review_fn_initializes_a_session_id() {
             .map(|s| s.designer_a.session_id.clone())
             .unwrap_or_default()
     };
-    assert_ne!(
-        after, placeholder,
-        "t22.1: ReviewFn must update designer_a.session_id from placeholder"
-    );
     assert!(
-        !after.is_empty(),
-        "t22.1: designer_a.session_id must be non-empty after ReviewFn"
+        after == placeholder,
+        "t22.1: stateless ReviewFn must not rewrite designer_a.session_id"
     );
 
     // Verify send_to_a_session was called with a review message.
@@ -5239,12 +5261,12 @@ async fn t22_1_review_fn_initializes_a_session_id() {
     );
     let msg = dispatch_msg.unwrap();
     assert!(
-        msg.contains("step 0"),
-        "t22.1: dispatch message must reference step id"
+        msg.contains("\"verdict\""),
+        "t22.1: dispatch message must contain typed verdict guidance"
     );
     assert!(
-        msg.contains("accepted"),
-        "t22.1: dispatch message must contain verdict"
+        !msg.contains("Coordinator verdict:"),
+        "t22.1: dispatch message must not anchor on coordinator verdict"
     );
 }
 
@@ -5436,9 +5458,42 @@ fn t22_1b_parse_a_review_decision_replan_step() {
 }
 
 #[test]
-fn t22_1b_parse_a_review_decision_default_accept_when_no_keyword() {
+fn t22_1b_parse_a_review_decision_invalid_text_does_not_default_accept() {
     let decision = rust_agent::core::boss::BossCoordinator::parse_a_review_decision_pub(
         "Looks fine to me.",
+        "review summary",
+    );
+    assert!(matches!(
+        decision,
+        rust_agent::core::boss_actor_runtime::ReviewDecision::Correct { .. }
+    ));
+}
+
+#[test]
+fn t22_1b_parse_a_review_decision_request_missing_evidence_json() {
+    let decision = rust_agent::core::boss::BossCoordinator::parse_a_review_decision_pub(
+        r#"{"verdict":"request_missing_evidence","summary":"need source read","audited_items":["artifact"],"evidence_used":[],"missing_evidence":["read:/tmp/source.md"],"weak_evidence_used":["worker prose"],"required_next_action":"restricted_verification","correction":null,"reason":null}"#,
+        "review summary",
+    );
+    let rust_agent::core::boss_actor_runtime::ReviewDecision::RequestMissingEvidence {
+        missing_evidence,
+        required_next_action,
+        ..
+    } = decision
+    else {
+        panic!("expected RequestMissingEvidence decision");
+    };
+    assert_eq!(missing_evidence, vec!["read:/tmp/source.md"]);
+    assert_eq!(
+        required_next_action.as_deref(),
+        Some("restricted_verification")
+    );
+}
+
+#[test]
+fn t22_1b_parse_a_review_decision_embedded_json_is_recovered() {
+    let decision = rust_agent::core::boss::BossCoordinator::parse_a_review_decision_pub(
+        "Designer A review follows:\n{\"verdict\":\"accept\",\"summary\":\"looks good\",\"audited_items\":[\"artifact\"],\"evidence_used\":[\"read:/tmp/report.md\"],\"missing_evidence\":[],\"weak_evidence_used\":[],\"required_next_action\":null,\"correction\":null,\"reason\":null}\nThanks.",
         "review summary",
     );
     assert!(matches!(
@@ -5508,16 +5563,25 @@ async fn t22_1b_review_fn_falls_back_to_coordinator_verdict_when_a_unavailable()
 #[tokio::test]
 async fn t22_1b_review_fn_uses_a_verdict_when_a_responds_accept() {
     // A responds ACCEPT; coordinator passes accepted=false. A's verdict must win.
-    let tmp = std::env::temp_dir().join("t22_1b_accept_tasks");
-    let task_manager = Arc::new(TaskManager::new_with_output_root(&tmp));
+    let task_manager = Arc::new(TaskManager::default());
     let session_id = "t22-1b-a-accept";
-    let app_state = app_state_with_tasks(session_id, task_manager.clone());
+    let app_state = app_state_with_scripted_active_model(
+        session_id,
+        task_manager.clone(),
+        vec![vec![rust_agent::service::api::streaming::StreamEvent::TextDelta(
+            r#"{"verdict":"accept","summary":"step output looks good","audited_items":["step 0"],"evidence_used":["runtime evidence"],"missing_evidence":[],"weak_evidence_used":[],"required_next_action":null,"correction":null,"reason":null}"#.into(),
+        )]],
+    );
 
     let (coordinator, plan_path) = coordinator_with_plan(
         boss_plan(vec![boss_step(0, "Step for A accept override")]),
         "t22_1b_a_accept.json",
     )
     .await;
+    {
+        let mut guard = coordinator.auto_advance_app_state.write().await;
+        *guard = Some(app_state.clone());
+    }
     coordinator
         .bootstrap_actor_registry_with_app_state(&app_state)
         .await;
@@ -5528,33 +5592,6 @@ async fn t22_1b_review_fn_uses_a_verdict_when_a_responds_accept() {
         plan.steps[0].worker_task_id = Some("b-task-accept".into());
         plan.steps[0].status = BossPlanStepStatus::Running;
     }
-
-    let fake_a_task = task_manager.create_with_type(
-        "fake designer A".to_string(),
-        TaskType::LocalAgent,
-        session_id.to_string(),
-        InteractionSurface::Cli,
-    );
-    // Launch the fake A task so it's in running_owners (required for send_message).
-    let aid_clone = fake_a_task.id.clone();
-    task_manager.launch(&fake_a_task.id, "", async move {
-        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-        drop(aid_clone);
-    });
-    // Pre-seed designer_a.session_id so ensure_a_session skips the real LLM spawn.
-    {
-        let mut guard = coordinator.session.write().await;
-        if let Some(s) = guard.as_mut() {
-            s.designer_a.session_id = fake_a_task.id.clone();
-        }
-    }
-    // Append A's response after a short delay so ask_a_session's polling loop finds it.
-    let tm = task_manager.clone();
-    let aid = fake_a_task.id.clone();
-    tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        tm.append_output(&aid, "ACCEPT: step output looks good\n");
-    });
 
     // Coordinator says accepted=false — A's ACCEPT must override to Completed.
     coordinator
@@ -5579,16 +5616,25 @@ async fn t22_1b_review_fn_uses_a_verdict_when_a_responds_accept() {
 #[tokio::test]
 async fn t22_1b_review_fn_uses_a_verdict_when_a_responds_reject() {
     // A responds REJECT + CORRECTION; coordinator passes accepted=true. A's verdict must win.
-    let tmp = std::env::temp_dir().join("t22_1b_reject_tasks");
-    let task_manager = Arc::new(TaskManager::new_with_output_root(&tmp));
+    let task_manager = Arc::new(TaskManager::default());
     let session_id = "t22-1b-a-reject";
-    let app_state = app_state_with_tasks(session_id, task_manager.clone());
+    let app_state = app_state_with_scripted_active_model(
+        session_id,
+        task_manager.clone(),
+        vec![vec![rust_agent::service::api::streaming::StreamEvent::TextDelta(
+            r#"{"verdict":"reject","summary":"output incomplete","audited_items":["step 0"],"evidence_used":["runtime evidence"],"missing_evidence":[],"weak_evidence_used":[],"required_next_action":"worker_correction","correction":"add retry logic for transient failures","reason":null}"#.into(),
+        )]],
+    );
 
     let (coordinator, plan_path) = coordinator_with_plan(
         boss_plan(vec![boss_step(0, "Step for A reject override")]),
         "t22_1b_a_reject.json",
     )
     .await;
+    {
+        let mut guard = coordinator.auto_advance_app_state.write().await;
+        *guard = Some(app_state.clone());
+    }
     coordinator
         .bootstrap_actor_registry_with_app_state(&app_state)
         .await;
@@ -5599,36 +5645,6 @@ async fn t22_1b_review_fn_uses_a_verdict_when_a_responds_reject() {
         plan.steps[0].worker_task_id = Some("b-task-reject".into());
         plan.steps[0].status = BossPlanStepStatus::Running;
     }
-
-    let fake_a_task = task_manager.create_with_type(
-        "fake designer A".to_string(),
-        TaskType::LocalAgent,
-        session_id.to_string(),
-        InteractionSurface::Cli,
-    );
-    // Launch the fake A task so it's in running_owners (required for send_message).
-    let aid_clone = fake_a_task.id.clone();
-    task_manager.launch(&fake_a_task.id, "", async move {
-        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-        drop(aid_clone);
-    });
-    // Pre-seed designer_a.session_id so ensure_a_session skips the real LLM spawn.
-    {
-        let mut guard = coordinator.session.write().await;
-        if let Some(s) = guard.as_mut() {
-            s.designer_a.session_id = fake_a_task.id.clone();
-        }
-    }
-    // Append A's response after a short delay so ask_a_session's polling loop finds it.
-    let tm = task_manager.clone();
-    let aid = fake_a_task.id.clone();
-    tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        tm.append_output(
-            &aid,
-            "REJECT: output incomplete. CORRECTION: add retry logic for transient failures\n",
-        );
-    });
 
     // Coordinator says accepted=true — A's REJECT must override to Rejected.
     coordinator
@@ -5665,7 +5681,13 @@ async fn r0_single_step_task_event_completed_routes_through_review_gate() {
     let tmp = std::env::temp_dir().join("r0_single_step_task_event_review_gate");
     let task_manager = Arc::new(TaskManager::new_with_output_root(&tmp));
     let session_id = "r0-single-step-task-event";
-    let app_state = app_state_with_tasks(session_id, task_manager.clone());
+    let app_state = app_state_with_scripted_active_model(
+        session_id,
+        task_manager.clone(),
+        vec![vec![rust_agent::service::api::streaming::StreamEvent::TextDelta(
+            r#"{"verdict":"reject","summary":"needs a better result","audited_items":["step 0"],"evidence_used":["runtime evidence"],"missing_evidence":[],"weak_evidence_used":[],"required_next_action":"worker_correction","correction":"add the missing artifact","reason":null}"#.into(),
+        )]],
+    );
 
     let (coordinator, plan_path) = coordinator_with_plan(
         boss_plan(vec![boss_step(0, "single-step review gate")]),
@@ -5675,13 +5697,6 @@ async fn r0_single_step_task_event_completed_routes_through_review_gate() {
     coordinator
         .bootstrap_actor_registry_with_app_state(&app_state)
         .await;
-    seed_fake_a_review_session(
-        &coordinator,
-        task_manager.clone(),
-        session_id,
-        "REJECT: needs a better result. CORRECTION: add the missing artifact\n",
-    )
-    .await;
 
     {
         let mut guard = coordinator.plan.write().await;
@@ -5725,7 +5740,13 @@ async fn r0_single_step_notification_completed_routes_through_review_gate() {
     let tmp = std::env::temp_dir().join("r0_single_step_notification_review_gate");
     let task_manager = Arc::new(TaskManager::new_with_output_root(&tmp));
     let session_id = "r0-single-step-notification";
-    let app_state = app_state_with_tasks(session_id, task_manager.clone());
+    let app_state = app_state_with_scripted_active_model(
+        session_id,
+        task_manager.clone(),
+        vec![vec![rust_agent::service::api::streaming::StreamEvent::TextDelta(
+            r#"{"verdict":"reject","summary":"the notification result is not enough","audited_items":["step 0"],"evidence_used":["runtime evidence"],"missing_evidence":[],"weak_evidence_used":[],"required_next_action":"worker_correction","correction":"verify output before accepting","reason":null}"#.into(),
+        )]],
+    );
 
     let (coordinator, plan_path) = coordinator_with_plan(
         boss_plan(vec![boss_step(0, "notification review gate")]),
@@ -5735,13 +5756,6 @@ async fn r0_single_step_notification_completed_routes_through_review_gate() {
     coordinator
         .bootstrap_actor_registry_with_app_state(&app_state)
         .await;
-    seed_fake_a_review_session(
-        &coordinator,
-        task_manager.clone(),
-        session_id,
-        "REJECT: the notification result is not enough. CORRECTION: verify output before accepting\n",
-    )
-    .await;
 
     {
         let mut guard = coordinator.plan.write().await;
@@ -9110,7 +9124,24 @@ fn t27_3_projection_emits_file_fact_when_worker_reports_reading_a_file() {
         stage_continuation_context: None,
         executor_b_stage_memory: None,
         review_task_id: None,
-        tool_execution_records: Vec::new(),
+        tool_execution_records: vec![ToolExecutionRecord {
+            tool_name: "Read".into(),
+            outcome: "Text".into(),
+            kind: ToolExecutionOutcomeKind::Success,
+            summary: "Read succeeded".into(),
+            detail: Some("pub struct FileFactRecord".into()),
+            pending_approval: None,
+            report_modifier: ToolReportModifier::None,
+            observable_input: Some(ObservableInput {
+                value: r#"{"path":"src/core/state_fact_ledger.rs"}"#.into(),
+                source: ObservableInputSource::Raw,
+            }),
+            batch_context: ToolBatchContext {
+                batch_index: 0,
+                batch_size: 1,
+                executed_in_batch: false,
+            },
+        }],
     };
     let plan = BossPlan {
         plan_id: "p-read-ledger".into(),

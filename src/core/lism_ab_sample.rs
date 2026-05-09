@@ -965,7 +965,13 @@ fn canonicalize_artifact_target_pairs(targets: Vec<(String, Option<String>)>) ->
             }
             canonical_paths
                 .contains(&path)
-                .then(|| format!("{target_ref}:{path}"))
+                .then(|| {
+                    if target_ref.starts_with("content_evidence:") {
+                        format!("content_evidence:{path}")
+                    } else {
+                        format!("{target_ref}:{path}")
+                    }
+                })
         })
         .collect()
 }
@@ -1356,6 +1362,69 @@ mod tests {
             vec!["artifact:contract:1:/tmp/report.md".to_string()]
         );
         assert!(record.automatic_fallback_targets.is_empty());
+    }
+
+    #[test]
+    fn ab_sample_normalizes_content_evidence_target_refs_without_duplicate_path_wrappers() {
+        let report = BossReportPayload {
+            stage: BossStage::Execution,
+            current_step: Some(1),
+            total_steps: Some(1),
+            designer_a: empty_actor(),
+            executor_b: empty_actor(),
+            active_children: Vec::new(),
+            steps: vec![BossStepReport {
+                id: 1,
+                status: BossPlanStepStatus::Rejected,
+                worker_task_id: None,
+                attempt_count: 1,
+                last_review_summary: Some("repair".into()),
+                action_required: None,
+                blocker_reason: None,
+                routed_metadata: Some(BossStepRoutedMetadata {
+                    completion_evidence_gaps: vec![CompletionEvidenceGap {
+                        target_ref:
+                            "content_evidence:RustAgent/docs/30-boss-mode-and-dual-agent-workflow.md"
+                                .into(),
+                        target_path: Some(
+                            "RustAgent/docs/30-boss-mode-and-dual-agent-workflow.md".into(),
+                        ),
+                        missing_artifact_evidence: false,
+                        missing_test_evidence: false,
+                        missing_verification_evidence: true,
+                        recommended_action: "read_source_evidence".into(),
+                    }],
+                    ..BossStepRoutedMetadata::default()
+                }),
+                stage_execution_contract: StageExecutionContract::default(),
+                stage_continuation_context: None,
+                executor_b_stage_memory: None,
+            }],
+            history_summary: Vec::new(),
+            observability_summary: None,
+            rollout_policy_decision: None,
+            success_classification: None,
+            lism_policy: Default::default(),
+            stage_execution_contract: StageExecutionContract::default(),
+            stage_continuation_context: None,
+            executor_b_stage_memory: None,
+        };
+
+        let record = build_ab_record(
+            "run-content-evidence".into(),
+            true,
+            &report,
+            BossTestRunOutcome::Aborted,
+            0,
+        );
+
+        assert_eq!(
+            record.missing_verification_evidence_targets,
+            vec![
+                "content_evidence:RustAgent/docs/30-boss-mode-and-dual-agent-workflow.md"
+                    .to_string()
+            ]
+        );
     }
 
     #[test]
