@@ -830,7 +830,9 @@ fn worker_report_has_target_scoped_read_anchor(
             let child_files = contract
                 .declared_artifacts
                 .iter()
-                .filter(|artifact| artifact.kind != "directory" && artifact.path.starts_with(&prefix))
+                .filter(|artifact| {
+                    artifact.kind != "directory" && artifact.path.starts_with(&prefix)
+                })
                 .map(|artifact| artifact.path.as_str())
                 .collect::<Vec<_>>();
             if !child_files.is_empty() {

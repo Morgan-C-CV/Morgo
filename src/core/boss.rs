@@ -784,10 +784,19 @@ fn verification_first_blocker_needs_review(blocker: Option<&str>) -> bool {
 
 fn verification_first_memory_follow_up_blocker(memory: &SharedStepMemory) -> Option<String> {
     let blocker = verification_first_shared_memory_blocker(memory);
+    if verification_first_blocker_needs_review(blocker.as_deref()) {
+        return None;
+    }
     if !verification_first_blocker_is_none(blocker.as_deref()) {
         return blocker;
     }
     None
+}
+
+fn verification_first_memory_needs_review(memory: &SharedStepMemory) -> bool {
+    verification_first_blocker_needs_review(
+        verification_first_shared_memory_blocker(memory).as_deref(),
+    )
 }
 
 fn push_verification_first_follow_up_gap(
@@ -1614,7 +1623,7 @@ fn parse_verification_first_patch(text: &str, target: &str) -> VerificationFirst
     if patch.evidence_refs.is_empty() && !prose_evidence_refs.is_empty() {
         patch.evidence_refs = prose_evidence_refs;
         if !saw_explicit_verification_result {
-            patch.verification_result = "blocked".into();
+            patch.verification_result = "needs_review".into();
         }
         if !saw_explicit_minimal_evidence {
             patch.minimal_evidence = verification_first_prose_minimal_evidence_from_text(text);
@@ -1639,7 +1648,7 @@ fn parse_verification_first_patch(text: &str, target: &str) -> VerificationFirst
     {
         patch.minimal_evidence = verification_first_prose_minimal_evidence_from_text(text);
         patch.remaining_blocker = "needs review".into();
-        patch.verification_result = "blocked".into();
+        patch.verification_result = "needs_review".into();
     }
 
     patch
@@ -4984,6 +4993,7 @@ impl BossCoordinator {
         memory: &SharedStepMemory,
     ) {
         let follow_up_blocker = verification_first_memory_follow_up_blocker(memory);
+        let needs_review_note = verification_first_memory_needs_review(memory);
         let completion_can_succeed = follow_up_blocker.is_none();
         let read_evidence_refs = memory
             .evidence_refs
@@ -5014,7 +5024,19 @@ impl BossCoordinator {
             );
             if report.completion_evidence_gaps.is_empty() && completion_can_succeed {
                 report.completion_evidence_status = CompletionEvidenceStatus::Sufficient;
-                report.verification_status = "verified".into();
+                report.verification_status = if needs_review_note {
+                    "needs_review".into()
+                } else {
+                    "verified".into()
+                };
+                if needs_review_note
+                    && !report
+                        .remaining_risks
+                        .iter()
+                        .any(|risk| risk == "needs review")
+                {
+                    report.remaining_risks.push("needs review".into());
+                }
             } else if let Some(blocker) = follow_up_blocker.as_deref() {
                 push_verification_first_follow_up_gap(
                     step,
@@ -5038,8 +5060,16 @@ impl BossCoordinator {
         if metadata.completion_evidence_gaps.is_empty() && completion_can_succeed {
             metadata.completion_evidence_status = Some("sufficient".into());
             metadata.step_failure_classification = None;
-            metadata.terminal_blocker_kind = None;
-            metadata.recovery_outcome = Some("verification_first_success".into());
+            metadata.terminal_blocker_kind = if needs_review_note {
+                Some("needs_review".into())
+            } else {
+                None
+            };
+            metadata.recovery_outcome = Some(if needs_review_note {
+                "verification_first_needs_review".into()
+            } else {
+                "verification_first_success".into()
+            });
         } else if let Some(blocker) = follow_up_blocker.as_deref() {
             push_verification_first_follow_up_gap(
                 step,
@@ -5389,10 +5419,48 @@ impl BossCoordinator {
     ) {
         let mut routed_step_metadata = self.routed_step_metadata.write().await;
         if let Some(metadata) = routed_step_metadata.get_mut(&step_id) {
+            let verification_repair = recovery_outcome == "repair_dispatched"
+                && (matches!(
+                    metadata.completion_evidence_status.as_deref(),
+                    Some("missing_verification_evidence")
+                ) || metadata
+                    .completion_evidence_gaps
+                    .iter()
+                    .any(|gap| gap.missing_verification_evidence)
+                    || metadata.worker_report.as_ref().is_some_and(|report| {
+                        report.completion_evidence_status
+                            == CompletionEvidenceStatus::MissingVerificationEvidence
+                            || report
+                                .completion_evidence_gaps
+                                .iter()
+                                .any(|gap| gap.missing_verification_evidence)
+                    })
+                    || matches!(
+                        terminal_blocker_kind,
+                        Some(
+                            "missing_verification_evidence"
+                                | "verification_repair_continuation"
+                                | "needs_review"
+                        )
+                    ));
             metadata.recovery_attempted = Some(true);
-            metadata.recovery_tier = Some("boss_artifact_repair".into());
+            metadata.recovery_tier = Some(
+                if verification_repair {
+                    "verification_repair_continuation"
+                } else {
+                    "boss_artifact_repair"
+                }
+                .into(),
+            );
             metadata.recovery_outcome = Some(recovery_outcome.into());
-            metadata.terminal_blocker_kind = terminal_blocker_kind.map(str::to_string);
+            metadata.terminal_blocker_kind = terminal_blocker_kind
+                .map(str::to_string)
+                .or_else(|| verification_repair.then(|| "missing_verification_evidence".into()));
+            if verification_repair {
+                metadata.step_failure_classification =
+                    Some(StepFailureClassification::VerificationRepairContinuation);
+            }
+            metadata.success_classification = classify_step_success(Some(metadata));
         }
     }
 
@@ -6587,7 +6655,17 @@ impl BossCoordinator {
                         {
                             step.last_review_summary = Some(reason.clone());
                             step.attempt_count += 1;
-                            if step.attempt_count >= step.retry_budget {
+                            if failure_classification
+                                == StepFailureClassification::VerificationRepairContinuation
+                            {
+                                apply_step_failure_classification(
+                                    step,
+                                    failure_classification,
+                                    &reason,
+                                    routed_metadata.as_ref(),
+                                );
+                                (false, Some(("repair_dispatched", None)))
+                            } else if step.attempt_count >= step.retry_budget {
                                 step.status = BossPlanStepStatus::Failed;
                                 update_step_continuation_context(
                                     step,
@@ -13974,7 +14052,7 @@ mod tests {
                 "read:RustAgent/Agent/src/tool/registry.rs".to_string(),
             ]
         );
-        assert_eq!(patch.verification_result, "blocked");
+        assert_eq!(patch.verification_result, "needs_review");
         assert_eq!(patch.remaining_blocker, "needs review");
         assert_eq!(patch.minimal_evidence, "Outcome: completed");
     }
@@ -14385,7 +14463,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn verification_first_needs_review_stays_recoverable_instead_of_sufficient() {
+    async fn verification_first_needs_review_is_accepted_with_review_warning() {
         let (coordinator, step) =
             verification_first_projection_coordinator(WorkerLisMPolicy::ForceOn).await;
 
@@ -14397,30 +14475,21 @@ mod tests {
             .await
             .expect("shared memory write");
 
-        assert_eq!(written.verification_status.as_deref(), Some("blocked"));
+        assert_eq!(written.verification_status.as_deref(), Some("needs_review"));
         assert_eq!(written.remaining_blocker.as_deref(), Some("needs review"));
 
         let routed = coordinator.routed_step_metadata.read().await;
         let metadata = routed.get(&step.id).expect("routed metadata");
         assert_eq!(
             metadata.completion_evidence_status.as_deref(),
-            Some("missing_verification_evidence")
+            Some("sufficient")
         );
-        assert_eq!(
-            metadata.step_failure_classification,
-            Some(StepFailureClassification::VerificationRepairContinuation)
-        );
+        assert_eq!(metadata.step_failure_classification, None);
         assert_eq!(
             metadata.terminal_blocker_kind.as_deref(),
             Some("needs_review")
         );
-        assert!(
-            metadata
-                .completion_evidence_gaps
-                .iter()
-                .any(|gap| gap.target_ref == "verification_first:needs_review"
-                    && gap.recommended_action == "verify_artifact")
-        );
+        assert!(metadata.completion_evidence_gaps.is_empty());
     }
 
     #[tokio::test]
@@ -14465,7 +14534,10 @@ mod tests {
             prose_memory.remaining_blocker.as_deref(),
             Some("needs review")
         );
-        assert_eq!(prose_memory.verification_status.as_deref(), Some("blocked"));
+        assert_eq!(
+            prose_memory.verification_status.as_deref(),
+            Some("needs_review")
+        );
 
         let repaired_memory = coordinator
             .sync_verification_first_shared_step_memory_from_result(
@@ -14490,6 +14562,146 @@ mod tests {
             Some("sufficient")
         );
         assert!(metadata.completion_evidence_gaps.is_empty());
+    }
+
+    #[tokio::test]
+    async fn verification_first_repair_continuation_does_not_terminal_fail_when_retry_budget_is_exhausted()
+     {
+        let coordinator = BossCoordinator::new();
+        let target_path = temp_report_path("verification-gap-budget");
+        {
+            let mut plan = coordinator.plan.write().await;
+            *plan = Some(BossPlan {
+                accepted_by_user: true,
+                auto_sequence: true,
+                steps: vec![BossPlanStep {
+                    id: 4,
+                    description: "verify report".into(),
+                    objective: Some(format!("verify {target_path}")),
+                    acceptance: vec![format!("verify {target_path}")],
+                    requires_approval: false,
+                    status: BossPlanStepStatus::Reviewing,
+                    completed: false,
+                    result_diff: None,
+                    worker_task_id: None,
+                    attempt_count: 2,
+                    retry_budget: 2,
+                    last_review_summary: None,
+                    last_correction: None,
+                    stage_execution_contract: StageExecutionContract {
+                        declared_artifacts: vec![DeclaredArtifactContract {
+                            ref_id: "artifact:step4:0".into(),
+                            path: target_path.clone(),
+                            kind: "file".into(),
+                            required_actions: vec!["write_artifact".into()],
+                            required_evidence: vec![target_path.clone()],
+                        }],
+                        verifications: vec![VerificationContract {
+                            target_ref: "artifact:step4:0".into(),
+                            target_path: Some(target_path.clone()),
+                            required_actions: vec!["verify_artifact".into()],
+                            required_evidence: vec![target_path.clone()],
+                        }],
+                        required_actions: vec!["verify_artifact".into()],
+                        required_evidence: vec![target_path.clone()],
+                        ..StageExecutionContract::default()
+                    },
+                    stage_continuation_context: None,
+                    executor_b_stage_memory: None,
+                    review_task_id: None,
+                    tool_execution_records: Vec::new(),
+                }],
+                ..BossPlan::default()
+            });
+        }
+        {
+            let mut metadata = coordinator.routed_step_metadata.write().await;
+            metadata.insert(
+                4,
+                BossStepRoutedMetadata {
+                    completion_evidence_status: Some("missing_verification_evidence".into()),
+                    completion_evidence_gaps: vec![CompletionEvidenceGap {
+                        target_ref: "artifact:step4:0".into(),
+                        target_path: Some(target_path.clone()),
+                        missing_artifact_evidence: false,
+                        missing_test_evidence: false,
+                        missing_verification_evidence: true,
+                        recommended_action: "verify_artifact".into(),
+                    }],
+                    worker_report: Some(WorkerStructuredReport {
+                        worker_state: AgentState::Done,
+                        last_tool_action: Some("Read".into()),
+                        files_changed: vec![target_path.clone()],
+                        tests_run: Vec::new(),
+                        artifact_status: "verified".into(),
+                        test_status: "not_required".into(),
+                        verification_status: "unverified".into(),
+                        stage_execution_contract: StageExecutionContract {
+                            declared_artifacts: vec![DeclaredArtifactContract {
+                                ref_id: "artifact:step4:0".into(),
+                                path: target_path.clone(),
+                                kind: "file".into(),
+                                required_actions: vec!["write_artifact".into()],
+                                required_evidence: vec![target_path.clone()],
+                            }],
+                            verifications: vec![VerificationContract {
+                                target_ref: "artifact:step4:0".into(),
+                                target_path: Some(target_path.clone()),
+                                required_actions: vec!["verify_artifact".into()],
+                                required_evidence: vec![target_path.clone()],
+                            }],
+                            required_actions: vec!["verify_artifact".into()],
+                            required_evidence: vec![target_path.clone()],
+                            ..StageExecutionContract::default()
+                        },
+                        stage_continuation_context: None,
+                        evidence_refs: vec![format!("read:{target_path}")],
+                        completion_evidence_gaps: vec![CompletionEvidenceGap {
+                            target_ref: "artifact:step4:0".into(),
+                            target_path: Some(target_path.clone()),
+                            missing_artifact_evidence: false,
+                            missing_test_evidence: false,
+                            missing_verification_evidence: true,
+                            recommended_action: "verify_artifact".into(),
+                        }],
+                        remaining_risks: vec!["verification missing".into()],
+                        completion_evidence_status:
+                            crate::core::state_frame::CompletionEvidenceStatus::MissingVerificationEvidence,
+                    }),
+                    ..BossStepRoutedMetadata::default()
+                },
+            );
+        }
+
+        coordinator
+            .apply_review_verdict(
+                4,
+                &crate::core::boss_actor_runtime::ReviewDecision::Accept {
+                    summary: "worker says done".into(),
+                },
+            )
+            .await
+            .expect("apply review verdict");
+
+        let plan = coordinator.plan.read().await;
+        let step = plan
+            .as_ref()
+            .and_then(|plan| plan.steps.iter().find(|step| step.id == 4))
+            .expect("step");
+        assert_eq!(step.status, BossPlanStepStatus::Rejected);
+        assert!(!step.completed);
+        assert!(step.attempt_count >= step.retry_budget);
+
+        let routed = coordinator.routed_step_metadata.read().await;
+        let metadata = routed.get(&4).expect("routed metadata");
+        assert_eq!(
+            metadata.completion_evidence_status.as_deref(),
+            Some("missing_verification_evidence")
+        );
+        assert_eq!(
+            metadata.step_failure_classification,
+            Some(StepFailureClassification::VerificationRepairContinuation)
+        );
     }
 
     fn verification_first_review_step(

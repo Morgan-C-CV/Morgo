@@ -4079,11 +4079,8 @@ pub async fn run_decision_loop_with_tools(
         total_usage.recovery_outcome = Some("repair_turn_injected".into());
         total_usage.terminal_blocker_kind = Some("verification_repair_continuation".into());
         finalize_worker_usage_report(&frame, &mut total_usage);
-        return Ok(LoopOutcome::ToolDispatchFailed {
+        return Ok(LoopOutcome::MaxIterationsReached {
             last_state: frame.state,
-            reason:
-                "verification repair continuation exhausted / remaining verification evidence missing"
-                    .into(),
             usage: total_usage,
         });
     }
@@ -5690,13 +5687,8 @@ mod tests {
             ))
             .expect("loop should not error");
         match outcome {
-            LoopOutcome::ToolDispatchFailed {
-                last_state,
-                reason,
-                usage,
-            } => {
+            LoopOutcome::MaxIterationsReached { last_state, usage } => {
                 assert_eq!(last_state, AgentState::Verifying);
-                assert!(reason.contains("verification repair continuation exhausted"));
                 assert_eq!(
                     usage
                         .completion_evidence_status
@@ -5712,7 +5704,7 @@ mod tests {
                         .any(|item| item.contains("required_action:verify_artifact"))
                 );
             }
-            other => panic!("expected ToolDispatchFailed, got {other:?}"),
+            other => panic!("expected MaxIterationsReached, got {other:?}"),
         }
     }
 
@@ -7474,13 +7466,8 @@ mod tests {
             .expect("loop should not error");
 
         match outcome {
-            LoopOutcome::ToolDispatchFailed {
-                last_state,
-                reason,
-                usage,
-            } => {
+            LoopOutcome::MaxIterationsReached { last_state, usage } => {
                 assert_eq!(last_state, AgentState::Verifying);
-                assert!(reason.contains("verification repair continuation exhausted"));
                 assert_eq!(
                     usage
                         .completion_evidence_status
@@ -7496,8 +7483,12 @@ mod tests {
                     usage.recovery_outcome.as_deref(),
                     Some("repair_turn_injected")
                 );
+                assert_eq!(
+                    usage.terminal_blocker_kind.as_deref(),
+                    Some("verification_repair_continuation")
+                );
             }
-            other => panic!("expected ToolDispatchFailed, got {other:?}"),
+            other => panic!("expected MaxIterationsReached, got {other:?}"),
         }
     }
 
@@ -7551,13 +7542,8 @@ mod tests {
             .expect("loop should not error");
 
         match outcome {
-            LoopOutcome::ToolDispatchFailed {
-                last_state,
-                reason,
-                usage,
-            } => {
+            LoopOutcome::MaxIterationsReached { last_state, usage } => {
                 assert_eq!(last_state, AgentState::Verifying);
-                assert!(reason.contains("verification repair continuation exhausted"));
                 assert_eq!(
                     usage.recovery_tier.as_deref(),
                     Some("verification_repair_continuation")
@@ -7566,8 +7552,12 @@ mod tests {
                     usage.recovery_outcome.as_deref(),
                     Some("repair_turn_injected")
                 );
+                assert_eq!(
+                    usage.terminal_blocker_kind.as_deref(),
+                    Some("verification_repair_continuation")
+                );
             }
-            other => panic!("expected ToolDispatchFailed, got {other:?}"),
+            other => panic!("expected MaxIterationsReached, got {other:?}"),
         }
     }
 
