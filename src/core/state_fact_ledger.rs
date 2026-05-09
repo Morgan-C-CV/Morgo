@@ -404,6 +404,61 @@ fn observable_string_field(record: &ToolExecutionRecord, key: &str) -> Option<St
         .map(str::to_string)
 }
 
+fn contract_read_evidence_targets(contract: &StageExecutionContract) -> Vec<String> {
+    let mut targets = Vec::new();
+    for target in &contract.content_evidence_targets {
+        if !target.trim().is_empty() && !targets.iter().any(|existing| existing == target) {
+            targets.push(target.clone());
+        }
+    }
+    for artifact in &contract.declared_artifacts {
+        if artifact.kind != "directory"
+            && !artifact.path.trim().is_empty()
+            && !targets.iter().any(|existing| existing == &artifact.path)
+        {
+            targets.push(artifact.path.clone());
+        }
+    }
+    for verification in &contract.verifications {
+        if let Some(path) = verification.target_path.as_ref() {
+            if !path.trim().is_empty() && !targets.iter().any(|existing| existing == path) {
+                targets.push(path.clone());
+            }
+        }
+    }
+    targets
+}
+
+fn text_mentions_path_scope(text: &str, target: &str) -> bool {
+    extract_path_candidates_anywhere(text)
+        .into_iter()
+        .any(|(path, _)| crate::core::evidence_scope::evidence_path_scope_matches(&path, target))
+}
+
+fn read_paths_from_tool_record(
+    contract: &StageExecutionContract,
+    record: &ToolExecutionRecord,
+) -> Vec<String> {
+    let mut paths = Vec::new();
+    if let Some(path) = observable_path(record).map(|path| normalize_runtime_path(&path)) {
+        paths.push(path);
+    }
+    let text = [
+        record.summary.as_str(),
+        record.detail.as_deref().unwrap_or_default(),
+    ]
+    .join("\n");
+    if !text.trim().is_empty() {
+        for target in contract_read_evidence_targets(contract) {
+            if text_mentions_path_scope(&text, &target) && !paths.iter().any(|path| path == &target)
+            {
+                paths.push(target);
+            }
+        }
+    }
+    paths
+}
+
 fn push_review_record(ledger: &mut StepFactLedgers, record: ReviewRecord) {
     let duplicate = ledger.review_refs.iter().any(|existing| {
         existing.verdict == record.verdict
@@ -812,43 +867,44 @@ pub fn append_runtime_tool_record(
             if record.kind != ToolExecutionOutcomeKind::Success {
                 return;
             }
-            let Some(path) = observable_path(record).map(|path| normalize_runtime_path(&path))
-            else {
-                return;
-            };
-            push_file_fact(
-                ledgers,
-                FileFactRecord {
-                    ref_id: format!("filefact:{ref_namespace}:read"),
-                    path: path.clone(),
-                    kind: "read_observation".into(),
-                    fact: format!("runtime Read succeeded for {path}"),
-                    symbol: extract_symbol_for_path(
-                        &path,
-                        &[record.detail.as_deref().unwrap_or_default()],
-                    ),
-                    source: "tool:Read".into(),
-                    source_event_id: format!("tool-read:{ref_namespace}"),
-                    freshness: "after-runtime-read".into(),
-                    confidence_milli: 1000,
-                    lineage: active_lineage(),
-                },
-            );
-            if is_target_scoped_readback(contract, record, &path) {
-                push_verification_record(
+            for (idx, path) in read_paths_from_tool_record(contract, record)
+                .into_iter()
+                .enumerate()
+            {
+                push_file_fact(
                     ledgers,
-                    VerificationRecord {
-                        ref_id: format!("verification:{ref_namespace}:readback"),
+                    FileFactRecord {
+                        ref_id: format!("filefact:{ref_namespace}:read:{idx}"),
                         path: path.clone(),
-                        status: "verified".into(),
+                        kind: "read_observation".into(),
+                        fact: format!("runtime Read succeeded for {path}"),
+                        symbol: extract_symbol_for_path(
+                            &path,
+                            &[record.detail.as_deref().unwrap_or_default()],
+                        ),
                         source: "tool:Read".into(),
                         source_event_id: format!("tool-read:{ref_namespace}"),
                         freshness: "after-runtime-read".into(),
-                        confidence_milli: 900,
+                        confidence_milli: 1000,
                         lineage: active_lineage(),
-                        summary: format!("runtime Read verified readable artifact at {path}"),
                     },
                 );
+                if is_target_scoped_readback(contract, record, &path) {
+                    push_verification_record(
+                        ledgers,
+                        VerificationRecord {
+                            ref_id: format!("verification:{ref_namespace}:readback:{idx}"),
+                            path: path.clone(),
+                            status: "verified".into(),
+                            source: "tool:Read".into(),
+                            source_event_id: format!("tool-read:{ref_namespace}"),
+                            freshness: "after-runtime-read".into(),
+                            confidence_milli: 900,
+                            lineage: active_lineage(),
+                            summary: format!("runtime Read verified readable artifact at {path}"),
+                        },
+                    );
+                }
             }
         }
         "Edit" | "Write" => {
@@ -1371,6 +1427,12 @@ pub fn build_step_fact_ledgers(step: &BossPlanStep) -> StepFactLedgers {
     {
         let read_like = result_diff.to_lowercase();
         if read_like.contains("read ")
+            || read_like.contains("read:")
+            || read_like.contains("evidence files read")
+            || read_like.contains("read source evidence files")
+            || read_like.contains("source evidence files read")
+            || read_like.contains("read operations completed")
+            || read_like.contains("reads performed")
             || read_like.contains("inspect")
             || read_like.contains("opened ")
             || read_like.contains("viewed ")
@@ -1642,6 +1704,49 @@ mod tests {
             item.kind == "read_observation"
                 && item.path.ends_with("src/core/state_fact_ledger.rs")
                 && item.symbol.as_deref() == Some("FileFactRecord")
+        }));
+    }
+
+    #[test]
+    fn build_step_fact_ledgers_extracts_source_evidence_read_block_paths() {
+        let step = BossPlanStep {
+            id: 18,
+            description: "source evidence repair".into(),
+            objective: Some("write a source-backed report".into()),
+            acceptance: vec![],
+            requires_approval: false,
+            status: BossPlanStepStatus::Reviewing,
+            completed: false,
+            result_diff: Some(
+                "Outcome: completed\nEvidence files read:\n- RustAgent/Agent/src/tool/builtin/glob.rs\n- RustAgent/Agent/src/tool/builtin/grep.rs\nRemaining risk: automated tests not run"
+                    .into(),
+            ),
+            worker_task_id: None,
+            attempt_count: 1,
+            retry_budget: 3,
+            last_review_summary: None,
+            last_correction: Some("read_source_evidence".into()),
+            stage_execution_contract: StageExecutionContract {
+                content_evidence_targets: vec![
+                    "RustAgent/Agent/src/tool/builtin/glob.rs".into(),
+                    "RustAgent/Agent/src/tool/builtin/grep.rs".into(),
+                ],
+                ..StageExecutionContract::default()
+            },
+            stage_continuation_context: None,
+            executor_b_stage_memory: None,
+            review_task_id: None,
+            tool_execution_records: Vec::new(),
+        };
+
+        let ledgers = build_step_fact_ledgers(&step);
+        assert!(ledgers.file_facts.iter().any(|item| {
+            item.kind == "read_observation"
+                && item.path == "RustAgent/Agent/src/tool/builtin/glob.rs"
+        }));
+        assert!(ledgers.file_facts.iter().any(|item| {
+            item.kind == "read_observation"
+                && item.path == "RustAgent/Agent/src/tool/builtin/grep.rs"
         }));
     }
 

@@ -1,5 +1,6 @@
 use crate::bootstrap::model_profiles::ModelProfileRegistry;
 use crate::core::boss_state::{BossPlan, BossStage};
+use crate::core::evidence_scope::evidence_refs_have_anchor_scope;
 use crate::core::state_frame::{
     ActorRole, CompletionEvidenceStatus, StageExecutionContract, StateFrame,
 };
@@ -793,13 +794,10 @@ fn worker_report_has_required_source_evidence(
     if report.evidence_refs.is_empty() {
         return false;
     }
-    contract.content_evidence_targets.iter().all(|target| {
-        let required_anchor = format!("read:{target}");
-        report
-            .evidence_refs
-            .iter()
-            .any(|evidence_ref| evidence_ref == &required_anchor)
-    })
+    contract
+        .content_evidence_targets
+        .iter()
+        .all(|target| evidence_refs_have_anchor_scope(&report.evidence_refs, "read", target))
 }
 
 fn worker_report_has_target_scoped_read_anchor(

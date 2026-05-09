@@ -437,7 +437,45 @@ fn declared_target_paths(frame: &StateFrame) -> Vec<String> {
             }
         }
     }
+    for target in &frame.stage_execution_contract.content_evidence_targets {
+        if !target.trim().is_empty() && !paths.iter().any(|existing| existing == target) {
+            paths.push(target.clone());
+        }
+    }
     paths
+}
+
+fn prose_read_heading(line: &str) -> bool {
+    let lowered = line.trim().to_ascii_lowercase();
+    lowered.contains("evidence files read")
+        || lowered.contains("read source evidence files")
+        || lowered.contains("source evidence files read")
+        || lowered.contains("read operations completed")
+        || lowered.contains("reads performed")
+}
+
+fn prose_read_path_candidate(line: &str, target_paths: &[String]) -> Option<String> {
+    let mut candidates = Vec::new();
+    let trimmed = line.trim().trim_start_matches('-').trim();
+    if let Some((before, _)) = trimmed.split_once(" - ") {
+        candidates.push(before.trim());
+    }
+    if let Some((before, _)) = trimmed.split_once('—') {
+        candidates.push(before.trim());
+    }
+    if let Some((before, _)) = trimmed.split_once(':') {
+        candidates.push(before.trim());
+    }
+    candidates.push(trimmed);
+
+    candidates.into_iter().find_map(|candidate| {
+        let candidate =
+            candidate.trim_matches(|ch: char| matches!(ch, '"' | '\'' | '`' | ',' | ';' | '.'));
+        if candidate.is_empty() {
+            return None;
+        }
+        matching_target_scope(candidate, target_paths).map(str::to_string)
+    })
 }
 
 fn parse_prefixed_path(text: &str, prefixes: &[&str]) -> Option<String> {
@@ -461,12 +499,30 @@ fn collect_target_scoped_evidence_refs_from_text(
     target_paths: &[String],
 ) -> Vec<String> {
     let mut refs = Vec::new();
+    let mut prose_read_block_remaining = 0usize;
     for line in text.lines() {
         let trimmed = line.trim();
         if trimmed.is_empty() {
+            prose_read_block_remaining = 0;
             continue;
         }
         let lowered = trimmed.to_ascii_lowercase();
+        if prose_read_heading(trimmed) {
+            prose_read_block_remaining = 12;
+        } else if prose_read_block_remaining > 0 {
+            prose_read_block_remaining -= 1;
+        }
+        if prose_read_block_remaining > 0
+            || lowered.contains("read succeeded")
+            || lowered.contains("read completed")
+        {
+            if let Some(target) = prose_read_path_candidate(trimmed, target_paths) {
+                let anchor = format!("read:{target}");
+                if !refs.iter().any(|existing| existing == &anchor) {
+                    refs.push(anchor);
+                }
+            }
+        }
         if let Some(reference) = evidence_field_value(trimmed, "ref") {
             if !reference.starts_with("artifact:")
                 && !refs.iter().any(|existing| existing == &reference)
@@ -720,12 +776,25 @@ fn append_required_source_read_anchors(
     }
 
     if let Some(usage) = usage {
+        let target_paths = declared_target_paths(frame);
         for record in &usage.tool_execution_records {
             if record.kind != ToolExecutionOutcomeKind::Success || record.tool_name != "Read" {
                 continue;
             }
             if let Some(path) = observable_path_from_input(record.observable_input.as_ref()) {
                 append_anchor(&path);
+                continue;
+            }
+            for text in [
+                record.summary.as_str(),
+                record.detail.as_deref().unwrap_or_default(),
+            ] {
+                for reference in collect_target_scoped_evidence_refs_from_text(text, &target_paths)
+                {
+                    if let Some(path) = reference.strip_prefix("read:") {
+                        append_anchor(path);
+                    }
+                }
             }
         }
     }
@@ -749,12 +818,25 @@ fn runtime_read_observation_paths(frame: &StateFrame, usage: Option<&LoopUsage>)
     }
 
     if let Some(usage) = usage {
+        let target_paths = declared_target_paths(frame);
         for record in &usage.tool_execution_records {
             if record.kind != ToolExecutionOutcomeKind::Success || record.tool_name != "Read" {
                 continue;
             }
             if let Some(path) = observable_path_from_input(record.observable_input.as_ref()) {
                 push_unique(&mut paths, path);
+                continue;
+            }
+            for text in [
+                record.summary.as_str(),
+                record.detail.as_deref().unwrap_or_default(),
+            ] {
+                for reference in collect_target_scoped_evidence_refs_from_text(text, &target_paths)
+                {
+                    if let Some(path) = reference.strip_prefix("read:") {
+                        push_unique(&mut paths, path.to_string());
+                    }
+                }
             }
         }
     }
@@ -5829,6 +5911,46 @@ mod tests {
             }
             other => panic!("expected Done, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn prose_evidence_files_read_block_closes_content_evidence_targets() {
+        let mut frame = make_clean_frame();
+        frame.stage_execution_contract.declared_artifacts.push(
+            crate::core::state_frame::DeclaredArtifactContract {
+                ref_id: "artifact:report".into(),
+                path: "/tmp/report.md".into(),
+                kind: "file".into(),
+                required_actions: vec!["write".into()],
+                required_evidence: Vec::new(),
+            },
+        );
+        frame.stage_execution_contract.content_evidence_targets = vec![
+            "RustAgent/Agent/src/tool/builtin/glob.rs".into(),
+            "RustAgent/Agent/src/tool/builtin/grep.rs".into(),
+            "RustAgent/docs/31-token-efficiency-cost-performance.md".into(),
+        ];
+        frame.recent_evidence.push(
+            "fact: artifact_status ref=artifact:report path=/tmp/report.md kind=file status=created source=tool:Write source_event_id=tool-write:1 freshness=after-runtime confidence=1.00 lineage_status=active invalidated_by=none supersedes=none conflicts_with=none summary=report written"
+                .into(),
+        );
+        frame.recent_evidence.push(
+            "Evidence files read:\n- RustAgent/Agent/src/tool/builtin/glob.rs\n- RustAgent/Agent/src/tool/builtin/grep.rs\n- /Users/example/repo/RustAgent/docs/31-token-efficiency-cost-performance.md"
+                .into(),
+        );
+
+        let refs = super::collect_evidence_refs(&frame, None);
+        assert!(refs.contains(&"read:RustAgent/Agent/src/tool/builtin/glob.rs".to_string()));
+        assert!(refs.contains(&"read:RustAgent/Agent/src/tool/builtin/grep.rs".to_string()));
+        assert!(
+            refs.contains(
+                &"read:RustAgent/docs/31-token-efficiency-cost-performance.md".to_string()
+            )
+        );
+        assert_eq!(
+            super::evaluate_completion_evidence(&frame, &LoopUsage::default()),
+            CompletionEvidenceStatus::Sufficient
+        );
     }
 
     #[test]
