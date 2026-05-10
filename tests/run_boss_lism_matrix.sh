@@ -74,6 +74,7 @@ Options:
   --mode VALUE          all_off | boss_on_only | all_on. Only for --plan single.
   --shared-memory-enabled
                         Enable shared step memory in the launched runtime.
+  --st                  Enable /st mode in the launched runtime.
   --runs N              Runs per mode. Default: 3. For single, default 1.
   --out DIR             Output root. Default: $DEFAULT_OUT_DIR
   --model MODEL         Override model written into generated config.
@@ -439,6 +440,7 @@ run_one() {
   local run_tag="$5"
   local timeout_secs="$6"
   local program_timeout_secs="$7"
+  local st_enabled="$8"
 
   local src_mode
   local boss_policy
@@ -476,6 +478,9 @@ run_one() {
     )
     if [ "$shared_memory_enabled" = "true" ]; then
       cmd+=(--shared-memory-enabled)
+    fi
+    if [ "$st_enabled" = "true" ]; then
+      cmd+=(--st)
     fi
     run_with_program_timeout "$program_timeout_secs" "${cmd[@]}"
   ) >"$log_file" 2>&1
@@ -654,6 +659,7 @@ model="$DEFAULT_MODEL"
 timeout_secs="$DEFAULT_TIMEOUT_SECS"
 program_timeout_secs="$DEFAULT_PROGRAM_TIMEOUT_SECS"
 shared_memory_enabled="false"
+st_enabled="false"
 prepare_only="false"
 summary_only=""
 list_cases="false"
@@ -674,6 +680,10 @@ while [ $# -gt 0 ]; do
       ;;
     --shared-memory-enabled)
       shared_memory_enabled="true"
+      shift
+      ;;
+    --st)
+      st_enabled="true"
       shift
       ;;
     --runs)
@@ -805,7 +815,7 @@ for usecase in "${selected_cases[@]}"; do
   for mode in "${mode_sequence[@]}"; do
     for run_id in $(seq 1 "$runs"); do
       assert_runtime_budget
-      run_one "$out_dir" "$usecase" "$mode" "$run_id" "$run_tag" "$timeout_secs" "$program_timeout_secs"
+      run_one "$out_dir" "$usecase" "$mode" "$run_id" "$run_tag" "$timeout_secs" "$program_timeout_secs" "$st_enabled"
     done
   done
 done
