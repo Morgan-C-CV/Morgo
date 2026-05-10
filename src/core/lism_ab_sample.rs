@@ -963,15 +963,13 @@ fn canonicalize_artifact_target_pairs(targets: Vec<(String, Option<String>)>) ->
             if path.starts_with("command:") {
                 return None;
             }
-            canonical_paths
-                .contains(&path)
-                .then(|| {
-                    if target_ref.starts_with("content_evidence:") {
-                        format!("content_evidence:{path}")
-                    } else {
-                        format!("{target_ref}:{path}")
-                    }
-                })
+            canonical_paths.contains(&path).then(|| {
+                if target_ref.starts_with("content_evidence:") {
+                    format!("content_evidence:{path}")
+                } else {
+                    format!("{target_ref}:{path}")
+                }
+            })
         })
         .collect()
 }

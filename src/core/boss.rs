@@ -314,7 +314,10 @@ fn verification_gap_required_targets(
     targets
 }
 
-fn verification_gap_can_continue(step: &BossPlanStep, metadata: Option<&BossStepRoutedMetadata>) -> bool {
+fn verification_gap_can_continue(
+    step: &BossPlanStep,
+    metadata: Option<&BossStepRoutedMetadata>,
+) -> bool {
     !verification_gap_required_targets(step, metadata).is_empty()
 }
 
@@ -345,12 +348,14 @@ fn verification_gap_requires_source_evidence_read(
     if source_targets.is_empty() {
         return false;
     }
-    verification_gap_required_targets(step, metadata).iter().any(|target| {
-        source_targets.iter().any(|source_target| {
-            evidence_path_scope_matches(target, source_target)
-                || evidence_path_scope_matches(source_target, target)
+    verification_gap_required_targets(step, metadata)
+        .iter()
+        .any(|target| {
+            source_targets.iter().any(|source_target| {
+                evidence_path_scope_matches(target, source_target)
+                    || evidence_path_scope_matches(source_target, target)
+            })
         })
-    })
 }
 
 fn normalize_verification_gap_target_path(
@@ -1797,6 +1802,38 @@ fn verification_first_required_runtime_targets(
     )
 }
 
+fn verification_first_required_runtime_file_targets(
+    contract: &ExecutorBAssignmentContract,
+) -> Vec<String> {
+    let targets = verification_first_required_runtime_targets(contract);
+    if targets.is_empty() {
+        return targets;
+    }
+    let mut file_targets = Vec::new();
+    for target in &targets {
+        if target_has_nested_required_target(target, &targets) {
+            continue;
+        }
+        if contract_target_is_directory(&contract.state_frame.stage_execution_contract, target) {
+            continue;
+        }
+        push_unique_required_evidence(&mut file_targets, target.clone());
+    }
+    if file_targets.is_empty() {
+        targets
+            .into_iter()
+            .filter(|target| {
+                !contract_target_is_directory(
+                    &contract.state_frame.stage_execution_contract,
+                    target,
+                )
+            })
+            .collect()
+    } else {
+        file_targets
+    }
+}
+
 fn verification_first_shared_memory_blocker(shared: &SharedStepMemory) -> Option<String> {
     if let Some(blocker) = shared.remaining_blocker.as_ref() {
         let trimmed = blocker.trim();
@@ -2860,7 +2897,7 @@ fn is_verification_first_assignment_contract(contract: &ExecutorBAssignmentContr
 }
 
 fn verification_first_contract_target(contract: &ExecutorBAssignmentContract) -> String {
-    let required_runtime_targets = verification_first_required_runtime_targets(contract);
+    let required_runtime_targets = verification_first_required_runtime_file_targets(contract);
     if let Some(shared) = contract.shared_step_memory.as_ref() {
         if let Some(target) = verification_first_shared_memory_target(shared) {
             if contract_target_is_directory(&contract.state_frame.stage_execution_contract, &target)
@@ -3176,7 +3213,7 @@ fn verification_first_repair_brief_lines(contract: &ExecutorBAssignmentContract)
 
 fn build_verification_first_task_message(contract: &ExecutorBAssignmentContract) -> String {
     let target = verification_first_contract_target(contract);
-    let required_runtime_targets = verification_first_required_runtime_targets(contract);
+    let required_runtime_targets = verification_first_required_runtime_file_targets(contract);
     let facts = verification_first_contract_facts(contract);
     let evidence = if facts.is_empty() {
         "none".into()
@@ -7619,11 +7656,6 @@ impl BossCoordinator {
                         }
                     } else {
                         append_review_runtime_record(step, "accepted", summary, None);
-                        append_artifact_verification_runtime_records(
-                            step,
-                            "verified",
-                            "artifact verification passed",
-                        );
                         let gate_metadata = routed_metadata
                             .as_ref()
                             .map(|metadata| metadata_with_current_runtime_evidence(step, metadata));
@@ -7675,6 +7707,11 @@ impl BossCoordinator {
                                 (false, Some(("repair_dispatched", None)))
                             }
                         } else {
+                            append_artifact_verification_runtime_records(
+                                step,
+                                "verified",
+                                "artifact verification passed",
+                            );
                             step.last_review_summary =
                                 Some(if is_verification_first_continuation(step) {
                                     normalize_verification_first_short_form(step, summary, None)
@@ -16235,10 +16272,7 @@ mod tests {
             "read:src/tool/definition.rs",
             Some(Path::new("/Users/wangmorgan/MProject/LearnCCfromCC")),
         );
-        assert_eq!(
-            normalized,
-            "RustAgent/Agent/src/tool/definition.rs"
-        );
+        assert_eq!(normalized, "RustAgent/Agent/src/tool/definition.rs");
     }
 
     #[test]
@@ -17003,6 +17037,105 @@ mod tests {
         assert!(message.contains("/tmp/source.md"));
         assert!(message.contains("required_runtime_evidence: use Read"));
         assert!(message.contains("- read:/tmp/source.md"));
+    }
+
+    #[tokio::test]
+    async fn verification_first_task_message_filters_directory_targets_from_runtime_evidence() {
+        let (coordinator, _) =
+            verification_first_projection_coordinator(WorkerLisMPolicy::ForceOn).await;
+        let root = "/tmp/python-demo".to_string();
+        let readme = format!("{root}/README.md");
+        let runtime = format!("{root}/runtime.py");
+        let model = format!("{root}/model.py");
+        let demo = format!("{root}/demo.py");
+        let mut assignment = coordinator
+            .build_executor_b_assignment_contract(0, "session-alpha", true)
+            .await
+            .expect("build assignment");
+        assignment.state_frame.stage_execution_contract = StageExecutionContract {
+            declared_artifacts: vec![
+                DeclaredArtifactContract {
+                    ref_id: "artifact:contract:0".into(),
+                    path: root.clone(),
+                    kind: "directory".into(),
+                    required_actions: vec!["write_artifact".into()],
+                    required_evidence: vec![root.clone()],
+                },
+                DeclaredArtifactContract {
+                    ref_id: "artifact:contract:1".into(),
+                    path: readme.clone(),
+                    kind: "file".into(),
+                    required_actions: vec!["write_artifact".into()],
+                    required_evidence: vec![readme.clone()],
+                },
+                DeclaredArtifactContract {
+                    ref_id: "artifact:contract:2".into(),
+                    path: runtime.clone(),
+                    kind: "file".into(),
+                    required_actions: vec!["write_artifact".into()],
+                    required_evidence: vec![runtime.clone()],
+                },
+                DeclaredArtifactContract {
+                    ref_id: "artifact:contract:3".into(),
+                    path: model.clone(),
+                    kind: "file".into(),
+                    required_actions: vec!["write_artifact".into()],
+                    required_evidence: vec![model.clone()],
+                },
+                DeclaredArtifactContract {
+                    ref_id: "artifact:contract:4".into(),
+                    path: demo.clone(),
+                    kind: "file".into(),
+                    required_actions: vec!["write_artifact".into()],
+                    required_evidence: vec![demo.clone()],
+                },
+            ],
+            verifications: vec![VerificationContract {
+                target_ref: "artifact:contract:0".into(),
+                target_path: Some(root.clone()),
+                required_actions: vec!["verify_artifact".into()],
+                required_evidence: vec![root.clone()],
+            }],
+            required_actions: vec!["verify_artifact".into()],
+            required_evidence: vec![root.clone()],
+            ..StageExecutionContract::default()
+        };
+        assignment.state_frame.stage_continuation_context = Some(
+            crate::core::state_frame::StageContinuationContext {
+                repair_intent: Some(crate::core::state_frame::RepairIntent {
+                    failed_target: Some(root.clone()),
+                    verified_facts: vec![
+                        format!(
+                            "required_evidence_targets: {root} | {readme} | {runtime} | {model} | {demo}"
+                        ),
+                        "verification_result: blocked".into(),
+                    ],
+                    next_action: Some("verify_artifact".into()),
+                    continuity_mode: Some(crate::core::state_frame::ContinuityMode::Repair),
+                }),
+                failed_target: Some(root.clone()),
+                verified_facts: vec![
+                    format!(
+                        "required_evidence_targets: {root} | {readme} | {runtime} | {model} | {demo}"
+                    ),
+                    "verification_result: blocked".into(),
+                ],
+                next_action: Some("verify_artifact".into()),
+                continuity_mode: Some(crate::core::state_frame::ContinuityMode::Repair),
+            },
+        );
+
+        let message = build_verification_first_task_message(&assignment);
+        assert!(message.contains("verified_target: /tmp/verification-first.md"));
+        assert!(message.contains(&format!("- read:{readme}")));
+        assert!(message.contains(&format!("- read:{runtime}")));
+        assert!(message.contains(&format!("- read:{model}")));
+        assert!(message.contains(&format!("- read:{demo}")));
+        assert!(
+            !message
+                .lines()
+                .any(|line| line.trim() == format!("- read:{root}"))
+        );
     }
 
     #[tokio::test]

@@ -722,12 +722,43 @@ fn infer_bash_readback_path(contract: &StageExecutionContract, command: &str) ->
     {
         return None;
     }
-    extract_artifact_expectations(command)
-        .into_iter()
-        .next()
-        .map(|expectation| expectation.path.to_string_lossy().to_string())
-        .filter(|path| contract_mentions_path(contract, path))
-        .filter(|path| contract_has_explicit_verify_intent(contract, path))
+    contract
+        .verifications
+        .iter()
+        .filter_map(|verification| verification.target_path.as_deref())
+        .chain(
+            contract
+                .declared_artifacts
+                .iter()
+                .map(|artifact| artifact.path.as_str()),
+        )
+        .find(|path| {
+            contract_has_explicit_verify_intent(contract, path)
+                && bash_command_reads_target(command, path)
+        })
+        .map(str::to_string)
+}
+
+fn bash_command_reads_target(command: &str, target: &str) -> bool {
+    [
+        format!("cat \"{target}\""),
+        format!("cat '{target}'"),
+        format!("cat {target}"),
+        format!("ls \"{target}\""),
+        format!("ls '{target}'"),
+        format!("ls {target}"),
+        format!("stat \"{target}\""),
+        format!("stat '{target}'"),
+        format!("stat {target}"),
+        format!("test -f \"{target}\""),
+        format!("test -f '{target}'"),
+        format!("test -f {target}"),
+        format!("test -d \"{target}\""),
+        format!("test -d '{target}'"),
+        format!("test -d {target}"),
+    ]
+    .iter()
+    .any(|pattern| command.contains(pattern))
 }
 
 fn bash_assignment_values(command: &str) -> Vec<(String, String)> {

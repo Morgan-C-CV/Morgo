@@ -85,10 +85,15 @@ pub(crate) fn matching_target_scope<'a>(
     candidate: &str,
     target_paths: &'a [String],
 ) -> Option<&'a str> {
+    let candidate = clean_path_like(candidate);
     target_paths
         .iter()
         .map(String::as_str)
-        .find(|target| evidence_path_scope_matches(candidate, target))
+        .filter(|target| evidence_path_scope_matches(&candidate, target))
+        .max_by_key(|target| {
+            let target = clean_path_like(target);
+            (candidate == target, target.len())
+        })
 }
 
 fn prefixed_evidence_path(value: &str, prefix: &str) -> Option<String> {
@@ -177,5 +182,17 @@ mod tests {
             "read",
             "/Users/example/repo/src/core/state_frame_projection.rs"
         ));
+    }
+
+    #[test]
+    fn matching_target_scope_prefers_more_specific_file_targets() {
+        let targets = vec![
+            "/tmp/example-site".to_string(),
+            "/tmp/example-site/README.md".to_string(),
+        ];
+        assert_eq!(
+            matching_target_scope("/tmp/example-site/README.md", &targets),
+            Some("/tmp/example-site/README.md")
+        );
     }
 }

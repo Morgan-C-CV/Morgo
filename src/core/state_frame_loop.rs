@@ -40,7 +40,7 @@ impl Default for DecisionLoopConfig {
             // Direct StateFrame workers can spend a few turns on recoverable tool
             // failures before they produce the artifact and still need one turn
             // to verify/finish.
-            max_iterations: 8,
+            max_iterations: 12,
             repair_budget: 2,
         }
     }
@@ -312,6 +312,9 @@ fn push_unique(items: &mut Vec<String>, value: String) -> bool {
 
 fn evidence_field_value(line: &str, field_name: &str) -> Option<String> {
     let prefix = format!("{field_name}=");
+    if !line.contains(&prefix) {
+        return None;
+    }
     line.split_whitespace()
         .find_map(|part| part.strip_prefix(&prefix))
         .map(|value| value.trim().trim_matches(',').to_string())
@@ -506,15 +509,26 @@ fn collect_target_scoped_evidence_refs_from_text(
             prose_read_block_remaining = 0;
             continue;
         }
-        let lowered = trimmed.to_ascii_lowercase();
-        if prose_read_heading(trimmed) {
+        if is_contract_dump_line(trimmed) {
+            continue;
+        }
+        let maybe_runtime_anchor = line_may_contain_runtime_anchor(trimmed);
+        if !maybe_runtime_anchor && prose_read_block_remaining == 0 {
+            continue;
+        }
+        let lowered = if maybe_runtime_anchor || prose_read_block_remaining > 0 {
+            trimmed.to_ascii_lowercase()
+        } else {
+            String::new()
+        };
+        if maybe_runtime_anchor && prose_read_heading(trimmed) {
             prose_read_block_remaining = 12;
         } else if prose_read_block_remaining > 0 {
             prose_read_block_remaining -= 1;
         }
         if prose_read_block_remaining > 0
-            || lowered.contains("read succeeded")
-            || lowered.contains("read completed")
+            || (maybe_runtime_anchor
+                && (lowered.contains("read succeeded") || lowered.contains("read completed")))
         {
             if let Some(target) = prose_read_path_candidate(trimmed, target_paths) {
                 let anchor = format!("claimed_read:{target}");
@@ -650,6 +664,65 @@ fn collect_target_scoped_evidence_refs_from_text(
         }
     }
     refs
+}
+
+fn is_contract_dump_line(line: &str) -> bool {
+    line.starts_with("fact: required_evidence ")
+        || line.starts_with("fact: required_actions ")
+        || line.starts_with("fact: declared_artifact_contract ")
+        || line.starts_with("fact: verification_contract ")
+        || line.starts_with("fact: completion_contract ")
+        || line.starts_with("fact: open_items ")
+        || line.starts_with("fact: open_blockers ")
+        || line.starts_with("fact: dangerous_assumptions ")
+        || line.starts_with("fact: review_feedback ")
+        || line.starts_with("fact: revision_notes ")
+        || line.starts_with("fact: documentation_feedback ")
+        || line.starts_with("fact: projection_invariants ")
+        || line.starts_with("completion_gate: ")
+        || line.starts_with("completion_gate_repair: ")
+        || line.starts_with("required_action:")
+        || line.starts_with("fact: permission_to_create_and_write:")
+}
+
+fn line_may_contain_runtime_anchor(line: &str) -> bool {
+    if line_has_structured_runtime_anchor_prefix(line) {
+        return true;
+    }
+    if line.len() > 1024 {
+        return false;
+    }
+    line.starts_with("tool_outcome:")
+        || line.starts_with("tool_feedback:")
+        || line.starts_with("recent_output_ref:")
+        || line.contains("evidence_ref")
+        || line.contains("evidence_refs")
+        || line.contains("verified_target:")
+        || line.contains("verified target:")
+        || line.contains("target_path:")
+        || line.contains("target path:")
+        || line.contains("file_snippet:")
+        || line.contains("read:")
+        || line.contains("write:")
+        || line.contains("Read succeeded")
+        || line.contains("read succeeded")
+        || line.contains("Read completed")
+        || line.contains("read completed")
+        || ((line.starts_with('-')
+            || line.starts_with('*')
+            || line.starts_with('•')
+            || line.contains("evidence")
+            || line.contains("Evidence")
+            || line.contains("read ")
+            || line.contains("Read "))
+            && prose_read_heading(line))
+}
+
+fn line_has_structured_runtime_anchor_prefix(line: &str) -> bool {
+    line.starts_with("fact: file_facts ")
+        || line.starts_with("fact: verification_status ")
+        || line.starts_with("fact: artifact_status ")
+        || line.starts_with("hydrated_context: file_snippet:")
 }
 
 fn path_matches_target_scope(path: &str, target_paths: &[String]) -> bool {
@@ -1535,9 +1608,6 @@ fn collect_completion_evidence_gaps_with_refs(
 }
 
 fn evaluate_completion_evidence(frame: &StateFrame, usage: &LoopUsage) -> CompletionEvidenceStatus {
-    let evidence_refs = collect_evidence_refs(frame, Some(usage));
-    let runtime_read_anchor_closed = verification_runtime_read_anchor_closed(frame, usage);
-    let completion_gate_reads_closed = completion_gate_required_reads_closed(frame, usage);
     if completion_contract_requirement(frame, "artifact_evidence")
         && !missing_artifact_evidence_refs(frame).is_empty()
     {
@@ -1548,16 +1618,27 @@ fn evaluate_completion_evidence(frame: &StateFrame, usage: &LoopUsage) -> Comple
     {
         return CompletionEvidenceStatus::MissingTestEvidence;
     }
-    if !missing_source_evidence_targets(frame, &evidence_refs).is_empty() {
-        return CompletionEvidenceStatus::MissingVerificationEvidence;
+    let runtime_read_anchor_closed = verification_runtime_read_anchor_closed(frame, usage);
+    let completion_gate_reads_closed = completion_gate_required_reads_closed(frame, usage);
+    let mut evidence_refs = None;
+    if source_evidence_gate_enabled(frame) {
+        let refs = collect_evidence_refs(frame, Some(usage));
+        if !missing_source_evidence_targets(frame, &refs).is_empty() {
+            return CompletionEvidenceStatus::MissingVerificationEvidence;
+        }
+        evidence_refs = Some(refs);
     }
     if completion_contract_requirement(frame, "verification_evidence")
         && !missing_verification_evidence_refs(frame).is_empty()
     {
-        if worker_has_target_scoped_verification_anchor(frame, &evidence_refs)
-            || verification_read_anchor_closed(frame, &evidence_refs)
-            || runtime_read_anchor_closed
-            || completion_gate_reads_closed
+        if runtime_read_anchor_closed || completion_gate_reads_closed {
+            return CompletionEvidenceStatus::Sufficient;
+        }
+        let refs = evidence_refs
+            .get_or_insert_with(|| collect_evidence_refs(frame, Some(usage)))
+            .as_slice();
+        if worker_has_target_scoped_verification_anchor(frame, refs)
+            || verification_read_anchor_closed(frame, refs)
         {
             return CompletionEvidenceStatus::Sufficient;
         }
@@ -1705,6 +1786,16 @@ fn enforce_completion_gate(
         return Ok(());
     }
     usage.completion_evidence_status = Some(status.clone());
+    let missing_source_targets_for_verification = if matches!(
+        &status,
+        CompletionEvidenceStatus::MissingVerificationEvidence
+    ) && source_evidence_gate_enabled(frame)
+    {
+        let evidence_refs = collect_evidence_refs(frame, Some(usage));
+        missing_source_evidence_targets(frame, &evidence_refs)
+    } else {
+        Vec::new()
+    };
     let (required_action, reason, missing_evidence_refs) = match status {
         CompletionEvidenceStatus::MissingArtifactEvidence => (
             "write_artifact".to_string(),
@@ -1719,16 +1810,14 @@ fn enforce_completion_gate(
         ),
         CompletionEvidenceStatus::MissingVerificationEvidence => (
             {
-                let evidence_refs = collect_evidence_refs(frame, Some(usage));
-                if missing_source_evidence_targets(frame, &evidence_refs).is_empty() {
+                if missing_source_targets_for_verification.is_empty() {
                     "verify_artifact".to_string()
                 } else {
                     "read_source_evidence".to_string()
                 }
             },
             {
-                let evidence_refs = collect_evidence_refs(frame, Some(usage));
-                if missing_source_evidence_targets(frame, &evidence_refs).is_empty() {
+                if missing_source_targets_for_verification.is_empty() {
                     "completion gate blocked done because required verification evidence is missing"
                         .to_string()
                 } else {
@@ -1737,12 +1826,10 @@ fn enforce_completion_gate(
                 }
             },
             {
-                let evidence_refs = collect_evidence_refs(frame, Some(usage));
-                let source_targets = missing_source_evidence_targets(frame, &evidence_refs);
-                if source_targets.is_empty() {
+                if missing_source_targets_for_verification.is_empty() {
                     missing_verification_evidence_refs(frame)
                 } else {
-                    source_targets
+                    missing_source_targets_for_verification.clone()
                 }
             },
         ),
@@ -1995,31 +2082,8 @@ fn verification_terminal_outcome(frame: &StateFrame, usage: &mut LoopUsage) -> O
         .last_effective_tool_action
         .as_deref()
         .unwrap_or("none");
-    let read_short_circuit_candidate = has_target_read_anchor
-        && source_evidence_closed
-        && (verification_status == "verified"
-            || last_effective_tool_action == "Read"
-            || completion_gate_reads_closed);
     let read_tailspin_candidate =
         verification_target_read_count >= 2 && has_target_read_anchor && source_evidence_closed;
-    if read_short_circuit_candidate {
-        if verify_terminal_diagnostics_enabled() {
-            eprintln!(
-                "verify_terminal_outcome: done state={:?} last_effective_tool_action={} has_target_read_anchor={} source_evidence_closed={} verification_status={} evidence_refs={}",
-                frame.state,
-                last_effective_tool_action,
-                has_target_read_anchor,
-                source_evidence_closed,
-                verification_status,
-                evidence_refs.join("|")
-            );
-        }
-        finalize_worker_usage_report(frame, usage);
-        return Some(LoopOutcome::Done {
-            final_state: AgentState::Done,
-            usage: usage.clone(),
-        });
-    }
 
     let completion = evaluate_completion_evidence(frame, usage);
     if matches!(completion, CompletionEvidenceStatus::Sufficient) {
@@ -6574,6 +6638,47 @@ mod tests {
     }
 
     #[test]
+    fn collect_evidence_refs_ignores_large_contract_dump_lines() {
+        let mut frame = make_frame();
+        frame.recent_evidence.clear();
+        push_completion_contract_with_refs(
+            &mut frame,
+            &["artifact:contract:0"],
+            &[],
+            &["artifact:contract:0"],
+        );
+        push_artifact_target_fact(&mut frame, "artifact:contract:0", "/tmp/report.md", "file");
+        let repeated_permissions = (0..200)
+            .map(|idx| {
+                format!(
+                    "fact: permission_to_create_and_write:/tmp/report-{idx}.md ref=permission:{idx} source=permission_scope"
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" | ");
+        frame
+            .recent_evidence
+            .push(format!("fact: required_evidence {repeated_permissions}"));
+        frame.recent_evidence.push(
+            "fact: file_facts ref=filefact:runtime:1:read path=/tmp/report.md kind=read_observation source=tool:Read source_event_id=tool-read:runtime:1 freshness=after-runtime-read confidence=1.00 status=active invalidated_by=none supersedes=none conflicts_with=none fact=runtime Read succeeded for /tmp/report.md".into(),
+        );
+
+        let evidence_refs = super::collect_evidence_refs(&frame, None);
+
+        assert!(
+            evidence_refs
+                .iter()
+                .any(|reference| reference == "read:/tmp/report.md")
+        );
+        assert!(
+            !evidence_refs
+                .iter()
+                .any(|reference| reference.starts_with("permission:")),
+            "contract dump permission refs are not runtime evidence: {evidence_refs:?}"
+        );
+    }
+
+    #[test]
     fn collect_evidence_refs_normalizes_absolute_file_snippet_reads_to_target_scope() {
         let mut frame = make_frame();
         frame.recent_evidence.clear();
@@ -7286,7 +7391,31 @@ mod tests {
             CompletionEvidenceStatus::MissingVerificationEvidence
         );
 
-        for (idx, path) in required_paths.iter().enumerate() {
+        frame.recent_evidence.push(format!(
+            "fact: file_facts ref=filefact:runtime:0:read path={} kind=read_observation source=tool:Read source_event_id=tool-read:runtime:0 freshness=after-runtime-read confidence=1.00 status=active invalidated_by=none supersedes=none conflicts_with=none fact=runtime Read succeeded for {}",
+            required_paths[0],
+            required_paths[0]
+        ));
+        let refs_mid = super::collect_evidence_refs(&frame, None);
+        assert!(
+            !refs_mid
+                .iter()
+                .any(|reference| reference == &format!("read:{root}")),
+            "a single child-file read must not collapse into the directory target: {refs_mid:?}"
+        );
+        let usage_mid = LoopUsage {
+            last_effective_tool_action: Some("Read".into()),
+            ..LoopUsage::default()
+        };
+        assert!(!super::completion_gate_required_reads_closed(
+            &frame, &usage_mid
+        ));
+        assert_eq!(
+            super::evaluate_completion_evidence(&frame, &usage_mid),
+            CompletionEvidenceStatus::MissingVerificationEvidence
+        );
+
+        for (idx, path) in required_paths.iter().enumerate().skip(1) {
             frame.recent_evidence.push(format!(
                 "fact: file_facts ref=filefact:runtime:{idx}:read path={path} kind=read_observation source=tool:Read source_event_id=tool-read:runtime:{idx} freshness=after-runtime-read confidence=1.00 status=active invalidated_by=none supersedes=none conflicts_with=none fact=runtime Read succeeded for {path}"
             ));
