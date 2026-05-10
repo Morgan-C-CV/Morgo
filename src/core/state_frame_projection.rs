@@ -66,6 +66,111 @@ fn is_readonly_analysis(plan: &BossPlan, step_id: Option<usize>) -> bool {
     )
 }
 
+fn path_looks_like_development_artifact(path: &str) -> bool {
+    let lowered = path.to_ascii_lowercase();
+    lowered.ends_with(".rs")
+        || lowered.ends_with(".py")
+        || lowered.ends_with(".js")
+        || lowered.ends_with(".ts")
+        || lowered.ends_with(".tsx")
+        || lowered.ends_with(".jsx")
+        || lowered.ends_with(".html")
+        || lowered.ends_with(".css")
+        || lowered.ends_with(".json")
+        || lowered.ends_with(".yml")
+        || lowered.ends_with(".yaml")
+        || lowered.ends_with(".sh")
+}
+
+fn step_looks_like_development_task(
+    step: Option<&crate::core::boss_state::BossPlanStep>,
+    declared_artifacts: &[DeclaredArtifactContract],
+) -> bool {
+    if declared_artifacts
+        .iter()
+        .any(|artifact| path_looks_like_development_artifact(&artifact.path))
+    {
+        return true;
+    }
+
+    let Some(step) = step else {
+        return false;
+    };
+    let mut text = current_task_contract_text(step.objective()).to_ascii_lowercase();
+    if !step.acceptance.is_empty() {
+        text.push('\n');
+        text.push_str(
+            &step
+                .acceptance
+                .iter()
+                .map(|item| item.to_ascii_lowercase())
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+    }
+
+    let has_development_marker = [
+        "implement",
+        "implementation",
+        "fix",
+        "bug",
+        "patch",
+        "refactor",
+        "demo",
+        "validator",
+        "tool",
+        "site",
+        "frontend",
+        "build",
+        "script",
+        "code",
+        "feature",
+        "task",
+        "cli",
+        "create",
+        "write",
+    ]
+    .iter()
+    .any(|marker| text.contains(marker));
+
+    if !has_development_marker
+        && (text.contains("report")
+            || text.contains("research")
+            || text.contains("audit")
+            || text.contains("analysis"))
+    {
+        return false;
+    }
+
+    has_development_marker
+}
+
+fn apply_development_test_policy(contract: &mut StageExecutionContract) {
+    if contract.tests.is_empty() {
+        contract.tests.push(TestContract {
+            name: "st_auto_validation".into(),
+            required_actions: vec!["run_test".into()],
+            required_evidence: vec!["runtime_test_passed".into()],
+        });
+    }
+    if !contract
+        .required_actions
+        .iter()
+        .any(|action| action == "run_test")
+    {
+        contract.required_actions.push("run_test".into());
+    }
+    if !contract
+        .required_evidence
+        .iter()
+        .any(|item| item == "runtime_test_passed")
+    {
+        contract
+            .required_evidence
+            .push("runtime_test_passed".into());
+    }
+}
+
 /// Map a `BossStage` to the corresponding `AgentState` for prompt projection.
 fn stage_to_agent_state(stage: BossStage) -> AgentState {
     match stage {
@@ -170,6 +275,7 @@ fn build_completion_contract_fact(
     permission_facts: &[String],
     artifact_ledgers: &[crate::core::state_fact_ledger::ArtifactRecord],
     open_item_ledgers: &[crate::core::state_fact_ledger::OpenItemRecord],
+    stage_execution_contract: &StageExecutionContract,
     readonly_analysis: bool,
 ) -> String {
     let artifact_required =
@@ -178,11 +284,16 @@ fn build_completion_contract_fact(
         .iter()
         .map(|item| item.ref_id.clone())
         .collect::<Vec<_>>();
-    let test_refs = open_item_ledgers
+    let mut test_refs = open_item_ledgers
         .iter()
         .filter(|item| open_item_requires_test(&item.summary))
         .map(|item| item.ref_id.clone())
         .collect::<Vec<_>>();
+    for test in &stage_execution_contract.tests {
+        if !test_refs.iter().any(|existing| existing == &test.name) {
+            test_refs.push(test.name.clone());
+        }
+    }
     let verification_refs = if readonly_analysis {
         Vec::new()
     } else if artifact_required {
@@ -229,6 +340,7 @@ fn build_stage_execution_contract(
     artifact_ledgers: &[crate::core::state_fact_ledger::ArtifactRecord],
     open_item_ledgers: &[crate::core::state_fact_ledger::OpenItemRecord],
     readonly_analysis: bool,
+    st_mode_enabled: bool,
 ) -> StageExecutionContract {
     let mut declared_artifacts = artifact_ledgers
         .iter()
@@ -353,14 +465,18 @@ fn build_stage_execution_contract(
             }
             acc
         });
-    StageExecutionContract {
+    let mut contract = StageExecutionContract {
         declared_artifacts,
         verifications,
         tests,
         content_evidence_targets,
         required_actions,
         required_evidence,
+    };
+    if st_mode_enabled && step_looks_like_development_task(step, &contract.declared_artifacts) {
+        apply_development_test_policy(&mut contract);
     }
+    contract
 }
 
 fn build_stage_contract_facts(contract: &StageExecutionContract) -> Vec<String> {
@@ -399,6 +515,16 @@ fn build_stage_contract_facts(contract: &StageExecutionContract) -> Vec<String> 
                 summarize_list(&test.required_actions),
                 summarize_list(&test.required_evidence)
             ),
+        ));
+    }
+    if contract
+        .tests
+        .iter()
+        .any(|test| test.name == "st_auto_validation")
+    {
+        facts.push(fact_line(
+            "st_mode",
+            "enabled test_first_validation=required",
         ));
     }
     if !contract.required_actions.is_empty() {
@@ -612,6 +738,7 @@ fn build_fact_ledger(
     open_items: &[String],
     blocked_items: &[String],
     readonly_analysis: bool,
+    st_mode_enabled: bool,
 ) -> Vec<String> {
     let current_step = step_id.and_then(|id| plan.steps.iter().find(|s| s.id == id));
     let mut facts = vec![fact_line(
@@ -867,12 +994,14 @@ fn build_fact_ledger(
             &ledgers.artifact_refs,
             &open_item_ledgers,
             readonly_analysis,
+            st_mode_enabled,
         );
         facts.extend(build_stage_contract_facts(&stage_execution_contract));
         facts.push(build_completion_contract_fact(
             &permission_facts,
             &ledgers.artifact_refs,
             &open_item_ledgers,
+            &stage_execution_contract,
             readonly_analysis,
         ));
     } else {
@@ -946,6 +1075,16 @@ pub fn project_state_frame(
     step_id: Option<usize>,
     role: ActorRole,
 ) -> StateFrame {
+    project_state_frame_with_st_mode(plan, stage, step_id, role, false)
+}
+
+pub fn project_state_frame_with_st_mode(
+    plan: &BossPlan,
+    stage: BossStage,
+    step_id: Option<usize>,
+    role: ActorRole,
+    st_mode_enabled: bool,
+) -> StateFrame {
     let state = stage_to_agent_state(stage);
     let readonly_analysis = is_readonly_analysis(plan, step_id);
 
@@ -1007,6 +1146,7 @@ pub fn project_state_frame(
             .unwrap_or(&[]),
         &open_item_ledgers,
         readonly_analysis,
+        st_mode_enabled,
     );
 
     // recent_evidence doubles as a compact Fact Ledger v1.
@@ -1018,6 +1158,7 @@ pub fn project_state_frame(
         &open_items,
         &blocked_items,
         readonly_analysis,
+        st_mode_enabled,
     ));
     if let Some(step) = step_id.and_then(|id| plan.steps.iter().find(|s| s.id == id)) {
         if let Some(r) = &step.last_review_summary {
@@ -1069,7 +1210,9 @@ pub fn project_state_frame(
 
 #[cfg(test)]
 mod tests {
-    use super::{collect_projection_diagnostics, project_state_frame};
+    use super::{
+        collect_projection_diagnostics, project_state_frame, project_state_frame_with_st_mode,
+    };
     use crate::core::boss_state::{BossPlan, BossPlanStep, BossPlanStepStatus, BossStage};
     use crate::core::state_frame::{
         ActorRole, AgentState, ContinuityMode, StageContinuationContext, StageExecutionContract,
@@ -1211,6 +1354,85 @@ mod tests {
         assert_eq!(
             frame.stage_execution_contract.required_actions,
             vec!["create", "write", "verify"]
+        );
+    }
+
+    #[test]
+    fn st_mode_projects_test_first_contract_for_demo_report_tasks() {
+        let plan = BossPlan {
+            plan_id: "plan-st-demo".into(),
+            task_description: "build demo".into(),
+            document_spec: String::new(),
+            pseudo_code: String::new(),
+            draft_spec: None,
+            review_feedback: None,
+            revision_notes: None,
+            finalized: false,
+            documentation_feedback: Vec::new(),
+            steps: vec![BossPlanStep {
+                id: 0,
+                description: "build demo".into(),
+                objective: Some("在独立目录创建一个最小 Python demo，并报告输出。".into()),
+                acceptance: vec!["demo output is available".into()],
+                requires_approval: false,
+                status: BossPlanStepStatus::Running,
+                completed: false,
+                result_diff: None,
+                worker_task_id: None,
+                attempt_count: 0,
+                retry_budget: 3,
+                last_review_summary: None,
+                last_correction: None,
+                stage_execution_contract: StageExecutionContract::default(),
+                stage_continuation_context: None,
+                executor_b_stage_memory: None,
+                review_task_id: None,
+                tool_execution_records: Vec::new(),
+            }],
+            accepted_by_user: true,
+            auto_sequence: false,
+            session_snapshot: None,
+        };
+
+        let frame = project_state_frame_with_st_mode(
+            &plan,
+            BossStage::Execution,
+            Some(0),
+            ActorRole::Worker,
+            true,
+        );
+
+        assert!(
+            frame
+                .stage_execution_contract
+                .tests
+                .iter()
+                .any(|test| test.name == "st_auto_validation")
+        );
+        assert!(
+            frame
+                .stage_execution_contract
+                .required_actions
+                .iter()
+                .any(|action| action == "run_test")
+        );
+        assert!(
+            frame
+                .recent_evidence
+                .iter()
+                .any(|line| line.starts_with("fact: st_mode "))
+        );
+        assert!(
+            frame
+                .recent_evidence
+                .iter()
+                .any(|line| line.starts_with("fact: test_contract "))
+        );
+        assert!(
+            frame
+                .recent_evidence
+                .iter()
+                .any(|line| line.contains("test_evidence=required"))
         );
     }
 

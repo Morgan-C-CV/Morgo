@@ -23,7 +23,7 @@ use crate::tool::registry::ToolRegistry;
 use crate::tool::result::{
     ToolExecutionOutcomeKind, ToolExecutionRecord, ToolOutcome, ToolOutcomeKind,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone)]
@@ -502,7 +502,13 @@ fn collect_target_scoped_evidence_refs_from_text(
     target_paths: &[String],
 ) -> Vec<String> {
     let mut refs = Vec::new();
+    let mut seen = HashSet::new();
     let mut prose_read_block_remaining = 0usize;
+    let push_ref = |refs: &mut Vec<String>, seen: &mut HashSet<String>, reference: String| {
+        if seen.insert(reference.clone()) {
+            refs.push(reference);
+        }
+    };
     for line in text.lines() {
         let trimmed = line.trim();
         if trimmed.is_empty() {
@@ -532,23 +538,17 @@ fn collect_target_scoped_evidence_refs_from_text(
         {
             if let Some(target) = prose_read_path_candidate(trimmed, target_paths) {
                 let anchor = format!("claimed_read:{target}");
-                if !refs.iter().any(|existing| existing == &anchor) {
-                    refs.push(anchor);
-                }
+                push_ref(&mut refs, &mut seen, anchor);
             }
         }
         if let Some(reference) = evidence_field_value(trimmed, "ref") {
-            if !reference.starts_with("artifact:")
-                && !refs.iter().any(|existing| existing == &reference)
-            {
-                refs.push(reference);
+            if !reference.starts_with("artifact:") {
+                push_ref(&mut refs, &mut seen, reference);
             }
         }
         if let Some(reference) = evidence_field_value(trimmed, "evidence_ref") {
-            if !reference.starts_with("artifact:")
-                && !refs.iter().any(|existing| existing == &reference)
-            {
-                refs.push(reference);
+            if !reference.starts_with("artifact:") {
+                push_ref(&mut refs, &mut seen, reference);
             }
         }
         if let Some(reference) = evidence_field_value(trimmed, "evidence_refs") {
@@ -557,8 +557,8 @@ fn collect_target_scoped_evidence_refs_from_text(
                 if item.is_empty() || item.eq_ignore_ascii_case("none") {
                     continue;
                 }
-                if !item.starts_with("artifact:") && !refs.iter().any(|existing| existing == item) {
-                    refs.push(item.to_string());
+                if !item.starts_with("artifact:") {
+                    push_ref(&mut refs, &mut seen, item.to_string());
                 }
             }
         }
@@ -573,9 +573,7 @@ fn collect_target_scoped_evidence_refs_from_text(
             ],
         ) {
             let anchor = format!("verification:{path}");
-            if !refs.iter().any(|existing| existing == &anchor) {
-                refs.push(anchor);
-            }
+            push_ref(&mut refs, &mut seen, anchor);
         }
 
         if let Some(path) = evidence_field_value(trimmed, "path")
@@ -584,9 +582,7 @@ fn collect_target_scoped_evidence_refs_from_text(
         {
             if evidence_field_value(trimmed, "status").as_deref() == Some("verified") {
                 let anchor = format!("verification:{path}");
-                if !refs.iter().any(|existing| existing == &anchor) {
-                    refs.push(anchor);
-                }
+                push_ref(&mut refs, &mut seen, anchor);
             }
         }
 
@@ -599,9 +595,7 @@ fn collect_target_scoped_evidence_refs_from_text(
                     || lowered.contains("artifact verification passed"))
             {
                 let anchor = format!("verification:{path}");
-                if !refs.iter().any(|existing| existing == &anchor) {
-                    refs.push(anchor);
-                }
+                push_ref(&mut refs, &mut seen, anchor);
             }
         }
 
@@ -615,9 +609,7 @@ fn collect_target_scoped_evidence_refs_from_text(
                     "read:{}",
                     matching_target_scope(&path, target_paths).unwrap_or(&path)
                 );
-                if !refs.iter().any(|existing| existing == &anchor) {
-                    refs.push(anchor);
-                }
+                push_ref(&mut refs, &mut seen, anchor);
             }
         }
 
@@ -633,9 +625,7 @@ fn collect_target_scoped_evidence_refs_from_text(
                         "read:{}",
                         matching_target_scope(path, target_paths).unwrap_or(path)
                     );
-                    if !refs.iter().any(|existing| existing == &anchor) {
-                        refs.push(anchor);
-                    }
+                    push_ref(&mut refs, &mut seen, anchor);
                 }
             }
         }
@@ -643,9 +633,7 @@ fn collect_target_scoped_evidence_refs_from_text(
         if let Some(path) = parse_prefixed_path(trimmed, &["file_snippet:"]) {
             if let Some(target) = matching_target_scope(&path, target_paths) {
                 let anchor = format!("read:{target}");
-                if !refs.iter().any(|existing| existing == &anchor) {
-                    refs.push(anchor);
-                }
+                push_ref(&mut refs, &mut seen, anchor);
             }
         }
 
@@ -658,9 +646,7 @@ fn collect_target_scoped_evidence_refs_from_text(
             } else {
                 format!("{prefix}:{path}")
             };
-            if !refs.iter().any(|existing| existing == &anchor) {
-                refs.push(anchor);
-            }
+            push_ref(&mut refs, &mut seen, anchor);
         }
     }
     refs
@@ -746,36 +732,40 @@ fn append_target_scoped_runtime_anchor(
 
 fn collect_evidence_refs(frame: &StateFrame, usage: Option<&LoopUsage>) -> Vec<String> {
     let mut refs = Vec::new();
+    let mut seen = HashSet::new();
     let target_paths = declared_target_paths(frame);
-    let ingest_text = |text: &str, refs: &mut Vec<String>| {
+    let push_ref = |refs: &mut Vec<String>, seen: &mut HashSet<String>, reference: String| {
+        if seen.insert(reference.clone()) {
+            refs.push(reference);
+        }
+    };
+    let ingest_text = |text: &str, refs: &mut Vec<String>, seen: &mut HashSet<String>| {
         for reference in collect_target_scoped_evidence_refs_from_text(text, &target_paths) {
-            if !refs.iter().any(|existing| existing == &reference) {
-                refs.push(reference);
-            }
+            push_ref(refs, seen, reference);
         }
     };
 
     for line in &frame.recent_evidence {
-        ingest_text(line, &mut refs);
+        ingest_text(line, &mut refs, &mut seen);
     }
     for item in &frame.accepted_summary {
-        ingest_text(item, &mut refs);
+        ingest_text(item, &mut refs, &mut seen);
     }
     for item in &frame.open_items {
-        ingest_text(item, &mut refs);
+        ingest_text(item, &mut refs, &mut seen);
     }
     for item in &frame.blocked_items {
-        ingest_text(item, &mut refs);
+        ingest_text(item, &mut refs, &mut seen);
     }
 
     if let Some(usage) = usage {
         for record in &usage.tool_execution_records {
-            ingest_text(&record.summary, &mut refs);
+            ingest_text(&record.summary, &mut refs, &mut seen);
             if let Some(detail) = record.detail.as_deref() {
-                ingest_text(detail, &mut refs);
+                ingest_text(detail, &mut refs, &mut seen);
             }
             if let Some(observable_input) = record.observable_input.as_ref() {
-                ingest_text(&observable_input.value, &mut refs);
+                ingest_text(&observable_input.value, &mut refs, &mut seen);
             }
             if record.kind == ToolExecutionOutcomeKind::Success {
                 if let Some(path) = observable_path_from_input(record.observable_input.as_ref()) {
@@ -799,12 +789,10 @@ fn collect_evidence_refs(frame: &StateFrame, usage: Option<&LoopUsage>) -> Vec<S
         }
         if let Some(outcome) = usage.last_failure_outcome.as_ref() {
             if let Some(evidence_ref) = outcome.evidence_ref.as_ref() {
-                if !refs.iter().any(|existing| existing == evidence_ref) {
-                    refs.push(evidence_ref.clone());
-                }
+                push_ref(&mut refs, &mut seen, evidence_ref.clone());
             }
             if let Some(excerpt) = outcome.bounded_excerpt.as_ref() {
-                ingest_text(excerpt, &mut refs);
+                ingest_text(excerpt, &mut refs, &mut seen);
             }
         }
     }
@@ -1937,12 +1925,12 @@ fn verification_gap_still_actionable(frame: &StateFrame, usage: &LoopUsage) -> b
     })
 }
 
-fn build_worker_structured_report(
+fn build_worker_structured_report_with_refs(
     frame: &StateFrame,
     usage: &LoopUsage,
     completion: CompletionEvidenceStatus,
+    evidence_refs: Vec<String>,
 ) -> WorkerStructuredReport {
-    let evidence_refs = collect_evidence_refs(frame, Some(usage));
     let read_anchor_closed = verification_read_anchor_closed(frame, &evidence_refs)
         || verification_runtime_read_anchor_closed(frame, usage);
     let completion_gate_reads_closed = completion_gate_required_reads_closed(frame, usage);
@@ -1992,9 +1980,23 @@ fn build_worker_structured_report(
     }
 }
 
+fn build_worker_structured_report(
+    frame: &StateFrame,
+    usage: &LoopUsage,
+    completion: CompletionEvidenceStatus,
+) -> WorkerStructuredReport {
+    build_worker_structured_report_with_refs(
+        frame,
+        usage,
+        completion,
+        collect_evidence_refs(frame, Some(usage)),
+    )
+}
+
 fn finalize_worker_usage_report(frame: &StateFrame, usage: &mut LoopUsage) {
     let completion = evaluate_completion_evidence(frame, usage);
-    let report = build_worker_structured_report(frame, usage, completion);
+    let evidence_refs = collect_evidence_refs(frame, Some(usage));
+    let report = build_worker_structured_report_with_refs(frame, usage, completion, evidence_refs);
     usage.completion_evidence_status = Some(report.completion_evidence_status.clone());
     usage.worker_report = Some(report);
 }
@@ -2028,6 +2030,7 @@ fn completion_gate_repair_terminal_outcome(
     let completion = evaluate_completion_evidence(frame, usage);
     let required_targets = completion_gate_required_read_targets(frame);
     let completion_gate_reads_closed = completion_gate_required_reads_closed(frame, usage);
+    let evidence_refs = collect_evidence_refs(frame, Some(usage));
     if verify_terminal_diagnostics_enabled() {
         eprintln!(
             "completion_gate_repair_terminal_outcome: state={:?} last_effective_tool_action={} repair_active={} completion={} completion_gate_reads_closed={} required_targets={} evidence_refs={}",
@@ -2040,13 +2043,13 @@ fn completion_gate_repair_terminal_outcome(
             completion.as_str(),
             completion_gate_reads_closed,
             required_targets.join("|"),
-            collect_evidence_refs(frame, Some(usage)).join("|")
+            evidence_refs.join("|")
         );
     }
     if !matches!(completion, CompletionEvidenceStatus::Sufficient) {
         return None;
     }
-    let report = build_worker_structured_report(frame, usage, completion);
+    let report = build_worker_structured_report_with_refs(frame, usage, completion, evidence_refs);
     if !report.completion_evidence_gaps.is_empty() {
         if verify_terminal_diagnostics_enabled() {
             eprintln!(

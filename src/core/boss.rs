@@ -30,7 +30,8 @@ use crate::core::state_frame_loop::{DecisionLoopConfig, StateFrameToolRuntime};
 use crate::core::state_frame_model_router::ModelTier;
 use crate::core::state_frame_orchestrator::{
     StepFailureClassification, StepOutcome, StepRuntimeResolutionContext,
-    build_routed_state_frame_with_model_route, requires_external_tool_execution,
+    build_routed_state_frame_with_model_route,
+    build_routed_state_frame_with_model_route_and_st_mode, requires_external_tool_execution,
     run_routed_step_with_runtime,
 };
 use crate::history::session::SessionHistory;
@@ -2694,15 +2695,7 @@ fn step_looks_like_development_task(
         );
     }
 
-    if text.contains("report")
-        || text.contains("research")
-        || text.contains("audit")
-        || text.contains("analysis")
-    {
-        return false;
-    }
-
-    [
+    let has_development_marker = [
         "implement",
         "implementation",
         "fix",
@@ -2720,9 +2713,22 @@ fn step_looks_like_development_task(
         "feature",
         "task",
         "cli",
+        "create",
+        "write",
     ]
     .iter()
-    .any(|marker| text.contains(marker))
+    .any(|marker| text.contains(marker));
+
+    if !has_development_marker
+        && (text.contains("report")
+            || text.contains("research")
+            || text.contains("audit")
+            || text.contains("analysis"))
+    {
+        return false;
+    }
+
+    has_development_marker
 }
 
 fn development_task_requires_source_evidence(step: &BossPlanStep) -> bool {
@@ -8708,6 +8714,7 @@ impl BossCoordinator {
                     self.lism_policy().await,
                     app_state.permission_context.lism_enabled(),
                 );
+                let st_mode_enabled = self.st_mode_enabled().await;
                 let step_rollout_execution_policy = {
                     let routed_step_metadata = self.routed_step_metadata.read().await;
                     routed_step_metadata.get(&step_id).and_then(|metadata| {
@@ -8725,11 +8732,12 @@ impl BossCoordinator {
                         let plan = plan_guard
                             .as_ref()
                             .ok_or_else(|| anyhow::anyhow!("No plan loaded"))?;
-                        build_routed_state_frame_with_model_route(
+                        build_routed_state_frame_with_model_route_and_st_mode(
                             plan,
                             BossStage::Execution,
                             step_id,
                             ActorRole::Worker,
+                            st_mode_enabled,
                         )
                     };
                     if full_worker_dispatch_fallback_enabled
@@ -8892,11 +8900,12 @@ impl BossCoordinator {
                                         "LisM boss path requires an active model snapshot"
                                     )
                                 })?;
-                            let routed = build_routed_state_frame_with_model_route(
+                            let routed = build_routed_state_frame_with_model_route_and_st_mode(
                                 plan,
                                 BossStage::Execution,
                                 step_id,
                                 ActorRole::Worker,
+                                st_mode_enabled,
                             );
                             let state_frame_size =
                                 serde_json::to_string(&routed.frame).map(|s| s.len()).ok();
@@ -9284,11 +9293,12 @@ impl BossCoordinator {
                     let step_size = {
                         let plan_guard = self.plan.read().await;
                         plan_guard.as_ref().and_then(|plan| {
-                            let frame = build_routed_state_frame_with_model_route(
+                            let frame = build_routed_state_frame_with_model_route_and_st_mode(
                                 plan,
                                 BossStage::Execution,
                                 step_id,
                                 ActorRole::Worker,
+                                st_mode_enabled,
                             )
                             .frame;
                             serde_json::to_string(&frame).ok().map(|s| s.len())
@@ -19040,6 +19050,68 @@ mod tests {
             .expect("continuation context");
         assert_eq!(context.failed_target.as_deref(), Some(source_path.as_str()));
         assert_eq!(context.next_action.as_deref(), Some("read_source_evidence"));
+    }
+
+    #[tokio::test]
+    async fn st_mode_treats_demo_report_tasks_as_development_and_injects_test_first() {
+        let mut coordinator = BossCoordinator::new();
+        coordinator.init_st_mode_enabled(true);
+        {
+            let mut plan = coordinator.plan.write().await;
+            *plan = Some(BossPlan {
+                plan_id: "plan-st-demo".into(),
+                accepted_by_user: true,
+                steps: vec![BossPlanStep {
+                    id: 0,
+                    description: "build demo".into(),
+                    objective: Some("在独立目录创建一个最小 Python demo，并报告输出。".into()),
+                    acceptance: vec!["demo output is available".into()],
+                    requires_approval: false,
+                    status: BossPlanStepStatus::Pending,
+                    completed: false,
+                    result_diff: None,
+                    worker_task_id: None,
+                    attempt_count: 0,
+                    retry_budget: 3,
+                    last_review_summary: None,
+                    last_correction: None,
+                    stage_execution_contract: StageExecutionContract::default(),
+                    stage_continuation_context: None,
+                    executor_b_stage_memory: None,
+                    review_task_id: None,
+                    tool_execution_records: Vec::new(),
+                }],
+                ..BossPlan::default()
+            });
+        }
+
+        let assignment = coordinator
+            .build_executor_b_assignment_contract(0, "session-alpha", true)
+            .await
+            .expect("build assignment");
+
+        assert!(assignment.st_mode);
+        assert_eq!(
+            assignment.state_frame.allowed_actions,
+            vec!["implement".to_string(), "run_test".to_string()]
+        );
+        assert!(!assignment.state_frame.stage_execution_contract.tests.is_empty());
+        assert!(
+            assignment
+                .state_frame
+                .stage_execution_contract
+                .required_actions
+                .iter()
+                .any(|action| action == "run_test")
+        );
+        assert!(
+            assignment
+                .state_frame
+                .required_output_hint
+                .as_deref()
+                .unwrap_or_default()
+                .contains("automated validation")
+        );
     }
 
     #[test]

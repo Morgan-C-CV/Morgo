@@ -10,7 +10,9 @@ use crate::core::state_frame_loop::{
 };
 use crate::core::state_frame_model_resolver::resolve_step_model;
 use crate::core::state_frame_model_router::{ModelRoute, route_model_tier};
-use crate::core::state_frame_projection::{collect_projection_diagnostics, project_state_frame};
+use crate::core::state_frame_projection::{
+    collect_projection_diagnostics, project_state_frame, project_state_frame_with_st_mode,
+};
 use crate::core::state_frame_router::{apply_route, route_toolset};
 use crate::service::api::client::{ModelPricing, ModelProviderClient};
 use crate::service::observability::ServiceObservabilityTracker;
@@ -323,7 +325,21 @@ pub fn build_routed_state_frame_with_model_route(
     step_id: usize,
     role: ActorRole,
 ) -> RoutedStateFrame {
-    let mut frame = project_state_frame(plan, stage, Some(step_id), role);
+    build_routed_state_frame_with_model_route_and_st_mode(plan, stage, step_id, role, false)
+}
+
+pub fn build_routed_state_frame_with_model_route_and_st_mode(
+    plan: &BossPlan,
+    stage: BossStage,
+    step_id: usize,
+    role: ActorRole,
+    st_mode_enabled: bool,
+) -> RoutedStateFrame {
+    let mut frame = if st_mode_enabled {
+        project_state_frame_with_st_mode(plan, stage, Some(step_id), role, true)
+    } else {
+        project_state_frame(plan, stage, Some(step_id), role)
+    };
     let projection_mismatch_count = collect_projection_diagnostics(&frame).mismatch_count;
     let route = route_toolset(&frame);
     apply_route(&mut frame, route);
