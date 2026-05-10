@@ -1015,7 +1015,7 @@ pub fn append_runtime_tool_record(
             let Some(command) = observable_bash_command(record) else {
                 return;
             };
-            if is_test_command(&command) {
+            if is_test_command(&command) || is_st_auto_validation_command(contract, &command) {
                 ledgers.test_refs.push(TestRecord {
                     ref_id: format!("test:{ref_namespace}:bash"),
                     name: trim_excerpt(&command, 60),
@@ -1132,6 +1132,87 @@ fn is_test_command(command: &str) -> bool {
         || lowered.contains("vitest")
         || lowered.contains("bun test")
         || lowered.contains("uv run pytest")
+}
+
+fn contract_has_st_auto_validation(contract: &StageExecutionContract) -> bool {
+    contract
+        .tests
+        .iter()
+        .any(|test| test.name == "st_auto_validation")
+}
+
+fn command_mentions_declared_runtime_target(
+    contract: &StageExecutionContract,
+    command: &str,
+) -> bool {
+    let lowered = command.to_ascii_lowercase();
+    contract.declared_artifacts.iter().any(|artifact| {
+        artifact.kind != "directory" && {
+            let path = normalize_runtime_path(&artifact.path);
+            let path_lower = path.to_ascii_lowercase();
+            let file_name_matches = Path::new(&path)
+                .file_name()
+                .and_then(|value| value.to_str())
+                .map(|value| lowered.contains(&value.to_ascii_lowercase()))
+                .unwrap_or(false);
+            lowered.contains(&path_lower) || file_name_matches
+        }
+    })
+}
+
+fn command_has_write_scaffold_intent(command: &str) -> bool {
+    let lowered = command.to_ascii_lowercase();
+    lowered.contains("cat >")
+        || lowered.contains("cat>>")
+        || lowered.contains("<<'py'")
+        || lowered.contains("<<\"py\"")
+        || lowered.contains("<<py")
+        || lowered.contains("mkdir -p")
+        || lowered.contains("touch ")
+        || lowered.contains("cp ")
+        || lowered.contains("mv ")
+}
+
+fn is_st_auto_validation_command(contract: &StageExecutionContract, command: &str) -> bool {
+    if !contract_has_st_auto_validation(contract) {
+        return false;
+    }
+
+    if command_has_write_scaffold_intent(command) {
+        return false;
+    }
+
+    let lowered = command.to_ascii_lowercase();
+    let execution_markers = [
+        "python ",
+        "python3 ",
+        "node ",
+        "deno ",
+        "bun ",
+        "uv run ",
+        "cargo test",
+        "cargo run",
+        "go test",
+        "go run",
+        "npm test",
+        "pnpm test",
+        "yarn test",
+        "npm run ",
+        "pnpm build",
+        "npm run build",
+        "yarn build",
+        "pytest",
+        "jest",
+        "vitest",
+        "tsc",
+        "bash ",
+        "sh ",
+    ];
+
+    execution_markers
+        .iter()
+        .any(|marker| lowered.contains(marker))
+        && command_mentions_declared_runtime_target(contract, command)
 }
 
 fn apply_runtime_tool_records(ledgers: &mut StepFactLedgers, step: &BossPlanStep) {
@@ -2186,6 +2267,93 @@ mod tests {
 
         assert!(ledgers.verification_refs.is_empty());
         assert!(ledgers.artifact_refs.is_empty());
+    }
+
+    #[test]
+    fn st_auto_validation_demo_run_emits_passed_test_record() {
+        let mut ledgers = StepFactLedgers::default();
+        let contract = StageExecutionContract {
+            declared_artifacts: vec![DeclaredArtifactContract {
+                ref_id: "artifact:demo".into(),
+                path: "/tmp/python-demo/demo.py".into(),
+                kind: "file".into(),
+                required_actions: vec!["create".into(), "write".into()],
+                required_evidence: vec!["artifact_evidence".into()],
+            }],
+            tests: vec![crate::core::state_frame::TestContract {
+                name: "st_auto_validation".into(),
+                required_actions: vec!["run_test".into()],
+                required_evidence: vec!["runtime_test_passed".into()],
+            }],
+            ..StageExecutionContract::default()
+        };
+        let record = ToolExecutionRecord {
+            tool_name: "Bash".into(),
+            outcome: "Text".into(),
+            kind: ToolExecutionOutcomeKind::Success,
+            summary: "Bash succeeded".into(),
+            detail: Some("exit_code: 0\nBoss/LisM demo ok".into()),
+            pending_approval: None,
+            report_modifier: ToolReportModifier::None,
+            observable_input: Some(ObservableInput {
+                value: r#"{"command":"set -e; cd /tmp/python-demo && python3 demo.py"}"#.into(),
+                source: ObservableInputSource::Raw,
+            }),
+            batch_context: ToolBatchContext {
+                batch_index: 0,
+                batch_size: 1,
+                executed_in_batch: false,
+            },
+        };
+
+        append_runtime_tool_record(&contract, &mut ledgers, &record, "st-auto");
+
+        assert_eq!(ledgers.test_refs.len(), 1);
+        assert_eq!(ledgers.test_refs[0].status, "passed");
+        assert_eq!(ledgers.test_refs[0].source, "tool:Bash");
+    }
+
+    #[test]
+    fn st_auto_validation_write_scaffold_does_not_emit_test_record() {
+        let mut ledgers = StepFactLedgers::default();
+        let contract = StageExecutionContract {
+            declared_artifacts: vec![DeclaredArtifactContract {
+                ref_id: "artifact:demo".into(),
+                path: "/tmp/python-demo/demo.py".into(),
+                kind: "file".into(),
+                required_actions: vec!["create".into(), "write".into()],
+                required_evidence: vec!["artifact_evidence".into()],
+            }],
+            tests: vec![crate::core::state_frame::TestContract {
+                name: "st_auto_validation".into(),
+                required_actions: vec!["run_test".into()],
+                required_evidence: vec!["runtime_test_passed".into()],
+            }],
+            ..StageExecutionContract::default()
+        };
+        let record = ToolExecutionRecord {
+            tool_name: "Bash".into(),
+            outcome: "Text".into(),
+            kind: ToolExecutionOutcomeKind::Success,
+            summary: "Bash succeeded".into(),
+            detail: Some("exit_code: 0".into()),
+            pending_approval: None,
+            report_modifier: ToolReportModifier::None,
+            observable_input: Some(ObservableInput {
+                value: r#"{"command":"cat > /tmp/python-demo/demo.py <<'PY'\nprint('demo')\nPY"}"#
+                    .into(),
+                source: ObservableInputSource::Raw,
+            }),
+            batch_context: ToolBatchContext {
+                batch_index: 0,
+                batch_size: 1,
+                executed_in_batch: false,
+            },
+        };
+
+        append_runtime_tool_record(&contract, &mut ledgers, &record, "st-auto-write");
+
+        assert!(ledgers.test_refs.is_empty());
     }
 
     #[test]

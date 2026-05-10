@@ -1441,9 +1441,7 @@ fn missing_test_evidence_refs(frame: &StateFrame) -> Vec<String> {
     }
 
     let contract_refs = completion_contract_refs(frame, "test_refs");
-    if contract_refs.is_empty()
-        || runtime_test_passed(frame)
-    {
+    if contract_refs.is_empty() || runtime_test_passed(frame) {
         Vec::new()
     } else {
         contract_refs
@@ -1856,8 +1854,7 @@ fn enforce_completion_gate(
                 "completion gate blocked done because automated test evidence is missing"
                     .to_string()
             } else {
-                "completion gate blocked done because required test evidence is missing"
-                    .to_string()
+                "completion gate blocked done because required test evidence is missing".to_string()
             },
             missing_test_evidence_refs(frame),
         ),
@@ -5686,7 +5683,10 @@ mod tests {
         let block =
             super::enforce_completion_gate(&mut frame, &mut usage).expect_err("gate should block");
         assert_eq!(block.required_action, "run_test");
-        assert_eq!(block.missing_evidence_refs, vec!["runtime_test_passed".to_string()]);
+        assert_eq!(
+            block.missing_evidence_refs,
+            vec!["runtime_test_passed".to_string()]
+        );
 
         super::inject_completion_gate_block(&mut frame, &block);
         assert!(
@@ -5718,7 +5718,10 @@ mod tests {
         let block =
             super::enforce_completion_gate(&mut frame, &mut usage).expect_err("gate should block");
         assert_eq!(block.required_action, "run_verification");
-        assert_eq!(block.missing_evidence_refs, vec!["openitem:test:0".to_string()]);
+        assert_eq!(
+            block.missing_evidence_refs,
+            vec!["openitem:test:0".to_string()]
+        );
     }
 
     #[test]

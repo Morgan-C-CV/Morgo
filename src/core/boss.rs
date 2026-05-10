@@ -19095,7 +19095,13 @@ mod tests {
             assignment.state_frame.allowed_actions,
             vec!["implement".to_string(), "run_test".to_string()]
         );
-        assert!(!assignment.state_frame.stage_execution_contract.tests.is_empty());
+        assert!(
+            !assignment
+                .state_frame
+                .stage_execution_contract
+                .tests
+                .is_empty()
+        );
         assert!(
             assignment
                 .state_frame
