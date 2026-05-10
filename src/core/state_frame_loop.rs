@@ -1398,6 +1398,28 @@ fn collect_remaining_risks(
     items
 }
 
+fn runtime_test_passed(frame: &StateFrame) -> bool {
+    frame.recent_evidence.iter().any(|line| {
+        line.starts_with("fact: test_failures ")
+            && evidence_field_value(line, "ref").is_some()
+            && evidence_field_value(line, "status").as_deref() == Some("passed")
+            && evidence_field_value(line, "source")
+                .as_deref()
+                .is_some_and(|source| source.starts_with("tool:"))
+    })
+}
+
+fn st_automated_test_audit_enabled(frame: &StateFrame) -> bool {
+    frame
+        .stage_execution_contract
+        .tests
+        .iter()
+        .any(|test| test.name == "st_auto_validation")
+        || frame.recent_evidence.iter().any(|line| {
+            line.starts_with("fact: st_mode ") && line.contains("test_first_validation=required")
+        })
+}
+
 fn missing_artifact_evidence_refs(frame: &StateFrame) -> Vec<String> {
     completion_contract_refs(frame, "artifact_refs")
         .into_iter()
@@ -1410,16 +1432,17 @@ fn missing_artifact_evidence_refs(frame: &StateFrame) -> Vec<String> {
 }
 
 fn missing_test_evidence_refs(frame: &StateFrame) -> Vec<String> {
+    if st_automated_test_audit_enabled(frame) {
+        return if runtime_test_passed(frame) {
+            Vec::new()
+        } else {
+            vec!["runtime_test_passed".into()]
+        };
+    }
+
     let contract_refs = completion_contract_refs(frame, "test_refs");
     if contract_refs.is_empty()
-        || frame.recent_evidence.iter().any(|line| {
-            line.starts_with("fact: test_failures ")
-                && evidence_field_value(line, "ref").is_some()
-                && evidence_field_value(line, "status").as_deref() == Some("passed")
-                && evidence_field_value(line, "source")
-                    .as_deref()
-                    .is_some_and(|source| source.starts_with("tool:"))
-        })
+        || runtime_test_passed(frame)
     {
         Vec::new()
     } else {
@@ -1463,6 +1486,7 @@ fn source_evidence_gate_enabled(frame: &StateFrame) -> bool {
 }
 
 fn recommended_action_for_gap(
+    frame: &StateFrame,
     missing_artifact_evidence: bool,
     missing_test_evidence: bool,
     missing_verification_evidence: bool,
@@ -1472,7 +1496,11 @@ fn recommended_action_for_gap(
     } else if missing_verification_evidence {
         "verify_artifact".into()
     } else if missing_test_evidence {
-        "run_verification".into()
+        if st_automated_test_audit_enabled(frame) {
+            "run_test".into()
+        } else {
+            "run_verification".into()
+        }
     } else {
         "none".into()
     }
@@ -1484,6 +1512,10 @@ fn completion_gate_repair_targets(
 ) -> (Vec<String>, Vec<String>) {
     let mut read_targets = Vec::new();
     let mut verify_targets = Vec::new();
+
+    if block.required_action == "run_test" {
+        return (read_targets, verify_targets);
+    }
 
     let push_unique_target = |targets: &mut Vec<String>, target: String| {
         if !targets.iter().any(|existing| existing == &target) {
@@ -1595,6 +1627,7 @@ fn collect_completion_evidence_gaps_with_refs(
                 missing_test_evidence,
                 missing_verification_evidence,
                 recommended_action: recommended_action_for_gap(
+                    frame,
                     missing_artifact_evidence,
                     missing_test_evidence,
                     missing_verification_evidence,
@@ -1688,6 +1721,7 @@ fn inject_completion_gate_block(frame: &mut StateFrame, block: &CompletionGateBl
     let repair_direction = match block.required_action.as_str() {
         "read_source_evidence" => "read_required_source_targets_then_return_read_anchors",
         "verify_artifact" => "read_required_artifact_targets_then_return_read_anchors",
+        "run_test" => "run_required_tests_then_return_test_anchors",
         "run_verification" => "run_verification_then_return_verification_anchors",
         "write_artifact" => "write_missing_artifacts_then_return_write_anchors",
         _ => "follow_required_action_and_return_runtime_anchors",
@@ -1813,8 +1847,18 @@ fn enforce_completion_gate(
             missing_artifact_evidence_refs(frame),
         ),
         CompletionEvidenceStatus::MissingTestEvidence => (
-            "run_verification".to_string(),
-            "completion gate blocked done because required test evidence is missing".to_string(),
+            if st_automated_test_audit_enabled(frame) {
+                "run_test".to_string()
+            } else {
+                "run_verification".to_string()
+            },
+            if st_automated_test_audit_enabled(frame) {
+                "completion gate blocked done because automated test evidence is missing"
+                    .to_string()
+            } else {
+                "completion gate blocked done because required test evidence is missing"
+                    .to_string()
+            },
             missing_test_evidence_refs(frame),
         ),
         CompletionEvidenceStatus::MissingVerificationEvidence => (
@@ -2011,10 +2055,12 @@ fn completion_gate_repair_active(frame: &StateFrame) -> bool {
                 || item.starts_with("completion_gate:")
                 || item.starts_with("required_action:verify_artifact")
                 || item.starts_with("required_action:read_source_evidence")
+                || item.starts_with("required_action:run_test")
                 || (item.starts_with("fact: stage_continuation ")
                     && item.contains("continuity_mode=repair")
                     && (item.contains("next_action=verify_artifact")
                         || item.contains("next_action=read_source_evidence")
+                        || item.contains("next_action=run_test")
                         || item.contains("required_evidence_targets:")))
         })
 }
@@ -5619,6 +5665,60 @@ mod tests {
         );
 
         assert!(missing_test_evidence_refs(&frame).is_empty());
+    }
+
+    #[test]
+    fn st_mode_missing_test_evidence_uses_run_test_without_file_read_targets() {
+        let mut frame = make_frame();
+        frame.recent_evidence.clear();
+        push_completion_contract_with_refs(&mut frame, &[], &["st_auto_validation"], &[]);
+
+        let missing = missing_test_evidence_refs(&frame);
+        assert_eq!(missing, vec!["runtime_test_passed".to_string()]);
+
+        let gaps = super::collect_completion_evidence_gaps(&frame);
+        assert_eq!(gaps.len(), 1);
+        assert_eq!(gaps[0].target_ref, "runtime_test_passed");
+        assert!(gaps[0].target_path.is_none());
+        assert_eq!(gaps[0].recommended_action, "run_test");
+
+        let mut usage = LoopUsage::default();
+        let block =
+            super::enforce_completion_gate(&mut frame, &mut usage).expect_err("gate should block");
+        assert_eq!(block.required_action, "run_test");
+        assert_eq!(block.missing_evidence_refs, vec!["runtime_test_passed".to_string()]);
+
+        super::inject_completion_gate_block(&mut frame, &block);
+        assert!(
+            frame
+                .open_items
+                .iter()
+                .any(|item| item.contains("required_action:run_test"))
+        );
+        let repair_line = frame
+            .recent_evidence
+            .iter()
+            .find(|line| line.contains("completion_gate:"))
+            .expect("completion gate evidence");
+        assert!(repair_line.contains("required_action=run_test"));
+        assert!(repair_line.contains("required_evidence_refs=none"));
+        assert!(!repair_line.contains("st_auto_validation"));
+    }
+
+    #[test]
+    fn non_st_missing_test_evidence_keeps_verification_repair_action() {
+        let mut frame = make_frame();
+        push_completion_contract(&mut frame, false, true, false);
+
+        let gaps = super::collect_completion_evidence_gaps(&frame);
+        assert_eq!(gaps.len(), 1);
+        assert_eq!(gaps[0].recommended_action, "run_verification");
+
+        let mut usage = LoopUsage::default();
+        let block =
+            super::enforce_completion_gate(&mut frame, &mut usage).expect_err("gate should block");
+        assert_eq!(block.required_action, "run_verification");
+        assert_eq!(block.missing_evidence_refs, vec!["openitem:test:0".to_string()]);
     }
 
     #[test]
