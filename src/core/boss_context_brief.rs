@@ -51,6 +51,7 @@ pub struct BossContextBrief {
     pub step_id: usize,
     pub plan_version: String,
     pub step_revision: String,
+    /// Volatile dispatch metadata kept out of cacheable prompt segments.
     pub generated_at: String,
     pub objective: String,
     pub acceptance: Vec<String>,
@@ -93,7 +94,6 @@ impl BossContextBrief {
             format!("step_id: {}", self.step_id),
             format!("plan_version: {}", self.plan_version),
             format!("step_revision: {}", self.step_revision),
-            format!("generated_at: {}", self.generated_at),
         ];
         if !self.acceptance.is_empty() {
             lines.push("acceptance:".into());
@@ -388,5 +388,6 @@ mod tests {
         let prompt = assemble_brief_prompt(&brief, &frame);
         assert!(prompt.contains("content_evidence_targets:"));
         assert!(prompt.contains("/tmp/source.md"));
+        assert!(!prompt.contains("generated_at:"));
     }
 }

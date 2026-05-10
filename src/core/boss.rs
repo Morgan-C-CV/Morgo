@@ -2156,6 +2156,35 @@ fn build_verification_first_shared_step_memory(
     }
 }
 
+fn verification_first_shared_memory_target_matches(
+    shared: &SharedStepMemory,
+    target: &str,
+) -> bool {
+    let expected = normalize_required_evidence_target(target);
+    let Some(shared_target) = shared.target.as_deref() else {
+        return false;
+    };
+    if normalize_required_evidence_target(shared_target) != expected {
+        return false;
+    }
+    let target_facts = shared
+        .verified_facts
+        .iter()
+        .filter_map(|fact| {
+            let trimmed = fact.trim();
+            let lower = trimmed.to_ascii_lowercase();
+            if lower.starts_with("verified_target:") || lower.starts_with("verified target:") {
+                trimmed
+                    .split_once(':')
+                    .map(|(_, value)| normalize_required_evidence_target(value))
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    !target_facts.is_empty() && target_facts.iter().all(|fact| fact == &expected)
+}
+
 fn render_shared_step_memory_summary(shared: &SharedStepMemory) -> String {
     let target = shared.target.as_deref().unwrap_or("unknown");
     let mut verification_result = shared.verification_status.as_ref().and_then(|value| {
@@ -6114,6 +6143,22 @@ impl BossCoordinator {
                 )
             });
         let mut patch = parse_verification_first_patch(result_text, &target);
+        let expected_target = normalize_required_evidence_target(&target);
+        if normalize_required_evidence_target(&patch.verified_target) != expected_target {
+            let mismatched_target = patch.verified_target.clone();
+            patch.verified_target = target.clone();
+            patch.verification_result = "blocked".into();
+            patch.minimal_evidence = format!(
+                "verified_target mismatch ignored: {}",
+                normalize_required_evidence_target(&mismatched_target)
+            );
+            patch.remaining_blocker = "verified_target_mismatch".into();
+            patch.evidence_refs.retain(|evidence_ref| {
+                evidence_ref
+                    .strip_prefix("read:")
+                    .is_some_and(|path| evidence_path_scope_matches(path, &target))
+            });
+        }
         if patch.evidence_refs.is_empty() {
             patch.evidence_refs =
                 verification_first_read_evidence_refs_from_records(step, &patch.verified_target);
@@ -9580,6 +9625,15 @@ impl BossCoordinator {
                         "verify_artifact",
                     )
                 });
+            if !verification_first_shared_memory_target_matches(&shared, &target) {
+                shared = build_verification_first_shared_step_memory(
+                    step.id,
+                    worker_role,
+                    &target,
+                    effective_acceptance.clone(),
+                    "verify_artifact",
+                );
+            }
             shared.step_id = Some(step.id);
             shared.worker_role = Some(worker_role.as_str().to_string());
             shared.target = Some(target.clone());
@@ -9741,15 +9795,6 @@ refresh_reason: {}\n\n{}",
             "assignment_fingerprint": assignment_fingerprint,
             "stale_brief_action": if needs_refresh { "refresh" } else { "reuse" },
             "refresh_reason": refresh_reason,
-            "refresh_task": if needs_refresh {
-                Some(
-                    verification_first_task_message
-                        .clone()
-                        .unwrap_or_else(|| assemble_brief_prompt(&contract.brief, &contract.state_frame))
-                )
-            } else {
-                None
-            },
             "continuation_payload": continuation_payload,
             "executor_b_stage_memory": executor_b_stage_memory,
             "shared_step_memory": contract.shared_step_memory.clone(),
@@ -16859,6 +16904,129 @@ mod tests {
             ]
         );
         assert_eq!(payload.next_action.as_deref(), Some("verify_artifact"));
+    }
+
+    #[tokio::test]
+    async fn all_on_verification_first_resets_shared_memory_when_target_changes() {
+        let (coordinator, _) =
+            verification_first_projection_coordinator(WorkerLisMPolicy::ForceOn).await;
+        let mut stale = build_verification_first_shared_step_memory(
+            0,
+            WorkerRole::Verify,
+            "/tmp/verification-first.md",
+            vec![],
+            "verify_artifact",
+        );
+        stale.verified_facts = vec![
+            "verified_target: /tmp/verification-first.md".into(),
+            "verification_result: verified".into(),
+            "minimal_evidence: old target read".into(),
+            "remaining_blocker: none".into(),
+        ];
+        stale.verification_status = Some("verified".into());
+        stale.completion_evidence_status = Some("present".into());
+        stale.evidence_refs = vec!["read:/tmp/verification-first.md".into()];
+        coordinator.upsert_shared_step_memory(0, stale).await;
+
+        let next_target = "/tmp/next-verification-target.md".to_string();
+        {
+            let mut plan = coordinator.plan.write().await;
+            let step = plan
+                .as_mut()
+                .and_then(|plan| plan.steps.iter_mut().find(|step| step.id == 0))
+                .expect("step");
+            if let Some(context) = step.stage_continuation_context.as_mut() {
+                context.failed_target = Some(next_target.clone());
+                context.verified_facts = vec!["verification_result: verified|blocked".into()];
+                if let Some(intent) = context.repair_intent.as_mut() {
+                    intent.failed_target = Some(next_target.clone());
+                    intent.verified_facts = vec!["verification_result: verified|blocked".into()];
+                }
+            }
+        }
+        {
+            let mut metadata = coordinator.routed_step_metadata.write().await;
+            let metadata = metadata.get_mut(&0).expect("metadata");
+            metadata.completion_evidence_status = Some("missing_verification_evidence".into());
+            metadata.step_failure_classification =
+                Some(StepFailureClassification::VerificationRepairContinuation);
+            metadata.completion_evidence_gaps = vec![CompletionEvidenceGap {
+                target_ref: "content_evidence:/tmp/next-verification-target.md".into(),
+                target_path: Some(next_target),
+                missing_artifact_evidence: false,
+                missing_test_evidence: false,
+                missing_verification_evidence: true,
+                recommended_action: "verify_artifact".into(),
+            }];
+        }
+
+        let assignment = coordinator
+            .build_executor_b_assignment_contract(0, "session-alpha", true)
+            .await
+            .expect("build assignment");
+        let shared = assignment
+            .shared_step_memory
+            .as_ref()
+            .expect("shared memory projection");
+
+        assert_eq!(
+            shared.target.as_deref(),
+            Some("/tmp/next-verification-target.md")
+        );
+        assert_eq!(
+            shared.verified_facts,
+            vec![
+                "verified_target: /tmp/next-verification-target.md".to_string(),
+                "verification_result: verified|blocked".to_string(),
+            ]
+        );
+        assert!(
+            shared
+                .verified_facts
+                .iter()
+                .all(|fact| !fact.contains("/tmp/verification-first.md"))
+        );
+        assert!(shared.evidence_refs.is_empty());
+        assert_eq!(shared.verification_status.as_deref(), Some("pending"));
+        assert_eq!(
+            render_shared_step_memory_summary(shared),
+            "verified_target: /tmp/next-verification-target.md\nverification_result: verified|blocked\nminimal_evidence: none recorded\nremaining_blocker: none"
+        );
+    }
+
+    #[tokio::test]
+    async fn verification_first_sync_blocks_mismatched_verified_target() {
+        let (coordinator, step) =
+            verification_first_projection_coordinator(WorkerLisMPolicy::ForceOn).await;
+
+        let written = coordinator
+            .sync_verification_first_shared_step_memory_from_result(
+                &step,
+                "verified_target: /tmp/stale-target.md\nverification_result: verified\nminimal_evidence: stale target read\nremaining_blocker: none\nevidence_refs: read:/tmp/stale-target.md",
+            )
+            .await
+            .expect("shared memory write");
+
+        assert_eq!(
+            written.target.as_deref(),
+            Some("/tmp/verification-first.md")
+        );
+        assert_eq!(written.verification_status.as_deref(), Some("blocked"));
+        assert_eq!(
+            written.remaining_blocker.as_deref(),
+            Some("verified_target_mismatch")
+        );
+        assert!(written.evidence_refs.is_empty());
+        assert_eq!(
+            written.verified_facts,
+            vec![
+                "verified_target: /tmp/verification-first.md".to_string(),
+                "verification_result: blocked".to_string(),
+                "minimal_evidence: verified_target mismatch ignored: /tmp/stale-target.md"
+                    .to_string(),
+                "remaining_blocker: verified_target_mismatch".to_string(),
+            ]
+        );
     }
 
     #[tokio::test]

@@ -549,32 +549,10 @@ fn build_worker_task_input(request: &SpawnAgentRequest) -> String {
             sections.push(format!("parent_session_id: {parent_session_id}"));
         }
         if let Some(continuation) = request.continuation_context.as_ref() {
-            sections.push("stage_continuation_context:".into());
-            sections.push(format!(
-                "failed_target: {}",
-                continuation.failed_target.as_deref().unwrap_or("none")
+            sections.extend(render_stage_continuation_context_section(
+                continuation,
+                request.shared_step_memory.is_none(),
             ));
-            sections.push(format!(
-                "next_action: {}",
-                continuation.next_action.as_deref().unwrap_or("none")
-            ));
-            sections.push(format!(
-                "continuity_mode: {}",
-                continuation
-                    .continuity_mode
-                    .as_ref()
-                    .map(|mode| format!("{mode:?}").to_ascii_lowercase())
-                    .unwrap_or_else(|| "none".into())
-            ));
-            if !continuation.verified_facts.is_empty() {
-                sections.push("verified_facts:".into());
-                sections.extend(
-                    continuation
-                        .verified_facts
-                        .iter()
-                        .map(|fact| format!("- {fact}")),
-                );
-            }
         }
         if let Some(memory) = request.shared_step_memory.as_ref() {
             sections.extend(render_shared_step_memory_section(memory));
@@ -604,12 +582,7 @@ fn build_worker_task_input(request: &SpawnAgentRequest) -> String {
 
 fn render_shared_step_memory_section(memory: &SharedStepMemory) -> Vec<String> {
     let mut sections = vec!["shared_step_memory:".into()];
-    if let Some(step_id) = memory.step_id {
-        sections.push(format!("step_id: {step_id}"));
-    }
-    if let Some(role) = memory.worker_role.as_deref() {
-        sections.push(format!("worker_role: {role}"));
-    }
+    // Prompt projection: step id and role are transport metadata, not worker facts.
     if let Some(target) = memory.target.as_deref() {
         sections.push(format!("target: {target}"));
     }
@@ -626,6 +599,39 @@ fn render_shared_step_memory_section(memory: &SharedStepMemory) -> Vec<String> {
     if !memory.evidence_refs.is_empty() {
         sections.push("evidence_refs:".into());
         sections.extend(memory.evidence_refs.iter().map(|item| format!("- {item}")));
+    }
+    sections
+}
+
+fn render_stage_continuation_context_section(
+    continuation: &StageContinuationContext,
+    include_verified_facts: bool,
+) -> Vec<String> {
+    let mut sections = vec!["stage_continuation_context:".into()];
+    sections.push(format!(
+        "failed_target: {}",
+        continuation.failed_target.as_deref().unwrap_or("none")
+    ));
+    sections.push(format!(
+        "next_action: {}",
+        continuation.next_action.as_deref().unwrap_or("none")
+    ));
+    sections.push(format!(
+        "continuity_mode: {}",
+        continuation
+            .continuity_mode
+            .as_ref()
+            .map(|mode| format!("{mode:?}").to_ascii_lowercase())
+            .unwrap_or_else(|| "none".into())
+    ));
+    if include_verified_facts && !continuation.verified_facts.is_empty() {
+        sections.push("verified_facts:".into());
+        sections.extend(
+            continuation
+                .verified_facts
+                .iter()
+                .map(|fact| format!("- {fact}")),
+        );
     }
     sections
 }
@@ -730,32 +736,10 @@ fn build_continue_task_input(
             sections.push(format!("parent_session_id: {parent_session_id}"));
         }
         if let Some(continuation) = context.continuation_context.as_ref() {
-            sections.push("stage_continuation_context:".into());
-            sections.push(format!(
-                "failed_target: {}",
-                continuation.failed_target.as_deref().unwrap_or("none")
+            sections.extend(render_stage_continuation_context_section(
+                continuation,
+                context.shared_step_memory.is_none(),
             ));
-            sections.push(format!(
-                "next_action: {}",
-                continuation.next_action.as_deref().unwrap_or("none")
-            ));
-            sections.push(format!(
-                "continuity_mode: {}",
-                continuation
-                    .continuity_mode
-                    .as_ref()
-                    .map(|mode| format!("{mode:?}").to_ascii_lowercase())
-                    .unwrap_or_else(|| "none".into())
-            ));
-            if !continuation.verified_facts.is_empty() {
-                sections.push("verified_facts:".into());
-                sections.extend(
-                    continuation
-                        .verified_facts
-                        .iter()
-                        .map(|fact| format!("- {fact}")),
-                );
-            }
         }
         if let Some(memory) = context.shared_step_memory.as_ref() {
             sections.extend(render_shared_step_memory_section(memory));
@@ -1480,6 +1464,49 @@ mod tests {
             .find("worker_local_memory:")
             .expect("local section");
         assert!(shared_index < local_index);
+    }
+
+    #[test]
+    fn continue_task_input_uses_shared_memory_as_canonical_verified_facts() {
+        let shared_step_memory = SharedStepMemory {
+            step_id: Some(7),
+            worker_role: Some("verify".into()),
+            target: Some("/tmp/shared.md".into()),
+            required_action: Some("verify_artifact".into()),
+            verified_facts: vec![
+                "verified_target: /tmp/shared.md".into(),
+                "verification_result: verified".into(),
+            ],
+            ..SharedStepMemory::default()
+        };
+        let context = ContinueBossStepContext {
+            step_id: Some(7),
+            boss_plan_id: Some("plan-7".into()),
+            step_objective: Some("verify shared artifact".into()),
+            step_acceptance: Vec::new(),
+            parent_session_id: Some("session-7".into()),
+            continuation_context: Some(StageContinuationContext {
+                failed_target: Some("/tmp/shared.md".into()),
+                next_action: Some("verify_artifact".into()),
+                continuity_mode: Some(crate::core::state_frame::ContinuityMode::Repair),
+                verified_facts: vec![
+                    "verified_target: /tmp/shared.md".into(),
+                    "verification_result: verified".into(),
+                ],
+                ..StageContinuationContext::default()
+            }),
+            executor_b_stage_memory: None,
+            shared_step_memory: Some(shared_step_memory),
+        };
+
+        let rendered = build_continue_task_input("please continue", Some(&context));
+        assert!(rendered.contains("stage_continuation_context:"));
+        assert!(rendered.contains("shared_step_memory:"));
+        assert_eq!(
+            rendered.matches("verified_target: /tmp/shared.md").count(),
+            1
+        );
+        assert_eq!(rendered.matches("verification_result: verified").count(), 1);
     }
 
     #[test]
