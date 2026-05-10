@@ -351,6 +351,9 @@ pub struct BootstrapCli {
     /// One of: inherit, force-on, force-off.
     #[arg(long, value_name = "POLICY")]
     pub worker_lism_policy: Option<String>,
+    /// Enable test-first mode for development tasks.
+    #[arg(long = "st", default_value_t = false)]
+    pub st_mode: bool,
     /// Enable shared step memory for verification-first boss flows.
     #[arg(long, default_value_t = false)]
     pub shared_memory_enabled: bool,
@@ -385,6 +388,7 @@ impl Default for BootstrapCli {
             lism_ab_conclude: None,
             lism_policy: None,
             worker_lism_policy: None,
+            st_mode: false,
             shared_memory_enabled: false,
             disable_full_worker_dispatch_fallback: false,
             boss_task: None,
@@ -1124,6 +1128,10 @@ impl RuntimeBootstrap {
         // Apply boss-spawned worker LisM policy override if requested via CLI.
         if let Some(policy_str) = &self.cli.worker_lism_policy {
             boss_coordinator.init_worker_lism_policy(parse_worker_lism_policy(policy_str));
+        }
+
+        if self.cli.st_mode {
+            boss_coordinator.init_st_mode_enabled(true);
         }
 
         if self.cli.shared_memory_enabled {
@@ -2222,6 +2230,12 @@ mod tests {
     fn bootstrap_cli_parses_shared_memory_enabled_flag() {
         let cli = BootstrapCli::parse_from(["rust-agent", "--shared-memory-enabled"]);
         assert!(cli.shared_memory_enabled);
+    }
+
+    #[test]
+    fn bootstrap_cli_parses_st_flag() {
+        let cli = BootstrapCli::parse_from(["rust-agent", "--st"]);
+        assert!(cli.st_mode);
     }
 
     #[test]

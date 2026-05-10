@@ -59,6 +59,7 @@ fn runtime_for_surface(surface: &str, interactive: bool, init_only: bool) -> Run
         boss_task: None,
         boss_task_timeout_secs: 900,
         shared_memory_enabled: false,
+        st_mode: false,
     })
     .with_provider_config(test_model_provider_config())
 }
@@ -291,6 +292,30 @@ async fn bootstrap_runtime_applies_shared_memory_enabled_to_boss_coordinator() {
         .boss_coordinator
         .expect("boss coordinator should be initialized");
     assert!(coordinator.shared_memory_enabled().await);
+}
+
+#[tokio::test]
+async fn bootstrap_runtime_applies_st_mode_to_boss_coordinator() {
+    let runtime = RuntimeBootstrap::from_cli(BootstrapCli {
+        st_mode: true,
+        ..BootstrapCli::default()
+    })
+    .with_provider_config(test_model_provider_config());
+    let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::Interactive, false);
+    state.current_cwd = std::env::current_dir().expect("cwd available");
+    let bundle = runtime
+        .initialize_runtime(
+            &state,
+            "session-bootstrap-st-mode".into(),
+            Arc::new(TaskManager::default()),
+            Arc::new(rust_agent::task::list_manager::TaskListManager::default()),
+            Arc::new(rust_agent::plan::manager::PlanManager::default()),
+        )
+        .expect("runtime should initialize");
+    let coordinator = bundle
+        .boss_coordinator
+        .expect("boss coordinator should be initialized");
+    assert!(coordinator.st_mode_enabled().await);
 }
 
 fn unique_temp_path(prefix: &str) -> std::path::PathBuf {
@@ -747,6 +772,7 @@ api_key_env = "OPENAI_API_KEY"
         boss_task: None,
         boss_task_timeout_secs: 900,
         shared_memory_enabled: false,
+        st_mode: false,
     });
     let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::InitOnly, false);
     state.current_cwd = root;
@@ -808,6 +834,7 @@ fn bootstrap_models_toml_missing_file_falls_back_to_existing_bootstrap_defaults(
         boss_task: None,
         boss_task_timeout_secs: 900,
         shared_memory_enabled: false,
+        st_mode: false,
     });
     let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::InitOnly, false);
     state.current_cwd = root;
@@ -879,6 +906,7 @@ api_key_env = "OPENAI_API_KEY"
         boss_task: None,
         boss_task_timeout_secs: 900,
         shared_memory_enabled: false,
+        st_mode: false,
     });
     let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::InitOnly, false);
     state.current_cwd = root;
@@ -946,6 +974,7 @@ api_key_env = "OPENAI_API_KEY"
         boss_task: None,
         boss_task_timeout_secs: 900,
         shared_memory_enabled: false,
+        st_mode: false,
     });
     let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::InitOnly, false);
     state.current_cwd = root;
@@ -1109,6 +1138,7 @@ api_key_env = "OPENAI_API_KEY"
         boss_task: None,
         boss_task_timeout_secs: 900,
         shared_memory_enabled: false,
+        st_mode: false,
     });
     let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::InitOnly, false);
     state.current_cwd = root;
@@ -1167,6 +1197,7 @@ fn bootstrap_infers_openai_family_provider_contract_from_env() {
         boss_task: None,
         boss_task_timeout_secs: 900,
         shared_memory_enabled: false,
+        st_mode: false,
     });
     let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::InitOnly, false);
     state.current_cwd = std::env::current_dir().expect("cwd available");
@@ -1240,6 +1271,7 @@ auth_strategy = "none"
         boss_task: None,
         boss_task_timeout_secs: 900,
         shared_memory_enabled: false,
+        st_mode: false,
     });
     let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::InitOnly, false);
     state.current_cwd = root;
@@ -1286,6 +1318,7 @@ fn bootstrap_rejects_unknown_provider_without_explicit_contract() {
         boss_task: None,
         boss_task_timeout_secs: 900,
         shared_memory_enabled: false,
+        st_mode: false,
     });
     let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::InitOnly, false);
     state.current_cwd = std::env::current_dir().expect("cwd available");
@@ -1336,6 +1369,7 @@ fn bootstrap_uses_default_chat_completions_path_when_env_unset() {
         boss_task: None,
         boss_task_timeout_secs: 900,
         shared_memory_enabled: false,
+        st_mode: false,
     });
     let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::InitOnly, false);
     state.current_cwd = std::env::current_dir().expect("cwd available");
@@ -1397,6 +1431,7 @@ fn bootstrap_accepts_custom_chat_completions_path_for_custom_provider() {
         boss_task: None,
         boss_task_timeout_secs: 900,
         shared_memory_enabled: false,
+        st_mode: false,
     });
     let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::InitOnly, false);
     state.current_cwd = std::env::current_dir().expect("cwd available");
@@ -1459,6 +1494,7 @@ fn bootstrap_rejects_invalid_chat_completions_path_env() {
         boss_task: None,
         boss_task_timeout_secs: 900,
         shared_memory_enabled: false,
+        st_mode: false,
     });
     let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::InitOnly, false);
     state.current_cwd = std::env::current_dir().expect("cwd available");
@@ -1510,6 +1546,7 @@ fn bootstrap_provider_alias_matrix(
         boss_task: None,
         boss_task_timeout_secs: 900,
         shared_memory_enabled: false,
+        st_mode: false,
     });
     let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::InitOnly, false);
     state.current_cwd = std::env::current_dir().expect("cwd available");
@@ -2124,6 +2161,7 @@ fn augment_prompt_depends_on_input_state_without_mutating_store() {
         boss_task: None,
         boss_task_timeout_secs: 900,
         shared_memory_enabled: false,
+        st_mode: false,
     })
     .with_provider_config(test_model_provider_config());
     let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::Headless, false);
@@ -2289,6 +2327,7 @@ fn gate_user_access_matches_cli_remote_and_telegram_expectations() {
         boss_task: None,
         boss_task_timeout_secs: 900,
         shared_memory_enabled: false,
+        st_mode: false,
     })
     .with_provider_config(test_model_provider_config());
 
@@ -2812,6 +2851,7 @@ fn finalize_runtime_state_is_single_writeback_entrypoint() {
         boss_task: None,
         boss_task_timeout_secs: 900,
         shared_memory_enabled: false,
+        st_mode: false,
     })
     .with_provider_config(test_model_provider_config());
     let mut state = BootstrapState::new(InteractionSurface::Cli, SessionMode::Headless, false);
@@ -2959,6 +2999,7 @@ async fn runtime_continue_session_uses_restored_snapshot() {
         boss_task: None,
         boss_task_timeout_secs: 900,
         shared_memory_enabled: false,
+        st_mode: false,
     })
     .with_provider_config(test_model_provider_config())
     .with_session_store(store);
@@ -3001,6 +3042,7 @@ async fn runtime_resume_prefers_restored_surface_and_mode() {
         boss_task: None,
         boss_task_timeout_secs: 900,
         shared_memory_enabled: false,
+        st_mode: false,
     })
     .with_provider_config(test_model_provider_config())
     .with_session_store(store);
@@ -3033,6 +3075,7 @@ fn initialize_runtime_tracks_surface_mode_visibility_matrix() {
         boss_task: None,
         boss_task_timeout_secs: 900,
         shared_memory_enabled: false,
+        st_mode: false,
     })
     .with_provider_config(test_model_provider_config());
 
@@ -3135,6 +3178,7 @@ async fn runtime_resume_keeps_restored_surface_visibility_contract() {
         boss_task: None,
         boss_task_timeout_secs: 900,
         shared_memory_enabled: false,
+        st_mode: false,
     })
     .with_provider_config(test_model_provider_config())
     .with_session_store(store.clone());
@@ -3234,6 +3278,7 @@ async fn runtime_restores_persisted_task_list_for_resumed_session() {
         boss_task: None,
         boss_task_timeout_secs: 900,
         shared_memory_enabled: false,
+        st_mode: false,
     })
     .with_provider_config(test_model_provider_config())
     .with_session_store(store);
@@ -3306,6 +3351,7 @@ async fn runtime_continue_restores_from_file_backed_store_across_instances() {
         boss_task: None,
         boss_task_timeout_secs: 900,
         shared_memory_enabled: false,
+        st_mode: false,
     })
     .with_provider_config(test_model_provider_config())
     .with_session_store(store_b);
@@ -3342,6 +3388,7 @@ async fn runtime_initializes_fresh_session_record_in_store() {
         boss_task: None,
         boss_task_timeout_secs: 900,
         shared_memory_enabled: false,
+        st_mode: false,
     })
     .with_provider_config(test_model_provider_config())
     .with_session_store(store.clone());
@@ -4090,6 +4137,7 @@ fn proxy_env_var_is_read_into_config() {
         boss_task: None,
         boss_task_timeout_secs: 900,
         shared_memory_enabled: false,
+        st_mode: false,
     });
     let config = runtime
         .build_model_provider_config_from_env_for_test()
@@ -4129,6 +4177,7 @@ fn no_proxy_env_var_is_read_into_config() {
         boss_task: None,
         boss_task_timeout_secs: 900,
         shared_memory_enabled: false,
+        st_mode: false,
     });
     let config = runtime
         .build_model_provider_config_from_env_for_test()
@@ -4164,6 +4213,7 @@ fn ca_bundle_env_var_is_read_into_config() {
         boss_task: None,
         boss_task_timeout_secs: 900,
         shared_memory_enabled: false,
+        st_mode: false,
     });
     let config = runtime
         .build_model_provider_config_from_env_for_test()
@@ -4201,6 +4251,7 @@ fn no_proxy_env_unset_leaves_field_none() {
         boss_task: None,
         boss_task_timeout_secs: 900,
         shared_memory_enabled: false,
+        st_mode: false,
     });
     let config = runtime
         .build_model_provider_config_from_env_for_test()
@@ -4364,6 +4415,7 @@ fn https_proxy_falls_back_when_rust_agent_proxy_unset() {
         boss_task: None,
         boss_task_timeout_secs: 900,
         shared_memory_enabled: false,
+        st_mode: false,
     });
     let config = runtime
         .build_model_provider_config_from_env_for_test()
@@ -4420,6 +4472,7 @@ fn webfetch_uses_same_proxy_resolution_contract() {
         boss_task: None,
         boss_task_timeout_secs: 900,
         shared_memory_enabled: false,
+        st_mode: false,
     });
     let config = runtime
         .build_model_provider_config_from_env_for_test()

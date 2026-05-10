@@ -24,7 +24,7 @@ use crate::core::lism_ab_sample::SharedLisMAbSampleSink;
 use crate::core::prompt_budget::{BudgetDecision, evaluate_message_budget};
 use crate::core::state_frame::{
     ActorRole, CompletionEvidenceGap, CompletionEvidenceStatus, DeclaredArtifactContract,
-    StageExecutionContract, VerificationContract,
+    StageExecutionContract, TestContract, VerificationContract,
 };
 use crate::core::state_frame_loop::{DecisionLoopConfig, StateFrameToolRuntime};
 use crate::core::state_frame_model_router::ModelTier;
@@ -95,6 +95,7 @@ pub struct BossCoordinator {
     runtime_owner: Arc<BossRuntimeOwner>,
     lism_policy: Arc<RwLock<BossLisMPolicy>>,
     worker_lism_policy: Arc<RwLock<WorkerLisMPolicy>>,
+    st_mode_enabled: Arc<RwLock<bool>>,
     shared_memory_enabled: Arc<RwLock<bool>>,
     shared_step_memory: Arc<RwLock<std::collections::HashMap<usize, SharedStepMemory>>>,
     full_worker_dispatch_fallback_enabled: Arc<RwLock<bool>>,
@@ -1422,6 +1423,10 @@ fn general_worker_output_contract() -> String {
     "return a unified diff or file edits".into()
 }
 
+fn development_test_output_contract() -> String {
+    "Return concise implementation status plus the automated validation command, its outcome, and the minimal runtime evidence that the command passed. Do not omit the test command when validation was run.".into()
+}
+
 fn target_scoped_verification_evidence(step: &BossPlanStep) -> Vec<String> {
     let mut evidence = Vec::new();
     for record in &step.tool_execution_records {
@@ -2649,6 +2654,117 @@ fn build_stage_execution_contract(
     }
 }
 
+fn path_looks_like_development_artifact(path: &str) -> bool {
+    let lowered = path.to_ascii_lowercase();
+    lowered.ends_with(".rs")
+        || lowered.ends_with(".py")
+        || lowered.ends_with(".js")
+        || lowered.ends_with(".ts")
+        || lowered.ends_with(".tsx")
+        || lowered.ends_with(".jsx")
+        || lowered.ends_with(".html")
+        || lowered.ends_with(".css")
+        || lowered.ends_with(".json")
+        || lowered.ends_with(".yml")
+        || lowered.ends_with(".yaml")
+        || lowered.ends_with(".sh")
+}
+
+fn step_looks_like_development_task(
+    step: &BossPlanStep,
+    target_artifacts: &[TargetArtifact],
+) -> bool {
+    if target_artifacts
+        .iter()
+        .any(|artifact| path_looks_like_development_artifact(&artifact.path))
+    {
+        return true;
+    }
+
+    let mut text = current_task_contract_text(step.objective()).to_ascii_lowercase();
+    if !step.acceptance.is_empty() {
+        text.push('\n');
+        text.push_str(
+            &step
+                .acceptance
+                .iter()
+                .map(|item| item.to_ascii_lowercase())
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+    }
+
+    if text.contains("report")
+        || text.contains("research")
+        || text.contains("audit")
+        || text.contains("analysis")
+    {
+        return false;
+    }
+
+    [
+        "implement",
+        "implementation",
+        "fix",
+        "bug",
+        "patch",
+        "refactor",
+        "demo",
+        "validator",
+        "tool",
+        "site",
+        "frontend",
+        "build",
+        "script",
+        "code",
+        "feature",
+        "task",
+        "cli",
+    ]
+    .iter()
+    .any(|marker| text.contains(marker))
+}
+
+fn development_task_requires_source_evidence(step: &BossPlanStep) -> bool {
+    let text = current_task_contract_text(step.objective()).to_ascii_lowercase();
+    [
+        "source-backed",
+        "source evidence",
+        "read source",
+        "read the source",
+        "evidence-backed",
+        "backed by source",
+    ]
+    .iter()
+    .any(|marker| text.contains(marker))
+}
+
+fn apply_development_test_policy(contract: &mut StageExecutionContract) {
+    if contract.tests.is_empty() {
+        contract.tests.push(TestContract {
+            name: "st_auto_validation".into(),
+            required_actions: vec!["run_test".into()],
+            required_evidence: vec!["runtime_test_passed".into()],
+        });
+    }
+    if !contract
+        .required_actions
+        .iter()
+        .any(|action| action == "run_test")
+    {
+        contract.required_actions.push("run_test".into());
+    }
+    if !contract
+        .required_evidence
+        .iter()
+        .any(|item| item == "runtime_test_passed")
+    {
+        contract
+            .required_evidence
+            .push("runtime_test_passed".into());
+    }
+}
+
 fn collect_content_evidence_targets(
     relevant_file_handles: &[RelevantFileHandle],
     contract: &StageExecutionContract,
@@ -2848,6 +2964,7 @@ struct ExecutorBAssignmentContract {
     allowed_tools: Vec<String>,
     lism_policy: String,
     worker_role: WorkerRole,
+    st_mode: bool,
     shared_step_memory: Option<SharedStepMemory>,
     content_evidence_targets: Vec<String>,
     assignment_fingerprint: String,
@@ -4684,6 +4801,7 @@ impl BossCoordinator {
             runtime_owner,
             lism_policy: Arc::new(RwLock::new(BossLisMPolicy::Inherit)),
             worker_lism_policy: Arc::new(RwLock::new(WorkerLisMPolicy::ForceOn)),
+            st_mode_enabled: Arc::new(RwLock::new(false)),
             shared_memory_enabled: Arc::new(RwLock::new(false)),
             shared_step_memory: Arc::new(RwLock::new(std::collections::HashMap::new())),
             full_worker_dispatch_fallback_enabled: Arc::new(RwLock::new(true)),
@@ -4891,6 +5009,7 @@ impl BossCoordinator {
             runtime_owner: self.runtime_owner.clone(),
             lism_policy: self.lism_policy.clone(),
             worker_lism_policy: self.worker_lism_policy.clone(),
+            st_mode_enabled: self.st_mode_enabled.clone(),
             shared_memory_enabled: self.shared_memory_enabled.clone(),
             shared_step_memory: self.shared_step_memory.clone(),
             full_worker_dispatch_fallback_enabled: self
@@ -5960,6 +6079,20 @@ impl BossCoordinator {
 
     pub async fn worker_lism_policy(&self) -> WorkerLisMPolicy {
         *self.worker_lism_policy.read().await
+    }
+
+    pub async fn set_st_mode_enabled(&self, enabled: bool) {
+        *self.st_mode_enabled.write().await = enabled;
+    }
+
+    pub fn init_st_mode_enabled(&mut self, enabled: bool) {
+        if let Ok(mut guard) = self.st_mode_enabled.try_write() {
+            *guard = enabled;
+        }
+    }
+
+    pub async fn st_mode_enabled(&self) -> bool {
+        *self.st_mode_enabled.read().await
     }
 
     pub async fn set_shared_memory_enabled(&self, enabled: bool) {
@@ -9417,6 +9550,10 @@ impl BossCoordinator {
                 policy.fallback_tier == "verification_first"
                     || policy.fallback_tier == "source_evidence_repair"
             });
+        let st_mode_enabled = self.st_mode_enabled().await;
+        let development_task = !verification_first_short_form
+            && step_looks_like_development_task(step, &target_artifacts);
+        let development_test_mode = st_mode_enabled && development_task;
         let lism_policy = if let Some(policy) = rollout_execution_policy.as_ref() {
             policy.forced_worker_lism_policy.as_str().to_string()
         } else {
@@ -9443,10 +9580,17 @@ impl BossCoordinator {
         let effective_acceptance = if verification_first_short_form {
             build_verification_first_acceptance(step)
         } else {
-            step.acceptance
+            let mut acceptance = step
+                .acceptance
                 .iter()
                 .map(|item| current_task_contract_text(item).to_string())
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            if development_test_mode {
+                acceptance.push(
+                    "Run at least one deterministic automated validation command and include its pass/fail outcome in the final report.".into(),
+                );
+            }
+            acceptance
         };
         let verification_first_target = verification_first_short_form
             .then(|| {
@@ -9493,12 +9637,23 @@ impl BossCoordinator {
                     .unwrap_or("file");
                 build_verification_first_minimal_contract(target, kind)
             } else {
-                build_stage_execution_contract(step, &target_artifacts)
+                let mut contract = build_stage_execution_contract(step, &target_artifacts);
+                if development_test_mode {
+                    apply_development_test_policy(&mut contract);
+                }
+                contract
             };
-        let content_evidence_targets = collect_content_evidence_targets(
-            &relevant_file_handles,
-            &effective_stage_execution_contract,
-        );
+        let content_evidence_targets = if development_test_mode
+            && !development_task_requires_source_evidence(step)
+            && !source_evidence_repair
+        {
+            Vec::new()
+        } else {
+            collect_content_evidence_targets(
+                &relevant_file_handles,
+                &effective_stage_execution_contract,
+            )
+        };
         let mut content_evidence_targets = content_evidence_targets;
         if content_evidence_targets.is_empty() && source_evidence_repair {
             for target in verification_gap_required_targets(step, routed_metadata.as_ref()) {
@@ -9599,10 +9754,16 @@ impl BossCoordinator {
             },
             allowed_actions: if verification_first_short_form {
                 vec!["verify_artifact".into()]
+            } else if development_test_mode {
+                vec!["implement".into(), "run_test".into()]
             } else {
                 vec!["implement".into()]
             },
-            required_output_hint,
+            required_output_hint: if development_test_mode {
+                Some(development_test_output_contract())
+            } else {
+                required_output_hint
+            },
         };
         let shared_step_memory = if verification_first_short_form
             && self
@@ -9674,6 +9835,7 @@ impl BossCoordinator {
                 "workspace_capability": permission_scope.workspace_capability,
                 "boss_actor_role": permission_scope.boss_actor_role,
             },
+            "st_mode": development_test_mode,
             "parent_session_id": parent_session_id,
         }));
 
@@ -9683,6 +9845,7 @@ impl BossCoordinator {
             allowed_tools,
             lism_policy,
             worker_role,
+            st_mode: development_test_mode,
             shared_step_memory,
             content_evidence_targets,
             assignment_fingerprint,
@@ -9806,6 +9969,7 @@ refresh_reason: {}\n\n{}",
             },
             "allowed_tools": contract.allowed_tools,
             "lism_policy": contract.lism_policy,
+            "st_mode": contract.st_mode,
             "task_contains_boss_context": needs_refresh,
         })
         .to_string();
@@ -9884,6 +10048,7 @@ refresh_reason: {}\n\n{}",
             "executor_b_stage_memory": executor_b_stage_memory,
             "shared_step_memory": contract.shared_step_memory.clone(),
             "content_evidence_targets": contract.content_evidence_targets.clone(),
+            "st_mode": contract.st_mode,
         })
         .to_string();
 
@@ -14373,6 +14538,7 @@ mod tests {
             shared_step_memory: None,
             content_evidence_targets: Vec::new(),
             assignment_fingerprint: "fingerprint".into(),
+            st_mode: false,
         };
 
         let payload = build_continuation_payload(&contract);
@@ -15710,6 +15876,7 @@ mod tests {
             shared_step_memory: Some(shared_step_memory),
             content_evidence_targets: Vec::new(),
             assignment_fingerprint: "fingerprint".into(),
+            st_mode: false,
         };
 
         let payload = build_continuation_payload(&contract);

@@ -54,6 +54,7 @@ struct SpawnAgentRequest {
     parent_session_id: Option<String>,
     requires_verification: bool,
     lism_policy: WorkerLisMPolicy,
+    st_mode: bool,
     continuation_context: Option<StageContinuationContext>,
     shared_step_memory: Option<SharedStepMemory>,
     /// When set, the spawned subagent runtime is assembled with this boss actor policy.
@@ -67,6 +68,7 @@ struct ContinueBossStepContext {
     step_objective: Option<String>,
     step_acceptance: Vec<String>,
     parent_session_id: Option<String>,
+    st_mode: bool,
     continuation_context: Option<StageContinuationContext>,
     executor_b_stage_memory: Option<ExecutorBStageMemory>,
     shared_step_memory: Option<SharedStepMemory>,
@@ -97,6 +99,7 @@ struct AgentJsonRequest {
     parent_session_id: Option<String>,
     requires_verification: Option<bool>,
     lism_policy: Option<String>,
+    st_mode: Option<bool>,
     task_id: Option<String>,
     message: Option<String>,
     continuation_payload: Option<StageContinuationContext>,
@@ -421,6 +424,7 @@ fn parse_agent_request(input: &str) -> anyhow::Result<AgentRequest> {
                     .as_ref()
                     .is_some_and(|items| !items.is_empty())
                 || request.parent_session_id.is_some()
+                || request.st_mode.unwrap_or(false)
                 || request.continuation_payload.is_some()
                 || request.executor_b_stage_memory.is_some()
                 || request.shared_step_memory.is_some()
@@ -431,6 +435,7 @@ fn parse_agent_request(input: &str) -> anyhow::Result<AgentRequest> {
                     step_objective: request.step_objective,
                     step_acceptance: request.step_acceptance.unwrap_or_default(),
                     parent_session_id: request.parent_session_id,
+                    st_mode: request.st_mode.unwrap_or(false),
                     continuation_context: request.continuation_payload,
                     executor_b_stage_memory: request.executor_b_stage_memory,
                     shared_step_memory: request.shared_step_memory,
@@ -468,6 +473,7 @@ fn parse_agent_request(input: &str) -> anyhow::Result<AgentRequest> {
                 parent_session_id: request.parent_session_id,
                 requires_verification: request.requires_verification.unwrap_or(false),
                 lism_policy: parse_worker_lism_policy(request.lism_policy.as_deref(), role)?,
+                st_mode: request.st_mode.unwrap_or(false),
                 continuation_context: request.continuation_payload,
                 shared_step_memory: request.shared_step_memory,
                 boss_actor_policy,
@@ -505,6 +511,7 @@ fn parse_agent_request(input: &str) -> anyhow::Result<AgentRequest> {
         parent_session_id: None,
         requires_verification: false,
         lism_policy: WorkerLisMPolicy::default_for_role(WorkerRole::Research),
+        st_mode: false,
         continuation_context: None,
         shared_step_memory: None,
         boss_actor_policy: None,
@@ -513,7 +520,13 @@ fn parse_agent_request(input: &str) -> anyhow::Result<AgentRequest> {
 
 fn build_worker_task_input(request: &SpawnAgentRequest) -> String {
     if request.task_contains_boss_context {
-        return with_verify_output_contract(request.role, request.task.clone());
+        let mut task = with_verify_output_contract(request.role, request.task.clone());
+        if request.st_mode {
+            task.push_str(
+                "\n<st-mode>\nprefer a deterministic automated validation command or smoke check before extra repair prose; report the exact command, result, and minimal runtime evidence\n</st-mode>",
+            );
+        }
+        return task;
     }
 
     let mut sections = vec![request.task.clone()];
@@ -523,6 +536,7 @@ fn build_worker_task_input(request: &SpawnAgentRequest) -> String {
         || request.step_objective.is_some()
         || !request.step_acceptance.is_empty()
         || request.parent_session_id.is_some()
+        || request.st_mode
         || request.continuation_context.is_some()
         || request.shared_step_memory.is_some()
     {
@@ -547,6 +561,12 @@ fn build_worker_task_input(request: &SpawnAgentRequest) -> String {
         }
         if let Some(parent_session_id) = request.parent_session_id.as_deref() {
             sections.push(format!("parent_session_id: {parent_session_id}"));
+        }
+        if request.st_mode {
+            sections.push("st_mode: true".into());
+            sections.push(
+                "test_first_validation: prefer a deterministic automated test or smoke check before extra repair prose; report the exact command, result, and minimal runtime evidence.".into(),
+            );
         }
         if let Some(continuation) = request.continuation_context.as_ref() {
             sections.extend(render_stage_continuation_context_section(
@@ -709,6 +729,7 @@ fn build_continue_task_input(
         || context.step_objective.is_some()
         || !context.step_acceptance.is_empty()
         || context.parent_session_id.is_some()
+        || context.st_mode
         || context.continuation_context.is_some()
         || context.shared_step_memory.is_some()
         || context.executor_b_stage_memory.is_some()
@@ -734,6 +755,12 @@ fn build_continue_task_input(
         }
         if let Some(parent_session_id) = context.parent_session_id.as_deref() {
             sections.push(format!("parent_session_id: {parent_session_id}"));
+        }
+        if context.st_mode {
+            sections.push("st_mode: true".into());
+            sections.push(
+                "test_first_validation: prefer a deterministic automated test or smoke check before extra repair prose; report the exact command, result, and minimal runtime evidence.".into(),
+            );
         }
         if let Some(continuation) = context.continuation_context.as_ref() {
             sections.extend(render_stage_continuation_context_section(
@@ -1305,6 +1332,7 @@ mod tests {
             parent_session_id: Some("parent-session".into()),
             requires_verification: false,
             lism_policy: WorkerLisMPolicy::default_for_role(WorkerRole::Implement),
+            st_mode: false,
             continuation_context: None,
             shared_step_memory: None,
             boss_actor_policy: None,
@@ -1386,6 +1414,16 @@ mod tests {
     }
 
     #[test]
+    fn build_worker_task_input_injects_st_mode_test_priority_guidance() {
+        let mut request = sample_spawn_request();
+        request.st_mode = true;
+        let input = build_worker_task_input(&request);
+        assert!(input.contains("st_mode: true"));
+        assert!(input.contains("test_first_validation"));
+        assert!(input.contains("deterministic automated test or smoke check"));
+    }
+
+    #[test]
     fn verification_first_emits_structured_patch_instead_of_report_prose() {
         let task_input =
             "Verify target artifact only: /tmp/report.md. Return a short verification result only.";
@@ -1444,6 +1482,7 @@ mod tests {
             step_objective: Some("verify shared artifact".into()),
             step_acceptance: vec!["target file exists".into()],
             parent_session_id: Some("session-7".into()),
+            st_mode: false,
             continuation_context: None,
             executor_b_stage_memory: Some(local_memory),
             shared_step_memory: Some(shared_step_memory),
@@ -1485,6 +1524,7 @@ mod tests {
             step_objective: Some("verify shared artifact".into()),
             step_acceptance: Vec::new(),
             parent_session_id: Some("session-7".into()),
+            st_mode: false,
             continuation_context: Some(StageContinuationContext {
                 failed_target: Some("/tmp/shared.md".into()),
                 next_action: Some("verify_artifact".into()),
@@ -1551,6 +1591,18 @@ mod tests {
             panic!("expected spawn request");
         };
         assert_eq!(spawn.lism_policy, WorkerLisMPolicy::Inherit);
+    }
+
+    #[test]
+    fn parse_agent_request_accepts_st_mode_flag() {
+        let request = parse_agent_request(
+            r#"{"task":"fix it","role":"implement","st_mode":true,"lism_policy":"inherit"}"#,
+        )
+        .expect("request should parse");
+        let AgentRequest::Spawn(spawn) = request else {
+            panic!("expected spawn request");
+        };
+        assert!(spawn.st_mode);
     }
 
     #[test]

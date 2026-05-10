@@ -1322,6 +1322,24 @@ fn summarize_artifact_status(frame: &StateFrame) -> String {
 }
 
 fn summarize_test_status(frame: &StateFrame) -> String {
+    if frame.recent_evidence.iter().any(|line| {
+        line.starts_with("fact: test_failures ")
+            && evidence_field_value(line, "status").as_deref() == Some("passed")
+            && evidence_field_value(line, "source")
+                .as_deref()
+                .is_some_and(|source| source.starts_with("tool:"))
+    }) {
+        return "passed".into();
+    }
+    if frame.recent_evidence.iter().any(|line| {
+        line.starts_with("fact: test_failures ")
+            && evidence_field_value(line, "status").as_deref() == Some("failed")
+            && evidence_field_value(line, "source")
+                .as_deref()
+                .is_some_and(|source| source.starts_with("tool:"))
+    }) {
+        return "failed".into();
+    }
     let statuses = collect_fact_field_values(frame, "test_failures", "status");
     if statuses.is_empty() {
         "not_run".into()
@@ -1409,7 +1427,10 @@ fn missing_test_evidence_refs(frame: &StateFrame) -> Vec<String> {
         || frame.recent_evidence.iter().any(|line| {
             line.starts_with("fact: test_failures ")
                 && evidence_field_value(line, "ref").is_some()
-                && evidence_field_value(line, "status").is_some()
+                && evidence_field_value(line, "status").as_deref() == Some("passed")
+                && evidence_field_value(line, "source")
+                    .as_deref()
+                    .is_some_and(|source| source.starts_with("tool:"))
         })
     {
         Vec::new()
@@ -4204,9 +4225,9 @@ mod tests {
     use super::{
         DecisionLoopConfig, LoopOutcome, LoopUsage, RecoveryAttempt, StateFrameToolRuntime,
         append_runtime_contract_facts, build_state_decision_repair_prompt, classify_tool_outcome,
-        evaluate_completion_evidence, execute_call_tool, parse_and_validate_decision,
-        push_tool_failure_feedback, push_tool_outcome_evidence, run_decision_loop,
-        run_decision_loop_with_tools, tool_backed_hydration_path,
+        evaluate_completion_evidence, execute_call_tool, missing_test_evidence_refs,
+        parse_and_validate_decision, push_tool_failure_feedback, push_tool_outcome_evidence,
+        run_decision_loop, run_decision_loop_with_tools, tool_backed_hydration_path,
     };
     use crate::core::state_frame::validate_state_decision;
     use crate::core::state_frame::{
@@ -5541,7 +5562,7 @@ mod tests {
             "fact: recent_changes_in_files ref=change:step1:0 path=/tmp/report.md source=worker_result source_event_id=worker-result:1 freshness=after-worker-output confidence=0.90 status=active invalidated_by=none supersedes=none conflicts_with=none summary=updated /tmp/report.md".into(),
         );
         frame.recent_evidence.push(
-            "fact: test_failures ref=test:step1:worker name=cargo_test status=passed source=worker_result source_event_id=worker-result:1 freshness=after-worker-output confidence=0.85 lineage_status=active invalidated_by=none supersedes=none conflicts_with=none summary=cargo test passed".into(),
+            "fact: test_failures ref=test:step1:worker name=cargo_test status=passed source=tool:Bash source_event_id=tool-bash:1 freshness=after-runtime-test confidence=0.85 lineage_status=active invalidated_by=none supersedes=none conflicts_with=none summary=cargo test passed".into(),
         );
         let done_json = r#"{"state":"done","decision":"done"}"#;
         let client = ModelProviderClient::with_scripted_turns(vec![vec![StreamEvent::TextDelta(
@@ -5577,6 +5598,24 @@ mod tests {
             }
             other => panic!("expected Done, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn missing_test_evidence_requires_passed_runtime_tool_test() {
+        let mut frame = make_frame();
+        push_completion_contract(&mut frame, false, true, false);
+        frame.recent_evidence.push(
+            "fact: test_failures ref=test:step1:worker name=cargo_test status=passed source=worker_result source_event_id=worker-result:1 freshness=after-worker-output confidence=0.85 lineage_status=active invalidated_by=none supersedes=none conflicts_with=none summary=cargo test passed".into(),
+        );
+
+        let missing = missing_test_evidence_refs(&frame);
+        assert_eq!(missing, vec!["openitem:test:0".to_string()]);
+
+        frame.recent_evidence.push(
+            "fact: test_failures ref=test:step1:runtime name=cargo_test status=passed source=tool:Bash source_event_id=tool-bash:1 freshness=after-runtime-test confidence=1.00 lineage_status=active invalidated_by=none supersedes=none conflicts_with=none summary=cargo test passed".into(),
+        );
+
+        assert!(missing_test_evidence_refs(&frame).is_empty());
     }
 
     #[test]
