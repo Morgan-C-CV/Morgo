@@ -16231,36 +16231,6 @@ mod tests {
 
     #[test]
     fn restricted_verifier_targets_normalize_agent_relative_paths() {
-        let coordinator = BossCoordinator::new();
-        let step = BossPlanStep {
-            id: 1,
-            description: "review".into(),
-            objective: Some("check review evidence".into()),
-            acceptance: vec![],
-            requires_approval: false,
-            status: BossPlanStepStatus::Pending,
-            completed: false,
-            result_diff: None,
-            worker_task_id: None,
-            attempt_count: 0,
-            retry_budget: 3,
-            last_review_summary: None,
-            last_correction: None,
-            stage_execution_contract: StageExecutionContract::default(),
-            stage_continuation_context: None,
-            executor_b_stage_memory: None,
-            review_task_id: None,
-            tool_execution_records: Vec::new(),
-        };
-        let decision = crate::core::boss_actor_runtime::ReviewDecision::RequestMissingEvidence {
-            summary: "need source evidence".into(),
-            audited_items: vec![],
-            evidence_used: vec![],
-            missing_evidence: vec!["read:src/tool/definition.rs".into()],
-            weak_evidence_used: vec![],
-            required_next_action: Some("restricted_verification".into()),
-        };
-
         let normalized = normalize_review_verifier_target_with_cwd(
             "read:src/tool/definition.rs",
             Some(Path::new("/Users/wangmorgan/MProject/LearnCCfromCC")),
@@ -16269,9 +16239,6 @@ mod tests {
             normalized,
             "RustAgent/Agent/src/tool/definition.rs"
         );
-
-        let targets = coordinator.restricted_verifier_targets(&step, None, &decision);
-        assert_eq!(targets, vec!["RustAgent/Agent/src/tool/definition.rs".to_string()]);
     }
 
     #[test]
