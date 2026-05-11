@@ -294,7 +294,11 @@ fn build_completion_contract_fact(
             test_refs.push(test.name.clone());
         }
     }
-    let verification_refs = if readonly_analysis {
+    let st_test_only_mode = stage_execution_contract
+        .tests
+        .iter()
+        .any(|test| test.name == "st_auto_validation");
+    let verification_refs = if readonly_analysis || st_test_only_mode {
         Vec::new()
     } else if artifact_required {
         artifact_refs.clone()
@@ -307,30 +311,51 @@ fn build_completion_contract_fact(
     };
     let test_required = !test_refs.is_empty();
     let verification_required = !verification_refs.is_empty();
-    fact_line(
-        "completion_contract",
-        format!(
-            "artifact_evidence={} artifact_refs={} test_evidence={} test_refs={} verification_evidence={} verification_refs={}",
-            if artifact_required {
-                "required"
-            } else {
-                "not_required"
-            },
-            join_contract_refs(&artifact_refs),
-            if test_required {
-                "required"
-            } else {
-                "not_required"
-            },
-            join_contract_refs(&test_refs),
-            if verification_required {
-                "required"
-            } else {
-                "not_required"
-            },
-            join_contract_refs(&verification_refs)
-        ),
-    )
+    if st_test_only_mode {
+        fact_line(
+            "completion_contract",
+            format!(
+                "artifact_evidence={} artifact_refs={} test_evidence={} test_refs={}",
+                if artifact_required {
+                    "required"
+                } else {
+                    "not_required"
+                },
+                join_contract_refs(&artifact_refs),
+                if test_required {
+                    "required"
+                } else {
+                    "not_required"
+                },
+                join_contract_refs(&test_refs),
+            ),
+        )
+    } else {
+        fact_line(
+            "completion_contract",
+            format!(
+                "artifact_evidence={} artifact_refs={} test_evidence={} test_refs={} verification_evidence={} verification_refs={}",
+                if artifact_required {
+                    "required"
+                } else {
+                    "not_required"
+                },
+                join_contract_refs(&artifact_refs),
+                if test_required {
+                    "required"
+                } else {
+                    "not_required"
+                },
+                join_contract_refs(&test_refs),
+                if verification_required {
+                    "required"
+                } else {
+                    "not_required"
+                },
+                join_contract_refs(&verification_refs)
+            ),
+        )
+    }
 }
 
 fn build_stage_execution_contract(
@@ -384,32 +409,38 @@ fn build_stage_execution_contract(
             });
         }
     }
-    let verifications = artifact_ledgers
-        .iter()
-        .map(|item| (item.ref_id.clone(), item.path.clone()))
-        .chain(
-            declared_artifacts
-                .iter()
-                .map(|item| (item.ref_id.clone(), item.path.clone())),
-        )
-        .fold(Vec::<(String, String)>::new(), |mut acc, item| {
-            if !acc.iter().any(|(ref_id, _)| ref_id == &item.0) {
-                acc.push(item);
-            }
-            acc
-        })
-        .into_iter()
-        .map(|(target_ref, target_path)| VerificationContract {
-            target_ref: target_ref.clone(),
-            target_path: Some(target_path.clone()),
-            required_actions: if readonly_analysis {
-                Vec::new()
-            } else {
-                vec!["verify".into()]
-            },
-            required_evidence: vec![target_ref, target_path],
-        })
-        .collect::<Vec<_>>();
+    let st_test_only_mode =
+        st_mode_enabled && step_looks_like_development_task(step, &declared_artifacts);
+    let verifications = if st_test_only_mode {
+        Vec::new()
+    } else {
+        artifact_ledgers
+            .iter()
+            .map(|item| (item.ref_id.clone(), item.path.clone()))
+            .chain(
+                declared_artifacts
+                    .iter()
+                    .map(|item| (item.ref_id.clone(), item.path.clone())),
+            )
+            .fold(Vec::<(String, String)>::new(), |mut acc, item| {
+                if !acc.iter().any(|(ref_id, _)| ref_id == &item.0) {
+                    acc.push(item);
+                }
+                acc
+            })
+            .into_iter()
+            .map(|(target_ref, target_path)| VerificationContract {
+                target_ref: target_ref.clone(),
+                target_path: Some(target_path.clone()),
+                required_actions: if readonly_analysis {
+                    Vec::new()
+                } else {
+                    vec!["verify".into()]
+                },
+                required_evidence: vec![target_ref, target_path],
+            })
+            .collect::<Vec<_>>()
+    };
     let tests = open_item_ledgers
         .iter()
         .filter(|item| open_item_requires_test(&item.summary))
@@ -473,7 +504,7 @@ fn build_stage_execution_contract(
         required_actions,
         required_evidence,
     };
-    if st_mode_enabled && step_looks_like_development_task(step, &contract.declared_artifacts) {
+    if st_test_only_mode {
         apply_development_test_policy(&mut contract);
     }
     contract
@@ -1416,6 +1447,14 @@ mod tests {
                 .iter()
                 .any(|action| action == "run_test")
         );
+        assert!(frame.stage_execution_contract.verifications.is_empty());
+        assert!(
+            frame
+                .stage_execution_contract
+                .required_actions
+                .iter()
+                .all(|action| action != "verify" && action != "verify_artifact")
+        );
         assert!(
             frame
                 .recent_evidence
@@ -1433,6 +1472,14 @@ mod tests {
                 .recent_evidence
                 .iter()
                 .any(|line| line.contains("test_evidence=required"))
+        );
+        assert!(
+            frame
+                .recent_evidence
+                .iter()
+                .filter(|line| line.starts_with("fact: completion_contract "))
+                .all(|line| !line.contains("verification_evidence")
+                    && !line.contains("verification_refs"))
         );
     }
 

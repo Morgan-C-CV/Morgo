@@ -343,7 +343,10 @@ fn completion_contract_requirement(frame: &StateFrame, field_name: &str) -> bool
     match field_name {
         "artifact_evidence" => !frame.stage_execution_contract.declared_artifacts.is_empty(),
         "test_evidence" => !frame.stage_execution_contract.tests.is_empty(),
-        "verification_evidence" => !frame.stage_execution_contract.verifications.is_empty(),
+        "verification_evidence" => {
+            !st_automated_test_audit_enabled(frame)
+                && !frame.stage_execution_contract.verifications.is_empty()
+        }
         _ => false,
     }
 }
@@ -367,6 +370,9 @@ fn completion_contract_refs(frame: &StateFrame, field_name: &str) -> Vec<String>
                 .collect();
         }
         "verification_refs" => {
+            if st_automated_test_audit_enabled(frame) {
+                return Vec::new();
+            }
             return frame
                 .stage_execution_contract
                 .verifications
@@ -1449,6 +1455,9 @@ fn missing_test_evidence_refs(frame: &StateFrame) -> Vec<String> {
 }
 
 fn missing_verification_evidence_refs(frame: &StateFrame) -> Vec<String> {
+    if st_automated_test_audit_enabled(frame) {
+        return Vec::new();
+    }
     completion_contract_refs(frame, "verification_refs")
         .into_iter()
         .filter(|verification_ref| {
@@ -1473,6 +1482,9 @@ fn missing_source_evidence_targets(frame: &StateFrame, evidence_refs: &[String])
 }
 
 fn source_evidence_gate_enabled(frame: &StateFrame) -> bool {
+    if st_automated_test_audit_enabled(frame) {
+        return false;
+    }
     !frame
         .stage_execution_contract
         .content_evidence_targets
@@ -1489,6 +1501,15 @@ fn recommended_action_for_gap(
     missing_test_evidence: bool,
     missing_verification_evidence: bool,
 ) -> String {
+    if st_automated_test_audit_enabled(frame) {
+        if missing_artifact_evidence {
+            return "write_artifact".into();
+        }
+        if missing_test_evidence {
+            return "run_test".into();
+        }
+        return "none".into();
+    }
     if missing_artifact_evidence {
         "write_artifact".into()
     } else if missing_verification_evidence {
@@ -1894,6 +1915,9 @@ fn enforce_completion_gate(
 }
 
 fn verification_only_completion_gate_block(frame: &StateFrame) -> Option<CompletionGateBlock> {
+    if st_automated_test_audit_enabled(frame) {
+        return None;
+    }
     if !completion_contract_requirement(frame, "verification_evidence") {
         return None;
     }
@@ -2043,19 +2067,28 @@ fn finalize_worker_usage_report(frame: &StateFrame, usage: &mut LoopUsage) {
 }
 
 fn completion_gate_repair_active(frame: &StateFrame) -> bool {
+    let allow_verification_repair = !st_automated_test_audit_enabled(frame);
     frame
         .open_items
         .iter()
         .chain(frame.recent_evidence.iter())
         .any(|item| {
+            if !allow_verification_repair
+                && (item.contains("verify_artifact")
+                    || item.contains("verification_evidence")
+                    || item.contains("missing_verification_evidence"))
+            {
+                return false;
+            }
             item.starts_with("completion_gate_repair:")
                 || item.starts_with("completion_gate:")
-                || item.starts_with("required_action:verify_artifact")
+                || (allow_verification_repair
+                    && item.starts_with("required_action:verify_artifact"))
                 || item.starts_with("required_action:read_source_evidence")
                 || item.starts_with("required_action:run_test")
                 || (item.starts_with("fact: stage_continuation ")
                     && item.contains("continuity_mode=repair")
-                    && (item.contains("next_action=verify_artifact")
+                    && ((allow_verification_repair && item.contains("next_action=verify_artifact"))
                         || item.contains("next_action=read_source_evidence")
                         || item.contains("next_action=run_test")
                         || item.contains("required_evidence_targets:")))
@@ -2120,6 +2153,9 @@ fn verify_terminal_diagnostics_enabled() -> bool {
 }
 
 fn verification_terminal_outcome(frame: &StateFrame, usage: &mut LoopUsage) -> Option<LoopOutcome> {
+    if st_automated_test_audit_enabled(frame) {
+        return None;
+    }
     if !completion_contract_requirement(frame, "verification_evidence") {
         return None;
     }
@@ -5703,6 +5739,47 @@ mod tests {
         assert!(repair_line.contains("required_action=run_test"));
         assert!(repair_line.contains("required_evidence_refs=none"));
         assert!(!repair_line.contains("st_auto_validation"));
+    }
+
+    #[test]
+    fn st_mode_ignores_verification_evidence_contracts() {
+        let mut frame = make_frame();
+        frame.recent_evidence.clear();
+        frame.stage_execution_contract.tests = vec![TestContract {
+            name: "st_auto_validation".into(),
+            required_actions: vec!["run_test".into()],
+            required_evidence: vec!["runtime_test_passed".into()],
+        }];
+        frame.stage_execution_contract.verifications = vec![
+            crate::core::state_frame::VerificationContract {
+                target_ref: "artifact:contract:0".into(),
+                target_path: Some("/tmp/report.md".into()),
+                required_actions: vec!["verify".into()],
+                required_evidence: vec!["artifact:contract:0".into()],
+            },
+        ];
+        frame.stage_execution_contract.content_evidence_targets = vec!["src/lib.rs".into()];
+        frame.open_items.push(
+            "required_action:verify_artifact reason=stale verification repair".into(),
+        );
+        frame
+            .recent_evidence
+            .push("fact: test_failures ref=test:runtime name=cargo_test status=passed source=tool:Bash source_event_id=tool-bash:1 freshness=after-runtime-test confidence=1.00 lineage_status=active invalidated_by=none supersedes=none conflicts_with=none summary=cargo test passed".into());
+        frame
+            .recent_evidence
+            .push("completion_gate: status=missing_verification_evidence required_action=verify_artifact reason=stale_verification missing_evidence_refs=artifact:contract:0".into());
+
+        assert!(super::missing_verification_evidence_refs(&frame).is_empty());
+        assert!(!super::completion_contract_requirement(
+            &frame,
+            "verification_evidence"
+        ));
+        assert!(!super::source_evidence_gate_enabled(&frame));
+        assert!(!super::completion_gate_repair_active(&frame));
+        assert_eq!(
+            super::evaluate_completion_evidence(&frame, &LoopUsage::default()),
+            CompletionEvidenceStatus::Sufficient
+        );
     }
 
     #[test]

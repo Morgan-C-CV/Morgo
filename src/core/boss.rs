@@ -2771,6 +2771,16 @@ fn apply_development_test_policy(contract: &mut StageExecutionContract) {
     }
 }
 
+fn apply_st_test_only_review_policy(contract: &mut StageExecutionContract) {
+    contract.verifications.clear();
+    contract.required_actions.retain(|action| {
+        !matches!(
+            action.as_str(),
+            "verify" | "verify_artifact" | "run_verification"
+        )
+    });
+}
+
 fn collect_content_evidence_targets(
     relevant_file_handles: &[RelevantFileHandle],
     contract: &StageExecutionContract,
@@ -9649,6 +9659,7 @@ impl BossCoordinator {
             } else {
                 let mut contract = build_stage_execution_contract(step, &target_artifacts);
                 if development_test_mode {
+                    apply_st_test_only_review_policy(&mut contract);
                     apply_development_test_policy(&mut contract);
                 }
                 contract
@@ -21905,6 +21916,53 @@ mod tests {
         let targets = collect_content_evidence_targets(&handles, &contract);
 
         assert_eq!(targets, vec![source_path]);
+    }
+
+    #[test]
+    fn st_development_contract_strips_verification_requirements() {
+        let step = BossPlanStep {
+            id: 0,
+            description: "build demo".into(),
+            objective: Some("build a demo app".into()),
+            acceptance: vec!["demo runs".into(), "demo verified".into()],
+            requires_approval: false,
+            status: BossPlanStepStatus::Pending,
+            completed: false,
+            result_diff: None,
+            worker_task_id: None,
+            attempt_count: 0,
+            retry_budget: 3,
+            last_review_summary: None,
+            last_correction: None,
+            stage_execution_contract: StageExecutionContract::default(),
+            stage_continuation_context: None,
+            executor_b_stage_memory: None,
+            review_task_id: None,
+            tool_execution_records: Vec::new(),
+        };
+        let target_artifacts = vec![TargetArtifact {
+            path: "/tmp/demo.py".into(),
+            kind: "file".into(),
+            required_state: "exists_non_empty".into(),
+            source: "artifact_expectation".into(),
+        }];
+        let mut contract = build_stage_execution_contract(&step, &target_artifacts);
+        apply_st_test_only_review_policy(&mut contract);
+        apply_development_test_policy(&mut contract);
+
+        assert!(contract.verifications.is_empty());
+        assert!(
+            contract
+                .required_actions
+                .iter()
+                .any(|action| action == "run_test")
+        );
+        assert!(
+            contract
+                .required_actions
+                .iter()
+                .all(|action| action != "verify" && action != "verify_artifact")
+        );
     }
 
     #[test]
