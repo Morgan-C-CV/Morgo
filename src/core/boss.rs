@@ -1425,7 +1425,7 @@ fn general_worker_output_contract() -> String {
 }
 
 fn development_test_output_contract() -> String {
-    "Return concise implementation status plus the automated validation command, its outcome, and the minimal runtime evidence that the command passed. Do not omit the test command when validation was run.".into()
+    "Return concise implementation status plus the automated validation command, its outcome, and the minimal runtime evidence that the command passed. If the task has multiple input/output cases, edge conditions, or failure paths, proactively add the smallest representative extra test cases and report them. Do not treat this as a hard gate; prioritize coverage guidance and explain any omitted cases briefly. Do not omit the test command when validation was run.".into()
 }
 
 fn target_scoped_verification_evidence(step: &BossPlanStep) -> Vec<String> {
@@ -4502,6 +4502,7 @@ fn build_step_review_prompt(step_id: usize, summary: &str, correction: Option<&s
         "You are Designer A reviewing a completed boss step.\n\
          No tools are available in this review. Do not request, read, search, or inspect files.\n\
          Use only the review package below, including current worker prose and current runtime evidence already included.\n\
+         For automated testing, prefer proactive coverage guidance over hard gating: if the task has multiple input/output cases, boundary conditions, or failure paths, note which small extra cases should be added, but do not reject solely because the worker did not enumerate every possible case.\n\
          Treat prose-only claims as weak evidence: they can be listed in weak_evidence_used, but they must not be reported as runtime-verified facts.\n\
          Historical attempts marked stale are background only; do not reject because of stale blockers when Current runtime evidence resolves them.\n\
          If the current attempt says source evidence remains missing, max iterations were reached, tool dispatch failed, or completion is blocked, do not accept unless the same package also includes explicit runtime evidence that resolves the blocker.\n\
@@ -9607,7 +9608,7 @@ impl BossCoordinator {
                 .collect::<Vec<_>>();
             if development_test_mode {
                 acceptance.push(
-                    "Run at least one deterministic automated validation command and include its pass/fail outcome in the final report.".into(),
+                    "Run at least one deterministic automated validation command and include its pass/fail outcome in the final report. If the task spans multiple input/output cases or edge conditions, proactively add the smallest representative extra tests and mention them in the report; this is guidance, not a hard gate.".into(),
                 );
             }
             acceptance
