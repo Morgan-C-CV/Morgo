@@ -193,7 +193,8 @@ StateDecision schema:\n\
     \"open_items_add\": [],\n\
     \"open_items_remove\": [],\n\
     \"accepted_summary_add\": [],\n\
-    \"review_mode\": \"<optional: target_verification | independent_review>\"\n\
+    \"review_mode\": \"<optional: target_verification | independent_review>\",\n\
+    \"tests_add\": [{\"name\":\"<optional explicit test contract>\",\"required_actions\":[\"run_test\"],\"required_evidence\":[\"runtime_test_passed\"]}]\n\
   },\n\
   \"confidence\": 0.9,\n\
   \"escalate\": false\n\
@@ -207,6 +208,7 @@ Rules:\n\
 - Default `review_mode` is `independent_review`. Do not switch it just because the task creates or writes a small validator/analyzer/script/report.\n\
 - Keep `independent_review` when the job is to audit, review, validate, replay logs, inspect evidence, or produce a verdict; in that case any small helper artifact is review-owned evidence, not the primary product.\n\
 - Set `state_patch.review_mode=\"target_verification\"` only when the task explicitly requires strict target verification/evidence-repair, or when the main deliverable is a durable artifact the user will use as the final product, such as a feature, app, site, library, or reusable tool.\n\
+- Add `state_patch.tests_add` only when your current task decision explicitly requires a runtime validation gate; do not infer tests from quoted background/reference material.\n\
 - Do NOT return wrapper payloads like `{ \"type\": ..., \"valid\": ..., \"decision\": {...} }`; return the canonical StateDecision object itself\n\
 - If `recent_evidence` contains `fact: execution_mode read_only_analysis`, prefer a single-turn `done`; do not use `continue` just to outline or narrate your plan\n\
 - If `required_output_schema` is `readonly_audit_4_paragraphs_v1`, return `decision=\"done\"` with exactly 4 `state_patch.accepted_summary_add` items, one each for `现状`、`主要风险`、`证据来源`、`下一步建议`\n\
@@ -2922,6 +2924,45 @@ fn apply_state_patch(frame: &mut StateFrame, patch: &StatePatch) -> bool {
     for item in &patch.accepted_summary_add {
         changed |= push_unique(&mut frame.accepted_summary, item.clone());
     }
+    for test in &patch.tests_add {
+        if test.name.trim().is_empty() {
+            continue;
+        }
+        let mut test = test.clone();
+        if test.required_actions.is_empty() {
+            test.required_actions.push("run_test".into());
+        }
+        if test.required_evidence.is_empty() {
+            test.required_evidence.push(test.name.clone());
+        }
+        if frame
+            .stage_execution_contract
+            .tests
+            .iter()
+            .all(|existing| existing.name != test.name)
+        {
+            frame.stage_execution_contract.tests.push(test.clone());
+            changed = true;
+        }
+        if !frame
+            .stage_execution_contract
+            .required_actions
+            .iter()
+            .any(|action| action == "run_test")
+        {
+            frame
+                .stage_execution_contract
+                .required_actions
+                .push("run_test".into());
+            changed = true;
+        }
+        for evidence in &test.required_evidence {
+            changed |= push_unique(
+                &mut frame.stage_execution_contract.required_evidence,
+                evidence.clone(),
+            );
+        }
+    }
     if let Some(review_mode) = patch.review_mode {
         if frame.stage_execution_contract.review_mode != Some(review_mode) {
             frame.stage_execution_contract.review_mode = Some(review_mode);
@@ -4031,6 +4072,7 @@ pub async fn run_decision_loop_with_tools(
         match decision.decision {
             DecisionKind::Done => {
                 frame.state = decision.state;
+                let _patch_changed = apply_state_patch(&mut frame, &decision.state_patch);
                 if let Err(block) = enforce_completion_gate(&mut frame, &mut total_usage) {
                     inject_completion_gate_block(&mut frame, &block);
                     record_completion_gate_recovery(&frame, &mut total_usage, &block);
@@ -4594,6 +4636,45 @@ mod tests {
                 .recent_evidence
                 .iter()
                 .all(|line| line != "fact: review_mode target_verification")
+        );
+    }
+
+    #[test]
+    fn state_patch_tests_add_updates_contract_and_completion_gate() {
+        let mut frame = make_clean_frame();
+        frame.recent_evidence.clear();
+
+        let changed = apply_state_patch(
+            &mut frame,
+            &StatePatch {
+                tests_add: vec![TestContract {
+                    name: "runtime_validation".into(),
+                    required_actions: vec!["run_test".into()],
+                    required_evidence: vec!["runtime_test_passed".into()],
+                }],
+                ..StatePatch::default()
+            },
+        );
+
+        assert!(changed);
+        assert_eq!(frame.stage_execution_contract.tests.len(), 1);
+        assert_eq!(
+            frame.stage_execution_contract.tests[0].name,
+            "runtime_validation"
+        );
+        assert!(
+            frame
+                .stage_execution_contract
+                .required_actions
+                .iter()
+                .any(|item| item == "run_test")
+        );
+        assert!(
+            frame
+                .stage_execution_contract
+                .required_evidence
+                .iter()
+                .any(|item| item == "runtime_test_passed")
         );
     }
 

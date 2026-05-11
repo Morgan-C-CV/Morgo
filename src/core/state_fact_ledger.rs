@@ -11,6 +11,8 @@ fn current_task_contract_text(text: &str) -> String {
     const HISTORICAL_CONTEXT_MARKERS: &[&str] = &[
         "参考材料摘录",
         "参考材料：",
+        "参考背景材料",
+        "关键材料摘录",
         "历史材料",
         "历史上下文",
         "背景材料摘录",

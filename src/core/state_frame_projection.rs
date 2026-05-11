@@ -21,6 +21,8 @@ fn current_task_contract_text(text: &str) -> String {
     const HISTORICAL_CONTEXT_MARKERS: &[&str] = &[
         "参考材料摘录",
         "参考材料：",
+        "参考背景材料",
+        "关键材料摘录",
         "历史材料",
         "历史上下文",
         "背景材料摘录",
@@ -418,30 +420,6 @@ fn step_contract_text_with_acceptance(step: &crate::core::boss_state::BossPlanSt
     text
 }
 
-fn step_requires_runtime_validation(step: Option<&crate::core::boss_state::BossPlanStep>) -> bool {
-    let Some(step) = step else {
-        return false;
-    };
-    let text = step_contract_text_with_acceptance(step);
-    let lowered = text.to_ascii_lowercase();
-    let has_runtime_action = lowered.contains("run ")
-        || lowered.contains("execute ")
-        || lowered.contains("replay ")
-        || text.contains("运行")
-        || text.contains("执行")
-        || text.contains("回放")
-        || text.contains("实际执行");
-    let has_validation_target = lowered.contains("validator")
-        || lowered.contains("validation")
-        || lowered.contains("verify")
-        || lowered.contains("test")
-        || text.contains("验证器")
-        || text.contains("验证")
-        || text.contains("终端验证摘要");
-
-    has_runtime_action && has_validation_target
-}
-
 fn step_requires_markdown_conclusion(step: Option<&crate::core::boss_state::BossPlanStep>) -> bool {
     let Some(step) = step else {
         return false;
@@ -761,18 +739,6 @@ fn build_stage_execution_contract(
             required_evidence: vec![item.ref_id.clone()],
         })
         .collect::<Vec<_>>();
-    let mut tests = tests;
-    if step_requires_runtime_validation(step)
-        && !tests
-            .iter()
-            .any(|test| test.name == "st_auto_validation" || test.name == "runtime_validation")
-    {
-        tests.push(TestContract {
-            name: "runtime_validation".into(),
-            required_actions: vec!["run_test".into()],
-            required_evidence: vec!["runtime_test_passed".into()],
-        });
-    }
     let mut required_actions = Vec::new();
     if step.is_some() && !declared_artifacts.is_empty() {
         required_actions.extend(["create".into(), "write".into()]);
@@ -2107,7 +2073,7 @@ mod tests {
     }
 
     #[test]
-    fn independent_review_runtime_validator_task_requires_lightweight_test_and_summary_artifact() {
+    fn independent_review_runtime_validator_task_does_not_infer_test_gate_from_reference_text() {
         let plan = BossPlan {
             plan_id: "plan-u10-runtime-validator".into(),
             task_description: "create validator".into(),
@@ -2160,14 +2126,14 @@ mod tests {
                 .stage_execution_contract
                 .tests
                 .iter()
-                .any(|test| test.name == "runtime_validation")
+                .all(|test| test.name != "runtime_validation" && test.name != "st_auto_validation")
         );
         assert!(
             frame
                 .stage_execution_contract
                 .required_actions
                 .iter()
-                .any(|action| action == "run_test")
+                .all(|action| action != "run_test")
         );
         assert!(
             frame
@@ -2183,7 +2149,7 @@ mod tests {
         );
         assert!(frame.recent_evidence.iter().any(|line| {
             line.starts_with("fact: completion_contract ")
-                && line.contains("test_evidence=required")
+                && line.contains("test_evidence=not_required")
                 && line.contains("verification_evidence=not_required")
         }));
     }

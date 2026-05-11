@@ -333,6 +333,8 @@ pub struct StatePatch {
     pub accepted_summary_add: Vec<String>,
     #[serde(default)]
     pub review_mode: Option<ReviewMode>,
+    #[serde(default)]
+    pub tests_add: Vec<TestContract>,
 }
 
 /// Structured output contract from the LLM in StateFrame-first mode.
@@ -449,6 +451,9 @@ fn normalize_state_patch(
     let review_mode = patch
         .and_then(|m| m.get("review_mode"))
         .or_else(|| root.get("review_mode"));
+    let tests_add = patch
+        .and_then(|m| m.get("tests_add"))
+        .or_else(|| root.get("tests_add"));
 
     if let Some(value) = accepted_summary {
         normalized.insert("accepted_summary_add".into(), value.clone());
@@ -467,6 +472,9 @@ fn normalize_state_patch(
         if !is_blank {
             normalized.insert("review_mode".into(), value.clone());
         }
+    }
+    if let Some(value) = tests_add {
+        normalized.insert("tests_add".into(), value.clone());
     }
 
     if normalized.is_empty() {
@@ -671,6 +679,26 @@ mod tests {
         .expect("blank review_mode should be ignored");
 
         assert_eq!(decision.state_patch.review_mode, None);
+    }
+
+    #[test]
+    fn state_decision_accepts_explicit_test_contract_patch() {
+        let decision = validate_state_decision(
+            r#"{
+                "state":"executing",
+                "decision":"call_tool",
+                "next_action":{"action_type":"Bash","args":{"command":"python validator.py sample.jsonl"}},
+                "state_patch":{"tests_add":[{"name":"runtime_validation","required_actions":["run_test"],"required_evidence":["runtime_test_passed"]}]}
+            }"#,
+        )
+        .expect("explicit test contract patch should normalize");
+
+        assert_eq!(decision.state_patch.tests_add.len(), 1);
+        assert_eq!(decision.state_patch.tests_add[0].name, "runtime_validation");
+        assert_eq!(
+            decision.state_patch.tests_add[0].required_evidence,
+            vec!["runtime_test_passed".to_string()]
+        );
     }
 }
 
