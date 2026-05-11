@@ -971,6 +971,7 @@ fn build_fact_ledger(
     blocked_items: &[String],
     readonly_analysis: bool,
     st_mode_enabled: bool,
+    blind_review: bool,
 ) -> Vec<String> {
     let current_step = step_id.and_then(|id| plan.steps.iter().find(|s| s.id == id));
     let mut facts = vec![fact_line(
@@ -1017,14 +1018,22 @@ fn build_fact_ledger(
         ));
         facts.push(fact_line(
             "reject_correction",
-            step.last_correction
-                .as_deref()
-                .or(step.last_review_summary.as_deref())
-                .unwrap_or("none recorded"),
+            if blind_review {
+                "none recorded"
+            } else {
+                step.last_correction
+                    .as_deref()
+                    .or(step.last_review_summary.as_deref())
+                    .unwrap_or("none recorded")
+            },
         ));
         facts.push(fact_line(
             "recent_diff",
-            step.result_diff.as_deref().unwrap_or("none recorded"),
+            if blind_review {
+                "none recorded"
+            } else {
+                step.result_diff.as_deref().unwrap_or("none recorded")
+            },
         ));
         let permission_facts = build_permission_facts(
             step.id,
@@ -1104,7 +1113,7 @@ fn build_fact_ledger(
             }
         }
         push_none_recorded_unless_present(&mut facts, "recent_changes_in_files");
-        if !ledgers.review_refs.is_empty() {
+        if !blind_review && !ledgers.review_refs.is_empty() {
             for item in &ledgers.review_refs {
                 facts.push(fact_line(
                     "review_verdicts",
@@ -1130,7 +1139,7 @@ fn build_fact_ledger(
             }
         }
         push_none_recorded_unless_present(&mut facts, "review_verdicts");
-        if !ledgers.artifact_refs.is_empty() {
+        if !blind_review && !ledgers.artifact_refs.is_empty() {
             for item in &ledgers.artifact_refs {
                 facts.push(fact_line(
                     "artifact_status",
@@ -1192,7 +1201,8 @@ fn build_fact_ledger(
             ));
         }
         push_none_recorded_unless_present(&mut facts, "blocker_refs");
-        for item in &rejected_ledgers {
+        if !blind_review {
+            for item in &rejected_ledgers {
             facts.push(fact_line(
                 "rejected_approaches",
                 format!(
@@ -1217,6 +1227,7 @@ fn build_fact_ledger(
                         .unwrap_or_default()
                 ),
             ));
+            }
         }
         push_none_recorded_unless_present(&mut facts, "rejected_approaches");
         let stage_execution_contract = build_stage_execution_contract(
@@ -1275,15 +1286,25 @@ fn build_fact_ledger(
     facts.push(fact_line("dangerous_assumptions", "none recorded"));
     facts.push(fact_line(
         "review_feedback",
-        plan.review_feedback.as_deref().unwrap_or("none recorded"),
+        if blind_review {
+            "none recorded"
+        } else {
+            plan.review_feedback.as_deref().unwrap_or("none recorded")
+        },
     ));
     facts.push(fact_line(
         "revision_notes",
-        plan.revision_notes.as_deref().unwrap_or("none recorded"),
+        if blind_review {
+            "none recorded"
+        } else {
+            plan.revision_notes.as_deref().unwrap_or("none recorded")
+        },
     ));
     facts.push(fact_line(
         "documentation_feedback",
-        if plan.documentation_feedback.is_empty() {
+        if blind_review {
+            "none recorded".into()
+        } else if plan.documentation_feedback.is_empty() {
             "none recorded".into()
         } else {
             summarize_list(&plan.documentation_feedback)
@@ -1321,6 +1342,9 @@ pub fn project_state_frame_with_st_mode(
 ) -> StateFrame {
     let mut state = stage_to_agent_state(stage);
     let readonly_analysis = is_readonly_analysis(plan, step_id);
+    let current_step = step_id.and_then(|id| plan.steps.iter().find(|s| s.id == id));
+    let blind_review_candidate = infer_review_mode(current_step, readonly_analysis)
+        .is_some_and(|mode| mode.is_independent_review());
 
     // Build archive of completed steps (excluding current step).
     let archive = build_accepted_archive(plan, step_id);
@@ -1337,13 +1361,13 @@ pub fn project_state_frame_with_st_mode(
         .filter(|s| !s.completed)
         .map(|s| retain_open_items(&s.acceptance, &archive))
         .unwrap_or_default();
-    if let Some(context) = step_id
-        .and_then(|id| plan.steps.iter().find(|s| s.id == id))
-        .and_then(|step| step.stage_continuation_context.as_ref())
-    {
-        for item in build_stage_continuation_open_items(context) {
-            if !open_items.iter().any(|existing| existing == &item) {
-                open_items.push(item);
+    if !blind_review_candidate {
+        if let Some(context) = current_step.and_then(|step| step.stage_continuation_context.as_ref())
+        {
+            for item in build_stage_continuation_open_items(context) {
+                if !open_items.iter().any(|existing| existing == &item) {
+                    open_items.push(item);
+                }
             }
         }
     }
@@ -1352,8 +1376,7 @@ pub fn project_state_frame_with_st_mode(
     let blocked_items = retain_blocked_items(stage, &archive);
 
     // accepted_summary: rendered from archive.
-    let accepted_summary = archive_to_summary(&archive);
-    let current_step = step_id.and_then(|id| plan.steps.iter().find(|s| s.id == id));
+    let mut accepted_summary = archive_to_summary(&archive);
     let permission_facts = current_step
         .map(|step| {
             build_permission_facts(
@@ -1382,6 +1405,12 @@ pub fn project_state_frame_with_st_mode(
         readonly_analysis,
         st_mode_enabled,
     );
+    let independent_review = stage_execution_contract
+        .review_mode
+        .is_some_and(|mode| mode.is_independent_review());
+    if independent_review {
+        accepted_summary.clear();
+    }
     let independent_review_runtime_verification =
         independent_review_requires_runtime_verification(&stage_execution_contract);
     if independent_review_runtime_verification {
@@ -1412,8 +1441,10 @@ pub fn project_state_frame_with_st_mode(
         &blocked_items,
         readonly_analysis,
         st_mode_enabled,
+        independent_review,
     ));
     if let Some(step) = step_id.and_then(|id| plan.steps.iter().find(|s| s.id == id)) {
+        if !independent_review {
         if let Some(r) = &step.last_review_summary {
             recent_evidence.push(format!("review: {r}"));
         }
@@ -1422,6 +1453,7 @@ pub fn project_state_frame_with_st_mode(
         }
         if let Some(context) = step.stage_continuation_context.as_ref() {
             recent_evidence.extend(build_stage_continuation_fact_lines(context));
+        }
         }
     }
 
@@ -1753,6 +1785,111 @@ mod tests {
                 .recent_evidence
                 .iter()
                 .any(|line| line == "fact: review_mode independent_review")
+        );
+    }
+
+    #[test]
+    fn independent_review_projection_hides_history_conclusions() {
+        let plan = BossPlan {
+            plan_id: "plan-blind-review".into(),
+            task_description: "audit the output".into(),
+            document_spec: String::new(),
+            pseudo_code: String::new(),
+            draft_spec: None,
+            review_feedback: Some("prior review said use source A".into()),
+            revision_notes: Some("previous reviewer recommended a different target".into()),
+            finalized: false,
+            documentation_feedback: vec!["history says prefer approach B".into()],
+            steps: vec![
+                BossPlanStep {
+                    id: 0,
+                    description: "completed target".into(),
+                    objective: Some("write the target".into()),
+                    acceptance: vec!["completed step".into()],
+                    requires_approval: false,
+                    status: BossPlanStepStatus::Completed,
+                    completed: true,
+                    result_diff: Some("old diff".into()),
+                    worker_task_id: None,
+                    attempt_count: 1,
+                    retry_budget: 3,
+                    last_review_summary: Some("old review said keep going".into()),
+                    last_correction: Some("old correction said read source first".into()),
+                    stage_execution_contract: StageExecutionContract::default(),
+                    stage_continuation_context: None,
+                    executor_b_stage_memory: None,
+                    review_task_id: None,
+                    tool_execution_records: Vec::new(),
+                },
+                BossPlanStep {
+                    id: 1,
+                    description: "audit".into(),
+                    objective: Some("audit this report and summarize risks".into()),
+                    acceptance: vec!["review outcome is clear".into()],
+                    requires_approval: false,
+                    status: BossPlanStepStatus::Running,
+                    completed: false,
+                    result_diff: None,
+                    worker_task_id: None,
+                    attempt_count: 0,
+                    retry_budget: 3,
+                    last_review_summary: Some("do not trust the current result".into()),
+                    last_correction: Some("prefer a different path".into()),
+                    stage_execution_contract: StageExecutionContract::default(),
+                    stage_continuation_context: Some(StageContinuationContext {
+                        failed_target: Some("/tmp/report.md".into()),
+                        verified_facts: vec!["verified from prior review".into()],
+                        next_action: Some("read_source_evidence".into()),
+                        continuity_mode: Some(crate::core::state_frame::ContinuityMode::Repair),
+                        repair_intent: None,
+                    }),
+                    executor_b_stage_memory: None,
+                    review_task_id: None,
+                    tool_execution_records: Vec::new(),
+                },
+            ],
+            accepted_by_user: true,
+            auto_sequence: false,
+            session_snapshot: None,
+        };
+
+        let frame = project_state_frame(&plan, BossStage::Execution, Some(1), ActorRole::Worker);
+
+        assert_eq!(frame.stage_execution_contract.review_mode, Some(ReviewMode::IndependentReview));
+        assert!(frame.accepted_summary.is_empty(), "blind review should not inherit archive summary");
+        assert!(frame
+            .recent_evidence
+            .iter()
+            .all(|line| {
+                !line.starts_with("review: ")
+                    && !line.starts_with("correction: ")
+                    && (!line.starts_with("fact: review_feedback ")
+                        || line == "fact: review_feedback none recorded")
+                    && (!line.starts_with("fact: revision_notes ")
+                        || line == "fact: revision_notes none recorded")
+                    && (!line.starts_with("fact: documentation_feedback ")
+                        || line == "fact: documentation_feedback none recorded")
+                    && (!line.starts_with("fact: review_verdicts ")
+                        || line == "fact: review_verdicts none recorded")
+                    && (!line.starts_with("fact: rejected_approaches ")
+                        || line == "fact: rejected_approaches none recorded")
+                    && (!line.starts_with("fact: artifact_status ")
+                        || line == "fact: artifact_status none recorded")
+            }),
+            "blind review should not inherit conclusion-bearing history"
+        );
+        assert!(
+            frame
+                .recent_evidence
+                .iter()
+                .any(|line| line.starts_with("fact: accepted_constraints "))
+        );
+        assert!(
+            frame
+                .recent_evidence
+                .iter()
+                .all(|line| !line.contains("verified from prior review") && !line.contains("do not trust the current result")),
+            "blind review should not leak continuation/review conclusions"
         );
     }
 
