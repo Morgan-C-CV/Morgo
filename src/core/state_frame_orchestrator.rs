@@ -112,19 +112,21 @@ fn infer_preflight_requirements_from_state_frame(frame: &StateFrame) -> ToolCont
         frame.required_output_schema.as_deref(),
         Some("readonly_audit_4_paragraphs_v1")
     );
+    let artifact_requires_write =
+        |artifact: &crate::core::state_frame::DeclaredArtifactContract| {
+            artifact.required_actions.iter().any(|action| {
+                matches!(
+                    action.as_str(),
+                    "write_file" | "edit_file" | "create" | "write"
+                )
+            })
+        };
     let requires_write = !readonly_contract
         && frame
             .stage_execution_contract
             .declared_artifacts
             .iter()
-            .any(|artifact| {
-                artifact.required_actions.iter().any(|action| {
-                    matches!(
-                        action.as_str(),
-                        "write_file" | "edit_file" | "create" | "write"
-                    )
-                })
-            });
+            .any(artifact_requires_write);
     let requires_command_execution = !readonly_contract
         && (frame.stage_execution_contract.tests.iter().any(|test| {
             test.required_actions
@@ -145,16 +147,19 @@ fn infer_preflight_requirements_from_state_frame(frame: &StateFrame) -> ToolCont
         .declared_artifacts
         .iter()
         .find(|artifact| {
-            artifact.required_actions.iter().any(|action| {
-                matches!(
-                    action.as_str(),
-                    "write_file" | "edit_file" | "create" | "write"
-                )
-            }) && std::path::Path::new(artifact.path.as_str())
+            artifact_requires_write(artifact) && std::path::Path::new(artifact.path.as_str())
                 .extension()
                 .is_some()
         })
-        .map(|artifact| artifact.path.clone());
+        .map(|artifact| artifact.path.clone())
+        .or_else(|| {
+            frame
+                .stage_execution_contract
+                .declared_artifacts
+                .iter()
+                .find(|artifact| artifact_requires_write(artifact) && artifact.kind == "directory")
+                .map(|artifact| format!("{}/README.md", artifact.path.trim_end_matches('/')))
+        });
 
     if requires_write {
         spec.required_allowed_actions.push("write_file".into());
@@ -1198,6 +1203,58 @@ mod tests {
                 .iter()
                 .any(|tool| tool == "Edit"),
             "declared artifact path should clear Edit permission probe: {mismatch:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn direct_worker_preflight_uses_readme_fallback_for_directory_edit_probe() {
+        let registry = ToolRegistry::new()
+            .register(Arc::new(FileEditTool))
+            .register(Arc::new(FileReadTool));
+        let permissions = ToolPermissionContext::new(PermissionMode::Default);
+        let runtime = crate::core::state_frame_loop::StateFrameToolRuntime {
+            registry: registry.clone(),
+            permissions: permissions.clone(),
+            cwd: test_runtime_paths().0,
+            config_root: test_runtime_paths().1,
+        };
+        let artifact_dir = std::env::temp_dir().join("state_frame_preflight_dir_probe");
+        let _ = std::fs::create_dir_all(&artifact_dir);
+        let readme_path = artifact_dir.join("README.md");
+        runtime
+            .permissions
+            .add_delegated_write_path(readme_path.as_path());
+        let mut frame = worker_frame("finish the assigned directory artifact");
+        frame.stage_execution_contract.declared_artifacts.push(
+            crate::core::state_frame::DeclaredArtifactContract {
+                ref_id: "artifact:step0:0".into(),
+                path: artifact_dir.display().to_string(),
+                kind: "directory".into(),
+                required_actions: vec!["write_file".into()],
+                required_evidence: vec!["artifact:step0:0".into()],
+            },
+        );
+        let snapshot = apply_tool_registry_contract(&mut frame, &runtime)
+            .await
+            .expect("snapshot");
+        let assembled = registry.assemble(tool_assembly_context_for_role(frame.role));
+        let mismatch = assembled
+            .preflight_contract(
+                &runtime.permissions,
+                &snapshot,
+                &infer_preflight_requirements_from_state_frame(&frame),
+            )
+            .await
+            .expect_err(
+                "directory write still lacks bash/write capability, but Edit should use README.md probe",
+            );
+        let _ = std::fs::remove_dir_all(&artifact_dir);
+        assert!(
+            !mismatch
+                .permission_denied_tools
+                .iter()
+                .any(|tool| tool == "Edit"),
+            "directory artifact should probe Edit with README.md fallback: {mismatch:?}"
         );
     }
 

@@ -42,28 +42,69 @@ fn current_task_contract_text(text: &str) -> String {
 }
 
 fn is_readonly_analysis(plan: &BossPlan, step_id: Option<usize>) -> bool {
-    let objective = step_id
+    let mut objective = step_id
         .and_then(|id| plan.steps.iter().find(|s| s.id == id))
-        .map(|s| s.objective())
-        .unwrap_or(plan.task_description.as_str())
-        .to_lowercase();
-    contains_any(
+        .map(|s| {
+            let mut text = s.objective().to_string();
+            if !s.acceptance.is_empty() {
+                text.push('\n');
+                text.push_str(&s.acceptance.join("\n"));
+            }
+            text
+        })
+        .unwrap_or_else(|| plan.task_description.clone());
+    objective = current_task_contract_text(&objective).to_lowercase();
+
+    if contains_any(
         &objective,
         &[
-            "只读",
             "不改文件",
             "不要改文件",
             "不要改代码",
             "不要写 patch",
             "不提出 patch",
             "只做只读",
-            "read-only",
-            "readonly",
             "do not modify",
             "no code changes",
             "no patch",
         ],
-    )
+    ) {
+        return true;
+    }
+
+    let has_soft_readonly_marker = contains_any(
+        &objective,
+        &["只读", "read-only", "readonly", "readonly-audit"],
+    );
+    if !has_soft_readonly_marker {
+        return false;
+    }
+
+    let has_write_intent = contains_any(
+        &objective,
+        &[
+            "允许修改",
+            "允许写",
+            "创建",
+            "写入",
+            "生成",
+            "落地",
+            "实现",
+            "修改文件",
+            "create",
+            "write",
+            "generate",
+            "implement",
+            "build",
+            "scaffold",
+            "edit",
+            "validator",
+            "tool",
+            "script",
+        ],
+    ) || !extract_artifact_expectations(&objective).is_empty();
+
+    !has_write_intent
 }
 
 fn path_looks_like_development_artifact(path: &str) -> bool {
@@ -214,11 +255,21 @@ fn step_looks_like_independent_review_task(
         "bug",
         "patch",
         "refactor",
+        "创建",
+        "写入",
+        "修改",
+        "实现",
+        "构建",
+        "生成",
+        "validator",
+        "tool",
         "frontend",
         "build",
         "script",
         "code",
         "feature",
+        "create",
+        "write",
         "cli",
     ]
     .iter()
@@ -1703,6 +1754,67 @@ mod tests {
                 .iter()
                 .any(|line| line == "fact: review_mode independent_review")
         );
+    }
+
+    #[test]
+    fn readonly_audit_validator_creation_task_is_not_projected_as_readonly_analysis() {
+        let plan = BossPlan {
+            plan_id: "plan-readonly-audit-validator".into(),
+            task_description: "create validator".into(),
+            document_spec: String::new(),
+            pseudo_code: String::new(),
+            draft_spec: None,
+            review_feedback: None,
+            revision_notes: None,
+            finalized: false,
+            documentation_feedback: Vec::new(),
+            steps: vec![BossPlanStep {
+                id: 0,
+                description: "create validator".into(),
+                objective: Some(
+                    "创建一个 StateDecision/readonly-audit contract 验证器。目标目录：/tmp/state-decision-validator。允许修改文件、创建目录、运行必要命令。".into(),
+                ),
+                acceptance: vec![
+                    "target directory exists and is non-empty: /tmp/state-decision-validator"
+                        .into(),
+                ],
+                requires_approval: false,
+                status: BossPlanStepStatus::Running,
+                completed: false,
+                result_diff: None,
+                worker_task_id: None,
+                attempt_count: 0,
+                retry_budget: 3,
+                last_review_summary: None,
+                last_correction: None,
+                stage_execution_contract: StageExecutionContract::default(),
+                stage_continuation_context: None,
+                executor_b_stage_memory: None,
+                review_task_id: None,
+                tool_execution_records: Vec::new(),
+            }],
+            accepted_by_user: true,
+            auto_sequence: false,
+            session_snapshot: None,
+        };
+
+        let frame = project_state_frame(&plan, BossStage::Execution, Some(0), ActorRole::Worker);
+
+        assert_eq!(frame.state, AgentState::Executing);
+        assert_eq!(
+            frame.stage_execution_contract.review_mode,
+            Some(ReviewMode::TargetVerification)
+        );
+        assert!(
+            frame
+                .recent_evidence
+                .iter()
+                .all(|line| !line.contains("execution_mode read_only_analysis")),
+            "readonly-audit as a contract name must not remove write capability"
+        );
+        assert!(frame.recent_evidence.iter().any(|line| {
+            line.contains("fact: permission_to_create_and_write:/tmp/state-decision-validator")
+        }));
     }
 
     #[test]
