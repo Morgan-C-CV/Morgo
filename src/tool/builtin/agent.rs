@@ -25,6 +25,8 @@ use crate::tool::definition::{Tool, ToolCall, ToolMetadata, ToolResult};
 use crate::tool::registry::ToolRegistry;
 use tracing::info;
 
+const INDEPENDENT_REVIEW_MODE: &str = "independent_review";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum AgentRequest {
     Spawn(SpawnAgentRequest),
@@ -53,6 +55,7 @@ struct SpawnAgentRequest {
     step_acceptance: Vec<String>,
     parent_session_id: Option<String>,
     requires_verification: bool,
+    review_mode: Option<String>,
     lism_policy: WorkerLisMPolicy,
     st_mode: bool,
     continuation_context: Option<StageContinuationContext>,
@@ -98,6 +101,7 @@ struct AgentJsonRequest {
     step_acceptance: Option<Vec<String>>,
     parent_session_id: Option<String>,
     requires_verification: Option<bool>,
+    review_mode: Option<String>,
     lism_policy: Option<String>,
     st_mode: Option<bool>,
     task_id: Option<String>,
@@ -472,6 +476,7 @@ fn parse_agent_request(input: &str) -> anyhow::Result<AgentRequest> {
                 step_acceptance: request.step_acceptance.unwrap_or_default(),
                 parent_session_id: request.parent_session_id,
                 requires_verification: request.requires_verification.unwrap_or(false),
+                review_mode: parse_review_mode(request.review_mode.as_deref(), role)?,
                 lism_policy: parse_worker_lism_policy(request.lism_policy.as_deref(), role)?,
                 st_mode: request.st_mode.unwrap_or(false),
                 continuation_context: request.continuation_payload,
@@ -510,6 +515,7 @@ fn parse_agent_request(input: &str) -> anyhow::Result<AgentRequest> {
         step_acceptance: Vec::new(),
         parent_session_id: None,
         requires_verification: false,
+        review_mode: None,
         lism_policy: WorkerLisMPolicy::default_for_role(WorkerRole::Research),
         st_mode: false,
         continuation_context: None,
@@ -521,6 +527,7 @@ fn parse_agent_request(input: &str) -> anyhow::Result<AgentRequest> {
 fn build_worker_task_input(request: &SpawnAgentRequest) -> String {
     if request.task_contains_boss_context {
         let mut task = with_verify_output_contract(request.role, request.task.clone());
+        append_review_mode_section(&mut task, request.review_mode.as_deref());
         if request.st_mode {
             task.push_str(
                 "\n<st-mode>\nprefer a deterministic automated validation command or smoke check before extra repair prose; report the exact command, result, and minimal runtime evidence\n</st-mode>",
@@ -580,6 +587,10 @@ fn build_worker_task_input(request: &SpawnAgentRequest) -> String {
         sections.push("</boss-step-context>".into());
     }
 
+    if let Some(review_mode) = request.review_mode.as_deref() {
+        sections.extend(render_review_mode_section(review_mode));
+    }
+
     if request.role == WorkerRole::Verify {
         sections.push("<verify-output-contract>".into());
         sections.push(
@@ -598,6 +609,26 @@ fn build_worker_task_input(request: &SpawnAgentRequest) -> String {
     }
 
     with_verify_output_contract(request.role, sections.join("\n"))
+}
+
+fn append_review_mode_section(task: &mut String, review_mode: Option<&str>) {
+    let Some(review_mode) = review_mode else {
+        return;
+    };
+    task.push('\n');
+    task.push_str(&render_review_mode_section(review_mode).join("\n"));
+}
+
+fn render_review_mode_section(review_mode: &str) -> Vec<String> {
+    let mut sections = vec!["<review-mode>".into(), format!("mode: {review_mode}")];
+    if review_mode == INDEPENDENT_REVIEW_MODE {
+        sections.push(
+            "act as an independent verifier: use only the provided contract, allowed tools, and runtime evidence; do not inherit implementation-worker assumptions or treat prose-only claims as verified facts"
+                .into(),
+        );
+    }
+    sections.push("</review-mode>".into());
+    sections
 }
 
 fn render_shared_step_memory_section(memory: &SharedStepMemory) -> Vec<String> {
@@ -1331,6 +1362,7 @@ mod tests {
             step_acceptance: vec!["acceptance 1".into()],
             parent_session_id: Some("parent-session".into()),
             requires_verification: false,
+            review_mode: None,
             lism_policy: WorkerLisMPolicy::default_for_role(WorkerRole::Implement),
             st_mode: false,
             continuation_context: None,
@@ -1403,7 +1435,11 @@ mod tests {
     fn build_worker_task_input_adds_verify_output_contract_for_verify_role() {
         let mut request = sample_spawn_request();
         request.role = WorkerRole::Verify;
+        request.review_mode = Some(INDEPENDENT_REVIEW_MODE.into());
         let input = build_worker_task_input(&request);
+        assert!(input.contains("<review-mode>"));
+        assert!(input.contains("mode: independent_review"));
+        assert!(input.contains("act as an independent verifier"));
         assert!(input.contains("<verify-output-contract>"));
         assert!(input.contains("return exactly five short fields only"));
         assert!(input.contains("do not include analysis"));
@@ -1411,6 +1447,18 @@ mod tests {
         assert!(input.contains(
             "set evidence_refs to read:<verified_target> when verification_result is verified"
         ));
+    }
+
+    #[test]
+    fn parse_verify_request_defaults_to_independent_review_mode() {
+        let request = parse_agent_request(
+            r#"{"task":"verify /tmp/report.md","role":"verify","reuse_strategy":"fresh"}"#,
+        )
+        .expect("parse request");
+        let AgentRequest::Spawn(request) = request else {
+            panic!("expected spawn request");
+        };
+        assert_eq!(request.review_mode.as_deref(), Some(INDEPENDENT_REVIEW_MODE));
     }
 
     #[test]
@@ -1774,6 +1822,15 @@ fn parse_reuse_strategy(value: Option<&str>, role: WorkerRole) -> anyhow::Result
             WorkerRole::Research => ReuseStrategy::RunningOnly,
             WorkerRole::Implement | WorkerRole::Verify => ReuseStrategy::Fresh,
         }),
+    }
+}
+
+fn parse_review_mode(value: Option<&str>, role: WorkerRole) -> anyhow::Result<Option<String>> {
+    match value {
+        Some(INDEPENDENT_REVIEW_MODE) => Ok(Some(INDEPENDENT_REVIEW_MODE.into())),
+        Some(other) => anyhow::bail!("unknown review mode: {other}"),
+        None if role == WorkerRole::Verify => Ok(Some(INDEPENDENT_REVIEW_MODE.into())),
+        None => Ok(None),
     }
 }
 

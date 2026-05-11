@@ -52,6 +52,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 pub(crate) const PERSISTED_WORKER_TASK_USAGE_SIGNAL: &str = "persisted_worker_task_usage";
+const INDEPENDENT_REVIEW_MODE: &str = "independent_review";
 
 fn current_task_contract_text(text: &str) -> String {
     const HISTORICAL_CONTEXT_MARKERS: &[&str] = &[
@@ -5514,25 +5515,14 @@ impl BossCoordinator {
         let task = format!(
             "Restricted review verification for boss step {step_id}.\n\
              You are verify_child. Do not spawn agents or broaden the task.\n\
+             This is an independent review pass: do not inherit implementation-worker assumptions or treat prose-only claims as verified facts.\n\
              Use only minimal read-only verification on these exact target(s):\n- {}\n\
              Review package excerpt:\n{}\n\
              Return the verify output contract fields only.",
             targets.join("\n- "),
             review_summary
         );
-        let payload = json!({
-            "task": task,
-            "role": "verify",
-            "inherit_context": false,
-            "allowed_tools": ["Read"],
-            "reuse_strategy": "fresh",
-            "max_turns": 20,
-            "step_id": step_id,
-            "boss_actor_role": "verify_child",
-            "boss_lineage_depth": 1,
-            "parent_runtime_role": "designer_a",
-        })
-        .to_string();
+        let payload = Self::build_independent_review_verifier_payload(step_id, task);
         let task_id = self
             .invoke_agent_tool_with_task_id(app_state, &payload)
             .await?;
@@ -5556,6 +5546,23 @@ impl BossCoordinator {
         )
         .await;
         Ok(output)
+    }
+
+    fn build_independent_review_verifier_payload(step_id: usize, task: String) -> String {
+        json!({
+            "task": task,
+            "role": "verify",
+            "inherit_context": false,
+            "allowed_tools": ["Read"],
+            "reuse_strategy": "fresh",
+            "review_mode": INDEPENDENT_REVIEW_MODE,
+            "max_turns": 20,
+            "step_id": step_id,
+            "boss_actor_role": "verify_child",
+            "boss_lineage_depth": 1,
+            "parent_runtime_role": "designer_a",
+        })
+        .to_string()
     }
 
     fn restricted_verifier_targets(
@@ -10053,6 +10060,10 @@ refresh_reason: {}\n\n{}",
                 WorkerRole::Verify => "fresh",
                 WorkerRole::Implement => "running_only",
                 WorkerRole::Research => "running_only",
+            },
+            "review_mode": match contract.worker_role {
+                WorkerRole::Verify => Some(INDEPENDENT_REVIEW_MODE),
+                _ => None::<&str>,
             },
             "step_id": contract.brief.step_id,
             "boss_plan_id": plan_id,
@@ -16501,6 +16512,31 @@ mod tests {
     }
 
     #[test]
+    fn independent_review_verifier_payload_sets_mode_and_read_only_scope() {
+        let payload = BossCoordinator::build_independent_review_verifier_payload(
+            17,
+            "Restricted review verification for boss step 17.".into(),
+        );
+        let json: serde_json::Value = serde_json::from_str(&payload).expect("json payload");
+
+        assert_eq!(json.get("role").and_then(|v| v.as_str()), Some("verify"));
+        assert_eq!(
+            json.get("reuse_strategy").and_then(|v| v.as_str()),
+            Some("fresh")
+        );
+        assert_eq!(
+            json.get("review_mode").and_then(|v| v.as_str()),
+            Some("independent_review")
+        );
+        assert_eq!(
+            json.get("allowed_tools")
+                .and_then(|v| v.as_array())
+                .map(|v| v.len()),
+            Some(1)
+        );
+    }
+
+    #[test]
     fn restricted_verifier_targets_normalize_agent_relative_paths() {
         let normalized = normalize_review_verifier_target_with_cwd(
             "read:src/tool/definition.rs",
@@ -19958,6 +19994,10 @@ mod tests {
         assert_eq!(
             json.get("reuse_strategy").and_then(|v| v.as_str()),
             Some("fresh")
+        );
+        assert_eq!(
+            json.get("review_mode").and_then(|v| v.as_str()),
+            Some("independent_review")
         );
     }
 
