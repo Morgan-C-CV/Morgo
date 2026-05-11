@@ -1,6 +1,6 @@
 use crate::core::boss_state::{BossPlanStepStatus, ExecutorBStageMemory};
 use crate::core::prompt_segment::{PromptAssembly, PromptSegment, PromptSegmentKind};
-use crate::core::state_frame::{StageContinuationContext, StageExecutionContract};
+use crate::core::state_frame::{ReviewMode, StageContinuationContext, StageExecutionContract};
 use serde::{Deserialize, Serialize};
 
 /// Which context strategy was used to build the B/child initial prompt.
@@ -74,6 +74,8 @@ pub struct BossContextBrief {
 pub struct BossStateFrame {
     pub step_id: usize,
     pub status: BossPlanStepStatus,
+    #[serde(default)]
+    pub review_mode: Option<ReviewMode>,
     pub stage_execution_contract: StageExecutionContract,
     #[serde(default)]
     pub stage_continuation_context: Option<StageContinuationContext>,
@@ -166,6 +168,9 @@ impl BossStateFrame {
             format!("step_id: {}", self.step_id),
             format!("status: {:?}", self.status),
         ];
+        if let Some(review_mode) = self.review_mode {
+            lines.push(format!("review_mode: {}", review_mode.as_str()));
+        }
         if !self.stage_execution_contract.declared_artifacts.is_empty()
             || !self.stage_execution_contract.verifications.is_empty()
             || !self.stage_execution_contract.tests.is_empty()
@@ -173,8 +178,12 @@ impl BossStateFrame {
                 .stage_execution_contract
                 .content_evidence_targets
                 .is_empty()
+            || self.stage_execution_contract.review_mode.is_some()
         {
             lines.push("stage_execution_contract:".into());
+            if let Some(review_mode) = self.stage_execution_contract.review_mode {
+                lines.push(format!("  - review_mode={}", review_mode.as_str()));
+            }
             for artifact in &self.stage_execution_contract.declared_artifacts {
                 lines.push(format!(
                     "  - declared_artifact ref={} path={} kind={} required_actions={} required_evidence={}",
@@ -357,6 +366,7 @@ mod tests {
         let frame = BossStateFrame {
             step_id: 0,
             status: BossPlanStepStatus::Running,
+            review_mode: None,
             stage_execution_contract: StageExecutionContract {
                 declared_artifacts: vec![DeclaredArtifactContract {
                     ref_id: "artifact:step0:0".into(),

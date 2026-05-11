@@ -7332,6 +7332,7 @@ fn make_frame(step_id: usize) -> BossStateFrame {
     BossStateFrame {
         step_id,
         status: BossPlanStepStatus::Running,
+        review_mode: None,
         stage_execution_contract: rust_agent::core::state_frame::StageExecutionContract::default(),
         stage_continuation_context: None,
         open_items: vec!["write tests".into()],
@@ -7398,6 +7399,7 @@ fn t26_4_brief_fingerprint_stable_across_state_frame_changes() {
     let frame2 = BossStateFrame {
         step_id: 1,
         status: BossPlanStepStatus::Running,
+        review_mode: None,
         stage_execution_contract: rust_agent::core::state_frame::StageExecutionContract::default(),
         stage_continuation_context: None,
         open_items: vec!["DIFFERENT open item".into()],

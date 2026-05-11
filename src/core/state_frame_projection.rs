@@ -5,7 +5,7 @@ use crate::core::state_fact_ledger::{
     build_step_fact_ledgers,
 };
 use crate::core::state_frame::{
-    ActorRole, AgentState, DeclaredArtifactContract, StageContinuationContext,
+    ActorRole, AgentState, DeclaredArtifactContract, ReviewMode, StageContinuationContext,
     StageExecutionContract, StateBudget, StateFrame, TestContract, VerificationContract,
 };
 use crate::core::state_frame_archive::{
@@ -168,6 +168,73 @@ fn apply_development_test_policy(contract: &mut StageExecutionContract) {
         contract
             .required_evidence
             .push("runtime_test_passed".into());
+    }
+}
+
+fn step_looks_like_independent_review_task(
+    step: Option<&crate::core::boss_state::BossPlanStep>,
+    readonly_analysis: bool,
+) -> bool {
+    if readonly_analysis {
+        return true;
+    }
+
+    let Some(step) = step else {
+        return false;
+    };
+
+    let mut text = current_task_contract_text(step.objective()).to_ascii_lowercase();
+    if !step.acceptance.is_empty() {
+        text.push('\n');
+        text.push_str(
+            &step
+                .acceptance
+                .iter()
+                .map(|item| item.to_ascii_lowercase())
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+    }
+
+    let has_review_marker = [
+        "audit",
+        "verify",
+        "verification",
+        "review",
+        "analysis",
+        "report",
+        "research",
+    ]
+    .iter()
+    .any(|marker| text.contains(marker));
+    let has_code_change_marker = [
+        "implement",
+        "implementation",
+        "fix",
+        "bug",
+        "patch",
+        "refactor",
+        "frontend",
+        "build",
+        "script",
+        "code",
+        "feature",
+        "cli",
+    ]
+    .iter()
+    .any(|marker| text.contains(marker));
+
+    has_review_marker && !has_code_change_marker
+}
+
+fn infer_review_mode(
+    step: Option<&crate::core::boss_state::BossPlanStep>,
+    readonly_analysis: bool,
+) -> Option<ReviewMode> {
+    if step_looks_like_independent_review_task(step, readonly_analysis) {
+        Some(ReviewMode::IndependentReview)
+    } else {
+        Some(ReviewMode::TargetVerification)
     }
 }
 
@@ -496,7 +563,9 @@ fn build_stage_execution_contract(
             }
             acc
         });
+    let review_mode = infer_review_mode(step, readonly_analysis);
     let mut contract = StageExecutionContract {
+        review_mode,
         declared_artifacts,
         verifications,
         tests,
@@ -512,6 +581,9 @@ fn build_stage_execution_contract(
 
 fn build_stage_contract_facts(contract: &StageExecutionContract) -> Vec<String> {
     let mut facts = Vec::new();
+    if let Some(review_mode) = contract.review_mode {
+        facts.push(fact_line("review_mode", review_mode.as_str()));
+    }
     for artifact in &contract.declared_artifacts {
         facts.push(fact_line(
             "declared_artifact_contract",
@@ -1246,8 +1318,8 @@ mod tests {
     };
     use crate::core::boss_state::{BossPlan, BossPlanStep, BossPlanStepStatus, BossStage};
     use crate::core::state_frame::{
-        ActorRole, AgentState, ContinuityMode, StageContinuationContext, StageExecutionContract,
-        StateBudget, StateFrame,
+        ActorRole, AgentState, ContinuityMode, ReviewMode, StageContinuationContext,
+        StageExecutionContract, StateBudget, StateFrame,
     };
 
     #[test]
@@ -1480,6 +1552,57 @@ mod tests {
                 .filter(|line| line.starts_with("fact: completion_contract "))
                 .all(|line| !line.contains("verification_evidence")
                     && !line.contains("verification_refs"))
+        );
+    }
+
+    #[test]
+    fn project_state_frame_defaults_audit_tasks_to_independent_review() {
+        let plan = BossPlan {
+            plan_id: "plan-review".into(),
+            task_description: "audit the output".into(),
+            document_spec: String::new(),
+            pseudo_code: String::new(),
+            draft_spec: None,
+            review_feedback: None,
+            revision_notes: None,
+            finalized: false,
+            documentation_feedback: Vec::new(),
+            steps: vec![BossPlanStep {
+                id: 0,
+                description: "audit".into(),
+                objective: Some("audit this report and summarize risks".into()),
+                acceptance: vec!["review outcome is clear".into()],
+                requires_approval: false,
+                status: BossPlanStepStatus::Running,
+                completed: false,
+                result_diff: None,
+                worker_task_id: None,
+                attempt_count: 0,
+                retry_budget: 3,
+                last_review_summary: None,
+                last_correction: None,
+                stage_execution_contract: StageExecutionContract::default(),
+                stage_continuation_context: None,
+                executor_b_stage_memory: None,
+                review_task_id: None,
+                tool_execution_records: Vec::new(),
+            }],
+            accepted_by_user: true,
+            auto_sequence: false,
+            session_snapshot: None,
+        };
+
+        let frame = project_state_frame(&plan, BossStage::Execution, Some(0), ActorRole::Worker);
+
+        assert_eq!(
+            frame.stage_execution_contract.review_mode,
+            Some(ReviewMode::IndependentReview)
+        );
+        assert!(
+            frame
+                .recent_evidence
+                .iter()
+                .any(|line| line == "fact: review_mode independent_review")
         );
     }
 

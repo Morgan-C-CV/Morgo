@@ -29,6 +29,27 @@ pub enum AgentState {
     Done,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewMode {
+    #[default]
+    TargetVerification,
+    IndependentReview,
+}
+
+impl ReviewMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::TargetVerification => "target_verification",
+            Self::IndependentReview => "independent_review",
+        }
+    }
+
+    pub fn is_independent_review(self) -> bool {
+        matches!(self, Self::IndependentReview)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CompletionEvidenceStatus {
@@ -96,6 +117,8 @@ pub struct TestContract {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct StageExecutionContract {
+    #[serde(default)]
+    pub review_mode: Option<ReviewMode>,
     #[serde(default)]
     pub declared_artifacts: Vec<DeclaredArtifactContract>,
     #[serde(default)]

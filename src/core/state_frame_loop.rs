@@ -7,7 +7,7 @@ use crate::core::state_fact_ledger::{
 };
 use crate::core::state_frame::{
     AgentState, CompletionEvidenceGap, CompletionEvidenceStatus, CompletionGateBlock, DecisionKind,
-    RepairNeeded, StageExecutionContract, StateFrame, StatePatch, WorkerStructuredReport,
+    RepairNeeded, ReviewMode, StateFrame, StatePatch, WorkerStructuredReport,
     validate_state_decision,
 };
 use crate::core::state_frame_hydration::{
@@ -1495,6 +1495,63 @@ fn source_evidence_gate_enabled(frame: &StateFrame) -> bool {
             || completion_contract_requirement(frame, "verification_evidence"))
 }
 
+fn review_mode(frame: &StateFrame) -> ReviewMode {
+    frame
+        .stage_execution_contract
+        .review_mode
+        .unwrap_or(ReviewMode::TargetVerification)
+}
+
+fn independent_review_enabled(frame: &StateFrame) -> bool {
+    review_mode(frame).is_independent_review()
+}
+
+fn independent_review_has_runtime_success(usage: &LoopUsage) -> bool {
+    usage
+        .tool_execution_records
+        .iter()
+        .any(|record| record.kind == ToolExecutionOutcomeKind::Success)
+}
+
+fn independent_review_can_close_with_refs(
+    frame: &StateFrame,
+    usage: &LoopUsage,
+    evidence_refs: &[String],
+) -> bool {
+    if !independent_review_enabled(frame) {
+        return false;
+    }
+    if completion_contract_requirement(frame, "artifact_evidence")
+        && !missing_artifact_evidence_refs(frame).is_empty()
+    {
+        return false;
+    }
+    if completion_contract_requirement(frame, "test_evidence")
+        && !missing_test_evidence_refs(frame).is_empty()
+    {
+        return false;
+    }
+    if source_evidence_gate_enabled(frame)
+        && !missing_source_evidence_targets(frame, evidence_refs).is_empty()
+    {
+        return false;
+    }
+    if !completion_contract_requirement(frame, "verification_evidence") {
+        return true;
+    }
+
+    worker_has_target_scoped_verification_anchor(frame, evidence_refs)
+        || verification_read_anchor_closed(frame, evidence_refs)
+        || verification_runtime_read_anchor_closed(frame, usage)
+        || completion_gate_required_reads_closed(frame, usage)
+        || independent_review_has_runtime_success(usage)
+}
+
+fn independent_review_can_close(frame: &StateFrame, usage: &LoopUsage) -> bool {
+    let evidence_refs = collect_evidence_refs(frame, Some(usage));
+    independent_review_can_close_with_refs(frame, usage, &evidence_refs)
+}
+
 fn recommended_action_for_gap(
     frame: &StateFrame,
     missing_artifact_evidence: bool,
@@ -1688,6 +1745,9 @@ fn evaluate_completion_evidence(frame: &StateFrame, usage: &LoopUsage) -> Comple
             return CompletionEvidenceStatus::MissingVerificationEvidence;
         }
         evidence_refs = Some(refs);
+    }
+    if independent_review_can_close(frame, usage) {
+        return CompletionEvidenceStatus::Sufficient;
     }
     if completion_contract_requirement(frame, "verification_evidence")
         && !missing_verification_evidence_refs(frame).is_empty()
@@ -2000,7 +2060,10 @@ fn build_worker_structured_report_with_refs(
         || verification_runtime_read_anchor_closed(frame, usage);
     let completion_gate_reads_closed = completion_gate_required_reads_closed(frame, usage);
     let source_evidence_closed = missing_source_evidence_targets(frame, &evidence_refs).is_empty();
-    let completion = if matches!(
+    let independent_review_closed =
+        independent_review_can_close_with_refs(frame, usage, &evidence_refs);
+    let completion = if independent_review_closed
+        || matches!(
         completion,
         CompletionEvidenceStatus::MissingVerificationEvidence
     ) && source_evidence_closed
@@ -2015,14 +2078,14 @@ fn build_worker_structured_report_with_refs(
     let mut completion_evidence_gaps =
         collect_completion_evidence_gaps_with_refs(frame, &evidence_refs);
     if matches!(completion, CompletionEvidenceStatus::Sufficient)
-        && source_evidence_closed
-        && (read_anchor_closed || completion_gate_reads_closed)
+        && (independent_review_closed
+            || (source_evidence_closed && (read_anchor_closed || completion_gate_reads_closed)))
     {
         completion_evidence_gaps.retain(|gap| !gap.missing_verification_evidence);
     }
     let verification_status = if matches!(completion, CompletionEvidenceStatus::Sufficient)
-        && (read_anchor_closed || completion_gate_reads_closed)
-        && source_evidence_closed
+        && (independent_review_closed
+            || ((read_anchor_closed || completion_gate_reads_closed) && source_evidence_closed))
     {
         "verified".into()
     } else {
@@ -2185,8 +2248,9 @@ fn verification_terminal_outcome(frame: &StateFrame, usage: &mut LoopUsage) -> O
         .last_effective_tool_action
         .as_deref()
         .unwrap_or("none");
-    let read_tailspin_candidate =
-        verification_target_read_count >= 2 && has_target_read_anchor && source_evidence_closed;
+    let read_tailspin_candidate = verification_target_read_count >= 2
+        && (has_target_read_anchor || completion_gate_reads_closed)
+        && source_evidence_closed;
 
     let completion = evaluate_completion_evidence(frame, usage);
     if matches!(completion, CompletionEvidenceStatus::Sufficient) {
@@ -4314,7 +4378,8 @@ mod tests {
     use crate::core::state_frame::validate_state_decision;
     use crate::core::state_frame::{
         ActorRole, AgentState, CompletionEvidenceStatus, DeclaredArtifactContract,
-        StageExecutionContract, StateBudget, StateFrame, TestContract, VerificationContract,
+        ReviewMode, StageExecutionContract, StateBudget, StateFrame, TestContract,
+        VerificationContract,
     };
     use crate::core::state_frame_hydration::hydrate_needed_context;
     use crate::service::api::client::ModelProviderClient;
@@ -5779,6 +5844,94 @@ mod tests {
         assert_eq!(
             super::evaluate_completion_evidence(&frame, &LoopUsage::default()),
             CompletionEvidenceStatus::Sufficient
+        );
+    }
+
+    #[test]
+    fn independent_review_can_close_with_runtime_success_signal_even_without_target_anchor() {
+        let mut frame = make_frame();
+        frame.recent_evidence.clear();
+        frame.stage_execution_contract.review_mode = Some(ReviewMode::IndependentReview);
+        push_completion_contract_with_refs(
+            &mut frame,
+            &["artifact:contract:0"],
+            &[],
+            &["artifact:contract:0"],
+        );
+        push_artifact_target_fact(&mut frame, "artifact:contract:0", "/tmp/report.md", "file");
+        frame.recent_evidence.push(
+            "fact: artifact_status ref=artifact:runtime:0 path=/tmp/report.md kind=file status=created source=tool:Write source_event_id=tool-write:1 freshness=after-runtime-write confidence=1.00 lineage_status=active invalidated_by=none supersedes=none conflicts_with=none summary=artifact created".into(),
+        );
+
+        let usage = LoopUsage {
+            tool_execution_records: vec![ToolExecutionRecord {
+                tool_name: "Write".into(),
+                outcome: "Text".into(),
+                kind: ToolExecutionOutcomeKind::Success,
+                summary: "Write succeeded".into(),
+                detail: None,
+                pending_approval: None,
+                report_modifier: crate::tool::result::ToolReportModifier::None,
+                observable_input: Some(ObservableInput {
+                    value: r#"{"file_path":"/tmp/report.md"}"#.into(),
+                    source: ObservableInputSource::Raw,
+                }),
+                batch_context: ToolBatchContext {
+                    batch_index: 0,
+                    batch_size: 1,
+                    executed_in_batch: false,
+                },
+            }],
+            ..LoopUsage::default()
+        };
+
+        assert_eq!(
+            super::evaluate_completion_evidence(&frame, &usage),
+            CompletionEvidenceStatus::Sufficient
+        );
+    }
+
+    #[test]
+    fn target_verification_still_blocks_without_runtime_anchor() {
+        let mut frame = make_frame();
+        frame.recent_evidence.clear();
+        frame.stage_execution_contract.review_mode = Some(ReviewMode::TargetVerification);
+        push_completion_contract_with_refs(
+            &mut frame,
+            &["artifact:contract:0"],
+            &[],
+            &["artifact:contract:0"],
+        );
+        push_artifact_target_fact(&mut frame, "artifact:contract:0", "/tmp/report.md", "file");
+        frame.recent_evidence.push(
+            "fact: artifact_status ref=artifact:runtime:0 path=/tmp/report.md kind=file status=created source=tool:Write source_event_id=tool-write:1 freshness=after-runtime-write confidence=1.00 lineage_status=active invalidated_by=none supersedes=none conflicts_with=none summary=artifact created".into(),
+        );
+
+        let usage = LoopUsage {
+            tool_execution_records: vec![ToolExecutionRecord {
+                tool_name: "Write".into(),
+                outcome: "Text".into(),
+                kind: ToolExecutionOutcomeKind::Success,
+                summary: "Write succeeded".into(),
+                detail: None,
+                pending_approval: None,
+                report_modifier: crate::tool::result::ToolReportModifier::None,
+                observable_input: Some(ObservableInput {
+                    value: r#"{"file_path":"/tmp/report.md"}"#.into(),
+                    source: ObservableInputSource::Raw,
+                }),
+                batch_context: ToolBatchContext {
+                    batch_index: 0,
+                    batch_size: 1,
+                    executed_in_batch: false,
+                },
+            }],
+            ..LoopUsage::default()
+        };
+
+        assert_eq!(
+            super::evaluate_completion_evidence(&frame, &usage),
+            CompletionEvidenceStatus::MissingVerificationEvidence
         );
     }
 

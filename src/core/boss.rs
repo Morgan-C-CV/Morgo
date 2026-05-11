@@ -24,7 +24,7 @@ use crate::core::lism_ab_sample::SharedLisMAbSampleSink;
 use crate::core::prompt_budget::{BudgetDecision, evaluate_message_budget};
 use crate::core::state_frame::{
     ActorRole, CompletionEvidenceGap, CompletionEvidenceStatus, DeclaredArtifactContract,
-    StageExecutionContract, TestContract, VerificationContract,
+    ReviewMode, StageExecutionContract, TestContract, VerificationContract,
 };
 use crate::core::state_frame_loop::{DecisionLoopConfig, StateFrameToolRuntime};
 use crate::core::state_frame_model_router::ModelTier;
@@ -150,6 +150,7 @@ fn step_completion_gate_error(
         Some("sufficient")
     );
     let worker_report = metadata.worker_report.as_ref();
+    let independent_review = worker_report.is_some_and(worker_report_uses_independent_review);
     let runtime_refs = runtime_evidence_refs_from_tool_records(step);
     let runtime_report =
         worker_report.map(|report| worker_report_runtime_view(report, &runtime_refs));
@@ -169,6 +170,17 @@ fn step_completion_gate_error(
         .as_ref()
         .is_some_and(|report| worker_report_has_required_source_evidence(step, report));
     let unresolved_core_read_failure = step_has_unresolved_core_read_failure(step);
+    if independent_review
+        && completion_sufficient
+        && worker_verification_satisfied
+        && worker_completion_sufficient
+        && source_evidence_satisfied
+        && !unresolved_core_read_failure
+        && !step_report_body_looks_like_placeholder(step)
+        && metadata.completion_evidence_gaps.is_empty()
+    {
+        return None;
+    }
     let verification_gate_satisfied = completion_sufficient
         && worker_verification_satisfied
         && worker_completion_sufficient
@@ -230,6 +242,15 @@ fn metadata_has_open_verification_gap(metadata: Option<&BossStepRoutedMetadata>)
                     .iter()
                     .any(|gap| gap.missing_verification_evidence)
         })
+}
+
+fn worker_report_uses_independent_review(
+    report: &crate::core::state_frame::WorkerStructuredReport,
+) -> bool {
+    report
+        .stage_execution_contract
+        .review_mode
+        .is_some_and(|mode| mode.is_independent_review())
 }
 
 fn terminalization_blocked_step(
@@ -1718,6 +1739,7 @@ fn verification_first_contract_fact_is_target_scoped(fact: &str, target: &str) -
 
 fn build_verification_first_minimal_contract(target: &str, kind: &str) -> StageExecutionContract {
     StageExecutionContract {
+        review_mode: Some(ReviewMode::IndependentReview),
         declared_artifacts: vec![DeclaredArtifactContract {
             ref_id: target.into(),
             path: target.into(),
@@ -2646,7 +2668,13 @@ fn build_stage_execution_contract(
         .map(|artifact| artifact.path.clone())
         .collect::<Vec<_>>();
     required_evidence.extend(tests.iter().map(|item| item.name.clone()));
+    let review_mode = if step_looks_like_independent_review_task(step) {
+        Some(ReviewMode::IndependentReview)
+    } else {
+        None
+    };
     StageExecutionContract {
+        review_mode,
         declared_artifacts,
         verifications,
         tests,
@@ -2654,6 +2682,49 @@ fn build_stage_execution_contract(
         required_actions,
         required_evidence,
     }
+}
+
+fn step_looks_like_independent_review_task(step: &BossPlanStep) -> bool {
+    let mut text = current_task_contract_text(step.objective()).to_ascii_lowercase();
+    if !step.acceptance.is_empty() {
+        text.push('\n');
+        text.push_str(
+            &step
+                .acceptance
+                .iter()
+                .map(|item| item.to_ascii_lowercase())
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+    }
+    let has_review_marker = [
+        "audit",
+        "verify",
+        "verification",
+        "review",
+        "analysis",
+        "report",
+        "research",
+    ]
+    .iter()
+    .any(|marker| text.contains(marker));
+    let has_code_change_marker = [
+        "implement",
+        "implementation",
+        "fix",
+        "bug",
+        "patch",
+        "refactor",
+        "frontend",
+        "build",
+        "script",
+        "code",
+        "feature",
+        "cli",
+    ]
+    .iter()
+    .any(|marker| text.contains(marker));
+    has_review_marker && !has_code_change_marker
 }
 
 fn path_looks_like_development_artifact(path: &str) -> bool {
@@ -9732,6 +9803,7 @@ impl BossCoordinator {
         let state_frame = BossStateFrame {
             step_id: step.id,
             status: step.status,
+            review_mode: effective_stage_execution_contract.review_mode,
             stage_execution_contract: effective_stage_execution_contract,
             stage_continuation_context: build_stage_continuation_context(step),
             executor_b_stage_memory: if verification_first_short_form {
@@ -12718,6 +12790,7 @@ mod tests {
             last_review_summary: None,
             last_correction: None,
             stage_execution_contract: StageExecutionContract {
+                review_mode: None,
                 declared_artifacts: vec![DeclaredArtifactContract {
                     ref_id: "artifact:report".into(),
                     path: "/tmp/report.md".into(),
@@ -13032,6 +13105,7 @@ mod tests {
             last_review_summary: None,
             last_correction: None,
             stage_execution_contract: StageExecutionContract {
+                review_mode: None,
                 declared_artifacts: vec![DeclaredArtifactContract {
                     ref_id: "artifact:step0:0".into(),
                     path: "/tmp/report.md".into(),
@@ -13122,6 +13196,7 @@ mod tests {
             last_review_summary: None,
             last_correction: None,
             stage_execution_contract: StageExecutionContract {
+                review_mode: None,
                 declared_artifacts: vec![DeclaredArtifactContract {
                     ref_id: "artifact:step0:0".into(),
                     path: target_path.clone(),
@@ -13198,6 +13273,7 @@ mod tests {
             last_review_summary: None,
             last_correction: None,
             stage_execution_contract: StageExecutionContract {
+                review_mode: None,
                 declared_artifacts: vec![DeclaredArtifactContract {
                     ref_id: "artifact:step0:0".into(),
                     path: target_path.clone(),
@@ -13274,6 +13350,7 @@ mod tests {
             last_review_summary: None,
             last_correction: None,
             stage_execution_contract: StageExecutionContract {
+                review_mode: None,
                 declared_artifacts: vec![DeclaredArtifactContract {
                     ref_id: "artifact:step0:0".into(),
                     path: target_path.clone(),
@@ -14547,6 +14624,7 @@ mod tests {
             state_frame: BossStateFrame {
                 step_id: 0,
                 status: BossPlanStepStatus::Running,
+                review_mode: None,
                 stage_execution_contract: StageExecutionContract {
                     declared_artifacts: vec![DeclaredArtifactContract {
                         ref_id: "artifact:contract:0".into(),
@@ -15869,6 +15947,7 @@ mod tests {
             state_frame: BossStateFrame {
                 step_id: 7,
                 status: BossPlanStepStatus::Running,
+                review_mode: None,
                 stage_execution_contract: StageExecutionContract {
                     declared_artifacts: vec![DeclaredArtifactContract {
                         ref_id: "artifact:contract:7".into(),
@@ -16875,6 +16954,7 @@ mod tests {
             last_review_summary: None,
             last_correction: None,
             stage_execution_contract: StageExecutionContract {
+                review_mode: None,
                 declared_artifacts: vec![DeclaredArtifactContract {
                     ref_id: "artifact:step0:0:/tmp/report.md".into(),
                     path: "/tmp/report.md".into(),
