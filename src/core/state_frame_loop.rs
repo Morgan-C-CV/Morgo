@@ -213,6 +213,7 @@ Rules:\n\
 - Use \"decision\": \"call_tool\" when you need a concrete runtime action before you can continue; always include `next_action.action_type` and structured `next_action.args`\n\
 - Only call tools listed in `allowed_tools`, and treat `allowed_actions` as the invokable runtime capability contract for this turn\n\
 - When `allowed_actions` is non-empty, do NOT request extra context like `fact:allow_worker_tool_calls`, `fact:increase_max_tool_calls`, or `fact:budget.max_tool_calls` to confirm permission; use the listed runtime actions directly\n\
+- When `review_mode` is `independent_review` and the completion contract requires `verification_evidence`, do not end the turn with prose-only completion if no runtime anchor exists yet; first use `call_tool` with a narrow `Read` on the exact target path(s), then complete once a real read or verification anchor is present\n\
 - In the current runtime, `call_tool` is expected to use real worker tools. Prefer narrow `Read` calls with exact `file_path`, use `Bash` only for concrete commands, and use `Edit` with exact `file_path` / `old_string` / `new_string`\n\
 - Never call `Edit` unless you already know the exact replacement span. If `old_string` is missing, empty, or uncertain, first `Read` the target file and then issue `Edit` with the exact `old_string`\n\
 - If a prior `call_tool` failed, read the `tool_feedback:` / `recent_output_ref:` lines in `recent_evidence`, diagnose the reason, and choose the next action accordingly\n\
@@ -936,7 +937,10 @@ fn push_completion_gate_required_read_target(
                 .map(|artifact| artifact.path.clone())
                 .collect::<Vec<_>>();
             if child_paths.is_empty() {
-                push_unique(targets, path);
+                push_unique(
+                    targets,
+                    directory_verification_fallback_child_path(&path),
+                );
             } else {
                 for child_path in child_paths {
                     push_unique(targets, child_path);
@@ -965,7 +969,10 @@ fn push_completion_gate_required_read_target(
             .map(|artifact| artifact.path.clone())
             .collect::<Vec<_>>();
         if child_paths.is_empty() {
-            push_unique(targets, target.to_string());
+            push_unique(
+                targets,
+                directory_verification_fallback_child_path(target),
+            );
         } else {
             for child_path in child_paths {
                 push_unique(targets, child_path);
@@ -1087,6 +1094,10 @@ fn directory_child_file_reads_closed(
     child_file_paths
         .iter()
         .all(|path| evidence_refs_have_anchor_scope(refs, "read", path))
+}
+
+fn directory_verification_fallback_child_path(directory: &str) -> String {
+    format!("{}/README.md", directory.trim_end_matches('/'))
 }
 
 fn verification_read_anchor_closed(frame: &StateFrame, refs: &[String]) -> bool {
@@ -1623,7 +1634,10 @@ fn completion_gate_repair_targets(
                     push_unique_target(&mut read_targets, child_path);
                 }
                 if !found_child {
-                    push_unique_target(&mut verify_targets, path);
+                    push_unique_target(
+                        &mut read_targets,
+                        directory_verification_fallback_child_path(&path),
+                    );
                 }
             } else {
                 push_unique_target(&mut read_targets, path);
@@ -2064,12 +2078,12 @@ fn build_worker_structured_report_with_refs(
         independent_review_can_close_with_refs(frame, usage, &evidence_refs);
     let completion = if independent_review_closed
         || matches!(
-        completion,
-        CompletionEvidenceStatus::MissingVerificationEvidence
-    ) && source_evidence_closed
-        && (worker_has_target_scoped_verification_anchor(frame, &evidence_refs)
-            || read_anchor_closed
-            || completion_gate_reads_closed)
+            completion,
+            CompletionEvidenceStatus::MissingVerificationEvidence
+        ) && source_evidence_closed
+            && (worker_has_target_scoped_verification_anchor(frame, &evidence_refs)
+                || read_anchor_closed
+                || completion_gate_reads_closed)
     {
         CompletionEvidenceStatus::Sufficient
     } else {
@@ -2151,7 +2165,8 @@ fn completion_gate_repair_active(frame: &StateFrame) -> bool {
                 || item.starts_with("required_action:run_test")
                 || (item.starts_with("fact: stage_continuation ")
                     && item.contains("continuity_mode=repair")
-                    && ((allow_verification_repair && item.contains("next_action=verify_artifact"))
+                    && ((allow_verification_repair
+                        && item.contains("next_action=verify_artifact"))
                         || item.contains("next_action=read_source_evidence")
                         || item.contains("next_action=run_test")
                         || item.contains("required_evidence_targets:")))
@@ -4377,9 +4392,8 @@ mod tests {
     };
     use crate::core::state_frame::validate_state_decision;
     use crate::core::state_frame::{
-        ActorRole, AgentState, CompletionEvidenceStatus, DeclaredArtifactContract,
-        ReviewMode, StageExecutionContract, StateBudget, StateFrame, TestContract,
-        VerificationContract,
+        ActorRole, AgentState, CompletionEvidenceStatus, DeclaredArtifactContract, ReviewMode,
+        StageExecutionContract, StateBudget, StateFrame, TestContract, VerificationContract,
     };
     use crate::core::state_frame_hydration::hydrate_needed_context;
     use crate::service::api::client::ModelProviderClient;
@@ -5815,18 +5829,17 @@ mod tests {
             required_actions: vec!["run_test".into()],
             required_evidence: vec!["runtime_test_passed".into()],
         }];
-        frame.stage_execution_contract.verifications = vec![
-            crate::core::state_frame::VerificationContract {
+        frame.stage_execution_contract.verifications =
+            vec![crate::core::state_frame::VerificationContract {
                 target_ref: "artifact:contract:0".into(),
                 target_path: Some("/tmp/report.md".into()),
                 required_actions: vec!["verify".into()],
                 required_evidence: vec!["artifact:contract:0".into()],
-            },
-        ];
+            }];
         frame.stage_execution_contract.content_evidence_targets = vec!["src/lib.rs".into()];
-        frame.open_items.push(
-            "required_action:verify_artifact reason=stale verification repair".into(),
-        );
+        frame
+            .open_items
+            .push("required_action:verify_artifact reason=stale verification repair".into());
         frame
             .recent_evidence
             .push("fact: test_failures ref=test:runtime name=cargo_test status=passed source=tool:Bash source_event_id=tool-bash:1 freshness=after-runtime-test confidence=1.00 lineage_status=active invalidated_by=none supersedes=none conflicts_with=none summary=cargo test passed".into());
@@ -6548,6 +6561,43 @@ mod tests {
             repair_line
                 .contains("forbidden_evidence=Bash|Glob|cat|sed|ls|self_claims|report_prose")
         );
+    }
+
+    #[test]
+    fn completion_gate_expands_directory_only_verification_gap_to_readme_fallback() {
+        let mut frame = make_frame();
+        frame.recent_evidence.clear();
+        push_completion_contract_with_refs(
+            &mut frame,
+            &["artifact:contract:dir"],
+            &[],
+            &["artifact:contract:dir"],
+        );
+        push_artifact_target_fact(
+            &mut frame,
+            "artifact:contract:dir",
+            "/tmp/example-site",
+            "directory",
+        );
+        frame.recent_evidence.push(
+            "fact: artifact_status ref=artifact:dir-created path=/tmp/example-site kind=directory status=created source=tool:Bash source_event_id=tool-bash:1 freshness=after-runtime confidence=1.00 lineage_status=active invalidated_by=none supersedes=none conflicts_with=none summary=target directory created".into(),
+        );
+
+        let mut usage = LoopUsage::default();
+        let block =
+            super::enforce_completion_gate(&mut frame, &mut usage).expect_err("gate should block");
+        assert_eq!(block.required_action, "verify_artifact");
+
+        super::inject_completion_gate_block(&mut frame, &block);
+
+        let repair_line = frame
+            .recent_evidence
+            .iter()
+            .find(|line| line.contains("completion_gate:"))
+            .expect("completion gate evidence");
+        assert!(repair_line.contains("required_read_targets=/tmp/example-site/README.md"));
+        assert!(repair_line.contains("required_verification_targets=none"));
+        assert!(repair_line.contains("required_evidence_refs=read:/tmp/example-site/README.md"));
     }
 
     #[test]

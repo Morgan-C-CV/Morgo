@@ -1458,7 +1458,10 @@ mod tests {
         let AgentRequest::Spawn(request) = request else {
             panic!("expected spawn request");
         };
-        assert_eq!(request.review_mode.as_deref(), Some(INDEPENDENT_REVIEW_MODE));
+        assert_eq!(
+            request.review_mode.as_deref(),
+            Some(INDEPENDENT_REVIEW_MODE)
+        );
     }
 
     #[test]

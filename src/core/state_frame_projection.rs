@@ -227,6 +227,83 @@ fn step_looks_like_independent_review_task(
     has_review_marker && !has_code_change_marker
 }
 
+fn independent_review_requires_runtime_verification(contract: &StageExecutionContract) -> bool {
+    contract
+        .review_mode
+        .is_some_and(|mode| mode.is_independent_review())
+        && !contract.verifications.is_empty()
+}
+
+fn directory_verification_fallback_child_path(directory: &str) -> String {
+    format!("{}/README.md", directory.trim_end_matches('/'))
+}
+
+fn push_unique_verification_target(targets: &mut Vec<String>, target: String) {
+    if !target.trim().is_empty() && !targets.iter().any(|existing| existing == &target) {
+        targets.push(target);
+    }
+}
+
+fn verification_contract_artifact<'a>(
+    contract: &'a StageExecutionContract,
+    verification: &VerificationContract,
+) -> Option<&'a DeclaredArtifactContract> {
+    contract
+        .declared_artifacts
+        .iter()
+        .find(|artifact| artifact.ref_id == verification.target_ref)
+        .or_else(|| {
+            verification.target_path.as_ref().and_then(|target_path| {
+                contract
+                    .declared_artifacts
+                    .iter()
+                    .find(|artifact| artifact.path == *target_path)
+            })
+        })
+}
+
+fn readable_verification_targets(contract: &StageExecutionContract) -> Vec<String> {
+    let mut targets = Vec::new();
+    for verification in &contract.verifications {
+        let raw_target = verification
+            .target_path
+            .as_deref()
+            .unwrap_or(verification.target_ref.as_str())
+            .trim();
+        if raw_target.is_empty() {
+            continue;
+        }
+
+        if let Some(artifact) = verification_contract_artifact(contract, verification) {
+            if artifact.kind == "directory" {
+                let prefix = format!("{}/", artifact.path.trim_end_matches('/'));
+                let child_paths = contract
+                    .declared_artifacts
+                    .iter()
+                    .filter(|candidate| {
+                        candidate.kind != "directory" && candidate.path.starts_with(&prefix)
+                    })
+                    .map(|candidate| candidate.path.clone())
+                    .collect::<Vec<_>>();
+                if child_paths.is_empty() {
+                    push_unique_verification_target(
+                        &mut targets,
+                        directory_verification_fallback_child_path(&artifact.path),
+                    );
+                } else {
+                    for child_path in child_paths {
+                        push_unique_verification_target(&mut targets, child_path);
+                    }
+                }
+                continue;
+            }
+        }
+
+        push_unique_verification_target(&mut targets, raw_target.to_string());
+    }
+    targets
+}
+
 fn infer_review_mode(
     step: Option<&crate::core::boss_state::BossPlanStep>,
     readonly_analysis: bool,
@@ -478,6 +555,8 @@ fn build_stage_execution_contract(
     }
     let st_test_only_mode =
         st_mode_enabled && step_looks_like_development_task(step, &declared_artifacts);
+    let review_mode = infer_review_mode(step, readonly_analysis);
+    let independent_review = review_mode.is_some_and(|mode| mode.is_independent_review());
     let verifications = if st_test_only_mode {
         Vec::new()
     } else {
@@ -499,7 +578,7 @@ fn build_stage_execution_contract(
             .map(|(target_ref, target_path)| VerificationContract {
                 target_ref: target_ref.clone(),
                 target_path: Some(target_path.clone()),
-                required_actions: if readonly_analysis {
+                required_actions: if readonly_analysis && !independent_review {
                     Vec::new()
                 } else {
                     vec!["verify".into()]
@@ -563,7 +642,6 @@ fn build_stage_execution_contract(
             }
             acc
         });
-    let review_mode = infer_review_mode(step, readonly_analysis);
     let mut contract = StageExecutionContract {
         review_mode,
         declared_artifacts,
@@ -1099,13 +1177,15 @@ fn build_fact_ledger(
             readonly_analysis,
             st_mode_enabled,
         );
+        let completion_contract_readonly = readonly_analysis
+            && !independent_review_requires_runtime_verification(&stage_execution_contract);
         facts.extend(build_stage_contract_facts(&stage_execution_contract));
         facts.push(build_completion_contract_fact(
             &permission_facts,
             &ledgers.artifact_refs,
             &open_item_ledgers,
             &stage_execution_contract,
-            readonly_analysis,
+            completion_contract_readonly,
         ));
     } else {
         facts.push(fact_line("accepted_constraints", "none recorded"));
@@ -1188,7 +1268,7 @@ pub fn project_state_frame_with_st_mode(
     role: ActorRole,
     st_mode_enabled: bool,
 ) -> StateFrame {
-    let state = stage_to_agent_state(stage);
+    let mut state = stage_to_agent_state(stage);
     let readonly_analysis = is_readonly_analysis(plan, step_id);
 
     // Build archive of completed steps (excluding current step).
@@ -1251,6 +1331,25 @@ pub fn project_state_frame_with_st_mode(
         readonly_analysis,
         st_mode_enabled,
     );
+    let independent_review_runtime_verification =
+        independent_review_requires_runtime_verification(&stage_execution_contract);
+    if independent_review_runtime_verification {
+        state = AgentState::Verifying;
+    }
+    let readonly_audit_contract = readonly_analysis && !independent_review_runtime_verification;
+    if independent_review_runtime_verification
+        && !open_items
+            .iter()
+            .any(|item| item.starts_with("required_action:verify_artifact"))
+    {
+        let verification_targets = readable_verification_targets(&stage_execution_contract);
+        if !verification_targets.is_empty() {
+            open_items.push(format!(
+                "required_action:verify_artifact target_refs={}",
+                verification_targets.join("|")
+            ));
+        }
+    }
 
     // recent_evidence doubles as a compact Fact Ledger v1.
     let mut recent_evidence = build_stage_contract_facts(&stage_execution_contract);
@@ -1288,7 +1387,7 @@ pub fn project_state_frame_with_st_mode(
         allowed_tools: Vec::new(),
         toolset_id: None,
         skillset_id: None,
-        required_output_schema: Some(if readonly_analysis {
+        required_output_schema: Some(if readonly_audit_contract {
             "readonly_audit_4_paragraphs_v1".into()
         } else {
             "state_decision_v1".into()
@@ -1603,6 +1702,146 @@ mod tests {
                 .recent_evidence
                 .iter()
                 .any(|line| line == "fact: review_mode independent_review")
+        );
+    }
+
+    #[test]
+    fn project_state_frame_routes_independent_review_verification_tasks_to_state_decision() {
+        let plan = BossPlan {
+            plan_id: "plan-review-runtime".into(),
+            task_description: "audit the target file /tmp/report.md and verify the result".into(),
+            document_spec: String::new(),
+            pseudo_code: String::new(),
+            draft_spec: None,
+            review_feedback: None,
+            revision_notes: None,
+            finalized: false,
+            documentation_feedback: Vec::new(),
+            steps: vec![BossPlanStep {
+                id: 0,
+                description: "audit".into(),
+                objective: Some(
+                    "audit the target file /tmp/report.md and verify the result".into(),
+                ),
+                acceptance: vec!["target file exists and is non-empty: /tmp/report.md".into()],
+                requires_approval: false,
+                status: BossPlanStepStatus::Running,
+                completed: false,
+                result_diff: None,
+                worker_task_id: None,
+                attempt_count: 0,
+                retry_budget: 3,
+                last_review_summary: None,
+                last_correction: None,
+                stage_execution_contract: StageExecutionContract::default(),
+                stage_continuation_context: None,
+                executor_b_stage_memory: None,
+                review_task_id: None,
+                tool_execution_records: Vec::new(),
+            }],
+            accepted_by_user: true,
+            auto_sequence: false,
+            session_snapshot: None,
+        };
+
+        let frame = project_state_frame(&plan, BossStage::Execution, Some(0), ActorRole::Worker);
+
+        assert_eq!(
+            frame.stage_execution_contract.review_mode,
+            Some(ReviewMode::IndependentReview)
+        );
+        assert!(
+            !frame.stage_execution_contract.verifications.is_empty(),
+            "verification contract should be preserved for runtime anchor closure"
+        );
+        assert_eq!(
+            frame
+                .stage_execution_contract
+                .verifications
+                .first()
+                .and_then(|item| item.required_actions.first())
+                .map(|item| item.as_str()),
+            Some("verify")
+        );
+        assert_eq!(
+            frame.required_output_schema.as_deref(),
+            Some("state_decision_v1")
+        );
+        assert_eq!(frame.toolset_id.as_deref(), Some("verifier-readonly"));
+        assert_eq!(
+            frame.allowed_actions,
+            vec!["read_file".to_string(), "summarize_findings".to_string()]
+        );
+    }
+
+    #[test]
+    fn project_state_frame_expands_directory_verification_targets_to_readable_child_files() {
+        let plan = BossPlan {
+            plan_id: "plan-review-runtime-directory".into(),
+            task_description: "audit the target directory /tmp/state-decision-validator and verify it".into(),
+            document_spec: String::new(),
+            pseudo_code: String::new(),
+            draft_spec: None,
+            review_feedback: None,
+            revision_notes: None,
+            finalized: false,
+            documentation_feedback: Vec::new(),
+            steps: vec![BossPlanStep {
+                id: 0,
+                description: "audit".into(),
+                objective: Some(
+                    "audit the target directory /tmp/state-decision-validator and verify it".into(),
+                ),
+                acceptance: vec![
+                    "target directory exists and is non-empty: /tmp/state-decision-validator"
+                        .into(),
+                ],
+                requires_approval: false,
+                status: BossPlanStepStatus::Running,
+                completed: false,
+                result_diff: None,
+                worker_task_id: None,
+                attempt_count: 0,
+                retry_budget: 3,
+                last_review_summary: None,
+                last_correction: None,
+                stage_execution_contract: StageExecutionContract::default(),
+                stage_continuation_context: None,
+                executor_b_stage_memory: None,
+                review_task_id: None,
+                tool_execution_records: Vec::new(),
+            }],
+            accepted_by_user: true,
+            auto_sequence: false,
+            session_snapshot: None,
+        };
+
+        let frame = project_state_frame(&plan, BossStage::Execution, Some(0), ActorRole::Worker);
+
+        assert_eq!(
+            frame.stage_execution_contract.review_mode,
+            Some(ReviewMode::IndependentReview)
+        );
+        assert!(
+            frame
+                .open_items
+                .iter()
+                .any(|item| item.contains("required_action:verify_artifact"))
+        );
+        assert!(
+            frame
+                .open_items
+                .iter()
+                .any(|item| item.contains("/tmp/state-decision-validator/README.md")),
+            "directory verification should expand to a readable child file"
+        );
+        assert!(
+            frame
+                .open_items
+                .iter()
+                .all(|item| !item.contains("target_refs=/tmp/state-decision-validator\n")
+                    && !item.contains("target_refs=/tmp/state-decision-validator ")),
+            "open items should not point the verifier at the bare directory path"
         );
     }
 

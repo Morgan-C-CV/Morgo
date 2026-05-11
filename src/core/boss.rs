@@ -444,6 +444,10 @@ fn declared_child_file_artifact_paths(step: &BossPlanStep, directory: &str) -> V
         .collect()
 }
 
+fn directory_verification_fallback_child_path(directory: &str) -> String {
+    format!("{}/README.md", directory.trim_end_matches('/'))
+}
+
 fn push_readable_verification_target(targets: &mut Vec<String>, step: &BossPlanStep, target: &str) {
     if declared_artifact_path_is_directory(step, target) {
         let child_files = declared_child_file_artifact_paths(step, target);
@@ -453,6 +457,11 @@ fn push_readable_verification_target(targets: &mut Vec<String>, step: &BossPlanS
             }
             return;
         }
+        push_unique_required_evidence(
+            targets,
+            directory_verification_fallback_child_path(target),
+        );
+        return;
     }
     push_unique_required_evidence(targets, target.to_string());
 }
@@ -1353,8 +1362,16 @@ fn build_artifact_repair_instruction(step: &BossPlanStep, missing_reason: &str) 
         "directory" => "create_directory_then_write_files",
         _ => "write_exact_target_file",
     };
+    let directory_hint = if expectation.1.as_str() == "directory" {
+        format!(
+            " child_file_hint={}",
+            directory_verification_fallback_child_path(&target_path)
+        )
+    } else {
+        String::new()
+    };
     Some(format!(
-        "repair artifact evidence for target_path={target_path} parent_dir={parent_dir} missing_reason={missing_reason} recommended_write_strategy={recommended_write_strategy}"
+        "repair artifact evidence for target_path={target_path} parent_dir={parent_dir} missing_reason={missing_reason} recommended_write_strategy={recommended_write_strategy}{directory_hint}"
     ))
 }
 
@@ -1795,6 +1812,18 @@ fn preferred_runtime_verification_target(targets: &[String]) -> Option<String> {
         .find(|target| !is_readme_like_artifact_path(target))
         .or_else(|| targets.first())
         .cloned()
+}
+
+fn verification_first_runtime_target_is_declared_artifact(
+    contract: &ExecutorBAssignmentContract,
+    target: &str,
+) -> bool {
+    contract
+        .state_frame
+        .stage_execution_contract
+        .declared_artifacts
+        .iter()
+        .any(|artifact| artifact.path == target)
 }
 
 fn verification_first_required_runtime_targets(
@@ -2390,6 +2419,11 @@ fn normalize_contract_readable_verification_targets(
                 }
                 continue;
             }
+            push_unique_required_evidence(
+                &mut targets,
+                directory_verification_fallback_child_path(trimmed),
+            );
+            continue;
         }
         if target_has_nested_required_target(trimmed, &raw_target_list) {
             continue;
@@ -3140,14 +3174,21 @@ fn verification_first_contract_target(contract: &ExecutorBAssignmentContract) ->
                 if let Some(preferred) =
                     preferred_runtime_verification_target(&required_runtime_targets)
                 {
-                    return preferred;
+                    if verification_first_runtime_target_is_declared_artifact(contract, &preferred)
+                    {
+                        return preferred;
+                    }
                 }
             }
             return target;
         }
     }
-    preferred_runtime_verification_target(&required_runtime_targets)
-        .or_else(|| verification_first_target_path_from_contract(contract))
+    if let Some(preferred) = preferred_runtime_verification_target(&required_runtime_targets) {
+        if verification_first_runtime_target_is_declared_artifact(contract, &preferred) {
+            return preferred;
+        }
+    }
+    verification_first_target_path_from_contract(contract)
         .unwrap_or_else(|| contract.brief.objective.clone())
 }
 
@@ -17609,6 +17650,61 @@ mod tests {
                 .lines()
                 .any(|line| line.trim() == format!("- read:{root}"))
         );
+    }
+
+    #[tokio::test]
+    async fn verification_first_task_message_falls_back_to_readme_for_directory_only_targets() {
+        let (coordinator, _) =
+            verification_first_projection_coordinator(WorkerLisMPolicy::ForceOn).await;
+        let root = "/tmp/state-decision-validator".to_string();
+        let mut assignment = coordinator
+            .build_executor_b_assignment_contract(0, "session-beta", true)
+            .await
+            .expect("build assignment");
+        assignment.state_frame.stage_execution_contract = StageExecutionContract {
+            declared_artifacts: vec![DeclaredArtifactContract {
+                ref_id: "artifact:contract:0".into(),
+                path: root.clone(),
+                kind: "directory".into(),
+                required_actions: vec!["write_artifact".into()],
+                required_evidence: vec![root.clone()],
+            }],
+            verifications: vec![VerificationContract {
+                target_ref: "artifact:contract:0".into(),
+                target_path: Some(root.clone()),
+                required_actions: vec!["verify_artifact".into()],
+                required_evidence: vec![root.clone()],
+            }],
+            required_actions: vec!["verify_artifact".into()],
+            required_evidence: vec![root.clone()],
+            ..StageExecutionContract::default()
+        };
+        assignment.state_frame.stage_continuation_context = Some(
+            crate::core::state_frame::StageContinuationContext {
+                repair_intent: Some(crate::core::state_frame::RepairIntent {
+                    failed_target: Some(root.clone()),
+                    verified_facts: vec![
+                        format!("required_evidence_targets: {root}"),
+                        "verification_result: blocked".into(),
+                    ],
+                    next_action: Some("verify_artifact".into()),
+                    continuity_mode: Some(crate::core::state_frame::ContinuityMode::Repair),
+                }),
+                failed_target: Some(root.clone()),
+                verified_facts: vec![
+                    format!("required_evidence_targets: {root}"),
+                    "verification_result: blocked".into(),
+                ],
+                next_action: Some("verify_artifact".into()),
+                continuity_mode: Some(crate::core::state_frame::ContinuityMode::Repair),
+            },
+        );
+
+        let message = build_verification_first_task_message(&assignment);
+        assert!(message.contains(&format!("- read:{root}/README.md")));
+        assert!(message.contains(&format!("evidence_refs:\n- read:{root}/README.md")));
+        assert!(!message.contains(&format!("- read:{root}\n")));
+        assert!(!message.contains(&format!("evidence_refs: read:{root}")));
     }
 
     #[tokio::test]

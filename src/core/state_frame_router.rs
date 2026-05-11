@@ -20,6 +20,14 @@ fn allowed_actions_for_route(route: &ToolsetRoute) -> Vec<String> {
     }
 }
 
+fn independent_review_requires_runtime_verification(frame: &StateFrame) -> bool {
+    frame
+        .stage_execution_contract
+        .review_mode
+        .is_some_and(|mode| mode.is_independent_review())
+        && !frame.stage_execution_contract.verifications.is_empty()
+}
+
 /// Route a StateFrame to its minimal toolset and skillset.
 ///
 /// Pure static mapping on role + state — no runtime calls, no side effects.
@@ -31,6 +39,12 @@ pub fn route_toolset(frame: &StateFrame) -> ToolsetRoute {
         return ToolsetRoute {
             toolset_id: None,
             skillset_id: None,
+        };
+    }
+    if independent_review_requires_runtime_verification(frame) {
+        return ToolsetRoute {
+            toolset_id: Some("verifier-readonly".into()),
+            skillset_id: Some("acceptance-checker".into()),
         };
     }
     if matches!(
@@ -134,4 +148,56 @@ pub fn apply_route(frame: &mut StateFrame, route: ToolsetRoute) {
     frame.toolset_id = route.toolset_id;
     frame.skillset_id = route.skillset_id;
     frame.allowed_actions = allowed_actions;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::route_toolset;
+    use crate::core::state_frame::{
+        ActorRole, AgentState, DeclaredArtifactContract, ReviewMode, StageExecutionContract,
+        StateBudget, StateFrame, VerificationContract,
+    };
+
+    fn verification_review_frame() -> StateFrame {
+        StateFrame {
+            role: ActorRole::Worker,
+            state: AgentState::Executing,
+            objective: "audit verification".into(),
+            stage_execution_contract: StageExecutionContract {
+                review_mode: Some(ReviewMode::IndependentReview),
+                declared_artifacts: vec![DeclaredArtifactContract {
+                    ref_id: "artifact:step0:0".into(),
+                    path: "/tmp/report.md".into(),
+                    kind: "file".into(),
+                    required_actions: vec![],
+                    required_evidence: vec![],
+                }],
+                verifications: vec![VerificationContract {
+                    target_ref: "artifact:step0:0".into(),
+                    target_path: Some("/tmp/report.md".into()),
+                    required_actions: vec!["verify".into()],
+                    required_evidence: vec!["artifact:step0:0".into()],
+                }],
+                ..StageExecutionContract::default()
+            },
+            open_items: vec![],
+            blocked_items: vec![],
+            accepted_summary: vec![],
+            recent_evidence: vec![],
+            allowed_actions: vec![],
+            allowed_tools: vec![],
+            toolset_id: None,
+            skillset_id: None,
+            required_output_schema: Some("readonly_audit_4_paragraphs_v1".into()),
+            budget: StateBudget::default(),
+        }
+    }
+
+    #[test]
+    fn independent_review_with_verification_contract_routes_to_verifier_readonly() {
+        let frame = verification_review_frame();
+        let route = route_toolset(&frame);
+        assert_eq!(route.toolset_id.as_deref(), Some("verifier-readonly"));
+        assert_eq!(route.skillset_id.as_deref(), Some("acceptance-checker"));
+    }
 }
