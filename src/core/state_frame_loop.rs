@@ -211,10 +211,12 @@ Rules:\n\
 - If a fact entry already says `none`, `none recorded`, `absent`, or equivalent, do NOT request that same context again\n\
 - Only use \"decision\": \"request_context\" when the missing fact is not already present in objective/open_items/blocked_items/accepted_summary/recent_evidence\n\
 - Use \"decision\": \"call_tool\" when you need a concrete runtime action before you can continue; always include `next_action.action_type` and structured `next_action.args`\n\
+- `next_action` must be an object, never a bare string. Valid example: `{\"action_type\":\"Read\",\"args\":{\"file_path\":\"src/lib.rs\"}}`\n\
 - Only call tools listed in `allowed_tools`, and treat `allowed_actions` as the invokable runtime capability contract for this turn\n\
 - When `allowed_actions` is non-empty, do NOT request extra context like `fact:allow_worker_tool_calls`, `fact:increase_max_tool_calls`, or `fact:budget.max_tool_calls` to confirm permission; use the listed runtime actions directly\n\
 - When `review_mode` is `independent_review` and the completion contract requires `verification_evidence`, do not end the turn with prose-only completion if no runtime anchor exists yet; first use `call_tool` with a narrow `Read` on the exact target path(s), then complete once a real read or verification anchor is present\n\
 - In the current runtime, `call_tool` is expected to use real worker tools. Prefer narrow `Read` calls with exact `file_path`, use `Bash` only for concrete commands, and use `Edit` with exact `file_path` / `old_string` / `new_string`\n\
+- Avoid giant inline `Bash.command` payloads, embedded source files, or heredocs that can hit max tokens. If you need to create or rewrite file content, prefer `Write` with structured `file_path`/`content`, or use a short `Bash.command` that calls an existing file/script\n\
 - Never call `Edit` unless you already know the exact replacement span. If `old_string` is missing, empty, or uncertain, first `Read` the target file and then issue `Edit` with the exact `old_string`\n\
 - If a prior `call_tool` failed, read the `tool_feedback:` / `recent_output_ref:` lines in `recent_evidence`, diagnose the reason, and choose the next action accordingly\n\
 - Prefer `tool_outcome:` lines for typed recovery hints such as recoverable, recommended_next_action, and evidence_ref\n\
@@ -239,6 +241,9 @@ fn build_state_decision_repair_prompt(reason: &str, raw_json: &str) -> String {
          Return ONLY one JSON object matching the canonical schema.\n\
          Canonical state values: planning, executing, reviewing, correcting, verifying, blocked, done.\n\
          Canonical decision values: continue, request_context, call_tool, handoff, accept, reject, done.\n\
+         If `decision` is `call_tool`, `next_action` MUST be an object of the form `{{\"action_type\":\"Read\",\"args\":{{\"file_path\":\"path/to/file.rs\"}}}}`.\n\
+         Never return string-valued `next_action` like `\"invoke_parsing_tool\"`.\n\
+         If the previous output was truncated or too long, do not emit giant inline `Bash.command` payloads, heredocs, or embedded file bodies; prefer `Write` with structured args or a short `Read`/`Edit`/`Bash` call.\n\
          Alias mapping you must normalize before responding: executed -> executing, completed -> done, success -> done.\n\
          Do not return explanations, wrappers, validation prose, or keys outside the canonical schema.\n\
          Please respond with canonical StateDecision JSON only."
@@ -4426,6 +4431,18 @@ mod tests {
         assert!(prompt.contains("canonical StateDecision JSON only"));
     }
 
+    #[test]
+    fn repair_prompt_requires_object_next_action_and_short_tool_calls() {
+        let prompt = build_state_decision_repair_prompt(
+            "JSON parse error: truncated output",
+            r#"{"state":"executing","decision":"call_tool","next_action":"invoke_parsing_tool"}"#,
+        );
+
+        assert!(prompt.contains("`next_action` MUST be an object"));
+        assert!(prompt.contains("Never return string-valued `next_action`"));
+        assert!(prompt.contains("giant inline `Bash.command` payloads"));
+    }
+
     #[async_trait::async_trait]
     impl Tool for ArtifactVerifyMockTool {
         fn metadata(&self) -> crate::tool::definition::ToolMetadata {
@@ -5382,6 +5399,45 @@ mod tests {
             decision.decision,
             crate::core::state_frame::DecisionKind::CallTool
         );
+    }
+
+    #[test]
+    fn string_next_action_repair_can_progress_to_done_without_exhaustion() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let malformed_json =
+            "{\"state\":\"executing\",\"decision\":\"call_tool\",\"next_action\":{\"action_type\":\"Bash\"";
+        let repaired_json =
+            r#"{"state":"executing","decision":"call_tool","next_action":"invoke_parsing_tool"}"#;
+        let done_json = r#"{"state":"done","decision":"done"}"#;
+        let client = ModelProviderClient::with_scripted_turns(vec![
+            vec![StreamEvent::TextDelta(malformed_json.into())],
+            vec![StreamEvent::TextDelta(repaired_json.into())],
+            vec![StreamEvent::TextDelta(done_json.into())],
+        ]);
+        let tool_runtime = StateFrameToolRuntime {
+            registry: ToolRegistry::new().register(Arc::new(FileReadTool)),
+            permissions: ToolPermissionContext::new(PermissionMode::Default),
+            cwd: test_runtime_paths().0,
+            config_root: test_runtime_paths().1,
+        };
+        let outcome = rt
+            .block_on(run_decision_loop_with_tools(
+                &client,
+                make_frame(),
+                DecisionLoopConfig::default(),
+                Some(tool_runtime),
+            ))
+            .expect("loop should not error");
+        match outcome {
+            LoopOutcome::Done { usage, .. } => {
+                assert_eq!(usage.tool_dispatch_failure_count, 1);
+                assert_eq!(
+                    usage.tool_dispatch_failure_taxonomy.get("tool_unavailable"),
+                    Some(&1usize)
+                );
+            }
+            other => panic!("expected Done after repair recovery, got {other:?}"),
+        }
     }
 
     #[test]

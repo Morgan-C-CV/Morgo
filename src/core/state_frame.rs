@@ -462,6 +462,20 @@ fn normalize_state_patch(
     }
 }
 
+fn normalize_next_action_value(value: Value) -> Value {
+    match value {
+        Value::String(action_type) => Value::Object(
+            [
+                ("action_type".into(), Value::String(action_type.trim().to_string())),
+                ("args".into(), Value::Object(Map::new())),
+            ]
+            .into_iter()
+            .collect(),
+        ),
+        other => other,
+    }
+}
+
 fn normalize_state_decision_value(value: Value) -> Result<Value, String> {
     let root = value
         .as_object()
@@ -508,7 +522,7 @@ fn normalize_state_decision_value(value: Value) -> Result<Value, String> {
         .cloned()
         .or_else(|| nested.and_then(|m| m.get("next_action").cloned()))
     {
-        normalized.insert("next_action".into(), next_action);
+        normalized.insert("next_action".into(), normalize_next_action_value(next_action));
     }
     if let Some(items) = needed_context {
         normalized.insert("needed_context".into(), Value::Array(items.clone()));
@@ -539,6 +553,7 @@ fn normalize_state_decision_value(value: Value) -> Result<Value, String> {
 #[cfg(test)]
 mod tests {
     use super::{AgentState, DecisionKind, validate_state_decision};
+    use serde_json::{Map, Value};
 
     #[test]
     fn invalid_repair_json_is_normalized_into_headless_safe_continuation() {
@@ -585,6 +600,24 @@ mod tests {
         .expect("completed alias should normalize");
 
         assert_eq!(decision.state, AgentState::Executing);
+    }
+
+    #[test]
+    fn string_next_action_is_normalized_into_object_shape() {
+        let decision = validate_state_decision(
+            r#"{
+                "state":"executing",
+                "decision":"call_tool",
+                "next_action":"invoke_parsing_tool"
+            }"#,
+        )
+        .expect("string next_action should normalize");
+
+        assert_eq!(decision.state, AgentState::Executing);
+        assert_eq!(decision.decision, DecisionKind::CallTool);
+        let next_action = decision.next_action.expect("next action");
+        assert_eq!(next_action.action_type, "invoke_parsing_tool");
+        assert_eq!(next_action.args, Value::Object(Map::new()));
     }
 }
 
