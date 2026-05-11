@@ -457,10 +457,7 @@ fn push_readable_verification_target(targets: &mut Vec<String>, step: &BossPlanS
             }
             return;
         }
-        push_unique_required_evidence(
-            targets,
-            directory_verification_fallback_child_path(target),
-        );
+        push_unique_required_evidence(targets, directory_verification_fallback_child_path(target));
         return;
     }
     push_unique_required_evidence(targets, target.to_string());
@@ -2702,11 +2699,10 @@ fn build_stage_execution_contract(
         .map(|artifact| artifact.path.clone())
         .collect::<Vec<_>>();
     required_evidence.extend(tests.iter().map(|item| item.name.clone()));
-    let review_mode = if step_looks_like_independent_review_task(step) {
-        Some(ReviewMode::IndependentReview)
-    } else {
-        None
-    };
+    let review_mode = step
+        .stage_execution_contract
+        .review_mode
+        .or(Some(ReviewMode::IndependentReview));
     StageExecutionContract {
         review_mode,
         declared_artifacts,
@@ -2716,49 +2712,6 @@ fn build_stage_execution_contract(
         required_actions,
         required_evidence,
     }
-}
-
-fn step_looks_like_independent_review_task(step: &BossPlanStep) -> bool {
-    let mut text = current_task_contract_text(step.objective()).to_ascii_lowercase();
-    if !step.acceptance.is_empty() {
-        text.push('\n');
-        text.push_str(
-            &step
-                .acceptance
-                .iter()
-                .map(|item| item.to_ascii_lowercase())
-                .collect::<Vec<_>>()
-                .join("\n"),
-        );
-    }
-    let has_review_marker = [
-        "audit",
-        "verify",
-        "verification",
-        "review",
-        "analysis",
-        "report",
-        "research",
-    ]
-    .iter()
-    .any(|marker| text.contains(marker));
-    let has_code_change_marker = [
-        "implement",
-        "implementation",
-        "fix",
-        "bug",
-        "patch",
-        "refactor",
-        "frontend",
-        "build",
-        "script",
-        "code",
-        "feature",
-        "cli",
-    ]
-    .iter()
-    .any(|marker| text.contains(marker));
-    has_review_marker && !has_code_change_marker
 }
 
 fn path_looks_like_development_artifact(path: &str) -> bool {
@@ -9201,7 +9154,13 @@ impl BossCoordinator {
                             } => Some(usage),
                             StepOutcome::Failed { usage: None, .. } => None,
                         } {
-                            if !usage.tool_execution_records.is_empty() {
+                            if !usage.tool_execution_records.is_empty()
+                                || usage
+                                    .worker_report
+                                    .as_ref()
+                                    .and_then(|report| report.stage_execution_contract.review_mode)
+                                    .is_some()
+                            {
                                 let mut plan_guard = self.plan.write().await;
                                 let plan = plan_guard
                                     .as_mut()
@@ -9213,6 +9172,13 @@ impl BossCoordinator {
                                     .ok_or_else(|| {
                                         anyhow::anyhow!("Unknown boss step {step_id}")
                                     })?;
+                                if let Some(review_mode) = usage
+                                    .worker_report
+                                    .as_ref()
+                                    .and_then(|report| report.stage_execution_contract.review_mode)
+                                {
+                                    step.stage_execution_contract.review_mode = Some(review_mode);
+                                }
                                 for record in &usage.tool_execution_records {
                                     append_step_runtime_record(step, record.clone());
                                 }
@@ -17679,8 +17645,8 @@ mod tests {
             required_evidence: vec![root.clone()],
             ..StageExecutionContract::default()
         };
-        assignment.state_frame.stage_continuation_context = Some(
-            crate::core::state_frame::StageContinuationContext {
+        assignment.state_frame.stage_continuation_context =
+            Some(crate::core::state_frame::StageContinuationContext {
                 repair_intent: Some(crate::core::state_frame::RepairIntent {
                     failed_target: Some(root.clone()),
                     verified_facts: vec![
@@ -17697,8 +17663,7 @@ mod tests {
                 ],
                 next_action: Some("verify_artifact".into()),
                 continuity_mode: Some(crate::core::state_frame::ContinuityMode::Repair),
-            },
-        );
+            });
 
         let message = build_verification_first_task_message(&assignment);
         assert!(message.contains(&format!("- read:{root}/README.md")));
@@ -22180,6 +22145,77 @@ mod tests {
                 .iter()
                 .all(|action| action != "verify" && action != "verify_artifact")
         );
+    }
+
+    #[test]
+    fn stage_execution_contract_preserves_explicit_review_mode() {
+        let step = BossPlanStep {
+            id: 0,
+            description: "create validator".into(),
+            objective: Some("create a readonly-audit validator script".into()),
+            acceptance: vec!["target directory exists and is non-empty: /tmp/validator".into()],
+            requires_approval: false,
+            status: BossPlanStepStatus::Pending,
+            completed: false,
+            result_diff: None,
+            worker_task_id: None,
+            attempt_count: 0,
+            retry_budget: 3,
+            last_review_summary: None,
+            last_correction: None,
+            stage_execution_contract: StageExecutionContract {
+                review_mode: Some(ReviewMode::IndependentReview),
+                ..StageExecutionContract::default()
+            },
+            stage_continuation_context: None,
+            executor_b_stage_memory: None,
+            review_task_id: None,
+            tool_execution_records: Vec::new(),
+        };
+        let target_artifacts = vec![TargetArtifact {
+            path: "/tmp/validator".into(),
+            kind: "directory".into(),
+            required_state: "exists_non_empty".into(),
+            source: "artifact_expectation".into(),
+        }];
+
+        let contract = build_stage_execution_contract(&step, &target_artifacts);
+
+        assert_eq!(contract.review_mode, Some(ReviewMode::IndependentReview));
+    }
+
+    #[test]
+    fn stage_execution_contract_defaults_to_independent_review() {
+        let step = BossPlanStep {
+            id: 0,
+            description: "create validator".into(),
+            objective: Some("create a validator and replay logs".into()),
+            acceptance: vec!["target directory exists and is non-empty: /tmp/validator".into()],
+            requires_approval: false,
+            status: BossPlanStepStatus::Pending,
+            completed: false,
+            result_diff: None,
+            worker_task_id: None,
+            attempt_count: 0,
+            retry_budget: 3,
+            last_review_summary: None,
+            last_correction: None,
+            stage_execution_contract: StageExecutionContract::default(),
+            stage_continuation_context: None,
+            executor_b_stage_memory: None,
+            review_task_id: None,
+            tool_execution_records: Vec::new(),
+        };
+        let target_artifacts = vec![TargetArtifact {
+            path: "/tmp/validator".into(),
+            kind: "directory".into(),
+            required_state: "exists_non_empty".into(),
+            source: "artifact_expectation".into(),
+        }];
+
+        let contract = build_stage_execution_contract(&step, &target_artifacts);
+
+        assert_eq!(contract.review_mode, Some(ReviewMode::IndependentReview));
     }
 
     #[test]

@@ -212,72 +212,6 @@ fn apply_development_test_policy(contract: &mut StageExecutionContract) {
     }
 }
 
-fn step_looks_like_independent_review_task(
-    step: Option<&crate::core::boss_state::BossPlanStep>,
-    readonly_analysis: bool,
-) -> bool {
-    if readonly_analysis {
-        return true;
-    }
-
-    let Some(step) = step else {
-        return false;
-    };
-
-    let mut text = current_task_contract_text(step.objective()).to_ascii_lowercase();
-    if !step.acceptance.is_empty() {
-        text.push('\n');
-        text.push_str(
-            &step
-                .acceptance
-                .iter()
-                .map(|item| item.to_ascii_lowercase())
-                .collect::<Vec<_>>()
-                .join("\n"),
-        );
-    }
-
-    let has_review_marker = [
-        "audit",
-        "verify",
-        "verification",
-        "review",
-        "analysis",
-        "report",
-        "research",
-    ]
-    .iter()
-    .any(|marker| text.contains(marker));
-    let has_code_change_marker = [
-        "implement",
-        "implementation",
-        "fix",
-        "bug",
-        "patch",
-        "refactor",
-        "创建",
-        "写入",
-        "修改",
-        "实现",
-        "构建",
-        "生成",
-        "validator",
-        "tool",
-        "frontend",
-        "build",
-        "script",
-        "code",
-        "feature",
-        "create",
-        "write",
-        "cli",
-    ]
-    .iter()
-    .any(|marker| text.contains(marker));
-
-    has_review_marker && !has_code_change_marker
-}
-
 fn independent_review_requires_runtime_verification(contract: &StageExecutionContract) -> bool {
     contract
         .review_mode
@@ -357,13 +291,12 @@ fn readable_verification_targets(contract: &StageExecutionContract) -> Vec<Strin
 
 fn infer_review_mode(
     step: Option<&crate::core::boss_state::BossPlanStep>,
-    readonly_analysis: bool,
+    _readonly_analysis: bool,
 ) -> Option<ReviewMode> {
-    if step_looks_like_independent_review_task(step, readonly_analysis) {
-        Some(ReviewMode::IndependentReview)
-    } else {
-        Some(ReviewMode::TargetVerification)
+    if let Some(review_mode) = step.and_then(|step| step.stage_execution_contract.review_mode) {
+        return Some(review_mode);
     }
+    Some(ReviewMode::IndependentReview)
 }
 
 /// Map a `BossStage` to the corresponding `AgentState` for prompt projection.
@@ -1203,7 +1136,7 @@ fn build_fact_ledger(
         push_none_recorded_unless_present(&mut facts, "blocker_refs");
         if !blind_review {
             for item in &rejected_ledgers {
-            facts.push(fact_line(
+                facts.push(fact_line(
                 "rejected_approaches",
                 format!(
                     "ref={} source={}{} source_event_id={} freshness={} confidence={} status={} invalidated_by={} supersedes={} conflicts_with={} summary={}{}",
@@ -1362,7 +1295,8 @@ pub fn project_state_frame_with_st_mode(
         .map(|s| retain_open_items(&s.acceptance, &archive))
         .unwrap_or_default();
     if !blind_review_candidate {
-        if let Some(context) = current_step.and_then(|step| step.stage_continuation_context.as_ref())
+        if let Some(context) =
+            current_step.and_then(|step| step.stage_continuation_context.as_ref())
         {
             for item in build_stage_continuation_open_items(context) {
                 if !open_items.iter().any(|existing| existing == &item) {
@@ -1856,12 +1790,16 @@ mod tests {
 
         let frame = project_state_frame(&plan, BossStage::Execution, Some(1), ActorRole::Worker);
 
-        assert_eq!(frame.stage_execution_contract.review_mode, Some(ReviewMode::IndependentReview));
-        assert!(frame.accepted_summary.is_empty(), "blind review should not inherit archive summary");
-        assert!(frame
-            .recent_evidence
-            .iter()
-            .all(|line| {
+        assert_eq!(
+            frame.stage_execution_contract.review_mode,
+            Some(ReviewMode::IndependentReview)
+        );
+        assert!(
+            frame.accepted_summary.is_empty(),
+            "blind review should not inherit archive summary"
+        );
+        assert!(
+            frame.recent_evidence.iter().all(|line| {
                 !line.starts_with("review: ")
                     && !line.starts_with("correction: ")
                     && (!line.starts_with("fact: review_feedback ")
@@ -1889,7 +1827,8 @@ mod tests {
             frame
                 .recent_evidence
                 .iter()
-                .all(|line| !line.contains("verified from prior review") && !line.contains("do not trust the current result")),
+                .all(|line| !line.contains("verified from prior review")
+                    && !line.contains("do not trust the current result")),
             "blind review should not leak continuation/review conclusions"
         );
     }
@@ -1938,10 +1877,17 @@ mod tests {
 
         let frame = project_state_frame(&plan, BossStage::Execution, Some(0), ActorRole::Worker);
 
-        assert_eq!(frame.state, AgentState::Executing);
+        assert_eq!(frame.state, AgentState::Verifying);
         assert_eq!(
             frame.stage_execution_contract.review_mode,
-            Some(ReviewMode::TargetVerification)
+            Some(ReviewMode::IndependentReview)
+        );
+        assert!(
+            frame
+                .recent_evidence
+                .iter()
+                .any(|line| line == "fact: review_mode independent_review"),
+            "validator-style audit tasks should default to independent_review"
         );
         assert!(
             frame
@@ -1953,6 +1899,66 @@ mod tests {
         assert!(frame.recent_evidence.iter().any(|line| {
             line.contains("fact: permission_to_create_and_write:/tmp/state-decision-validator")
         }));
+    }
+
+    #[test]
+    fn explicit_review_mode_overrides_keyword_fallback_for_validator_tasks() {
+        let plan = BossPlan {
+            plan_id: "plan-explicit-review-mode".into(),
+            task_description: "create validator".into(),
+            document_spec: String::new(),
+            pseudo_code: String::new(),
+            draft_spec: None,
+            review_feedback: None,
+            revision_notes: None,
+            finalized: false,
+            documentation_feedback: Vec::new(),
+            steps: vec![BossPlanStep {
+                id: 0,
+                description: "create validator".into(),
+                objective: Some(
+                    "创建一个 StateDecision/readonly-audit contract 验证器。目标目录：/tmp/state-decision-validator。允许修改文件、创建目录、运行必要命令。".into(),
+                ),
+                acceptance: vec![
+                    "target directory exists and is non-empty: /tmp/state-decision-validator"
+                        .into(),
+                ],
+                requires_approval: false,
+                status: BossPlanStepStatus::Running,
+                completed: false,
+                result_diff: None,
+                worker_task_id: None,
+                attempt_count: 0,
+                retry_budget: 3,
+                last_review_summary: None,
+                last_correction: None,
+                stage_execution_contract: StageExecutionContract {
+                    review_mode: Some(ReviewMode::IndependentReview),
+                    ..StageExecutionContract::default()
+                },
+                stage_continuation_context: None,
+                executor_b_stage_memory: None,
+                review_task_id: None,
+                tool_execution_records: Vec::new(),
+            }],
+            accepted_by_user: true,
+            auto_sequence: false,
+            session_snapshot: None,
+        };
+
+        let frame = project_state_frame(&plan, BossStage::Execution, Some(0), ActorRole::Worker);
+
+        assert_eq!(
+            frame.stage_execution_contract.review_mode,
+            Some(ReviewMode::IndependentReview)
+        );
+        assert!(
+            frame
+                .recent_evidence
+                .iter()
+                .any(|line| line == "fact: review_mode independent_review"),
+            "explicit model-selected review mode should reach the Fact Ledger"
+        );
     }
 
     #[test]
@@ -2028,7 +2034,8 @@ mod tests {
     fn project_state_frame_expands_directory_verification_targets_to_readable_child_files() {
         let plan = BossPlan {
             plan_id: "plan-review-runtime-directory".into(),
-            task_description: "audit the target directory /tmp/state-decision-validator and verify it".into(),
+            task_description:
+                "audit the target directory /tmp/state-decision-validator and verify it".into(),
             document_spec: String::new(),
             pseudo_code: String::new(),
             draft_spec: None,
@@ -2086,11 +2093,9 @@ mod tests {
             "directory verification should expand to a readable child file"
         );
         assert!(
-            frame
-                .open_items
-                .iter()
-                .all(|item| !item.contains("target_refs=/tmp/state-decision-validator\n")
-                    && !item.contains("target_refs=/tmp/state-decision-validator ")),
+            frame.open_items.iter().all(|item| !item
+                .contains("target_refs=/tmp/state-decision-validator\n")
+                && !item.contains("target_refs=/tmp/state-decision-validator ")),
             "open items should not point the verifier at the bare directory path"
         );
     }

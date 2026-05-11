@@ -331,6 +331,8 @@ pub struct StatePatch {
     pub open_items_remove: Vec<String>,
     #[serde(default, alias = "accepted_summary")]
     pub accepted_summary_add: Vec<String>,
+    #[serde(default)]
+    pub review_mode: Option<ReviewMode>,
 }
 
 /// Structured output contract from the LLM in StateFrame-first mode.
@@ -444,6 +446,9 @@ fn normalize_state_patch(
                 .or_else(|| root.get("open_items"))
         });
     let open_items_remove = patch.and_then(|m| m.get("open_items_remove"));
+    let review_mode = patch
+        .and_then(|m| m.get("review_mode"))
+        .or_else(|| root.get("review_mode"));
 
     if let Some(value) = accepted_summary {
         normalized.insert("accepted_summary_add".into(), value.clone());
@@ -453,6 +458,9 @@ fn normalize_state_patch(
     }
     if let Some(value) = open_items_remove {
         normalized.insert("open_items_remove".into(), value.clone());
+    }
+    if let Some(value) = review_mode {
+        normalized.insert("review_mode".into(), value.clone());
     }
 
     if normalized.is_empty() {
@@ -466,7 +474,10 @@ fn normalize_next_action_value(value: Value) -> Value {
     match value {
         Value::String(action_type) => Value::Object(
             [
-                ("action_type".into(), Value::String(action_type.trim().to_string())),
+                (
+                    "action_type".into(),
+                    Value::String(action_type.trim().to_string()),
+                ),
                 ("args".into(), Value::Object(Map::new())),
             ]
             .into_iter()
@@ -522,7 +533,10 @@ fn normalize_state_decision_value(value: Value) -> Result<Value, String> {
         .cloned()
         .or_else(|| nested.and_then(|m| m.get("next_action").cloned()))
     {
-        normalized.insert("next_action".into(), normalize_next_action_value(next_action));
+        normalized.insert(
+            "next_action".into(),
+            normalize_next_action_value(next_action),
+        );
     }
     if let Some(items) = needed_context {
         normalized.insert("needed_context".into(), Value::Array(items.clone()));
@@ -552,7 +566,7 @@ fn normalize_state_decision_value(value: Value) -> Result<Value, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{AgentState, DecisionKind, validate_state_decision};
+    use super::{AgentState, DecisionKind, ReviewMode, validate_state_decision};
     use serde_json::{Map, Value};
 
     #[test]
@@ -618,6 +632,24 @@ mod tests {
         let next_action = decision.next_action.expect("next action");
         assert_eq!(next_action.action_type, "invoke_parsing_tool");
         assert_eq!(next_action.args, Value::Object(Map::new()));
+    }
+
+    #[test]
+    fn state_decision_accepts_review_mode_patch() {
+        let decision = validate_state_decision(
+            r#"{
+                "state":"executing",
+                "decision":"call_tool",
+                "next_action":{"action_type":"Read","args":{"file_path":"/tmp/report.md"}},
+                "state_patch":{"review_mode":"independent_review"}
+            }"#,
+        )
+        .expect("review_mode patch should normalize");
+
+        assert_eq!(
+            decision.state_patch.review_mode,
+            Some(ReviewMode::IndependentReview)
+        );
     }
 }
 

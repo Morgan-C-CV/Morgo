@@ -2115,7 +2115,10 @@ mod tests {
             "blind review should not emit claimed_source_evidence file facts"
         );
         assert!(
-            ledgers.change_refs.iter().all(|item| item.source != "worker_result"),
+            ledgers
+                .change_refs
+                .iter()
+                .all(|item| item.source != "worker_result"),
             "blind review should not infer changes from worker prose"
         );
     }

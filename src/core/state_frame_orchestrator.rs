@@ -147,9 +147,10 @@ fn infer_preflight_requirements_from_state_frame(frame: &StateFrame) -> ToolCont
         .declared_artifacts
         .iter()
         .find(|artifact| {
-            artifact_requires_write(artifact) && std::path::Path::new(artifact.path.as_str())
-                .extension()
-                .is_some()
+            artifact_requires_write(artifact)
+                && std::path::Path::new(artifact.path.as_str())
+                    .extension()
+                    .is_some()
         })
         .map(|artifact| artifact.path.clone())
         .or_else(|| {

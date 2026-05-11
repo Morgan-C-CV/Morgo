@@ -192,7 +192,8 @@ StateDecision schema:\n\
   \"state_patch\": {\n\
     \"open_items_add\": [],\n\
     \"open_items_remove\": [],\n\
-    \"accepted_summary_add\": []\n\
+    \"accepted_summary_add\": [],\n\
+    \"review_mode\": \"<optional: target_verification | independent_review>\"\n\
   },\n\
   \"confidence\": 0.9,\n\
   \"escalate\": false\n\
@@ -203,6 +204,9 @@ Rules:\n\
 - Use \"decision\": \"continue\" only when you also change state or provide a non-empty state_patch that advances the frame\n\
 - When adding accepted summary lines, use `state_patch.accepted_summary_add`; do not emit `accepted_summary` as a replacement field\n\
 - When adding open items, use `state_patch.open_items_add`; do not emit `open_items` as a replacement field\n\
+- Default `review_mode` is `independent_review`. Do not switch it just because the task creates or writes a small validator/analyzer/script/report.\n\
+- Keep `independent_review` when the job is to audit, review, validate, replay logs, inspect evidence, or produce a verdict; in that case any small helper artifact is review-owned evidence, not the primary product.\n\
+- Set `state_patch.review_mode=\"target_verification\"` only when the task explicitly requires strict target verification/evidence-repair, or when the main deliverable is a durable artifact the user will use as the final product, such as a feature, app, site, library, or reusable tool.\n\
 - Do NOT return wrapper payloads like `{ \"type\": ..., \"valid\": ..., \"decision\": {...} }`; return the canonical StateDecision object itself\n\
 - If `recent_evidence` contains `fact: execution_mode read_only_analysis`, prefer a single-turn `done`; do not use `continue` just to outline or narrate your plan\n\
 - If `required_output_schema` is `readonly_audit_4_paragraphs_v1`, return `decision=\"done\"` with exactly 4 `state_patch.accepted_summary_add` items, one each for `现状`、`主要风险`、`证据来源`、`下一步建议`\n\
@@ -942,10 +946,7 @@ fn push_completion_gate_required_read_target(
                 .map(|artifact| artifact.path.clone())
                 .collect::<Vec<_>>();
             if child_paths.is_empty() {
-                push_unique(
-                    targets,
-                    directory_verification_fallback_child_path(&path),
-                );
+                push_unique(targets, directory_verification_fallback_child_path(&path));
             } else {
                 for child_path in child_paths {
                     push_unique(targets, child_path);
@@ -974,10 +975,7 @@ fn push_completion_gate_required_read_target(
             .map(|artifact| artifact.path.clone())
             .collect::<Vec<_>>();
         if child_paths.is_empty() {
-            push_unique(
-                targets,
-                directory_verification_fallback_child_path(target),
-            );
+            push_unique(targets, directory_verification_fallback_child_path(target));
         } else {
             for child_path in child_paths {
                 push_unique(targets, child_path);
@@ -1515,7 +1513,7 @@ fn review_mode(frame: &StateFrame) -> ReviewMode {
     frame
         .stage_execution_contract
         .review_mode
-        .unwrap_or(ReviewMode::TargetVerification)
+        .unwrap_or(ReviewMode::IndependentReview)
 }
 
 fn independent_review_enabled(frame: &StateFrame) -> bool {
@@ -2900,6 +2898,18 @@ fn apply_state_patch(frame: &mut StateFrame, patch: &StatePatch) -> bool {
     for item in &patch.accepted_summary_add {
         changed |= push_unique(&mut frame.accepted_summary, item.clone());
     }
+    if let Some(review_mode) = patch.review_mode {
+        if frame.stage_execution_contract.review_mode != Some(review_mode) {
+            frame.stage_execution_contract.review_mode = Some(review_mode);
+            frame
+                .recent_evidence
+                .retain(|line| !line.starts_with("fact: review_mode "));
+            changed |= push_unique(
+                &mut frame.recent_evidence,
+                format!("fact: review_mode {}", review_mode.as_str()),
+            );
+        }
+    }
     changed
 }
 
@@ -4221,6 +4231,7 @@ pub async fn run_decision_loop_with_tools(
                 }
             }
             DecisionKind::CallTool => {
+                let _patch_changed = apply_state_patch(&mut frame, &decision.state_patch);
                 frame.state = decision.state;
                 if let Some(outcome) =
                     completion_gate_repair_terminal_outcome(&frame, &mut total_usage)
@@ -4390,15 +4401,17 @@ pub async fn run_decision_loop_with_tools(
 mod tests {
     use super::{
         DecisionLoopConfig, LoopOutcome, LoopUsage, RecoveryAttempt, StateFrameToolRuntime,
-        append_runtime_contract_facts, build_state_decision_repair_prompt, classify_tool_outcome,
-        evaluate_completion_evidence, execute_call_tool, missing_test_evidence_refs,
-        parse_and_validate_decision, push_tool_failure_feedback, push_tool_outcome_evidence,
-        run_decision_loop, run_decision_loop_with_tools, tool_backed_hydration_path,
+        append_runtime_contract_facts, apply_state_patch, build_state_decision_repair_prompt,
+        classify_tool_outcome, evaluate_completion_evidence, execute_call_tool,
+        missing_test_evidence_refs, parse_and_validate_decision, push_tool_failure_feedback,
+        push_tool_outcome_evidence, run_decision_loop, run_decision_loop_with_tools,
+        tool_backed_hydration_path,
     };
     use crate::core::state_frame::validate_state_decision;
     use crate::core::state_frame::{
         ActorRole, AgentState, CompletionEvidenceStatus, DeclaredArtifactContract, ReviewMode,
-        StageExecutionContract, StateBudget, StateFrame, TestContract, VerificationContract,
+        StageExecutionContract, StateBudget, StateFrame, StatePatch, TestContract,
+        VerificationContract,
     };
     use crate::core::state_frame_hydration::hydrate_needed_context;
     use crate::service::api::client::ModelProviderClient;
@@ -4513,6 +4526,41 @@ mod tests {
             required_output_schema: Some("state_decision_v1".into()),
             budget: StateBudget::default(),
         }
+    }
+
+    #[test]
+    fn state_patch_review_mode_updates_contract_and_fact_ledger() {
+        let mut frame = make_clean_frame();
+        frame.stage_execution_contract.review_mode = Some(ReviewMode::TargetVerification);
+        frame
+            .recent_evidence
+            .push("fact: review_mode target_verification".into());
+
+        let changed = apply_state_patch(
+            &mut frame,
+            &StatePatch {
+                review_mode: Some(ReviewMode::IndependentReview),
+                ..StatePatch::default()
+            },
+        );
+
+        assert!(changed);
+        assert_eq!(
+            frame.stage_execution_contract.review_mode,
+            Some(ReviewMode::IndependentReview)
+        );
+        assert!(
+            frame
+                .recent_evidence
+                .iter()
+                .any(|line| line == "fact: review_mode independent_review")
+        );
+        assert!(
+            frame
+                .recent_evidence
+                .iter()
+                .all(|line| line != "fact: review_mode target_verification")
+        );
     }
 
     fn verification_repair_tool_runtime() -> StateFrameToolRuntime {
@@ -5404,8 +5452,7 @@ mod tests {
     #[test]
     fn string_next_action_repair_can_progress_to_done_without_exhaustion() {
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let malformed_json =
-            "{\"state\":\"executing\",\"decision\":\"call_tool\",\"next_action\":{\"action_type\":\"Bash\"";
+        let malformed_json = "{\"state\":\"executing\",\"decision\":\"call_tool\",\"next_action\":{\"action_type\":\"Bash\"";
         let repaired_json =
             r#"{"state":"executing","decision":"call_tool","next_action":"invoke_parsing_tool"}"#;
         let done_json = r#"{"state":"done","decision":"done"}"#;
