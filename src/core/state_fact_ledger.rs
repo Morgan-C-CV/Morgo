@@ -1525,6 +1525,13 @@ pub fn build_rejected_approach_records(
 }
 
 pub fn build_step_fact_ledgers(step: &BossPlanStep) -> StepFactLedgers {
+    build_step_fact_ledgers_with_mode(step, false)
+}
+
+pub fn build_step_fact_ledgers_with_mode(
+    step: &BossPlanStep,
+    blind_review: bool,
+) -> StepFactLedgers {
     let mut ledgers = StepFactLedgers::default();
     apply_runtime_tool_records(&mut ledgers, step);
 
@@ -1535,8 +1542,16 @@ pub fn build_step_fact_ledgers(step: &BossPlanStep) -> StepFactLedgers {
             &path,
             &[
                 &objective,
-                step.result_diff.as_deref().unwrap_or_default(),
-                step.last_review_summary.as_deref().unwrap_or_default(),
+                if blind_review {
+                    ""
+                } else {
+                    step.result_diff.as_deref().unwrap_or_default()
+                },
+                if blind_review {
+                    ""
+                } else {
+                    step.last_review_summary.as_deref().unwrap_or_default()
+                },
             ],
         );
         push_file_fact(
@@ -1581,138 +1596,142 @@ pub fn build_step_fact_ledgers(step: &BossPlanStep) -> StepFactLedgers {
         }
     }
 
-    if let Some(result_diff) = step
-        .result_diff
-        .as_deref()
-        .filter(|text| !text.trim().is_empty())
-    {
-        let read_like = result_diff.to_lowercase();
-        if read_like.contains("read ")
-            || read_like.contains("read:")
-            || read_like.contains("evidence files read")
-            || read_like.contains("read source evidence files")
-            || read_like.contains("source evidence files read")
-            || read_like.contains("read operations completed")
-            || read_like.contains("reads performed")
-            || read_like.contains("inspect")
-            || read_like.contains("opened ")
-            || read_like.contains("viewed ")
-            || result_diff.contains("查看")
-            || result_diff.contains("阅读")
-            || result_diff.contains("读了")
+    if !blind_review {
+        if let Some(result_diff) = step
+            .result_diff
+            .as_deref()
+            .filter(|text| !text.trim().is_empty())
         {
-            for (idx, (path, _)) in extract_path_candidates_anywhere(result_diff)
-                .into_iter()
-                .enumerate()
+            let read_like = result_diff.to_lowercase();
+            if read_like.contains("read ")
+                || read_like.contains("read:")
+                || read_like.contains("evidence files read")
+                || read_like.contains("read source evidence files")
+                || read_like.contains("source evidence files read")
+                || read_like.contains("read operations completed")
+                || read_like.contains("reads performed")
+                || read_like.contains("inspect")
+                || read_like.contains("opened ")
+                || read_like.contains("viewed ")
+                || result_diff.contains("查看")
+                || result_diff.contains("阅读")
+                || result_diff.contains("读了")
             {
-                push_file_fact(
-                    &mut ledgers,
-                    FileFactRecord {
-                        ref_id: format!("filefact:step{}:prose-claim:{idx}", step.id),
-                        path: path.clone(),
-                        kind: "claimed_source_evidence".into(),
-                        fact: format!(
-                            "worker prose claims or implies this file was read or inspected: {path}; runtime Read confirmation is still required"
-                        ),
-                        symbol: extract_symbol_for_path(&path, &[result_diff, &objective]),
-                        source: "worker_result".into(),
-                        source_event_id: format!("worker-prose-claim:{}", step.id),
-                        freshness: "after-worker-output".into(),
-                        confidence_milli: 500,
-                        lineage: active_lineage(),
-                    },
-                );
+                for (idx, (path, _)) in extract_path_candidates_anywhere(result_diff)
+                    .into_iter()
+                    .enumerate()
+                {
+                    push_file_fact(
+                        &mut ledgers,
+                        FileFactRecord {
+                            ref_id: format!("filefact:step{}:prose-claim:{idx}", step.id),
+                            path: path.clone(),
+                            kind: "claimed_source_evidence".into(),
+                            fact: format!(
+                                "worker prose claims or implies this file was read or inspected: {path}; runtime Read confirmation is still required"
+                            ),
+                            symbol: extract_symbol_for_path(&path, &[result_diff, &objective]),
+                            source: "worker_result".into(),
+                            source_event_id: format!("worker-prose-claim:{}", step.id),
+                            freshness: "after-worker-output".into(),
+                            confidence_milli: 500,
+                            lineage: active_lineage(),
+                        },
+                    );
+                }
             }
-        }
-        let paths = extract_path_candidates_anywhere(result_diff);
-        if paths.is_empty() {
-            for (idx, file) in ledgers.file_facts.iter().enumerate() {
-                ledgers.change_refs.push(ChangeRecord {
-                    ref_id: format!("change:step{}:{idx}", step.id),
-                    path: file.path.clone(),
+            let paths = extract_path_candidates_anywhere(result_diff);
+            if paths.is_empty() {
+                for (idx, file) in ledgers.file_facts.iter().enumerate() {
+                    ledgers.change_refs.push(ChangeRecord {
+                        ref_id: format!("change:step{}:{idx}", step.id),
+                        path: file.path.clone(),
+                        summary: trim_excerpt(result_diff, 140),
+                        source: "worker_result".into(),
+                        source_event_id: format!("worker-result:{}", step.id),
+                        freshness: "after-worker-output".into(),
+                        confidence_milli: 800,
+                        lineage: active_lineage(),
+                    });
+                }
+            } else {
+                for (idx, (path, _)) in paths.into_iter().enumerate() {
+                    ledgers.change_refs.push(ChangeRecord {
+                        ref_id: format!("change:step{}:{idx}", step.id),
+                        path,
+                        summary: trim_excerpt(result_diff, 140),
+                        source: "worker_result".into(),
+                        source_event_id: format!("worker-result:{}", step.id),
+                        freshness: "after-worker-output".into(),
+                        confidence_milli: 900,
+                        lineage: active_lineage(),
+                    });
+                }
+            }
+            if let Some(status) = infer_test_status(result_diff) {
+                ledgers.test_refs.push(TestRecord {
+                    ref_id: format!("test:step{}:worker", step.id),
+                    name: "worker_reported_tests".into(),
+                    status: status.into(),
                     summary: trim_excerpt(result_diff, 140),
                     source: "worker_result".into(),
                     source_event_id: format!("worker-result:{}", step.id),
                     freshness: "after-worker-output".into(),
-                    confidence_milli: 800,
+                    confidence_milli: 850,
                     lineage: active_lineage(),
                 });
             }
-        } else {
-            for (idx, (path, _)) in paths.into_iter().enumerate() {
-                ledgers.change_refs.push(ChangeRecord {
-                    ref_id: format!("change:step{}:{idx}", step.id),
-                    path,
-                    summary: trim_excerpt(result_diff, 140),
-                    source: "worker_result".into(),
-                    source_event_id: format!("worker-result:{}", step.id),
-                    freshness: "after-worker-output".into(),
+        }
+    }
+
+    if !blind_review {
+        if let Some(review) = step
+            .last_review_summary
+            .as_deref()
+            .filter(|text| !text.trim().is_empty())
+        {
+            let review_lowered = review.to_lowercase();
+            if review_lowered.contains("read ")
+                || review_lowered.contains("inspect")
+                || review.contains("查看")
+                || review.contains("阅读")
+            {
+                for (idx, (path, _)) in extract_path_candidates_anywhere(review)
+                    .into_iter()
+                    .enumerate()
+                {
+                    push_file_fact(
+                        &mut ledgers,
+                        FileFactRecord {
+                            ref_id: format!("filefact:step{}:review-prose-claim:{idx}", step.id),
+                            path: path.clone(),
+                            kind: "claimed_source_evidence".into(),
+                            fact: format!(
+                                "review prose claims or implies this file was read or inspected: {path}; runtime Read confirmation is still required"
+                            ),
+                            symbol: extract_symbol_for_path(&path, &[review, &objective]),
+                            source: "review_summary".into(),
+                            source_event_id: format!("review-prose-claim:{}", step.id),
+                            freshness: "after-review".into(),
+                            confidence_milli: 500,
+                            lineage: active_lineage(),
+                        },
+                    );
+                }
+            }
+            if let Some(status) = infer_test_status(review) {
+                ledgers.test_refs.push(TestRecord {
+                    ref_id: format!("test:step{}:review", step.id),
+                    name: "review_reported_tests".into(),
+                    status: status.into(),
+                    summary: trim_excerpt(review, 140),
+                    source: "review_summary".into(),
+                    source_event_id: format!("review-summary:{}", step.id),
+                    freshness: "after-review".into(),
                     confidence_milli: 900,
                     lineage: active_lineage(),
                 });
             }
-        }
-        if let Some(status) = infer_test_status(result_diff) {
-            ledgers.test_refs.push(TestRecord {
-                ref_id: format!("test:step{}:worker", step.id),
-                name: "worker_reported_tests".into(),
-                status: status.into(),
-                summary: trim_excerpt(result_diff, 140),
-                source: "worker_result".into(),
-                source_event_id: format!("worker-result:{}", step.id),
-                freshness: "after-worker-output".into(),
-                confidence_milli: 850,
-                lineage: active_lineage(),
-            });
-        }
-    }
-
-    if let Some(review) = step
-        .last_review_summary
-        .as_deref()
-        .filter(|text| !text.trim().is_empty())
-    {
-        let review_lowered = review.to_lowercase();
-        if review_lowered.contains("read ")
-            || review_lowered.contains("inspect")
-            || review.contains("查看")
-            || review.contains("阅读")
-        {
-            for (idx, (path, _)) in extract_path_candidates_anywhere(review)
-                .into_iter()
-                .enumerate()
-            {
-                push_file_fact(
-                    &mut ledgers,
-                    FileFactRecord {
-                        ref_id: format!("filefact:step{}:review-prose-claim:{idx}", step.id),
-                        path: path.clone(),
-                        kind: "claimed_source_evidence".into(),
-                        fact: format!(
-                            "review prose claims or implies this file was read or inspected: {path}; runtime Read confirmation is still required"
-                        ),
-                        symbol: extract_symbol_for_path(&path, &[review, &objective]),
-                        source: "review_summary".into(),
-                        source_event_id: format!("review-prose-claim:{}", step.id),
-                        freshness: "after-review".into(),
-                        confidence_milli: 500,
-                        lineage: active_lineage(),
-                    },
-                );
-            }
-        }
-        if let Some(status) = infer_test_status(review) {
-            ledgers.test_refs.push(TestRecord {
-                ref_id: format!("test:step{}:review", step.id),
-                name: "review_reported_tests".into(),
-                status: status.into(),
-                summary: trim_excerpt(review, 140),
-                source: "review_summary".into(),
-                source_event_id: format!("review-summary:{}", step.id),
-                freshness: "after-review".into(),
-                confidence_milli: 900,
-                lineage: active_lineage(),
-            });
         }
     } else if step.completed
         && step
@@ -1734,7 +1753,9 @@ pub fn build_step_fact_ledgers(step: &BossPlanStep) -> StepFactLedgers {
     }
 
     build_review_ledgers(&mut ledgers, step);
-    build_artifact_ledgers(&mut ledgers, step);
+    if !blind_review {
+        build_artifact_ledgers(&mut ledgers, step);
+    }
 
     ledgers
 }
@@ -1744,7 +1765,7 @@ mod tests {
     use super::{
         LedgerLineage, ReviewRecord, StepFactLedgers, append_runtime_tool_record,
         build_blocker_records, build_open_item_records, build_rejected_approach_records,
-        build_step_fact_ledgers,
+        build_step_fact_ledgers, build_step_fact_ledgers_with_mode,
     };
     use crate::core::boss_state::{BossPlanStep, BossPlanStepStatus, BossStage};
     use crate::core::state_frame::{
@@ -2060,6 +2081,43 @@ mod tests {
         }));
 
         let _ = std::fs::remove_file(artifact_path);
+    }
+
+    #[test]
+    fn blind_review_ledgers_do_not_emit_prose_claimed_source_evidence() {
+        let step = BossPlanStep {
+            id: 12,
+            description: "blind review".into(),
+            objective: Some("review the output".into()),
+            acceptance: vec![],
+            requires_approval: false,
+            status: BossPlanStepStatus::Completed,
+            completed: true,
+            result_diff: Some("I read src/core/state_fact_ledger.rs and updated docs".into()),
+            worker_task_id: None,
+            attempt_count: 1,
+            retry_budget: 3,
+            last_review_summary: Some("looks fine after reading src/core/state_frame.rs".into()),
+            last_correction: Some("read_source_evidence".into()),
+            stage_execution_contract: StageExecutionContract::default(),
+            stage_continuation_context: None,
+            executor_b_stage_memory: None,
+            review_task_id: None,
+            tool_execution_records: Vec::new(),
+        };
+
+        let ledgers = build_step_fact_ledgers_with_mode(&step, true);
+        assert!(
+            ledgers
+                .file_facts
+                .iter()
+                .all(|item| item.kind != "claimed_source_evidence"),
+            "blind review should not emit claimed_source_evidence file facts"
+        );
+        assert!(
+            ledgers.change_refs.iter().all(|item| item.source != "worker_result"),
+            "blind review should not infer changes from worker prose"
+        );
     }
 
     #[test]

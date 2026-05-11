@@ -2,7 +2,7 @@ use crate::core::boss_acceptance::extract_artifact_expectations;
 use crate::core::boss_state::{BossPlan, BossStage};
 use crate::core::state_fact_ledger::{
     build_blocker_records, build_open_item_records, build_rejected_approach_records,
-    build_step_fact_ledgers,
+    build_step_fact_ledgers_with_mode,
 };
 use crate::core::state_frame::{
     ActorRole, AgentState, DeclaredArtifactContract, ReviewMode, StageContinuationContext,
@@ -986,7 +986,7 @@ fn build_fact_ledger(
     )];
 
     if let Some(step) = current_step {
-        let ledgers = build_step_fact_ledgers(step);
+        let ledgers = build_step_fact_ledgers_with_mode(step, blind_review);
         let open_item_ledgers = build_open_item_records(step, open_items);
         let blocker_ledgers = build_blocker_records(Some(step), stage, blocked_items);
         let rejected_ledgers = build_rejected_approach_records(step, &ledgers.review_refs);
@@ -1386,7 +1386,8 @@ pub fn project_state_frame_with_st_mode(
             )
         })
         .unwrap_or_default();
-    let ledgers = current_step.map(build_step_fact_ledgers);
+    let ledgers =
+        current_step.map(|step| build_step_fact_ledgers_with_mode(step, blind_review_candidate));
     let open_item_ledgers = current_step
         .map(|step| build_open_item_records(step, &open_items))
         .unwrap_or_default();
@@ -1445,15 +1446,15 @@ pub fn project_state_frame_with_st_mode(
     ));
     if let Some(step) = step_id.and_then(|id| plan.steps.iter().find(|s| s.id == id)) {
         if !independent_review {
-        if let Some(r) = &step.last_review_summary {
-            recent_evidence.push(format!("review: {r}"));
-        }
-        if let Some(c) = &step.last_correction {
-            recent_evidence.push(format!("correction: {c}"));
-        }
-        if let Some(context) = step.stage_continuation_context.as_ref() {
-            recent_evidence.extend(build_stage_continuation_fact_lines(context));
-        }
+            if let Some(r) = &step.last_review_summary {
+                recent_evidence.push(format!("review: {r}"));
+            }
+            if let Some(c) = &step.last_correction {
+                recent_evidence.push(format!("correction: {c}"));
+            }
+            if let Some(context) = step.stage_continuation_context.as_ref() {
+                recent_evidence.extend(build_stage_continuation_fact_lines(context));
+            }
         }
     }
 
