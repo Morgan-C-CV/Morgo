@@ -123,6 +123,24 @@ fn path_looks_like_development_artifact(path: &str) -> bool {
         || lowered.ends_with(".sh")
 }
 
+fn sanitize_extracted_artifact_path(path: &str) -> String {
+    let end = path
+        .char_indices()
+        .find_map(|(idx, ch)| {
+            (ch.is_whitespace()
+                || matches!(
+                    ch,
+                    '`' | '"' | '\'' | '，' | '。' | '；' | '、' | ')' | '）' | ']' | '】'
+                ))
+            .then_some(idx)
+        })
+        .unwrap_or(path.len());
+    path[..end]
+        .trim()
+        .trim_end_matches(['.', ',', ':', ';'])
+        .to_string()
+}
+
 fn step_looks_like_development_task(
     step: Option<&crate::core::boss_state::BossPlanStep>,
     declared_artifacts: &[DeclaredArtifactContract],
@@ -345,7 +363,7 @@ fn build_permission_facts(step_id: usize, objective: &str, readonly_analysis: bo
         .into_iter()
         .enumerate()
     {
-        let path = expectation.path.to_string_lossy().to_string();
+        let path = sanitize_extracted_artifact_path(&expectation.path.to_string_lossy());
         facts.push(fact_line(
             &format!("permission_to_create_and_write:{path}"),
             format!(
@@ -389,6 +407,111 @@ fn open_item_requires_verification(summary: &str) -> bool {
         || lowered.contains("verification")
         || lowered.contains("artifact check")
         || summary.contains("验证")
+}
+
+fn step_contract_text_with_acceptance(step: &crate::core::boss_state::BossPlanStep) -> String {
+    let mut text = current_task_contract_text(step.objective());
+    if !step.acceptance.is_empty() {
+        text.push('\n');
+        text.push_str(&step.acceptance.join("\n"));
+    }
+    text
+}
+
+fn step_requires_runtime_validation(step: Option<&crate::core::boss_state::BossPlanStep>) -> bool {
+    let Some(step) = step else {
+        return false;
+    };
+    let text = step_contract_text_with_acceptance(step);
+    let lowered = text.to_ascii_lowercase();
+    let has_runtime_action = lowered.contains("run ")
+        || lowered.contains("execute ")
+        || lowered.contains("replay ")
+        || text.contains("运行")
+        || text.contains("执行")
+        || text.contains("回放")
+        || text.contains("实际执行");
+    let has_validation_target = lowered.contains("validator")
+        || lowered.contains("validation")
+        || lowered.contains("verify")
+        || lowered.contains("test")
+        || text.contains("验证器")
+        || text.contains("验证")
+        || text.contains("终端验证摘要");
+
+    has_runtime_action && has_validation_target
+}
+
+fn step_requires_markdown_conclusion(step: Option<&crate::core::boss_state::BossPlanStep>) -> bool {
+    let Some(step) = step else {
+        return false;
+    };
+    let text = step_contract_text_with_acceptance(step);
+    let lowered = text.to_ascii_lowercase();
+    (lowered.contains("markdown") || lowered.contains(".md"))
+        && (lowered.contains("conclusion")
+            || lowered.contains("summary")
+            || lowered.contains("report")
+            || text.contains("结论文件")
+            || text.contains("结论")
+            || text.contains("报告"))
+}
+
+fn first_declared_target_directory(
+    declared_artifacts: &[DeclaredArtifactContract],
+) -> Option<String> {
+    if let Some(directory) = declared_artifacts
+        .iter()
+        .find(|artifact| artifact.kind == "directory")
+    {
+        return Some(
+            sanitize_extracted_artifact_path(&directory.path)
+                .trim_end_matches('/')
+                .to_string(),
+        );
+    }
+    declared_artifacts
+        .iter()
+        .find(|artifact| !artifact.path.trim().is_empty())
+        .map(|artifact| {
+            let path = sanitize_extracted_artifact_path(&artifact.path);
+            path.rsplit_once('/')
+                .map(|(parent, _)| parent.to_string())
+                .unwrap_or(path)
+        })
+}
+
+fn first_absolute_path_token(text: &str) -> Option<String> {
+    let start = text
+        .char_indices()
+        .find_map(|(idx, ch)| (ch == '/').then_some(idx))?;
+    let tail = &text[start..];
+    let end = tail
+        .char_indices()
+        .find_map(|(idx, ch)| {
+            (ch.is_whitespace()
+                || matches!(
+                    ch,
+                    '`' | '"' | '\'' | '，' | '。' | '；' | '、' | ')' | '）' | ']' | '】'
+                ))
+            .then_some(idx)
+        })
+        .unwrap_or(tail.len());
+    let path = tail[..end].trim().trim_end_matches(['.', ',', ':', ';']);
+    (!path.is_empty()).then(|| path.to_string())
+}
+
+fn first_step_target_directory(step: &crate::core::boss_state::BossPlanStep) -> Option<String> {
+    let path = first_absolute_path_token(&step_contract_text_with_acceptance(step))?;
+    if path
+        .rsplit('/')
+        .next()
+        .is_some_and(|name| name.contains('.'))
+    {
+        path.rsplit_once('/').map(|(parent, _)| parent.to_string())
+    } else {
+        Some(path.trim_end_matches('/').to_string())
+    }
 }
 
 fn join_contract_refs(refs: &[String]) -> String {
@@ -539,7 +662,7 @@ fn build_stage_execution_contract(
                 .into_iter()
                 .enumerate()
         {
-            let path = expectation.path.to_string_lossy().to_string();
+            let path = sanitize_extracted_artifact_path(&expectation.path.to_string_lossy());
             if declared_artifacts.iter().any(|item| item.path == path) {
                 continue;
             }
@@ -559,6 +682,40 @@ fn build_stage_execution_contract(
                 },
                 required_evidence: vec![format!("artifact:step{}:{idx}", step.id), path, kind],
             });
+        }
+    }
+    if step_requires_markdown_conclusion(step) {
+        if let Some(target_dir) = first_declared_target_directory(&declared_artifacts)
+            .or_else(|| step.and_then(first_step_target_directory))
+        {
+            let path = format!("{target_dir}/summary.md");
+            if !declared_artifacts
+                .iter()
+                .any(|artifact| artifact.path == path)
+            {
+                let idx = declared_artifacts.len();
+                declared_artifacts.push(DeclaredArtifactContract {
+                    ref_id: format!(
+                        "artifact:step{}:{idx}",
+                        step.map(|step| step.id).unwrap_or(0)
+                    ),
+                    path: path.clone(),
+                    kind: "file".into(),
+                    required_actions: if readonly_analysis {
+                        Vec::new()
+                    } else {
+                        vec!["create".into(), "write".into()]
+                    },
+                    required_evidence: vec![
+                        format!(
+                            "artifact:step{}:{idx}",
+                            step.map(|step| step.id).unwrap_or(0)
+                        ),
+                        path,
+                        "file".into(),
+                    ],
+                });
+            }
         }
     }
     let st_test_only_mode =
@@ -604,6 +761,18 @@ fn build_stage_execution_contract(
             required_evidence: vec![item.ref_id.clone()],
         })
         .collect::<Vec<_>>();
+    let mut tests = tests;
+    if step_requires_runtime_validation(step)
+        && !tests
+            .iter()
+            .any(|test| test.name == "st_auto_validation" || test.name == "runtime_validation")
+    {
+        tests.push(TestContract {
+            name: "runtime_validation".into(),
+            required_actions: vec!["run_test".into()],
+            required_evidence: vec!["runtime_test_passed".into()],
+        });
+    }
     let mut required_actions = Vec::new();
     if step.is_some() && !declared_artifacts.is_empty() {
         required_actions.extend(["create".into(), "write".into()]);
@@ -1934,6 +2103,88 @@ mod tests {
         );
         assert!(frame.recent_evidence.iter().any(|line| {
             line.contains("fact: permission_to_create_and_write:/tmp/state-decision-validator")
+        }));
+    }
+
+    #[test]
+    fn independent_review_runtime_validator_task_requires_lightweight_test_and_summary_artifact() {
+        let plan = BossPlan {
+            plan_id: "plan-u10-runtime-validator".into(),
+            task_description: "create validator".into(),
+            document_spec: String::new(),
+            pseudo_code: String::new(),
+            draft_spec: None,
+            review_feedback: None,
+            revision_notes: None,
+            finalized: false,
+            documentation_feedback: Vec::new(),
+            steps: vec![BossPlanStep {
+                id: 0,
+                description: "create StateDecision validator".into(),
+                objective: Some(
+                    "创建一个 StateDecision contract 验证器。目标目录：/tmp/state-decision-validator。要求实际执行验证器并给出终端验证摘要。输出一个 markdown 结论文件，说明 ON/OFF 差异。".into(),
+                ),
+                acceptance: vec![
+                    "target directory exists and is non-empty: /tmp/state-decision-validator"
+                        .into(),
+                ],
+                requires_approval: false,
+                status: BossPlanStepStatus::Running,
+                completed: false,
+                result_diff: None,
+                worker_task_id: None,
+                attempt_count: 0,
+                retry_budget: 3,
+                last_review_summary: None,
+                last_correction: None,
+                stage_execution_contract: StageExecutionContract::default(),
+                stage_continuation_context: None,
+                executor_b_stage_memory: None,
+                review_task_id: None,
+                tool_execution_records: Vec::new(),
+            }],
+            accepted_by_user: true,
+            auto_sequence: false,
+            session_snapshot: None,
+        };
+
+        let frame = project_state_frame(&plan, BossStage::Execution, Some(0), ActorRole::Worker);
+
+        assert_eq!(
+            frame.stage_execution_contract.review_mode,
+            Some(ReviewMode::IndependentReview)
+        );
+        assert!(frame.stage_execution_contract.verifications.is_empty());
+        assert!(
+            frame
+                .stage_execution_contract
+                .tests
+                .iter()
+                .any(|test| test.name == "runtime_validation")
+        );
+        assert!(
+            frame
+                .stage_execution_contract
+                .required_actions
+                .iter()
+                .any(|action| action == "run_test")
+        );
+        assert!(
+            frame
+                .stage_execution_contract
+                .declared_artifacts
+                .iter()
+                .any(
+                    |artifact| artifact.path == "/tmp/state-decision-validator/summary.md"
+                        && artifact.kind == "file"
+                ),
+            "declared_artifacts={:?}",
+            frame.stage_execution_contract.declared_artifacts
+        );
+        assert!(frame.recent_evidence.iter().any(|line| {
+            line.starts_with("fact: completion_contract ")
+                && line.contains("test_evidence=required")
+                && line.contains("verification_evidence=not_required")
         }));
     }
 

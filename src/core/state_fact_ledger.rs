@@ -1134,11 +1134,13 @@ fn is_test_command(command: &str) -> bool {
         || lowered.contains("uv run pytest")
 }
 
-fn contract_has_st_auto_validation(contract: &StageExecutionContract) -> bool {
-    contract
-        .tests
-        .iter()
-        .any(|test| test.name == "st_auto_validation")
+fn contract_has_runtime_validation(contract: &StageExecutionContract) -> bool {
+    contract.tests.iter().any(|test| {
+        matches!(
+            test.name.as_str(),
+            "st_auto_validation" | "runtime_validation"
+        )
+    })
 }
 
 fn command_mentions_declared_runtime_target(
@@ -1147,16 +1149,17 @@ fn command_mentions_declared_runtime_target(
 ) -> bool {
     let lowered = command.to_ascii_lowercase();
     contract.declared_artifacts.iter().any(|artifact| {
-        artifact.kind != "directory" && {
-            let path = normalize_runtime_path(&artifact.path);
-            let path_lower = path.to_ascii_lowercase();
-            let file_name_matches = Path::new(&path)
-                .file_name()
-                .and_then(|value| value.to_str())
-                .map(|value| lowered.contains(&value.to_ascii_lowercase()))
-                .unwrap_or(false);
-            lowered.contains(&path_lower) || file_name_matches
+        let path = normalize_runtime_path(&artifact.path);
+        let path_lower = path.to_ascii_lowercase();
+        if artifact.kind == "directory" {
+            return lowered.contains(&path_lower);
         }
+        let file_name_matches = Path::new(&path)
+            .file_name()
+            .and_then(|value| value.to_str())
+            .map(|value| lowered.contains(&value.to_ascii_lowercase()))
+            .unwrap_or(false);
+        lowered.contains(&path_lower) || file_name_matches
     })
 }
 
@@ -1174,7 +1177,7 @@ fn command_has_write_scaffold_intent(command: &str) -> bool {
 }
 
 fn is_st_auto_validation_command(contract: &StageExecutionContract, command: &str) -> bool {
-    if !contract_has_st_auto_validation(contract) {
+    if !contract_has_runtime_validation(contract) {
         return false;
     }
 
@@ -2368,6 +2371,50 @@ mod tests {
         };
 
         append_runtime_tool_record(&contract, &mut ledgers, &record, "st-auto");
+
+        assert_eq!(ledgers.test_refs.len(), 1);
+        assert_eq!(ledgers.test_refs[0].status, "passed");
+        assert_eq!(ledgers.test_refs[0].source, "tool:Bash");
+    }
+
+    #[test]
+    fn runtime_validation_command_under_declared_directory_emits_passed_test_record() {
+        let mut ledgers = StepFactLedgers::default();
+        let contract = StageExecutionContract {
+            declared_artifacts: vec![DeclaredArtifactContract {
+                ref_id: "artifact:validator-dir".into(),
+                path: "/tmp/state-decision-validator".into(),
+                kind: "directory".into(),
+                required_actions: vec!["create".into(), "write".into()],
+                required_evidence: vec!["artifact_evidence".into()],
+            }],
+            tests: vec![crate::core::state_frame::TestContract {
+                name: "runtime_validation".into(),
+                required_actions: vec!["run_test".into()],
+                required_evidence: vec!["runtime_test_passed".into()],
+            }],
+            ..StageExecutionContract::default()
+        };
+        let record = ToolExecutionRecord {
+            tool_name: "Bash".into(),
+            outcome: "Text".into(),
+            kind: ToolExecutionOutcomeKind::Success,
+            summary: "Bash succeeded".into(),
+            detail: Some("exit_code: 0\nvalidator ok".into()),
+            pending_approval: None,
+            report_modifier: ToolReportModifier::None,
+            observable_input: Some(ObservableInput {
+                value: r#"{"command":"python3 /tmp/state-decision-validator/validator.py /tmp/a.jsonl"}"#.into(),
+                source: ObservableInputSource::Raw,
+            }),
+            batch_context: ToolBatchContext {
+                batch_index: 0,
+                batch_size: 1,
+                executed_in_batch: false,
+            },
+        };
+
+        append_runtime_tool_record(&contract, &mut ledgers, &record, "runtime-validation");
 
         assert_eq!(ledgers.test_refs.len(), 1);
         assert_eq!(ledgers.test_refs[0].status, "passed");
