@@ -406,12 +406,31 @@ fn build_completion_contract_fact(
     stage_execution_contract: &StageExecutionContract,
     readonly_analysis: bool,
 ) -> String {
-    let artifact_required =
-        !readonly_analysis && (!permission_facts.is_empty() || !artifact_ledgers.is_empty());
-    let artifact_refs = artifact_ledgers
+    let artifact_required = !readonly_analysis
+        && (!permission_facts.is_empty()
+            || !artifact_ledgers.is_empty()
+            || !stage_execution_contract.declared_artifacts.is_empty());
+    let mut artifact_refs = artifact_ledgers
         .iter()
         .map(|item| item.ref_id.clone())
         .collect::<Vec<_>>();
+    if artifact_refs.is_empty() {
+        artifact_refs.extend(
+            stage_execution_contract
+                .declared_artifacts
+                .iter()
+                .map(|item| item.ref_id.clone()),
+        );
+    }
+    if artifact_refs.is_empty() {
+        artifact_refs.extend(permission_facts.iter().filter_map(|line| {
+            line.strip_prefix("fact: permission_to_create_and_write:")
+                .map(|rest| rest.split_once(' ').map(|(path, _)| path).unwrap_or(rest))
+                .map(str::trim)
+                .filter(|path| !path.is_empty())
+                .map(str::to_string)
+        }));
+    }
     let mut test_refs = open_item_ledgers
         .iter()
         .filter(|item| open_item_requires_test(&item.summary))
@@ -426,7 +445,12 @@ fn build_completion_contract_fact(
         .tests
         .iter()
         .any(|test| test.name == "st_auto_validation");
-    let verification_refs = if readonly_analysis || st_test_only_mode {
+    let verification_refs = if readonly_analysis
+        || st_test_only_mode
+        || stage_execution_contract
+            .review_mode
+            .is_some_and(|mode| mode.is_independent_review())
+    {
         Vec::new()
     } else if artifact_required {
         artifact_refs.clone()
@@ -541,7 +565,7 @@ fn build_stage_execution_contract(
         st_mode_enabled && step_looks_like_development_task(step, &declared_artifacts);
     let review_mode = infer_review_mode(step, readonly_analysis);
     let independent_review = review_mode.is_some_and(|mode| mode.is_independent_review());
-    let verifications = if st_test_only_mode {
+    let verifications = if st_test_only_mode || independent_review {
         Vec::new()
     } else {
         artifact_ledgers
@@ -1877,7 +1901,7 @@ mod tests {
 
         let frame = project_state_frame(&plan, BossStage::Execution, Some(0), ActorRole::Worker);
 
-        assert_eq!(frame.state, AgentState::Verifying);
+        assert_eq!(frame.state, AgentState::Executing);
         assert_eq!(
             frame.stage_execution_contract.review_mode,
             Some(ReviewMode::IndependentReview)
@@ -1888,6 +1912,18 @@ mod tests {
                 .iter()
                 .any(|line| line == "fact: review_mode independent_review"),
             "validator-style audit tasks should default to independent_review"
+        );
+        assert!(
+            frame.stage_execution_contract.verifications.is_empty(),
+            "independent_review should not inject target_verification evidence requirements"
+        );
+        assert!(
+            frame
+                .recent_evidence
+                .iter()
+                .any(|line| line.starts_with("fact: completion_contract ")
+                    && line.contains("verification_evidence=not_required")),
+            "independent_review completion contract should not require verification evidence"
         );
         assert!(
             frame

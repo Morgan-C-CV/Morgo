@@ -2668,15 +2668,24 @@ fn build_stage_execution_contract(
             required_evidence: vec![artifact.path.clone()],
         })
         .collect::<Vec<_>>();
-    let verifications = target_artifacts
-        .iter()
-        .map(|artifact| VerificationContract {
-            target_ref: artifact.path.clone(),
-            target_path: Some(artifact.path.clone()),
-            required_actions: vec!["verify".into()],
-            required_evidence: vec![artifact.path.clone()],
-        })
-        .collect::<Vec<_>>();
+    let review_mode = step
+        .stage_execution_contract
+        .review_mode
+        .or(Some(ReviewMode::IndependentReview));
+    let independent_review = review_mode.is_some_and(|mode| mode.is_independent_review());
+    let verifications = if independent_review {
+        Vec::new()
+    } else {
+        target_artifacts
+            .iter()
+            .map(|artifact| VerificationContract {
+                target_ref: artifact.path.clone(),
+                target_path: Some(artifact.path.clone()),
+                required_actions: vec!["verify".into()],
+                required_evidence: vec![artifact.path.clone()],
+            })
+            .collect::<Vec<_>>()
+    };
     let tests = step
         .acceptance
         .iter()
@@ -2690,7 +2699,10 @@ fn build_stage_execution_contract(
             required_evidence: vec![item.clone()],
         })
         .collect::<Vec<_>>();
-    let mut required_actions = vec!["create".into(), "write".into(), "verify".into()];
+    let mut required_actions = vec!["create".into(), "write".into()];
+    if !verifications.is_empty() {
+        required_actions.push("verify".into());
+    }
     if !tests.is_empty() {
         required_actions.push("run_test".into());
     }
@@ -2699,10 +2711,6 @@ fn build_stage_execution_contract(
         .map(|artifact| artifact.path.clone())
         .collect::<Vec<_>>();
     required_evidence.extend(tests.iter().map(|item| item.name.clone()));
-    let review_mode = step
-        .stage_execution_contract
-        .review_mode
-        .or(Some(ReviewMode::IndependentReview));
     StageExecutionContract {
         review_mode,
         declared_artifacts,
@@ -22182,6 +22190,17 @@ mod tests {
         let contract = build_stage_execution_contract(&step, &target_artifacts);
 
         assert_eq!(contract.review_mode, Some(ReviewMode::IndependentReview));
+        assert!(
+            contract.verifications.is_empty(),
+            "default independent_review should not create target verification contracts"
+        );
+        assert!(
+            contract
+                .required_actions
+                .iter()
+                .all(|action| action != "verify" && action != "verify_artifact"),
+            "default independent_review should not require verify actions"
+        );
     }
 
     #[test]

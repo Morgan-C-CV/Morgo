@@ -460,7 +460,13 @@ fn normalize_state_patch(
         normalized.insert("open_items_remove".into(), value.clone());
     }
     if let Some(value) = review_mode {
-        normalized.insert("review_mode".into(), value.clone());
+        let is_blank = value
+            .as_str()
+            .map(|mode| mode.trim().is_empty())
+            .unwrap_or(false);
+        if !is_blank {
+            normalized.insert("review_mode".into(), value.clone());
+        }
     }
 
     if normalized.is_empty() {
@@ -650,6 +656,21 @@ mod tests {
             decision.state_patch.review_mode,
             Some(ReviewMode::IndependentReview)
         );
+    }
+
+    #[test]
+    fn state_decision_ignores_blank_review_mode_patch() {
+        let decision = validate_state_decision(
+            r#"{
+                "state":"executing",
+                "decision":"call_tool",
+                "next_action":{"action_type":"Read","args":{"file_path":"/tmp/report.md"}},
+                "state_patch":{"review_mode":""}
+            }"#,
+        )
+        .expect("blank review_mode should be ignored");
+
+        assert_eq!(decision.state_patch.review_mode, None);
     }
 }
 

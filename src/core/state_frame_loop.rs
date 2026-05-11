@@ -2224,6 +2224,30 @@ fn completion_gate_repair_terminal_outcome(
     })
 }
 
+fn independent_review_terminal_outcome(
+    frame: &StateFrame,
+    usage: &mut LoopUsage,
+) -> Option<LoopOutcome> {
+    if !independent_review_enabled(frame) || !independent_review_has_runtime_success(usage) {
+        return None;
+    }
+    let completion = evaluate_completion_evidence(frame, usage);
+    if !matches!(completion, CompletionEvidenceStatus::Sufficient) {
+        return None;
+    }
+    let evidence_refs = collect_evidence_refs(frame, Some(usage));
+    let report = build_worker_structured_report_with_refs(frame, usage, completion, evidence_refs);
+    if !report.completion_evidence_gaps.is_empty() {
+        return None;
+    }
+    usage.completion_evidence_status = Some(report.completion_evidence_status.clone());
+    usage.worker_report = Some(report);
+    Some(LoopOutcome::Done {
+        final_state: AgentState::Done,
+        usage: usage.clone(),
+    })
+}
+
 fn verify_terminal_diagnostics_enabled() -> bool {
     std::env::var("RUST_AGENT_VERIFY_TERMINAL_DIAGNOSTICS")
         .map(|value| {
@@ -4117,6 +4141,11 @@ pub async fn run_decision_loop_with_tools(
                                     return Ok(outcome);
                                 }
                                 if let Some(outcome) =
+                                    independent_review_terminal_outcome(&frame, &mut total_usage)
+                                {
+                                    return Ok(outcome);
+                                }
+                                if let Some(outcome) =
                                     verification_terminal_outcome(&frame, &mut total_usage)
                                 {
                                     return Ok(outcome);
@@ -4307,6 +4336,11 @@ pub async fn run_decision_loop_with_tools(
                         total_usage.tool_execution_records.push(record);
                         if let Some(outcome) =
                             completion_gate_repair_terminal_outcome(&frame, &mut total_usage)
+                        {
+                            return Ok(outcome);
+                        }
+                        if let Some(outcome) =
+                            independent_review_terminal_outcome(&frame, &mut total_usage)
                         {
                             return Ok(outcome);
                         }
@@ -5061,6 +5095,55 @@ mod tests {
                 assert_eq!(usage.fallback_count, 0);
             }
             other => panic!("expected Done, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn independent_review_closes_after_sufficient_runtime_tool_anchor() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let temp_path = unique_temp_path("independent_review_anchor");
+        std::fs::write(&temp_path, "review anchor\n").expect("temp file should be written");
+        let request_json = format!(
+            r#"{{"state":"verifying","decision":"call_tool","next_action":{{"action_type":"Read","args":{{"file_path":"{}"}}}},"state_patch":{{"review_mode":"independent_review"}}}}"#,
+            temp_path.display()
+        );
+        let client = ModelProviderClient::with_scripted_turns(vec![vec![StreamEvent::TextDelta(
+            request_json.into(),
+        )]]);
+        let tool_runtime = StateFrameToolRuntime {
+            registry: ToolRegistry::new().register(Arc::new(FileReadTool)),
+            permissions: ToolPermissionContext::new(PermissionMode::Default),
+            cwd: test_runtime_paths().0,
+            config_root: test_runtime_paths().1,
+        };
+        let mut frame = make_clean_frame();
+        frame.stage_execution_contract.review_mode = Some(ReviewMode::IndependentReview);
+
+        let outcome = rt
+            .block_on(run_decision_loop_with_tools(
+                &client,
+                frame,
+                DecisionLoopConfig {
+                    max_iterations: 4,
+                    ..DecisionLoopConfig::default()
+                },
+                Some(tool_runtime),
+            ))
+            .expect("loop should not error");
+        let _ = std::fs::remove_file(&temp_path);
+
+        match outcome {
+            LoopOutcome::Done { usage, .. } => {
+                assert_eq!(usage.tool_dispatch_count, 1);
+                assert_eq!(usage.tool_dispatch_success_count, 1);
+                let report = usage.worker_report.expect("worker report");
+                assert_eq!(
+                    report.stage_execution_contract.review_mode,
+                    Some(ReviewMode::IndependentReview)
+                );
+                assert!(report.completion_evidence_gaps.is_empty());
+            }
+            other => panic!("expected Done after independent review runtime anchor, got {other:?}"),
         }
     }
 
