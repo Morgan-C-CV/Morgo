@@ -216,7 +216,9 @@ Rules:\n\
 - If you add a runtime follow-up via `state_patch.open_items_add`, remove that exact item with `state_patch.open_items_remove` before returning `decision=\"done\"`\n\
 - Default `review_mode` is `independent_review`. Do not switch it just because the task creates or writes a small validator/analyzer/script/report.\n\
 - If you already know the task mode in this turn, set `state_patch.task_profile` in the same response. Do not spend an extra classification turn just to label the task.\n\
+- Treat `task_profile` and `requires_source_evidence` as explicit typed intent; do not expect downstream projection to infer them from objective or acceptance keywords.\n\
 - Keep `independent_review` when the job is to audit, review, validate, replay logs, inspect evidence, or produce a verdict; in that case any small helper artifact is review-owned evidence, not the primary product.\n\
+- For validator/analyzer/replay/report helper tasks under `independent_review`, use `task_profile=\"independent_review\"` and `requires_source_evidence=false`; log replay inputs are review evidence inputs, not source-evidence repair gates.\n\
 - Set `state_patch.review_mode=\"target_verification\"` only when the task explicitly requires strict target verification/evidence-repair, or when the main deliverable is a durable artifact the user will use as the final product, such as a feature, app, site, library, or reusable tool.\n\
 - Use `task_profile=\"code_change\"` for implementation work, `task_profile=\"read_only_analysis\"` for strict no-modify audits, `task_profile=\"independent_review\"` for blind/independent review loops, and `task_profile=\"target_verification\"` only for explicit verification-first / evidence-repair work.\n\
 - Set `requires_source_evidence=true` only when completion should stay blocked until source files are actually read; set `false` when heavy source-evidence repair is not part of this task's gate.\n\
@@ -3029,6 +3031,15 @@ fn push_decision_feedback(
     )
 }
 
+fn independent_review_typed_intent_locked(frame: &StateFrame) -> bool {
+    frame
+        .stage_execution_contract
+        .review_mode
+        .is_some_and(|mode| mode.is_independent_review())
+        && (frame.stage_execution_contract.task_profile == Some(TaskProfile::IndependentReview)
+            || frame.stage_execution_contract.requires_source_evidence == Some(false))
+}
+
 fn apply_state_patch(frame: &mut StateFrame, patch: &StatePatch) -> bool {
     let mut changed = false;
     for item in &patch.open_items_add {
@@ -3086,7 +3097,17 @@ fn apply_state_patch(frame: &mut StateFrame, patch: &StatePatch) -> bool {
         }
     }
     if let Some(review_mode) = patch.review_mode {
-        if frame.stage_execution_contract.review_mode != Some(review_mode) {
+        if independent_review_typed_intent_locked(frame)
+            && matches!(review_mode, ReviewMode::TargetVerification)
+        {
+            changed |= push_decision_feedback(
+                frame,
+                "typed_intent_patch_ignored",
+                true,
+                "keep_independent_review_for_helper_review_task",
+                "ignored review_mode=target_verification because this frame is locked to independent_review helper-task intent",
+            );
+        } else if frame.stage_execution_contract.review_mode != Some(review_mode) {
             frame.stage_execution_contract.review_mode = Some(review_mode);
             frame
                 .recent_evidence
@@ -3098,7 +3119,20 @@ fn apply_state_patch(frame: &mut StateFrame, patch: &StatePatch) -> bool {
         }
     }
     if let Some(task_profile) = patch.task_profile {
-        if frame.stage_execution_contract.task_profile != Some(task_profile) {
+        if independent_review_typed_intent_locked(frame)
+            && matches!(
+                task_profile,
+                TaskProfile::CodeChange | TaskProfile::TargetVerification
+            )
+        {
+            changed |= push_decision_feedback(
+                frame,
+                "typed_intent_patch_ignored",
+                true,
+                "keep_task_profile_independent_review",
+                "ignored task_profile escalation because validator/replay/audit helper artifacts are review-owned, not product code changes",
+            );
+        } else if frame.stage_execution_contract.task_profile != Some(task_profile) {
             frame.stage_execution_contract.task_profile = Some(task_profile);
             frame
                 .recent_evidence
@@ -3119,7 +3153,16 @@ fn apply_state_patch(frame: &mut StateFrame, patch: &StatePatch) -> bool {
         }
     }
     if let Some(requires_source_evidence) = patch.requires_source_evidence {
-        if frame.stage_execution_contract.requires_source_evidence != Some(requires_source_evidence)
+        if independent_review_typed_intent_locked(frame) && requires_source_evidence {
+            changed |= push_decision_feedback(
+                frame,
+                "typed_intent_patch_ignored",
+                true,
+                "keep_requires_source_evidence_false",
+                "ignored requires_source_evidence=true because this independent_review helper task should not enter source-evidence repair",
+            );
+        } else if frame.stage_execution_contract.requires_source_evidence
+            != Some(requires_source_evidence)
         {
             frame.stage_execution_contract.requires_source_evidence =
                 Some(requires_source_evidence);
@@ -5176,6 +5219,54 @@ mod tests {
                 .iter()
                 .all(|line| !line.starts_with("fact: execution_mode ")),
             "non-readonly task profiles must not inject readonly execution facts"
+        );
+    }
+
+    #[test]
+    fn independent_review_helper_ignores_code_change_source_evidence_patch() {
+        let mut frame = make_clean_frame();
+        frame.recent_evidence.clear();
+        frame.stage_execution_contract.review_mode = Some(ReviewMode::IndependentReview);
+        frame.stage_execution_contract.task_profile = Some(TaskProfile::IndependentReview);
+        frame.stage_execution_contract.requires_source_evidence = Some(false);
+
+        let changed = apply_state_patch(
+            &mut frame,
+            &StatePatch {
+                review_mode: Some(ReviewMode::TargetVerification),
+                task_profile: Some(TaskProfile::CodeChange),
+                requires_source_evidence: Some(true),
+                ..StatePatch::default()
+            },
+        );
+
+        assert!(changed, "ignored patch should still feed back to the model");
+        assert_eq!(
+            frame.stage_execution_contract.review_mode,
+            Some(ReviewMode::IndependentReview)
+        );
+        assert_eq!(
+            frame.stage_execution_contract.task_profile,
+            Some(TaskProfile::IndependentReview)
+        );
+        assert_eq!(
+            frame.stage_execution_contract.requires_source_evidence,
+            Some(false)
+        );
+        assert!(frame.recent_evidence.iter().any(|line| {
+            line.starts_with("decision_feedback: category=typed_intent_patch_ignored ")
+        }));
+        assert!(
+            frame
+                .recent_evidence
+                .iter()
+                .all(|line| line != "fact: task_profile code_change")
+        );
+        assert!(
+            frame
+                .recent_evidence
+                .iter()
+                .all(|line| line != "fact: requires_source_evidence required")
         );
     }
 

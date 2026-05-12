@@ -2748,35 +2748,12 @@ fn build_stage_execution_contract(
     }
 }
 
-fn path_looks_like_development_artifact(path: &str) -> bool {
-    let lowered = path.to_ascii_lowercase();
-    lowered.ends_with(".rs")
-        || lowered.ends_with(".py")
-        || lowered.ends_with(".js")
-        || lowered.ends_with(".ts")
-        || lowered.ends_with(".tsx")
-        || lowered.ends_with(".jsx")
-        || lowered.ends_with(".html")
-        || lowered.ends_with(".css")
-        || lowered.ends_with(".json")
-        || lowered.ends_with(".yml")
-        || lowered.ends_with(".yaml")
-        || lowered.ends_with(".sh")
-}
-
 fn step_looks_like_development_task(
     step: &BossPlanStep,
-    target_artifacts: &[TargetArtifact],
+    _target_artifacts: &[TargetArtifact],
 ) -> bool {
     if let Some(task_profile) = step.stage_execution_contract.task_profile {
         return matches!(task_profile, TaskProfile::CodeChange);
-    }
-
-    if target_artifacts
-        .iter()
-        .any(|artifact| path_looks_like_development_artifact(&artifact.path))
-    {
-        return true;
     }
     false
 }
@@ -5316,6 +5293,9 @@ impl BossCoordinator {
         let msg = format!(
             "Draft a technical specification for the following task. \
              Include objectives, acceptance criteria, and a high-level approach. \
+             If you produce or revise BossPlan steps, each step must carry an explicit \
+             stage_execution_contract with review_mode, task_profile, and requires_source_evidence; \
+             do not rely on downstream keyword inference from prose. \
              Task: {task_description}"
         );
         self.ask_a_session(app_state, msg).await
@@ -6445,6 +6425,12 @@ impl BossCoordinator {
                 .map(|d| d.as_millis())
                 .unwrap_or(0)
         );
+        let default_stage_execution_contract = StageExecutionContract {
+            review_mode: Some(ReviewMode::IndependentReview),
+            task_profile: Some(TaskProfile::IndependentReview),
+            requires_source_evidence: Some(false),
+            ..StageExecutionContract::default()
+        };
         let plan = BossPlan {
             plan_id: plan_id.clone(),
             task_description: task.to_string(),
@@ -6469,7 +6455,7 @@ impl BossCoordinator {
                 retry_budget: 3,
                 last_review_summary: None,
                 last_correction: None,
-                stage_execution_contract: StageExecutionContract::default(),
+                stage_execution_contract: default_stage_execution_contract,
                 stage_continuation_context: None,
                 executor_b_stage_memory: None,
                 review_task_id: None,

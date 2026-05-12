@@ -14,10 +14,6 @@ use crate::core::state_frame_archive::{
 };
 use crate::core::state_frame_router::{apply_route, route_toolset};
 
-fn contains_any(haystack: &str, needles: &[&str]) -> bool {
-    needles.iter().any(|needle| haystack.contains(needle))
-}
-
 fn current_task_contract_text(text: &str) -> String {
     const HISTORICAL_CONTEXT_MARKERS: &[&str] = &[
         "参考材料摘录",
@@ -52,52 +48,7 @@ fn is_readonly_analysis(plan: &BossPlan, step_id: Option<usize>) -> bool {
     {
         return true;
     }
-    let mut objective = step_id
-        .and_then(|id| plan.steps.iter().find(|s| s.id == id))
-        .map(|s| {
-            let mut text = s.objective().to_string();
-            if !s.acceptance.is_empty() {
-                text.push('\n');
-                text.push_str(&s.acceptance.join("\n"));
-            }
-            text
-        })
-        .unwrap_or_else(|| plan.task_description.clone());
-    objective = current_task_contract_text(&objective).to_lowercase();
-
-    if contains_any(
-        &objective,
-        &[
-            "不改文件",
-            "不要改文件",
-            "不要改代码",
-            "不要写 patch",
-            "不提出 patch",
-            "只做只读",
-            "do not modify",
-            "no code changes",
-            "no patch",
-        ],
-    ) {
-        return true;
-    }
     false
-}
-
-fn path_looks_like_development_artifact(path: &str) -> bool {
-    let lowered = path.to_ascii_lowercase();
-    lowered.ends_with(".rs")
-        || lowered.ends_with(".py")
-        || lowered.ends_with(".js")
-        || lowered.ends_with(".ts")
-        || lowered.ends_with(".tsx")
-        || lowered.ends_with(".jsx")
-        || lowered.ends_with(".html")
-        || lowered.ends_with(".css")
-        || lowered.ends_with(".json")
-        || lowered.ends_with(".yml")
-        || lowered.ends_with(".yaml")
-        || lowered.ends_with(".sh")
 }
 
 fn sanitize_extracted_artifact_path(path: &str) -> String {
@@ -120,19 +71,18 @@ fn sanitize_extracted_artifact_path(path: &str) -> String {
 
 fn step_looks_like_development_task(
     step: Option<&crate::core::boss_state::BossPlanStep>,
-    declared_artifacts: &[DeclaredArtifactContract],
+    _declared_artifacts: &[DeclaredArtifactContract],
 ) -> bool {
     if let Some(task_profile) = step.and_then(|step| step.stage_execution_contract.task_profile) {
         return matches!(task_profile, TaskProfile::CodeChange);
     }
-
-    if declared_artifacts
-        .iter()
-        .any(|artifact| path_looks_like_development_artifact(&artifact.path))
-    {
-        return true;
-    }
     false
+}
+
+fn has_source_evidence_continuation(step: Option<&crate::core::boss_state::BossPlanStep>) -> bool {
+    step.and_then(|step| step.stage_continuation_context.as_ref())
+        .and_then(|context| context.next_action.as_deref())
+        == Some("read_source_evidence")
 }
 
 fn apply_development_test_policy(contract: &mut StageExecutionContract) {
@@ -159,6 +109,21 @@ fn apply_development_test_policy(contract: &mut StageExecutionContract) {
             .required_evidence
             .push("runtime_test_passed".into());
     }
+}
+
+fn sort_required_actions(actions: &mut Vec<String>) {
+    fn order(action: &str) -> usize {
+        match action {
+            "create" => 0,
+            "write" => 1,
+            "run_test" => 2,
+            "verify" => 3,
+            "verify_artifact" => 4,
+            _ => 100,
+        }
+    }
+    actions.sort_by(|left, right| order(left).cmp(&order(right)).then_with(|| left.cmp(right)));
+    actions.dedup();
 }
 
 fn independent_review_requires_runtime_verification(contract: &StageExecutionContract) -> bool {
@@ -558,11 +523,17 @@ fn build_stage_execution_contract(
     let st_test_only_mode =
         st_mode_enabled && step_looks_like_development_task(step, &declared_artifacts);
     let review_mode = infer_review_mode(step, readonly_analysis);
+    let typed_independent_review_task = review_mode
+        .is_some_and(|mode| mode.is_independent_review())
+        && step
+            .and_then(|step| step.stage_execution_contract.task_profile)
+            .is_some_and(|profile| matches!(profile, TaskProfile::IndependentReview));
     let task_profile = step
         .and_then(|step| step.stage_execution_contract.task_profile)
         .or(readonly_analysis.then_some(TaskProfile::ReadOnlyAnalysis));
-    let requires_source_evidence =
-        step.and_then(|step| step.stage_execution_contract.requires_source_evidence);
+    let requires_source_evidence = step
+        .and_then(|step| step.stage_execution_contract.requires_source_evidence)
+        .or(typed_independent_review_task.then_some(false));
     let derived_verifications = || {
         artifact_ledgers
             .iter()
@@ -591,7 +562,7 @@ fn build_stage_execution_contract(
         .map(|contract| contract.verifications.clone())
         .filter(|items| !items.is_empty())
         .or_else(|| {
-            if st_test_only_mode || !matches!(task_profile, Some(TaskProfile::TargetVerification)) {
+            if st_test_only_mode || typed_independent_review_task {
                 None
             } else {
                 Some(derived_verifications())
@@ -613,8 +584,7 @@ fn build_stage_execution_contract(
     for verification in &verifications {
         required_actions.extend(verification.required_actions.iter().cloned());
     }
-    required_actions.sort();
-    required_actions.dedup();
+    sort_required_actions(&mut required_actions);
     let mut required_evidence = explicit_contract
         .map(|contract| contract.required_evidence.clone())
         .unwrap_or_default();
@@ -764,7 +734,10 @@ fn build_stage_contract_facts(contract: &StageExecutionContract) -> Vec<String> 
     facts
 }
 
-fn build_stage_continuation_fact_lines(context: &StageContinuationContext) -> Vec<String> {
+fn build_stage_continuation_fact_lines_with_history(
+    context: &StageContinuationContext,
+    include_verified_facts: bool,
+) -> Vec<String> {
     let next_action = context.next_action.as_deref().unwrap_or("none");
     let failed_target = context.failed_target.as_deref().unwrap_or("none");
     let continuity_mode = context
@@ -779,7 +752,11 @@ fn build_stage_continuation_fact_lines(context: &StageContinuationContext) -> Ve
             continuity_mode,
             next_action,
             failed_target,
-            summarize_list(&context.verified_facts)
+            if include_verified_facts {
+                summarize_list(&context.verified_facts)
+            } else {
+                "none".into()
+            }
         ),
     )];
     if next_action == "read_source_evidence" && failed_target != "none" {
@@ -1333,7 +1310,8 @@ pub fn project_state_frame_with_st_mode(
     let readonly_analysis = is_readonly_analysis(plan, step_id);
     let current_step = step_id.and_then(|id| plan.steps.iter().find(|s| s.id == id));
     let blind_review_candidate = infer_review_mode(current_step, readonly_analysis)
-        .is_some_and(|mode| mode.is_independent_review());
+        .is_some_and(|mode| mode.is_independent_review())
+        && !has_source_evidence_continuation(current_step);
 
     // Build archive of completed steps (excluding current step).
     let archive = build_accepted_archive(plan, step_id);
@@ -1399,6 +1377,7 @@ pub fn project_state_frame_with_st_mode(
     let independent_review = stage_execution_contract
         .review_mode
         .is_some_and(|mode| mode.is_independent_review());
+    let source_evidence_continuation = has_source_evidence_continuation(current_step);
     if independent_review {
         accepted_summary.clear();
     }
@@ -1442,8 +1421,13 @@ pub fn project_state_frame_with_st_mode(
             if let Some(c) = &step.last_correction {
                 recent_evidence.push(format!("correction: {c}"));
             }
+        }
+        if !independent_review || source_evidence_continuation {
             if let Some(context) = step.stage_continuation_context.as_ref() {
-                recent_evidence.extend(build_stage_continuation_fact_lines(context));
+                recent_evidence.extend(build_stage_continuation_fact_lines_with_history(
+                    context,
+                    !independent_review,
+                ));
             }
         }
     }
@@ -1493,7 +1477,7 @@ mod tests {
     use crate::core::boss_state::{BossPlan, BossPlanStep, BossPlanStepStatus, BossStage};
     use crate::core::state_frame::{
         ActorRole, AgentState, ContinuityMode, ReviewMode, StageContinuationContext,
-        StageExecutionContract, StateBudget, StateFrame,
+        StageExecutionContract, StateBudget, StateFrame, TaskProfile, VerificationContract,
     };
 
     #[test]
@@ -1608,7 +1592,10 @@ mod tests {
                 retry_budget: 3,
                 last_review_summary: None,
                 last_correction: None,
-                stage_execution_contract: StageExecutionContract::default(),
+                stage_execution_contract: StageExecutionContract {
+                    task_profile: Some(TaskProfile::CodeChange),
+                    ..StageExecutionContract::default()
+                },
                 stage_continuation_context: None,
                 executor_b_stage_memory: None,
                 review_task_id: None,
@@ -1662,7 +1649,10 @@ mod tests {
                 retry_budget: 3,
                 last_review_summary: None,
                 last_correction: None,
-                stage_execution_contract: StageExecutionContract::default(),
+                stage_execution_contract: StageExecutionContract {
+                    task_profile: Some(TaskProfile::CodeChange),
+                    ..StageExecutionContract::default()
+                },
                 stage_continuation_context: None,
                 executor_b_stage_memory: None,
                 review_task_id: None,
@@ -1773,6 +1763,11 @@ mod tests {
         assert_eq!(
             frame.stage_execution_contract.review_mode,
             Some(ReviewMode::IndependentReview)
+        );
+        assert_eq!(frame.stage_execution_contract.task_profile, None);
+        assert_eq!(
+            frame.stage_execution_contract.requires_source_evidence,
+            None
         );
         assert!(
             frame
@@ -1923,7 +1918,11 @@ mod tests {
                 retry_budget: 3,
                 last_review_summary: None,
                 last_correction: None,
-                stage_execution_contract: StageExecutionContract::default(),
+                stage_execution_contract: StageExecutionContract {
+                    task_profile: Some(TaskProfile::IndependentReview),
+                    requires_source_evidence: Some(false),
+                    ..StageExecutionContract::default()
+                },
                 stage_continuation_context: None,
                 executor_b_stage_memory: None,
                 review_task_id: None,
@@ -2003,7 +2002,11 @@ mod tests {
                 retry_budget: 3,
                 last_review_summary: None,
                 last_correction: None,
-                stage_execution_contract: StageExecutionContract::default(),
+                stage_execution_contract: StageExecutionContract {
+                    task_profile: Some(TaskProfile::IndependentReview),
+                    requires_source_evidence: Some(false),
+                    ..StageExecutionContract::default()
+                },
                 stage_continuation_context: None,
                 executor_b_stage_memory: None,
                 review_task_id: None,
@@ -2019,6 +2022,14 @@ mod tests {
         assert_eq!(
             frame.stage_execution_contract.review_mode,
             Some(ReviewMode::IndependentReview)
+        );
+        assert_eq!(
+            frame.stage_execution_contract.task_profile,
+            Some(TaskProfile::IndependentReview)
+        );
+        assert_eq!(
+            frame.stage_execution_contract.requires_source_evidence,
+            Some(false)
         );
         assert!(frame.stage_execution_contract.verifications.is_empty());
         assert!(
@@ -2139,7 +2150,17 @@ mod tests {
                 retry_budget: 3,
                 last_review_summary: None,
                 last_correction: None,
-                stage_execution_contract: StageExecutionContract::default(),
+                stage_execution_contract: StageExecutionContract {
+                    task_profile: Some(TaskProfile::IndependentReview),
+                    requires_source_evidence: Some(false),
+                    verifications: vec![VerificationContract {
+                        target_ref: "artifact:report".into(),
+                        target_path: Some("/tmp/report.md".into()),
+                        required_actions: vec!["verify".into()],
+                        required_evidence: vec!["/tmp/report.md".into()],
+                    }],
+                    ..StageExecutionContract::default()
+                },
                 stage_continuation_context: None,
                 executor_b_stage_memory: None,
                 review_task_id: None,
@@ -2156,7 +2177,7 @@ mod tests {
             frame.stage_execution_contract.review_mode,
             Some(ReviewMode::IndependentReview)
         );
-        assert!(frame.stage_execution_contract.verifications.is_empty());
+        assert!(!frame.stage_execution_contract.verifications.is_empty());
         assert_eq!(
             frame.required_output_schema.as_deref(),
             Some("state_decision_v1")
@@ -2196,7 +2217,11 @@ mod tests {
                 retry_budget: 3,
                 last_review_summary: None,
                 last_correction: None,
-                stage_execution_contract: StageExecutionContract::default(),
+                stage_execution_contract: StageExecutionContract {
+                    task_profile: Some(TaskProfile::IndependentReview),
+                    requires_source_evidence: Some(false),
+                    ..StageExecutionContract::default()
+                },
                 stage_continuation_context: None,
                 executor_b_stage_memory: None,
                 review_task_id: None,
