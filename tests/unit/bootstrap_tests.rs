@@ -330,6 +330,13 @@ fn shutdown_test_app_state(
     session_store: Arc<InMemorySessionStore>,
     task_manager: Arc<TaskManager>,
 ) -> AppState {
+    shutdown_test_app_state_with_store(session_store, task_manager)
+}
+
+fn shutdown_test_app_state_with_store(
+    session_store: Arc<dyn SessionStore>,
+    task_manager: Arc<TaskManager>,
+) -> AppState {
     let session_id = SessionId("shutdown-session".into());
     let snapshot = SessionSnapshot {
         session_id: session_id.clone(),
@@ -339,7 +346,9 @@ fn shutdown_test_app_state(
         last_turn_at: None,
         prompt_seed: None,
     };
-    session_store.save(snapshot.clone(), SessionHistory::default());
+    session_store
+        .save(snapshot.clone(), SessionHistory::default())
+        .expect("seed session");
     let permission_context = ToolPermissionContext::new(PermissionMode::Default)
         .with_task_manager(task_manager)
         .with_active_session_id(session_id.0.clone())
@@ -720,6 +729,41 @@ fn resolved_session_state_restores_model_level_override() {
         resolved.model_level_override,
         Some(rust_agent::bootstrap::model_profiles::ModelLevel::Xhigh)
     );
+}
+
+#[test]
+fn persist_current_session_state_round_trips_model_level_override_through_file_store() {
+    let root = unique_temp_path("rust-agent-model-level-roundtrip");
+    let store: Arc<dyn SessionStore> = Arc::new(FileBackedSessionStore::new(root.clone()));
+    let tasks = Arc::new(TaskManager::default());
+    let app_state = shutdown_test_app_state_with_store(store.clone(), tasks);
+    let session_id = app_state.current_session_id();
+
+    store
+        .save_model_level_override(
+            &session_id,
+            Some(rust_agent::bootstrap::model_profiles::ModelLevel::High),
+        )
+        .expect("save model level override");
+    assert_eq!(app_state.persist_current_session_state(), Ok(()));
+
+    let restored = resolve_session_state(
+        store.as_ref(),
+        Some(&RestoreRequest {
+            source: RestoreSource::ResumeSession,
+            session_id: Some(session_id.0.clone()),
+        }),
+        InteractionSurface::Cli,
+        SessionMode::Interactive,
+        std::path::Path::new("."),
+    );
+
+    assert_eq!(
+        restored.model_level_override,
+        Some(rust_agent::bootstrap::model_profiles::ModelLevel::High)
+    );
+
+    std::fs::remove_dir_all(root).expect("cleanup");
 }
 
 #[test]

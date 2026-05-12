@@ -972,6 +972,130 @@ auth_strategy = "none"
 }
 
 #[tokio::test]
+async fn model_clear_session_removes_override_and_leaves_workspace_default() {
+    let _env_lock = router_env_lock().lock().expect("router env lock");
+    let registry = Arc::new(CommandRegistry::new().register(Arc::new(ModelCommand)));
+    let router = CommandRouter::new(registry, Box::new(DefaultSurfaceAuthorizer::default()));
+    let root = unique_temp_path("rust-agent-router-model-clear-session");
+    fs::create_dir_all(root.join(".claude")).expect("create config root");
+    fs::write(
+        root.join(".claude/models.toml"),
+        r#"
+active_level = "low"
+
+[levels]
+low = "openai-low"
+medium = "openai-medium"
+
+[profiles.openai-low]
+provider_id = "openai"
+protocol = "openai_compatible"
+compatibility_profile = "openai_compatible"
+base_url = "https://api.openai.com"
+model = "gpt-5.4-mini"
+auth_strategy = "none"
+
+[profiles.openai-medium]
+provider_id = "openai"
+protocol = "openai_compatible"
+compatibility_profile = "openai_compatible"
+base_url = "https://api.openai.com"
+model = "gpt-5.4"
+auth_strategy = "none"
+"#,
+    )
+    .expect("write models.toml");
+    let store = Arc::new(InMemorySessionStore::default());
+    let app_state = app_state_with_session_root_and_store(&root, store.clone());
+
+    router
+        .route(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/model use medium"),
+            &app_state,
+        )
+        .await
+        .expect("session model use should succeed");
+    assert_eq!(
+        store.load_model_level_override(&app_state.current_session_id()),
+        Some(rust_agent::bootstrap::model_profiles::ModelLevel::Medium)
+    );
+
+    let clear_result = router
+        .route(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/model clear"),
+            &app_state,
+        )
+        .await
+        .expect("session model clear should succeed");
+    let RouteExecution::CommandResult(CommandResult::Message(clear_text)) = clear_result else {
+        panic!("expected model clear result");
+    };
+    assert!(clear_text.contains("Cleared session model override"));
+    assert_eq!(store.load_model_level_override(&app_state.current_session_id()), None);
+
+    let saved = fs::read_to_string(root.join(".claude/models.toml")).expect("read models.toml");
+    assert!(saved.contains("active_level = \"low\""));
+
+    fs::remove_dir_all(root).expect("cleanup model clear session root");
+}
+
+#[tokio::test]
+async fn model_clear_workspace_removes_active_level_from_models_toml() {
+    let _env_lock = router_env_lock().lock().expect("router env lock");
+    let registry = Arc::new(CommandRegistry::new().register(Arc::new(ModelCommand)));
+    let router = CommandRouter::new(registry, Box::new(DefaultSurfaceAuthorizer::default()));
+    let root = unique_temp_path("rust-agent-router-model-clear-workspace");
+    fs::create_dir_all(root.join(".claude")).expect("create config root");
+    fs::write(
+        root.join(".claude/models.toml"),
+        r#"
+active_level = "high"
+
+[levels]
+low = "openai-low"
+high = "openai-high"
+
+[profiles.openai-low]
+provider_id = "openai"
+protocol = "openai_compatible"
+compatibility_profile = "openai_compatible"
+base_url = "https://api.openai.com"
+model = "gpt-5.4-mini"
+auth_strategy = "none"
+
+[profiles.openai-high]
+provider_id = "openai"
+protocol = "openai_compatible"
+compatibility_profile = "openai_compatible"
+base_url = "https://api.openai.com"
+model = "gpt-5.4"
+auth_strategy = "none"
+"#,
+    )
+    .expect("write models.toml");
+    let app_state = app_state_with_session_root_and_store(&root, Arc::new(InMemorySessionStore::default()));
+
+    let clear_result = router
+        .route(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/model clear --workspace"),
+            &app_state,
+        )
+        .await
+        .expect("workspace model clear should succeed");
+    let RouteExecution::CommandResult(CommandResult::Message(clear_text)) = clear_result else {
+        panic!("expected model clear result");
+    };
+    assert!(clear_text.contains("Cleared workspace active_level"));
+
+    let saved = fs::read_to_string(root.join(".claude/models.toml")).expect("read models.toml");
+    assert!(!saved.contains("active_level"));
+    assert!(saved.contains("[levels]"));
+    assert!(saved.contains("[profiles.openai-high]"));
+
+    fs::remove_dir_all(root).expect("cleanup model clear workspace root");
+}
+
+#[tokio::test]
 async fn config_and_model_commands_do_not_conflict() {
     let registry = Arc::new(
         CommandRegistry::new()
