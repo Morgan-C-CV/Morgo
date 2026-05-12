@@ -193,7 +193,7 @@ StateDecision schema:\n\
 {\n\
   \"state\": \"<one of: planning, executing, reviewing, correcting, verifying, blocked, done>\",\n\
   \"decision\": \"<one of: continue, request_context, call_tool, handoff, accept, reject, done>\",\n\
-  \"next_action\": {\"action_type\": \"Read\", \"args\": {\"file_path\": \"path/to/file.rs\"}},\n\
+  \"next_action\": {\"action_type\": \"<allowed tool>\", \"args\": {\"file_path\": \"path/to/file.rs\"}},\n\
   \"needed_context\": [],\n\
   \"state_patch\": {\n\
     \"open_items_add\": [],\n\
@@ -231,7 +231,7 @@ Rules:\n\
 - If a fact entry already says `none`, `none recorded`, `absent`, or equivalent, do NOT request that same context again\n\
 - Only use \"decision\": \"request_context\" when the missing fact is not already present in objective/open_items/blocked_items/accepted_summary/recent_evidence\n\
 - Use \"decision\": \"call_tool\" when you need a concrete runtime action before you can continue; always include `next_action.action_type` and structured `next_action.args`\n\
-- `next_action` must be an object, never a bare string. Valid example: `{\"action_type\":\"Read\",\"args\":{\"file_path\":\"src/lib.rs\"}}`\n\
+- `next_action` must be an object, never a bare string. Valid shape: `{\"action_type\":\"<allowed tool>\",\"args\":{...}}`; choose the tool from the actual task and current recovery evidence, not from an example.\n\
 - Only call tools listed in `allowed_tools`, and treat `allowed_actions` as the invokable runtime capability contract for this turn\n\
 - When `allowed_actions` is non-empty, do NOT request extra context like `fact:allow_worker_tool_calls`, `fact:increase_max_tool_calls`, or `fact:budget.max_tool_calls` to confirm permission; use the listed runtime actions directly\n\
 - When `review_mode` is `independent_review` and the completion contract requires `verification_evidence`, do not end the turn with prose-only completion if no runtime anchor exists yet; first use `call_tool` with a narrow `Read` on the exact target path(s), then complete once a real read or verification anchor is present\n\
@@ -254,16 +254,22 @@ Rules:\n\
 StateFrame:";
 
 fn build_state_decision_repair_prompt(reason: &str, raw_json: &str) -> String {
+    let raw_excerpt = if raw_json.trim().is_empty() {
+        "none".to_string()
+    } else {
+        compact_tool_excerpt(raw_json, 1_200)
+    };
     format!(
         "Your previous response could not be parsed as canonical StateDecision JSON.\n\
          Error: {reason}\n\
-         Raw output: {raw_json}\n\
+         Raw output excerpt, truncated for safety; do not copy it verbatim: {raw_excerpt}\n\
          Return ONLY one JSON object matching the canonical schema.\n\
          Canonical state values: planning, executing, reviewing, correcting, verifying, blocked, done.\n\
          Canonical decision values: continue, request_context, call_tool, handoff, accept, reject, done.\n\
-         If `decision` is `call_tool`, `next_action` MUST be an object of the form `{{\"action_type\":\"Read\",\"args\":{{\"file_path\":\"path/to/file.rs\"}}}}`.\n\
+         If `decision` is `call_tool`, `next_action` MUST be an object of the form `{{\"action_type\":\"<allowed tool>\",\"args\":{{...}}}}`.\n\
          Never return string-valued `next_action` like `\"invoke_parsing_tool\"`.\n\
-         If the previous output was truncated or too long, do not emit giant inline `Bash.command` payloads, heredocs, or embedded file bodies. Return a short executable next step: either a small `Write` with content under 2500 characters, a narrow `Edit`, or a short `Bash` command that calls an existing script/file.\n\
+         If the previous output was truncated or too long, do not emit giant inline `Bash.command` payloads, heredocs, or embedded file bodies. Return a short executable next step: either a small `Write`, a narrow `Edit`, or a short `Bash` command that calls an existing script/file.\n\
+         Do not repair a missing target file by reading that same missing file again; create/write the target or choose a different concrete action.\n\
          Never repair a truncated tool-writing response with a bare `request_context`; if no external context is missing, use `call_tool` or `continue` with a concrete state_patch.\n\
          Alias mapping you must normalize before responding: executed -> executing, completed -> done, success -> done.\n\
          Do not return explanations, wrappers, validation prose, or keys outside the canonical schema.\n\
@@ -2601,12 +2607,8 @@ fn inject_missing_path_recovery_gate(frame: &mut StateFrame, usage: &mut LoopUsa
                 .map(|parent| parent.to_string_lossy().to_string())
                 .filter(|parent| !parent.trim().is_empty())
                 .unwrap_or_else(|| ".".into());
-            let permission_marker = format!("fact: permission_to_create_and_write:{target_path} ");
-            let permission_ref = frame
-                .recent_evidence
-                .iter()
-                .find(|line| line.starts_with(&permission_marker))
-                .and_then(|line| evidence_field_value(line, "ref"))
+            let permission_ref = permission_scope_for_path(frame, target_path)
+                .map(|(_, permission_ref)| permission_ref)
                 .unwrap_or_else(|| "none".into());
             Some(ArtifactRepairTurn {
                 target_path: target_path.to_string(),
@@ -3206,7 +3208,7 @@ fn has_explicit_implementation_target(frame: &StateFrame) -> bool {
     primary_declared_target_path(frame).is_some()
 }
 
-const MAX_INLINE_WRITE_CONTENT_CHARS: usize = 2500;
+const INLINE_WRITE_CONTENT_ADVISORY_CHARS: usize = 2500;
 
 fn parse_write_content(decision: &crate::core::state_frame::StateDecision) -> Option<String> {
     let next_action = decision.next_action.as_ref()?;
@@ -3220,11 +3222,107 @@ fn parse_write_content(decision: &crate::core::state_frame::StateDecision) -> Op
         .map(ToString::to_string)
 }
 
+fn inline_write_content_chars(decision: &crate::core::state_frame::StateDecision) -> Option<usize> {
+    parse_write_content(decision).map(|content| content.chars().count())
+}
+
+fn push_inline_write_size_feedback_if_needed(
+    frame: &mut StateFrame,
+    decision: &crate::core::state_frame::StateDecision,
+) {
+    let Some(content_chars) = inline_write_content_chars(decision) else {
+        return;
+    };
+    if content_chars <= INLINE_WRITE_CONTENT_ADVISORY_CHARS {
+        return;
+    }
+    push_decision_feedback(
+        frame,
+        "oversized_inline_write_accepted",
+        true,
+        "prefer_smaller_write_or_existing_script_next_time",
+        &format!(
+            "Write.content has {content_chars} chars, above advisory {INLINE_WRITE_CONTENT_ADVISORY_CHARS}; executing this valid tool call instead of reparsing to avoid retry loops"
+        ),
+    );
+}
+
+fn patch_has_nominal_progress(
+    frame: &StateFrame,
+    patch: &StatePatch,
+    next_state: AgentState,
+) -> bool {
+    if next_state != frame.state {
+        return true;
+    }
+    if !patch.open_items_add.is_empty()
+        || !patch.open_items_remove.is_empty()
+        || !patch.accepted_summary_add.is_empty()
+        || !patch.tests_add.is_empty()
+    {
+        return true;
+    }
+    if let Some(review_mode) = patch.review_mode {
+        let ignored = independent_review_typed_intent_locked(frame)
+            && matches!(review_mode, ReviewMode::TargetVerification);
+        if !ignored && frame.stage_execution_contract.review_mode != Some(review_mode) {
+            return true;
+        }
+    }
+    if let Some(task_profile) = patch.task_profile {
+        let ignored = independent_review_typed_intent_locked(frame)
+            && matches!(
+                task_profile,
+                TaskProfile::CodeChange | TaskProfile::TargetVerification
+            );
+        if !ignored && frame.stage_execution_contract.task_profile != Some(task_profile) {
+            return true;
+        }
+    }
+    if let Some(requires_source_evidence) = patch.requires_source_evidence {
+        let ignored = independent_review_typed_intent_locked(frame) && requires_source_evidence;
+        if !ignored
+            && frame.stage_execution_contract.requires_source_evidence
+                != Some(requires_source_evidence)
+        {
+            return true;
+        }
+    }
+    false
+}
+
 fn validate_decision_for_frame(
     frame: &StateFrame,
     decision: &crate::core::state_frame::StateDecision,
 ) -> Result<(), RepairNeeded> {
     if !requires_readonly_audit_contract(frame) {
+        if decision.decision != DecisionKind::CallTool && decision.next_action.is_some() {
+            return Err(RepairNeeded {
+                reason: format!(
+                    "{} must not include next_action; use decision=call_tool for executable actions",
+                    match decision.decision {
+                        DecisionKind::Continue => "continue",
+                        DecisionKind::RequestContext => "request_context",
+                        DecisionKind::Handoff => "handoff",
+                        DecisionKind::Accept => "accept",
+                        DecisionKind::Reject => "reject",
+                        DecisionKind::Done => "done",
+                        DecisionKind::CallTool => unreachable!(),
+                    }
+                ),
+                raw_json: String::new(),
+            });
+        }
+        if decision.decision == DecisionKind::Continue
+            && !patch_has_nominal_progress(frame, &decision.state_patch, decision.state)
+        {
+            return Err(RepairNeeded {
+                reason:
+                    "continue requires either a state change or a non-empty state_patch that advances the frame"
+                        .into(),
+                raw_json: String::new(),
+            });
+        }
         if decision.decision == DecisionKind::CallTool {
             let Some(next_action) = decision.next_action.as_ref() else {
                 return Err(RepairNeeded {
@@ -3266,19 +3364,6 @@ fn validate_decision_for_frame(
                     reason: "Edit requires exact non-empty old_string; if you do not yet know the replacement span, request Read first".into(),
                     raw_json: String::new(),
                 });
-            }
-            if next_action.action_type.eq_ignore_ascii_case("Write") {
-                if let Some(content) = parse_write_content(decision) {
-                    let content_chars = content.chars().count();
-                    if content_chars > MAX_INLINE_WRITE_CONTENT_CHARS {
-                        return Err(RepairNeeded {
-                            reason: format!(
-                                "Write.content is too large for StateDecision output: {content_chars} chars > {MAX_INLINE_WRITE_CONTENT_CHARS}; return a smaller executable step, split the artifact across turns, or use a short Bash command that calls an existing file/script"
-                            ),
-                            raw_json: String::new(),
-                        });
-                    }
-                }
             }
         }
         return Ok(());
@@ -3853,12 +3938,38 @@ fn canonical_arg_shape(tool_name: &str) -> Option<&'static str> {
     }
 }
 
-fn has_create_permission_for_path(frame: &StateFrame, path: &str) -> bool {
-    let marker = format!("fact: permission_to_create_and_write:{path} ");
+fn child_path_within_directory(path: &str, directory: &str) -> bool {
+    let path = std::path::Path::new(path);
+    let directory = std::path::Path::new(directory);
+    path != directory && path.starts_with(directory)
+}
+
+fn permission_scope_for_path(frame: &StateFrame, path: &str) -> Option<(String, String)> {
     frame
         .recent_evidence
         .iter()
-        .any(|line| line.starts_with(&marker))
+        .filter(|line| line.starts_with("fact: permission_to_create_and_write:"))
+        .filter_map(|line| {
+            let permission_path = permission_target_path(line)?;
+            let permission_ref = evidence_field_value(line, "ref").unwrap_or_else(|| "none".into());
+            Some((permission_path, permission_ref))
+        })
+        .find(|(permission_path, _)| {
+            if permission_path == path {
+                return true;
+            }
+            frame
+                .stage_execution_contract
+                .declared_artifact_by_path(permission_path)
+                .is_some_and(|artifact| {
+                    artifact.kind == "directory"
+                        && child_path_within_directory(path, permission_path)
+                })
+        })
+}
+
+fn has_create_permission_for_path(frame: &StateFrame, path: &str) -> bool {
+    permission_scope_for_path(frame, path).is_some()
 }
 
 fn outcome_excerpt(text: &str) -> String {
@@ -4558,6 +4669,9 @@ pub async fn run_decision_loop_with_tools(
                                     current_action_target_path(&synthetic_read),
                                 );
                                 total_usage.tool_execution_records.push(error.record);
+                                if inject_missing_path_recovery_gate(&mut frame, &mut total_usage) {
+                                    continue;
+                                }
                                 if changed {
                                     summary = hydrate_needed_context(
                                         &mut frame,
@@ -4643,6 +4757,7 @@ pub async fn run_decision_loop_with_tools(
             DecisionKind::CallTool => {
                 let _patch_changed = apply_state_patch(&mut frame, &decision.state_patch);
                 frame.state = decision.state;
+                push_inline_write_size_feedback_if_needed(&mut frame, &decision);
                 if let Some(outcome) =
                     completion_gate_repair_terminal_outcome(&frame, &mut total_usage)
                 {
@@ -4796,6 +4911,9 @@ pub async fn run_decision_loop_with_tools(
                             current_action_target_path(&decision),
                         );
                         total_usage.tool_execution_records.push(error.record);
+                        if inject_missing_path_recovery_gate(&mut frame, &mut total_usage) {
+                            continue;
+                        }
                         if !changed {
                             if count_decision_feedback(&frame, "call_tool_failure_feedback_repeat")
                                 < 2
@@ -4866,12 +4984,13 @@ pub async fn run_decision_loop_with_tools(
 #[cfg(test)]
 mod tests {
     use super::{
-        DecisionLoopConfig, LoopOutcome, LoopUsage, MAX_INLINE_WRITE_CONTENT_CHARS,
-        RecoveryAttempt, StateFrameToolRuntime, append_runtime_contract_facts, apply_state_patch,
-        build_state_decision_repair_prompt, classify_tool_outcome, collect_text_and_usage,
-        evaluate_completion_evidence, execute_call_tool, missing_test_evidence_refs,
-        parse_and_validate_decision, push_tool_failure_feedback, push_tool_outcome_evidence,
-        run_decision_loop, run_decision_loop_with_tools, tool_backed_hydration_path,
+        DecisionKind, DecisionLoopConfig, INLINE_WRITE_CONTENT_ADVISORY_CHARS, LoopOutcome,
+        LoopUsage, RecoveryAttempt, StateFrameToolRuntime, append_runtime_contract_facts,
+        apply_state_patch, build_state_decision_repair_prompt, classify_tool_outcome,
+        collect_text_and_usage, evaluate_completion_evidence, execute_call_tool,
+        missing_test_evidence_refs, parse_and_validate_decision, push_tool_failure_feedback,
+        push_tool_outcome_evidence, run_decision_loop, run_decision_loop_with_tools,
+        tool_backed_hydration_path,
     };
     use crate::core::state_frame::validate_state_decision;
     use crate::core::state_frame::{
@@ -4888,6 +5007,7 @@ mod tests {
     use crate::tool::builtin::bash::BashTool;
     use crate::tool::builtin::file_edit::FileEditTool;
     use crate::tool::builtin::file_read::FileReadTool;
+    use crate::tool::builtin::file_write::FileWriteTool;
     use crate::tool::definition::{ObservableInput, ObservableInputSource};
     use crate::tool::definition::{Tool, ToolCall, ToolMetadata, ToolResult};
     use crate::tool::orchestrator::build_execution_record;
@@ -4922,7 +5042,11 @@ mod tests {
         assert!(prompt.contains("`next_action` MUST be an object"));
         assert!(prompt.contains("Never return string-valued `next_action`"));
         assert!(prompt.contains("giant inline `Bash.command` payloads"));
-        assert!(prompt.contains("content under 2500 characters"));
+        assert!(prompt.contains("Raw output excerpt, truncated for safety"));
+        assert!(prompt.contains("do not copy it verbatim"));
+        assert!(prompt.contains(
+            "Do not repair a missing target file by reading that same missing file again"
+        ));
         assert!(prompt.contains(
             "Never repair a truncated tool-writing response with a bare `request_context`"
         ));
@@ -4944,19 +5068,93 @@ mod tests {
     }
 
     #[test]
-    fn oversized_inline_write_content_is_rejected_for_repair() {
+    fn oversized_inline_write_content_is_allowed_for_tool_execution() {
         let mut frame = make_clean_frame();
         frame.allowed_tools.push("Write".into());
-        let content = "x".repeat(MAX_INLINE_WRITE_CONTENT_CHARS + 1);
+        let content = "x".repeat(INLINE_WRITE_CONTENT_ADVISORY_CHARS + 1);
         let decision_json = format!(
             r#"{{"state":"executing","decision":"call_tool","next_action":{{"action_type":"Write","args":{{"file_path":"/tmp/large.py","content":"{}"}}}}}}"#,
             content
         );
 
-        let err = parse_and_validate_decision(&frame, &decision_json)
-            .expect_err("oversized inline Write should be rejected");
-        assert!(err.reason.contains("Write.content is too large"));
-        assert!(err.reason.contains("use a short Bash command"));
+        let decision = parse_and_validate_decision(&frame, &decision_json)
+            .expect("oversized inline Write should remain executable once valid JSON is parsed");
+        assert_eq!(decision.decision, DecisionKind::CallTool);
+    }
+
+    #[test]
+    fn oversized_inline_write_executes_instead_of_repair_looping() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let target = unique_temp_path("oversized_inline_write_executes");
+        let content = "x".repeat(INLINE_WRITE_CONTENT_ADVISORY_CHARS + 128);
+        let decision_json = format!(
+            r#"{{"state":"executing","decision":"call_tool","next_action":{{"action_type":"Write","args":{{"file_path":"{}","content":"{}"}}}}}}"#,
+            target.display(),
+            content
+        );
+        let client = ModelProviderClient::with_scripted_turns(vec![vec![StreamEvent::TextDelta(
+            decision_json.into(),
+        )]]);
+        let permissions = ToolPermissionContext::new(PermissionMode::Default);
+        permissions.add_always_allow_rule("Write");
+        let tool_runtime = StateFrameToolRuntime {
+            registry: ToolRegistry::new().register(Arc::new(FileWriteTool)),
+            permissions,
+            cwd: test_runtime_paths().0,
+            config_root: test_runtime_paths().1,
+        };
+        let mut frame = make_clean_frame();
+        frame.allowed_actions = vec!["write_file".into()];
+        frame.allowed_tools = vec!["Write".into()];
+
+        let outcome = rt
+            .block_on(run_decision_loop_with_tools(
+                &client,
+                frame,
+                DecisionLoopConfig {
+                    max_iterations: 1,
+                    ..DecisionLoopConfig::default()
+                },
+                Some(tool_runtime),
+            ))
+            .expect("loop should execute oversized write");
+
+        assert_eq!(
+            std::fs::read_to_string(&target).expect("target should be written"),
+            content
+        );
+        match outcome {
+            LoopOutcome::MaxIterationsReached { usage, .. } => {
+                assert_eq!(usage.tool_dispatch_success_count, 1);
+                assert_eq!(usage.tool_dispatch_failure_count, 0);
+            }
+            other => panic!("expected max-iteration outcome after one write, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn continue_with_next_action_is_rejected_for_repair() {
+        let mut frame = make_clean_frame();
+        frame.allowed_tools.push("Write".into());
+        let decision_json = r#"{"state":"executing","decision":"continue","next_action":{"action_type":"Write","args":{"file_path":"/tmp/validator.py","content":"print('x')"}},"state_patch":{"open_items_add":["run validator"]}}"#;
+
+        let err = parse_and_validate_decision(&frame, decision_json)
+            .expect_err("continue with next_action should be rejected");
+        assert!(err.reason.contains("continue must not include next_action"));
+        assert!(err.reason.contains("decision=call_tool"));
+    }
+
+    #[test]
+    fn continue_without_state_or_patch_progress_is_rejected_for_repair() {
+        let frame = make_clean_frame();
+        let decision_json = r#"{"state":"executing","decision":"continue","state_patch":{}}"#;
+
+        let err = parse_and_validate_decision(&frame, decision_json)
+            .expect_err("continue without progress should be rejected");
+        assert!(
+            err.reason
+                .contains("continue requires either a state change or a non-empty state_patch")
+        );
     }
 
     #[test]
@@ -6239,6 +6437,65 @@ mod tests {
     }
 
     #[test]
+    fn call_tool_missing_path_injects_repair_gate_when_create_permission_exists() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let missing_path = unique_temp_path("call_tool_missing_read_writable");
+        let read_json = format!(
+            r#"{{"state":"executing","decision":"call_tool","next_action":{{"action_type":"Read","args":{{"file_path":"{}"}}}}}}"#,
+            missing_path.display()
+        );
+        let client = ModelProviderClient::with_scripted_turns(vec![vec![StreamEvent::TextDelta(
+            read_json.into(),
+        )]]);
+        let tool_runtime = StateFrameToolRuntime {
+            registry: ToolRegistry::new().register(Arc::new(FileReadTool)),
+            permissions: ToolPermissionContext::new(PermissionMode::Default),
+            cwd: test_runtime_paths().0,
+            config_root: test_runtime_paths().1,
+        };
+        let mut frame = make_clean_frame();
+        frame.allowed_actions = vec!["read_file".into(), "write_file".into()];
+        frame.allowed_tools = vec!["Read".into(), "Write".into()];
+        frame.recent_evidence.push(format!(
+            "fact: permission_to_create_and_write:{} ref=permission:step0:0 source=permission_scope source_event_id=permission-scope:0:0 freshness=current confidence=1.00 status=active invalidated_by=none supersedes=none conflicts_with=none summary=worker may create and write the declared target artifact path {}",
+            missing_path.display(),
+            missing_path.display()
+        ));
+
+        let outcome = rt
+            .block_on(run_decision_loop_with_tools(
+                &client,
+                frame,
+                DecisionLoopConfig {
+                    max_iterations: 1,
+                    ..DecisionLoopConfig::default()
+                },
+                Some(tool_runtime),
+            ))
+            .expect("loop should not error");
+        match outcome {
+            LoopOutcome::MaxIterationsReached { usage, .. } => {
+                assert_eq!(usage.tool_dispatch_failure_count, 1);
+                assert_eq!(
+                    usage.tool_dispatch_failure_taxonomy.get("missing_path"),
+                    Some(&1usize)
+                );
+                assert_eq!(
+                    usage.recovery_tier.as_deref(),
+                    Some("missing_path_recovery_gate")
+                );
+                assert_eq!(
+                    usage.recovery_outcome.as_deref(),
+                    Some("repair_turn_injected")
+                );
+            }
+            other => panic!(
+                "expected MaxIterationsReached after missing-path repair gate injection, got {other:?}"
+            ),
+        }
+    }
+
+    #[test]
     fn missing_path_feedback_carries_directory_recovery_hint_when_permission_exists() {
         let target_dir = unique_temp_dir("missing_path_recovery_hint");
         let read_json = format!(
@@ -6378,6 +6635,54 @@ mod tests {
     }
 
     #[test]
+    fn tool_outcome_missing_child_file_under_writable_directory_is_recoverable() {
+        let mut frame = make_frame();
+        let target_dir = std::env::temp_dir().join("p1_outcome_writable_dir");
+        let child_file = target_dir.join("validator.py");
+        frame
+            .stage_execution_contract
+            .declared_artifacts
+            .push(DeclaredArtifactContract {
+                ref_id: "artifact:validator-dir".into(),
+                path: target_dir.display().to_string(),
+                kind: "directory".into(),
+                required_actions: vec!["create".into(), "write".into()],
+                required_evidence: vec![],
+            });
+        frame.recent_evidence.push(format!(
+            "fact: permission_to_create_and_write:{} ref=permission:dir source=permission_scope source_event_id=permission-scope:dir freshness=current confidence=1.00 status=active invalidated_by=none supersedes=none conflicts_with=none summary=worker may create and write the declared target artifact path {}",
+            target_dir.display(),
+            target_dir.display()
+        ));
+        let decision = validate_state_decision(&format!(
+            r#"{{"state":"executing","decision":"call_tool","next_action":{{"action_type":"Read","args":{{"file_path":"{}"}}}}}}"#,
+            child_file.display()
+        ))
+        .expect("decision");
+        let record = build_execution_record(
+            "Read",
+            &ToolResult::Interrupted("failed to read missing path".into()),
+            None,
+        );
+        let outcome = classify_tool_outcome(
+            &frame,
+            &decision,
+            &record,
+            &format!(
+                "failed to read {}: No such file or directory (os error 2)",
+                child_file.display()
+            ),
+            1,
+        );
+        assert_eq!(outcome.kind.as_str(), "missing_path");
+        assert!(outcome.recoverable);
+        assert_eq!(
+            outcome.recommended_next_action.as_deref(),
+            Some("create_parent_directory_and_write_target_file")
+        );
+    }
+
+    #[test]
     fn dir_plus_file_missing_path_repair_issues_create_and_write_once() {
         let mut frame = make_frame();
         frame.recent_evidence.clear();
@@ -6407,6 +6712,45 @@ mod tests {
                 "recommended_write_strategy=create_parent_directory_and_write_target_file"
             )
         );
+    }
+
+    #[test]
+    fn child_file_missing_path_repair_uses_parent_directory_permission() {
+        let mut frame = make_frame();
+        frame.recent_evidence.clear();
+        let target_dir = "/tmp/headless-repair-dir";
+        let target_path = "/tmp/headless-repair-dir/validator.py";
+        frame
+            .stage_execution_contract
+            .declared_artifacts
+            .push(DeclaredArtifactContract {
+                ref_id: "artifact:validator-dir".into(),
+                path: target_dir.into(),
+                kind: "directory".into(),
+                required_actions: vec!["create".into(), "write".into()],
+                required_evidence: vec![],
+            });
+        frame.recent_evidence.push(format!(
+            "fact: permission_to_create_and_write:{target_dir} ref=permission:dir source=permission_scope source_event_id=permission:dir freshness=current confidence=1.00 status=active invalidated_by=none supersedes=none conflicts_with=none summary=write target directory"
+        ));
+        let mut usage = LoopUsage::default();
+        usage.last_recovery_attempt = Some(RecoveryAttempt {
+            failure_kind: "missing_path".into(),
+            recommended_next_action: "create_parent_directory_and_write_target_file".into(),
+            target_path: Some(target_path.into()),
+        });
+
+        assert!(super::inject_missing_path_recovery_gate(
+            &mut frame, &mut usage
+        ));
+        let repair_line = frame
+            .recent_evidence
+            .iter()
+            .find(|line| line.starts_with("fact: repair_turn "))
+            .expect("repair turn");
+        assert!(repair_line.contains("target_path=/tmp/headless-repair-dir/validator.py"));
+        assert!(repair_line.contains("permission_ref=permission:dir"));
+        assert!(repair_line.contains("write_target_file=true"));
     }
 
     #[test]
