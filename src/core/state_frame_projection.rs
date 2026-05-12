@@ -6,7 +6,8 @@ use crate::core::state_fact_ledger::{
 };
 use crate::core::state_frame::{
     ActorRole, AgentState, DeclaredArtifactContract, ReviewMode, StageContinuationContext,
-    StageExecutionContract, StateBudget, StateFrame, TestContract, VerificationContract,
+    StageExecutionContract, StateBudget, StateFrame, TaskProfile, TestContract,
+    VerificationContract,
 };
 use crate::core::state_frame_archive::{
     archive_to_summary, build_accepted_archive, retain_blocked_items, retain_open_items,
@@ -44,6 +45,13 @@ fn current_task_contract_text(text: &str) -> String {
 }
 
 fn is_readonly_analysis(plan: &BossPlan, step_id: Option<usize>) -> bool {
+    if step_id
+        .and_then(|id| plan.steps.iter().find(|s| s.id == id))
+        .and_then(|step| step.stage_execution_contract.task_profile)
+        .is_some_and(|profile| matches!(profile, TaskProfile::ReadOnlyAnalysis))
+    {
+        return true;
+    }
     let mut objective = step_id
         .and_then(|id| plan.steps.iter().find(|s| s.id == id))
         .map(|s| {
@@ -73,40 +81,7 @@ fn is_readonly_analysis(plan: &BossPlan, step_id: Option<usize>) -> bool {
     ) {
         return true;
     }
-
-    let has_soft_readonly_marker = contains_any(
-        &objective,
-        &["只读", "read-only", "readonly", "readonly-audit"],
-    );
-    if !has_soft_readonly_marker {
-        return false;
-    }
-
-    let has_write_intent = contains_any(
-        &objective,
-        &[
-            "允许修改",
-            "允许写",
-            "创建",
-            "写入",
-            "生成",
-            "落地",
-            "实现",
-            "修改文件",
-            "create",
-            "write",
-            "generate",
-            "implement",
-            "build",
-            "scaffold",
-            "edit",
-            "validator",
-            "tool",
-            "script",
-        ],
-    ) || !extract_artifact_expectations(&objective).is_empty();
-
-    !has_write_intent
+    false
 }
 
 fn path_looks_like_development_artifact(path: &str) -> bool {
@@ -147,63 +122,17 @@ fn step_looks_like_development_task(
     step: Option<&crate::core::boss_state::BossPlanStep>,
     declared_artifacts: &[DeclaredArtifactContract],
 ) -> bool {
+    if let Some(task_profile) = step.and_then(|step| step.stage_execution_contract.task_profile) {
+        return matches!(task_profile, TaskProfile::CodeChange);
+    }
+
     if declared_artifacts
         .iter()
         .any(|artifact| path_looks_like_development_artifact(&artifact.path))
     {
         return true;
     }
-
-    let Some(step) = step else {
-        return false;
-    };
-    let mut text = current_task_contract_text(step.objective()).to_ascii_lowercase();
-    if !step.acceptance.is_empty() {
-        text.push('\n');
-        text.push_str(
-            &step
-                .acceptance
-                .iter()
-                .map(|item| item.to_ascii_lowercase())
-                .collect::<Vec<_>>()
-                .join("\n"),
-        );
-    }
-
-    let has_development_marker = [
-        "implement",
-        "implementation",
-        "fix",
-        "bug",
-        "patch",
-        "refactor",
-        "demo",
-        "validator",
-        "tool",
-        "site",
-        "frontend",
-        "build",
-        "script",
-        "code",
-        "feature",
-        "task",
-        "cli",
-        "create",
-        "write",
-    ]
-    .iter()
-    .any(|marker| text.contains(marker));
-
-    if !has_development_marker
-        && (text.contains("report")
-            || text.contains("research")
-            || text.contains("audit")
-            || text.contains("analysis"))
-    {
-        return false;
-    }
-
-    has_development_marker
+    false
 }
 
 fn apply_development_test_policy(contract: &mut StageExecutionContract) {
@@ -389,28 +318,6 @@ fn push_none_recorded_unless_present(facts: &mut Vec<String>, fact_name: &str) {
     }
 }
 
-fn open_item_requires_test(summary: &str) -> bool {
-    let lowered = summary.to_ascii_lowercase();
-    lowered.contains("cargo test")
-        || lowered.contains("run test")
-        || lowered.contains("run tests")
-        || lowered.contains("pytest")
-        || lowered.contains("unit test")
-        || lowered.contains("integration test")
-        || lowered.contains("pytest")
-        || lowered.contains("run verification")
-        || summary.contains("运行测试")
-        || summary.contains("执行测试")
-}
-
-fn open_item_requires_verification(summary: &str) -> bool {
-    let lowered = summary.to_ascii_lowercase();
-    lowered.contains("verify")
-        || lowered.contains("verification")
-        || lowered.contains("artifact check")
-        || summary.contains("验证")
-}
-
 fn step_contract_text_with_acceptance(step: &crate::core::boss_state::BossPlanStep) -> String {
     let mut text = current_task_contract_text(step.objective());
     if !step.acceptance.is_empty() {
@@ -418,21 +325,6 @@ fn step_contract_text_with_acceptance(step: &crate::core::boss_state::BossPlanSt
         text.push_str(&step.acceptance.join("\n"));
     }
     text
-}
-
-fn step_requires_markdown_conclusion(step: Option<&crate::core::boss_state::BossPlanStep>) -> bool {
-    let Some(step) = step else {
-        return false;
-    };
-    let text = step_contract_text_with_acceptance(step);
-    let lowered = text.to_ascii_lowercase();
-    (lowered.contains("markdown") || lowered.contains(".md"))
-        && (lowered.contains("conclusion")
-            || lowered.contains("summary")
-            || lowered.contains("report")
-            || text.contains("结论文件")
-            || text.contains("结论")
-            || text.contains("报告"))
 }
 
 fn first_declared_target_directory(
@@ -503,7 +395,6 @@ fn join_contract_refs(refs: &[String]) -> String {
 fn build_completion_contract_fact(
     permission_facts: &[String],
     artifact_ledgers: &[crate::core::state_fact_ledger::ArtifactRecord],
-    open_item_ledgers: &[crate::core::state_fact_ledger::OpenItemRecord],
     stage_execution_contract: &StageExecutionContract,
     readonly_analysis: bool,
 ) -> String {
@@ -532,11 +423,7 @@ fn build_completion_contract_fact(
                 .map(str::to_string)
         }));
     }
-    let mut test_refs = open_item_ledgers
-        .iter()
-        .filter(|item| open_item_requires_test(&item.summary))
-        .map(|item| item.ref_id.clone())
-        .collect::<Vec<_>>();
+    let mut test_refs = Vec::new();
     for test in &stage_execution_contract.tests {
         if !test_refs.iter().any(|existing| existing == &test.name) {
             test_refs.push(test.name.clone());
@@ -546,20 +433,13 @@ fn build_completion_contract_fact(
         .tests
         .iter()
         .any(|test| test.name == "st_auto_validation");
-    let verification_refs = if readonly_analysis
-        || st_test_only_mode
-        || stage_execution_contract
-            .review_mode
-            .is_some_and(|mode| mode.is_independent_review())
-    {
+    let verification_refs = if readonly_analysis || st_test_only_mode {
         Vec::new()
-    } else if artifact_required {
-        artifact_refs.clone()
     } else {
-        open_item_ledgers
+        stage_execution_contract
+            .verifications
             .iter()
-            .filter(|item| open_item_requires_verification(&item.summary))
-            .map(|item| item.ref_id.clone())
+            .map(|item| item.target_ref.clone())
             .collect::<Vec<_>>()
     };
     let test_required = !test_refs.is_empty();
@@ -616,10 +496,11 @@ fn build_stage_execution_contract(
     permission_facts: &[String],
     file_facts: &[crate::core::state_fact_ledger::FileFactRecord],
     artifact_ledgers: &[crate::core::state_fact_ledger::ArtifactRecord],
-    open_item_ledgers: &[crate::core::state_fact_ledger::OpenItemRecord],
+    _open_item_ledgers: &[crate::core::state_fact_ledger::OpenItemRecord],
     readonly_analysis: bool,
     st_mode_enabled: bool,
 ) -> StageExecutionContract {
+    let explicit_contract = step.map(|step| &step.stage_execution_contract);
     let mut declared_artifacts = artifact_ledgers
         .iter()
         .map(|item| DeclaredArtifactContract {
@@ -662,47 +543,29 @@ fn build_stage_execution_contract(
             });
         }
     }
-    if step_requires_markdown_conclusion(step) {
-        if let Some(target_dir) = first_declared_target_directory(&declared_artifacts)
-            .or_else(|| step.and_then(first_step_target_directory))
+    for artifact in explicit_contract
+        .into_iter()
+        .flat_map(|contract| contract.declared_artifacts.iter())
+    {
+        if declared_artifacts
+            .iter()
+            .any(|existing| existing.path == artifact.path)
         {
-            let path = format!("{target_dir}/summary.md");
-            if !declared_artifacts
-                .iter()
-                .any(|artifact| artifact.path == path)
-            {
-                let idx = declared_artifacts.len();
-                declared_artifacts.push(DeclaredArtifactContract {
-                    ref_id: format!(
-                        "artifact:step{}:{idx}",
-                        step.map(|step| step.id).unwrap_or(0)
-                    ),
-                    path: path.clone(),
-                    kind: "file".into(),
-                    required_actions: if readonly_analysis {
-                        Vec::new()
-                    } else {
-                        vec!["create".into(), "write".into()]
-                    },
-                    required_evidence: vec![
-                        format!(
-                            "artifact:step{}:{idx}",
-                            step.map(|step| step.id).unwrap_or(0)
-                        ),
-                        path,
-                        "file".into(),
-                    ],
-                });
-            }
+            continue;
         }
+        declared_artifacts.push(artifact.clone());
     }
     let st_test_only_mode =
         st_mode_enabled && step_looks_like_development_task(step, &declared_artifacts);
     let review_mode = infer_review_mode(step, readonly_analysis);
-    let independent_review = review_mode.is_some_and(|mode| mode.is_independent_review());
-    let verifications = if st_test_only_mode || independent_review {
-        Vec::new()
-    } else {
+    let task_profile = step
+        .and_then(|step| step.stage_execution_contract.task_profile)
+        .or(readonly_analysis.then_some(TaskProfile::ReadOnlyAnalysis));
+    let requires_source_evidence = step.and_then(|step| {
+        step.stage_execution_contract
+            .requires_source_evidence
+    });
+    let derived_verifications = || {
         artifact_ledgers
             .iter()
             .map(|item| (item.ref_id.clone(), item.path.clone()))
@@ -721,35 +584,42 @@ fn build_stage_execution_contract(
             .map(|(target_ref, target_path)| VerificationContract {
                 target_ref: target_ref.clone(),
                 target_path: Some(target_path.clone()),
-                required_actions: if readonly_analysis && !independent_review {
-                    Vec::new()
-                } else {
-                    vec!["verify".into()]
-                },
+                required_actions: vec!["verify".into()],
                 required_evidence: vec![target_ref, target_path],
             })
             .collect::<Vec<_>>()
     };
-    let tests = open_item_ledgers
-        .iter()
-        .filter(|item| open_item_requires_test(&item.summary))
-        .map(|item| TestContract {
-            name: item.summary.clone(),
-            required_actions: vec!["run_test".into()],
-            required_evidence: vec![item.ref_id.clone()],
+    let verifications = explicit_contract
+        .map(|contract| contract.verifications.clone())
+        .filter(|items| !items.is_empty())
+        .or_else(|| {
+            if st_test_only_mode || !matches!(task_profile, Some(TaskProfile::TargetVerification)) {
+                None
+            } else {
+                Some(derived_verifications())
+            }
         })
-        .collect::<Vec<_>>();
-    let mut required_actions = Vec::new();
-    if step.is_some() && !declared_artifacts.is_empty() {
+        .unwrap_or_default();
+    let tests = explicit_contract
+        .map(|contract| contract.tests.clone())
+        .unwrap_or_default();
+    let mut required_actions = explicit_contract
+        .map(|contract| contract.required_actions.clone())
+        .unwrap_or_default();
+    if step.is_some() && !declared_artifacts.is_empty() && !readonly_analysis {
         required_actions.extend(["create".into(), "write".into()]);
     }
-    if !tests.is_empty() {
-        required_actions.push("run_test".into());
+    for test in &tests {
+        required_actions.extend(test.required_actions.iter().cloned());
     }
-    if !verifications.is_empty() {
-        required_actions.push("verify".into());
+    for verification in &verifications {
+        required_actions.extend(verification.required_actions.iter().cloned());
     }
-    let mut required_evidence = Vec::new();
+    required_actions.sort();
+    required_actions.dedup();
+    let mut required_evidence = explicit_contract
+        .map(|contract| contract.required_evidence.clone())
+        .unwrap_or_default();
     required_evidence.extend(permission_facts.iter().cloned());
     required_evidence.extend(
         declared_artifacts
@@ -766,27 +636,38 @@ fn build_stage_execution_contract(
             .iter()
             .flat_map(|item| item.required_evidence.iter().cloned()),
     );
+    required_evidence.sort();
+    required_evidence.dedup();
     let artifact_paths = declared_artifacts
         .iter()
         .map(|artifact| artifact.path.as_str())
         .collect::<Vec<_>>();
-    let content_evidence_targets = file_facts
-        .iter()
-        .filter(|item| matches!(item.kind.as_str(), "source_file" | "document"))
-        .map(|item| item.path.trim())
-        .filter(|path| {
-            !path.is_empty()
-                && !path.ends_with('/')
-                && !artifact_paths.iter().any(|artifact| *artifact == *path)
-        })
-        .fold(Vec::<String>::new(), |mut acc, path| {
-            if !acc.iter().any(|existing| existing == path) {
-                acc.push(path.to_string());
+    let content_evidence_targets = if requires_source_evidence == Some(false) {
+        Vec::new()
+    } else {
+        let mut targets = explicit_contract
+            .map(|contract| contract.content_evidence_targets.clone())
+            .unwrap_or_default();
+        for path in file_facts
+            .iter()
+            .filter(|item| matches!(item.kind.as_str(), "source_file" | "document"))
+            .map(|item| item.path.trim())
+            .filter(|path| {
+                !path.is_empty()
+                    && !path.ends_with('/')
+                    && !artifact_paths.iter().any(|artifact| *artifact == *path)
+            })
+        {
+            if !targets.iter().any(|existing| existing == path) {
+                targets.push(path.to_string());
             }
-            acc
-        });
+        }
+        targets
+    };
     let mut contract = StageExecutionContract {
         review_mode,
+        task_profile,
+        requires_source_evidence,
         declared_artifacts,
         verifications,
         tests,
@@ -804,6 +685,25 @@ fn build_stage_contract_facts(contract: &StageExecutionContract) -> Vec<String> 
     let mut facts = Vec::new();
     if let Some(review_mode) = contract.review_mode {
         facts.push(fact_line("review_mode", review_mode.as_str()));
+    }
+    if let Some(task_profile) = contract.task_profile {
+        facts.push(fact_line("task_profile", task_profile.as_str()));
+        if matches!(task_profile, TaskProfile::ReadOnlyAnalysis) {
+            facts.push(fact_line(
+                "execution_mode",
+                "read_only_analysis no_file_edits no_patch",
+            ));
+        }
+    }
+    if let Some(requires_source_evidence) = contract.requires_source_evidence {
+        facts.push(fact_line(
+            "requires_source_evidence",
+            if requires_source_evidence {
+                "required"
+            } else {
+                "not_required"
+            },
+        ));
     }
     for artifact in &contract.declared_artifacts {
         facts.push(fact_line(
@@ -1337,7 +1237,6 @@ fn build_fact_ledger(
         facts.push(build_completion_contract_fact(
             &permission_facts,
             &ledgers.artifact_refs,
-            &open_item_ledgers,
             &stage_execution_contract,
             completion_contract_readonly,
         ));
@@ -1570,6 +1469,7 @@ pub fn project_state_frame_with_st_mode(
             "state_decision_v1".into()
         }),
         budget: StateBudget::default(),
+        runtime_open_items: Vec::new(),
     };
     let route = route_toolset(&frame);
     apply_route(&mut frame, route);
@@ -1619,6 +1519,7 @@ mod tests {
             skillset_id: None,
             required_output_schema: Some("state_decision_v1".into()),
             budget: StateBudget::default(),
+            runtime_open_items: Vec::new(),
         };
 
         let diagnostics = collect_projection_diagnostics(&frame);
@@ -1657,6 +1558,7 @@ mod tests {
             skillset_id: None,
             required_output_schema: Some("state_decision_v1".into()),
             budget: StateBudget::default(),
+            runtime_open_items: Vec::new(),
         };
 
         let diagnostics = collect_projection_diagnostics(&frame);
@@ -2140,10 +2042,7 @@ mod tests {
                 .stage_execution_contract
                 .declared_artifacts
                 .iter()
-                .any(
-                    |artifact| artifact.path == "/tmp/state-decision-validator/summary.md"
-                        && artifact.kind == "file"
-                ),
+                .all(|artifact| artifact.path != "/tmp/state-decision-validator/summary.md"),
             "declared_artifacts={:?}",
             frame.stage_execution_contract.declared_artifacts
         );
@@ -2259,32 +2158,16 @@ mod tests {
             frame.stage_execution_contract.review_mode,
             Some(ReviewMode::IndependentReview)
         );
-        assert!(
-            !frame.stage_execution_contract.verifications.is_empty(),
-            "verification contract should be preserved for runtime anchor closure"
-        );
-        assert_eq!(
-            frame
-                .stage_execution_contract
-                .verifications
-                .first()
-                .and_then(|item| item.required_actions.first())
-                .map(|item| item.as_str()),
-            Some("verify")
-        );
+        assert!(frame.stage_execution_contract.verifications.is_empty());
         assert_eq!(
             frame.required_output_schema.as_deref(),
             Some("state_decision_v1")
         );
         assert_eq!(frame.toolset_id.as_deref(), Some("verifier-readonly"));
-        assert_eq!(
-            frame.allowed_actions,
-            vec!["read_file".to_string(), "summarize_findings".to_string()]
-        );
     }
 
     #[test]
-    fn project_state_frame_expands_directory_verification_targets_to_readable_child_files() {
+    fn project_state_frame_directory_audit_stays_neutral_without_typed_target_verification() {
         let plan = BossPlan {
             plan_id: "plan-review-runtime-directory".into(),
             task_description:
@@ -2332,24 +2215,12 @@ mod tests {
             frame.stage_execution_contract.review_mode,
             Some(ReviewMode::IndependentReview)
         );
+        assert!(frame.stage_execution_contract.verifications.is_empty());
         assert!(
             frame
                 .open_items
                 .iter()
-                .any(|item| item.contains("required_action:verify_artifact"))
-        );
-        assert!(
-            frame
-                .open_items
-                .iter()
-                .any(|item| item.contains("/tmp/state-decision-validator/README.md")),
-            "directory verification should expand to a readable child file"
-        );
-        assert!(
-            frame.open_items.iter().all(|item| !item
-                .contains("target_refs=/tmp/state-decision-validator\n")
-                && !item.contains("target_refs=/tmp/state-decision-validator ")),
-            "open items should not point the verifier at the bare directory path"
+                .all(|item| !item.contains("required_action:verify_artifact"))
         );
     }
 

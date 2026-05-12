@@ -7,7 +7,7 @@ use crate::core::state_fact_ledger::{
 };
 use crate::core::state_frame::{
     AgentState, CompletionEvidenceGap, CompletionEvidenceStatus, CompletionGateBlock, DecisionKind,
-    RepairNeeded, ReviewMode, StateFrame, StatePatch, WorkerStructuredReport,
+    RepairNeeded, ReviewMode, StateFrame, StatePatch, TaskProfile, WorkerStructuredReport,
     validate_state_decision,
 };
 use crate::core::state_frame_hydration::{
@@ -194,6 +194,8 @@ StateDecision schema:\n\
     \"open_items_remove\": [],\n\
     \"accepted_summary_add\": [],\n\
     \"review_mode\": \"<optional: target_verification | independent_review>\",\n\
+    \"task_profile\": \"<optional: read_only_analysis | independent_review | target_verification | code_change>\",\n\
+    \"requires_source_evidence\": \"<optional bool>\",\n\
     \"tests_add\": [{\"name\":\"<optional explicit test contract>\",\"required_actions\":[\"run_test\"],\"required_evidence\":[\"runtime_test_passed\"]}]\n\
   },\n\
   \"confidence\": 0.9,\n\
@@ -205,12 +207,16 @@ Rules:\n\
 - Use \"decision\": \"continue\" only when you also change state or provide a non-empty state_patch that advances the frame\n\
 - When adding accepted summary lines, use `state_patch.accepted_summary_add`; do not emit `accepted_summary` as a replacement field\n\
 - When adding open items, use `state_patch.open_items_add`; do not emit `open_items` as a replacement field\n\
+- If you add a runtime follow-up via `state_patch.open_items_add`, remove that exact item with `state_patch.open_items_remove` before returning `decision=\"done\"`\n\
 - Default `review_mode` is `independent_review`. Do not switch it just because the task creates or writes a small validator/analyzer/script/report.\n\
+- If you already know the task mode in this turn, set `state_patch.task_profile` in the same response. Do not spend an extra classification turn just to label the task.\n\
 - Keep `independent_review` when the job is to audit, review, validate, replay logs, inspect evidence, or produce a verdict; in that case any small helper artifact is review-owned evidence, not the primary product.\n\
 - Set `state_patch.review_mode=\"target_verification\"` only when the task explicitly requires strict target verification/evidence-repair, or when the main deliverable is a durable artifact the user will use as the final product, such as a feature, app, site, library, or reusable tool.\n\
+- Use `task_profile=\"code_change\"` for implementation work, `task_profile=\"read_only_analysis\"` for strict no-modify audits, `task_profile=\"independent_review\"` for blind/independent review loops, and `task_profile=\"target_verification\"` only for explicit verification-first / evidence-repair work.\n\
+- Set `requires_source_evidence=true` only when completion should stay blocked until source files are actually read; set `false` when heavy source-evidence repair is not part of this task's gate.\n\
 - Add `state_patch.tests_add` only when your current task decision explicitly requires a runtime validation gate; do not infer tests from quoted background/reference material.\n\
 - Do NOT return wrapper payloads like `{ \"type\": ..., \"valid\": ..., \"decision\": {...} }`; return the canonical StateDecision object itself\n\
-- If `recent_evidence` contains `fact: execution_mode read_only_analysis`, prefer a single-turn `done`; do not use `continue` just to outline or narrate your plan\n\
+- If `recent_evidence` contains `fact: task_profile read_only_analysis` or `fact: execution_mode read_only_analysis`, prefer a single-turn `done`; do not use `continue` just to outline or narrate your plan\n\
 - If `required_output_schema` is `readonly_audit_4_paragraphs_v1`, return `decision=\"done\"` with exactly 4 `state_patch.accepted_summary_add` items, one each for `现状`、`主要风险`、`证据来源`、`下一步建议`\n\
 - Treat `recent_evidence` entries prefixed with `fact:` as the authoritative Fact Ledger for this turn\n\
 - Treat `budget.max_tool_calls=0` as unlimited tool calls, not as tool calls being disabled\n\
@@ -312,6 +318,31 @@ fn append_runtime_contract_facts(frame: &mut StateFrame) {
             }
         ),
     );
+    if let Some(task_profile) = frame.stage_execution_contract.task_profile {
+        push_unique(
+            &mut frame.recent_evidence,
+            format!("fact: task_profile {}", task_profile.as_str()),
+        );
+        if matches!(task_profile, TaskProfile::ReadOnlyAnalysis) {
+            push_unique(
+                &mut frame.recent_evidence,
+                "fact: execution_mode read_only_analysis no_file_edits no_patch".into(),
+            );
+        }
+    }
+    if let Some(requires_source_evidence) = frame.stage_execution_contract.requires_source_evidence {
+        push_unique(
+            &mut frame.recent_evidence,
+            format!(
+                "fact: requires_source_evidence {}",
+                if requires_source_evidence {
+                    "required"
+                } else {
+                    "not_required"
+                }
+            ),
+        );
+    }
 }
 
 fn push_unique(items: &mut Vec<String>, value: String) -> bool {
@@ -1522,6 +1553,10 @@ fn independent_review_enabled(frame: &StateFrame) -> bool {
     review_mode(frame).is_independent_review()
 }
 
+fn runtime_open_items_pending(frame: &StateFrame) -> bool {
+    !frame.runtime_open_items.is_empty()
+}
+
 fn independent_review_has_runtime_success(usage: &LoopUsage) -> bool {
     usage
         .tool_execution_records
@@ -1535,6 +1570,9 @@ fn independent_review_can_close_with_refs(
     evidence_refs: &[String],
 ) -> bool {
     if !independent_review_enabled(frame) {
+        return false;
+    }
+    if runtime_open_items_pending(frame) {
         return false;
     }
     if completion_contract_requirement(frame, "artifact_evidence")
@@ -2230,7 +2268,10 @@ fn independent_review_terminal_outcome(
     frame: &StateFrame,
     usage: &mut LoopUsage,
 ) -> Option<LoopOutcome> {
-    if !independent_review_enabled(frame) || !independent_review_has_runtime_success(usage) {
+    if !independent_review_enabled(frame)
+        || !independent_review_has_runtime_success(usage)
+        || runtime_open_items_pending(frame)
+    {
         return None;
     }
     let completion = evaluate_completion_evidence(frame, usage);
@@ -2915,11 +2956,15 @@ fn apply_state_patch(frame: &mut StateFrame, patch: &StatePatch) -> bool {
     let mut changed = false;
     for item in &patch.open_items_add {
         changed |= push_unique(&mut frame.open_items, item.clone());
+        changed |= push_unique(&mut frame.runtime_open_items, item.clone());
     }
     for item in &patch.open_items_remove {
         let before = frame.open_items.len();
         frame.open_items.retain(|existing| existing != item);
         changed |= frame.open_items.len() != before;
+        let runtime_before = frame.runtime_open_items.len();
+        frame.runtime_open_items.retain(|existing| existing != item);
+        changed |= frame.runtime_open_items.len() != runtime_before;
     }
     for item in &patch.accepted_summary_add {
         changed |= push_unique(&mut frame.accepted_summary, item.clone());
@@ -2972,6 +3017,47 @@ fn apply_state_patch(frame: &mut StateFrame, patch: &StatePatch) -> bool {
             changed |= push_unique(
                 &mut frame.recent_evidence,
                 format!("fact: review_mode {}", review_mode.as_str()),
+            );
+        }
+    }
+    if let Some(task_profile) = patch.task_profile {
+        if frame.stage_execution_contract.task_profile != Some(task_profile) {
+            frame.stage_execution_contract.task_profile = Some(task_profile);
+            frame
+                .recent_evidence
+                .retain(|line| !line.starts_with("fact: task_profile "));
+            changed |= push_unique(
+                &mut frame.recent_evidence,
+                format!("fact: task_profile {}", task_profile.as_str()),
+            );
+            frame
+                .recent_evidence
+                .retain(|line| !line.starts_with("fact: execution_mode "));
+            if matches!(task_profile, TaskProfile::ReadOnlyAnalysis) {
+                changed |= push_unique(
+                    &mut frame.recent_evidence,
+                    "fact: execution_mode read_only_analysis no_file_edits no_patch".into(),
+                );
+            }
+        }
+    }
+    if let Some(requires_source_evidence) = patch.requires_source_evidence {
+        if frame.stage_execution_contract.requires_source_evidence != Some(requires_source_evidence)
+        {
+            frame.stage_execution_contract.requires_source_evidence = Some(requires_source_evidence);
+            frame
+                .recent_evidence
+                .retain(|line| !line.starts_with("fact: requires_source_evidence "));
+            changed |= push_unique(
+                &mut frame.recent_evidence,
+                format!(
+                    "fact: requires_source_evidence {}",
+                    if requires_source_evidence {
+                        "required"
+                    } else {
+                        "not_required"
+                    }
+                ),
             );
         }
     }
@@ -4073,6 +4159,17 @@ pub async fn run_decision_loop_with_tools(
             DecisionKind::Done => {
                 frame.state = decision.state;
                 let _patch_changed = apply_state_patch(&mut frame, &decision.state_patch);
+                if runtime_open_items_pending(&frame) {
+                    push_unique(
+                        &mut frame.recent_evidence,
+                        format!(
+                            "runtime_obligation_pending: {}",
+                            frame.runtime_open_items.join(" | ")
+                        ),
+                    );
+                    frame.state = AgentState::Executing;
+                    continue;
+                }
                 if let Err(block) = enforce_completion_gate(&mut frame, &mut total_usage) {
                     inject_completion_gate_block(&mut frame, &block);
                     record_completion_gate_recovery(&frame, &mut total_usage, &block);
@@ -4486,7 +4583,7 @@ mod tests {
     use crate::core::state_frame::validate_state_decision;
     use crate::core::state_frame::{
         ActorRole, AgentState, CompletionEvidenceStatus, DeclaredArtifactContract, ReviewMode,
-        StageExecutionContract, StateBudget, StateFrame, StatePatch, TestContract,
+        StageExecutionContract, StateBudget, StateFrame, StatePatch, TaskProfile, TestContract,
         VerificationContract,
     };
     use crate::core::state_frame_hydration::hydrate_needed_context;
@@ -4582,6 +4679,7 @@ mod tests {
             skillset_id: None,
             required_output_schema: Some("state_decision_v1".into()),
             budget: StateBudget::default(),
+            runtime_open_items: Vec::new(),
         }
     }
 
@@ -4601,6 +4699,7 @@ mod tests {
             skillset_id: None,
             required_output_schema: Some("state_decision_v1".into()),
             budget: StateBudget::default(),
+            runtime_open_items: Vec::new(),
         }
     }
 
@@ -4675,6 +4774,137 @@ mod tests {
                 .required_evidence
                 .iter()
                 .any(|item| item == "runtime_test_passed")
+        );
+    }
+
+    #[test]
+    fn state_patch_task_profile_and_source_evidence_update_contract_and_facts() {
+        let mut frame = make_clean_frame();
+        frame.recent_evidence.clear();
+
+        let changed = apply_state_patch(
+            &mut frame,
+            &StatePatch {
+                task_profile: Some(TaskProfile::CodeChange),
+                requires_source_evidence: Some(false),
+                ..StatePatch::default()
+            },
+        );
+
+        assert!(changed);
+        assert_eq!(
+            frame.stage_execution_contract.task_profile,
+            Some(TaskProfile::CodeChange)
+        );
+        assert_eq!(frame.stage_execution_contract.requires_source_evidence, Some(false));
+        assert!(
+            frame
+                .recent_evidence
+                .iter()
+                .any(|line| line == "fact: task_profile code_change")
+        );
+        assert!(
+            frame
+                .recent_evidence
+                .iter()
+                .any(|line| line == "fact: requires_source_evidence not_required")
+        );
+        assert!(
+            frame
+                .recent_evidence
+                .iter()
+                .all(|line| !line.starts_with("fact: execution_mode ")),
+            "non-readonly task profiles must not inject readonly execution facts"
+        );
+    }
+
+    #[test]
+    fn state_patch_tracks_runtime_open_items_until_removed() {
+        let mut frame = make_clean_frame();
+        frame.open_items.clear();
+        frame.runtime_open_items.clear();
+
+        let changed = apply_state_patch(
+            &mut frame,
+            &StatePatch {
+                open_items_add: vec!["Run the validator script and capture the summary.".into()],
+                ..StatePatch::default()
+            },
+        );
+
+        assert!(changed);
+        assert_eq!(
+            frame.runtime_open_items,
+            vec!["Run the validator script and capture the summary.".to_string()]
+        );
+        assert!(frame.open_items.iter().any(|item| {
+            item == "Run the validator script and capture the summary."
+        }));
+
+        let changed = apply_state_patch(
+            &mut frame,
+            &StatePatch {
+                open_items_remove: vec!["Run the validator script and capture the summary.".into()],
+                ..StatePatch::default()
+            },
+        );
+
+        assert!(changed);
+        assert!(frame.runtime_open_items.is_empty());
+        assert!(!frame.open_items.iter().any(|item| {
+            item == "Run the validator script and capture the summary."
+        }));
+    }
+
+    #[test]
+    fn independent_review_terminal_outcome_waits_for_runtime_open_items_to_clear() {
+        let mut frame = make_clean_frame();
+        frame.open_items.clear();
+        frame.recent_evidence.clear();
+        frame.stage_execution_contract.review_mode = Some(ReviewMode::IndependentReview);
+        frame.runtime_open_items = vec!["Run the validator script and capture the summary.".into()];
+
+        let success_record = ToolExecutionRecord {
+            tool_name: "Write".into(),
+            outcome: "Text".into(),
+            kind: ToolExecutionOutcomeKind::Success,
+            summary: "Write succeeded".into(),
+            detail: None,
+            pending_approval: None,
+            report_modifier: crate::tool::result::ToolReportModifier::None,
+            observable_input: Some(ObservableInput {
+                value: r#"{"file_path":"/tmp/validator.py"}"#.into(),
+                source: ObservableInputSource::Raw,
+            }),
+            batch_context: ToolBatchContext {
+                batch_index: 0,
+                batch_size: 1,
+                executed_in_batch: false,
+            },
+        };
+        let mut usage = LoopUsage {
+            last_effective_tool_action: Some("Write".into()),
+            tool_execution_records: vec![success_record.clone()],
+            ..LoopUsage::default()
+        };
+
+        assert!(
+            super::independent_review_terminal_outcome(&frame, &mut usage).is_none(),
+            "runtime-open follow-up work must block independent-review auto-close"
+        );
+
+        frame.runtime_open_items.clear();
+        let mut usage = LoopUsage {
+            last_effective_tool_action: Some("Write".into()),
+            tool_execution_records: vec![success_record],
+            ..LoopUsage::default()
+        };
+        assert!(
+            matches!(
+                super::independent_review_terminal_outcome(&frame, &mut usage),
+                Some(LoopOutcome::Done { .. })
+            ),
+            "once runtime obligations are cleared, normal independent-review closure may resume"
         );
     }
 

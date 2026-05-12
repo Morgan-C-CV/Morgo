@@ -8600,6 +8600,7 @@ fn t27_2_state_frame_serializes_and_deserializes() {
             max_tool_calls: 10,
             max_wall_time_ms: 0,
         },
+        runtime_open_items: Vec::new(),
     };
 
     let json = serde_json::to_string(&frame).expect("serialize");
@@ -8675,6 +8676,7 @@ fn t27_2_state_frame_to_prompt_segment_is_non_cacheable() {
         skillset_id: None,
         required_output_schema: None,
         budget: StateBudget::default(),
+        runtime_open_items: Vec::new(),
     };
 
     let seg = frame.to_prompt_segment();
@@ -9437,6 +9439,7 @@ fn t27_4_done_decision_terminates_loop() {
         skillset_id: None,
         required_output_schema: Some("state_decision_v1".into()),
         budget: StateBudget::default(),
+        runtime_open_items: Vec::new(),
     };
     let outcome = rt
         .block_on(run_decision_loop(
@@ -9486,6 +9489,7 @@ fn t27_4_continue_decision_advances_state() {
         skillset_id: None,
         required_output_schema: None,
         budget: StateBudget::default(),
+        runtime_open_items: Vec::new(),
     };
     let outcome = rt
         .block_on(run_decision_loop(
@@ -9526,6 +9530,7 @@ fn t27_4_reject_decision_returns_rejected_outcome() {
         skillset_id: None,
         required_output_schema: None,
         budget: StateBudget::default(),
+        runtime_open_items: Vec::new(),
     };
     let outcome = rt
         .block_on(run_decision_loop(
@@ -9574,6 +9579,7 @@ fn t27_4_invalid_json_triggers_repair_then_done() {
         skillset_id: None,
         required_output_schema: None,
         budget: StateBudget::default(),
+        runtime_open_items: Vec::new(),
     };
     let config = DecisionLoopConfig {
         max_iterations: 3,
@@ -9622,6 +9628,7 @@ fn t27_4_max_iterations_reached_when_always_continue() {
         skillset_id: None,
         required_output_schema: None,
         budget: StateBudget::default(),
+        runtime_open_items: Vec::new(),
     };
     let config = DecisionLoopConfig {
         max_iterations: 3,
@@ -9683,6 +9690,7 @@ fn t27_4_noop_continue_stops_without_repeating_prompt() {
         skillset_id: None,
         required_output_schema: None,
         budget: StateBudget::default(),
+        runtime_open_items: Vec::new(),
     };
     let outcome = rt
         .block_on(run_decision_loop(
@@ -9742,6 +9750,7 @@ fn t27_4_request_context_hydrates_typed_selector_before_done() {
         skillset_id: None,
         required_output_schema: None,
         budget: StateBudget::default(),
+        runtime_open_items: Vec::new(),
     };
     let outcome = rt
         .block_on(run_decision_loop(
@@ -9791,6 +9800,7 @@ fn t27_4_request_context_budget_deferred_still_counts_as_progress() {
             max_input_tokens: 250,
             ..StateBudget::default()
         },
+        runtime_open_items: Vec::new(),
     };
     let outcome = rt
         .block_on(run_decision_loop(
@@ -9833,6 +9843,7 @@ fn t27_4_continue_with_state_patch_is_progress() {
         skillset_id: None,
         required_output_schema: None,
         budget: StateBudget::default(),
+        runtime_open_items: Vec::new(),
     };
     let outcome = rt
         .block_on(run_decision_loop(
@@ -9878,6 +9889,7 @@ fn t27_4_continue_with_patch_alias_is_progress() {
         skillset_id: None,
         required_output_schema: None,
         budget: StateBudget::default(),
+        runtime_open_items: Vec::new(),
     };
     let outcome = rt
         .block_on(run_decision_loop(
@@ -9934,6 +9946,7 @@ fn t27_4_continue_clearing_open_items_auto_completes() {
         skillset_id: None,
         required_output_schema: None,
         budget: StateBudget::default(),
+        runtime_open_items: Vec::new(),
     };
     let outcome = rt
         .block_on(run_decision_loop(
@@ -10005,6 +10018,7 @@ fn t27_4_readonly_audit_contract_repairs_short_summary() {
         skillset_id: None,
         required_output_schema: Some("readonly_audit_4_paragraphs_v1".into()),
         budget: StateBudget::default(),
+        runtime_open_items: Vec::new(),
     };
     let outcome = rt
         .block_on(run_decision_loop(
@@ -11709,6 +11723,7 @@ fn make_state_frame(
         skillset_id: None,
         required_output_schema: None,
         budget: StateBudget::default(),
+        runtime_open_items: Vec::new(),
     }
 }
 

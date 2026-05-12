@@ -1199,6 +1199,7 @@ mod tests {
             skillset_id: None,
             required_output_schema: Some("state_decision_v1".into()),
             budget: StateBudget::default(),
+            runtime_open_items: Vec::new(),
         }
     }
 

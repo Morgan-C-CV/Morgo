@@ -50,6 +50,27 @@ impl ReviewMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskProfile {
+    ReadOnlyAnalysis,
+    #[default]
+    IndependentReview,
+    TargetVerification,
+    CodeChange,
+}
+
+impl TaskProfile {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::ReadOnlyAnalysis => "read_only_analysis",
+            Self::IndependentReview => "independent_review",
+            Self::TargetVerification => "target_verification",
+            Self::CodeChange => "code_change",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CompletionEvidenceStatus {
@@ -120,6 +141,10 @@ pub struct StageExecutionContract {
     #[serde(default)]
     pub review_mode: Option<ReviewMode>,
     #[serde(default)]
+    pub task_profile: Option<TaskProfile>,
+    #[serde(default)]
+    pub requires_source_evidence: Option<bool>,
+    #[serde(default)]
     pub declared_artifacts: Vec<DeclaredArtifactContract>,
     #[serde(default)]
     pub verifications: Vec<VerificationContract>,
@@ -162,6 +187,14 @@ impl StageExecutionContract {
 
     pub fn test_by_name(&self, name: &str) -> Option<&TestContract> {
         self.tests.iter().find(|item| item.name == name)
+    }
+
+    pub fn task_profile(&self) -> Option<TaskProfile> {
+        self.task_profile
+    }
+
+    pub fn requires_source_evidence(&self) -> Option<bool> {
+        self.requires_source_evidence
     }
 }
 
@@ -291,6 +324,8 @@ pub struct StateFrame {
     pub required_output_schema: Option<String>,
     #[serde(default)]
     pub budget: StateBudget,
+    #[serde(default, skip_serializing, skip_deserializing)]
+    pub runtime_open_items: Vec<String>,
 }
 
 impl StateFrame {
@@ -333,6 +368,10 @@ pub struct StatePatch {
     pub accepted_summary_add: Vec<String>,
     #[serde(default)]
     pub review_mode: Option<ReviewMode>,
+    #[serde(default)]
+    pub task_profile: Option<TaskProfile>,
+    #[serde(default)]
+    pub requires_source_evidence: Option<bool>,
     #[serde(default)]
     pub tests_add: Vec<TestContract>,
 }
@@ -399,6 +438,35 @@ fn normalized_decision_kind(raw: &str) -> Option<&'static str> {
     }
 }
 
+fn normalize_task_profile(raw: &str) -> Option<&'static str> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "readonly" | "read_only" | "read_only_analysis" | "read-only" | "read only analysis" => {
+            Some("read_only_analysis")
+        }
+        "independent_review" | "independent review" | "review" => Some("independent_review"),
+        "target_verification" | "target verification" | "verification" => {
+            Some("target_verification")
+        }
+        "code_change" | "code change" | "implementation" | "implement" | "development"
+        | "dev" => Some("code_change"),
+        _ => None,
+    }
+}
+
+fn normalize_boolish(value: &Value) -> Option<bool> {
+    match value {
+        Value::Bool(value) => Some(*value),
+        Value::String(raw) => match raw.trim().to_ascii_lowercase().as_str() {
+            "true" | "1" | "yes" | "y" | "required" | "need" | "needed" => Some(true),
+            "false" | "0" | "no" | "n" | "not_required" | "not required" | "optional" => {
+                Some(false)
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 fn infer_decision_kind(
     explicit: Option<&str>,
     state: Option<&str>,
@@ -451,6 +519,23 @@ fn normalize_state_patch(
     let review_mode = patch
         .and_then(|m| m.get("review_mode"))
         .or_else(|| root.get("review_mode"));
+    let task_profile = patch
+        .and_then(|m| m.get("task_profile").or_else(|| m.get("task_type")))
+        .or_else(|| {
+            root.get("task_profile")
+                .or_else(|| root.get("task_type"))
+        });
+    let requires_source_evidence = patch
+        .and_then(|m| {
+            m.get("requires_source_evidence")
+                .or_else(|| m.get("source_evidence_required"))
+                .or_else(|| m.get("requires_source_evidence_read"))
+        })
+        .or_else(|| {
+            root.get("requires_source_evidence")
+                .or_else(|| root.get("source_evidence_required"))
+                .or_else(|| root.get("requires_source_evidence_read"))
+        });
     let tests_add = patch
         .and_then(|m| m.get("tests_add"))
         .or_else(|| root.get("tests_add"));
@@ -475,6 +560,16 @@ fn normalize_state_patch(
     }
     if let Some(value) = tests_add {
         normalized.insert("tests_add".into(), value.clone());
+    }
+    if let Some(value) = task_profile {
+        if let Some(profile) = value.as_str().and_then(normalize_task_profile) {
+            normalized.insert("task_profile".into(), Value::String(profile.into()));
+        }
+    }
+    if let Some(value) = requires_source_evidence {
+        if let Some(flag) = normalize_boolish(value) {
+            normalized.insert("requires_source_evidence".into(), Value::Bool(flag));
+        }
     }
 
     if normalized.is_empty() {
@@ -580,7 +675,7 @@ fn normalize_state_decision_value(value: Value) -> Result<Value, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{AgentState, DecisionKind, ReviewMode, validate_state_decision};
+    use super::{AgentState, DecisionKind, ReviewMode, TaskProfile, validate_state_decision};
     use serde_json::{Map, Value};
 
     #[test]
@@ -699,6 +794,27 @@ mod tests {
             decision.state_patch.tests_add[0].required_evidence,
             vec!["runtime_test_passed".to_string()]
         );
+    }
+
+    #[test]
+    fn state_decision_accepts_typed_task_profile_patch() {
+        let decision = validate_state_decision(
+            r#"{
+                "state":"executing",
+                "decision":"continue",
+                "state_patch":{
+                    "task_profile":"code_change",
+                    "requires_source_evidence":false
+                }
+            }"#,
+        )
+        .expect("typed task profile patch should normalize");
+
+        assert_eq!(
+            decision.state_patch.task_profile,
+            Some(TaskProfile::CodeChange)
+        );
+        assert_eq!(decision.state_patch.requires_source_evidence, Some(false));
     }
 }
 

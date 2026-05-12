@@ -215,33 +215,6 @@ async fn apply_tool_registry_contract(
     Ok(snapshot)
 }
 
-fn contains_external_effect_marker(text: &str) -> bool {
-    let lowered = text.to_lowercase();
-    [
-        "目标目录",
-        "目标文件",
-        "目标路径",
-        "创建",
-        "生成",
-        "写入",
-        "修改文件",
-        "运行命令",
-        "运行一次",
-        "执行命令",
-        "create ",
-        "write ",
-        "modify ",
-        "edit ",
-        "run ",
-        "execute ",
-        "target directory",
-        "target file",
-        "output file",
-    ]
-    .iter()
-    .any(|marker| lowered.contains(marker))
-}
-
 /// The current StateFrame loop can decide, summarize, and request context, but it does not
 /// execute read/write/shell tool calls. Until tool dispatch is wired, direct LisM execution must
 /// reject tasks whose success depends on filesystem or command side effects.
@@ -249,13 +222,15 @@ pub fn requires_external_tool_execution(
     frame: &StateFrame,
     direct_tool_runtime_available: bool,
 ) -> bool {
+    let preflight = infer_preflight_requirements_from_state_frame(frame);
     frame.role == ActorRole::Worker
         && !direct_tool_runtime_available
         && !matches!(
             frame.required_output_schema.as_deref(),
             Some("readonly_audit_4_paragraphs_v1")
         )
-        && contains_external_effect_marker(&frame.objective)
+        && (!preflight.required_visible_tools.is_empty()
+            || !preflight.required_allowed_actions.is_empty())
 }
 
 fn external_tool_execution_unsupported() -> StepOutcome {
@@ -916,6 +891,7 @@ mod tests {
             skillset_id: None,
             required_output_schema: Some("state_decision_v1".into()),
             budget: StateBudget::default(),
+            runtime_open_items: Vec::new(),
         }
     }
 

@@ -190,6 +190,7 @@ mod tests {
             skillset_id: None,
             required_output_schema: Some("readonly_audit_4_paragraphs_v1".into()),
             budget: StateBudget::default(),
+            runtime_open_items: Vec::new(),
         }
     }
 

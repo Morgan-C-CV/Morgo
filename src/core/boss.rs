@@ -24,7 +24,7 @@ use crate::core::lism_ab_sample::SharedLisMAbSampleSink;
 use crate::core::prompt_budget::{BudgetDecision, evaluate_message_budget};
 use crate::core::state_frame::{
     ActorRole, CompletionEvidenceGap, CompletionEvidenceStatus, DeclaredArtifactContract,
-    ReviewMode, StageExecutionContract, TestContract, VerificationContract,
+    ReviewMode, StageExecutionContract, TaskProfile, TestContract, VerificationContract,
 };
 use crate::core::state_frame_loop::{DecisionLoopConfig, StateFrameToolRuntime};
 use crate::core::state_frame_model_router::ModelTier;
@@ -1754,6 +1754,8 @@ fn verification_first_contract_fact_is_target_scoped(fact: &str, target: &str) -
 fn build_verification_first_minimal_contract(target: &str, kind: &str) -> StageExecutionContract {
     StageExecutionContract {
         review_mode: Some(ReviewMode::IndependentReview),
+        task_profile: Some(TaskProfile::TargetVerification),
+        requires_source_evidence: Some(true),
         declared_artifacts: vec![DeclaredArtifactContract {
             ref_id: target.into(),
             path: target.into(),
@@ -2658,7 +2660,7 @@ fn build_stage_execution_contract(
     step: &BossPlanStep,
     target_artifacts: &[TargetArtifact],
 ) -> StageExecutionContract {
-    let declared_artifacts = target_artifacts
+    let mut declared_artifacts = target_artifacts
         .iter()
         .map(|artifact| DeclaredArtifactContract {
             ref_id: artifact.path.clone(),
@@ -2668,14 +2670,24 @@ fn build_stage_execution_contract(
             required_evidence: vec![artifact.path.clone()],
         })
         .collect::<Vec<_>>();
+    for artifact in &step.stage_execution_contract.declared_artifacts {
+        if declared_artifacts
+            .iter()
+            .any(|existing| existing.path == artifact.path)
+        {
+            continue;
+        }
+        declared_artifacts.push(artifact.clone());
+    }
     let review_mode = step
         .stage_execution_contract
         .review_mode
         .or(Some(ReviewMode::IndependentReview));
-    let independent_review = review_mode.is_some_and(|mode| mode.is_independent_review());
-    let verifications = if independent_review {
-        Vec::new()
-    } else {
+    let task_profile = step.stage_execution_contract.task_profile;
+    let requires_source_evidence = step.stage_execution_contract.requires_source_evidence;
+    let verifications = if !step.stage_execution_contract.verifications.is_empty() {
+        step.stage_execution_contract.verifications.clone()
+    } else if matches!(task_profile, Some(TaskProfile::TargetVerification)) {
         target_artifacts
             .iter()
             .map(|artifact| VerificationContract {
@@ -2685,38 +2697,47 @@ fn build_stage_execution_contract(
                 required_evidence: vec![artifact.path.clone()],
             })
             .collect::<Vec<_>>()
+    } else {
+        Vec::new()
     };
-    let tests = step
-        .acceptance
-        .iter()
-        .filter(|item| {
-            let lowered = item.to_ascii_lowercase();
-            lowered.contains("test") || lowered.contains("verify")
-        })
-        .map(|item| crate::core::state_frame::TestContract {
-            name: item.clone(),
-            required_actions: vec!["run_test".into()],
-            required_evidence: vec![item.clone()],
-        })
-        .collect::<Vec<_>>();
-    let mut required_actions = vec!["create".into(), "write".into()];
-    if !verifications.is_empty() {
-        required_actions.push("verify".into());
+    let tests = step.stage_execution_contract.tests.clone();
+    let mut required_actions = step.stage_execution_contract.required_actions.clone();
+    if !matches!(task_profile, Some(TaskProfile::ReadOnlyAnalysis)) {
+        required_actions.extend(["create".into(), "write".into()]);
     }
-    if !tests.is_empty() {
-        required_actions.push("run_test".into());
+    for verification in &verifications {
+        required_actions.extend(verification.required_actions.iter().cloned());
     }
-    let mut required_evidence = target_artifacts
+    for test in &tests {
+        required_actions.extend(test.required_actions.iter().cloned());
+    }
+    required_actions.sort();
+    required_actions.dedup();
+    let mut required_evidence = step.stage_execution_contract.required_evidence.clone();
+    required_evidence.extend(target_artifacts
         .iter()
         .map(|artifact| artifact.path.clone())
-        .collect::<Vec<_>>();
-    required_evidence.extend(tests.iter().map(|item| item.name.clone()));
+        .collect::<Vec<_>>());
+    required_evidence.extend(
+        verifications
+            .iter()
+            .flat_map(|item| item.required_evidence.iter().cloned()),
+    );
+    required_evidence.extend(
+        tests
+            .iter()
+            .flat_map(|item| item.required_evidence.iter().cloned()),
+    );
+    required_evidence.sort();
+    required_evidence.dedup();
     StageExecutionContract {
         review_mode,
+        task_profile,
+        requires_source_evidence,
         declared_artifacts,
         verifications,
         tests,
-        content_evidence_targets: Vec::new(),
+        content_evidence_targets: step.stage_execution_contract.content_evidence_targets.clone(),
         required_actions,
         required_evidence,
     }
@@ -2742,74 +2763,23 @@ fn step_looks_like_development_task(
     step: &BossPlanStep,
     target_artifacts: &[TargetArtifact],
 ) -> bool {
+    if let Some(task_profile) = step.stage_execution_contract.task_profile {
+        return matches!(task_profile, TaskProfile::CodeChange);
+    }
+
     if target_artifacts
         .iter()
         .any(|artifact| path_looks_like_development_artifact(&artifact.path))
     {
         return true;
     }
-
-    let mut text = current_task_contract_text(step.objective()).to_ascii_lowercase();
-    if !step.acceptance.is_empty() {
-        text.push('\n');
-        text.push_str(
-            &step
-                .acceptance
-                .iter()
-                .map(|item| item.to_ascii_lowercase())
-                .collect::<Vec<_>>()
-                .join("\n"),
-        );
-    }
-
-    let has_development_marker = [
-        "implement",
-        "implementation",
-        "fix",
-        "bug",
-        "patch",
-        "refactor",
-        "demo",
-        "validator",
-        "tool",
-        "site",
-        "frontend",
-        "build",
-        "script",
-        "code",
-        "feature",
-        "task",
-        "cli",
-        "create",
-        "write",
-    ]
-    .iter()
-    .any(|marker| text.contains(marker));
-
-    if !has_development_marker
-        && (text.contains("report")
-            || text.contains("research")
-            || text.contains("audit")
-            || text.contains("analysis"))
-    {
-        return false;
-    }
-
-    has_development_marker
+    false
 }
 
 fn development_task_requires_source_evidence(step: &BossPlanStep) -> bool {
-    let text = current_task_contract_text(step.objective()).to_ascii_lowercase();
-    [
-        "source-backed",
-        "source evidence",
-        "read source",
-        "read the source",
-        "evidence-backed",
-        "backed by source",
-    ]
-    .iter()
-    .any(|marker| text.contains(marker))
+    step.stage_execution_contract
+        .requires_source_evidence
+        .unwrap_or(true)
 }
 
 fn apply_development_test_policy(contract: &mut StageExecutionContract) {
@@ -3207,36 +3177,47 @@ fn verification_first_shared_memory_compact_facts(shared: &SharedStepMemory) -> 
     facts
 }
 
+fn normalize_small_token(value: Option<&str>) -> Option<String> {
+    let raw = value?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let token = raw
+        .split_whitespace()
+        .next()
+        .unwrap_or(raw)
+        .trim_matches(|ch: char| matches!(ch, '"' | '\'' | '`' | ',' | ';' | ':'))
+        .to_ascii_lowercase()
+        .replace(['-', ' '], "_");
+    (!token.is_empty()).then_some(token)
+}
+
 fn normalize_verification_first_blocker_code(reason: Option<&str>) -> &'static str {
     let Some(reason) = reason else {
         return "none";
     };
-    let reason = reason.trim().to_ascii_lowercase();
-    if reason.is_empty() || reason == "none" {
+    let Some(reason) = normalize_small_token(Some(reason)) else {
+        return "none";
+    };
+    if reason == "none" {
         return "none";
     }
-    if reason.contains("needs review") || reason.contains("needs_review") {
+    if reason == "needs_review" {
         return "needs_review";
     }
-    if reason == "verify_artifact" || reason.contains("verify_artifact") {
+    if reason == "verify_artifact" {
         return "verification_evidence_missing";
     }
-    if reason == "repair_artifact" || reason.contains("repair_artifact") {
+    if reason == "repair_artifact" {
         return "repair_exhausted";
     }
-    if reason.contains("remaining verification evidence missing") {
-        return "repair_exhausted";
-    }
-    if reason.contains("verification") || reason.contains("evidence") || reason.contains("verify") {
+    if reason == "verification_evidence_missing" || reason == "source_evidence_missing" {
         return "verification_evidence_missing";
     }
-    if reason.contains("artifact")
-        || reason.contains("target missing")
-        || reason.contains("missing artifact")
-    {
+    if reason == "artifact_missing" || reason == "target_missing" || reason == "missing_artifact" {
         return "artifact_missing";
     }
-    if reason.contains("exhausted") {
+    if reason == "repair_exhausted" || reason == "exhausted" {
         return "repair_exhausted";
     }
     "none"
@@ -3644,17 +3625,17 @@ fn build_stage_memory_payload(
 }
 
 fn normalize_verification_first_next_action(action: Option<String>) -> Option<String> {
-    let action = action?.trim().to_ascii_lowercase();
-    if action.is_empty() || action == "none" {
+    let action = normalize_small_token(action.as_deref())?;
+    if action == "none" {
         return Some("none".into());
     }
-    if action.contains("read_source_evidence") || action.contains("source evidence") {
+    if action == "read_source_evidence" {
         return Some("read_source_evidence".into());
     }
-    if action.contains("verify") {
+    if action == "verify_artifact" || action == "verify" {
         return Some("verify_artifact".into());
     }
-    if action.contains("repair") || action.contains("fix") || action.contains("blocked") {
+    if action == "repair_artifact" || action == "repair" || action == "blocked" {
         return Some("repair_artifact".into());
     }
     Some("none".into())
@@ -4593,18 +4574,19 @@ fn review_summary_has_unresolved_completion_blocker(summary: &str) -> bool {
         .split("Historical attempts (stale")
         .next()
         .unwrap_or(summary);
-    let lower = active_summary.to_ascii_lowercase();
-    [
-        "source evidence remains missing",
-        "required source evidence has not been read",
-        "missing source evidence",
-        "missing_verification_evidence",
-        "completion blocked",
-        "tool dispatch failed",
-        "max iterations reached",
-    ]
-    .iter()
-    .any(|needle| lower.contains(needle))
+    active_summary.lines().any(|line| {
+        let trimmed = line.trim();
+        trimmed.starts_with("remaining_blocker:")
+            && normalize_small_token(trimmed.split_once(':').map(|(_, value)| value.trim()))
+                .as_deref()
+                .is_some_and(|value| value != "none")
+    }) || active_summary.lines().any(|line| {
+        let trimmed = line.trim();
+        trimmed.starts_with("verification_result:")
+            && normalize_small_token(trimmed.split_once(':').map(|(_, value)| value.trim()))
+                .as_deref()
+                .is_some_and(|value| value == "blocked")
+    })
 }
 
 fn guard_review_decision_against_unresolved_blockers(
@@ -4636,17 +4618,18 @@ fn review_correction_only_restates_stale_blocker(correction: Option<&str>) -> bo
     let Some(correction) = correction else {
         return false;
     };
-    let lower = correction.to_ascii_lowercase();
-    (lower.contains("source evidence remains missing")
-        || lower.contains("source evidence is missing")
-        || lower.contains("tool dispatch failed")
-        || lower.contains("missing runtime-evidence blocker")
-        || lower.contains("missing runtime evidence")
-        || lower.contains("missing_verification_evidence"))
-        && !lower.contains("stage 4")
-        && !lower.contains("not yet completed")
-        && !lower.contains("placeholder")
-        && !lower.contains("empty")
+    normalize_small_token(Some(correction))
+        .as_deref()
+        .is_some_and(|token| {
+            matches!(
+                token,
+                "missing_verification_evidence"
+                    | "verification_evidence_missing"
+                    | "repair_exhausted"
+                    | "artifact_missing"
+                    | "source_evidence_missing"
+            )
+        })
 }
 
 fn guard_review_reject_against_closed_gate(
@@ -4743,14 +4726,10 @@ fn parse_typed_review_response(response: &str) -> Option<TypedReviewResponse> {
 }
 
 fn missing_evidence_action_mentions_review_gap(value: &str) -> bool {
-    let lower = value.to_ascii_lowercase();
-    lower.contains("missing evidence")
-        || lower.contains("missing_evidence")
-        || lower.contains("source evidence")
-        || lower.contains("verification evidence")
-        || lower.contains("completion blocked")
-        || lower.contains("required source evidence has not been read")
-        || lower.contains("tool dispatch failed")
+    matches!(
+        normalize_small_token(Some(value)).as_deref(),
+        Some("read_source_evidence" | "verify_artifact" | "repair_artifact")
+    )
 }
 
 fn review_decision_requests_restricted_verification(
@@ -9758,9 +9737,9 @@ impl BossCoordinator {
                 }
                 contract
             };
-        let content_evidence_targets = if development_test_mode
-            && !development_task_requires_source_evidence(step)
-            && !source_evidence_repair
+        let content_evidence_targets = if effective_stage_execution_contract
+            .requires_source_evidence
+            == Some(false)
         {
             Vec::new()
         } else {
@@ -12806,6 +12785,8 @@ mod tests {
             last_correction: None,
             stage_execution_contract: StageExecutionContract {
                 review_mode: None,
+                task_profile: None,
+                requires_source_evidence: None,
                 declared_artifacts: vec![DeclaredArtifactContract {
                     ref_id: "artifact:report".into(),
                     path: "/tmp/report.md".into(),
@@ -13121,6 +13102,8 @@ mod tests {
             last_correction: None,
             stage_execution_contract: StageExecutionContract {
                 review_mode: None,
+                task_profile: None,
+                requires_source_evidence: None,
                 declared_artifacts: vec![DeclaredArtifactContract {
                     ref_id: "artifact:step0:0".into(),
                     path: "/tmp/report.md".into(),
@@ -13212,6 +13195,8 @@ mod tests {
             last_correction: None,
             stage_execution_contract: StageExecutionContract {
                 review_mode: None,
+                task_profile: None,
+                requires_source_evidence: None,
                 declared_artifacts: vec![DeclaredArtifactContract {
                     ref_id: "artifact:step0:0".into(),
                     path: target_path.clone(),
@@ -16970,6 +16955,8 @@ mod tests {
             last_correction: None,
             stage_execution_contract: StageExecutionContract {
                 review_mode: None,
+                task_profile: None,
+                requires_source_evidence: None,
                 declared_artifacts: vec![DeclaredArtifactContract {
                     ref_id: "artifact:step0:0:/tmp/report.md".into(),
                     path: "/tmp/report.md".into(),
