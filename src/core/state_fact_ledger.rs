@@ -390,6 +390,11 @@ fn observable_path(record: &ToolExecutionRecord) -> Option<String> {
                 .and_then(|value| value.as_str())
                 .map(str::to_string)
         })
+        .or_else(|| {
+            json.get("target_path")
+                .and_then(|value| value.as_str())
+                .map(str::to_string)
+        })
 }
 
 fn observable_bash_command(record: &ToolExecutionRecord) -> Option<String> {
@@ -1415,7 +1420,10 @@ fn build_artifact_ledgers(ledgers: &mut StepFactLedgers, step: &BossPlanStep) {
         }
         .to_string();
         let touched_by_runtime = ledgers.change_refs.iter().any(|item| item.path == path)
-            || ledgers.file_facts.iter().any(|item| item.path == path);
+            || ledgers
+                .file_facts
+                .iter()
+                .any(|item| item.path == path && item.source.starts_with("tool:"));
         let (status, summary, confidence_milli) = if let Some(reason) = verification_error.as_ref()
         {
             (
@@ -1616,25 +1624,7 @@ pub fn build_step_fact_ledgers_with_mode(
         }
     }
 
-    if !blind_review {
-        if let Some(review) = step
-            .last_review_summary
-            .as_deref()
-            .filter(|text| !text.trim().is_empty())
-        {
-            ledgers.review_refs.push(ReviewRecord {
-                ref_id: format!("review:step{}:summary", step.id),
-                verdict: infer_review_verdict(step, review).into(),
-                summary: trim_excerpt(review, 180),
-                correction: step.last_correction.clone(),
-                source: "review_summary".into(),
-                source_event_id: format!("review-summary:{}", step.id),
-                freshness: "after-review".into(),
-                confidence_milli: 950,
-                lineage: active_lineage(),
-            });
-        }
-    } else if step.completed
+    if blind_review && step.completed
         && step
             .acceptance
             .iter()

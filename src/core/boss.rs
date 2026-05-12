@@ -1418,9 +1418,14 @@ fn continuation_verified_facts(step: &BossPlanStep) -> Vec<String> {
             Some(format!("{prefix}:{path}"))
         });
         if let Some(fact) = anchored_fact {
-            push_unique_required_evidence(&mut facts, fact);
+            if !facts.iter().any(|existing| existing == &fact) {
+                facts.push(fact);
+            }
         } else if !record.summary.trim().is_empty() {
-            push_unique_required_evidence(&mut facts, record.summary.clone());
+            let summary = record.summary.trim().to_string();
+            if !facts.iter().any(|existing| existing == &summary) {
+                facts.push(summary);
+            }
         }
     }
     facts.truncate(16);
