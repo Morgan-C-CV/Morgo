@@ -278,61 +278,6 @@ fn build_state_decision_repair_prompt(reason: &str, raw_json: &str) -> String {
 }
 
 fn append_runtime_contract_facts(frame: &mut StateFrame) {
-    let max_tool_calls_value = if frame.budget.max_tool_calls == 0 {
-        "unlimited".to_string()
-    } else {
-        frame.budget.max_tool_calls.to_string()
-    };
-    push_unique(
-        &mut frame.recent_evidence,
-        format!(
-            "fact: budget.max_tool_calls value={} summary=max_tool_calls={} ({})",
-            max_tool_calls_value,
-            frame.budget.max_tool_calls,
-            if frame.budget.max_tool_calls == 0 {
-                "0 means unlimited"
-            } else {
-                "hard cap"
-            }
-        ),
-    );
-    push_unique(
-        &mut frame.recent_evidence,
-        format!(
-            "fact: allow_worker_tool_calls status={} allowed_actions={} allowed_tools={} summary=use allowed_actions as the runtime invocation contract",
-            if frame.allowed_actions.is_empty() {
-                "not_allowed"
-            } else {
-                "allowed"
-            },
-            if frame.allowed_actions.is_empty() {
-                "none".to_string()
-            } else {
-                frame.allowed_actions.join("|")
-            },
-            if frame.allowed_tools.is_empty() {
-                "none".to_string()
-            } else {
-                frame.allowed_tools.join("|")
-            }
-        ),
-    );
-    push_unique(
-        &mut frame.recent_evidence,
-        format!(
-            "fact: increase_max_tool_calls status={} summary={}",
-            if frame.budget.max_tool_calls == 0 {
-                "not_needed"
-            } else {
-                "available_if_cap_exhausted"
-            },
-            if frame.budget.max_tool_calls == 0 {
-                "max_tool_calls is already unlimited in this runtime"
-            } else {
-                "request only after consuming the current capped budget"
-            }
-        ),
-    );
     if let Some(task_profile) = frame.stage_execution_contract.task_profile {
         push_unique(
             &mut frame.recent_evidence,
@@ -4334,15 +4279,23 @@ pub async fn run_decision_loop_with_tools(
         if let Some(outcome) = verification_terminal_outcome(&frame, &mut total_usage) {
             return Ok(outcome);
         }
-        let prompt = format!(
-            "{}\n{}",
-            STATE_DECISION_INSTRUCTION,
-            frame.to_prompt_segment().content
-        );
-        let prompt_chars = prompt.chars().count();
+        let prompt_assembly = frame.to_prompt_assembly(STATE_DECISION_INSTRUCTION);
+        let prompt_static_chars: usize = prompt_assembly
+            .segments()
+            .iter()
+            .filter(|segment| segment.is_cacheable())
+            .map(|segment| segment.content.chars().count())
+            .sum();
+        let prompt_dynamic_chars: usize = prompt_assembly
+            .segments()
+            .iter()
+            .filter(|segment| !segment.is_cacheable())
+            .map(|segment| segment.content.chars().count())
+            .sum();
+        let prompt_chars = prompt_static_chars + prompt_dynamic_chars;
         total_usage.original_prompt_chars += prompt_chars;
         total_usage.sent_prompt_chars += prompt_chars;
-        let events = client.stream_message(&Message::user(prompt)).await;
+        let events = client.stream_prompt_assembly(&prompt_assembly).await;
         let (text, iter_usage, stream_error, stop_reason) = collect_text_and_usage(events);
         total_usage.input_tokens += iter_usage.input_tokens;
         total_usage.uncached_input_tokens += iter_usage.uncached_input_tokens;
@@ -5575,27 +5528,38 @@ mod tests {
     }
 
     #[test]
-    fn runtime_contract_facts_explain_unlimited_tool_budget() {
+    fn runtime_contract_facts_do_not_duplicate_typed_runtime_budget() {
         let mut frame = make_frame();
         frame.allowed_actions = vec!["read_file".into(), "edit_file".into()];
         frame.allowed_tools = vec!["Read".into(), "Edit".into()];
         frame.budget.max_tool_calls = 0;
+        frame.stage_execution_contract.task_profile = Some(TaskProfile::ReadOnlyAnalysis);
 
         append_runtime_contract_facts(&mut frame);
 
-        assert!(frame.recent_evidence.iter().any(|item| {
-            item.contains("fact: budget.max_tool_calls")
-                && item.contains("value=unlimited")
-                && item.contains("0 means unlimited")
-        }));
-        assert!(frame.recent_evidence.iter().any(|item| {
-            item.contains("fact: allow_worker_tool_calls")
-                && item.contains("status=allowed")
-                && item.contains("allowed_actions=read_file|edit_file")
-        }));
-        assert!(frame.recent_evidence.iter().any(|item| {
-            item.contains("fact: increase_max_tool_calls") && item.contains("status=not_needed")
-        }));
+        assert!(
+            frame
+                .recent_evidence
+                .iter()
+                .all(|item| !item.contains("fact: budget.max_tool_calls"))
+        );
+        assert!(
+            frame
+                .recent_evidence
+                .iter()
+                .all(|item| !item.contains("fact: allow_worker_tool_calls"))
+        );
+        assert!(
+            frame
+                .recent_evidence
+                .iter()
+                .all(|item| !item.contains("fact: increase_max_tool_calls"))
+        );
+        assert!(
+            frame.recent_evidence.iter().any(
+                |item| item == "fact: execution_mode read_only_analysis no_file_edits no_patch"
+            )
+        );
     }
 
     fn unique_temp_path(label: &str) -> std::path::PathBuf {

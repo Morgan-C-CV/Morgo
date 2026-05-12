@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
 
-use crate::core::prompt_segment::{PromptSegment, PromptSegmentKind};
+use crate::core::prompt_segment::{PromptAssembly, PromptSegment, PromptSegmentKind};
 
 /// Which actor role is receiving this StateFrame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -333,6 +333,56 @@ impl StateFrame {
     pub fn to_prompt_segment(&self) -> PromptSegment {
         let json = serde_json::to_string_pretty(self).unwrap_or_default();
         PromptSegment::new("state_frame_v1", PromptSegmentKind::StateFrame, json)
+    }
+
+    /// Render the StateFrame decision prompt as a cache-aware assembly.
+    ///
+    /// Stable contract fields are separated from high-churn runtime evidence so
+    /// providers with prefix/block caching can reuse the immutable prefix across
+    /// decision turns without hiding any dynamic feedback from the model.
+    pub fn to_prompt_assembly(&self, instruction: impl Into<String>) -> PromptAssembly {
+        let mut assembly = PromptAssembly::new();
+        assembly.push(PromptSegment::new(
+            "state_decision_instruction_v1",
+            PromptSegmentKind::StaticSystem,
+            instruction.into(),
+        ));
+
+        let stable = json!({
+            "state_frame_static_v1": {
+                "role": self.role,
+                "objective": &self.objective,
+                "stage_execution_contract": &self.stage_execution_contract,
+                "allowed_actions": &self.allowed_actions,
+                "allowed_tools": &self.allowed_tools,
+                "toolset_id": &self.toolset_id,
+                "skillset_id": &self.skillset_id,
+                "required_output_schema": &self.required_output_schema,
+                "budget": &self.budget,
+            }
+        });
+        assembly.push(PromptSegment::new(
+            "state_frame_static_v1",
+            PromptSegmentKind::ActorBrief,
+            serde_json::to_string_pretty(&stable).unwrap_or_default(),
+        ));
+
+        let dynamic = json!({
+            "state_frame_dynamic_v1": {
+                "state": self.state,
+                "open_items": &self.open_items,
+                "blocked_items": &self.blocked_items,
+                "accepted_summary": &self.accepted_summary,
+                "recent_evidence": &self.recent_evidence,
+                "runtime_open_items": &self.runtime_open_items,
+            }
+        });
+        assembly.push(PromptSegment::new(
+            "state_frame_dynamic_v1",
+            PromptSegmentKind::StateFrame,
+            serde_json::to_string_pretty(&dynamic).unwrap_or_default(),
+        ));
+        assembly
     }
 }
 
@@ -673,7 +723,11 @@ fn normalize_state_decision_value(value: Value) -> Result<Value, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{AgentState, DecisionKind, ReviewMode, TaskProfile, validate_state_decision};
+    use super::{
+        ActorRole, AgentState, DecisionKind, ReviewMode, StageExecutionContract, StateBudget,
+        StateFrame, TaskProfile, validate_state_decision,
+    };
+    use crate::core::prompt_segment::PromptSegmentKind;
     use serde_json::{Map, Value};
 
     #[test]
@@ -813,6 +867,49 @@ mod tests {
             Some(TaskProfile::CodeChange)
         );
         assert_eq!(decision.state_patch.requires_source_evidence, Some(false));
+    }
+
+    #[test]
+    fn state_frame_prompt_assembly_keeps_recent_evidence_dynamic() {
+        let mut frame = StateFrame {
+            role: ActorRole::Worker,
+            state: AgentState::Executing,
+            objective: "write report".into(),
+            stage_execution_contract: StageExecutionContract::default(),
+            open_items: vec!["open".into()],
+            blocked_items: Vec::new(),
+            accepted_summary: Vec::new(),
+            recent_evidence: vec!["first dynamic fact".into()],
+            allowed_actions: vec!["write_file".into()],
+            allowed_tools: vec!["Write".into()],
+            toolset_id: None,
+            skillset_id: None,
+            required_output_schema: None,
+            budget: StateBudget::default(),
+            runtime_open_items: Vec::new(),
+        };
+        let first = frame.to_prompt_assembly("stable instruction");
+        frame.recent_evidence.push("second dynamic fact".into());
+        let second = frame.to_prompt_assembly("stable instruction");
+
+        assert_eq!(
+            first.stable_prefix_fingerprint(),
+            second.stable_prefix_fingerprint()
+        );
+        assert!(
+            first
+                .segments()
+                .iter()
+                .filter(|segment| segment.is_cacheable())
+                .all(|segment| !segment.content.contains("first dynamic fact"))
+        );
+        assert!(
+            second
+                .segments()
+                .iter()
+                .any(|segment| segment.kind == PromptSegmentKind::StateFrame
+                    && segment.content.contains("second dynamic fact"))
+        );
     }
 }
 

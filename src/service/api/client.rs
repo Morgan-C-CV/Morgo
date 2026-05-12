@@ -10,6 +10,9 @@ use serde_json::{Value, json};
 use tokio::time::{sleep, timeout};
 
 use crate::core::message::Message;
+use crate::core::prompt_budget::{PromptCacheCapability, ProviderProfile as PromptProviderProfile};
+use crate::core::prompt_cache_adapter::apply_cache_control;
+use crate::core::prompt_segment::PromptAssembly;
 use crate::service::api::errors::{ApiError, ApiErrorKind};
 use crate::service::api::retry::RetryPolicy;
 use crate::service::api::streaming::{
@@ -56,6 +59,7 @@ struct RequestOptions {
     stop_sequences: Vec<String>,
     require_tools: bool,
     tools: Vec<ModelToolDefinition>,
+    prompt_assembly: Option<PromptAssembly>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -134,6 +138,7 @@ impl Default for RequestOptions {
             stop_sequences: Vec::new(),
             require_tools: false,
             tools: Vec::new(),
+            prompt_assembly: None,
         }
     }
 }
@@ -299,6 +304,18 @@ impl ModelProviderClient {
     pub async fn stream_message(&self, input: &Message) -> Vec<StreamEvent> {
         self.stream_message_with_options(input, RequestOptions::default())
             .await
+    }
+
+    pub async fn stream_prompt_assembly(&self, assembly: &PromptAssembly) -> Vec<StreamEvent> {
+        let input = Message::user(assembly.assemble());
+        self.stream_message_with_options(
+            &input,
+            RequestOptions {
+                prompt_assembly: Some(assembly.clone()),
+                ..RequestOptions::default()
+            },
+        )
+        .await
     }
 
     pub async fn stream_message_with_tools(
@@ -751,7 +768,24 @@ fn build_request_payload_with_options(
     input: &Message,
     request_options: RequestOptions,
 ) -> Result<Value, ApiError> {
-    adapter_for_config(config)?.build_request_payload(config, input, request_options)
+    let prompt_assembly = request_options.prompt_assembly.clone();
+    let mut payload =
+        adapter_for_config(config)?.build_request_payload(config, input, request_options)?;
+    if let Some(assembly) = prompt_assembly.as_ref() {
+        let profile = prompt_cache_profile_for_provider(config);
+        apply_cache_control(assembly, &profile, &mut payload);
+    }
+    Ok(payload)
+}
+
+fn prompt_cache_profile_for_provider(config: &ModelProviderConfig) -> PromptProviderProfile {
+    let mut profile = PromptProviderProfile::default();
+    profile.prompt_cache = match config.protocol {
+        ProviderProtocol::MessagesApi => PromptCacheCapability::MessagesApiEphemeral,
+        ProviderProtocol::OpenAICompatible => PromptCacheCapability::OpenAICompatiblePrefix,
+        ProviderProtocol::GeminiNative => PromptCacheCapability::Unsupported,
+    };
+    profile
 }
 
 fn normalized_request_model(config: &ModelProviderConfig) -> &str {
@@ -2477,6 +2511,84 @@ mod tests {
     }
 
     #[test]
+    fn messages_api_prompt_assembly_applies_ephemeral_cache_control() {
+        use crate::core::message::Message;
+        use crate::core::prompt_segment::{PromptAssembly, PromptSegment, PromptSegmentKind};
+        let config = test_provider(
+            ProviderProtocol::MessagesApi,
+            ProviderCompatibilityProfileKind::MessagesApi,
+        );
+        let mut assembly = PromptAssembly::new();
+        assembly.push(PromptSegment::new(
+            "instruction",
+            PromptSegmentKind::StaticSystem,
+            "stable instruction",
+        ));
+        assembly.push(PromptSegment::new(
+            "dynamic",
+            PromptSegmentKind::StateFrame,
+            "dynamic state",
+        ));
+
+        let payload = build_request_payload_with_options(
+            &config,
+            &Message::user(assembly.assemble()),
+            RequestOptions {
+                prompt_assembly: Some(assembly),
+                ..RequestOptions::default()
+            },
+        )
+        .expect("assembly payload");
+
+        assert_eq!(payload["system"][0]["text"], "stable instruction");
+        assert_eq!(
+            payload["system"][0]["cache_control"]["type"].as_str(),
+            Some("ephemeral")
+        );
+        assert_eq!(
+            payload["messages"][0]["content"][0]["text"].as_str(),
+            Some("dynamic state")
+        );
+    }
+
+    #[test]
+    fn openai_compatible_prompt_assembly_keeps_plain_payload_shape() {
+        use crate::core::message::Message;
+        use crate::core::prompt_segment::{PromptAssembly, PromptSegment, PromptSegmentKind};
+        let config = test_provider(
+            ProviderProtocol::OpenAICompatible,
+            ProviderCompatibilityProfileKind::OpenAICompatible,
+        );
+        let mut assembly = PromptAssembly::new();
+        assembly.push(PromptSegment::new(
+            "instruction",
+            PromptSegmentKind::StaticSystem,
+            "stable instruction",
+        ));
+        assembly.push(PromptSegment::new(
+            "dynamic",
+            PromptSegmentKind::StateFrame,
+            "dynamic state",
+        ));
+
+        let payload = build_request_payload_with_options(
+            &config,
+            &Message::user(assembly.assemble()),
+            RequestOptions {
+                prompt_assembly: Some(assembly),
+                ..RequestOptions::default()
+            },
+        )
+        .expect("assembly payload");
+
+        assert!(payload.get("system").is_none());
+        assert_eq!(
+            payload["messages"][0]["content"].as_str(),
+            Some("stable instruction\ndynamic state")
+        );
+    }
+
+    #[test]
     fn openai_adapter_image_block_serializes_as_array_with_image_url() {
         use crate::core::message::{ContentBlock, Message};
         let config = test_provider(
@@ -2705,6 +2817,7 @@ mod tests {
                 stop_sequences: vec!["STOP".into()],
                 require_tools: true,
                 tools: Vec::new(),
+                prompt_assembly: None,
             },
         )
         .expect("supported options should build");
@@ -2822,6 +2935,7 @@ mod tests {
                 stop_sequences: vec!["END".into()],
                 require_tools: false,
                 tools: Vec::new(),
+                prompt_assembly: None,
             },
         )
         .expect("unsupported optional options should be dropped");

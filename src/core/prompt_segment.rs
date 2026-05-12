@@ -57,7 +57,7 @@ impl PromptSegmentFingerprint {
 }
 
 /// A single named slice of a prompt, with its kind, content, and fingerprint.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PromptSegment {
     pub id: String,
     pub kind: PromptSegmentKind,
@@ -84,7 +84,7 @@ impl PromptSegment {
 
 /// An ordered collection of prompt segments ready for assembly.
 /// Cacheable segments must precede dynamic segments — callers are responsible for ordering.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct PromptAssembly {
     segments: Vec<PromptSegment>,
 }

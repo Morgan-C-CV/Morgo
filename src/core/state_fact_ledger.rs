@@ -1140,10 +1140,17 @@ fn is_test_command(command: &str) -> bool {
 
 fn contract_has_runtime_validation(contract: &StageExecutionContract) -> bool {
     contract.tests.iter().any(|test| {
-        matches!(
-            test.name.as_str(),
-            "st_auto_validation" | "runtime_validation"
-        )
+        test.required_actions
+            .iter()
+            .any(|action| action == "run_test")
+            || test
+                .required_evidence
+                .iter()
+                .any(|evidence| evidence == "runtime_test_passed")
+            || matches!(
+                test.name.as_str(),
+                "st_auto_validation" | "runtime_validation"
+            )
     })
 }
 
@@ -2272,7 +2279,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_validation_command_under_declared_directory_emits_passed_test_record() {
+    fn typed_runtime_validation_command_under_declared_directory_emits_passed_test_record() {
         let mut ledgers = StepFactLedgers::default();
         let contract = StageExecutionContract {
             declared_artifacts: vec![DeclaredArtifactContract {
@@ -2283,7 +2290,7 @@ mod tests {
                 required_evidence: vec!["artifact_evidence".into()],
             }],
             tests: vec![crate::core::state_frame::TestContract {
-                name: "runtime_validation".into(),
+                name: "run_validator_and_validate_logs".into(),
                 required_actions: vec!["run_test".into()],
                 required_evidence: vec!["runtime_test_passed".into()],
             }],
