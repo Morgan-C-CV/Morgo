@@ -2,6 +2,7 @@ use crate::state::app_state::AppState;
 use crate::state::permission_context::{
     sanitize_external_memory_entries, sanitize_nested_memory_lineage,
 };
+use std::borrow::Cow;
 
 pub fn describe_memory_context(app_state: &AppState) -> String {
     let session_id = app_state.active_session_id.as_str();
@@ -10,7 +11,7 @@ pub fn describe_memory_context(app_state: &AppState) -> String {
         format!("- session_id: {session_id}"),
     ];
 
-    if let Some(history) = app_state.history.as_ref() {
+    if let Some(history) = effective_history(app_state) {
         let entry_count = history.entries.len();
         lines.push(format!("- history_entries: {entry_count}"));
 
@@ -74,6 +75,23 @@ pub fn describe_memory_context(app_state: &AppState) -> String {
     }
 
     lines.join("\n")
+}
+
+fn effective_history(app_state: &AppState) -> Option<Cow<'_, crate::history::session::SessionHistory>> {
+    let session_id = app_state.current_session_id();
+    if let Some(session_store) = app_state.session_store.as_ref() {
+        let request = crate::history::session::SessionRestoreRequest {
+            resume: Some(session_id.0.clone()),
+            continue_session: false,
+        };
+        if let Some((snapshot, history)) = session_store.load(&request) {
+            if snapshot.session_id == session_id {
+                return Some(Cow::Owned(history));
+            }
+        }
+    }
+
+    app_state.history.as_ref().map(Cow::Borrowed)
 }
 
 fn truncate(value: &str, max_chars: usize) -> String {

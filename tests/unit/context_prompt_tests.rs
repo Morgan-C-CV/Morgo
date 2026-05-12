@@ -5,7 +5,9 @@ use tokio::sync::RwLock;
 
 use rust_agent::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
 use rust_agent::core::message::Message;
-use rust_agent::history::session::{SessionHistory, SessionHistoryEntry, SessionSnapshot};
+use rust_agent::history::session::{
+    InMemorySessionStore, SessionHistory, SessionHistoryEntry, SessionSnapshot,
+};
 use rust_agent::interaction::dispatcher::NotificationDispatcher;
 use rust_agent::interaction::telegram::gateway::TelegramGateway;
 use rust_agent::plan::manager::PlanManager;
@@ -294,6 +296,86 @@ fn context_prompt_includes_truthy_runtime_sections() {
     assert!(prompt.contains("runtime_group=step-2 runtime_hint=group step-2 still in progress"));
 
     fs::remove_dir_all(repo).expect("cleanup repo");
+}
+
+#[test]
+fn context_prompt_prefers_live_session_store_history_over_stale_app_state_history() {
+    let mut app_state = build_app_state();
+    let session = app_state
+        .session
+        .clone()
+        .expect("test app state should include session snapshot");
+    let store = Arc::new(InMemorySessionStore::default());
+    store.insert(
+        session,
+        SessionHistory {
+            entries: vec![
+                SessionHistoryEntry {
+                    message: Message::user("first live turn"),
+                    timestamp: None,
+                    tool_refs: vec!["src/live/one.rs".into()],
+                    milestone: None,
+                },
+                SessionHistoryEntry {
+                    message: Message::assistant("second live turn"),
+                    timestamp: None,
+                    tool_refs: vec!["src/live/two.rs".into()],
+                    milestone: None,
+                },
+                SessionHistoryEntry {
+                    message: Message::assistant("third live turn"),
+                    timestamp: None,
+                    tool_refs: vec!["src/live/three.rs".into()],
+                    milestone: None,
+                },
+            ],
+        },
+    );
+    app_state.session_store = Some(store);
+    app_state.history = Some(SessionHistory {
+        entries: vec![SessionHistoryEntry {
+            message: Message::user("stale in-memory turn"),
+            timestamp: None,
+            tool_refs: vec!["src/stale.rs".into()],
+            milestone: None,
+        }],
+    });
+
+    let prompt = rust_agent::prompt::context::build_context_prompt(&app_state);
+
+    assert!(prompt.contains("- history_entries: 3"), "{prompt}");
+    assert!(prompt.contains("assistant: third live turn"), "{prompt}");
+    assert!(prompt.contains("src/live/one.rs"), "{prompt}");
+    assert!(!prompt.contains("stale in-memory turn"), "{prompt}");
+}
+
+#[test]
+fn context_prompt_uses_session_store_history_when_app_state_history_is_empty() {
+    let mut app_state = build_app_state();
+    let session = app_state
+        .session
+        .clone()
+        .expect("test app state should include session snapshot");
+    let store = Arc::new(InMemorySessionStore::default());
+    store.insert(
+        session,
+        SessionHistory {
+            entries: vec![SessionHistoryEntry {
+                message: Message::assistant("restored from store"),
+                timestamp: None,
+                tool_refs: vec!["src/store.rs".into()],
+                milestone: None,
+            }],
+        },
+    );
+    app_state.session_store = Some(store);
+    app_state.history = None;
+
+    let prompt = rust_agent::prompt::context::build_context_prompt(&app_state);
+
+    assert!(prompt.contains("- history_entries: 1"), "{prompt}");
+    assert!(prompt.contains("assistant: restored from store"), "{prompt}");
+    assert!(prompt.contains("src/store.rs"), "{prompt}");
 }
 
 #[test]
