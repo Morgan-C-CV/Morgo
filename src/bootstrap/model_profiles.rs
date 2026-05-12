@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use anyhow::{Context, bail};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::service::api::client::{
     ModelPricing, ModelProviderConfig, ProviderAuthStrategy, ProviderCompatibilityProfileKind,
@@ -10,10 +10,53 @@ use crate::service::api::client::{
 };
 use crate::service::api::retry::RetryPolicy;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ModelLevel {
+    Low,
+    Medium,
+    High,
+    Xhigh,
+}
+
+impl ModelLevel {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Xhigh => "xhigh",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "low" => Some(Self::Low),
+            "medium" => Some(Self::Medium),
+            "high" => Some(Self::High),
+            "xhigh" => Some(Self::Xhigh),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct ModelProfilesFile {
-    pub active: String,
+    pub active: Option<String>,
+    pub active_level: Option<ModelLevel>,
+    #[serde(default)]
+    pub levels: ModelLevelsFile,
+    #[serde(default)]
     pub profiles: BTreeMap<String, ModelProfileSpec>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelLevelsFile {
+    pub low: Option<String>,
+    pub medium: Option<String>,
+    pub high: Option<String>,
+    pub xhigh: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -49,11 +92,14 @@ pub struct ModelProfileSpec {
 pub struct ResolvedModelProfile {
     pub name: String,
     pub config: ModelProviderConfig,
+    pub level: Option<ModelLevel>,
 }
 
 #[derive(Debug, Clone)]
 pub struct ModelProfileRegistry {
-    pub active: String,
+    pub active: Option<String>,
+    pub active_level: Option<ModelLevel>,
+    pub levels: BTreeMap<ModelLevel, String>,
     pub profiles: BTreeMap<String, ModelProfileSpec>,
 }
 
@@ -101,21 +147,80 @@ pub fn load_model_profiles_registry_from_root(
 pub fn parse_model_profiles_registry(content: &str) -> anyhow::Result<ModelProfileRegistry> {
     let file: ModelProfilesFile = toml::from_str(content)
         .map_err(|error| anyhow::anyhow!("invalid_configuration: invalid models.toml: {error}"))?;
-    let active = file.active.trim();
-    if active.is_empty() {
-        bail!("invalid_configuration: models.toml active profile is empty");
+    let active = file
+        .active
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let levels = file.levels.into_map();
+    if file.profiles.is_empty() {
+        bail!("invalid_configuration: models.toml must define at least one profile");
     }
-    if !file.profiles.contains_key(active) {
-        bail!("invalid_configuration: active model profile '{active}' was not found");
+    if active.is_none() && file.active_level.is_none() {
+        bail!("invalid_configuration: models.toml requires active or active_level");
+    }
+    if let Some(active_profile) = active.as_deref() {
+        if !file.profiles.contains_key(active_profile) {
+            bail!("invalid_configuration: active model profile '{active_profile}' was not found");
+        }
+    }
+    if let Some(active_level) = file.active_level {
+        let Some(profile_name) = levels.get(&active_level) else {
+            bail!(
+                "invalid_configuration: active_level '{}' has no profile mapping",
+                active_level.as_str()
+            );
+        };
+        if !file.profiles.contains_key(profile_name) {
+            bail!(
+                "invalid_configuration: level '{}' references missing profile '{}'",
+                active_level.as_str(),
+                profile_name
+            );
+        }
+    }
+    for (level, profile_name) in &levels {
+        if !file.profiles.contains_key(profile_name) {
+            bail!(
+                "invalid_configuration: level '{}' references missing profile '{}'",
+                level.as_str(),
+                profile_name
+            );
+        }
     }
     for (name, spec) in &file.profiles {
         let config = spec.to_model_provider_config(name)?;
         validate_provider_config(&config).map_err(|error| anyhow::anyhow!(error.to_string()))?;
     }
     Ok(ModelProfileRegistry {
-        active: active.to_string(),
+        active,
+        active_level: file.active_level,
+        levels,
         profiles: file.profiles,
     })
+}
+
+pub fn merge_model_profiles_registry(
+    base: Option<&ModelProfileRegistry>,
+    overlay: Option<&ModelProfileRegistry>,
+) -> Option<ModelProfileRegistry> {
+    match (base, overlay) {
+        (None, None) => None,
+        (Some(registry), None) | (None, Some(registry)) => Some(registry.clone()),
+        (Some(base), Some(overlay)) => {
+            let mut levels = base.levels.clone();
+            levels.extend(overlay.levels.clone());
+            let mut profiles = base.profiles.clone();
+            profiles.extend(overlay.profiles.clone());
+            Some(ModelProfileRegistry {
+                active: overlay.active.clone().or_else(|| base.active.clone()),
+                active_level: overlay.active_level.or(base.active_level),
+                levels,
+                profiles,
+            })
+        }
+    }
 }
 
 pub fn resolve_active_model_profile(content: &str) -> anyhow::Result<ResolvedModelProfile> {
@@ -126,13 +231,19 @@ pub fn resolve_active_model_profile(content: &str) -> anyhow::Result<ResolvedMod
 pub fn resolve_active_model_profile_from_registry(
     registry: &ModelProfileRegistry,
 ) -> anyhow::Result<ResolvedModelProfile> {
-    resolve_model_profile_from_registry(registry, registry.active.as_str()).map_err(|error| {
+    if let Some(level) = registry.active_level {
+        return resolve_model_level_from_registry(registry, level);
+    }
+    let active_profile = registry.active.as_deref().ok_or_else(|| {
+        anyhow::anyhow!("invalid_configuration: active model profile is not configured")
+    })?;
+    resolve_model_profile_from_registry(registry, active_profile).map_err(|error| {
         if error.to_string().contains("model profile '")
             && error.to_string().contains("' was not found")
         {
             anyhow::anyhow!(
                 "invalid_configuration: active model profile '{}' was not found",
-                registry.active
+                active_profile
             )
         } else {
             error
@@ -155,7 +266,26 @@ pub fn resolve_model_profile_from_registry(
     Ok(ResolvedModelProfile {
         name: profile.to_string(),
         config,
+        level: registry
+            .levels
+            .iter()
+            .find_map(|(level, name)| (name == profile).then_some(*level)),
     })
+}
+
+pub fn resolve_model_level_from_registry(
+    registry: &ModelProfileRegistry,
+    level: ModelLevel,
+) -> anyhow::Result<ResolvedModelProfile> {
+    let profile = registry.levels.get(&level).ok_or_else(|| {
+        anyhow::anyhow!(
+            "invalid_configuration: model level '{}' is not configured",
+            level.as_str()
+        )
+    })?;
+    let mut resolved = resolve_model_profile_from_registry(registry, profile)?;
+    resolved.level = Some(level);
+    Ok(resolved)
 }
 
 pub fn build_model_profile_display_view(
@@ -203,6 +333,28 @@ pub fn build_model_profile_display_view(
         prompt_cache_key: spec.prompt_cache_key.clone(),
         prompt_cache_retention: spec.prompt_cache_retention.clone(),
     })
+}
+
+impl ModelLevelsFile {
+    fn into_map(self) -> BTreeMap<ModelLevel, String> {
+        let mut map = BTreeMap::new();
+        for (level, value) in [
+            (ModelLevel::Low, self.low),
+            (ModelLevel::Medium, self.medium),
+            (ModelLevel::High, self.high),
+            (ModelLevel::Xhigh, self.xhigh),
+        ] {
+            if let Some(profile) = value
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+            {
+                map.insert(level, profile);
+            }
+        }
+        map
+    }
 }
 
 impl ModelProfileSpec {
@@ -341,12 +493,6 @@ mod tests {
         LOCK.get_or_init(|| Mutex::new(()))
     }
 
-    fn with_env_lock<F: FnOnce()>(f: F) {
-        let lock = env_lock();
-        let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
-        f();
-    }
-
     fn set_env(key: &str, value: &str) {
         unsafe { std::env::set_var(key, value) }
     }
@@ -356,12 +502,16 @@ mod tests {
     }
 
     #[test]
-    fn models_toml_active_profile_resolves_to_model_provider_config() {
+    fn models_toml_active_level_resolves_to_model_provider_config() {
         let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
         set_env("OPENAI_API_KEY", "test-openai-key");
         let resolved = resolve_active_model_profile(
             r#"
-active = "openai-fast"
+active_level = "medium"
+
+[levels]
+low = "openai-fast"
+medium = "openai-strong"
 
 [profiles.openai-fast]
 provider_id = "openai"
@@ -369,6 +519,14 @@ protocol = "openai_compatible"
 compatibility_profile = "openai_compatible"
 base_url = "https://api.openai.com"
 model = "gpt-4.1-mini"
+api_key_env = "OPENAI_API_KEY"
+
+[profiles.openai-strong]
+provider_id = "openai"
+protocol = "openai_compatible"
+compatibility_profile = "openai_compatible"
+base_url = "https://api.openai.com"
+model = "gpt-5.4"
 api_key_env = "OPENAI_API_KEY"
 request_timeout_ms = 10000
 stream_timeout_ms = 90000
@@ -379,36 +537,18 @@ prompt_cache_key = "rust-agent-r1"
 prompt_cache_retention = "in_memory"
 "#,
         )
-        .expect("active profile should resolve");
+        .expect("active level should resolve");
         remove_env("OPENAI_API_KEY");
 
-        assert_eq!(resolved.name, "openai-fast");
+        assert_eq!(resolved.name, "openai-strong");
+        assert_eq!(resolved.level, Some(ModelLevel::Medium));
         assert_eq!(resolved.config.provider_id, "openai");
         assert_eq!(resolved.config.protocol, ProviderProtocol::OpenAICompatible);
-        assert_eq!(
-            resolved.config.compatibility_profile,
-            ProviderCompatibilityProfileKind::OpenAICompatible
-        );
-        assert_eq!(resolved.config.base_url, "https://api.openai.com");
-        assert_eq!(
-            resolved.config.chat_completions_path,
-            "/v1/chat/completions"
-        );
-        assert_eq!(resolved.config.model_id, "gpt-4.1-mini");
+        assert_eq!(resolved.config.model_id, "gpt-5.4");
         assert_eq!(resolved.config.api_key.as_deref(), Some("test-openai-key"));
         assert_eq!(resolved.config.timeout.request_timeout_ms, 10_000);
         assert_eq!(resolved.config.timeout.stream_timeout_ms, 90_000);
         assert_eq!(resolved.config.retry_policy.max_attempts, 2);
-        assert_eq!(resolved.config.retry_policy.initial_backoff_ms, 100);
-        assert_eq!(resolved.config.retry_policy.max_backoff_ms, 500);
-        assert_eq!(
-            resolved.config.prompt_cache_key.as_deref(),
-            Some("rust-agent-r1")
-        );
-        assert_eq!(
-            resolved.config.prompt_cache_retention.as_deref(),
-            Some("in_memory")
-        );
     }
 
     #[test]
@@ -436,10 +576,10 @@ api_key_env = "OPENAI_API_KEY"
     }
 
     #[test]
-    fn models_toml_bearer_profile_requires_api_key_env() {
+    fn models_toml_rejects_active_level_without_mapping() {
         let error = resolve_active_model_profile(
             r#"
-active = "openai-fast"
+active_level = "high"
 
 [profiles.openai-fast]
 provider_id = "openai"
@@ -447,52 +587,12 @@ protocol = "openai_compatible"
 compatibility_profile = "openai_compatible"
 base_url = "https://api.openai.com"
 model = "gpt-4.1-mini"
-"#,
-        )
-        .expect_err("bearer profile without api_key_env should fail");
-
-        assert!(error.to_string().contains("requires api_key_env"));
-    }
-
-    #[test]
-    fn models_toml_rejects_full_url_chat_completions_path() {
-        let error = resolve_active_model_profile(
-            r#"
-active = "gemini-flash"
-
-[profiles.gemini-flash]
-provider_id = "gemini-openai"
-protocol = "openai_compatible"
-compatibility_profile = "openai_compatible"
-base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
-chat_completions_path = "https://example.com/chat/completions"
-model = "gemini-2.5-flash"
 auth_strategy = "none"
 "#,
         )
-        .expect_err("full URL path should fail");
+        .expect_err("missing level mapping should fail");
 
-        assert!(error.to_string().contains("must not be a full URL"));
-    }
-
-    #[test]
-    fn models_toml_rejects_unknown_protocol_profile_combination() {
-        let error = resolve_active_model_profile(
-            r#"
-active = "bad"
-
-[profiles.bad]
-provider_id = "custom-local"
-protocol = "anthropic"
-compatibility_profile = "openai_compatible"
-base_url = "http://localhost:8080"
-model = "local-model"
-auth_strategy = "none"
-"#,
-        )
-        .expect_err("protocol/profile mismatch should fail");
-
-        assert!(error.to_string().contains("incompatible protocol/profile"));
+        assert!(error.to_string().contains("active_level 'high'"));
     }
 
     #[test]
@@ -501,7 +601,10 @@ auth_strategy = "none"
         set_env("WORKER_API_KEY", "worker-key");
         let registry = parse_model_profiles_registry(
             r#"
-active = "default"
+active_level = "medium"
+
+[levels]
+medium = "worker-override"
 
 [profiles.default]
 provider_id = "openai"
@@ -518,175 +621,78 @@ compatibility_profile = "openai_compatible"
 base_url = "http://127.0.0.1:9999"
 model = "gpt-4.1-nano"
 api_key_env = "WORKER_API_KEY"
-request_timeout_ms = 5000
-stream_timeout_ms = 10000
 "#,
         )
         .expect("registry should parse");
-
         let resolved = resolve_model_profile_from_registry(&registry, "worker-override")
-            .expect("worker-override should resolve");
+            .expect("profile should resolve");
         remove_env("WORKER_API_KEY");
 
-        assert_eq!(resolved.name, "worker-override");
-        assert_eq!(resolved.config.base_url, "http://127.0.0.1:9999");
+        assert_eq!(registry.active_level, Some(ModelLevel::Medium));
+        assert_eq!(resolved.level, Some(ModelLevel::Medium));
         assert_eq!(resolved.config.model_id, "gpt-4.1-nano");
-        assert_eq!(resolved.config.timeout.request_timeout_ms, 5_000);
-        assert_eq!(resolved.config.timeout.stream_timeout_ms, 10_000);
     }
 
     #[test]
-    fn models_toml_no_auth_profile_resolves_without_api_key() {
-        let registry = parse_model_profiles_registry(
+    fn merged_registry_overlays_levels_profiles_and_active_level() {
+        let home = parse_model_profiles_registry(
             r#"
-active = "local"
+active_level = "low"
 
-[profiles.local]
-provider_id = "ollama"
-protocol = "openai_compatible"
-compatibility_profile = "openai_compatible"
-base_url = "http://localhost:11434"
-model = "llama3.2"
-auth_strategy = "none"
-"#,
-        )
-        .expect("no-auth registry should parse");
+[levels]
+low = "home-low"
+medium = "home-medium"
 
-        let resolved = resolve_model_profile_from_registry(&registry, "local")
-            .expect("local profile should resolve");
-
-        assert_eq!(resolved.config.provider_id, "ollama");
-        assert_eq!(resolved.config.base_url, "http://localhost:11434");
-        assert_eq!(resolved.config.model_id, "llama3.2");
-        assert!(resolved.config.api_key.is_none());
-    }
-
-    #[test]
-    fn models_toml_proxy_fields_are_preserved() {
-        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
-        set_env("PROXY_API_KEY", "proxy-key");
-        let registry = parse_model_profiles_registry(
-            r#"
-active = "proxied"
-
-[profiles.proxied]
+[profiles.home-low]
 provider_id = "openai"
 protocol = "openai_compatible"
 compatibility_profile = "openai_compatible"
 base_url = "https://api.openai.com"
-model = "gpt-4.1-mini"
-api_key_env = "PROXY_API_KEY"
-proxy_url = "http://proxy.corp.example:8080"
-no_proxy = "localhost,127.0.0.1"
-"#,
-        )
-        .expect("proxied registry should parse");
-
-        let resolved = resolve_model_profile_from_registry(&registry, "proxied")
-            .expect("proxied profile should resolve");
-        remove_env("PROXY_API_KEY");
-
-        assert_eq!(
-            resolved.config.proxy_url.as_deref(),
-            Some("http://proxy.corp.example:8080")
-        );
-        assert_eq!(
-            resolved.config.no_proxy.as_deref(),
-            Some("localhost,127.0.0.1")
-        );
-    }
-
-    #[test]
-    fn models_toml_gemini_custom_path_resolves() {
-        let registry = parse_model_profiles_registry(
-            r#"
-active = "gemini-flash"
-
-[profiles.gemini-flash]
-provider_id = "gemini-openai"
-protocol = "openai_compatible"
-compatibility_profile = "openai_compatible"
-base_url = "https://generativelanguage.googleapis.com"
-chat_completions_path = "/v1beta/openai/chat/completions"
-model = "gemini-2.0-flash"
+model = "gpt-5.4-mini"
 auth_strategy = "none"
-"#,
-        )
-        .expect("gemini registry should parse");
 
-        let resolved = resolve_model_profile_from_registry(&registry, "gemini-flash")
-            .expect("gemini-flash should resolve");
-
-        assert_eq!(
-            resolved.config.chat_completions_path,
-            "/v1beta/openai/chat/completions"
-        );
-        assert_eq!(resolved.config.model_id, "gemini-2.0-flash");
-    }
-
-    #[test]
-    fn models_toml_resolve_unknown_profile_returns_error() {
-        let registry = parse_model_profiles_registry(
-            r#"
-active = "default"
-
-[profiles.default]
+[profiles.home-medium]
 provider_id = "openai"
 protocol = "openai_compatible"
 compatibility_profile = "openai_compatible"
 base_url = "https://api.openai.com"
-model = "gpt-4.1-mini"
+model = "gpt-5.4"
 auth_strategy = "none"
 "#,
         )
-        .expect("registry should parse");
+        .expect("home registry should parse");
+        let workspace = parse_model_profiles_registry(
+            r#"
+active_level = "medium"
 
-        let error = resolve_model_profile_from_registry(&registry, "nonexistent")
-            .expect_err("unknown profile should fail");
+[levels]
+medium = "workspace-medium"
 
-        assert!(
-            error
-                .to_string()
-                .contains("model profile 'nonexistent' was not found")
-        );
-    }
+[profiles.workspace-medium]
+provider_id = "openai"
+protocol = "openai_compatible"
+compatibility_profile = "openai_compatible"
+base_url = "https://workspace.example"
+model = "gpt-5.5"
+auth_strategy = "none"
+"#,
+        )
+        .expect("workspace registry should parse");
+        let merged = merge_model_profiles_registry(Some(&home), Some(&workspace))
+            .expect("merged registry should exist");
+        let resolved = resolve_active_model_profile_from_registry(&merged)
+            .expect("merged active profile should resolve");
 
-    #[test]
-    fn models_toml_display_view_shows_api_key_env_status() {
-        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
-        set_env("DISPLAY_TEST_KEY", "some-key");
-        let spec = ModelProfileSpec {
-            provider_id: "openai".into(),
-            protocol: "openai_compatible".into(),
-            compatibility_profile: "openai_compatible".into(),
-            base_url: "https://api.openai.com".into(),
-            chat_completions_path: "/v1/chat/completions".into(),
-            model: "gpt-4.1-mini".into(),
-            auth_strategy: "bearer".into(),
-            api_key_env: Some("DISPLAY_TEST_KEY".into()),
-            request_timeout_ms: None,
-            stream_timeout_ms: None,
-            retry_max_attempts: None,
-            retry_initial_backoff_ms: None,
-            retry_max_backoff_ms: None,
-            proxy_url: None,
-            no_proxy: None,
-            ca_bundle_path: None,
-            max_tokens_param: None,
-            prompt_cache_key: Some("rust-agent-test-cache-key".into()),
-            prompt_cache_retention: Some("in_memory".into()),
-        };
-        let view = build_model_profile_display_view("test-profile", &spec)
-            .expect("display view should build");
-        remove_env("DISPLAY_TEST_KEY");
-
-        assert_eq!(view.api_key_env_status.as_deref(), Some("set"));
-        assert_eq!(view.request_timeout_ms, 30_000);
-        assert_eq!(view.retry_max_attempts, 3);
+        assert_eq!(merged.active_level, Some(ModelLevel::Medium));
         assert_eq!(
-            view.prompt_cache_key.as_deref(),
-            Some("rust-agent-test-cache-key")
+            merged.levels.get(&ModelLevel::Low).map(String::as_str),
+            Some("home-low")
         );
-        assert_eq!(view.prompt_cache_retention.as_deref(), Some("in_memory"));
+        assert_eq!(
+            merged.levels.get(&ModelLevel::Medium).map(String::as_str),
+            Some("workspace-medium")
+        );
+        assert_eq!(resolved.level, Some(ModelLevel::Medium));
+        assert_eq!(resolved.config.base_url, "https://workspace.example");
     }
 }

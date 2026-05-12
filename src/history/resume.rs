@@ -1,4 +1,5 @@
 use crate::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
+use crate::bootstrap::model_profiles::ModelLevel;
 use crate::history::session::{
     SessionHistory, SessionId, SessionRestoreRequest, SessionSnapshot, SessionStore,
 };
@@ -34,6 +35,7 @@ pub struct ResolvedSessionState {
     pub restored_session: Option<RestoredSession>,
     pub client_type: ClientType,
     pub session_source: SessionSource,
+    pub model_level_override: Option<ModelLevel>,
     pub external_memory_entries: Vec<String>,
     pub nested_memory_lineage: Vec<String>,
 }
@@ -62,6 +64,7 @@ pub fn resolve_session_state(
                 snapshot,
                 history,
                 true,
+                session_store.load_model_level_override(&session_id),
                 session_store.load_external_memory_entries(&session_id),
                 session_store.load_nested_memory_lineage(&session_id),
             );
@@ -82,6 +85,7 @@ pub fn resolve_session_state(
             },
             SessionHistory::default(),
             true,
+            None,
             Vec::new(),
             Vec::new(),
         );
@@ -98,6 +102,7 @@ pub fn resolve_session_state(
         },
         SessionHistory::default(),
         false,
+        None,
         Vec::new(),
         Vec::new(),
     )
@@ -107,6 +112,7 @@ pub fn resolved_from_snapshot(
     snapshot: SessionSnapshot,
     history: SessionHistory,
     restored: bool,
+    model_level_override: Option<ModelLevel>,
     external_memory_entries: Vec<String>,
     nested_memory_lineage: Vec<String>,
 ) -> ResolvedSessionState {
@@ -122,6 +128,7 @@ pub fn resolved_from_snapshot(
         restored_session,
         client_type,
         session_source,
+        model_level_override,
         external_memory_entries: sanitize_external_memory_entries(external_memory_entries),
         nested_memory_lineage: sanitize_nested_memory_lineage(nested_memory_lineage),
     }

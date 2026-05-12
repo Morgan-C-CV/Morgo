@@ -94,6 +94,7 @@ mod tests {
             config: config.clone(),
             client: crate::service::api::client::ModelProviderClient::from_config(config),
             active_profile_name: Some("inherited-fast".into()),
+            active_level: None,
             source: ActiveModelProfileSource::ModelsToml,
             summary: ActiveModelProviderSummary {
                 provider_id: "inherited-provider".into(),

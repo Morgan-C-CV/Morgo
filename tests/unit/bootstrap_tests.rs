@@ -527,6 +527,21 @@ impl SessionStore for FlakySessionStore {
     ) -> Result<(), SessionStoreWriteError> {
         self.inner.save_lifecycle_status(session_id, status)
     }
+
+    fn load_model_level_override(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<rust_agent::bootstrap::model_profiles::ModelLevel> {
+        self.inner.load_model_level_override(session_id)
+    }
+
+    fn save_model_level_override(
+        &self,
+        session_id: &SessionId,
+        level: Option<rust_agent::bootstrap::model_profiles::ModelLevel>,
+    ) -> Result<(), SessionStoreWriteError> {
+        self.inner.save_model_level_override(session_id, level)
+    }
 }
 
 #[test]
@@ -650,6 +665,7 @@ fn persist_resolved_session_state_retries_transient_store_write_failures() {
         restored_session: None,
         client_type: rust_agent::bootstrap::ClientType::Cli,
         session_source: SessionSource::LocalCli,
+        model_level_override: None,
         external_memory_entries: Vec::new(),
         nested_memory_lineage: Vec::new(),
     };
@@ -664,6 +680,45 @@ fn persist_resolved_session_state_retries_transient_store_write_failures() {
             })
             .is_some(),
         "final retry should persist the resolved session after transient failures"
+    );
+}
+
+#[test]
+fn resolved_session_state_restores_model_level_override() {
+    let store = InMemorySessionStore::default();
+    let session_id = SessionId("model-level-session".into());
+    let snapshot = SessionSnapshot {
+        session_id: session_id.clone(),
+        surface: InteractionSurface::Cli,
+        session_mode: SessionMode::Interactive,
+        cwd: "/tmp/model-level".into(),
+        last_turn_at: None,
+        prompt_seed: None,
+    };
+    store
+        .save(snapshot, SessionHistory::default())
+        .expect("save session");
+    store
+        .save_model_level_override(
+            &session_id,
+            Some(rust_agent::bootstrap::model_profiles::ModelLevel::Xhigh),
+        )
+        .expect("save model override");
+
+    let resolved = rust_agent::history::resume::resolve_session_state(
+        &store,
+        Some(&rust_agent::history::resume::RestoreRequest {
+            source: rust_agent::history::resume::RestoreSource::ResumeSession,
+            session_id: Some(session_id.0.clone()),
+        }),
+        InteractionSurface::Cli,
+        SessionMode::Interactive,
+        std::path::Path::new("/tmp/model-level"),
+    );
+
+    assert_eq!(
+        resolved.model_level_override,
+        Some(rust_agent::bootstrap::model_profiles::ModelLevel::Xhigh)
     );
 }
 
@@ -803,7 +858,7 @@ api_key_env = "OPENAI_API_KEY"
     );
     assert_eq!(
         bundle.active_model_profile_source,
-        rust_agent::state::app_state::ActiveModelProfileSource::ModelsToml
+        rust_agent::state::app_state::ActiveModelProfileSource::WorkspaceModelsToml
     );
 }
 
@@ -1030,7 +1085,7 @@ auth_strategy = "none"
         .expect("registry should load")
         .expect("models.toml should exist");
 
-    assert_eq!(registry.active, "openai-fast");
+    assert_eq!(registry.active.as_deref(), Some("openai-fast"));
     assert_eq!(registry.profiles.len(), 2);
     assert!(registry.profiles.contains_key("openai-fast"));
     assert!(registry.profiles.contains_key("local-dev"));
@@ -2685,6 +2740,7 @@ fn persist_resolved_session_state_commits_all_fields_in_one_record_write() {
         restored_session: None,
         client_type: rust_agent::bootstrap::ClientType::RemoteControl,
         session_source: SessionSource::RemoteControl,
+        model_level_override: None,
         external_memory_entries: vec!["linear:XYZ-9".into()],
         nested_memory_lineage: vec!["session:resolved".into()],
     };
@@ -2800,6 +2856,7 @@ fn update_record_preserves_existing_fields_when_mutating_one_section() {
             external_memory_entries: Some(vec!["linear:KEEP-1".into()]),
             nested_memory_lineage: Some(vec!["session:update-preserve".into()]),
             lifecycle_status: SessionLifecycleStatus::Active,
+            model_level_override: None,
         },
     );
 
@@ -3966,6 +4023,7 @@ fn minimal_persisted_record(session_id: &SessionId) -> PersistedSessionRecord {
         external_memory_entries: None,
         nested_memory_lineage: None,
         lifecycle_status: SessionLifecycleStatus::Active,
+        model_level_override: None,
     }
 }
 

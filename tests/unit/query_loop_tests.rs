@@ -2470,6 +2470,7 @@ async fn subagent_context_inherits_active_model_snapshot_without_sharing_handle(
         config: rust_agent::service::api::client::ModelProviderConfig::default(),
         client: parent_client.clone(),
         active_profile_name: Some("runtime-profile".into()),
+        active_level: None,
         source: rust_agent::state::app_state::ActiveModelProfileSource::ModelsToml,
         summary: rust_agent::state::app_state::ActiveModelProviderSummary {
             provider_id: "runtime-provider".into(),
@@ -2606,6 +2607,7 @@ async fn updated_runtime_snapshot_applies_only_to_next_turn_and_new_subagents() 
         },
         client: old_runtime_client,
         active_profile_name: Some("old-profile".into()),
+        active_level: None,
         source: rust_agent::state::app_state::ActiveModelProfileSource::ModelsToml,
         summary: rust_agent::state::app_state::ActiveModelProviderSummary {
             provider_id: "old-provider".into(),
@@ -2623,6 +2625,7 @@ async fn updated_runtime_snapshot_applies_only_to_next_turn_and_new_subagents() 
         },
         client: new_runtime_client,
         active_profile_name: Some("new-profile".into()),
+        active_level: None,
         source: rust_agent::state::app_state::ActiveModelProfileSource::ModelsToml,
         summary: rust_agent::state::app_state::ActiveModelProviderSummary {
             provider_id: "new-provider".into(),

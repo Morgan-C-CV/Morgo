@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 use crate::bootstrap::{InteractionSurface, SessionMode};
+use crate::bootstrap::model_profiles::ModelLevel;
 use crate::core::events::SessionMilestone;
 use crate::core::message::Message;
 use crate::plan::types::PlanState;
@@ -183,6 +184,12 @@ pub trait SessionStore: Send + Sync {
         session_id: &SessionId,
         status: SessionLifecycleStatus,
     ) -> Result<(), SessionStoreWriteError>;
+    fn load_model_level_override(&self, session_id: &SessionId) -> Option<ModelLevel>;
+    fn save_model_level_override(
+        &self,
+        session_id: &SessionId,
+        level: Option<ModelLevel>,
+    ) -> Result<(), SessionStoreWriteError>;
 }
 
 #[derive(Debug, Clone, Default)]
@@ -193,6 +200,7 @@ pub struct InMemorySessionStore {
     external_memory_entries: Arc<RwLock<HashMap<SessionId, Vec<String>>>>,
     nested_memory_lineage: Arc<RwLock<HashMap<SessionId, Vec<String>>>>,
     lifecycle_statuses: Arc<RwLock<HashMap<SessionId, SessionLifecycleStatus>>>,
+    model_level_overrides: Arc<RwLock<HashMap<SessionId, ModelLevel>>>,
     latest_session: Arc<RwLock<Option<SessionId>>>,
 }
 
@@ -305,6 +313,16 @@ impl SessionStore for InMemorySessionStore {
             SessionStoreWriteError::lock_poisoned("save_full_record.lifecycle_statuses")
         })?;
         lifecycle_statuses.insert(session_id.clone(), record.lifecycle_status);
+        drop(lifecycle_statuses);
+
+        let mut model_level_overrides = self.model_level_overrides.write().map_err(|_| {
+            SessionStoreWriteError::lock_poisoned("save_full_record.model_level_overrides")
+        })?;
+        if let Some(level) = record.model_level_override {
+            model_level_overrides.insert(session_id.clone(), level);
+        } else {
+            model_level_overrides.remove(session_id);
+        }
         Ok(())
     }
 
@@ -416,6 +434,29 @@ impl SessionStore for InMemorySessionStore {
         lifecycle_statuses.insert(session_id.clone(), status);
         Ok(())
     }
+
+    fn load_model_level_override(&self, session_id: &SessionId) -> Option<ModelLevel> {
+        self.model_level_overrides
+            .read()
+            .ok()
+            .and_then(|overrides| overrides.get(session_id).copied())
+    }
+
+    fn save_model_level_override(
+        &self,
+        session_id: &SessionId,
+        level: Option<ModelLevel>,
+    ) -> Result<(), SessionStoreWriteError> {
+        let mut model_level_overrides = self.model_level_overrides.write().map_err(|_| {
+            SessionStoreWriteError::lock_poisoned("save_model_level_override.model_level_overrides")
+        })?;
+        if let Some(level) = level {
+            model_level_overrides.insert(session_id.clone(), level);
+        } else {
+            model_level_overrides.remove(session_id);
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -433,6 +474,8 @@ pub struct PersistedSessionRecord {
     pub nested_memory_lineage: Option<Vec<String>>,
     #[serde(default)]
     pub lifecycle_status: SessionLifecycleStatus,
+    #[serde(default)]
+    pub model_level_override: Option<ModelLevel>,
 }
 
 impl FileBackedSessionStore {
@@ -458,6 +501,7 @@ impl FileBackedSessionStore {
             external_memory_entries: None,
             nested_memory_lineage: None,
             lifecycle_status: SessionLifecycleStatus::Active,
+            model_level_override: None,
         }
     }
 
@@ -673,7 +717,10 @@ impl SessionStore for FileBackedSessionStore {
         let external_memory_entries = record
             .as_ref()
             .and_then(|record| record.external_memory_entries.clone());
-        let nested_memory_lineage = record.and_then(|record| record.nested_memory_lineage);
+        let nested_memory_lineage = record
+            .as_ref()
+            .and_then(|record| record.nested_memory_lineage.clone());
+        let model_level_override = record.and_then(|record| record.model_level_override);
         let lifecycle_status = self.load_lifecycle_status(&session_id);
         self.write_record(
             &session_id,
@@ -685,6 +732,7 @@ impl SessionStore for FileBackedSessionStore {
                 external_memory_entries,
                 nested_memory_lineage,
                 lifecycle_status,
+                model_level_override,
             },
         )
     }
@@ -782,6 +830,21 @@ impl SessionStore for FileBackedSessionStore {
     ) -> Result<(), SessionStoreWriteError> {
         self.update_record(session_id, |record| {
             record.lifecycle_status = status;
+        })
+    }
+
+    fn load_model_level_override(&self, session_id: &SessionId) -> Option<ModelLevel> {
+        self.read_record(session_id)
+            .and_then(|record| record.model_level_override)
+    }
+
+    fn save_model_level_override(
+        &self,
+        session_id: &SessionId,
+        level: Option<ModelLevel>,
+    ) -> Result<(), SessionStoreWriteError> {
+        self.update_record(session_id, |record| {
+            record.model_level_override = level;
         })
     }
 }

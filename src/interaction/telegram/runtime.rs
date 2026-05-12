@@ -135,6 +135,7 @@ fn resolve_telegram_session_state(
         },
         crate::history::session::SessionHistory::default(),
         false,
+        None,
         Vec::new(),
         Vec::new(),
     )

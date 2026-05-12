@@ -125,6 +125,7 @@ async fn remote_request_prefers_active_model_runtime_client_for_bound_turns() {
             config: rust_agent::service::api::client::ModelProviderConfig::default(),
             client: runtime_client.clone(),
             active_profile_name: Some("remote-runtime".into()),
+            active_level: None,
             source: rust_agent::state::app_state::ActiveModelProfileSource::ModelsToml,
             summary: rust_agent::state::app_state::ActiveModelProviderSummary {
                 provider_id: "runtime-provider".into(),

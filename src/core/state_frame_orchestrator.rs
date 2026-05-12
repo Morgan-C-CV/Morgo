@@ -999,6 +999,7 @@ mod tests {
             config: ModelProviderConfig::default(),
             client: ModelProviderClient::with_scripted_turns(Vec::new()),
             active_profile_name: None,
+            active_level: None,
             source: ActiveModelProfileSource::BootstrapDefault,
             summary: ActiveModelProviderSummary {
                 provider_id: "test".into(),

@@ -92,6 +92,7 @@ fn app_state_with_session_root(root: &std::path::Path) -> AppState {
             service_observability_tracker.clone(),
         ),
         active_profile_name: Some("openai-fast".into()),
+        active_level: None,
         source: rust_agent::state::app_state::ActiveModelProfileSource::ModelsToml,
         summary: rust_agent::state::app_state::ActiveModelProviderSummary {
             provider_id: "openai".into(),
@@ -153,6 +154,15 @@ fn app_state_with_session_root(root: &std::path::Path) -> AppState {
         boss_coordinator: None,
         remote_actor_store: None,
     }
+}
+
+fn app_state_with_session_root_and_store(
+    root: &std::path::Path,
+    store: Arc<InMemorySessionStore>,
+) -> AppState {
+    let mut app_state = app_state_with_session_root(root);
+    app_state.session_store = Some(store);
+    app_state
 }
 
 struct DenyingAuthorizer;
@@ -690,7 +700,11 @@ async fn model_command_list_show_reload_and_local_rejection_work() {
     fs::write(
         root.join(".claude/models.toml"),
         r#"
-active = "openai-fast"
+active_level = "medium"
+
+[levels]
+low = "openai-fast"
+medium = "local-dev"
 
 [profiles.openai-fast]
 provider_id = "openai"
@@ -724,14 +738,14 @@ request_timeout_ms = 5000
     let RouteExecution::CommandResult(CommandResult::Message(list_text)) = list_result else {
         panic!("expected model list result");
     };
-    assert!(list_text.contains("active_profile: openai-fast"));
+    assert!(list_text.contains("active_level: medium"));
     assert!(list_text.contains("profiles: 2"));
-    assert!(list_text.contains("openai-fast: provider_id=openai"));
-    assert!(list_text.contains("local-dev: provider_id=local"));
+    assert!(list_text.contains("low -> openai-fast: provider_id=openai"));
+    assert!(list_text.contains("medium -> local-dev: provider_id=local"));
 
     let show_result = router
         .route(
-            &NormalizedInput::from_raw(InteractionSurface::Cli, "/model show openai-fast"),
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/model show"),
             &app_state,
         )
         .await
@@ -739,14 +753,17 @@ request_timeout_ms = 5000
     let RouteExecution::CommandResult(CommandResult::Message(show_text)) = show_result else {
         panic!("expected model show result");
     };
-    assert!(show_text.contains("Model profile: openai-fast"));
-    assert!(show_text.contains("api_key_env: OPENAI_API_KEY (set)"));
+    assert!(show_text.contains("low -> profile=openai-fast"));
+    assert!(show_text.contains("medium -> profile=local-dev"));
     assert!(!show_text.contains("resolved-secret"));
 
     fs::write(
         root.join(".claude/models.toml"),
         r#"
-active = "local-dev"
+active_level = "medium"
+
+[levels]
+medium = "local-dev"
 
 [profiles.local-dev]
 provider_id = "local"
@@ -769,12 +786,15 @@ auth_strategy = "none"
     let RouteExecution::CommandResult(CommandResult::Message(reload_text)) = reload_result else {
         panic!("expected model reload result");
     };
-    assert!(reload_text.contains("active_profile=local-dev"));
+    assert!(reload_text.contains("active_level=medium"));
     assert!(reload_text.contains("runtime active model remains unchanged"));
 
+    let store = Arc::new(InMemorySessionStore::default());
+    let mut app_state = app_state;
+    app_state.session_store = Some(store.clone());
     let use_result = router
         .route(
-            &NormalizedInput::from_raw(InteractionSurface::Cli, "/model use local-dev"),
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/model use medium"),
             &app_state,
         )
         .await
@@ -794,11 +814,19 @@ auth_strategy = "none"
         runtime_snapshot.active_profile_name.as_deref(),
         Some("local-dev")
     );
+    assert_eq!(
+        runtime_snapshot.active_level,
+        Some(rust_agent::bootstrap::model_profiles::ModelLevel::Medium)
+    );
     assert_eq!(runtime_snapshot.config.model_id, "local-model-v2");
     assert_eq!(runtime_snapshot.config.base_url, "http://localhost:1234");
     assert_eq!(
         runtime_snapshot.source,
-        rust_agent::state::app_state::ActiveModelProfileSource::ModelsToml
+        rust_agent::state::app_state::ActiveModelProfileSource::SessionOverride
+    );
+    assert_eq!(
+        store.load_model_level_override(&app_state.current_session_id()),
+        Some(rust_agent::bootstrap::model_profiles::ModelLevel::Medium)
     );
 
     unsafe { std::env::remove_var("OPENAI_API_KEY") };
@@ -815,7 +843,10 @@ async fn model_use_rejects_missing_profile_and_env_override() {
     fs::write(
         root.join(".claude/models.toml"),
         r#"
-active = "openai-fast"
+active_level = "low"
+
+[levels]
+low = "openai-fast"
 
 [profiles.openai-fast]
 provider_id = "openai"
@@ -840,14 +871,14 @@ api_key_env = "OPENAI_API_KEY"
     assert_eq!(
         missing_result,
         RouteExecution::CommandResult(CommandResult::Denied(
-            "Profile not found: missing-profile".into()
+            "Unknown model level: missing-profile. Expected low, medium, high, or xhigh.".into()
         ))
     );
 
     unsafe { std::env::set_var("RUST_AGENT_PROVIDER_ID", "openai") };
     let env_locked_result = router
         .route(
-            &NormalizedInput::from_raw(InteractionSurface::Cli, "/model use openai-fast"),
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/model use low"),
             &app_state,
         )
         .await
@@ -862,6 +893,82 @@ api_key_env = "OPENAI_API_KEY"
     };
 
     fs::remove_dir_all(root).expect("cleanup model use reject root");
+}
+
+#[tokio::test]
+async fn model_use_workspace_persists_workspace_active_level_and_clears_session_override() {
+    let _env_lock = router_env_lock().lock().expect("router env lock");
+    let registry = Arc::new(CommandRegistry::new().register(Arc::new(ModelCommand)));
+    let router = CommandRouter::new(registry, Box::new(DefaultSurfaceAuthorizer::default()));
+    let root = unique_temp_path("rust-agent-router-model-workspace");
+    fs::create_dir_all(root.join(".claude")).expect("create config root");
+    fs::write(
+        root.join(".claude/models.toml"),
+        r#"
+active_level = "low"
+
+[levels]
+low = "openai-low"
+high = "openai-high"
+
+[profiles.openai-low]
+provider_id = "openai"
+protocol = "openai_compatible"
+compatibility_profile = "openai_compatible"
+base_url = "https://api.openai.com"
+model = "gpt-5.4-mini"
+auth_strategy = "none"
+
+[profiles.openai-high]
+provider_id = "openai"
+protocol = "openai_compatible"
+compatibility_profile = "openai_compatible"
+base_url = "https://api.openai.com"
+model = "gpt-5.4"
+auth_strategy = "none"
+"#,
+    )
+    .expect("write models.toml");
+    let store = Arc::new(InMemorySessionStore::default());
+    let app_state = app_state_with_session_root_and_store(&root, store.clone());
+    store
+        .save_model_level_override(
+            &app_state.current_session_id(),
+            Some(rust_agent::bootstrap::model_profiles::ModelLevel::Low),
+        )
+        .expect("seed session override");
+
+    let use_result = router
+        .route(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/model use high --workspace"),
+            &app_state,
+        )
+        .await
+        .expect("workspace model use should succeed");
+    let RouteExecution::CommandResult(CommandResult::Message(use_text)) = use_result else {
+        panic!("expected model use result");
+    };
+    assert!(use_text.contains("Updated workspace model level to high"));
+    assert_eq!(store.load_model_level_override(&app_state.current_session_id()), None);
+
+    let saved = fs::read_to_string(root.join(".claude/models.toml")).expect("read models.toml");
+    assert!(saved.contains("active_level = \"high\""));
+    let runtime_snapshot = app_state
+        .active_model_runtime
+        .as_ref()
+        .expect("active model runtime should exist")
+        .snapshot_blocking();
+    assert_eq!(
+        runtime_snapshot.source,
+        rust_agent::state::app_state::ActiveModelProfileSource::WorkspaceModelsToml
+    );
+    assert_eq!(
+        runtime_snapshot.active_level,
+        Some(rust_agent::bootstrap::model_profiles::ModelLevel::High)
+    );
+    assert_eq!(runtime_snapshot.config.model_id, "gpt-5.4");
+
+    fs::remove_dir_all(root).expect("cleanup workspace model root");
 }
 
 #[tokio::test]

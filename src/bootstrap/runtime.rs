@@ -9,7 +9,10 @@ use clap::Parser;
 use crate::bootstrap::config_root::{
     is_managed_config_root, preferred_home_config_root, resolve_config_root,
 };
-use crate::bootstrap::model_profiles::load_active_model_profile_from_root;
+use crate::bootstrap::model_profiles::{
+    ModelLevel, load_model_profiles_registry_from_root, merge_model_profiles_registry,
+    resolve_active_model_profile_from_registry, resolve_model_level_from_registry,
+};
 use crate::bootstrap::proxy_env::resolve_proxy_env_contract;
 use crate::bootstrap::setup::SetupContext;
 use crate::bootstrap::{BootstrapPhase, BootstrapState, InteractionSurface, SessionMode};
@@ -1243,7 +1246,12 @@ impl RuntimeBootstrap {
         };
         let snapshot = build_runtime_plugin_snapshot(&app_state);
         let command_registry = snapshot.command_registry.clone();
-        let (provider_config, active_model_profile_name, active_model_profile_source) =
+        let (
+            provider_config,
+            active_model_profile_name,
+            active_model_level,
+            active_model_profile_source,
+        ) =
             self.build_model_provider_config(&config_root)?;
         validate_provider_config(&provider_config)
             .map_err(|error| anyhow::anyhow!(error.to_string()))?;
@@ -1255,6 +1263,7 @@ impl RuntimeBootstrap {
             config: provider_config.clone(),
             client: api_client.clone(),
             active_profile_name: active_model_profile_name.clone(),
+            active_level: active_model_level,
             source: active_model_profile_source.clone(),
             summary: summarize_active_model_provider(&provider_config),
         };
@@ -1336,7 +1345,37 @@ impl RuntimeBootstrap {
                 .as_secs(),
         ));
         let cancellation_token = CancellationToken::new();
-        let active_model_snapshot = initialize_bundle.active_model_runtime.snapshot_blocking();
+        let mut active_model_snapshot = initialize_bundle.active_model_runtime.snapshot_blocking();
+        if let Some(level) = resolved_session.model_level_override {
+            let home_root = preferred_home_config_root();
+            let cwd = std::path::PathBuf::from(resolved_session.snapshot.cwd.clone());
+            let config_root = resolve_config_root(&cwd).ok();
+            let home_registry = match (home_root.as_ref(), config_root.as_ref()) {
+                (Some(path), Some(workspace_root)) if path != workspace_root => {
+                    load_model_profiles_registry_from_root(path).ok().flatten()
+                }
+                (Some(path), None) => load_model_profiles_registry_from_root(path).ok().flatten(),
+                _ => None,
+            };
+            let workspace_registry = config_root
+                .as_ref()
+                .and_then(|path| load_model_profiles_registry_from_root(path).ok().flatten());
+            let merged_registry =
+                merge_model_profiles_registry(home_registry.as_ref(), workspace_registry.as_ref());
+            if let Some(registry) = merged_registry {
+                if let Ok(resolved) = resolve_model_level_from_registry(&registry, level) {
+                    active_model_snapshot = ActiveModelRuntimeSnapshot {
+                        source: ActiveModelProfileSource::SessionOverride,
+                        active_level: Some(level),
+                        ..ActiveModelRuntimeSnapshot::from_resolved_profile(
+                            &resolved,
+                            initialize_bundle.api_client.observability_tracker(),
+                        )
+                    };
+                }
+            }
+        }
+        let active_model_runtime = ActiveModelRuntime::new(active_model_snapshot.clone());
         permission_context = permission_context
             .with_last_activity_ts(last_activity_ts.clone())
             .with_cancellation_token(cancellation_token.clone())
@@ -1370,7 +1409,7 @@ impl RuntimeBootstrap {
                 .iter()
                 .map(|phase| format!("{phase:?}"))
                 .collect(),
-            active_model_runtime: Some(initialize_bundle.active_model_runtime.clone()),
+            active_model_runtime: Some(active_model_runtime),
             active_model_profile_name: active_model_snapshot.active_profile_name,
             active_model_profile_source: active_model_snapshot.source,
             active_model_provider_summary: active_model_snapshot.summary,
@@ -1461,10 +1500,15 @@ impl RuntimeBootstrap {
         hydrate_app_state_from_snapshot(&mut app_state, &initial_snapshot);
         let store = AppStateStore::new(app_state.clone());
         let router = build_turn_router(&initial_snapshot);
+        let runtime_api_client = app_state
+            .active_model_runtime
+            .as_ref()
+            .map(|runtime| runtime.snapshot_blocking().client)
+            .unwrap_or_else(|| initialize_bundle.api_client.clone());
         let base_query_context = QueryContext {
             app_state: app_state.clone(),
             tool_registry: initial_snapshot.tool_registry.clone(),
-            api_client: initialize_bundle.api_client.clone(),
+            api_client: runtime_api_client,
             compactor: initialize_bundle.compactor.clone(),
             hook_registry: initial_snapshot.hook_registry.clone(),
             agent_id: None,
@@ -1639,11 +1683,13 @@ impl RuntimeBootstrap {
     ) -> anyhow::Result<(
         ModelProviderConfig,
         Option<String>,
+        Option<ModelLevel>,
         ActiveModelProfileSource,
     )> {
         if let Some(provider_config) = &self.provider_config_override {
             return Ok((
                 provider_config.clone(),
+                None,
                 None,
                 ActiveModelProfileSource::BootstrapDefault,
             ));
@@ -1651,20 +1697,45 @@ impl RuntimeBootstrap {
 
         if has_explicit_provider_env_override() {
             let provider_config = self.build_model_provider_config_from_env()?;
-            return Ok((provider_config, None, ActiveModelProfileSource::EnvOverride));
+            return Ok((provider_config, None, None, ActiveModelProfileSource::EnvOverride));
         }
 
-        if let Some(resolved) = load_active_model_profile_from_root(config_root)? {
+        let home_root = preferred_home_config_root();
+        let home_registry = match home_root.as_ref() {
+            Some(path) if path != config_root => load_model_profiles_registry_from_root(path)?,
+            _ => None,
+        };
+        let workspace_registry = load_model_profiles_registry_from_root(config_root)?;
+        let merged_registry =
+            merge_model_profiles_registry(home_registry.as_ref(), workspace_registry.as_ref());
+
+        if let Some(registry) = merged_registry {
+            let resolved = resolve_active_model_profile_from_registry(&registry)?;
+            let source = if workspace_registry
+                .as_ref()
+                .is_some_and(|registry| registry.active_level.is_some() || registry.active.is_some())
+            {
+                ActiveModelProfileSource::WorkspaceModelsToml
+            } else if home_registry
+                .as_ref()
+                .is_some_and(|registry| registry.active_level.is_some() || registry.active.is_some())
+            {
+                ActiveModelProfileSource::HomeModelsToml
+            } else {
+                ActiveModelProfileSource::ModelsToml
+            };
             return Ok((
                 resolved.config,
                 Some(resolved.name),
-                ActiveModelProfileSource::ModelsToml,
+                resolved.level,
+                source,
             ));
         }
 
         let provider_config = self.build_model_provider_config_from_env()?;
         Ok((
             provider_config,
+            None,
             None,
             ActiveModelProfileSource::BootstrapDefault,
         ))

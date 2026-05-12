@@ -92,6 +92,9 @@ pub enum WorkerRole {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ActiveModelProfileSource {
     EnvOverride,
+    SessionOverride,
+    WorkspaceModelsToml,
+    HomeModelsToml,
     ModelsToml,
     BootstrapDefault,
 }
@@ -100,6 +103,9 @@ impl ActiveModelProfileSource {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::EnvOverride => "env_override",
+            Self::SessionOverride => "session_override",
+            Self::WorkspaceModelsToml => "workspace_models_toml",
+            Self::HomeModelsToml => "home_models_toml",
             Self::ModelsToml => "models_toml",
             Self::BootstrapDefault => "bootstrap_default",
         }
@@ -212,6 +218,7 @@ impl AppState {
             external_memory_entries: Some(self.permission_context.external_memory_entries()),
             nested_memory_lineage: Some(self.permission_context.nested_memory_lineage()),
             lifecycle_status: session_store.load_lifecycle_status(&session_id),
+            model_level_override: session_store.load_model_level_override(&session_id),
         };
         persist_store_write_with_retry("persist_current_session_state", || {
             session_store.save_full_record(&session_id, record.clone())
@@ -326,6 +333,7 @@ impl AppState {
             external_memory_entries: Some(self.permission_context.external_memory_entries()),
             nested_memory_lineage: Some(self.permission_context.nested_memory_lineage()),
             lifecycle_status: SessionLifecycleStatus::Active,
+            model_level_override: session_store.load_model_level_override(&session_id),
         };
         persist_store_write_with_retry("persist_resolved_session_state", || {
             session_store.save_full_record(&session_id, record.clone())

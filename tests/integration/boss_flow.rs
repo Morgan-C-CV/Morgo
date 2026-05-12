@@ -92,6 +92,7 @@ fn make_inherited_runtime_snapshot_with_scripted_turns(
             scripted_turns,
         ),
         active_profile_name: Some("inherited-fast".into()),
+        active_level: None,
         source: ActiveModelProfileSource::ModelsToml,
         summary: ActiveModelProviderSummary {
             provider_id: "scripted".into(),
@@ -333,6 +334,7 @@ fn make_openai_runtime_snapshot_for_base_url(
                 observability.clone(),
             ),
         active_profile_name: Some("test-openai-compatible".into()),
+        active_level: None,
         source: rust_agent::state::app_state::ActiveModelProfileSource::ModelsToml,
         summary: rust_agent::state::app_state::ActiveModelProviderSummary {
             provider_id: "openai-compatible".into(),

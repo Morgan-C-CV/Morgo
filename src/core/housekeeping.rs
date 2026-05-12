@@ -700,6 +700,21 @@ mod tests {
             }
             self.inner.save_lifecycle_status(session_id, status)
         }
+
+        fn load_model_level_override(
+            &self,
+            session_id: &SessionId,
+        ) -> Option<crate::bootstrap::model_profiles::ModelLevel> {
+            self.inner.load_model_level_override(session_id)
+        }
+
+        fn save_model_level_override(
+            &self,
+            session_id: &SessionId,
+            level: Option<crate::bootstrap::model_profiles::ModelLevel>,
+        ) -> Result<(), SessionStoreWriteError> {
+            self.inner.save_model_level_override(session_id, level)
+        }
     }
 
     fn test_app_state(

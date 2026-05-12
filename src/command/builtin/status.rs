@@ -122,6 +122,28 @@ impl Command for StatusCommand {
             .count();
 
         // Runtime section
+        let active_model_snapshot = app_state
+            .active_model_runtime
+            .as_ref()
+            .map(|runtime| runtime.snapshot_blocking());
+        let active_model_profile = active_model_snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.active_profile_name.as_deref())
+            .or(app_state.active_model_profile_name.as_deref())
+            .unwrap_or("default");
+        let active_model_source = active_model_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.source.as_str())
+            .unwrap_or_else(|| app_state.active_model_profile_source.as_str());
+        let active_model_level = active_model_snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.active_level)
+            .map(|level| level.as_str())
+            .unwrap_or("none");
+        let active_model_summary = active_model_snapshot
+            .as_ref()
+            .map(|snapshot| &snapshot.summary)
+            .unwrap_or(&app_state.active_model_provider_summary);
         let runtime_items = vec![
             OutputBlock::kv("session_id", &app_state.active_session_id),
             OutputBlock::kv("surface", format!("{:?}", app_state.surface)),
@@ -136,27 +158,23 @@ impl Command for StatusCommand {
             OutputBlock::kv("cost", app_state.cost_tracker.format_report()),
             OutputBlock::kv(
                 "active_model_profile",
-                app_state
-                    .active_model_profile_name
-                    .as_deref()
-                    .unwrap_or("default"),
+                active_model_profile,
             ),
+            OutputBlock::kv("active_model_level", active_model_level),
             OutputBlock::kv(
                 "active_model_source",
-                app_state.active_model_profile_source.as_str(),
+                active_model_source,
             ),
             OutputBlock::kv(
                 "active_model_summary",
                 format!(
                     "provider_id={}, protocol={}, compatibility_profile={}, base_url_host={}, model={}, auth_status={}",
-                    app_state.active_model_provider_summary.provider_id,
-                    app_state.active_model_provider_summary.protocol,
-                    app_state
-                        .active_model_provider_summary
-                        .compatibility_profile,
-                    app_state.active_model_provider_summary.base_url_host,
-                    app_state.active_model_provider_summary.model,
-                    app_state.active_model_provider_summary.auth_status,
+                    active_model_summary.provider_id,
+                    active_model_summary.protocol,
+                    active_model_summary.compatibility_profile,
+                    active_model_summary.base_url_host,
+                    active_model_summary.model,
+                    active_model_summary.auth_status,
                 ),
             ),
         ];

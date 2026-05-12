@@ -1,10 +1,15 @@
+use std::fs;
+use std::path::PathBuf;
+
+use anyhow::bail;
 use async_trait::async_trait;
 
-use crate::bootstrap::config_root::resolve_config_root;
+use crate::bootstrap::config_root::{preferred_home_config_root, resolve_config_root};
 use crate::bootstrap::has_explicit_provider_env_override;
 use crate::bootstrap::model_profiles::{
-    build_model_profile_display_view, load_model_profiles_registry_from_root,
-    resolve_model_profile_from_registry,
+    ModelLevel, ModelProfileRegistry, build_model_profile_display_view,
+    load_model_profiles_registry_from_root, merge_model_profiles_registry,
+    resolve_model_level_from_registry,
 };
 use crate::command::types::{
     Command, CommandAvailability, CommandMetadata, CommandResult, CommandSource, CommandType,
@@ -15,12 +20,18 @@ use crate::state::app_state::{ActiveModelProfileSource, AppState};
 
 pub struct ModelCommand;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ModelScope {
+    Session,
+    Workspace,
+}
+
 #[async_trait]
 impl Command for ModelCommand {
     fn metadata(&self) -> CommandMetadata {
         CommandMetadata {
             name: "model".into(),
-            description: "Inspect active model state and available model profiles".into(),
+            description: "Inspect active model state and available model levels".into(),
             source: CommandSource::Builtin,
             category: "core".into(),
             command_type: CommandType::Local,
@@ -43,164 +54,168 @@ impl Command for ModelCommand {
         let action = parts.next().unwrap_or("");
 
         match action {
-            "" => Ok(CommandResult::Message(render_active_model_summary(
-                app_state,
-            ))),
+            "" => Ok(CommandResult::Message(render_active_model_summary(app_state)?)),
             "list" => Ok(CommandResult::Message(render_model_list(app_state)?)),
-            "show" => {
-                let profile = parts.collect::<Vec<_>>().join(" ");
-                if profile.trim().is_empty() {
-                    return Ok(CommandResult::Message(
-                        "Usage: /model [list|show <profile>|use <profile>|reload]".into(),
-                    ));
-                }
-                Ok(CommandResult::Message(render_model_show(
-                    app_state,
-                    profile.trim(),
-                )?))
-            }
+            "show" => Ok(CommandResult::Message(render_model_show(app_state)?)),
             "use" => {
-                let profile = parts.collect::<Vec<_>>().join(" ");
-                if profile.trim().is_empty() {
-                    return Ok(CommandResult::Message(
-                        "Usage: /model [list|show <profile>|use <profile>|reload]".into(),
-                    ));
-                }
-                apply_model_use(app_state, profile.trim()).await
+                let args = parts.collect::<Vec<_>>();
+                apply_model_use(app_state, &args).await
+            }
+            "clear" => {
+                let args = parts.collect::<Vec<_>>();
+                apply_model_clear(app_state, &args).await
             }
             "reload" => Ok(CommandResult::Message(render_model_reload(app_state)?)),
             other => Ok(CommandResult::Denied(format!(
-                "Unknown /model action: {other}. Usage: /model [list|show <profile>|use <profile>|reload]"
+                "Unknown /model action: {other}. Usage: /model [list|show|use <low|medium|high|xhigh> [--workspace]|clear [--workspace]|reload]"
             ))),
         }
     }
 }
 
-fn render_active_model_summary(app_state: &AppState) -> String {
-    [
+fn render_active_model_summary(app_state: &AppState) -> anyhow::Result<String> {
+    let snapshot = current_runtime_snapshot(app_state)?;
+    let session_level = app_state
+        .session_store
+        .as_ref()
+        .and_then(|store| store.load_model_level_override(&app_state.current_session_id()));
+    let (workspace_root, home_root, registry) = load_effective_registry(app_state)?;
+
+    Ok([
         "Model".to_string(),
         String::new(),
         format!(
+            "- active_level: {}",
+            snapshot.active_level.map(|level| level.as_str()).unwrap_or("none")
+        ),
+        format!(
             "- active_profile: {}",
-            app_state
-                .active_model_profile_name
-                .as_deref()
-                .unwrap_or("default")
+            snapshot.active_profile_name.as_deref().unwrap_or("default")
+        ),
+        format!("- source: {}", snapshot.source.as_str()),
+        format!(
+            "- session_override: {}",
+            session_level.map(|level| level.as_str()).unwrap_or("none")
+        ),
+        format!("- workspace_root: {}", workspace_root.display()),
+        format!(
+            "- home_root: {}",
+            home_root
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "none".into())
         ),
         format!(
-            "- source: {}",
-            app_state.active_model_profile_source.as_str()
+            "- workspace_active_level: {}",
+            registry
+                .as_ref()
+                .and_then(|registry| registry.active_level)
+                .map(|level| level.as_str())
+                .unwrap_or("none")
         ),
-        format!(
-            "- provider_id: {}",
-            app_state.active_model_provider_summary.provider_id
-        ),
-        format!("- protocol: {}", app_state.active_model_provider_summary.protocol),
-        format!(
-            "- compatibility_profile: {}",
-            app_state.active_model_provider_summary.compatibility_profile
-        ),
-        format!(
-            "- base_url_host: {}",
-            app_state.active_model_provider_summary.base_url_host
-        ),
-        format!("- model: {}", app_state.active_model_provider_summary.model),
-        format!(
-            "- auth_status: {}",
-            app_state.active_model_provider_summary.auth_status
-        ),
+        format!("- provider_id: {}", snapshot.summary.provider_id),
+        format!("- protocol: {}", snapshot.summary.protocol),
+        format!("- compatibility_profile: {}", snapshot.summary.compatibility_profile),
+        format!("- base_url_host: {}", snapshot.summary.base_url_host),
+        format!("- model: {}", snapshot.summary.model),
+        format!("- auth_status: {}", snapshot.summary.auth_status),
         String::new(),
-        "Note: /model applies changes on the next turn only. Use /model list|show|use|reload to inspect or update the runtime handle; reload does not switch the active runtime client.".into(),
+        "Note: /model use defaults to session scope; add --workspace to change the workspace default for future sessions.".into(),
     ]
-    .join("\n")
+    .join("\n"))
 }
 
 fn render_model_list(app_state: &AppState) -> anyhow::Result<String> {
-    let config_root = resolve_runtime_config_root(app_state)?;
-    let Some(registry) = load_model_profiles_registry_from_root(&config_root)? else {
+    let (workspace_root, home_root, registry) = load_effective_registry(app_state)?;
+    let Some(registry) = registry else {
         return Ok(format!(
-            "Model registry unavailable: models.toml not found under {}",
-            config_root.display()
+            "Model registry unavailable: no models.toml found under workspace {} or home {}",
+            workspace_root.display(),
+            home_root
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "none".into())
         ));
     };
 
     let mut lines = vec![
-        "Model profiles".to_string(),
+        "Model levels".to_string(),
         String::new(),
-        format!("- config_root: {}", config_root.display()),
-        format!("- active_profile: {}", registry.active),
+        format!("- workspace_root: {}", workspace_root.display()),
+        format!(
+            "- home_root: {}",
+            home_root
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "none".into())
+        ),
+        format!(
+            "- active_level: {}",
+            registry.active_level.map(|level| level.as_str()).unwrap_or("none")
+        ),
         format!("- profiles: {}", registry.profiles.len()),
     ];
 
-    for (name, spec) in &registry.profiles {
-        let view = build_model_profile_display_view(name, spec)?;
-        lines.push(format!(
-            "- {}: provider_id={}, protocol={}, model={}, auth_strategy={}",
-            view.name, view.provider_id, view.protocol, view.model, view.auth_strategy
-        ));
+    for level in [
+        ModelLevel::Low,
+        ModelLevel::Medium,
+        ModelLevel::High,
+        ModelLevel::Xhigh,
+    ] {
+        match registry.levels.get(&level) {
+            Some(profile_name) => {
+                let spec = registry.profiles.get(profile_name).expect("mapped profile exists");
+                let view = build_model_profile_display_view(profile_name, spec)?;
+                lines.push(format!(
+                    "- {} -> {}: provider_id={}, model={}, auth_strategy={}",
+                    level.as_str(),
+                    view.name,
+                    view.provider_id,
+                    view.model,
+                    view.auth_strategy
+                ));
+            }
+            None => lines.push(format!("- {} -> unconfigured", level.as_str())),
+        }
     }
 
     Ok(lines.join("\n"))
 }
 
-fn render_model_show(app_state: &AppState, profile: &str) -> anyhow::Result<String> {
-    let config_root = resolve_runtime_config_root(app_state)?;
-    let Some(registry) = load_model_profiles_registry_from_root(&config_root)? else {
-        return Ok(format!(
-            "Model registry unavailable: models.toml not found under {}",
-            config_root.display()
-        ));
+fn render_model_show(app_state: &AppState) -> anyhow::Result<String> {
+    let (_, _, registry) = load_effective_registry(app_state)?;
+    let Some(registry) = registry else {
+        return Ok("Model registry unavailable".into());
     };
-    let Some(spec) = registry.profiles.get(profile) else {
-        return Ok(format!("Profile not found: {profile}"));
-    };
-
-    let view = build_model_profile_display_view(profile, spec)?;
-    let mut lines = vec![
-        format!("Model profile: {}", view.name),
-        String::new(),
-        format!("- provider_id: {}", view.provider_id),
-        format!("- protocol: {}", view.protocol),
-        format!("- compatibility_profile: {}", view.compatibility_profile),
-        format!("- base_url: {}", view.base_url),
-        format!("- chat_completions_path: {}", view.chat_completions_path),
-        format!("- model: {}", view.model),
-        format!("- auth_strategy: {}", view.auth_strategy),
-    ];
-
-    match (
-        view.api_key_env.as_deref(),
-        view.api_key_env_status.as_deref(),
-    ) {
-        (Some(env_name), Some(status)) => {
-            lines.push(format!("- api_key_env: {} ({})", env_name, status));
-        }
-        (Some(env_name), None) => {
-            lines.push(format!("- api_key_env: {}", env_name));
-        }
-        (None, _) => {
-            lines.push("- api_key_env: none".into());
+    let mut lines = vec!["Model mapping".to_string(), String::new()];
+    for level in [
+        ModelLevel::Low,
+        ModelLevel::Medium,
+        ModelLevel::High,
+        ModelLevel::Xhigh,
+    ] {
+        if let Some(profile_name) = registry.levels.get(&level) {
+            let spec = registry.profiles.get(profile_name).expect("mapped profile exists");
+            let view = build_model_profile_display_view(profile_name, spec)?;
+            lines.push(format!(
+                "- {} -> profile={} provider_id={} model={} base_url={}",
+                level.as_str(),
+                view.name,
+                view.provider_id,
+                view.model,
+                view.base_url
+            ));
+        } else {
+            lines.push(format!("- {} -> unconfigured", level.as_str()));
         }
     }
-
-    lines.extend([
-        format!("- request_timeout_ms: {}", view.request_timeout_ms),
-        format!("- stream_timeout_ms: {}", view.stream_timeout_ms),
-        format!("- retry_max_attempts: {}", view.retry_max_attempts),
-        format!(
-            "- retry_initial_backoff_ms: {}",
-            view.retry_initial_backoff_ms
-        ),
-        format!("- retry_max_backoff_ms: {}", view.retry_max_backoff_ms),
-    ]);
-
     Ok(lines.join("\n"))
 }
 
-async fn apply_model_use(app_state: &AppState, profile: &str) -> anyhow::Result<CommandResult> {
+async fn apply_model_use(app_state: &AppState, args: &[&str]) -> anyhow::Result<CommandResult> {
     if has_explicit_provider_env_override()
         || matches!(
-            app_state.active_model_profile_source,
+            current_runtime_snapshot(app_state)?.source,
             ActiveModelProfileSource::EnvOverride
         )
     {
@@ -209,6 +224,17 @@ async fn apply_model_use(app_state: &AppState, profile: &str) -> anyhow::Result<
         ));
     }
 
+    let Some(level_arg) = args.first().copied() else {
+        return Ok(CommandResult::Message(
+            "Usage: /model use <low|medium|high|xhigh> [--workspace]".into(),
+        ));
+    };
+    let Some(level) = ModelLevel::parse(level_arg) else {
+        return Ok(CommandResult::Denied(format!(
+            "Unknown model level: {level_arg}. Expected low, medium, high, or xhigh."
+        )));
+    };
+    let scope = parse_scope_flag(&args[1..])?;
     let Some(active_model_runtime) = app_state.active_model_runtime.as_ref() else {
         return Ok(CommandResult::Denied(
             "active model runtime is unavailable; /model use cannot update the runtime handle"
@@ -216,55 +242,186 @@ async fn apply_model_use(app_state: &AppState, profile: &str) -> anyhow::Result<
         ));
     };
 
-    let config_root = resolve_runtime_config_root(app_state)?;
-    let Some(registry) = load_model_profiles_registry_from_root(&config_root)? else {
+    let (workspace_root, _, registry) = load_effective_registry(app_state)?;
+    let Some(registry) = registry else {
         return Ok(CommandResult::Denied(format!(
-            "models.toml not found under {}; /model use requires a model registry",
-            config_root.display()
+            "models.toml not found for workspace {}; /model use requires a model registry",
+            workspace_root.display()
         )));
     };
 
-    let resolved = match resolve_model_profile_from_registry(&registry, profile) {
-        Ok(resolved) => resolved,
-        Err(error) if error.to_string().contains("was not found") => {
-            return Ok(CommandResult::Denied(format!(
-                "Profile not found: {profile}"
-            )));
-        }
-        Err(error) => return Err(error),
-    };
-
-    let snapshot = ActiveModelRuntimeSnapshot::from_resolved_profile(
+    let resolved = resolve_model_level_from_registry(&registry, level)?;
+    let mut snapshot = ActiveModelRuntimeSnapshot::from_resolved_profile(
         &resolved,
         app_state.service_observability_tracker.clone(),
     );
+    snapshot.active_level = Some(level);
+    snapshot.source = match scope {
+        ModelScope::Session => ActiveModelProfileSource::SessionOverride,
+        ModelScope::Workspace => ActiveModelProfileSource::WorkspaceModelsToml,
+    };
     active_model_runtime.replace(snapshot).await;
 
-    Ok(CommandResult::Message(format!(
-        "Updated runtime model handle to profile {} from {}. This will apply on next turn; in-flight turns and existing subagents keep their current snapshot.",
-        resolved.name,
-        config_root.display()
-    )))
+    match scope {
+        ModelScope::Session => {
+            let Some(store) = app_state.session_store.as_ref() else {
+                return Ok(CommandResult::Denied(
+                    "session store is unavailable; cannot persist session model override".into(),
+                ));
+            };
+            store
+                .save_model_level_override(&app_state.current_session_id(), Some(level))
+                .map_err(|error| anyhow::anyhow!(error.detail.clone()))?;
+            Ok(CommandResult::Message(format!(
+                "Updated session model level to {}. This will apply on next turn; in-flight turns and existing subagents keep their current snapshot.",
+                level.as_str()
+            )))
+        }
+        ModelScope::Workspace => {
+            write_workspace_active_level(&workspace_root, Some(level))?;
+            let Some(store) = app_state.session_store.as_ref() else {
+                return Ok(CommandResult::Message(format!(
+                    "Updated workspace model level to {} at {}. Runtime handle will apply on next turn.",
+                    level.as_str(),
+                    workspace_root.display()
+                )));
+            };
+            store
+                .save_model_level_override(&app_state.current_session_id(), None)
+                .map_err(|error| anyhow::anyhow!(error.detail.clone()))?;
+            Ok(CommandResult::Message(format!(
+                "Updated workspace model level to {} at {}. Cleared any session override; runtime handle will apply on next turn.",
+                level.as_str(),
+                workspace_root.display()
+            )))
+        }
+    }
+}
+
+async fn apply_model_clear(app_state: &AppState, args: &[&str]) -> anyhow::Result<CommandResult> {
+    let scope = parse_scope_flag(args)?;
+    match scope {
+        ModelScope::Session => {
+            let Some(store) = app_state.session_store.as_ref() else {
+                return Ok(CommandResult::Denied(
+                    "session store is unavailable; cannot clear session model override".into(),
+                ));
+            };
+            store
+                .save_model_level_override(&app_state.current_session_id(), None)
+                .map_err(|error| anyhow::anyhow!(error.detail.clone()))?;
+            Ok(CommandResult::Message(
+                "Cleared session model override. The next turn will fall back to workspace/home configuration.".into(),
+            ))
+        }
+        ModelScope::Workspace => {
+            let (workspace_root, _, _) = load_effective_registry(app_state)?;
+            write_workspace_active_level(&workspace_root, None)?;
+            Ok(CommandResult::Message(format!(
+                "Cleared workspace active_level in {}. Future sessions will fall back to home/bootstrap configuration.",
+                workspace_root.display()
+            )))
+        }
+    }
 }
 
 fn render_model_reload(app_state: &AppState) -> anyhow::Result<String> {
-    let config_root = resolve_runtime_config_root(app_state)?;
-    let Some(registry) = load_model_profiles_registry_from_root(&config_root)? else {
+    let (workspace_root, home_root, registry) = load_effective_registry(app_state)?;
+    let Some(registry) = registry else {
         return Ok(format!(
-            "Reloaded model profiles from {}. models.toml not found; runtime active model remains unchanged.",
-            config_root.display()
+            "Reloaded model profiles from workspace {} and home {}. No models.toml found; runtime active model remains unchanged.",
+            workspace_root.display(),
+            home_root
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "none".into())
         ));
     };
 
     Ok(format!(
-        "Reloaded model profiles from {}. active_profile={} profiles={} runtime active model remains unchanged.",
-        config_root.display(),
-        registry.active,
+        "Reloaded model profiles from workspace {} and home {}. active_level={} profiles={} runtime active model remains unchanged.",
+        workspace_root.display(),
+        home_root
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "none".into()),
+        registry.active_level.map(|level| level.as_str()).unwrap_or("none"),
         registry.profiles.len()
     ))
 }
 
-fn resolve_runtime_config_root(app_state: &AppState) -> anyhow::Result<std::path::PathBuf> {
+fn current_runtime_snapshot(app_state: &AppState) -> anyhow::Result<ActiveModelRuntimeSnapshot> {
+    app_state
+        .active_model_runtime
+        .as_ref()
+        .map(|runtime| runtime.snapshot_blocking())
+        .ok_or_else(|| anyhow::anyhow!("active model runtime is unavailable"))
+}
+
+fn load_effective_registry(
+    app_state: &AppState,
+) -> anyhow::Result<(PathBuf, Option<PathBuf>, Option<ModelProfileRegistry>)> {
+    let workspace_root = resolve_runtime_config_root(app_state)?;
+    let home_root = preferred_home_config_root();
+    let home_registry = match home_root.as_ref() {
+        Some(path) if path != &workspace_root => load_model_profiles_registry_from_root(path)?,
+        _ => None,
+    };
+    let workspace_registry = load_model_profiles_registry_from_root(&workspace_root)?;
+    Ok((
+        workspace_root,
+        home_root,
+        merge_model_profiles_registry(home_registry.as_ref(), workspace_registry.as_ref()),
+    ))
+}
+
+fn parse_scope_flag(args: &[&str]) -> anyhow::Result<ModelScope> {
+    let mut scope = ModelScope::Session;
+    for arg in args {
+        match *arg {
+            "--workspace" => scope = ModelScope::Workspace,
+            "--session" => scope = ModelScope::Session,
+            other => bail!("unknown /model option: {other}"),
+        }
+    }
+    Ok(scope)
+}
+
+fn write_workspace_active_level(
+    config_root: &std::path::Path,
+    level: Option<ModelLevel>,
+) -> anyhow::Result<()> {
+    fs::create_dir_all(config_root)?;
+    let path = config_root.join("models.toml");
+    let mut doc = if path.exists() {
+        fs::read_to_string(&path)
+            .ok()
+            .and_then(|text| text.parse::<toml::Value>().ok())
+            .unwrap_or_else(|| toml::Value::Table(toml::map::Map::new()))
+    } else {
+        toml::Value::Table(toml::map::Map::new())
+    };
+    let Some(table) = doc.as_table_mut() else {
+        bail!("invalid_configuration: workspace models.toml root must be a table");
+    };
+    match level {
+        Some(level) => {
+            table.insert(
+                "active_level".into(),
+                toml::Value::String(level.as_str().to_string()),
+            );
+        }
+        None => {
+            table.remove("active_level");
+        }
+    }
+    let serialized = toml::to_string_pretty(&doc)
+        .map_err(|error| anyhow::anyhow!("invalid_configuration: failed to serialize models.toml: {error}"))?;
+    fs::write(path, serialized)?;
+    Ok(())
+}
+
+fn resolve_runtime_config_root(app_state: &AppState) -> anyhow::Result<PathBuf> {
     let cwd = app_state
         .session
         .as_ref()
