@@ -87,10 +87,10 @@ pub fn build_tui_screen(document: &RenderDocument) -> TuiScreen {
                 }
             }
             RenderBlock::RawRuntime(text) => {
-                if !text.is_empty() {
+                if let Some(lines) = raw_runtime_lines_for_tui(text) {
                     panels.push(TuiPanelSection {
                         title: "Runtime".into(),
-                        lines: text.lines().map(|line| line.to_string()).collect(),
+                        lines,
                     });
                 }
             }
@@ -155,6 +155,19 @@ fn render_block_for_surface_item(item: &SurfaceItem) -> RenderBlock {
         }
         other => RenderBlock::RawRuntime(other.to_legacy_line()),
     }
+}
+
+fn raw_runtime_lines_for_tui(text: &str) -> Option<Vec<String>> {
+    if text.is_empty() {
+        return None;
+    }
+
+    let lines = text.lines().map(|line| line.to_string()).collect::<Vec<_>>();
+    if lines.is_empty() || lines.iter().all(|line| line.starts_with("[delta]")) {
+        return None;
+    }
+
+    Some(lines)
 }
 
 fn render_task_panel(task_event: &TaskView) -> RenderPanel {

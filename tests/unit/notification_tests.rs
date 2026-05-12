@@ -765,6 +765,41 @@ fn cli_renderer_builds_tui_screen_with_fixed_layout_sections() {
 }
 
 #[test]
+fn cli_renderer_tui_screen_filters_assistant_delta_runtime_noise() {
+    let turn = CliTurnOutput {
+        primary_text: "final answer".into(),
+        events: vec![
+            CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::AssistantDelta {
+                text: "版".into(),
+            }),
+            CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::AssistantDelta {
+                text: "实现".into(),
+            }),
+            CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::Notice {
+                kind: "validation".into(),
+                message: "verify before shipping".into(),
+                code: None,
+                runtime_kind: None,
+                service_failure_code: None,
+                provider_kind: None,
+                status_code: None,
+                retryable: None,
+                surface_visible: None,
+            }),
+        ],
+    };
+
+    let screen = build_tui_screen(&render_turn_document(&turn));
+    let rendered = render_document_tui_output(&render_turn_document(&turn));
+
+    assert_eq!(screen.panels.len(), 1);
+    assert_eq!(screen.panels[0].title, "Notice: validation");
+    assert!(!rendered.contains("[delta]"), "{rendered}");
+    assert!(!rendered.contains("版"), "{rendered}");
+    assert!(rendered.contains("verify before shipping"), "{rendered}");
+}
+
+#[test]
 fn cli_renderer_tui_screen_uses_welcome_empty_state_when_document_is_empty() {
     let screen = build_tui_screen(&render_turn_document(&CliTurnOutput {
         primary_text: String::new(),
